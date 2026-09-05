@@ -595,6 +595,15 @@ audit:
 # if a future include_str! use is genuinely valid and trips this gate,
 # allow it case by case — narrow the pattern or exempt that path here,
 # in a reviewed change — never contort the code around the lint.
+# The toolchain and broker pins are copied by hand into the container
+# image's base images, every workflow's rust-toolchain step and every
+# compose file's broker image (scripts/check-pins.sh lists them). A bump
+# that misses a copy builds the image with a different compiler from the
+# tarball's; this fails instead (#102).
+# Check every hand-copied toolchain/broker version against its pin.
+check-pins:
+    scripts/check-pins.sh
+
 # Reject include!-family macros that splice Rust source (tracked *.rs).
 lint-sources:
     #!/usr/bin/env bash
@@ -759,6 +768,7 @@ quality:
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
+    run_phase "check-pins"   just check-pins
     run_phase "lint-sources" just lint-sources
     run_phase "test-fq-lint" just test-fq-lint
     run_phase "lint-sizes"   just lint-sizes

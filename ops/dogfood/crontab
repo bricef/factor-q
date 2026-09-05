@@ -2,7 +2,9 @@
 # bootstrap.sh (`crontab -u <user> ops/dogfood/crontab`). Every job is a
 # script in the instance directory that exits 0 quietly when there is
 # nothing to do, so a line in its log means something happened, and a
-# non-zero exit means something needs a human.
+# non-zero exit means something needs a human — who hears of it through
+# notify.sh (FQ_NOTIFY_HOOK in .env), since the output goes to logs/ and
+# cron mail never fires.
 #
 # Continuous delivery is deploy.sh --auto, hourly: it pulls main-latest,
 # does nothing when that build is live, defers while an invocation is in

@@ -3,8 +3,9 @@
 # builds, and release builds all compile with the same compiler —
 # "same commit" implies "same binary" (#102).
 #
-# Keep the CI/release workflows' `dtolnay/rust-toolchain@<version>` refs in
-# lockstep with this pin when bumping.
+# Keep the CI/release workflows' `dtolnay/rust-toolchain@<version>` refs and
+# the container image's `FROM rust:<version>` stage in lockstep with this
+# pin when bumping — `just check-pins` fails when one is missed.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

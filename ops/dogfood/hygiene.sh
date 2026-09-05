@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ops/dogfood/hygiene.sh — the host's periodic check (ops/dogfood/crontab,
 # every 30 minutes): disk, the instance volume's subtrees, a bounded build
-# cache, dangling images. Prints a short report; exits non-zero when a
-# threshold is crossed, so cron mails the deploy user and the log shows a
-# red line. Nothing here touches the stores, the identity or a workspace.
+# cache, dangling images, the age of the newest backup. Prints a short
+# report; exits non-zero when a threshold is crossed and sends the
+# warnings through notify.sh (FQ_NOTIFY_HOOK). Nothing here touches the
+# stores, the identity or a workspace.
 #
 #   hygiene.sh            report, and prune what is over its bound
 #   hygiene.sh --report   report only
@@ -12,7 +13,9 @@
 # docker's data root is fuller than this; FQ_BUILD_CACHE_MAX_GB (default
 # 60) — above this the daemon's build/ subtree (cargo target, sccache, go
 # caches — all regenerable) is emptied, but only while no invocation is in
-# flight, since a running build would lose its tree from under it.
+# flight, since a running build would lose its tree from under it;
+# FQ_BACKUP_STALE_HOURS (default 36) — warn when the newest backup set is
+# older than this (a nightly that has quietly stopped).
 #
 # Workspaces are reported, never deleted: reclaiming a terminal
 # invocation's workspace is the daemon's job (#367), and this script
@@ -27,11 +30,40 @@ REPORT_ONLY=0; [ "${1:-}" = "--report" ] && REPORT_ONLY=1
 envval() { sed -n "s/^$1=\(.*\)$/\1/p" .env 2>/dev/null | tail -1; }
 WARN_PCT="${FQ_DISK_WARN_PCT:-$(envval FQ_DISK_WARN_PCT)}"; WARN_PCT="${WARN_PCT:-80}"
 CACHE_MAX_GB="${FQ_BUILD_CACHE_MAX_GB:-$(envval FQ_BUILD_CACHE_MAX_GB)}"; CACHE_MAX_GB="${CACHE_MAX_GB:-60}"
+BACKUP_DIR="${FQ_BACKUP_DIR:-$(envval FQ_BACKUP_DIR)}"; BACKUP_DIR="${BACKUP_DIR:-$DOGFOOD/backups}"
+STALE_HOURS="${FQ_BACKUP_STALE_HOURS:-$(envval FQ_BACKUP_STALE_HOURS)}"; STALE_HOURS="${STALE_HOURS:-36}"
 
 now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 say()  { printf '%s %s\n' "$(now)" "$*"; }
-warn() { printf '%s WARNING: %s\n' "$(now)" "$*"; RC=1; }
-RC=0
+warn() { printf '%s WARNING: %s\n' "$(now)" "$*"; RC=1; WARNINGS="${WARNINGS}${WARNINGS:+$'\n'}$*"; }
+RC=0; WARNINGS=""
+# Every exit: the warnings, if any, through notify.sh (one message per run).
+finish() {
+    if [ "$RC" != 0 ] && [ -x "$DOGFOOD/notify.sh" ]; then
+        printf '%s\n' "$WARNINGS" | "$DOGFOOD/notify.sh" "hygiene: $(printf '%s\n' "$WARNINGS" | wc -l | tr -dc '0-9') warning(s)" || true
+    fi
+    exit "$RC"
+}
+
+# --- 0. the newest backup set ------------------------------------------------------
+# Sets are directories named <utc-stamp> (backup.sh), so the newest sorts last.
+newest="$(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | sort | tail -1)"
+if [ -z "$newest" ]; then
+    say "backups: none yet in $BACKUP_DIR (backup.sh runs nightly from the crontab)"
+else
+    stamp="$(basename "$newest")"
+    taken="$(date -u -d "${stamp:0:8} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null || echo 0)"
+    if [ "$taken" = 0 ]; then
+        warn "backups: cannot read the age of the newest set, $stamp (not a backup.sh name?)"
+    else
+        age_h=$(( ($(date +%s) - taken) / 3600 ))
+        if [ "$age_h" -ge "$STALE_HOURS" ]; then
+            warn "backups: newest set $stamp is ${age_h}h old (threshold ${STALE_HOURS}h) — has the nightly backup.sh stopped? (logs/backup.log)"
+        else
+            say "backups: newest set $stamp, ${age_h}h old ($(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | wc -l | tr -dc '0-9') kept)"
+        fi
+    fi
+fi
 
 # --- 1. the disk docker lives on -------------------------------------------------
 root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
@@ -50,7 +82,7 @@ say "docker: $(docker system df --format '{{.Type}} {{.Size}} (reclaimable {{.Re
 fqd="$(docker compose ps -q --status running fqd 2>/dev/null | head -1)"
 if [ -z "$fqd" ]; then
     say "daemon not running — volume report and cache bound skipped"
-    exit "$RC"
+    finish
 fi
 sizes="$(docker compose exec -T fqd sh -c 'cd /var/lib/factor-q && du -sm build workspace cache state agents 2>/dev/null' || true)"
 say "volume: $(printf '%s' "$sizes" | awk '{printf "%s=%dM ", $2, $1}')"
@@ -82,4 +114,4 @@ if [ "$REPORT_ONLY" != 1 ]; then
     [ -n "$pruned" ] && say "images: $pruned"
 fi
 
-exit "$RC"
+finish

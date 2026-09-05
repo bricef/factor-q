@@ -17,7 +17,10 @@ import (
 
 type cliConfig struct {
 	ConfigPath, NATSURL, KVBucket string
-	Check                         bool
+	// HealthBind is the loopback address of GET /healthz (health.go);
+	// "" = no endpoint.
+	HealthBind string
+	Check      bool
 }
 
 func envOr(key, fallback string) string {
@@ -34,6 +37,7 @@ func configFromArgs(args []string) (cliConfig, error) {
 	fs.StringVar(&c.ConfigPath, "config", envOr("FQCRON_CONFIG", ""), "config file (env FQCRON_CONFIG)")
 	fs.StringVar(&c.NATSURL, "nats-url", envOr("FQCRON_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env FQCRON_NATS_URL)")
 	fs.StringVar(&c.KVBucket, "kv-bucket", envOr("FQCRON_KV_BUCKET", "fq-cron-state"), "KV bucket (env FQCRON_KV_BUCKET)")
+	fs.StringVar(&c.HealthBind, "health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 	fs.BoolVar(&c.Check, "check", false, "validate config and exit")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -86,6 +90,12 @@ func run(args []string) error {
 			fmt.Println("fq-cron", buildVersion())
 			return nil
 		}
+		// The container's HEALTHCHECK: ask the running process, from the
+		// same environment, and exit 0 on healthy (health.go). Answered
+		// here for the same reason as --version: it needs no --config.
+		if a == "-probe" || a == "--probe" {
+			return probe(envOr(healthBindEnv, defaultHealthBind))
+		}
 	}
 	cli, err := configFromArgs(args)
 	if err != nil {
@@ -107,6 +117,21 @@ func run(args []string) error {
 		return fmt.Errorf("connect to NATS: %w", err)
 	}
 	defer nc.Close()
+	// Liveness for the supervisor: the broker connection (health.go).
+	// Bound before the scheduler starts, so a taken port is a startup
+	// error rather than a process that shows unhealthy for ever.
+	if cli.HealthBind != "" {
+		ln, err := listenHealth(cli.HealthBind)
+		if err != nil {
+			return err
+		}
+		health := NewHealth(nc, 0)
+		go func() {
+			if err := serveHealth(ctx, ln, health, log.Default()); err != nil && ctx.Err() == nil {
+				log.Printf("health endpoint stopped: %v", err)
+			}
+		}()
+	}
 	publisher, err := NewNATSPublisher(nc)
 	if err != nil {
 		return err

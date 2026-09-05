@@ -164,6 +164,9 @@ type Watcher struct {
 	Reviewer  ReviewSource // optional; nil disables the merged-PR → done sweep
 	Config    Config
 	Log       *slog.Logger
+	// Heartbeat, if set, is called after every poll cycle, succeeded or
+	// not — the liveness signal behind /healthz (health.go).
+	Heartbeat func()
 }
 
 // pollOnce runs one poll cycle: list ready issues, plan, and for each
@@ -245,6 +248,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	for {
 		if err := w.pollOnce(ctx); err != nil {
 			w.Log.Error("poll cycle failed", "err", err)
+		}
+		if w.Heartbeat != nil {
+			w.Heartbeat()
 		}
 		select {
 		case <-ctx.Done():

@@ -13,7 +13,9 @@
 #                             in flight, and roll back by itself when the new
 #                             build does not come up — continuous delivery
 #                             with the same drain, checks and rollback as a
-#                             deploy by hand (ops/dogfood/crontab)
+#                             deploy by hand (ops/dogfood/crontab). A deploy,
+#                             a rollback, a failure and a deferral that has
+#                             lasted FQ_DEFER_WARN_HOURS go through notify.sh
 #
 # The host never compiles and never fetches a tarball. Every merge to main
 # publishes one image per binary to ghcr.io/bricef (`FQ_IMAGE_REPO` in .env),
@@ -25,8 +27,9 @@
 #
 # Contract: exits 0 ONLY when the daemon, watcher, dashboard and scheduler
 # containers run the target tag — checked on the running containers'
-# images, not on what .env says — and the daemon has logged "Runtime ready"
-# since it was started.
+# images, not on what .env says — the daemon has logged "Runtime ready"
+# since it was started, and the watcher, scheduler and dashboard report
+# healthy on their own probes.
 #
 # Bring-down is graceful (ADR-0027) and needs no ladder: `docker compose
 # stop` sends SIGTERM, which the daemon treats as a drain — in-flight
@@ -39,6 +42,7 @@ set -euo pipefail
 
 DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
 READY_WAIT="${READY_WAIT:-180}"      # seconds to wait for the daemon's "Runtime ready"
+HEALTH_WAIT="${HEALTH_WAIT:-90}"     # seconds to wait for the adapters' and dashboard's probes
 KEEP_IMAGES="${KEEP_IMAGES:-5}"      # local image tags kept per name, newest first
 
 # The services a deploy restarts, with the image each runs, in the order
@@ -54,10 +58,37 @@ QUIET=0
 stamp() { [ "$AUTO" = 1 ] && date -u '+%Y-%m-%dT%H:%M:%SZ ' || true; }
 log() { [ "$QUIET" = 1 ] && return 0; printf '\n\033[1;36m%s==> %s\033[0m\n' "$(stamp)" "$*"; }
 ok()  { [ "$QUIET" = 1 ] && return 0; printf '\033[1;32m%s    ✓ %s\033[0m\n' "$(stamp)" "$*"; }
-die() { printf '\n\033[1;31m%s✗ ERROR: %s\033[0m\n' "$(stamp)" "$*" >&2; exit 1; }
+# Unattended, anything that needs a human goes through notify.sh
+# (FQ_NOTIFY_HOOK); by hand, the operator is looking at the terminal.
+notify() {  # $1 = subject, $2 = body
+    [ "$AUTO" = 1 ] || return 0
+    [ -x "$DOGFOOD/notify.sh" ] || return 0
+    printf '%s\n' "$2" | "$DOGFOOD/notify.sh" "$1" || true
+}
+die() { printf '\n\033[1;31m%s✗ ERROR: %s\033[0m\n' "$(stamp)" "$*" >&2; notify "deploy FAILED" "$*"; exit 1; }
 # A quiet exit for --auto: nothing to do, or not now. One line, exit 0, so
 # a cron run that changed nothing leaves one line in the log and no mail.
 defer() { printf '%s· %s\n' "$(stamp)" "$*"; exit 0; }
+# A deferral is fine once and worrying after a day: an invocation stuck
+# in flight, or a container never paired, keeps every merge off the host
+# with nothing but a quiet line an hour in the log. .deploy.deferred
+# remembers since when the same target has been waiting; past
+# FQ_DEFER_WARN_HOURS (6) it is reported once, and the file goes when the
+# deploy happens or the target changes.
+deferring() {  # $1 = target sha, $2 = why
+    local since="" notified="" now age file="$DOGFOOD/.deploy.deferred" hours
+    hours="$(sed -n 's/^FQ_DEFER_WARN_HOURS=\(.*\)$/\1/p' .env | tail -1)"; hours="${hours:-6}"
+    now="$(date +%s)"
+    if [ -f "$file" ]; then IFS=$'\t' read -r sha since notified < "$file" || true; [ "${sha:-}" = "$1" ] || since=""; fi
+    [ -n "$since" ] || { since="$now"; notified=""; }
+    age=$(( (now - since) / 3600 ))
+    if [ "$age" -ge "$hours" ] && [ -z "$notified" ]; then
+        notify "deploy of $1 deferred for ${age}h" "$2"$'\n'"Every hourly run since $(date -u -d "@$since" '+%Y-%m-%dT%H:%MZ') has found the same. See ops/dogfood/README.md, \"Continuous delivery\"."
+        notified=notified
+    fi
+    printf '%s\t%s\t%s\n' "$1" "$since" "$notified" > "$file"
+    defer "$2"
+}
 
 FORCE=0
 WANT="latest"
@@ -181,6 +212,7 @@ if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$SHA" ]; then
         [ "$(running_image "$svc")" = "$REPO/${IMAGE_OF[$svc]}:$SHA" ] || { live=0; break; }
     done
     if [ "$live" = 1 ]; then
+        rm -f "$DOGFOOD/.deploy.deferred"
         [ "$AUTO" = 1 ] && defer "already running $SHA"
         ok "already running $SHA — nothing to do (--force to restart anyway)"
         exit 0
@@ -196,9 +228,10 @@ if [ "$AUTO" = 1 ]; then
     busy="$(in_flight)"
     case "$busy" in
         0) ;;
-        unknown) defer "cannot ask the daemon whether it is idle (not paired? see README) — deferring $SHA" ;;
-        *) defer "$busy invocation(s) in flight — deferring $SHA" ;;
+        unknown) deferring "$SHA" "cannot ask the daemon whether it is idle (not paired? see README) — deferring $SHA" ;;
+        *) deferring "$SHA" "$busy invocation(s) in flight — deferring $SHA" ;;
     esac
+    rm -f "$DOGFOOD/.deploy.deferred"
     QUIET=0
     log "AUTO DEPLOY ${CURRENT:-<none>} → $SHA (daemon idle; images verified)"
 fi
@@ -253,6 +286,27 @@ bring_up() {  # $1 = sha
         [ "$got" = "$want" ] || { echo "$svc runs '${got:-nothing}', not $want (docker compose ps)"; return 1; }
     done
     ok "fqd, github-watcher, fq-cron and fq-dashboard run $tag"
+
+    # The other three images carry their own probes (ADR-0035 clause 8):
+    # attached to the broker, serving. Wait for each to report healthy; an
+    # image from before the probes reports nothing and is not waited on.
+    # The daemon's probe is not waited on here — it needs the pairing that
+    # a fresh instance does not have yet; "Runtime ready" is its signal.
+    log "Waiting for the adapters' and the dashboard's probes (up to ${HEALTH_WAIT}s)"
+    local pending="" state
+    for _ in $(seq 1 "$HEALTH_WAIT"); do
+        pending=""
+        for svc in github-watcher fq-cron fq-dashboard; do
+            cid="$(docker compose ps -q "$svc" 2>/dev/null | head -1)"
+            [ -n "$cid" ] || continue
+            state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
+            case "$state" in ""|healthy) ;; *) pending="$pending $svc=$state" ;; esac
+        done
+        [ -z "$pending" ] && break
+        sleep 1
+    done
+    [ -z "$pending" ] || { echo "not healthy after ${HEALTH_WAIT}s:$pending (docker inspect --format '{{json .State.Health}}' <container>)"; return 1; }
+    ok "github-watcher, fq-cron and fq-dashboard probes healthy"
 }
 
 [ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ] && ok "moving from $CURRENT"
@@ -266,6 +320,7 @@ if ! reason="$(bring_up "$SHA")"; then
         log "ROLLING BACK to $CURRENT — $reason"
         if bring_up "$CURRENT" >/dev/null; then
             printf '\033[1;33m%s    ⟲ rolled back to %s after %s failed: %s\033[0m\n' "$(stamp)" "$CURRENT" "$SHA" "$reason" >&2
+            notify "rolled back to $CURRENT — $SHA failed" "$reason"$'\n'"The instance is on $CURRENT, the build it was on before. The failed containers went with the rollback; to look at the failure, deploy by hand — deploy.sh $SHA stops on the failed container instead of rolling back. deploy.sh --auto will try $SHA again next hour unless main moves on."
             exit 1
         fi
         die "rollback to $CURRENT ALSO failed — the stack needs a human (docker compose ps; docker compose logs fqd)"
@@ -288,6 +343,7 @@ done
 # --- done ------------------------------------------------------------------------
 printf '\n\033[1;32m════════════════════════════════════════════════════\n'
 printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
+notify "deployed $SHA" "from ${CURRENT:-<none>}. $(docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
 docker compose ps --format '    {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Image}}' 2>/dev/null || true
 printf '    rollback: %s %s   history: docker images %s/fq-dogfood\n' "$0" "${CURRENT:-<sha>}" "$REPO"
 printf '════════════════════════════════════════════════════\033[0m\n'

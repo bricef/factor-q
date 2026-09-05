@@ -119,6 +119,8 @@ ENTRYPOINT ["/usr/local/bin/fqd"]
 # Each comes from its official image or release rather than a distro
 # package, so the version is the one the repo pins. Build stages, not
 # layers of the final image: only the installed trees are copied across.
+# The versions here are copies of the repository's pins; `just check-pins`
+# (scripts/check-pins.sh, in `just quality`) fails when a copy drifts.
 
 # rust-toolchain.toml pins 1.95.0 with rustfmt + clippy; the official
 # image installs the minimal profile, so add the two components here.
@@ -258,19 +260,28 @@ ENTRYPOINT ["/usr/local/bin/fqd"]
 # --- the adapters and the dashboard --------------------------------------------
 #
 # Static Go binaries and a static musl dashboard: distroless/static is
-# enough. No health check yet — none of the three exposes a probe a
-# shell-less image can run; that is the `--probe` follow-up on #587.
+# enough. Each binary is its own probe (ADR-0035 clause 8): the process
+# serves GET /healthz on a loopback address and `--probe` (the adapters)
+# or `probe` (the dashboard) asks it from the same environment, so the
+# HEALTHCHECK needs no shell, no curl and no credential. The adapters
+# report healthy while attached to the broker (the watcher also while its
+# poll loop is cycling); the dashboard while it is serving — none of them
+# fails on the daemon's account, which is the daemon's own probe's job.
 # Configuration is the environment (GHW_*, FQCRON_*, FQ_DASHBOARD_*,
 # FQ_EDGE*), supplied by compose; see each binary's README.
 
 FROM gcr.io/distroless/static-debian12:nonroot AS watcher
 COPY --chmod=755 dist/bin/github-watcher /usr/local/bin/github-watcher
 USER nonroot:nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/github-watcher", "--probe"]
 ENTRYPOINT ["/usr/local/bin/github-watcher"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS cron
 COPY --chmod=755 dist/bin/fq-cron /usr/local/bin/fq-cron
 USER nonroot:nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/fq-cron", "--probe"]
 ENTRYPOINT ["/usr/local/bin/fq-cron"]
 
 # The dashboard is the one web-facing process and holds an attenuated
@@ -279,4 +290,6 @@ ENTRYPOINT ["/usr/local/bin/fq-cron"]
 FROM gcr.io/distroless/static-debian12:nonroot AS dashboard
 COPY --chmod=755 dist/bin/fq-dashboard /usr/local/bin/fq-dashboard
 USER nonroot:nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/fq-dashboard", "probe"]
 ENTRYPOINT ["/usr/local/bin/fq-dashboard"]

@@ -12,7 +12,7 @@
 # from Docker's apt repository (plus git, cron); asks the distribution's
 # init to run the container runtime — the only thing we ever ask of it;
 # creates the deploy user (default `fq`) in the docker group; lays out
-# ~fq/fq-dogfood with compose.yml, infra/, the four scripts, an .env and
+# ~fq/fq-dogfood with compose.yml, infra/, the five scripts, an .env and
 # the four secrets files from their templates (a broker token and a
 # dashboard session secret generated on first run); installs the crontab
 # (deploy.sh --auto hourly, hygiene.sh, a nightly backup.sh); and prints
@@ -60,7 +60,7 @@ else
     SRC="$FQ_REPO_DIR/ops/dogfood"
     ok "$SRC at $(git -C "$FQ_REPO_DIR" rev-parse --short=12 HEAD)"
 fi
-for f in compose.yml deploy.sh hygiene.sh backup.sh restore.sh crontab .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile; do
+for f in compose.yml deploy.sh hygiene.sh backup.sh restore.sh notify.sh crontab .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile; do
     [ -f "$SRC/$f" ] || die "missing $SRC/$f — an incomplete checkout?"
 done
 
@@ -110,10 +110,10 @@ install -d -o "$FQ_USER" -g "$FQ_USER" -m 700 "$DOGFOOD/.secrets"
 for f in compose.yml infra/nats.conf infra/Caddyfile; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 644 "$SRC/$f" "$DOGFOOD/$f"
 done
-for f in deploy.sh hygiene.sh backup.sh restore.sh; do
+for f in deploy.sh hygiene.sh backup.sh restore.sh notify.sh; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 755 "$SRC/$f" "$DOGFOOD/$f"
 done
-ok "compose.yml, infra/, deploy.sh, hygiene.sh, backup.sh, restore.sh (refreshed)"
+ok "compose.yml, infra/, deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh (refreshed)"
 
 # Host-authored files: created from their templates once, never touched again.
 seed() {  # $1 = template, $2 = destination, $3 = mode
@@ -159,6 +159,8 @@ Left for you (ops/dogfood/README.md, "Bootstrap"):
   1. $DOGFOOD/.secrets/env         — ANTHROPIC_API_KEY, GH_TOKEN (the broker token is already in)
      $DOGFOOD/.secrets/caddy.env   — DASH_USER, DASH_HASH
      docker login ghcr.io          — as $FQ_USER, if the packages are private
+     $DOGFOOD/.env                 — FQ_NOTIFY_HOOK, where a rollback or a warning should reach you
+                                     (then: sudo -iu $FQ_USER $DOGFOOD/notify.sh --test)
   2. Seed the instance volume: fqd.toml (edge bind 0.0.0.0:9470, workspace path, token_env),
      fq-cron.toml, agents/ — or restore.sh <backup-set> to bring an instance across.
   3. sudo -iu $FQ_USER $DOGFOOD/deploy.sh      # first deploy: pulls main-latest, brings the stack up

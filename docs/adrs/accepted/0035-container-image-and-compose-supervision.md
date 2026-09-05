@@ -29,10 +29,12 @@ as the drain, `up -d`, verify on the running containers — and the
 `bootstrap.sh` provisions a dedicated host, `deploy.sh --auto` is hourly
 continuous delivery with an idle check and automatic rollback, and
 `hygiene.sh`, `backup.sh` and `restore.sh` bound the volume and make the
-instance restorable (slice 5). Not built: probes on the adapter and
-dashboard images (8); the live instance has not yet been moved onto the
-stack (the runbook is in the ops README). The tracking issue carries
-what remains.
+instance restorable (slice 5); the adapter and dashboard images carry
+their own probes — each binary serves a loopback `/healthz` and asks it
+under the `HEALTHCHECK` — completing clause 8, `deploy.sh` waits on
+them, and `notify.sh` is the channel for what the unattended scripts
+find (slice 6 and after). Not built: the live instance has not yet been
+moved onto the stack (the runbook is in the ops README).
 
 ## Context
 
