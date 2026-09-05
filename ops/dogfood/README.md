@@ -46,7 +46,10 @@ fq-dogfood/
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE
-└── .deploy.lock             # deploy.sh's flock
+├── deploy.sh, hygiene.sh, backup.sh, restore.sh   # copied by bootstrap.sh, run by the crontab
+├── logs/                    # deploy.log, hygiene.log, backup.log — the cron jobs' output
+├── backups/                 # backup.sh's sets, FQ_BACKUP_KEEP of them
+└── .deploy.lock             # the flock deploy.sh, backup.sh and restore.sh share
 
 docker volume fq-dogfood_fq-data → /var/lib/factor-q in the daemon's container:
     fqd.toml, fq.toml, fq-cron.toml, agents/, state/ (edge identity + the
@@ -55,11 +58,11 @@ docker volume fq-dogfood_nats-data   → the event log
 docker volume fq-dogfood_caddy-data, fq-dogfood_caddy-config → certificates; regenerable
 ```
 
-`deploy.sh` runs from a repo checkout (it is the bootstrap and cannot
-live inside the thing it swaps); everything else on the host is copied
-from this directory once and edited in place. Secrets are `chmod 600`
-and never committed (`ops/dogfood/.secrets/` is git-ignored so a local
-`docker compose config` can create them).
+Everything tracked is copied in by `bootstrap.sh` and refreshed by
+running it again; the secrets and `.env` are written once by hand and
+never overwritten. Secrets are `chmod 600` and never committed
+(`ops/dogfood/.secrets/` is git-ignored so a local `docker compose
+config` can create them).
 
 **Installing a repo-tracked agent is two steps, and the order matters.**
 An agent definition names a model, and the daemon refuses to start when
@@ -78,25 +81,43 @@ the config. So:
 until #257 lands), which declares `model: claude-fable-5` — check it is
 in the live registry before installing it.
 
-## Bootstrap (one-time per host)
+## Bootstrap (one-time per host, and again when the tracked files change)
 
-Docker Engine with the compose plugin (`docker compose version` ≥ 2).
-If the packages under `ghcr.io/bricef` are private, `docker login
-ghcr.io` with a token that has `read:packages`. Then:
+A dedicated Debian or Ubuntu host, and root. [bootstrap.sh](bootstrap.sh)
+does the host-side work and is idempotent — run it again after any change
+to `compose.yml`, `infra/` or the scripts, and it refreshes those while
+never touching a secret, `.env`, or a volume:
 
 ```sh
-mkdir -p ~/fq-dogfood/.secrets && chmod 700 ~/fq-dogfood/.secrets
-cp ops/dogfood/compose.yml ~/fq-dogfood/ && cp -r ops/dogfood/infra ~/fq-dogfood/
-install -m 644 ops/dogfood/.env.example        ~/fq-dogfood/.env                      # then set FQ_TAG (or let deploy.sh)
-install -m 600 ops/dogfood/env.example         ~/fq-dogfood/.secrets/env              # then edit: keys, GH_TOKEN, the broker token
-install -m 600 ops/dogfood/dashboard.env.example ~/fq-dogfood/.secrets/dashboard.env  # fingerprint + token come after first start
-printf 'authorization { token: "%s" }\n' "$(openssl rand -hex 32)" > ~/fq-dogfood/.secrets/nats-auth.conf && chmod 600 ~/fq-dogfood/.secrets/nats-auth.conf
-# .secrets/caddy.env: DASH_USER, DASH_HASH (docker run --rm caddy:2 caddy hash-password), DASH_COOKIE (openssl rand -hex 32)
+# from a checkout on the host
+sudo ops/dogfood/bootstrap.sh
+# or from nothing — clones the repository to /opt/factor-q first
+curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/ops/dogfood/bootstrap.sh | sudo bash
 ```
 
-Put the same broker token in the three `.secrets/env` variables
-(`FQ_NATS_TOKEN`, and as userinfo in `GHW_NATS_URL` and
-`FQCRON_NATS_URL`).
+It installs Docker Engine and the compose plugin from Docker's
+repository (plus `git` and `cron`), asks the distribution's init to run
+the container runtime — the only thing we ask of it — creates the
+deploy user `fq` in the `docker` group, lays out `~fq/fq-dogfood` with
+the tracked files and the four secrets files from their templates (one
+broker token generated and written to all four places, a dashboard
+session secret generated), and installs the [crontab](crontab). It ends
+by printing what only a human can do:
+
+1. `.secrets/env`: `ANTHROPIC_API_KEY`, `GH_TOKEN` (literal — nothing
+   runs `gh auth token` for you now; #402 wants a per-role PAT).
+   `.secrets/caddy.env`: `DASH_USER`, `DASH_HASH` (`docker run --rm
+   caddy:2 caddy hash-password`). `docker login ghcr.io` as `fq` if the
+   packages are private.
+2. Seed the instance volume (below), or `restore.sh <set>` to bring an
+   existing instance across.
+3. The first `deploy.sh`, then pair and mint the dashboard token (below).
+
+Knobs: `FQ_USER`, `FQ_REPO_URL`, `FQ_REF`, `FQ_REPO_DIR`. Inbound 443 and
+22 are the provider firewall's business; the stack publishes nothing
+else. The crontab is active from the moment it is installed, but
+`deploy.sh --auto` deploys nothing until the daemon can be asked whether
+it is idle — i.e. until the pairing in step 3 exists.
 
 **Seed the instance volume.** The daemon needs `fqd.toml`, `agents/`
 and, if the scheduler runs, `fq-cron.toml` inside the volume before its
@@ -126,7 +147,7 @@ token_env = "FQ_NATS_TOKEN"             # the URL is the image's; the token is i
 `fq init` writes a fresh-project starter, not this instance's config;
 start from the instance's existing `fqd.toml`.
 
-**First deploy, then pair.** `ops/dogfood/deploy.sh` pulls, proves and
+**First deploy, then pair.** `~/fq-dogfood/deploy.sh` pulls, proves and
 starts everything. The daemon mints its edge identity on first start
 into `state/edge/` and logs the fingerprint. Its container reports
 unhealthy until its `fq` is paired (the health check is `fq status`);
@@ -167,9 +188,10 @@ out).
 ## Routine operations
 
 ```sh
-ops/dogfood/deploy.sh              # upgrade to the newest main build (the images' main-latest)
-ops/dogfood/deploy.sh --force      # redeploy/restart the same build (a .env, fqd.toml or secrets change)
-ops/dogfood/deploy.sh 1a2b3c4d5e6f # roll back / pin (a unique prefix is fine for images already on the host)
+~/fq-dogfood/deploy.sh              # upgrade to the newest main build (the images' main-latest)
+~/fq-dogfood/deploy.sh --force      # redeploy/restart the same build (a .env, fqd.toml or secrets change)
+~/fq-dogfood/deploy.sh 1a2b3c4d5e6f # roll back / pin (a unique prefix is fine for images already on the host)
+tail -f ~/fq-dogfood/logs/deploy.log # what the hourly deploy.sh --auto did
 cd ~/fq-dogfood && docker compose ps            # every service, its state and health
 docker compose logs -f fqd                      # the daemon's log (rotated by the driver: 5 × 50 MB)
 docker compose exec fqd fq status               # ask the daemon; fq doctor, fq workers list likewise
@@ -285,6 +307,79 @@ survive it. Caddy and the dashboard run on the host network,
 loopback-bound, exactly as the processes did — the dashboard refuses
 any other bind, and Caddy is the only door.
 
+## Continuous delivery: `deploy.sh --auto`
+
+The [crontab](crontab) runs `deploy.sh --auto` hourly. It is the same
+deploy as by hand — pull `main-latest`, resolve it to a commit, prove
+every image reports it, drain, up, verify — with three differences for
+running unattended:
+
+- **Quiet when there is nothing to do.** One timestamped line in
+  `logs/deploy.log` per run; the narration starts only when a deploy is
+  actually going to happen.
+- **It waits its turn.** Before draining it asks the daemon, through
+  the container's `fq`, whether any invocation is in flight, and defers
+  to the next run if so, or if the daemon cannot be asked (an unpaired
+  container is never assumed idle). This automates the first check of
+  "Before any restart", and it is why a merge lands on the next quiet
+  hour rather than interrupting the fleet's own builds.
+- **It rolls back by itself.** If the new build does not log `Runtime
+  ready` (or logs a startup refusal), it puts the previous tag back,
+  verifies that, and exits non-zero with a `⟲ rolled back` line — cron
+  mails it, the log shows it, and the instance is on the build it was on
+  before. A rollback that also fails says "needs a human" and stops.
+
+Not Watchtower, deliberately: the five images are not published
+atomically (a poll mid-publish would recreate the daemon on one build
+and the dashboard on another), and an updater without a readiness check
+and a rollback is not delivery, it is roulette. The cadence is hourly
+rather than per-merge because the fleet merges its own PRs. `deploy.sh`
+by hand still works at any time; the two share a lock.
+
+## Hygiene: `hygiene.sh`
+
+Every 30 minutes from the crontab, into `logs/hygiene.log`: the disk
+docker lives on (warns above `FQ_DISK_WARN_PCT`, 80% — a full disk has
+killed the daemon and the broker before), `docker system df`, the
+instance volume by subtree, the workspace count and how many are
+untouched for a week, and dangling images pruned. Above
+`FQ_BUILD_CACHE_MAX_GB` (60) it empties the daemon's `build/` subtree —
+cargo target, sccache and go caches, all regenerable — but only while no
+invocation is in flight; the next build is cold. Workspaces are reported
+and never deleted: reclaiming a terminal invocation's directory is the
+daemon's job (#367), and the script cannot tell a suspended one from a
+dead one. A non-zero exit means a threshold was crossed; `hygiene.sh
+--report` never prunes.
+
+## Backups and the restore drill
+
+`backup.sh` (nightly at 03:30 from the crontab, `--auto` so it defers
+while an invocation is in flight) takes a **consistent** copy: it stops
+the scheduler, the daemon (a drain), the watcher and the broker, copies
+the instance volume minus `build/` and `workspace/` and the broker's
+JetStream store into `backups/<utc-stamp>/` as two tarballs with
+`SHA256SUMS` and a `MANIFEST` (the tag it was taken at), and starts the
+stack again — a minute or two with the dashboard showing "runtime
+unreachable". Copying SQLite and JetStream files under a live writer
+would not be guaranteed to restore, which is the only property a backup
+has. `FQ_BACKUP_KEEP` (7) sets are kept on the host; `FQ_BACKUP_HOOK` is
+a command run with the finished set's directory, for the off-host copy
+— the on-host copy alone does not survive the host.
+
+`restore.sh <set> [--yes]` is the other half: it verifies the checksums,
+takes the stack down (volumes kept), refuses to overwrite a volume that
+already has content unless `--yes`, fills both volumes from the tarballs
+as root and hands them to the runtime user, and brings the stack up on
+the set's tag (or `.env`'s, if set). The pairing comes back with
+`state/client/`, so `fq status` answers immediately.
+
+**The drill**, once, and again after anything touches the layout: on a
+scratch VM, `bootstrap.sh`, copy a backup set over, `restore.sh <set>`,
+then `docker compose exec fqd fq status` and `fq invocation list` show
+the instance as it was. Clone-and-restore is cheap on a dedicated VM;
+the ADR's acceptance asks for it and so does the production-readiness
+review's Phase 3.
+
 ## Migrating an instance onto the stack
 
 From a host running the launcher shape (or from one host to another):
@@ -326,8 +421,7 @@ one re-pair and one dashboard token; the steps below move it.
    read by anything (GH_TOKEN is literal in `.secrets/env`).
 
 Not built yet: probes on the adapter and dashboard images
-([#587](https://github.com/bricef/factor-q/issues/587)), the post-deploy
-health gate with automatic rollback
-([#339](https://github.com/bricef/factor-q/issues/339)), and host hygiene
-— a disk alert and a prune job for `build/` and terminal workspaces
-(#587 slice 5).
+([#587](https://github.com/bricef/factor-q/issues/587)), and a
+notification channel for the warnings `hygiene.sh` and `deploy.sh
+--auto` write to their logs and cron mail — the metrics and alerting of
+[#342](https://github.com/bricef/factor-q/issues/342).

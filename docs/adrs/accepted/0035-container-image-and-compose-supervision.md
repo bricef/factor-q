@@ -25,10 +25,14 @@ supervisor of clause 2 with clause 7's network shape and the one volume
 of clause 6 (slice 3); `ops/dogfood/deploy.sh` is clause 5's tag bump —
 pull, prove every image's binary reports the tag, `docker compose stop`
 as the drain, `up -d`, verify on the running containers — and the
-`setsid` launchers and the release tree are gone (slice 4). Not built:
-probes on the adapter and dashboard images (8), and the live instance
-has not yet been moved onto the stack (the runbook is in the ops
-README). The tracking issue carries what remains.
+`setsid` launchers and the release tree are gone (slice 4); a
+`bootstrap.sh` provisions a dedicated host, `deploy.sh --auto` is hourly
+continuous delivery with an idle check and automatic rollback, and
+`hygiene.sh`, `backup.sh` and `restore.sh` bound the volume and make the
+instance restorable (slice 5). Not built: probes on the adapter and
+dashboard images (8); the live instance has not yet been moved onto the
+stack (the runbook is in the ops README). The tracking issue carries
+what remains.
 
 ## Context
 
