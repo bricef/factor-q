@@ -23,9 +23,13 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 	}
 	unhealthy := make(map[string]bool)
 	for {
-		state, err := loadState(ctx, config, store)
-		if err != nil {
+		var state map[string]FireState
+		if err := withBrokerRetry(ctx, logger, "load state", func() error {
+			var err error
+			state, err = loadState(ctx, config, store)
 			return err
+		}); err != nil {
+			return nil // withBrokerRetry only fails on a cancelled context
 		}
 		fires := plan(time.Now(), JobSet{Jobs: config.Jobs, MaxFiresPerHour: config.Limits.MaxFiresPerHour}, state)
 		if len(fires) == 0 {
@@ -37,8 +41,10 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 					reloads = nil
 					continue
 				}
-				if err := removeState(ctx, event.Diff.Removed, store); err != nil {
-					return err
+				if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
+					return removeState(ctx, event.Diff.Removed, store)
+				}); err != nil {
+					return nil
 				}
 				config = event.Config
 				unhealthy = make(map[string]bool)
@@ -56,8 +62,10 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 			case event, ok := <-reloads:
 				timer.Stop()
 				if ok {
-					if err := removeState(ctx, event.Diff.Removed, store); err != nil {
-						return err
+					if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
+						return removeState(ctx, event.Diff.Removed, store)
+					}); err != nil {
+						return nil
 					}
 					config = event.Config
 					unhealthy = make(map[string]bool)
@@ -81,8 +89,11 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 			if err := publishWithBackoff(ctx, publisher, fire, job, logger); err != nil {
 				if errors.Is(err, errFireSuperseded) {
 					logger.Printf("job=%s scheduled=%s missed: superseded by next slot", fire.Job, fire.ScheduledAt.Format(time.RFC3339))
-					if err := store.Put(ctx, fire.Job, FireState{LastScheduled: fire.ScheduledAt}); err != nil {
-						return fmt.Errorf("record superseded fire %q: %w", fire.Job, err)
+					record := FireState{LastScheduled: fire.ScheduledAt}
+					if err := withBrokerRetry(ctx, logger, fmt.Sprintf("record superseded fire %q", fire.Job), func() error {
+						return store.Put(ctx, fire.Job, record)
+					}); err != nil {
+						return nil
 					}
 					continue
 				}
@@ -97,12 +108,61 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 				return err
 			}
 			record := FireState{LastScheduled: fire.ScheduledAt, PublishedAt: time.Now()}
-			if err := store.Put(ctx, fire.Job, record); err != nil {
-				return fmt.Errorf("record acknowledged fire %q: %w", fire.Job, err)
+			if err := withBrokerRetry(ctx, logger, fmt.Sprintf("record acknowledged fire %q", fire.Job), func() error {
+				return store.Put(ctx, fire.Job, record)
+			}); err != nil {
+				return nil
 			}
 			logger.Printf("job=%s scheduled=%s published", fire.Job, fire.ScheduledAt.Format(time.RFC3339))
 		}
 	}
+}
+
+// withBrokerRetry runs op with capped exponential backoff for as long as
+// it keeps failing, returning only once it succeeds or ctx ends — so the
+// only error it ever returns is ctx.Err().
+//
+// Every state-store call goes through it because the state store *is* the
+// broker (JetStream KV). Returning those errors up the loop is exactly how
+// a broker outage used to end the process: the KV read is the first thing
+// each iteration does, so sixty failed reconnects later the scheduler
+// exited, and with `setsid … &` and no supervisor nothing brought it back.
+// A store that stays unreachable now keeps the process alive and loud
+// instead, and the fires resume by themselves when the broker returns.
+func withBrokerRetry(ctx context.Context, logger *log.Logger, what string, op func() error) error {
+	backoff := initialRetryBackoff
+	for attempt := 1; ; attempt++ {
+		err := op()
+		if err == nil {
+			if attempt > 1 {
+				logger.Printf("%s: recovered after %d attempts", what, attempt)
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger.Printf("%s: attempt=%d failed, retrying in %s: %v", what, attempt, backoff, err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = nextBackoff(backoff)
+	}
+}
+
+// nextBackoff doubles backoff up to maximumRetryBackoff.
+func nextBackoff(backoff time.Duration) time.Duration {
+	if backoff >= maximumRetryBackoff {
+		return maximumRetryBackoff
+	}
+	if backoff *= 2; backoff > maximumRetryBackoff {
+		return maximumRetryBackoff
+	}
+	return backoff
 }
 
 func loadState(ctx context.Context, config *Config, store StateStore) (map[string]FireState, error) {
@@ -157,11 +217,6 @@ func publishWithBackoff(ctx context.Context, publisher Publisher, fire Fire, job
 			}
 		}
 		attempt++
-		if backoff < maximumRetryBackoff {
-			backoff *= 2
-			if backoff > maximumRetryBackoff {
-				backoff = maximumRetryBackoff
-			}
-		}
+		backoff = nextBackoff(backoff)
 	}
 }
