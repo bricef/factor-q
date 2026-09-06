@@ -34,6 +34,10 @@ use fq_runtime::views::Views;
 pub(crate) fn register_active_report(
     registry: &mut fq_edge::EdgeRegistry,
     views: Arc<Views>,
+    // The daemon's derived stuck threshold (#37). Every surface that
+    // shows a liveness verdict is handed the same number, or two of them
+    // call the same invocation two different things.
+    stuck_after_ms: i64,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<ActiveParams, Vec<fq_runtime::views::ActiveInvocationView>>(
         fq_ops::InvocationReport::Active,
@@ -67,7 +71,7 @@ pub(crate) fn register_active_report(
                     views
                         .active_invocations(
                             chrono::Utc::now().timestamp_millis(),
-                            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
+                            stuck_after_ms,
                             fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
                         )
                         .await

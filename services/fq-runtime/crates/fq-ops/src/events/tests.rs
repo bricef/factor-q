@@ -307,7 +307,7 @@ fn worker_heartbeat_subject_reads_from_payload_not_envelope() {
         runtime_id,
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: worker_id.clone(),
-            last_step_at: None,
+            last_step_at_ms: None,
         }),
     );
     assert_eq!(event.subject(), "fq.worker.worker-007.heartbeat");
@@ -1368,7 +1368,7 @@ fn schema_id_for_every_payload_variant() {
         }),
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: crate::worker::WorkerId::new("w").unwrap(),
-            last_step_at: None,
+            last_step_at_ms: None,
         }),
         EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
             worker_id: crate::worker::WorkerId::new("w").unwrap(),

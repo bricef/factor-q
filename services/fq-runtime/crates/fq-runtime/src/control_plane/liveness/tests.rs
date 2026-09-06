@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::{StuckSweep, classify_liveness};
 use crate::bus::EventBus;
+use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::store::ControlPlaneStore;
 use crate::events::EventPayload;
 use crate::views::{Liveness, Views};
@@ -39,6 +40,13 @@ impl Fixture {
                 .await
                 .unwrap(),
         );
+        // Created and dropped: `Views::open` opens all three stores
+        // read-only and refuses a projection file that does not exist,
+        // so a fixture without one silently turns the agreement test
+        // below into a no-op. Nothing here writes to it.
+        ProjectionStore::open(&dir.path().join("projection.db"))
+            .await
+            .unwrap();
         let bus = EventBus::connect(server_url).await.expect("connect NATS");
         // A per-fixture agent id keeps parallel tests off each other's
         // subject: the sweep addresses the event at the agent.
@@ -227,33 +235,114 @@ async fn the_doctor_and_the_sweep_agree_on_the_same_invocation() {
     let event = next_stuck(&mut sub).await;
     let flagged_by_sweep = event.envelope.invocation_id.to_string();
 
+    // `.expect`, not `if let Ok`: a fixture that could not open the
+    // views must fail this test rather than skip its assertions.
     let views = Views::open(&crate::db::RuntimeDbPaths {
         worker: fixture._dir.path().join("worker.db"),
         control_plane: fixture._dir.path().join("cp.db"),
         projection: fixture._dir.path().join("projection.db"),
     })
-    .await;
-    // The projection store is not written by this fixture, so open it
-    // only if `Views` could; the agreement claim is about the worker
-    // and control-plane halves.
-    if let Ok(views) = views {
-        let executions = views
-            .executions(
-                NOW,
-                THRESHOLD_MS,
-                crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
-            )
-            .await
-            .expect("executions");
-        assert_eq!(
-            executions.stuck_ids,
-            vec![flagged_by_sweep.clone()],
-            "the doctor's stuck set must be exactly the sweep's"
-        );
-        assert_eq!(executions.in_flight, 2);
-        assert!(!executions.stuck_ids.contains(&fresh));
-    }
+    .await
+    .expect("open the read views over the fixture's three stores");
+
+    // `control.doctor`.
+    let executions = views
+        .executions(
+            NOW,
+            THRESHOLD_MS,
+            crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await
+        .expect("executions");
+    assert_eq!(
+        executions.stuck_ids,
+        vec![flagged_by_sweep.clone()],
+        "the doctor's stuck set must be exactly the sweep's"
+    );
+    assert_eq!(executions.in_flight, 2);
+    assert!(!executions.stuck_ids.contains(&fresh));
+
+    // `invocation.active` / `fq active` / the dashboard's active table
+    // and detail page, which read the same rows through a different
+    // call. A surface handed a different threshold would call the same
+    // invocation something else, which is the drift this pins.
+    let active = views
+        .active_invocations(
+            NOW,
+            THRESHOLD_MS,
+            crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await
+        .expect("active invocations");
+    let active_stuck: Vec<&str> = active
+        .iter()
+        .filter(|row| row.liveness == Liveness::Stuck)
+        .map(|row| row.invocation_id.as_str())
+        .collect();
+    assert_eq!(
+        active_stuck,
+        vec![flagged_by_sweep.as_str()],
+        "the active table's stuck rows must be exactly the sweep's"
+    );
+    assert_eq!(active.len(), 2);
+
     assert_eq!(flagged_by_sweep, stuck);
+}
+
+/// A publish that does not land must not consume the crossing.
+///
+/// The memory is the only thing stopping the sweep re-reporting, so a
+/// crossing recorded for an event the bus never carried is a stall that
+/// is never reported at that boundary — the WAL row goes on stating the
+/// condition and nothing says so. Asserted on the memory directly,
+/// because "an event that was not published" has no observable on the
+/// wire.
+#[tokio::test]
+async fn a_failed_publish_does_not_consume_the_crossing() {
+    let server = crate::test_support::nats::test_nats();
+    let fixture = Fixture::new(server.url()).await;
+    let id = fixture.in_flight(10 * THRESHOLD_MS).await;
+
+    // A bus whose broker has gone away: the publish is attempted and
+    // fails on the ack.
+    let doomed = crate::test_support::nats::test_nats();
+    let dead_bus = EventBus::connect(doomed.url()).await.expect("connect NATS");
+    drop(doomed);
+    let dead = StuckSweep::new(
+        dead_bus,
+        fixture.worker.clone(),
+        fixture.control_plane.clone(),
+        THRESHOLD_MS,
+    );
+
+    // A failed publish is not a failed sweep — the tick still succeeds.
+    dead.tick(NOW)
+        .await
+        .expect("a tick survives a failed publish");
+    assert!(
+        dead.flagged.lock().unwrap().is_empty(),
+        "a crossing the bus never carried must not be remembered as reported"
+    );
+
+    // The contrast, on a live bus: a crossing that did go out is
+    // remembered, at the boundary it was reported for.
+    let mut sub = Box::pin(fixture.subscribe().await);
+    let live = fixture.sweep();
+    live.tick(NOW).await.expect("tick");
+    assert_eq!(
+        next_stuck(&mut sub)
+            .await
+            .envelope
+            .invocation_id
+            .to_string(),
+        id
+    );
+    assert_eq!(
+        live.flagged.lock().unwrap().get(&id).copied(),
+        Some(NOW - 10 * THRESHOLD_MS)
+    );
+    live.tick(NOW).await.expect("second tick");
+    assert_quiet(&mut sub, "a published crossing is not re-reported").await;
 }
 
 /// The classifier itself, without a database. Three verdicts, and the

@@ -481,7 +481,7 @@ mod tests {
             Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
-                last_step_at: None,
+                last_step_at_ms: None,
             }),
         );
         bus.publish(&event).await.expect("publish");
@@ -546,7 +546,7 @@ mod tests {
                 Uuid::now_v7(),
                 EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                     worker_id: worker.clone(),
-                    last_step_at: None,
+                    last_step_at_ms: None,
                 }),
             );
             bus.publish(&event).await.expect("publish");

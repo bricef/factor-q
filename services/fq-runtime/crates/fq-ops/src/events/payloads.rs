@@ -496,7 +496,12 @@ pub struct WorkerHeartbeatPayload {
     /// putting a per-invocation list on a 10-second ping would put the
     /// same rows on the wire ~8,600 times a day to answer a question
     /// nothing asks of the beat.
-    pub last_step_at: Option<i64>,
+    ///
+    /// Optional on read, and always written: a beat recorded before
+    /// this field existed deserialises with it absent, which reads as
+    /// "not recorded" rather than as a boundary of zero.
+    #[serde(default)]
+    pub last_step_at_ms: Option<i64>,
 }
 
 /// Payload for [`EventPayload::WorkerOrphaned`](super::EventPayload::WorkerOrphaned).

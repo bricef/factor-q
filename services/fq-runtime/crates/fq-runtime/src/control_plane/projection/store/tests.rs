@@ -942,7 +942,7 @@ async fn heartbeats_are_not_projected_and_legacy_rows_are_swept() {
         Uuid::now_v7(),
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: WorkerId::new("w1".to_string()).unwrap(),
-            last_step_at: None,
+            last_step_at_ms: None,
         }),
     );
     store.insert_event(&heartbeat, None).await.unwrap();

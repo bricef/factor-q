@@ -54,7 +54,7 @@ pub struct HeartbeatProducer {
     interval_ms: u64,
     /// The WAL this worker writes its step boundaries into. Absent in
     /// the unit tests that only assert the cadence; a producer without
-    /// it beats with `last_step_at: None`, which reads as "this worker
+    /// it beats with `last_step_at_ms: None`, which reads as "this worker
     /// is not saying", not as "this worker has no work".
     store: Option<Arc<super::store::WorkerStore>>,
 }
@@ -137,8 +137,12 @@ impl HeartbeatProducer {
     /// the population is bounded by `max_concurrent_invocations`
     /// (default 1), the query already exists, and the alternative was a
     /// new column-max query in a store file that is at its size budget
-    /// and may only shrink.
-    async fn last_step_at(&self) -> Option<i64> {
+    /// and may only shrink. It drags each row's `state_blob` and
+    /// `trigger_payload` off disk every ten seconds to read one `i64`,
+    /// which is cheap at a concurrency of one and is not at twenty.
+    // TODO(#37 follow-up): MAX(updated_at) WHERE terminal_at IS NULL
+    // once worker/store.rs has headroom
+    async fn last_step_at_ms(&self) -> Option<i64> {
         let store = self.store.as_ref()?;
         match store.find_in_flight_invocations().await {
             Ok(rows) => rows.iter().map(|r| r.updated_at).max(),
@@ -160,7 +164,7 @@ impl HeartbeatProducer {
             self.runtime_id,
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: self.worker_id.clone(),
-                last_step_at: self.last_step_at().await,
+                last_step_at_ms: self.last_step_at_ms().await,
             }),
         );
         match self.bus.publish(&event).await {
@@ -265,7 +269,7 @@ mod tests {
                 .expect("stream open")
                 .expect("deserialise");
             match event.payload {
-                EventPayload::WorkerHeartbeat(p) => p.last_step_at,
+                EventPayload::WorkerHeartbeat(p) => p.last_step_at_ms,
                 other => panic!("expected a heartbeat, got {other:?}"),
             }
         }
@@ -321,7 +325,7 @@ mod tests {
         );
         let worker_id = WorkerId::new(format!("hb-idle-{}", Uuid::now_v7().simple())).unwrap();
         let producer = HeartbeatProducer::new(bus, worker_id, Uuid::now_v7()).with_store(store);
-        assert_eq!(producer.last_step_at().await, None);
+        assert_eq!(producer.last_step_at_ms().await, None);
     }
 
     #[tokio::test]

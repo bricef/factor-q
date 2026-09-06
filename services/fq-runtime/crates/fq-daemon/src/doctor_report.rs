@@ -113,6 +113,19 @@ pub(crate) fn register_doctor_report(
                     )
                     .await
                     .map_err(internal)?;
+                // Only `.ambiguous` is read, and that count does not
+                // depend on the threshold — the argument feeds
+                // `recovery`'s stale-worker half, which this report gets
+                // from `views.workers()` instead. It reads
+                // `DEFAULT_STALE_THRESHOLD_MS` because that is what the
+                // parameter means, not because anything here observes
+                // it: passing the derived stuck threshold was wrong for
+                // the same reason, and equally invisible.
+                //
+                // The stale-worker query behind it is therefore run and
+                // thrown away on every `fq doctor`. Pre-existing, left
+                // alone here: narrowing it is a change to `Views`, not
+                // to this handler.
                 let ambiguous = views
                     .recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS)
                     .await

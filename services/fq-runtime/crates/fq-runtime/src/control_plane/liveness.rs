@@ -98,6 +98,9 @@ pub(crate) async fn is_closed_by_control_plane(
 /// a row that advanced and then stalled again has crossed a second
 /// time and is. That is what makes the event usable as an alert: its
 /// arrival rate is the rate of *new* stalls, not of ticks.
+///
+/// The memory records only what was actually published, so a crossing
+/// whose publish failed is reported on the next tick rather than lost.
 pub struct StuckSweep {
     bus: EventBus,
     worker_store: Arc<WorkerStore>,
@@ -133,10 +136,23 @@ impl StuckSweep {
         self.stuck_after_ms
     }
 
-    /// One pass. Publish failures are logged and not retried: the WAL
-    /// row is still there and the next tick will find it, because a
-    /// failed publish never records the crossing.
+    /// One pass. Publish failures are logged and not retried *within*
+    /// the tick, and they do not consume the crossing: the WAL row is
+    /// still there and the next tick reports it again.
+    ///
+    /// That is the opposite of the stale-worker sweep's at-most-once
+    /// posture, deliberately. There the store write consumes an
+    /// alive→stale transition that cannot recur, so re-publishing on
+    /// failure would mean re-publishing on every tick forever. Here the
+    /// condition is a *standing* one the WAL keeps stating, so a
+    /// dropped notice costs nothing to restate and losing it costs an
+    /// operator the only signal there was.
     pub async fn tick(&self, now_ms: i64) -> Result<(), StuckSweepError> {
+        // Every ten seconds, and it carries each row's `state_blob` and
+        // `trigger_payload` along with the two fields the verdict needs.
+        // Bounded by `max_concurrent_invocations` (default 1) today.
+        // TODO(#37 follow-up): MAX(updated_at) WHERE terminal_at IS NULL
+        // once worker/store.rs has headroom
         let rows = self.worker_store.find_in_flight_invocations().await?;
         let mut live: Vec<String> = Vec::with_capacity(rows.len());
         for row in rows {
@@ -155,14 +171,20 @@ impl StuckSweep {
             if verdict != Liveness::Stuck {
                 continue;
             }
-            if !self.record_crossing(&row.invocation_id, row.updated_at) {
+            if self.already_reported(&row.invocation_id, row.updated_at) {
                 debug!(
                     invocation_id = %row.invocation_id,
                     "invocation still stuck at an already-reported step boundary; not re-emitting"
                 );
                 continue;
             }
-            self.emit(&row).await;
+            // Record only what actually went out. Recording first would
+            // let a failed publish consume the crossing, and that stall
+            // would then never be reported at that boundary — the one
+            // failure mode this memory must not have.
+            if self.emit(&row).await {
+                self.record_crossing(&row.invocation_id, row.updated_at);
+            }
         }
         self.forget_all_but(&live);
         Ok(())
@@ -191,15 +213,19 @@ impl StuckSweep {
         Ok(tools.max(llms))
     }
 
-    /// Claim the right to report this crossing. `true` when the
-    /// invocation was not already flagged at this same step boundary.
-    fn record_crossing(&self, invocation_id: &str, updated_at: i64) -> bool {
+    /// Has this invocation already been reported at this exact step
+    /// boundary? A row still stuck where it was last flagged is the
+    /// same finding; one flagged at an older boundary has moved since
+    /// and stalled again.
+    fn already_reported(&self, invocation_id: &str, updated_at: i64) -> bool {
+        let flagged = self.flagged.lock().expect("stuck-sweep memory poisoned");
+        flagged.get(invocation_id) == Some(&updated_at)
+    }
+
+    /// Remember a crossing that was actually published.
+    fn record_crossing(&self, invocation_id: &str, updated_at: i64) {
         let mut flagged = self.flagged.lock().expect("stuck-sweep memory poisoned");
-        if flagged.get(invocation_id) == Some(&updated_at) {
-            return false;
-        }
         flagged.insert(invocation_id.to_string(), updated_at);
-        true
     }
 
     /// Drop the memory of invocations that are no longer in flight, so
@@ -210,21 +236,29 @@ impl StuckSweep {
         flagged.retain(|id, _| live.iter().any(|live_id| live_id == id));
     }
 
-    async fn emit(&self, row: &crate::worker::store::InvocationStateRow) {
+    /// Publish one report. `true` when it reached the bus — which is
+    /// what the caller records the crossing on.
+    ///
+    /// An unaddressable row (an id or agent id the envelope cannot
+    /// carry) returns `false` too. It will be retried every tick and
+    /// fail every tick, which is right: the log line is the only place
+    /// that corruption can surface, and silently forgetting the row
+    /// would hide it.
+    async fn emit(&self, row: &crate::worker::store::InvocationStateRow) -> bool {
         let Ok(agent_id) = crate::agent::AgentId::new(row.agent_id.clone()) else {
             error!(
                 invocation_id = %row.invocation_id,
                 agent_id = %row.agent_id,
                 "stuck invocation has an invalid agent id; cannot address the event"
             );
-            return;
+            return false;
         };
         let Ok(invocation_id) = Uuid::parse_str(&row.invocation_id) else {
             error!(
                 invocation_id = %row.invocation_id,
                 "stuck invocation has an invalid id; cannot address the event"
             );
-            return;
+            return false;
         };
         let event = Event::new(
             agent_id,
@@ -240,9 +274,9 @@ impl StuckSweep {
             error!(
                 invocation_id = %row.invocation_id,
                 error = %err,
-                "failed to publish invocation.stuck event"
+                "failed to publish invocation.stuck event; the next sweep will report it again"
             );
-            return;
+            return false;
         }
         warn!(
             invocation_id = %row.invocation_id,
@@ -251,6 +285,7 @@ impl StuckSweep {
             stuck_after_ms = self.stuck_after_ms,
             "invocation has not crossed a step boundary within the stuck threshold"
         );
+        true
     }
 }
 
