@@ -141,7 +141,6 @@ Test tiers, each with different prerequisites:
 | Smoke (real LLM) | `just smoke` (repo root) | a running broker + the key named by `SMOKE_API_KEY_ENV` (default `OPENROUTER_API_KEY`) |
 | Parallel-workers drill (real LLM) | `just drill` (repo root) | a running broker with no other daemon on it + `DRILL_API_KEY_ENV` (default `OPENROUTER_API_KEY`) |
 | Drift detector (real LLM) | `just acceptance-drift` | `ANTHROPIC_API_KEY` |
-| Shell sandbox (container) | `just test-shell-sandbox` | Docker |
 
 **No shared broker for the suite.** Every NATS-backed test spawns its own
 private `nats-server` (#233, via `fq-test-support`) and points the code
