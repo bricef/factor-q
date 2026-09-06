@@ -97,4 +97,19 @@ pub enum ConfigError {
         teardown: u64,
         backstop: u64,
     },
+
+    /// An `[mcp]` bound set to zero. Every one of them would be
+    /// satisfiable only by a server that does nothing — a zero deadline
+    /// expires before the handshake is sent, a zero page cap admits no
+    /// page, a zero line length admits no message — so the effect is
+    /// "every MCP server is unavailable", which is not what anyone
+    /// means to configure. The key is named because that is the line to
+    /// fix; `retry_initial_secs` is deliberately not among them, where
+    /// zero means "do not retry".
+    #[error(
+        "[mcp] {key} must be greater than zero: {key} = 0 would make every MCP server \
+         unavailable rather than bounding one that misbehaves — remove the line to take the \
+         default, or set a real bound"
+    )]
+    McpZeroBound { key: &'static str },
 }

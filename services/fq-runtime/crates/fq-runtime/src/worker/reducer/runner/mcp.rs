@@ -156,26 +156,58 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// The event is the whole point: a silent skip left an operator
     /// with an agent that failed for an unrelated-looking reason, and a
     /// hang left them with nothing at all. `Setup` is the phase because
-    /// nothing of the agent's work has begun.
+    /// nothing of the agent's work has begun — and nothing of it has,
+    /// literally: this runs before the workspace is provisioned and
+    /// before a single grant-bearing server is spawned, so a refused
+    /// invocation costs one pair of events and no child processes.
+    ///
+    /// `triggered` is published first regardless. The failure has to
+    /// hang off something: a `failed` with no chain root is an event
+    /// the projection cannot attribute to an invocation.
     pub(super) async fn refuse_for_unavailable_mcp(
         &self,
-        agent_id: &AgentId,
+        agent: &Agent,
         invocation_id: Uuid,
+        trigger: &Trigger,
         message: String,
         totals: InvocationTotals,
-        cursor: &mut Option<Uuid>,
     ) -> Result<InvocationOutcome, ExecutorError> {
+        let agent_id = agent.id().clone();
+        let mut cursor: Option<Uuid> = None;
+        self.publish_chained(&mut cursor, triggered_event(agent, invocation_id, trigger))
+            .await?;
         let kind = FailureKind::RuntimeError;
         self.emit_failed(
-            agent_id,
+            &agent_id,
             invocation_id,
             kind,
             message.clone(),
             FailurePhase::Setup,
             totals,
-            cursor,
+            &mut cursor,
         )
         .await?;
         Err(ExecutorError::InvocationFailed { kind, message })
     }
+}
+
+/// The `triggered` event that opens an invocation's chain.
+///
+/// Its own function because two paths publish it now — the ordinary
+/// one, and the refusal above, which has to open a chain before it can
+/// close one. Cloning what it carries rather than moving it is what
+/// lets the caller keep the trigger; the ordinary path built its own
+/// step-0 payload from the same fields anyway.
+pub(super) fn triggered_event(agent: &Agent, invocation_id: Uuid, trigger: &Trigger) -> Event {
+    Event::new(
+        agent.id().clone(),
+        invocation_id,
+        EventPayload::Triggered(TriggeredPayload {
+            trigger_id: Some(trigger.id),
+            trigger_source: trigger.source,
+            trigger_subject: trigger.subject.clone(),
+            trigger_payload: trigger.payload.clone(),
+            config_snapshot: agent.to_snapshot(),
+        }),
+    )
 }
