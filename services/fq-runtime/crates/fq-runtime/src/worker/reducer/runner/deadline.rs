@@ -15,7 +15,7 @@
 //! finding B2, <https://github.com/bricef/factor-q/issues/547>).
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 use super::*;
 
@@ -33,9 +33,39 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// than letting a second caller exist, and without blocking the
     /// tool (ADR-0018 §2). With no channel wired this is a plain await.
     ///
-    /// The deadline covers the whole loop, servicing included: wall
-    /// clock is wall clock, and a tool is no less stuck for the host
-    /// having been busy.
+    /// The deadline is measured over the whole wait, servicing
+    /// included — a tool is no less stuck for the host having been busy
+    /// — but it is an *arm of the same `select!`*, never a `timeout`
+    /// wrapped around the loop. That distinction is the whole design.
+    ///
+    /// A `timeout` around the loop looks equivalent and is not, because
+    /// it can fire while a branch body is mid-`await`, dropping it.
+    /// Three things break when the body it drops is
+    /// `handle_server_request`:
+    ///
+    /// - the provider call inside it is abandoned after the request
+    ///   went out, so its **cost is never recorded** — and cost
+    ///   information is the one thing this system never loses;
+    /// - the server's sampling request is never answered, so a
+    ///   well-behaved server waits on a reply that is not coming;
+    /// - a `publish_chained` dropped between the bus accepting an event
+    ///   and `*cursor = Some(id)` **forks the event chain**: the event
+    ///   is on the bus, and the next one records the wrong parent.
+    ///
+    /// As an arm, the deadline can only win *between* servicings: a
+    /// `select!` branch body runs to completion once chosen, so an
+    /// in-flight `handle_server_request` finishes and the timeout is
+    /// taken on the next pass. The tool future is the only thing
+    /// dropped, which is the one drop that is safe — a `Tool::execute`
+    /// that needs to clean up is told its deadline through
+    /// [`ToolContext::deadline`](fq_tools::ToolContext::deadline) and
+    /// acts on it first (the MCP adapter sends
+    /// `notifications/cancelled` there).
+    ///
+    /// The cost of that choice is that the deadline cannot interrupt a
+    /// single wedged server request. It does not need to: the model
+    /// call inside one carries `[worker] llm_timeout_secs` (#546), so
+    /// the servicing is itself bounded.
     ///
     /// The outer `Err` is infrastructure (a server request that failed
     /// to publish); a timeout is an ordinary tool error in the inner
@@ -57,51 +87,63 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         cursor: &mut Option<Uuid>,
         sampling: Option<&mut SamplingChannel>,
     ) -> Result<Result<ToolResult, ToolError>, ExecutorError> {
-        let running = async {
-            match sampling {
-                None => Ok(tool.execute(ctx, params).await),
-                Some(channel) => {
-                    let tool_fut = tool.execute(ctx, params);
-                    tokio::pin!(tool_fut);
-                    loop {
-                        tokio::select! {
-                            // Bias toward completing the tool: if both
-                            // are ready, return the tool result rather
-                            // than starving it behind a backlog of
-                            // requests.
-                            biased;
-                            result = &mut tool_fut => break Ok(result),
-                            maybe_req = channel.recv() => match maybe_req {
-                                Some((server, request)) => {
-                                    let mut ctx = InvocationCtx::new(
-                                        llm, agent_id, invocation_id, totals, cursor,
-                                    );
-                                    self.handle_server_request(&mut ctx, agent, &server, request)
-                                        .await?;
-                                }
-                                // All servers' channels closed: just
-                                // await the tool to completion.
-                                None => break Ok((&mut tool_fut).await),
-                            }
-                        }
-                    }
-                }
-            }
+        let expires_at = tokio::time::Instant::now() + deadline.armed;
+        let timed_out = || {
+            warn!(
+                agent_id = %agent_id,
+                invocation_id = %invocation_id,
+                tool = %tool_name,
+                deadline_secs = deadline.allowed.as_secs(),
+                "tool call passed its deadline and the host backstop fired; abandoning the call"
+            );
+            Ok(Err(ToolError::TimedOut {
+                after: deadline.allowed,
+                // The host stopped waiting; it stopped nothing else.
+                output: None,
+            }))
         };
 
-        match timeout(deadline.armed, running).await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                warn!(
-                    agent_id = %agent_id,
-                    invocation_id = %invocation_id,
-                    tool = %tool_name,
-                    deadline_secs = deadline.allowed.as_secs(),
-                    "tool call passed its deadline and the host backstop fired; abandoning the call"
-                );
-                Ok(Err(ToolError::TimedOut {
-                    after: deadline.allowed,
-                }))
+        let Some(channel) = sampling else {
+            // Nothing else is being awaited, so nothing else can be
+            // dropped: a plain deadline on the tool future is exactly
+            // right.
+            return match timeout_at(expires_at, tool.execute(ctx, params)).await {
+                Ok(result) => Ok(result),
+                Err(_) => timed_out(),
+            };
+        };
+
+        let tool_fut = tool.execute(ctx, params);
+        tokio::pin!(tool_fut);
+        let expiry = tokio::time::sleep_until(expires_at);
+        tokio::pin!(expiry);
+        loop {
+            tokio::select! {
+                // Ordered, not random. The tool first: if it finished
+                // during the last servicing, that answer beats a
+                // deadline that has since passed. Then the deadline,
+                // so a chatty server cannot hold the call past it by
+                // always having another request ready. Requests last.
+                biased;
+                result = &mut tool_fut => break Ok(result),
+                _ = &mut expiry => break timed_out(),
+                maybe_req = channel.recv() => match maybe_req {
+                    Some((server, request)) => {
+                        let mut ctx = InvocationCtx::new(
+                            llm, agent_id, invocation_id, totals, cursor,
+                        );
+                        // Runs to completion — see the note above on
+                        // why this must never be a dropped future.
+                        self.handle_server_request(&mut ctx, agent, &server, request)
+                            .await?;
+                    }
+                    // All servers' channels closed: nothing left to
+                    // service, so the tool alone, still bounded.
+                    None => break match timeout_at(expires_at, &mut tool_fut).await {
+                        Ok(result) => Ok(result),
+                        Err(_) => timed_out(),
+                    },
+                }
             }
         }
     }

@@ -25,9 +25,14 @@
 //!   be granted explicitly.
 //! - **Timeout** — every call has a wall-clock timeout. The agent may
 //!   request a shorter timeout via `timeout_secs`; anything longer is
-//!   clamped to the runtime-configured maximum. On timeout the child
-//!   is killed and the tool returns with `is_error: true` plus
-//!   whatever output was captured up to that point.
+//!   clamped to the runtime-configured maximum, as is the configured
+//!   default. On timeout the child is killed and the tool returns
+//!   [`ToolError::TimedOut`] carrying whatever output was captured up
+//!   to that point. A `TimedOut` and not an `is_error: true` result:
+//!   the host counts consecutive deadlines to end an invocation whose
+//!   tools have stopped answering, and a timeout dressed as an answer
+//!   left the one tool that can hang for fifteen minutes outside that
+//!   protection (#547).
 //! - **Bounded output drain** — once the child is gone (exited or
 //!   killed), legitimate leftover output is only what sits in the
 //!   kernel pipe buffer, so capture continues for a short grace window
@@ -95,13 +100,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+
+mod output;
+
+use output::{LineLimit, capture_stream, format_output};
+// Re-exported at the path it has always had: `fq-cli`'s status view
+// renders byte counts with it.
+pub use output::human_bytes;
 
 /// The `PATH` every child the runtime starts with a cleared environment
 /// gets by default: the `exec` tool's children, and the stdio MCP
@@ -173,13 +184,23 @@ impl ExecTool {
     /// [`requested_deadline`](Tool::requested_deadline) can never
     /// disagree — the host arms its backstop off the second and the
     /// child dies by the first.
+    ///
+    /// `max_timeout` bounds **both** arms, the configured default
+    /// included. A config with `default_timeout > max_timeout` is an
+    /// operator mistake the runtime also refuses at load, but the
+    /// primitive must not depend on that: an unclamped default would
+    /// run the child past the ceiling the host clamped its own backstop
+    /// to, inverting the ordering the backstop grace exists to
+    /// guarantee, and the child would then die by future-drop with its
+    /// captured output discarded.
     fn call_timeout(&self, requested_secs: Option<u64>) -> Duration {
-        match requested_secs {
+        let requested = match requested_secs {
             // Zero is rejected in `execute`; here it is simply not a
             // request for a longer deadline.
             None | Some(0) => self.config.default_timeout,
-            Some(secs) => Duration::from_secs(secs).min(self.config.max_timeout),
-        }
+            Some(secs) => Duration::from_secs(secs),
+        };
+        requested.min(self.config.max_timeout)
     }
 }
 
@@ -448,13 +469,18 @@ impl Tool for ExecTool {
             ));
         }
 
+        // A deadline, not an ordinary error result. This used to be
+        // `Ok(ToolResult { is_error: true })`, which reads to the host
+        // as the tool having *answered* — so a command that hung on
+        // every attempt never advanced the consecutive-timeout count,
+        // and the one tool that can legitimately sit for fifteen
+        // minutes was the one that limit did not protect (#547). The
+        // captured output rides along on the error so nothing the
+        // command did say is lost.
         if timed_out {
-            return Ok(ToolResult {
-                output: format!(
-                    "Command timed out after {}s.\n\n{body}",
-                    timeout_duration.as_secs()
-                ),
-                is_error: true,
+            return Err(ToolError::TimedOut {
+                after: timeout_duration,
+                output: Some(body),
             });
         }
 
@@ -520,229 +546,6 @@ fn classify_spawn_error(program: &str, err: std::io::Error) -> ToolError {
             ToolError::PermissionDenied(format!("permission denied executing {program}: {err}"))
         }
         _ => ToolError::Io(format!("failed to spawn {program}: {err}")),
-    }
-}
-
-/// How to bound returned output beyond the byte cap.
-#[derive(Debug, Clone, Copy)]
-enum LineLimit {
-    /// No line limit — keep the head up to the byte cap.
-    None,
-    /// Keep only the first N lines (still byte-capped).
-    Head(usize),
-    /// Keep only the last N lines (still byte-capped).
-    Tail(usize),
-}
-
-/// Capture a child stream, keeping either the head (default) or the tail
-/// (`tail = true`) up to `max_bytes`. Returns the kept bytes, the total
-/// number of bytes the stream produced (so the caller can report drops),
-/// and whether capture was cut by the drain-grace signal rather than
-/// ending at EOF (#176).
-async fn capture_stream<R>(
-    stream: R,
-    max_bytes: usize,
-    tail: bool,
-    stop: watch::Receiver<bool>,
-) -> (Vec<u8>, usize, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    if tail {
-        read_capped_tail(stream, max_bytes, stop).await
-    } else {
-        read_capped(stream, max_bytes, stop).await
-    }
-}
-
-/// Keep at most `max_bytes` from the **front** of a stream, draining and
-/// counting the rest (so the child never blocks on a full pipe and the
-/// caller learns the true size). Ends at EOF, or when `stop` flips true
-/// (the bounded drain, #176). Returns `(kept, total_produced, cut)`.
-async fn read_capped<R>(
-    stream: R,
-    max_bytes: usize,
-    mut stop: watch::Receiver<bool>,
-) -> (Vec<u8>, usize, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut reader = BufReader::new(stream);
-    let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
-    let mut scratch = [0u8; 8 * 1024];
-    let mut total = 0usize;
-    let mut stop_open = true;
-    loop {
-        tokio::select! {
-            read = reader.read(&mut scratch) => match read {
-                Ok(0) => break,
-                Ok(n) => {
-                    total += n;
-                    if buf.len() < max_bytes {
-                        let take = (max_bytes - buf.len()).min(n);
-                        buf.extend_from_slice(&scratch[..take]);
-                    }
-                }
-                Err(_) => break,
-            },
-            changed = stop.changed(), if stop_open => match changed {
-                Ok(()) if *stop.borrow() => return (buf, total, true),
-                Ok(()) => {}
-                // Sender gone without a cut: drain to EOF as before.
-                Err(_) => stop_open = false,
-            },
-        }
-    }
-    (buf, total, false)
-}
-
-/// Keep at most `max_bytes` from the **end** of a stream, reading the whole
-/// thing but trimming the retained window so memory stays bounded. Ends at
-/// EOF, or when `stop` flips true (the bounded drain, #176). Returns
-/// `(kept_tail, total_produced, cut)`.
-async fn read_capped_tail<R>(
-    stream: R,
-    max_bytes: usize,
-    mut stop: watch::Receiver<bool>,
-) -> (Vec<u8>, usize, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut reader = BufReader::new(stream);
-    let mut buf: Vec<u8> = Vec::new();
-    let mut scratch = [0u8; 8 * 1024];
-    let mut total = 0usize;
-    let mut stop_open = true;
-    let mut cut = false;
-    loop {
-        tokio::select! {
-            read = reader.read(&mut scratch) => match read {
-                Ok(0) => break,
-                Ok(n) => {
-                    total += n;
-                    buf.extend_from_slice(&scratch[..n]);
-                    // Amortised trim: only memmove once the window doubles.
-                    if buf.len() > 2 * max_bytes {
-                        let excess = buf.len() - max_bytes;
-                        buf.drain(..excess);
-                    }
-                }
-                Err(_) => break,
-            },
-            changed = stop.changed(), if stop_open => match changed {
-                Ok(()) if *stop.borrow() => {
-                    cut = true;
-                    break;
-                }
-                Ok(()) => {}
-                // Sender gone without a cut: drain to EOF as before.
-                Err(_) => stop_open = false,
-            },
-        }
-    }
-    if buf.len() > max_bytes {
-        let excess = buf.len() - max_bytes;
-        buf.drain(..excess);
-    }
-    (buf, total, cut)
-}
-
-/// Human-readable byte size, e.g. `3.4 MiB`, `100.0 KiB`, `512 B`.
-pub fn human_bytes(n: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    if n >= MIB {
-        format!("{}.{} MiB", n / MIB, (n % MIB) * 10 / MIB)
-    } else if n >= KIB {
-        format!("{}.{} KiB", n / KIB, (n % KIB) * 10 / KIB)
-    } else {
-        format!("{n} B")
-    }
-}
-
-/// The first `n` lines of `s`, plus whether more lines followed.
-fn first_lines(s: &str, n: usize) -> (String, bool) {
-    let mut lines = s.lines();
-    let head: Vec<&str> = lines.by_ref().take(n).collect();
-    let more = lines.next().is_some();
-    (head.join("\n"), more)
-}
-
-/// The last `n` lines of `s`, plus whether earlier lines were dropped.
-fn last_lines(s: &str, n: usize) -> (String, bool) {
-    let all: Vec<&str> = s.lines().collect();
-    let dropped = all.len() > n;
-    let start = all.len().saturating_sub(n);
-    (all[start..].join("\n"), dropped)
-}
-
-/// Render one captured stream to display text plus an optional truncation
-/// note. `bytes` is what was kept (already byte-capped); `total` is how
-/// many bytes the stream actually produced.
-fn render_stream(bytes: &[u8], total: usize, limit: LineLimit) -> (String, Option<String>) {
-    let text = String::from_utf8_lossy(bytes);
-    let byte_truncated = total > bytes.len();
-    match limit {
-        LineLimit::None => {
-            let note = byte_truncated.then(|| {
-                format!(
-                    "truncated at the byte cap: kept {} of {} — use max_lines / \
-                     tail_lines to choose what you keep",
-                    human_bytes(bytes.len() as u64),
-                    human_bytes(total as u64),
-                )
-            });
-            (text.into_owned(), note)
-        }
-        LineLimit::Head(n) => {
-            let (shown, more) = first_lines(&text, n);
-            let note = (more || byte_truncated)
-                .then(|| format!("showing the first {n} line(s); more output followed"));
-            (shown, note)
-        }
-        LineLimit::Tail(n) => {
-            let (shown, more) = last_lines(&text, n);
-            let note = (more || byte_truncated)
-                .then(|| format!("showing the last {n} line(s); earlier output omitted"));
-            (shown, note)
-        }
-    }
-}
-
-fn format_output(
-    stdout: &[u8],
-    stdout_total: usize,
-    stderr: &[u8],
-    stderr_total: usize,
-    limit: LineLimit,
-) -> String {
-    let (out_text, out_note) = render_stream(stdout, stdout_total, limit);
-    let (err_text, err_note) = render_stream(stderr, stderr_total, limit);
-
-    let mut out = String::new();
-    push_stream(&mut out, "stdout", &out_text, out_note);
-    out.push('\n');
-    push_stream(&mut out, "stderr", &err_text, err_note);
-    out
-}
-
-/// Append one `--- <name> ---` section with its optional truncation note.
-fn push_stream(out: &mut String, name: &str, text: &str, note: Option<String>) {
-    out.push_str("--- ");
-    out.push_str(name);
-    out.push_str(" ---\n");
-    if text.is_empty() {
-        out.push_str("(empty)\n");
-    } else {
-        out.push_str(text);
-        if !text.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    if let Some(note) = note {
-        out.push('(');
-        out.push_str(&note);
-        out.push_str(")\n");
     }
 }
 
@@ -1021,14 +824,17 @@ mod tests {
                 }),
             )
             .await
-            .unwrap();
+            .expect_err("a deadline is a TimedOut error, not an ok result (#547)");
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
             "should have been killed well before sleep finished, took {elapsed:?}"
         );
-        assert!(result.is_error);
-        assert!(result.output.contains("timed out"));
+        let ToolError::TimedOut { after, output } = result else {
+            panic!("expected TimedOut, got: {result}");
+        };
+        assert_eq!(after, Duration::from_secs(1));
+        assert!(output.is_some(), "the captured output rides along");
     }
 
     #[tokio::test]
@@ -1056,10 +862,12 @@ mod tests {
                 }),
             )
             .await
-            .unwrap();
+            .expect_err("a deadline is a TimedOut error, not an ok result (#547)");
         assert!(start.elapsed() < Duration::from_secs(4));
-        assert!(result.is_error);
-        assert!(result.output.contains("timed out"));
+        let ToolError::TimedOut { after, .. } = result else {
+            panic!("expected TimedOut, got: {result}");
+        };
+        assert_eq!(after, Duration::from_secs(2), "clamped to max_timeout");
     }
 
     /// The deadline `exec` declares to the host is exactly the one it
@@ -1110,22 +918,20 @@ mod tests {
                 }),
             )
             .await
-            .unwrap();
+            .expect_err("a deadline is a TimedOut error, not an ok result (#547)");
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
             "must return within timeout + drain grace, took {elapsed:?}"
         );
-        assert!(result.is_error);
-        assert!(result.output.contains("timed out"), "{}", result.output);
+        let ToolError::TimedOut { output, .. } = result else {
+            panic!("expected TimedOut, got: {result}");
+        };
+        let output = output.expect("the captured output rides along on the error");
         // Output captured before the cut is present…
-        assert!(result.output.contains("hi"), "{}", result.output);
+        assert!(output.contains("hi"), "{output}");
         // …and the cut is reported honestly.
-        assert!(
-            result.output.contains("output capture ended"),
-            "{}",
-            result.output
-        );
+        assert!(output.contains("output capture ended"), "{output}");
     }
 
     /// The same defect one branch over (#176): a child that exits
@@ -1339,25 +1145,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters(_)));
-    }
-
-    #[test]
-    fn human_bytes_formats_sizes() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(2048), "2.0 KiB");
-        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
-    }
-
-    #[test]
-    fn first_lines_takes_head_and_flags_more() {
-        assert_eq!(first_lines("a\nb\nc\nd", 2), ("a\nb".to_string(), true));
-        assert_eq!(first_lines("a\nb", 5), ("a\nb".to_string(), false));
-    }
-
-    #[test]
-    fn last_lines_takes_tail_and_flags_dropped() {
-        assert_eq!(last_lines("a\nb\nc\nd", 2), ("c\nd".to_string(), true));
-        assert_eq!(last_lines("a\nb", 5), ("a\nb".to_string(), false));
     }
 
     #[tokio::test]

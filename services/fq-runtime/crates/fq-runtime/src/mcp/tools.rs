@@ -95,6 +95,10 @@ impl Tool for McpTool {
         let Some(result) = outcome else {
             return Err(ToolError::TimedOut {
                 after: deadline.unwrap_or_default(),
+                // The server was asked to stop; whether it did is its
+                // business, so nothing here is a record of what
+                // happened.
+                output: None,
             });
         };
 
