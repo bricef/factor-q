@@ -1,4 +1,5 @@
 timestamp            agent                                    event          cost         event-id
+<TIME>               researcher                               invocation_stuck -            <EVENT_ID>
 <TIME>               system                                   worker_orphaned -            <EVENT_ID>
 <TIME>               system                                   worker_orphaned -            <EVENT_ID>
 <TIME>               system                                   worker_orphaned -            <EVENT_ID>
