@@ -74,7 +74,7 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
             "  -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage\n",
         );
         out.push_str(
-            "  -> `fq events query --type invocation_stuck` for when each one was flagged\n",
+            "  -> `fq events query --event-type invocation_stuck` for when each one was flagged\n",
         );
     }
 
