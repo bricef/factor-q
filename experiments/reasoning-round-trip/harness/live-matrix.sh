@@ -36,9 +36,10 @@ export XDG_CACHE_HOME="$TMP_ROOT/cache"
 unset FQ_ADDR FQ_EDGE FQ_EDGE_TOKEN FQ_EDGE_FINGERPRINT FQ_NATS_URL || true
 
 # Keys come from the repo-root .env (override with ENV_FILE=...); read into the
-# process only, never printed.
+# process only, never printed. No file is fine — CI passes the keys in the
+# environment — and the checks below still insist on both.
 ENV_FILE="${ENV_FILE:-$W/.env}"
-set -a; . "$ENV_FILE"; set +a
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY missing}"
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
 
@@ -94,6 +95,10 @@ write_agent kimi-k3-reasoner   "moonshotai/kimi-k3"  1.00 "effort: medium"
 write_agent opus-5-thinker     "claude-opus-5"       2.00 "effort: high"
 write_agent gpt4o-mini-control "openai/gpt-4o-mini"  0.20 ""
 ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control)
+# What each arm must show for the run to pass (verify-carry.py): a
+# reasoning arm carries at least one reasoning part into its next turn,
+# the control records none.
+declare -A EXPECT=([kimi-k3-reasoner]=reasoning [opus-5-thinker]=reasoning [gpt4o-mini-control]=none)
 
 write_config() { # edge bind address
   cat > "$FQ_DAEMON_CONFIG" <<EOF
@@ -241,3 +246,14 @@ log "=== summary"
 for arm in "${ARMS[@]}"; do log "$arm: ${RESULT[$arm]:-unknown}"; done
 log "events tailed: $(wc -l < "$OUT/events.ndjson") lines"
 log "expected word count: $EXPECTED_WORDS"
+
+# ------------------------------------------------------------------ verdict
+# One judgement per arm from the event log, and it is the harness's exit
+# status: a nightly run is only worth having if it can go red. VERIFY=0
+# skips it, for a TASK= probe whose arms are being read some other way.
+if [[ "${VERIFY:-1}" == "1" ]]; then
+  log "=== verdict"
+  expect_args=()
+  for arm in "${ARMS[@]}"; do expect_args+=(--expect "$arm=${EXPECT[$arm]}"); done
+  python3 "$(dirname "$0")/verify-carry.py" "$OUT/events.ndjson" "${expect_args[@]}"
+fi
