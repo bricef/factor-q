@@ -230,6 +230,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over this invocation's calls that reported a\nthought-versus-spoken split; `None` (`null` on the wire) when\nnone did, which is not `0`.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1737,6 +1745,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over the calls that reported a thought-versus-\nspoken split — part of `total_output_tokens`, not in addition to\nit. `None` when no call in the aggregate reported one, which is\nevery Anthropic call; that is not `Some(0)`, a provider that\nreported none were spent. `n/a` against `0` in a table, `null`\nagainst `0` in JSON.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1833,6 +1849,14 @@
           "total_output_tokens": {
             "format": "int64",
             "type": "integer"
+          },
+          "total_reasoning_tokens": {
+            "description": "Reasoning tokens over every call that reported a thought-versus-\nspoken split, across agents; `None` (`null` on the wire) when no\ncall did, which is not `0`. Folded with the rule `sum_reported`\nstates, so an agent that reported nothing contributes nothing.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1928,6 +1952,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over the calls that reported a thought-versus-\nspoken split — part of `total_output_tokens`, not in addition to\nit. `None` when no call in the aggregate reported one, which is\nevery Anthropic call; that is not `Some(0)`, a provider that\nreported none were spent. `n/a` against `0` in a table, `null`\nagainst `0` in JSON.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1977,6 +2009,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over this invocation's calls that reported a\nthought-versus-spoken split; `None` (`null` on the wire) when\nnone did, which is not `0`.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [

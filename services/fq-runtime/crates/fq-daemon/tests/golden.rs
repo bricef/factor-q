@@ -130,7 +130,10 @@ fn opening_messages() -> Vec<Message> {
     ]
 }
 
-fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
+/// `reasoning_tokens` is the provider's thought-versus-spoken split as
+/// reported: `None` where the provider reports none, which is every
+/// Anthropic call, and `Some(n)` where it does (#536).
+fn cost(call: u32, total: f64, cumulative: f64, reasoning_tokens: Option<u32>) -> CostMetadata {
     CostMetadata {
         call_id: fixed_uuid(call),
         model: "claude-haiku".into(),
@@ -144,11 +147,22 @@ fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
         cumulative_invocation_cost: cumulative,
         cumulative_agent_cost: cumulative,
         origin: LlmCallOrigin::AgentTurn,
-        reasoning_tokens: None,
+        reasoning_tokens,
     }
 }
 
-fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -> Event {
+/// `fixer`'s response reports a split, as a model on an OpenAI-compatible
+/// route does; `researcher`'s does not, as Anthropic's never do. So the
+/// goldens pin both renderings — `n/a` beside a number — and the fold of
+/// an unreported split with a reported one across `fixer`'s two calls.
+fn llm_response(
+    agent: &str,
+    invocation: &str,
+    seq: u32,
+    at_ms: i64,
+    total_cost: f64,
+    reasoning_tokens: Option<u32>,
+) -> Event {
     let payload = EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
         parts: fq_runtime::events::assistant_parts(
             Some("Fixture assistant reply.".into()),
@@ -162,7 +176,7 @@ fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost:
             output_tokens: 340,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: None,
+            reasoning_tokens,
         },
         origin: LlmCallOrigin::AgentTurn,
     });
@@ -171,7 +185,7 @@ fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost:
         seq,
         at_ms,
     )
-    .with_cost(cost(seq, total_cost, total_cost))
+    .with_cost(cost(seq, total_cost, total_cost, reasoning_tokens))
 }
 
 /// A call that ended in `llm.failure` (#447), in the shape that
@@ -202,7 +216,7 @@ fn llm_failure(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: 
         seq,
         at_ms,
     )
-    .with_cost(cost(seq, total_cost, total_cost))
+    .with_cost(cost(seq, total_cost, total_cost, None))
 }
 
 /// The summariser's own call (#216): published under the reserved
@@ -277,7 +291,14 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     // `fixer`, with per-call costs on the LLM responses.
     for event in [
         triggered(AGENT_RESEARCHER, INV_COMPLETED, 1, base_ms),
-        llm_response(AGENT_RESEARCHER, INV_COMPLETED, 2, base_ms + 1_000, 0.0125),
+        llm_response(
+            AGENT_RESEARCHER,
+            INV_COMPLETED,
+            2,
+            base_ms + 1_000,
+            0.0125,
+            None,
+        ),
         stamp(
             Event::new(
                 AgentId::new(AGENT_RESEARCHER).unwrap(),
@@ -295,7 +316,14 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             base_ms + 5_000,
         ),
         triggered(AGENT_FIXER, INV_FAILED, 4, base_ms + 10_000),
-        llm_response(AGENT_FIXER, INV_FAILED, 5, base_ms + 11_000, 0.0031),
+        llm_response(
+            AGENT_FIXER,
+            INV_FAILED,
+            5,
+            base_ms + 11_000,
+            0.0031,
+            Some(40),
+        ),
         llm_failure(AGENT_FIXER, INV_FAILED, 9, base_ms + 11_500, 0.0007),
         stamp(
             Event::new(
@@ -1214,7 +1242,7 @@ fn conversation_events() -> Vec<Event> {
             20,
             BASE_MS,
         )
-        .with_cost(cost(20, 0.0125, 0.0125)),
+        .with_cost(cost(20, 0.0125, 0.0125, None)),
         stamp(
             Event::new(
                 agent.clone(),
@@ -1257,7 +1285,7 @@ fn conversation_events() -> Vec<Event> {
             22,
             BASE_MS + 3_000,
         )
-        .with_cost(cost(22, 0.0125, 0.0125)),
+        .with_cost(cost(22, 0.0125, 0.0125, None)),
     ]
 }
 

@@ -66,6 +66,7 @@ fn cost_report_totals_across_agents() {
             total_output_tokens: outs,
             total_cache_read_tokens: 0,
             total_cache_write_tokens: 0,
+            total_reasoning_tokens: None,
             invocation_count: 1,
             framework_cost: framework,
         });
@@ -665,4 +666,141 @@ async fn executions_ignore_clock_skew() {
         .unwrap();
     assert_eq!(execs.in_flight, 1);
     assert_eq!(execs.stuck, 0, "future updated_at must not read as stuck");
+}
+
+/// An `llm.response` costed on its envelope, with the provider's
+/// thought-versus-spoken split as reported: `None` is a provider that
+/// reported none (Anthropic), `Some(n)` one that did.
+fn costed_response(
+    agent: &str,
+    inv: uuid::Uuid,
+    cost: f64,
+    reasoning_tokens: Option<u32>,
+) -> crate::events::Event {
+    use crate::events::{
+        AssistantPart, CostMetadata, Event, EventPayload, LlmCallOrigin, LlmResponsePayload,
+        StopReason, TokenUsage,
+    };
+    Event::new(
+        AgentId::new(agent).unwrap(),
+        inv,
+        EventPayload::LlmResponse(LlmResponsePayload {
+            round: 0,
+            origin: LlmCallOrigin::AgentTurn,
+            call_id: uuid::Uuid::now_v7(),
+            parts: vec![AssistantPart::Text {
+                text: "ok".to_string(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens,
+            },
+        }),
+    )
+    .with_cost(CostMetadata {
+        call_id: uuid::Uuid::now_v7(),
+        model: "m".to_string(),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        input_cost: cost / 2.0,
+        output_cost: cost / 2.0,
+        total_cost: cost,
+        cumulative_invocation_cost: cost,
+        cumulative_agent_cost: cost,
+        origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens,
+    })
+}
+
+/// `Views::costs` folds the per-agent reasoning totals with the rule
+/// the projection's `SUM` applies within an agent (#536): an agent that
+/// reported no split contributes nothing to the fleet total and says
+/// nothing. `None + Some(45) = Some(45)`, `Some(45) + Some(3) =
+/// Some(48)`, and a fleet where nobody reported one has no total
+/// rather than a zero.
+#[tokio::test]
+async fn cost_report_reasoning_total_folds_unreported_splits_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = RuntimeDbPaths::under(dir.path());
+    let anthropic_inv = uuid::Uuid::now_v7();
+    let kimi_inv = uuid::Uuid::now_v7();
+    {
+        let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+        let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+        let proj = ProjectionStore::open(&paths.projection).await.unwrap();
+        for event in [
+            costed_response("anthropic-agent", anthropic_inv, 0.1, None),
+            costed_response("kimi-agent", kimi_inv, 0.2, Some(45)),
+            costed_response("gemini-agent", uuid::Uuid::now_v7(), 0.3, Some(3)),
+        ] {
+            proj.insert_event(&event, None).await.unwrap();
+        }
+    }
+    let views = Views::open(&paths).await.unwrap();
+
+    let report = views.costs(None, None, false).await.unwrap();
+    let by_agent = |id: &str| {
+        report
+            .agents
+            .iter()
+            .find(|a| a.agent_id == id)
+            .unwrap_or_else(|| panic!("{id} has a cost row"))
+            .total_reasoning_tokens
+    };
+    assert_eq!(by_agent("anthropic-agent"), None);
+    assert_eq!(by_agent("kimi-agent"), Some(45));
+    assert_eq!(by_agent("gemini-agent"), Some(3));
+    assert_eq!(
+        report.total_reasoning_tokens,
+        Some(48),
+        "None + Some(45) + Some(3): the unreported split contributes nothing"
+    );
+
+    // Filtered to the one agent that reported nothing: no fleet total,
+    // and not a zero.
+    let report = views
+        .costs(Some("anthropic-agent"), None, false)
+        .await
+        .unwrap();
+    assert_eq!(report.total_reasoning_tokens, None);
+
+    // The drill-down carries the same figure on its totals and on the
+    // invocation rows under them.
+    let detail = views
+        .agent_costs("kimi-agent", None, 10)
+        .await
+        .unwrap()
+        .expect("kimi-agent has cost rows");
+    assert_eq!(detail.totals.total_reasoning_tokens, Some(45));
+    assert_eq!(detail.invocations[0].total_reasoning_tokens, Some(45));
+    let detail = views
+        .agent_costs("anthropic-agent", None, 10)
+        .await
+        .unwrap()
+        .expect("anthropic-agent has cost rows");
+    assert_eq!(detail.totals.total_reasoning_tokens, None);
+    assert_eq!(detail.invocations[0].total_reasoning_tokens, None);
+
+    // And the invocation detail's "cost so far".
+    let shown = views
+        .invocation(
+            &anthropic_inv.to_string(),
+            1_000,
+            30_000,
+            DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await
+        .unwrap()
+        .expect("the invocation is known to the projection");
+    assert_eq!(
+        shown.cost.expect("costed").total_reasoning_tokens,
+        None,
+        "an Anthropic invocation shows no split, not a zero"
+    );
 }
