@@ -273,10 +273,7 @@ async fn an_agent_needing_an_unavailable_mcp_server_is_refused_at_dispatch() {
             _ => None,
         })
         .expect("a terminal failed event");
-    assert!(matches!(
-        failed.phase,
-        crate::events::FailurePhase::Setup
-    ));
+    assert!(matches!(failed.phase, crate::events::FailurePhase::Setup));
     assert!(failed.error_message.contains("'wedged'"));
     assert!(
         events

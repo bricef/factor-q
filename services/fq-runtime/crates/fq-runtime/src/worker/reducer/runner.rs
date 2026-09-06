@@ -565,32 +565,33 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 self.refuse_for_unavailable_mcp(&agent_id, invocation_id, why, totals, &mut cursor)
                     .await
             }
-            None => self
-            .run_loop_inner(
-                agent,
-                llm,
-                invocation_id,
-                &agent_id,
-                &agent_config,
-                &step_trigger,
-                &sandbox,
-                tools,
-                workspace.as_deref(),
-                state,
-                last_result,
-                step_index_start,
-                totals,
-                start,
-                started_at_ms,
-                static_context,
-                sampling,
-                durable_start,
-                &mut cursor,
-                // Fresh invocation: no previous incarnation, nothing
-                // recorded for the first step.
-                Vec::new(),
-            )
-                .await,
+            None => {
+                self.run_loop_inner(
+                    agent,
+                    llm,
+                    invocation_id,
+                    &agent_id,
+                    &agent_config,
+                    &step_trigger,
+                    &sandbox,
+                    tools,
+                    workspace.as_deref(),
+                    state,
+                    last_result,
+                    step_index_start,
+                    totals,
+                    start,
+                    started_at_ms,
+                    static_context,
+                    sampling,
+                    durable_start,
+                    &mut cursor,
+                    // Fresh invocation: no previous incarnation, nothing
+                    // recorded for the first step.
+                    Vec::new(),
+                )
+                .await
+            }
         };
         manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)

@@ -46,8 +46,7 @@ async fn a_line_past_the_cap_fails_the_read() {
 /// documented number is a length a server may actually send.
 #[tokio::test]
 async fn a_line_of_exactly_the_cap_is_allowed() {
-    let input: &'static [u8] =
-        Box::leak([&vec![b'x'; CAP][..], b"\n"].concat().into_boxed_slice());
+    let input: &'static [u8] = Box::leak([&vec![b'x'; CAP][..], b"\n"].concat().into_boxed_slice());
     assert_eq!(read_all(input).await.expect("at the cap").len(), CAP + 1);
 }
 
@@ -56,7 +55,10 @@ async fn a_line_of_exactly_the_cap_is_allowed() {
 /// refused. A caller that retried would otherwise resume mid-message.
 #[tokio::test]
 async fn the_refusal_is_terminal() {
-    let mut reader = LineCapped::new(&b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrecovered\n"[..], 8);
+    let mut reader = LineCapped::new(
+        &b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrecovered\n"[..],
+        8,
+    );
     let mut buf = [0u8; 64];
     assert_eq!(
         reader.read(&mut buf).await.expect_err("first read").kind(),

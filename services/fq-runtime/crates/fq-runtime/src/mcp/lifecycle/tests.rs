@@ -142,8 +142,7 @@ async fn one_transport_declared_twice_is_dialled_once() {
         .count();
     assert_eq!(empty, 1, "exactly one declaration must be the duplicate");
     assert!(
-        manager.states().state("second").is_none()
-            || manager.states().state("first").is_none(),
+        manager.states().state("second").is_none() || manager.states().state("first").is_none(),
         "the deduplicated declaration is never dialled, so it has no state"
     );
     manager.shutdown().await;
@@ -190,7 +189,10 @@ fn the_state_table_records_what_a_health_surface_needs() {
     states.starting("one");
     assert_eq!(states.state("one"), Some(McpServerState::Starting));
     states.ready("one", 7);
-    assert_eq!(states.state("one"), Some(McpServerState::Ready { tools: 7 }));
+    assert_eq!(
+        states.state("one"),
+        Some(McpServerState::Ready { tools: 7 })
+    );
 
     states.unavailable("two", "no initialize response".to_string(), 3, Some(42));
     assert_eq!(
@@ -202,7 +204,11 @@ fn the_state_table_records_what_a_health_surface_needs() {
         })
     );
     assert_eq!(
-        states.snapshot().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        states
+            .snapshot()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
         vec!["one", "two"],
         "the snapshot is ordered, so a report reads the same way twice"
     );

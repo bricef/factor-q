@@ -25,7 +25,10 @@ fn tools(n: usize) -> Arc<Mutex<Vec<rmcp::model::Tool>>> {
 async fn discovery_failure(client: &Arc<McpClient>, server: &str, limits: &McpLimits) -> String {
     match discover_tools(client, server, &ProgressRegistry::default(), limits).await {
         Err(err) => err.to_string(),
-        Ok((tools, _)) => panic!("{server}: discovery must have been refused, got {} tools", tools.len()),
+        Ok((tools, _)) => panic!(
+            "{server}: discovery must have been refused, got {} tools",
+            tools.len()
+        ),
     }
 }
 

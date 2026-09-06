@@ -189,7 +189,10 @@ fn render_mcp_servers(servers: &[fq_ops::health::McpServerHealth]) -> String {
         return String::new();
     }
     let down = servers.iter().filter(|s| s.is_fault()).count();
-    let mut out = format!("MCP servers: {} declared, {down} unavailable\n", servers.len());
+    let mut out = format!(
+        "MCP servers: {} declared, {down} unavailable\n",
+        servers.len()
+    );
     for server in servers {
         match server {
             McpServerHealth::Ready { name, tools } => {
@@ -216,7 +219,7 @@ fn render_mcp_servers(servers: &[fq_ops::health::McpServerHealth]) -> String {
                              disabled ([mcp] retry_initial_secs = 0), so this needs a restart \
                              once the server is back\n"
                         .to_string(),
-                },);
+                });
             }
         }
     }
