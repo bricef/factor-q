@@ -18,10 +18,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+mod bus;
 mod edge;
 mod error;
 mod nats;
 mod tools;
+pub use bus::BusConfig;
 pub use edge::EdgeConfig;
 pub use error::ConfigError;
 pub use nats::NatsConfig;
@@ -64,6 +66,11 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
+    /// How every durable consumer on the event bus paces redelivery of
+    /// a message its handler keeps failing on, and when a consumer that
+    /// is still retrying counts as stuck.
+    #[serde(default)]
+    pub bus: BusConfig,
 }
 
 /// `[state]` — durable runtime state: where it lives, and how long
@@ -585,6 +592,7 @@ impl Default for Config {
             drain_deadline_ms: default_drain_deadline_ms(),
             edge: EdgeConfig::default(),
             tools: ToolsConfig::default(),
+            bus: BusConfig::default(),
         }
     }
 }
@@ -754,6 +762,46 @@ mod tests {
             config.worker.llm_retry.max_attempts, 4,
             "the other retry knobs keep their defaults"
         );
+    }
+
+    /// #549: every number in the redelivery policy is reachable from
+    /// `fqd.toml`, and an unconfigured daemon runs the documented
+    /// defaults — 1s doubling to a 60s cap, an explicit 30s `ack_wait`,
+    /// a line a minute, stuck after five redeliveries.
+    #[test]
+    fn bus_redelivery_policy_defaults_and_parses() {
+        use crate::bus::ConsumerRedeliveryPolicy;
+
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.bus.policy(), ConsumerRedeliveryPolicy::default());
+        assert_eq!(config.bus.nak_initial_ms, 1_000);
+        assert_eq!(config.bus.nak_max_ms, 60_000);
+        assert_eq!(config.bus.ack_wait_ms, 30_000);
+        assert_eq!(config.bus.log_interval_ms, 60_000);
+        assert_eq!(config.bus.stuck_after_redeliveries, 5);
+
+        let config = Config::from_toml_str(
+            "[bus]\nnak_initial_ms = 250\nnak_max_ms = 5000\nack_wait_ms = 45000\n\
+             log_interval_ms = 30000\nstuck_after_redeliveries = 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.bus.policy(),
+            ConsumerRedeliveryPolicy {
+                nak_initial: Duration::from_millis(250),
+                nak_max: Duration::from_millis(5_000),
+                ack_wait: Duration::from_millis(45_000),
+                log_interval: Duration::from_millis(30_000),
+                stuck_after_redeliveries: 2,
+            }
+        );
+
+        // Partial tables keep the other defaults, so an operator who
+        // only wants a longer ack window does not silently reset the
+        // escalation.
+        let config = Config::from_toml_str("[bus]\nack_wait_ms = 90000\n").unwrap();
+        assert_eq!(config.bus.ack_wait_ms, 90_000);
+        assert_eq!(config.bus.nak_initial_ms, 1_000);
     }
 
     #[test]

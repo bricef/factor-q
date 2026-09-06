@@ -24,9 +24,13 @@ use crate::version::FQ_VERSION;
 /// construction rather than by redaction (#540).
 async fn connect_bus(config: &fq_runtime::Config) -> anyhow::Result<EventBus> {
     let token = config.nats.resolve_token()?;
-    EventBus::connect_with_token(&config.nats.url, token.as_deref())
+    let bus = EventBus::connect_with_token(&config.nats.url, token.as_deref())
         .await
-        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))
+        .with_context(|| format!("failed to connect to NATS at {}", config.nats.url))?;
+    // `[bus]` applies before any durable exists, so every consumer this
+    // daemon creates is stamped with the operator's redelivery policy
+    // rather than the defaults it connected with (#549).
+    Ok(bus.with_redelivery_policy(config.bus.policy()))
 }
 
 /// Lifecycle events are published on `fq.system.*` so operators
