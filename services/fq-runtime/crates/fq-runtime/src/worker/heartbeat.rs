@@ -195,6 +195,134 @@ pub enum HeartbeatError {
 mod tests {
     use super::*;
 
+    /// Finding F, end to end through the real producer, a real WAL and
+    /// a real broker: the beat carries the newest step boundary, and it
+    /// *moves* when the reducer crosses one.
+    ///
+    /// Both halves matter. A beat that carried a boundary but never
+    /// advanced it would look identical to a wedge; a beat that
+    /// advanced without carrying one would be the pre-#37 signal, which
+    /// is exactly what a wedged invocation does not disturb.
+    #[tokio::test]
+    async fn a_beat_carries_the_last_step_boundary_and_it_advances() {
+        use crate::worker::store::{InvocationStateRow, WorkerStore};
+        use futures::StreamExt;
+        use std::sync::Arc;
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        let worker_id = WorkerId::new(format!("hb-step-{}", Uuid::now_v7().simple())).unwrap();
+
+        let row = |updated_at: i64, step_index: u32| InvocationStateRow {
+            invocation_id: "aa000000-0000-7000-8000-0000000000aa".to_string(),
+            agent_id: "researcher".to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".to_string(),
+            state_blob: b"{}".to_vec(),
+            step_index,
+            started_at: 1_700_000_000_000,
+            updated_at,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+        };
+        store
+            .upsert_invocation_state(&row(1_700_000_005_000, 1))
+            .await
+            .unwrap();
+
+        let mut sub = bus
+            .subscribe(format!("fq.worker.{worker_id}.heartbeat"))
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let producer = HeartbeatProducer::new(bus.clone(), worker_id.clone(), Uuid::now_v7())
+            .with_store(store.clone())
+            .with_interval_ms(150);
+        let handle = tokio::spawn(producer.run(shutdown_rx));
+
+        async fn next_boundary(
+            sub: &mut (impl futures::Stream<
+                Item = Result<crate::events::Event, crate::bus::BusError>,
+            > + Unpin),
+        ) -> Option<i64> {
+            let event = tokio::time::timeout(Duration::from_secs(5), sub.next())
+                .await
+                .expect("a heartbeat within 5s")
+                .expect("stream open")
+                .expect("deserialise");
+            match event.payload {
+                EventPayload::WorkerHeartbeat(p) => p.last_step_at,
+                other => panic!("expected a heartbeat, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            next_boundary(&mut sub).await,
+            Some(1_700_000_005_000),
+            "the first beat reports the boundary already in the WAL"
+        );
+
+        // The reducer crosses a step boundary: same invocation, new
+        // `updated_at`, one step further on. This is the write the
+        // runner makes at every step.
+        store
+            .upsert_invocation_state(&row(1_700_000_012_000, 2))
+            .await
+            .unwrap();
+
+        // Beats are periodic, and one already in flight may still carry
+        // the old value; wait for the boundary to move.
+        let mut seen = None;
+        for _ in 0..10 {
+            seen = next_boundary(&mut sub).await;
+            if seen == Some(1_700_000_012_000) {
+                break;
+            }
+        }
+        assert_eq!(
+            seen,
+            Some(1_700_000_012_000),
+            "the beat must follow the WAL across a step boundary"
+        );
+
+        let _ = shutdown_tx.send(());
+        assert!(handle.await.expect("join").is_ok());
+        drop(sub);
+    }
+
+    /// A worker holding nothing in flight has no boundary to report.
+    /// `None` is the honest answer and is not the same fact as "old".
+    #[tokio::test]
+    async fn an_idle_worker_reports_no_step_boundary() {
+        use crate::worker::store::WorkerStore;
+        use std::sync::Arc;
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        let worker_id = WorkerId::new(format!("hb-idle-{}", Uuid::now_v7().simple())).unwrap();
+        let producer = HeartbeatProducer::new(bus, worker_id, Uuid::now_v7()).with_store(store);
+        assert_eq!(producer.last_step_at().await, None);
+    }
+
     #[tokio::test]
     async fn heartbeat_producer_emits_immediately_and_on_tick() {
         let server = crate::test_support::nats::test_nats();

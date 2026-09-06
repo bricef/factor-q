@@ -384,6 +384,59 @@ A server that reports progress makes a long call visible: the host
 logs one rate-limited line per call carrying the invocation, the tool
 call and the numbers, and records when each call last reported.
 
+## When an invocation stops making progress
+
+Every individual call an invocation makes is now bounded — a model call
+by `[worker] llm_timeout_secs` under its retry cap, a tool call by
+`[tools] max_timeout_secs` plus the host's five-second backstop. What
+none of those covers is an invocation that is inside none of them and
+still not moving: a reducer looping, a step wedged between calls, a
+worker alive and beating while the work it holds has stopped.
+
+The daemon watches for that on the same ten-second tick that sweeps
+stale workers. An in-flight invocation that has crossed no step boundary
+within the **stuck threshold**, and has no tool or model call open
+recently enough to explain the silence, is reported — once per stall —
+as an `invocation.stuck` event, and counted on `fq doctor`'s executions
+line with its id.
+
+The threshold is derived, not configured:
+
+```text
+stuck_after = 2 x (timeout_max_attempts x llm_timeout_secs
+                   + tools.max_timeout_secs
+                   + 5s backstop grace)
+```
+
+Twice the longest a single reducer step can legitimately take, given the
+deadlines above. At the shipped defaults that is **4210s** — a little
+over an hour. Trim a deadline and the safety net under it moves with it.
+Ask the daemon rather than working it out:
+
+```console
+$ fq status | grep 'stuck after'
+  stuck after:      4210s
+$ fq doctor
+Current executions: 2 in-flight (1 working, 1 stuck after 4210s)
+  -> 1 not advanced in >4210s: 019f534f-4b3c-7f42-a619-b5e43a64fd38
+  -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage
+  -> `fq events query --type invocation_stuck` for when each one was flagged
+```
+
+Nothing is done about it automatically. The event is a report: it says
+which invocation, when it last moved, and against what threshold, and
+leaves the decision to you. `fq invocation show <id>` says what it was
+doing; `fq invocation drop <id>` abandons it. A stuck invocation that
+starts moving again and stalls a second time is reported again — the
+event's arrival rate is the rate of new stalls, not of sweeps, so it is
+safe to alert on.
+
+`[worker] stuck_threshold_override_secs` replaces the derivation
+outright. It is unset by default and meant for an operator narrowing or
+widening the report during a live incident; a workload that needs it
+permanently is telling you the call deadlines are wrong, and those are
+what should move.
+
 ## When a consumer stops making progress
 
 `fq doctor` reports every durable consumer this daemon expects, by
@@ -448,6 +501,8 @@ other consumer; if you need to reset a durable, stop the daemon with
 | Hot-reload agent definitions | `fq reload` |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | See which consumers are keeping up | `fq doctor` (names every durable and any that is stuck) |
+| See the stuck threshold this daemon derived | `fq status` (the `stuck after` line) |
+| Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --type invocation_stuck` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |

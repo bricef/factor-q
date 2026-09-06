@@ -8,7 +8,8 @@ fn the_threshold_is_twice_one_worst_case_step() {
     let config: Config = Config::from_toml_str(
         "[worker]\nllm_timeout_secs = 70\n\n\
          [worker.llm_retry]\ntimeout_max_attempts = 3\n\n\
-         [tools]\nmax_timeout_secs = 400\n",
+         [tools]\nmax_timeout_secs = 400\n\n\
+         [tools.exec]\nmax_timeout_secs = 400\n",
     )
     .expect("parse");
     // 2 × (3 × 70 + 400 + 5) = 2 × 615 = 1230
