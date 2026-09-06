@@ -7,6 +7,8 @@
 //! nor mutates it, and cannot show a test what `_meta` arrived.
 
 use super::*;
+use rmcp::model::LoggingLevel;
+
 use crate::mcp::discovery;
 use crate::mcp::limits::McpLimits;
 use crate::mcp::progress::ProgressRegistry;
