@@ -203,6 +203,12 @@ pub fn operator_registry(
     let status_registry = deps.agents.clone();
     let agent_registry = deps.agents.clone();
     let machinery = deps.machinery;
+    // One threshold across every liveness verdict this surface serves
+    // (#37): the Invocation view's detail, `invocation.active`, and
+    // `control.doctor`. Derived from the daemon's call deadlines and
+    // carried on `DaemonFacts`, so none of them can quote a different
+    // number for the same invocation.
+    let stuck_after_ms = deps.facts.stuck_after_ms;
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
         let horizon = horizon.clone();
@@ -243,7 +249,7 @@ pub fn operator_registry(
                         .invocation(
                             &key.invocation_id,
                             chrono::Utc::now().timestamp_millis(),
-                            fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS,
+                            stuck_after_ms,
                             fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
                         )
                         .await
@@ -277,7 +283,7 @@ pub fn operator_registry(
         )
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
 
-    crate::active_report::register_active_report(&mut registry, active_views)?;
+    crate::active_report::register_active_report(&mut registry, active_views, stuck_after_ms)?;
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
     crate::event_atom::register_event_atom(&mut registry, event_bus, event_views)?;

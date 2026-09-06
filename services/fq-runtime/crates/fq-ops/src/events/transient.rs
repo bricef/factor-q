@@ -76,7 +76,7 @@ mod tests {
         let known: Vec<&'static str> = vec![
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: WorkerId::new("w").unwrap(),
-                last_step_at: None,
+                last_step_at_ms: None,
             })
             .event_type(),
         ];
@@ -97,7 +97,7 @@ mod tests {
             uuid::Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: WorkerId::new("w").unwrap(),
-                last_step_at: None,
+                last_step_at_ms: None,
             }),
         );
         assert!(heartbeat.payload.is_transient());
