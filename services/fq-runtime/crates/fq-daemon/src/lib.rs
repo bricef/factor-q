@@ -19,6 +19,7 @@ mod dead_letter_requeue;
 mod doctor_report;
 mod edge_identity;
 mod event_atom;
+mod health_surface;
 mod operator_surface;
 mod pricing;
 mod recovery;

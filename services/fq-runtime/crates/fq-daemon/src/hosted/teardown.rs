@@ -218,6 +218,59 @@ pub(crate) async fn join_optional<E: std::fmt::Display>(
     }
 }
 
+/// Watch a hosted task that only exists under some configuration, in
+/// the same `select!` as the unconditional ones. With no such task the
+/// future never resolves, so the supervising arm reads identically
+/// whether or not one was spawned.
+///
+/// The summariser is the case (review finding F): it was spawned
+/// *outside* the supervised `select!`, so its consumer stream ending
+/// exited the task in silence — summaries simply stopped appearing and
+/// nothing anywhere said why. Everything else the daemon hosts is
+/// watched; being optional is not a reason to be unwatched.
+pub(crate) async fn supervise_optional<E>(
+    handle: Option<&mut JoinHandle<Result<(), E>>>,
+) -> Result<Result<(), E>, tokio::task::JoinError> {
+    match handle {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Announce a hosted task's unexpected exit — to the log, and to the
+/// event stream as `system.task_failed` — before the rest is torn down.
+///
+/// Best-effort on the publish: a daemon losing a task must still reach
+/// its teardown, and a broker that cannot be published to is usually
+/// *why* the task exited.
+pub(crate) async fn report_task_failure(
+    bus: &fq_runtime::EventBus,
+    runtime_id: uuid::Uuid,
+    failed: Option<&(&'static str, String)>,
+) {
+    let Some((task_name, error_message)) = failed else {
+        return;
+    };
+    tracing::error!(
+        task = task_name,
+        error = error_message.as_str(),
+        "hosted task exited unexpectedly"
+    );
+    let event = fq_runtime::events::Event::system(
+        runtime_id,
+        fq_runtime::events::EventPayload::SystemTaskFailed(
+            fq_runtime::events::SystemTaskFailedPayload {
+                runtime_id,
+                task_name: task_name.to_string(),
+                error_message: error_message.clone(),
+            },
+        ),
+    );
+    if let Err(err) = bus.publish(&event).await {
+        tracing::error!(error = %err, "failed to publish system.task_failed event");
+    }
+}
+
 /// Join a task that answers with `()` — a panic is the only way it can
 /// fail, and it arrives as a `JoinError`.
 pub(crate) async fn join_infallible(name: &str, handle: JoinHandle<()>) {

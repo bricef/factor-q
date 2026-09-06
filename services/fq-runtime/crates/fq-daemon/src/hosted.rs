@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use fq_runtime::events::{
-    Event, EventPayload, SystemShutdownPayload, SystemStartupPayload, SystemTaskFailedPayload,
+    Event, EventPayload, SystemShutdownPayload, SystemStartupPayload,
 };
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
@@ -250,7 +250,10 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // per-model) and pricing table; its spend is emitted under the
     // reserved `summary` agent id, never against an invocation.
     let (summary_shutdown_tx, summary_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let summary_handle = config.summary.model.clone().map(|model| {
+    // Supervised like every other hosted task (review finding F): set by
+    // the select's own summariser arm, which consumes the handle.
+    let mut summary_joined = false;
+    let mut summary_handle = config.summary.model.clone().map(|model| {
         println!("  summariser:       {model}");
         let sc = fq_runtime::SummaryConsumer::new(
             bus.clone(),
@@ -440,6 +443,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             let err_msg = describe_task_result("heartbeat consumer", result);
             ("task_failed", false, Some(("heartbeat_consumer", err_msg)))
         }
+        result = teardown::supervise_optional(summary_handle.as_mut()) => {
+            summary_joined = true;
+            let err_msg = describe_task_result("summary consumer", result);
+            ("task_failed", false, Some(("summary_consumer", err_msg)))
+        }
         result = &mut advisory_handle => {
             let err_msg = describe_task_result("advisory watch", result);
             ("task_failed", false, Some(("advisory_watch", err_msg)))
@@ -508,24 +516,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let dispatcher_handle = (!dispatcher_joined).then_some(dispatcher_handle);
     // If a task failed, publish a system.task_failed event with
     // its details before we tear everything else down.
-    if let Some((task_name, error_message)) = failed_task.as_ref() {
-        tracing::error!(
-            task = task_name,
-            error = error_message.as_str(),
-            "hosted task exited unexpectedly"
-        );
-        let failed_event = Event::system(
-            runtime_id,
-            EventPayload::SystemTaskFailed(SystemTaskFailedPayload {
-                runtime_id,
-                task_name: task_name.to_string(),
-                error_message: error_message.clone(),
-            }),
-        );
-        if let Err(err) = bus.publish(&failed_event).await {
-            tracing::error!(error = %err, "failed to publish system.task_failed event");
-        }
-    }
+    teardown::report_task_failure(&bus, runtime_id, failed_task.as_ref()).await;
 
     // The dispatcher stops consuming first, and nothing else is touched
     // until the drain has had its deadline. Every other task keeps
@@ -592,7 +583,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     tokio::join!(
         teardown::join_fallible("projection consumer", projection_handle),
         teardown::join_fallible("coordination consumer", coord_handle),
-        teardown::join_optional("summary consumer", summary_handle),
+        teardown::join_optional("summary consumer", summary_handle.take_if(|_| !summary_joined)),
         teardown::join_fallible("heartbeat consumer", hb_consumer_handle),
         teardown::join_fallible("advisory watch", advisory_handle),
         teardown::join_fallible("heartbeat producer", hb_producer_handle),

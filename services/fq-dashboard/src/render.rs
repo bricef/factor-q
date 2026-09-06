@@ -7,10 +7,11 @@
 // Documented by its own `//!` header — no outer doc here, so that
 // rustdoc resolves its links in its own scope (db59f35).
 mod agents;
+mod consumers;
 mod transcript;
 pub use transcript::{transcript_entry_html, transcript_outcome, transcript_status_html};
 
-use fq_ops::health::{ConsumerHealth, StreamHealth};
+use fq_ops::health::StreamHealth;
 use fq_ops::surface::{DoctorReport, StatusReport};
 use fq_ops::transcript::TranscriptEntry;
 use fq_ops::views::{
@@ -22,6 +23,7 @@ use fq_ops::views::{
 // `render::agents` / `render::agent_detail`, and the tests address them
 // through `super::*` exactly as before.
 pub use agents::{agent_detail, agents};
+use consumers::consumer_row;
 
 /// Minimal HTML escape for text and attribute positions.
 pub fn esc(s: &str) -> String {
@@ -250,58 +252,6 @@ fn liveness_badge(liveness: Liveness) -> String {
 }
 
 /// The health page body.
-/// One durable's cells in the health table: name, state, lag, pending.
-/// A stuck consumer reads as stuck rather than as merely lagging — the
-/// two look alike in a lag column and are entirely different problems
-/// (#549).
-fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String, String) {
-    match consumer {
-        ConsumerHealth::Active {
-            name,
-            lag,
-            ack_pending,
-            num_pending,
-            num_redelivered,
-            redeliveries,
-            stuck,
-            ..
-        } => {
-            let state = if *stuck {
-                format!(r#"<span class="bad">✗ stuck ({redeliveries} redeliveries)</span>"#)
-            } else if *lag == 0 {
-                r#"<span class="ok">✓ caught up</span>"#.to_string()
-            } else if *lag < 10 {
-                r#"<span class="warn">◐ slightly behind</span>"#.to_string()
-            } else {
-                r#"<span class="bad">✗ lagging</span>"#.to_string()
-            };
-            let redelivery_suffix = if *num_redelivered > 0 {
-                format!(r#" / <span class="warn">redelivered {num_redelivered}</span>"#)
-            } else {
-                String::new()
-            };
-            (
-                esc(name),
-                state,
-                lag.to_string(),
-                format!("ack {ack_pending} / num {num_pending}{redelivery_suffix}"),
-            )
-        }
-        ConsumerHealth::Missing { name } => (
-            esc(name),
-            r#"<span class="muted">not present</span>"#.to_string(),
-            "-".to_string(),
-            "-".to_string(),
-        ),
-        ConsumerHealth::Error { name, error } => (
-            esc(name),
-            format!(r#"<span class="bad">✗ {}</span>"#, esc(error)),
-            "-".to_string(),
-            "-".to_string(),
-        ),
-    }
-}
-
 pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
     let mut b = String::new();
 
