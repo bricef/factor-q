@@ -31,7 +31,17 @@ Gemini row is built since 2026-09-05 (#600): a bare `thoughtSignature` is
 recorded as an opaque part and replayed on the function call it came with —
 hermetically verified against a Gemini mock and wire goldens only, no live
 run, since no Gemini key is held here. The recorded `reasoning_tokens`
-reaches no operator surface yet (#536).
+reaches no operator surface yet (#536). Since 2026-09-06 the adapter records
+an assistant turn's parts in the order they arrived, reasoning included — I6
+taken literally, and what a Gemini signature needs to ride back on the part
+it belongs to — and asks every provider for the readable side of its
+reasoning: Anthropic's `thinking.display: summarized` on adaptive models and
+Gemini's `includeThoughts`. Without the former every Opus 5 thinking block
+came back with an empty text, which is what the 2026-09-04 run recorded and
+this ADR called the provider's data; it was a missing request field. With it
+the live matrix of 2026-09-06 recorded a readable summary beside the
+signature, carried and accepted; the matrix now judges its own event log and
+runs nightly.
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends

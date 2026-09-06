@@ -159,10 +159,23 @@ TASK='Read {work}/notes.txt and {work}/checklist.txt in one turn, then …' \
   mise exec -- bash harness/live-matrix.sh     # another task on the same matrix
 ```
 
-Keys come from the repo-root `.env` (`ENV_FILE=` overrides) and are read into the
-process only. The run writes `events.ndjson` (every payload, live), and per arm the
-transcripts, `fq invocation show`, `fq costs` and the daemon config; the databases are
-left under `$OUT/run/cache/` for inspection. Spend is well under $0.20.
+Keys come from the repo-root `.env` (`ENV_FILE=` overrides; no file at all is fine
+when the keys are already in the environment, which is how CI passes them) and are
+read into the process only. The run writes `events.ndjson` (every payload, live), and
+per arm the transcripts, `fq invocation show`, `fq costs` and the daemon config; the
+databases are left under `$OUT/run/cache/` for inspection. Spend is well under $0.20.
+
+The run judges itself. `harness/verify-carry.py` reads `events.ndjson` and, per arm,
+requires a `completed` invocation with no `llm.failure`, every assistant turn replayed
+verbatim (canonical JSON — reasoning, text and tool calls, in recorded order) in the
+request that followed it, at least one reasoning part carried for the two reasoning
+arms, and none at all for the control. Readable characters are reported, not asserted.
+Its exit status is the harness's, so the nightly `reasoning-matrix` job in
+`.github/workflows/live-suites.yml` goes red on a lost token and on a run that proved
+nothing — an Opus turn that never thought fails the Opus arm by design; adaptive
+thinking skips a task it finds trivial, so a red that says "no reasoning part was
+carried" is a rerun before it is a bug. `VERIFY=0` skips the verdict for a `TASK=`
+probe whose arms are being read some other way.
 
 `TASK=` replaces the default sequential task; a `{work}` token in it expands to the
 fixture directory, which holds `notes.txt` and `checklist.txt`. The default task
@@ -206,6 +219,51 @@ Gemini mock. **No live run has been made**: this repository holds no Gemini key.
 harness takes a fourth arm the moment one exists — add a `[providers.gemini]` block with
 `api_shape = "gemini"` to `write_config` and a `gemini-3-pro` agent — and the same
 per-turn check applies.
+
+## Readable thinking, and arrival order (2026-09-06)
+
+**Why every Opus 5 thinking block was empty.** The 2026-09-04 run recorded Opus 5's
+thinking blocks with an empty `thinking` and a 700-character signature, and this file
+called that "their data". It was ours: Anthropic's adaptive-thinking request takes
+`thinking.display: "summarized"`, and without it the block comes back signature-only.
+genai writes that field from its `capture_reasoning_content` option, which factor-q never
+set. A probe replaying the recorded request shape with a question that forces thinking,
+with and without the field (`probe/` beside the run below):
+
+| request | thinking text | signature | thinking tokens |
+|---|---|---|---|
+| as recorded, no `display` | 0 chars | 936 chars | 284 |
+| `display: "summarized"` | 175 chars | 692 chars | 182 |
+
+The same option is Gemini's `includeThoughts`, without which a thought summary is never
+returned, and is inert on the OpenAI-shaped wire (non-streaming). factor-q sets it on
+every call since this date. The wire goldens moved by exactly those two keys and nothing
+else, with every recorded turn byte-identical.
+
+**Live run on that build, same matrix, same task** (`~/factor-q-live-runs/2026-09-06-readable-thinking/`):
+
+| arm | status | turns | reasoning parts produced / carried | kinds | readable chars | cost |
+|---|---|---|---|---|---|---|
+| kimi-k3-reasoner | completed | 3 | 3 / 2 | plain | 247 | $0.0159 |
+| opus-5-thinker | completed | 3 | 1 / 1 | signed | 162 | $0.0391 |
+| gpt4o-mini-control | completed | 4 | 0 / 0 | — | 0 | $0.0007 |
+
+Opus 5's one block carries 162 readable characters and a 512-character signature in the
+same `thinking` block, recorded as `signed`, replayed verbatim on the next request and
+accepted; the transcript's `--reasoning` view shows the text where it showed
+`[opaque — carried, not readable]` before. "Carried" is one less than "produced" because
+the final turn is never replayed. Adaptive thinking engaged on the first turn only, which
+is the model's choice; a run where it never engaged fails the Opus arm's verdict by
+design (see [Running it](#running-it)).
+
+**Arrival order.** The adapter used to record a turn's reasoning parts ahead of its text
+and tool calls whatever order the provider sent them. Harmless for Anthropic, whose
+thinking blocks lead anyway; wrong for Gemini the moment genai stops hoisting signatures
+itself (the adjacency fix proposed upstream), because a signature that arrived between
+the text and the call would be replayed ahead of the text and attached to it. Parts are
+now recorded in arrival order; a sibling-field summary goes after whatever reasoning
+already leads the turn and before the first spoken part; none of the fourteen goldens'
+recorded turns moved.
 
 ## Traps this harness already hit
 
