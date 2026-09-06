@@ -406,8 +406,8 @@ pub struct StatusReport {
     /// stale threshold, with their ids.
     pub recovery: RecoveryView,
     /// Every shared MCP server this daemon declares and whether it is
-    /// up (#548) — the same list `fq doctor` judges, reported here
-    /// without a verdict, exactly as this report treats stale workers.
+    /// up — the same list `fq doctor` judges, reported here without a
+    /// verdict, exactly as this report treats stale workers.
     #[serde(default)]
     pub mcp_servers: Vec<crate::health::McpServerHealth>,
 }
@@ -514,11 +514,11 @@ pub struct DoctorReport {
     #[serde(default)]
     pub consumers: Vec<crate::health::ConsumerHealth>,
     /// Every shared MCP server a loaded agent declares, and whether it
-    /// is up (#548). An unavailable server is not a daemon-level
-    /// failure — boot carries on without it — so it is exactly the kind
-    /// of standing degradation only a health report surfaces: the
-    /// agents that need it are refused at dispatch, and nothing else
-    /// says why.
+    /// is up. An unavailable server is not a daemon-level failure —
+    /// boot carries on without it — so it is exactly the kind of
+    /// standing degradation only a health report surfaces: the agents
+    /// that need it are refused at dispatch, and nothing else says
+    /// why.
     #[serde(default)]
     pub mcp_servers: Vec<crate::health::McpServerHealth>,
 }

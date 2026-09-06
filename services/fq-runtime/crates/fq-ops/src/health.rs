@@ -127,8 +127,8 @@ impl ConsumerHealth {
     }
 }
 
-/// Health of one shared MCP server, as every operator surface reads it
-/// (#548). Externally tagged, for the same encoding reason as
+/// Health of one shared MCP server, as every operator surface reads
+/// it. Externally tagged, for the same encoding reason as
 /// [`StreamHealth`].
 ///
 /// Only *shared* servers appear. A grant-bearing server runs

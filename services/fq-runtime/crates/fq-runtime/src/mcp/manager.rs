@@ -57,8 +57,9 @@ pub(super) struct RunningServer {
 
 /// Manages the lifecycle of MCP server child processes.
 ///
-/// Starts servers, discovers their tools (wrapping each as an [`McpTool`]),
-/// and provides graceful shutdown. Deduplicates servers by transport
+/// Starts servers, discovers their tools (wrapping each as an
+/// [`McpTool`](super::McpTool)) and provides graceful shutdown.
+/// Deduplicates servers by transport
 /// identity — the stdio process spawned, or the remote endpoint dialled
 /// — so the same server declared by multiple agents starts only once.
 pub struct McpClientManager {
@@ -213,7 +214,8 @@ impl McpClientManager {
     /// This is what makes boot bounded by the slowest server rather
     /// than by the sum of all of them, and what keeps one unresponsive
     /// server from holding the daemon at startup with every agent down.
-    /// A server that fails is [`Unavailable`](McpServerState::Unavailable)
+    /// A server that fails is
+    /// [`Unavailable`](super::McpServerState::Unavailable)
     /// with its reason recorded; the returned outcome carries the same
     /// error so the caller can log it against the agent that declared
     /// it.
@@ -604,8 +606,9 @@ impl McpClientManager {
     ///
     /// This is the host's own cancellation — shutdown, budget, a
     /// superseded step. The agent's tool calls take the same path
-    /// through [`McpTool`], which supplies its deadline as the `cancel`
-    /// future; both go through the same private `call` module, so
+    /// through [`McpTool`](super::McpTool), which supplies its deadline
+    /// as the `cancel` future; both go through the same private `call`
+    /// module, so
     /// there is one implementation of what cancelling a call means.
     pub async fn call_tool_cancellable<F>(
         &self,
