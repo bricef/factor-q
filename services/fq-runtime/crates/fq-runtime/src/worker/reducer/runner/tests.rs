@@ -4000,10 +4000,30 @@ async fn consecutive_timeouts_end_the_invocation_naming_the_count() {
 }
 
 /// An LLM client that takes its time. `FixtureClient` answers
-/// instantly, which is the one thing the test below cannot have.
+/// instantly, which is the one thing the tests below cannot have.
+///
+/// It also stamps each answer, so a test can assert what happened
+/// *relative to the last servicing* rather than to the start of the
+/// call.
 struct SlowLlmClient {
     delay: Duration,
     response: ChatResponse,
+    answered_at: std::sync::Mutex<Vec<tokio::time::Instant>>,
+}
+
+impl SlowLlmClient {
+    fn new(delay: Duration, response: ChatResponse) -> Self {
+        Self {
+            delay,
+            response,
+            answered_at: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// When each answer was handed back, in order.
+    fn answers(&self) -> Vec<tokio::time::Instant> {
+        self.answered_at.lock().expect("not poisoned").clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -4013,6 +4033,10 @@ impl crate::llm::LlmClient for SlowLlmClient {
         _request: crate::llm::ChatRequest,
     ) -> Result<ChatResponse, crate::llm::LlmError> {
         tokio::time::sleep(self.delay).await;
+        self.answered_at
+            .lock()
+            .expect("not poisoned")
+            .push(tokio::time::Instant::now());
         Ok(self.response.clone())
     }
 }
@@ -4050,10 +4074,10 @@ async fn a_deadline_falling_during_a_sampling_answer_waits_for_it() {
     let mut channel = SamplingChannel::new("srv", rx);
 
     // haiku rates in test_pricing: $1/M in, $5/M out → $0.15.
-    let llm = SlowLlmClient {
-        delay: Duration::from_millis(600),
-        response: canned("sampled.", 100_000, 10_000),
-    };
+    let llm = SlowLlmClient::new(
+        Duration::from_millis(600),
+        canned("sampled.", 100_000, 10_000),
+    );
 
     let sandbox = fq_tools::ToolSandbox::new();
     let ctx = fq_tools::ToolContext::new(&sandbox);
@@ -4117,6 +4141,298 @@ async fn a_deadline_falling_during_a_sampling_answer_waits_for_it() {
         matches!(err, fq_tools::ToolError::TimedOut { .. }),
         "expected a timeout, got: {err}"
     );
+}
+
+/// A tool that acts on its own deadline and needs a moment to do it.
+///
+/// It waits out the deadline the host told it about, spends `teardown`
+/// stopping the work — `exec`'s group kill and output drain, in the
+/// real thing — and answers with what it had captured. The gap between
+/// `allowed` and `armed` exists for exactly that window; these tests
+/// are about who gets to spend it.
+struct SelfKillingTool {
+    teardown: Duration,
+}
+
+/// What the tool hands back, and what the host's bare backstop would
+/// replace it with.
+const SALVAGED: &str = "partial output captured before the kill";
+
+#[async_trait::async_trait]
+impl fq_tools::Tool for SelfKillingTool {
+    fn name(&self) -> &str {
+        "wedge__self_killing"
+    }
+    fn description(&self) -> &str {
+        "times itself out and keeps its output"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}, "additionalProperties": false})
+    }
+    async fn execute(
+        &self,
+        ctx: &fq_tools::ToolContext<'_>,
+        _params: serde_json::Value,
+    ) -> Result<fq_tools::ToolResult, fq_tools::ToolError> {
+        let after = ctx.deadline.expect("the host tells this tool its deadline");
+        tokio::time::sleep(after).await;
+        tokio::time::sleep(self.teardown).await;
+        Err(fq_tools::ToolError::TimedOut {
+            after,
+            output: Some(SALVAGED.to_string()),
+        })
+    }
+}
+
+/// The backstop grace belongs to the tool, and a long servicing does not
+/// get to spend it (#617).
+///
+/// A server request is serviced mid-call and the provider takes longer
+/// to answer than the whole armed deadline. Before the fix, the tool
+/// future got exactly one poll on the next pass before an already
+/// elapsed expiry won and dropped it — so `exec`'s child would die by
+/// `kill_on_drop` and the model would be told "timed out" with nothing
+/// attached, having lost the output the command had already produced.
+///
+/// The rule is that the grace is measured from the moment the host is
+/// polling the tool again. Remove the reset in
+/// `await_tool_under_deadline` and this test fails on `output`: the
+/// answer becomes the host's bare `TimedOut { output: None }`.
+#[tokio::test]
+async fn a_servicing_that_outlives_the_backstop_gives_the_tool_its_grace_back() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = sampling_agent(10.0, None);
+
+    // Queued up front, so the first pass of the select services it
+    // rather than racing to see it.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::mcp::ServerRequest::Sampling {
+        params: sampling_params(),
+        reply: reply_tx,
+    })
+    .expect("channel open");
+    let mut channel = SamplingChannel::new("srv", rx);
+
+    // 800 ms of servicing against a 100 ms deadline armed at 600 ms:
+    // the backstop passes while the host is busy answering the server.
+    let llm = SlowLlmClient::new(
+        Duration::from_millis(800),
+        canned("sampled.", 100_000, 10_000),
+    );
+
+    let allowed = Duration::from_millis(100);
+    let sandbox = fq_tools::ToolSandbox::new();
+    let ctx = fq_tools::ToolContext::new(&sandbox).with_deadline(allowed);
+    // Teardown well inside the grace, so what the test measures is
+    // whether the grace was there at all.
+    let tool = SelfKillingTool {
+        teardown: Duration::from_millis(200),
+    };
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+
+    let outcome = runner
+        .await_tool_under_deadline(
+            &tool,
+            &ctx,
+            json!({}),
+            crate::tools::CallDeadline {
+                allowed,
+                armed: allowed + Duration::from_millis(500),
+            },
+            "wedge__self_killing",
+            &agent,
+            &llm,
+            agent.id(),
+            Uuid::now_v7(),
+            &mut totals,
+            &mut cursor,
+            Some(&mut channel),
+        )
+        .await
+        .expect("infrastructure ok");
+
+    // The servicing still ran to completion (#614) and the server was
+    // answered — the fix must not have cost that.
+    let reply = reply_rx
+        .await
+        .expect("the reply sender must not be dropped unanswered");
+    assert!(reply.is_ok(), "the sampling result is delivered: {reply:?}");
+
+    let err = outcome.expect_err("the tool timed itself out");
+    match err {
+        fq_tools::ToolError::TimedOut { after, output } => {
+            assert_eq!(after, allowed, "the deadline the tool was told");
+            assert_eq!(
+                output.as_deref(),
+                Some(SALVAGED),
+                "the tool's own answer, with what it captured — not the host's bare timeout"
+            );
+        }
+        other => panic!("expected a timeout, got: {other}"),
+    }
+    drop(tx);
+}
+
+/// No servicing, no extension: the backstop is `armed` and nothing else.
+///
+/// The grace is given back to a tool the *host* kept waiting. A tool
+/// that simply never answers, on an open and silent channel, must still
+/// be cut off at `armed` — otherwise the reset would be a way for any
+/// call to outlive its deadline.
+#[tokio::test]
+async fn without_a_servicing_the_backstop_stays_at_the_armed_deadline() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = sampling_agent(10.0, None);
+
+    // Open, so the "all servers gone" arm stays out of it; silent, so
+    // nothing is ever serviced.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut channel = SamplingChannel::new("srv", rx);
+    let llm = FixtureClient::new(); // must never be consulted
+
+    let sandbox = fq_tools::ToolSandbox::new();
+    let ctx = fq_tools::ToolContext::new(&sandbox);
+    let armed = Duration::from_millis(400);
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+
+    let started = tokio::time::Instant::now();
+    let outcome = runner
+        .await_tool_under_deadline(
+            &NeverReturnsTool,
+            &ctx,
+            json!({}),
+            crate::tools::CallDeadline {
+                allowed: Duration::from_millis(100),
+                armed,
+            },
+            "wedge__hang",
+            &agent,
+            &llm,
+            agent.id(),
+            Uuid::now_v7(),
+            &mut totals,
+            &mut cursor,
+            Some(&mut channel),
+        )
+        .await
+        .expect("infrastructure ok");
+    let elapsed = started.elapsed();
+
+    let err = outcome.expect_err("the tool never answered");
+    assert!(
+        matches!(err, fq_tools::ToolError::TimedOut { output: None, .. }),
+        "the host's backstop, which stopped nothing: {err}"
+    );
+    assert!(
+        elapsed >= armed,
+        "the backstop must not fire early, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < armed * 2,
+        "and must not be extended when nothing was serviced, took {elapsed:?}"
+    );
+    drop(tx);
+}
+
+/// The extension is one grace after the *last* servicing, not one per
+/// servicing.
+///
+/// Three requests are serviced back to back, each answer outlasting
+/// what is left of the backstop. The rule re-arms the timer at one
+/// grace from the end of whichever servicing has just finished, so a
+/// chatty server cannot buy the tool extra *running* time — only the
+/// teardown window it was always owed. A reset that added `armed`, or
+/// that accumulated a grace per servicing, would show up here as a
+/// backstop firing much later than one grace after the last answer.
+#[tokio::test]
+async fn repeated_servicings_extend_the_backstop_by_one_grace_not_by_each() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = sampling_agent(10.0, None);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut replies = Vec::new();
+    for _ in 0..3 {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::mcp::ServerRequest::Sampling {
+            params: sampling_params(),
+            reply: reply_tx,
+        })
+        .expect("channel open");
+        replies.push(reply_rx);
+    }
+    let mut channel = SamplingChannel::new("srv", rx);
+
+    // 700 ms per answer against a 1 s deadline armed at 1.3 s: the
+    // first servicing ends inside the backstop, the second and third
+    // each outlive what is left of it and hand the grace back.
+    let llm = SlowLlmClient::new(
+        Duration::from_millis(700),
+        canned("sampled.", 100_000, 10_000),
+    );
+
+    let grace = Duration::from_millis(300);
+    let allowed = Duration::from_secs(1);
+    let sandbox = fq_tools::ToolSandbox::new();
+    let ctx = fq_tools::ToolContext::new(&sandbox);
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+
+    let outcome = runner
+        .await_tool_under_deadline(
+            &NeverReturnsTool,
+            &ctx,
+            json!({}),
+            crate::tools::CallDeadline {
+                allowed,
+                armed: allowed + grace,
+            },
+            "wedge__hang",
+            &agent,
+            &llm,
+            agent.id(),
+            Uuid::now_v7(),
+            &mut totals,
+            &mut cursor,
+            Some(&mut channel),
+        )
+        .await
+        .expect("infrastructure ok");
+    let fired_at = tokio::time::Instant::now();
+
+    let err = outcome.expect_err("the tool never answered");
+    assert!(
+        matches!(err, fq_tools::ToolError::TimedOut { output: None, .. }),
+        "the host's backstop, which stopped nothing: {err}"
+    );
+
+    let answers = llm.answers();
+    assert_eq!(answers.len(), 3, "every queued request was serviced");
+    for reply in replies {
+        assert!(
+            reply.await.expect("answered").is_ok(),
+            "each server got its answer"
+        );
+    }
+
+    // The timeline, measured from the last answer rather than from the
+    // start: one grace, plus scheduling slack.
+    let after_last = fired_at.duration_since(answers[2]);
+    assert!(
+        after_last >= grace / 2,
+        "the tool must get a grace back after the last servicing, got {after_last:?}"
+    );
+    assert!(
+        after_last < grace + Duration::from_millis(200),
+        "the backstop fires one grace ({grace:?}) after the last servicing, \
+         never one per servicing nor a fresh `armed`, got {after_last:?}"
+    );
+    drop(tx);
 }
 
 /// `exec` timing itself out counts toward the streak (#547 review).

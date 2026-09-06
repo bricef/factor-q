@@ -293,6 +293,15 @@ pub struct CallDeadline {
     /// When the host's own backstop timer fires — `allowed` plus a few
     /// seconds, so a tool that acts on its deadline gets to answer
     /// first.
+    ///
+    /// The difference between the two is the tool's teardown budget and
+    /// is spent by the tool alone. If the host services a
+    /// server-initiated request mid-call and that servicing outlives the
+    /// backstop, the backstop is re-armed one grace from the moment the
+    /// tool is polled again rather than firing on the first poll — the
+    /// host's own busyness must not cost `exec` the seconds it needs to
+    /// kill and drain (#617). `allowed`, which is what the tool was
+    /// told, never moves.
     pub armed: Duration,
 }
 
