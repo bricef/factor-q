@@ -183,6 +183,36 @@ func TestPollOnceDoesNotPublishALostClaim(t *testing.T) {
 	}
 }
 
+// An issue carrying both labels is skipped by the planner for ever, so
+// the one thing the log must not say is "will retry next poll".
+func TestPollOnceRaisesAClaimStrandedWithBothLabels(t *testing.T) {
+	rec := &recorder{}
+	logs := &syncBuffer{}
+	w := &Watcher{
+		Source: &fakeSource{
+			rec:        rec,
+			issues:     []Issue{{7, []string{"ready"}}},
+			relabelErr: map[int]error{7: fmt.Errorf("remove %q from #7 failed and %q could not be rolled back: %w", "ready", "in-progress", ErrBothLabels)},
+		},
+		Publisher: &fakePublisher{rec: rec},
+		Config:    testConfig(),
+		Log:       slog.New(slog.NewTextHandler(logs, nil)),
+	}
+	if err := w.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.ops) != 0 {
+		t.Errorf("ops = %v, want nothing published on a failed claim", rec.ops)
+	}
+	got := logs.String()
+	if strings.Contains(got, "will retry next poll") {
+		t.Errorf("a stranded issue is never retried; log = %q", got)
+	}
+	if !strings.Contains(got, "by hand") || !strings.Contains(got, "issue=7") {
+		t.Errorf("log = %q, want a hand-repair line naming issue 7", got)
+	}
+}
+
 // "Stranded" is what the log says when a transition leaves an issue
 // nowhere. A lost race leaves it somewhere — wherever the winner put it —
 // so it must not be reported the same way, at any of the relabel sites.

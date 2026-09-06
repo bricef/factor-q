@@ -83,6 +83,12 @@ func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Iss
 // transition first. The caller must not act on a claim it did not win.
 var ErrClaimLost = errors.New("claim lost: the label was already removed")
 
+// ErrBothLabels means a transition failed *and* could not be undone: the
+// issue carries the label the transition was adding as well as the one it
+// was removing. The planner skips an issue in that state, so nothing will
+// pick it up again — it is not a "retry next poll", it is a hand repair.
+var ErrBothLabels = errors.New("issue stranded carrying both labels")
+
 // Relabel adds `add` and then removes `remove`, in that order. The order
 // is the whole safety property.
 //
@@ -97,7 +103,16 @@ var ErrClaimLost = errors.New("claim lost: the label was already removed")
 // removal can find the label there. The loser gets a 404, which is
 // ErrClaimLost and means "do not publish" — the same 404 the old code
 // tolerated as idempotency while both watchers went on to trigger the
-// same issue. Any other failure (403, 5xx) is returned as itself.
+// same issue.
+//
+// Any other removal failure (403, 5xx, a timeout) is a failed transition,
+// not a lost race, and the add is rolled back before it is reported.
+// Without that rollback the issue keeps both labels, which the planner
+// skips on every later cycle: the transition would be parked for good
+// while the caller logged "will retry next poll". Removing first at least
+// left it `ready` and retrying. If the rollback fails too the issue really
+// is stuck with both labels, and the error says so (ErrBothLabels) so the
+// caller can raise it rather than promise a retry.
 //
 // Two removals that race inside GitHub could still both report success;
 // the definitive fix is one watcher per repo, tracked separately
@@ -114,7 +129,13 @@ func (g *GhCliIssueSource) Relabel(ctx context.Context, number int, remove, add 
 		if isNotFound(err) {
 			return fmt.Errorf("remove %q from #%d: %w", remove, number, ErrClaimLost)
 		}
-		return fmt.Errorf("remove label from #%d: %w", number, err)
+		// The transition failed: undo our own half so the issue is left
+		// where it started and the next cycle can try again.
+		if _, rollback := g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, number, add); rollback != nil && !isNotFound(rollback) {
+			return fmt.Errorf("remove %q from #%d failed (%v) and %q could not be rolled back (%v): %w",
+				remove, number, err, add, rollback, ErrBothLabels)
+		}
+		return fmt.Errorf("remove %q from #%d (%q rolled back, issue unchanged): %w", remove, number, add, err)
 	}
 	return nil
 }

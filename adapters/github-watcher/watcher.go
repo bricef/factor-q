@@ -220,6 +220,11 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 					"issue", pt.Issue, "err", err)
 				continue
 			}
+			if errors.Is(err, ErrBothLabels) {
+				w.Log.Error("claim failed and could not be undone; the issue carries both labels and no poll will pick it up again — remove one by hand",
+					"issue", pt.Issue, "ready", w.Config.ReadyLabel, "in_progress", w.Config.InProgressLabel, "err", err)
+				continue
+			}
 			w.Log.Error("relabel failed; skipping trigger (will retry next poll)",
 				"issue", pt.Issue, "err", err)
 			continue
