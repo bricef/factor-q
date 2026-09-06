@@ -3793,3 +3793,231 @@ async fn consecutive_timeouts_end_the_invocation_naming_the_count() {
         .count();
     assert_eq!(timeouts, 2, "every timed-out call is recorded");
 }
+
+/// An LLM client that takes its time. `FixtureClient` answers
+/// instantly, which is the one thing the test below cannot have.
+struct SlowLlmClient {
+    delay: Duration,
+    response: ChatResponse,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::LlmClient for SlowLlmClient {
+    async fn chat(
+        &self,
+        _request: crate::llm::ChatRequest,
+    ) -> Result<ChatResponse, crate::llm::LlmError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.response.clone())
+    }
+}
+
+/// The deadline is a `select!` arm, not a `timeout` around the loop,
+/// and this is the difference.
+///
+/// A server's tool call triggers a sampling request; the provider
+/// answers slowly; the tool's deadline expires *during* that answer.
+/// Wrapped in a `timeout`, the whole future would be dropped
+/// mid-`dispatch_llm`: the provider call's cost would never be
+/// recorded (and cost information is the one thing this system never
+/// loses), the server would wait forever on a reply that is not
+/// coming, and a `publish_chained` dropped between the bus accepting an
+/// event and the cursor advancing would fork the event chain.
+///
+/// As an arm, the deadline can only win between servicings. So: the
+/// answer is delivered, its cost is on the books and on the bus, and
+/// *then* the call is reported timed out.
+#[tokio::test]
+async fn a_deadline_falling_during_a_sampling_answer_waits_for_it() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = sampling_agent(10.0, None);
+
+    // One request already queued, so the first pass of the select
+    // services it rather than racing to see it.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::mcp::ServerRequest::Sampling {
+        params: sampling_params(),
+        reply: reply_tx,
+    })
+    .expect("channel open");
+    let mut channel = SamplingChannel::new("srv", rx);
+
+    // haiku rates in test_pricing: $1/M in, $5/M out → $0.15.
+    let llm = SlowLlmClient {
+        delay: Duration::from_millis(600),
+        response: canned("sampled.", 100_000, 10_000),
+    };
+
+    let sandbox = fq_tools::ToolSandbox::new();
+    let ctx = fq_tools::ToolContext::new(&sandbox);
+    let tool = NeverReturnsTool;
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+    let invocation_id = Uuid::now_v7();
+
+    let started = std::time::Instant::now();
+    let outcome = runner
+        .await_tool_under_deadline(
+            &tool,
+            &ctx,
+            json!({}),
+            // Expires well inside the provider's 600 ms answer.
+            crate::tools::CallDeadline {
+                allowed: Duration::from_millis(100),
+                armed: Duration::from_millis(100),
+            },
+            "wedge__hang",
+            &agent,
+            &llm,
+            agent.id(),
+            invocation_id,
+            &mut totals,
+            &mut cursor,
+            Some(&mut channel),
+        )
+        .await
+        .expect("infrastructure ok");
+
+    // The servicing was not cut short.
+    assert!(
+        started.elapsed() >= Duration::from_millis(600),
+        "the deadline must not interrupt an in-flight server request, took {:?}",
+        started.elapsed()
+    );
+
+    // The server got its answer.
+    let reply = reply_rx
+        .await
+        .expect("the reply sender must not be dropped unanswered");
+    assert!(reply.is_ok(), "the sampling result is delivered: {reply:?}");
+
+    // The money is on the books and on the bus.
+    assert!(
+        (totals.total_cost - 0.15).abs() < 1e-12,
+        "the provider call's cost must survive the deadline, got {}",
+        totals.total_cost
+    );
+    assert!(
+        sink.events()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::LlmResponse(_))),
+        "the llm.response event must be published, not dropped with the future"
+    );
+
+    // And only then is the call reported timed out.
+    let err = outcome.expect_err("the tool never answered");
+    assert!(
+        matches!(err, fq_tools::ToolError::TimedOut { .. }),
+        "expected a timeout, got: {err}"
+    );
+}
+
+/// `exec` timing itself out counts toward the streak (#547 review).
+///
+/// It used to answer its own timeout as `Ok(ToolResult { is_error:
+/// true })`, which reads to the host as the tool having *answered* — so
+/// a command that hung on every attempt reset the count every time, and
+/// the one tool that can legitimately sit for the whole ceiling was the
+/// one `max_consecutive_timeouts` did not protect.
+#[tokio::test]
+async fn exec_timing_itself_out_counts_toward_the_streak() {
+    let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    // Exec's own deadline is 200 ms, well inside the host's backstop —
+    // so it is exec's timeout, not the host's, that is being counted.
+    let tools = ToolRegistry::with_builtins_exec(fq_tools::builtin::ExecConfig {
+        default_timeout: Duration::from_millis(200),
+        max_timeout: Duration::from_secs(1),
+        drain_grace: Duration::from_millis(100),
+        ..fq_tools::builtin::ExecConfig::default()
+    });
+    let runner = ReducerRunner::new(
+        Arc::new(ReducerContext::builder().tools(Arc::new(tools)).build()),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(Arc::clone(&sink) as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .tool_limits(crate::tools::ToolCallLimits {
+                    default_timeout: Duration::from_secs(30),
+                    max_timeout: Duration::from_secs(30),
+                    max_consecutive_timeouts: 3,
+                })
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).expect("workdir");
+    let agent = Agent::builder()
+        .id(unique_agent_id("exec-streak"))
+        .model("claude-haiku")
+        .system_prompt("run the command")
+        .sandbox(Sandbox::new().exec_cwd(work.to_string_lossy()))
+        .tools(vec!["builtin__exec".to_string()])
+        .budget(1.0)
+        .build()
+        .unwrap();
+
+    let llm = FixtureClient::new();
+    for n in 0..6 {
+        llm.push_response(tool_call_response(
+            "builtin__exec",
+            &format!("call-{n}"),
+            json!({"command": ["sleep", "30"], "cwd": work.to_string_lossy()}),
+        ));
+    }
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        runner.run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        ),
+    )
+    .await
+    .expect("the invocation must not hang");
+
+    let message = outcome
+        .expect_err("three self-timed-out execs end the invocation")
+        .to_string();
+    assert!(
+        message.contains("3 consecutive tool calls timed out"),
+        "exec's own timeout must advance the streak: {message}"
+    );
+
+    // Each one still reached the model as a timeout carrying what the
+    // command had said before the kill.
+    let results: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::ToolResult(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 3, "three calls, then the invocation ends");
+    for result in &results {
+        assert_eq!(
+            result.error_kind,
+            Some(crate::events::ToolErrorKind::Timeout)
+        );
+        assert!(
+            result.output.contains("the command was killed"),
+            "a self-timed-out tool tells the model the work stopped: {}",
+            result.output
+        );
+    }
+}

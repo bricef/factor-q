@@ -93,21 +93,44 @@ impl ToolsConfig {
         }
     }
 
-    /// The general ceiling must be at least the `exec` ceiling.
+    /// Two orderings that must hold, both checked rather than silently
+    /// clamped, because a settings pair that disagrees is an operator
+    /// mistake with an invisible consequence.
     ///
-    /// Checked rather than silently clamped because the two settings
-    /// disagreeing is an operator mistake with an invisible
-    /// consequence: `[tools] max_timeout_secs = 60` under a
-    /// `[tools.exec] max_timeout_secs = 900` would cap every `exec`
-    /// call at a minute while the `exec` section still said 900, and
-    /// the operator would read the wrong number for as long as the
-    /// daemon ran.
+    /// **The general ceiling must be at least the `exec` ceiling.**
+    /// `[tools] max_timeout_secs = 60` under a `[tools.exec]
+    /// max_timeout_secs = 900` would cap every `exec` call at a minute
+    /// while the `exec` section still said 900, and the operator would
+    /// read the wrong number for as long as the daemon ran.
+    ///
+    /// **In each section, the default must not exceed its own
+    /// ceiling.** A `default_timeout_secs` above `max_timeout_secs` is
+    /// clamped everywhere it is used, so the file states a deadline
+    /// nothing honours; and in `[tools.exec]` specifically it would let
+    /// the child outlive the host's backstop, inverting the ordering
+    /// the backstop grace exists to guarantee.
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
         if self.max_timeout_secs < self.exec.max_timeout_secs {
             return Err(ConfigError::ToolCeilingBelowExec {
                 tools_max: self.max_timeout_secs,
                 exec_max: self.exec.max_timeout_secs,
             });
+        }
+        for (section, default, max) in [
+            ("[tools]", self.default_timeout_secs, self.max_timeout_secs),
+            (
+                "[tools.exec]",
+                self.exec.default_timeout_secs,
+                self.exec.max_timeout_secs,
+            ),
+        ] {
+            if default > max {
+                return Err(ConfigError::ToolDefaultAboveMax {
+                    section,
+                    default,
+                    max,
+                });
+            }
         }
         Ok(())
     }

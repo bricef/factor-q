@@ -61,4 +61,21 @@ pub enum ConfigError {
          max_timeout_secs to at least {exec_max}, or lower [tools.exec] max_timeout_secs"
     )]
     ToolCeilingBelowExec { tools_max: u64, exec_max: u64 },
+
+    /// A section's `default_timeout_secs` sits above its own
+    /// `max_timeout_secs`, so the default is clamped everywhere it is
+    /// used and the file states a deadline nothing honours. Named with
+    /// its section because both `[tools]` and `[tools.exec]` carry the
+    /// pair.
+    #[error(
+        "{section} default_timeout_secs = {default} is above {section} max_timeout_secs = \
+         {max}: the default is clamped to the ceiling wherever it is applied, so this file \
+         states a deadline nothing honours — lower default_timeout_secs to at most {max}, or \
+         raise max_timeout_secs"
+    )]
+    ToolDefaultAboveMax {
+        section: &'static str,
+        default: u64,
+        max: u64,
+    },
 }
