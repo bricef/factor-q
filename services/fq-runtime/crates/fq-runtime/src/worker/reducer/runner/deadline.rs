@@ -67,6 +67,22 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// call inside one carries `[worker] llm_timeout_secs` (#546), so
     /// the servicing is itself bounded.
     ///
+    /// **A servicing that outlives the backstop hands the tool its full
+    /// grace back.** The gap between `allowed` and `armed` is not slack
+    /// in the deadline, it is the tool's teardown budget — `exec`'s
+    /// group kill and output drain, the MCP adapter's
+    /// `notifications/cancelled` — and a servicing bounded only by
+    /// `llm_timeout_secs` would otherwise spend all of it while the tool
+    /// future sits unpolled. The tool would then get exactly one poll
+    /// before an already-elapsed expiry won and dropped it: `exec`'s
+    /// child would die by `kill_on_drop` and the output it had captured
+    /// would reach the model as a bare "timed out" instead. So after
+    /// each servicing an expiry that has already passed is re-armed at
+    /// `now + (armed − allowed)`. The tool's *own* deadline never moves,
+    /// only the host's backstop, and only ever to one grace after the
+    /// last servicing — a chatty server buys the tool no extra running
+    /// time, just the teardown it was always owed (#617).
+    ///
     /// The outer `Err` is infrastructure (a server request that failed
     /// to publish); a timeout is an ordinary tool error in the inner
     /// `Result`, which is what makes it something the model reads and
@@ -87,7 +103,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         cursor: &mut Option<Uuid>,
         sampling: Option<&mut SamplingChannel>,
     ) -> Result<Result<ToolResult, ToolError>, ExecutorError> {
-        let expires_at = tokio::time::Instant::now() + deadline.armed;
+        // The tool's teardown budget, held apart from the deadline
+        // itself because a servicing can give it back (see below).
+        let grace = deadline.armed.saturating_sub(deadline.allowed);
+        let mut expires_at = tokio::time::Instant::now() + deadline.armed;
         let timed_out = || {
             warn!(
                 agent_id = %agent_id,
@@ -136,6 +155,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         // why this must never be a dropped future.
                         self.handle_server_request(&mut ctx, agent, &server, request)
                             .await?;
+                        // The host was busy, not the tool. Give back the
+                        // teardown budget this servicing consumed,
+                        // measured from the moment the tool is polled
+                        // again, so a co-operative tool still gets to
+                        // stop its work and answer (#617).
+                        let now = tokio::time::Instant::now();
+                        if now >= expires_at {
+                            expires_at = now + grace;
+                            expiry.as_mut().reset(expires_at);
+                        }
                     }
                     // All servers' channels closed: nothing left to
                     // service, so the tool alone, still bounded.
