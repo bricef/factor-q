@@ -264,6 +264,25 @@ is done. Do **not** delete `cache/projection.db` across such a bump: a
 rebuild replays every event and silently drops the ones it cannot parse
 (#409).
 
+### Broker restarts and the Go adapters (#551)
+
+`github-watcher` and `fq-cron` survive a broker restart on their own:
+both reconnect without an attempt limit and both may be started before
+the broker is up. Before #551 nats.go's default gave up after sixty
+attempts two seconds apart, so a broker down for more than two minutes
+left `fq-cron` exited and the watcher polling GitHub with a dead
+connection — churning issue labels it could not trigger. Two
+consequences for an operator:
+
+- Restarting `nats` alone no longer needs the adapters restarted with
+  it, unless what changed is a value they read at startup (the token
+  below).
+- An adapter that is gone after a broker blip is now a real fault worth
+  reading the logs for, not the expected outcome. During an outage both
+  log the disconnect and answer `/healthz` with 503; the watcher also
+  logs a skipped poll cycle each interval, and `fq-cron` logs the
+  state-store retries.
+
 ### Broker token (#542)
 
 The broker requires a token: `infra/nats.conf` includes `auth.conf`,

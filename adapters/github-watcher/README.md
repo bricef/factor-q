@@ -36,7 +36,7 @@ ready ──trigger──▶ in-progress ──completed (task success/partial)�
 
 **On each poll**, for every open issue labelled `status:ready`:
 
-1. **Relabel** the issue `ready` → `in-progress`.
+1. **Claim** the issue: add `in-progress`, **then** remove `ready`.
 2. **Then** publish a trigger on `fq.trigger.<agent>`.
 
 Relabelling *out of* `ready` before triggering is the idempotency
@@ -44,6 +44,17 @@ mechanism — a re-seen issue is no longer `ready`, so edits, re-polls, and
 watcher restarts cannot double-trigger. If the publish fails after the
 relabel, the claim is reverted (`in-progress` → `ready`) so the next poll
 retries. A `max-per-poll` guard bounds how many issues trigger at once.
+
+**Add before remove**, in that order, for two reasons. An interrupted
+claim then leaves the issue carrying *both* labels, which the planner
+skips and the ready list still shows — removing first leaves a window
+where the issue has no status label at all, and a failure there strands it
+where no list will ever surface it again. And it arbitrates between two
+watchers: both may add `in-progress`, but only one removal can find
+`ready` there, so the loser gets a 404, reads it as a lost claim, and does
+not publish a second trigger for the same issue. Two removals racing
+inside GitHub could still both report success; one watcher per repo is the
+definitive fix ([#553](https://github.com/bricef/factor-q/issues/553)).
 
 **Observing the outcome** (closes the gap that stranded issue #9). The
 watcher subscribes to the triggered agent's lifecycle events

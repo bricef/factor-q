@@ -77,23 +77,44 @@ func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Iss
 	return out, nil
 }
 
-// Relabel removes `remove` and adds `add` on the issue. Removing out of
-// `ready` before triggering is the watcher's double-trigger dedup, so
-// leniency is scoped precisely: a *missing* label (404) is harmless —
-// matching gh's idempotency — but any other removal failure (403, 5xx)
-// must fail loudly, or a claim could "succeed" while the issue stays
-// `ready` and re-triggers on the next poll.
+// ErrClaimLost means the label this transition was moving out of was
+// already gone when the removal ran: another actor — the second watcher
+// the deploy runs, or a person on the issue — completed the same
+// transition first. The caller must not act on a claim it did not win.
+var ErrClaimLost = errors.New("claim lost: the label was already removed")
+
+// Relabel adds `add` and then removes `remove`, in that order. The order
+// is the whole safety property.
+//
+// Removing first leaves a window in which the issue carries neither
+// label: a failure there (or a crash, or the process being killed) strands
+// it where no status list will ever show it again. Adding first cannot
+// strand anything — `status:ready` plus `status:in-progress` is already
+// skipped by the planner's dedup and stays visible in the ready list, so
+// an interrupted claim is inert rather than invisible.
+//
+// It is also the arbitration between two watchers. Both may add; only one
+// removal can find the label there. The loser gets a 404, which is
+// ErrClaimLost and means "do not publish" — the same 404 the old code
+// tolerated as idempotency while both watchers went on to trigger the
+// same issue. Any other failure (403, 5xx) is returned as itself.
+//
+// Two removals that race inside GitHub could still both report success;
+// the definitive fix is one watcher per repo, tracked separately
+// (https://github.com/bricef/factor-q/issues/553).
 func (g *GhCliIssueSource) Relabel(ctx context.Context, number int, remove, add string) error {
 	owner, repo, err := splitRepo(g.Repo)
 	if err != nil {
 		return err
 	}
-	_, err = g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, number, remove)
-	if err != nil && !isNotFound(err) {
-		return fmt.Errorf("remove label from #%d: %w", number, err)
-	}
 	if _, _, err := g.Client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{add}); err != nil {
 		return fmt.Errorf("add label to #%d: %w", number, err)
+	}
+	if _, err := g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, number, remove); err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("remove %q from #%d: %w", remove, number, ErrClaimLost)
+		}
+		return fmt.Errorf("remove label from #%d: %w", number, err)
 	}
 	return nil
 }

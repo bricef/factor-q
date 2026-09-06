@@ -3,13 +3,18 @@
 // for each, drives a two-step label state machine before triggering a
 // factor-q agent:
 //
-//  1. Relabel the issue `ready` -> `in-progress`.
+//  1. Relabel the issue `ready` -> `in-progress` — adding `in-progress`
+//     first, then removing `ready`.
 //  2. Publish a trigger on `fq.trigger.<agent>` per the trigger wire
 //     contract (docs/design/committed/trigger-wire-contract.md).
 //
 // Relabelling out of `ready` *before* triggering is the idempotency
 // mechanism: a re-seen issue is no longer `ready`, so edits, re-polls, and
-// watcher restarts cannot double-trigger.
+// watcher restarts cannot double-trigger. The add-then-remove order makes
+// that claim safe to interrupt and safe to lose: an issue carrying both
+// labels is skipped by the planner and still listed, and the watcher whose
+// removal finds `ready` already gone knows it lost the race and does not
+// publish.
 //
 // The adapter also *observes the outcome* of what it triggered, closing the
 // gap that stranded issue #9: a failed invocation is relabelled off
@@ -26,6 +31,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -58,9 +64,13 @@ func (i Issue) HasLabel(label string) bool {
 type IssueSource interface {
 	// ListReady returns open issues that carry readyLabel.
 	ListReady(ctx context.Context, readyLabel string) ([]Issue, error)
-	// Relabel removes `remove` and adds `add` on the issue. This is the
-	// idempotency step: it must complete before the trigger is published,
-	// so a re-seen issue is no longer `ready`.
+	// Relabel adds `add` and then removes `remove` on the issue — in that
+	// order, so an interrupted transition leaves the issue carrying both
+	// labels (inert, and still listed) rather than neither (invisible).
+	// It is the idempotency step: it must complete before the trigger is
+	// published, so a re-seen issue is no longer `ready`. A removal that
+	// finds the label already gone is ErrClaimLost: another actor
+	// completed this transition, and the caller must not act on it.
 	Relabel(ctx context.Context, number int, remove, add string) error
 }
 
@@ -174,8 +184,8 @@ type Watcher struct {
 }
 
 // pollOnce runs one poll cycle: list ready issues, plan, and for each
-// planned trigger relabel (status:ready -> status:in-progress) THEN publish. The
-// relabel-before-publish order is the dedup: a re-seen issue is no longer
+// planned trigger claim it (status:ready -> status:in-progress) THEN publish.
+// The claim-before-publish order is the dedup: a re-seen issue is no longer
 // ready. If the publish fails after the relabel, the claim is reverted
 // (in-progress -> ready) so the next poll retries, rather than stranding
 // the issue. Per-issue errors are logged and do not stop the others.
@@ -200,8 +210,16 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 	for _, pt := range planTriggers(issues, w.Config) {
 		// Step 1: claim the issue by relabelling out of `ready`. This
 		// must happen before the trigger so a re-seen issue cannot
-		// double-trigger.
+		// double-trigger. The claim is add-then-remove, so a lost race
+		// is reported rather than shared: whoever removed `ready` owns
+		// the issue, and the loser must not publish a second trigger
+		// for it.
 		if err := w.Source.Relabel(ctx, pt.Issue, w.Config.ReadyLabel, w.Config.InProgressLabel); err != nil {
+			if errors.Is(err, ErrClaimLost) {
+				w.Log.Warn("claim lost; another actor took the issue, not publishing",
+					"issue", pt.Issue, "err", err)
+				continue
+			}
 			w.Log.Error("relabel failed; skipping trigger (will retry next poll)",
 				"issue", pt.Issue, "err", err)
 			continue

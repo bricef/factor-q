@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +24,7 @@ func TestGitHubAPISource(t *testing.T) {
 			json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "labels": []map[string]string{{"name": "ready"}}}})
 		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
 			removed = true
-			http.NotFound(w, r) // removal is deliberately lenient
+			w.Write([]byte("[]"))
 		case r.URL.Path == "/repos/o/r/issues/7/labels" && r.Method == http.MethodPost:
 			added = true
 			w.Write([]byte("[]"))
@@ -107,6 +109,10 @@ func TestGraphQLQueryErrorsAreLoud(t *testing.T) {
 // `ready` and re-triggers next poll.
 func TestRelabelFailsLoudlyOnForbiddenRemoval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte("[]")) // the add succeeds; the removal is what fails
+			return
+		}
 		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
 	}))
 	defer server.Close()
@@ -114,7 +120,67 @@ func TestRelabelFailsLoudlyOnForbiddenRemoval(t *testing.T) {
 	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
 	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token", GraphQLEndpoint: server.URL + "/graphql"}
 
-	if err := source.Relabel(context.Background(), 7, "ready", "in-progress"); err == nil {
+	err := source.Relabel(context.Background(), 7, "ready", "in-progress")
+	if err == nil {
 		t.Fatal("a 403 on label removal must fail the claim, not be swallowed")
+	}
+	if errors.Is(err, ErrClaimLost) {
+		t.Fatalf("a 403 is not a lost claim, it is a broken watcher: %v", err)
+	}
+}
+
+// The claim is add-then-remove. Removing first leaves a window in which
+// the issue carries no status label at all, and an interruption there
+// strands it where no list will ever show it again.
+func TestRelabelAddsBeforeItRemoves(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/issues/7/labels" && r.Method == http.MethodPost:
+			calls = append(calls, "add in-progress")
+			w.Write([]byte("[]"))
+		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
+			calls = append(calls, "remove ready")
+			w.Write([]byte("[]"))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := github.NewClient(nil)
+	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
+	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token"}
+
+	if err := source.Relabel(context.Background(), 7, "ready", "in-progress"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"add in-progress", "remove ready"}; !slices.Equal(calls, want) {
+		t.Fatalf("call order = %v, want %v", calls, want)
+	}
+}
+
+// A 404 on the removal means someone else already made this transition —
+// the other watcher the deploy runs, or a person on the issue. The old
+// code treated it as idempotency and carried on, which is how one issue
+// got two triggers.
+func TestRelabelReportsALostClaimOnMissingLabel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte("[]"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := github.NewClient(nil)
+	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
+	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token"}
+
+	err := source.Relabel(context.Background(), 7, "ready", "in-progress")
+	if !errors.Is(err, ErrClaimLost) {
+		t.Fatalf("Relabel = %v, want ErrClaimLost", err)
+	}
+	if !strings.Contains(err.Error(), "ready") || !strings.Contains(err.Error(), "#7") {
+		t.Errorf("error should name the label and the issue: %v", err)
 	}
 }
