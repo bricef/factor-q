@@ -3576,3 +3576,220 @@ async fn a_hung_provider_ends_the_invocation_within_the_timeout() {
 
     mock.shutdown().await;
 }
+
+// ---- tool-call deadlines (#547, review finding B2) ------------------
+//
+// Fault injection, not unit tests: the tool below never returns, which
+// is the wedge class the deadline exists for ("hung tool" in the Phase
+// 1 exit criteria). Both tests drive the real `run` loop, so what they
+// prove is the *invocation's* behaviour, not the helper's.
+
+/// A tool that accepts the call and never answers.
+struct NeverReturnsTool;
+
+#[async_trait::async_trait]
+impl fq_tools::Tool for NeverReturnsTool {
+    fn name(&self) -> &str {
+        "wedge__hang"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}, "additionalProperties": false})
+    }
+    async fn execute(
+        &self,
+        _ctx: &fq_tools::ToolContext<'_>,
+        _params: serde_json::Value,
+    ) -> Result<fq_tools::ToolResult, fq_tools::ToolError> {
+        std::future::pending().await
+    }
+}
+
+/// A runner whose tool registry holds [`NeverReturnsTool`] and whose
+/// `[tools]` limits are short enough to test against.
+async fn wedged_tool_runner(
+    sink: &std::sync::Arc<crate::test_support::sim::RecordingSink>,
+    dir: &tempfile::TempDir,
+    limits: crate::tools::ToolCallLimits,
+) -> ReducerRunner {
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let mut tools = ToolRegistry::with_builtins();
+    tools
+        .register(Arc::new(NeverReturnsTool) as Arc<dyn fq_tools::Tool>)
+        .expect("the wedge tool registers");
+    ReducerRunner::new(
+        Arc::new(ReducerContext::builder().tools(Arc::new(tools)).build()),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(Arc::clone(sink) as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .tool_limits(limits)
+                .build(),
+        ),
+        Harness::new(),
+    )
+}
+
+fn wedge_agent(name: &str) -> Agent {
+    Agent::builder()
+        .id(unique_agent_id(name))
+        .model("claude-haiku")
+        .system_prompt("call the tool")
+        .sandbox(Sandbox::new())
+        .tools(vec!["wedge__hang".to_string()])
+        .budget(1.0)
+        .build()
+        .unwrap()
+}
+
+/// One hung tool ends as a *tool error* the model can read, inside the
+/// deadline, and the invocation carries on — that is the whole point of
+/// making a timeout a tool result rather than a failed invocation.
+#[tokio::test]
+async fn a_hung_tool_times_out_and_the_invocation_continues() {
+    let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+    let dir = tempdir().expect("tempdir");
+    let runner = wedged_tool_runner(
+        &sink,
+        &dir,
+        crate::tools::ToolCallLimits {
+            default_timeout: Duration::from_millis(200),
+            max_timeout: Duration::from_secs(60),
+            max_consecutive_timeouts: 3,
+        },
+    )
+    .await;
+
+    let llm = FixtureClient::new();
+    llm.push_response(tool_call_response("wedge__hang", "call-1", json!({})));
+    llm.push_response(end_turn_response("gave up on that tool"));
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        runner.run(
+            &wedge_agent("hung-tool"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        ),
+    )
+    .await
+    .expect("the invocation must not hang");
+    assert!(
+        matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+        "the invocation continues past a timed-out tool: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the deadline, not the test's timeout, ended the call"
+    );
+
+    let results: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::ToolResult(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "one tool result");
+    assert!(results[0].is_error);
+    assert_eq!(
+        results[0].error_kind,
+        Some(crate::events::ToolErrorKind::Timeout),
+        "the model must be able to read that this was a deadline"
+    );
+    assert!(
+        results[0].output.contains("may still be running"),
+        "the message must warn that the effect is unknown: {}",
+        results[0].output
+    );
+}
+
+/// A run of them ends the invocation instead of spending its budget one
+/// deadline at a time. The terminal `failed` names the count and the
+/// setting, so an operator reading the record knows which knob moved
+/// it.
+#[tokio::test]
+async fn consecutive_timeouts_end_the_invocation_naming_the_count() {
+    let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+    let dir = tempdir().expect("tempdir");
+    let runner = wedged_tool_runner(
+        &sink,
+        &dir,
+        crate::tools::ToolCallLimits {
+            default_timeout: Duration::from_millis(150),
+            max_timeout: Duration::from_secs(60),
+            max_consecutive_timeouts: 2,
+        },
+    )
+    .await;
+
+    // Enough scripted turns to outlast the limit if it were not
+    // enforced: the invocation must stop at the second timeout.
+    let llm = FixtureClient::new();
+    for n in 0..6 {
+        llm.push_response(tool_call_response(
+            "wedge__hang",
+            &format!("call-{n}"),
+            json!({}),
+        ));
+    }
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        runner.run(
+            &wedge_agent("hung-tool-streak"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        ),
+    )
+    .await
+    .expect("the invocation must not hang");
+
+    let err = outcome.expect_err("a run of timeouts fails the invocation");
+    let message = err.to_string();
+    assert!(
+        message.contains("2 consecutive tool calls timed out"),
+        "the failure must name the count: {message}"
+    );
+    assert!(
+        message.contains("max_consecutive_timeouts"),
+        "the failure must name the setting that ended it: {message}"
+    );
+
+    let events = sink.events();
+    let failed: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::Failed(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "exactly one terminal failure");
+    assert!(matches!(failed[0].error_kind, FailureKind::ToolError));
+    assert!(failed[0].error_message.contains("2 consecutive"));
+
+    // Both timed-out calls are on the record before the failure: the
+    // terminal event must not hide the calls that caused it.
+    let timeouts = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::ToolResult(p)
+                if p.error_kind == Some(crate::events::ToolErrorKind::Timeout))
+        })
+        .count();
+    assert_eq!(timeouts, 2, "every timed-out call is recorded");
+}
