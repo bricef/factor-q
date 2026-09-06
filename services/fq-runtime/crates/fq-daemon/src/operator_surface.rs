@@ -285,21 +285,12 @@ pub fn operator_registry(
     crate::trigger_command::register_trigger_surface(&mut registry, trigger_bus, trigger_views)?;
     crate::control_commands::register_control_commands(&mut registry, machinery)?;
     crate::cost_report::register_cost_reports(&mut registry, cost_views)?;
-    crate::doctor_report::register_doctor_report(
+    crate::health_surface::register_health_reports(
         &mut registry,
-        doctor_views,
-        doctor_bus,
-        deps.facts.summary_enabled,
-    )?;
-    crate::status_report::register_status_report(
-        &mut registry,
-        status_views,
-        status_bus,
+        (doctor_views, status_views),
+        (doctor_bus, status_bus),
         status_registry,
-        deps.facts.db_paths.clone(),
-        deps.facts.legacy_events_db.clone(),
-        deps.facts.drain_deadline_ms,
-        deps.facts.summary_enabled,
+        &deps.facts,
     )?;
 
     crate::resume::register_resume_command(&mut registry, deps.resume.clone())?;
