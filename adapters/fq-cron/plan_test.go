@@ -201,9 +201,18 @@ func TestValveCountsFiresAcrossJobs(t *testing.T) {
 	jobs := []Job{testJob("0 * * * *", "UTC", "skip"), testJob("0 * * * *", "UTC", "skip")}
 	jobs[1].Name = "other"
 	oldest := now.Add(-40 * time.Minute)
+	// PublishedAt is each ledger's last entry, the invariant recordFire
+	// maintains — so counting jobs would see two of them here and let a
+	// third fire through, which is exactly the difference under test.
 	state := map[string]FireState{
-		"job":   {RecentFires: []time.Time{oldest, now.Add(-20 * time.Minute)}},
-		"other": {RecentFires: []time.Time{now.Add(-10 * time.Minute)}},
+		"job": {
+			PublishedAt: now.Add(-20 * time.Minute),
+			RecentFires: []time.Time{oldest, now.Add(-20 * time.Minute)},
+		},
+		"other": {
+			PublishedAt: now.Add(-10 * time.Minute),
+			RecentFires: []time.Time{now.Add(-10 * time.Minute)},
+		},
 	}
 
 	fires, reopens := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 3}, state)
@@ -214,7 +223,10 @@ func TestValveCountsFiresAcrossJobs(t *testing.T) {
 		t.Fatalf("valve reopens at %s, want %s", reopens, want)
 	}
 	// Two fires between them leave a slot, and it goes to one job only.
-	state["job"] = FireState{RecentFires: []time.Time{now.Add(-20 * time.Minute)}}
+	state["job"] = FireState{
+		PublishedAt: now.Add(-20 * time.Minute),
+		RecentFires: []time.Time{now.Add(-20 * time.Minute)},
+	}
 	if fires, _ := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 3}, state); len(fires) != 1 {
 		t.Fatalf("plan() = %#v; want the one remaining slot", fires)
 	}

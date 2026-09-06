@@ -78,8 +78,11 @@ fire valve counts (D6):
 
 `recent_fires` is a per-job ledger of publication instants, oldest
 first, trimmed on every write to what the valve can still count: fires
-inside the window, and at most `max_fires_per_hour` of them. The
-one-fire-a-minute schedule floor bounds it at sixty instants per job. An
+inside the window, and at most `max_fires_per_hour` of them — which is
+also what bounds the stored value, whatever the job's schedule does.
+Trimming per job is exact for the global count while the ceiling is
+unchanged; lowering it stays exact, and raising it under-counts for at
+most one window, until the ledgers refill under the new ceiling. An
 entry written before the ledger existed has no `recent_fires`, and its
 `published_at` is read as the single fire it records — the bucket needs
 no migration.
@@ -230,15 +233,21 @@ Three guard rails, same principle:
   one entry per job — the last fire of each — as it did until
   <https://github.com/bricef/factor-q/issues/612>, the valve only ever
   closed when the file itself held `max_fires_per_hour` jobs, and a
-  runaway schedule was never clamped at all. A fire over the ceiling is
-  suppressed with a loud log line and then treated as any other missed
-  fire (this section's policy governs), so a runaway schedule is clamped
-  to the valve rate rather than trusted to its own floor. The window is
-  sliding, so the valve reopens on its own: when it is shut the planner
-  reports the instant the oldest counted fire leaves the window, and the
-  loop wakes then and re-plans. Nothing waits for a config reload — a
-  burst used to leave the scheduler silent until someone edited the
-  file. The 1-minute floor bounds each job; the valve bounds the file
+  runaway schedule was never clamped at all. The count is over the jobs
+  the file currently declares: a job dropped on reload takes its fires
+  out of it with its KV entry (D4), so renaming a runaway job hands the
+  new name an empty ledger and a full ceiling. The valve bounds the file
+  as configured, not the history of every name that has been in it.
+
+  A fire over the ceiling is suppressed with a loud log line and then
+  treated as any other missed fire (this section's policy governs), so a
+  runaway schedule is clamped to the valve rate rather than trusted to
+  its own floor. The window is sliding, so the valve reopens on its own:
+  when it is shut the planner reports the instant the oldest counted
+  fire leaves the window, and the loop wakes then and re-plans. Nothing
+  waits for a config reload — a burst used to leave the scheduler silent
+  until someone edited the file. The 1-minute floor bounds each job; the
+  valve bounds the file
   ([ADR-0004](../../docs/adrs/accepted/0004-cost-controls-from-day-one.md):
   cost controls from day one).
 
