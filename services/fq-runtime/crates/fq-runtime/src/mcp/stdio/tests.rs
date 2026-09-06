@@ -132,7 +132,7 @@ async fn a_path_shaped_server_name_is_refused_before_any_directory_exists() {
     for name in [escape.as_str(), "/tmp/x", "a/b"] {
         let mut cfg = config("env", &[]);
         cfg.name = name.to_string();
-        let err = match spawn_transport(&cfg, root.path()) {
+        let err = match spawn_transport(&cfg, root.path(), 1024) {
             Err(err) => err,
             Ok(_) => panic!("{name}: a path-shaped server name was accepted"),
         };

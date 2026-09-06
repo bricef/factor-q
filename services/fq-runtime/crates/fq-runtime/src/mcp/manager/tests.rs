@@ -7,6 +7,8 @@
 //! nor mutates it, and cannot show a test what `_meta` arrived.
 
 use super::*;
+use crate::mcp::discovery;
+use crate::mcp::limits::McpLimits;
 use crate::mcp::progress::ProgressRegistry;
 
 use crate::mcp::mock::{mock_tool, serve_mock, serve_mock_recording};
@@ -43,7 +45,12 @@ async fn discover_follows_the_pagination_cursor() {
     ));
     let client = serve_mock(tools, 2).await;
     let (_, names) =
-        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+        discovery::discover_tools(
+            &client,
+            "mock",
+            &ProgressRegistry::default(),
+            &McpLimits::default(),
+        )
             .await
             .expect("discover");
     assert_eq!(names.len(), 5, "all pages should be walked");
@@ -72,7 +79,12 @@ async fn concurrent_callers_multiplex_over_one_shared_client() {
         let client = Arc::clone(&client);
         set.spawn(async move {
             let (_, names) =
-                McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+                discovery::discover_tools(
+            &client,
+            "mock",
+            &ProgressRegistry::default(),
+            &McpLimits::default(),
+        )
                     .await
                     .expect("concurrent discover");
             (caller, names)
@@ -94,7 +106,12 @@ async fn rediscovery_reflects_a_mutated_tool_list() {
     let tools = Arc::new(Mutex::new(vec![mock_tool("a"), mock_tool("b")]));
     let client = serve_mock(tools.clone(), 10).await;
     let (_, before) =
-        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+        discovery::discover_tools(
+            &client,
+            "mock",
+            &ProgressRegistry::default(),
+            &McpLimits::default(),
+        )
             .await
             .expect("discover");
     assert_eq!(before.len(), 2);
@@ -103,7 +120,12 @@ async fn rediscovery_reflects_a_mutated_tool_list() {
     // signals); a re-discovery (the refresh path) must reflect it.
     tools.lock().await.push(mock_tool("c"));
     let (_, after) =
-        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+        discovery::discover_tools(
+            &client,
+            "mock",
+            &ProgressRegistry::default(),
+            &McpLimits::default(),
+        )
             .await
             .expect("re-discover");
     assert_eq!(
@@ -256,7 +278,7 @@ async fn a_held_mcp_call_is_cancelled_at_the_deadline_and_leaves_no_entry() {
     )
     .await;
 
-    let (tools, _) = McpClientManager::discover_tools(&client, "mock", &progress)
+    let (tools, _) = discovery::discover_tools(&client, "mock", &progress, &McpLimits::default())
         .await
         .expect("discover");
     let tool = tools
@@ -329,7 +351,7 @@ async fn progress_from_the_server_is_attributed_to_the_issuing_call() {
     )
     .await;
 
-    let (tools, _) = McpClientManager::discover_tools(&client, "mock", &progress)
+    let (tools, _) = discovery::discover_tools(&client, "mock", &progress, &McpLimits::default())
         .await
         .expect("discover");
     let tool = Arc::clone(

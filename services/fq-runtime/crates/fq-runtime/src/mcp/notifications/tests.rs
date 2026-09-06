@@ -9,6 +9,27 @@ use tokio::sync::Mutex;
 use super::*;
 use crate::mcp::mock::{mock_tool, serve_mock};
 
+/// A refresher over a fixed set of clients. Production hands out a live
+/// view of the manager's own table; a test that never adds a server
+/// wants the same thing seeded once.
+fn refresher_over(clients: Vec<(String, Arc<crate::mcp::McpClient>)>) -> McpToolRefresher {
+    McpToolRefresher {
+        clients: Arc::new(std::sync::RwLock::new(clients)),
+        exec_config: fq_tools::builtin::ExecConfig::default(),
+        progress: Default::default(),
+        limits: Default::default(),
+    }
+}
+
+/// The late-arrival channel, already closed: the drain then behaves
+/// exactly as it did before retries existed — it ends when every
+/// notification channel has drained.
+fn no_late_arrivals()
+-> mpsc::UnboundedReceiver<(String, mpsc::UnboundedReceiver<ServerNotification>)> {
+    let (_tx, rx) = mpsc::unbounded_channel();
+    rx
+}
+
 /// B1 / ADR-0020: the drain consumes notifications and, on
 /// `tools/list_changed`, hands a rebuilt registry (built-ins +
 /// the server's *current* tools) to the install callback.
@@ -16,17 +37,14 @@ use crate::mcp::mock::{mock_tool, serve_mock};
 async fn drain_rebuilds_the_registry_on_tool_list_changed() {
     let tools = Arc::new(Mutex::new(vec![mock_tool("alpha")]));
     let client = serve_mock(tools.clone(), 10).await;
-    let refresher = McpToolRefresher {
-        clients: vec![("mock".to_string(), client)],
-        exec_config: fq_tools::builtin::ExecConfig::default(),
-        progress: Default::default(),
-    };
+    let refresher = refresher_over(vec![("mock".to_string(), client)]);
 
     let (notif_tx, notif_rx) = mpsc::unbounded_channel();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let (log_tx, mut log_rx) = mpsc::unbounded_channel();
     let drain = tokio::spawn(drain_server_notifications(
         vec![("mock".to_string(), notif_rx)],
+        no_late_arrivals(),
         refresher,
         move |registry| {
             let _ = out_tx.send(registry);
@@ -132,11 +150,8 @@ async fn a_chatty_server_cannot_starve_a_quiet_one() {
             ("chatty".to_string(), chatty_rx),
             ("quiet".to_string(), quiet_rx),
         ],
-        McpToolRefresher {
-            clients: Vec::new(),
-            exec_config: fq_tools::builtin::ExecConfig::default(),
-            progress: Default::default(),
-        },
+        no_late_arrivals(),
+        refresher_over(Vec::new()),
         |_registry| unreachable!("no tools/list_changed is sent"),
         move |server, _level, _logger, _data| {
             let _ = seen_tx.send(server);

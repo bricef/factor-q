@@ -62,6 +62,11 @@ pub(super) type CallLog = Arc<Mutex<Vec<RecordedCall>>>;
 pub(super) struct MockToolServer {
     tools: Arc<Mutex<Vec<Tool>>>,
     page_size: usize,
+    /// Answer every `tools/list` with a `next_cursor`, whether or not
+    /// there are more tools — the discovery spin finding B3 describes
+    /// (#548). A real server can produce it by accident (a cursor that
+    /// never advances) as easily as on purpose.
+    endless_cursor: bool,
     calls: CallLog,
     behaviour: CallBehaviour,
     control: MockControl,
@@ -102,7 +107,11 @@ impl ServerHandler for MockToolServer {
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
         let end = (start + self.page_size).min(tools.len());
-        let next_cursor = (end < tools.len()).then(|| end.to_string());
+        let next_cursor = if self.endless_cursor {
+            Some((start + self.page_size).to_string())
+        } else {
+            (end < tools.len()).then(|| end.to_string())
+        };
         Ok(ListToolsResult {
             tools: tools[start..end].to_vec(),
             next_cursor,
@@ -167,6 +176,23 @@ pub(super) async fn serve_mock(tools: Arc<Mutex<Vec<Tool>>>, page_size: usize) -
     serve_mock_recording(tools, page_size).await.0
 }
 
+/// A server whose `tools/list` always answers with a `next_cursor`, so
+/// following the chain never ends. The fixture for the discovery page
+/// cap (#548).
+pub(super) async fn serve_mock_endless_cursor(
+    tools: Arc<Mutex<Vec<Tool>>>,
+    page_size: usize,
+) -> Arc<McpClient> {
+    serve_mock_options(MockOptions {
+        tools,
+        page_size,
+        endless_cursor: true,
+        ..MockOptions::default()
+    })
+    .await
+    .0
+}
+
 /// [`serve_mock`], plus the log of every `tools/call` the server
 /// received — for asserting on what the host actually put on the wire.
 pub(super) async fn serve_mock_recording(
@@ -176,6 +202,28 @@ pub(super) async fn serve_mock_recording(
     let (client, calls, _control) =
         serve_mock_behaving(tools, page_size, CallBehaviour::Answer, None).await;
     (client, calls)
+}
+
+/// Everything a mock can be told to do, so a new dimension is a field
+/// rather than another `serve_mock_*` arity.
+pub(super) struct MockOptions {
+    pub(super) tools: Arc<Mutex<Vec<Tool>>>,
+    pub(super) page_size: usize,
+    pub(super) endless_cursor: bool,
+    pub(super) behaviour: CallBehaviour,
+    pub(super) progress: Option<(String, super::progress::ProgressRegistry)>,
+}
+
+impl Default for MockOptions {
+    fn default() -> Self {
+        Self {
+            tools: Arc::new(Mutex::new(Vec::new())),
+            page_size: 10,
+            endless_cursor: false,
+            behaviour: CallBehaviour::Answer,
+            progress: None,
+        }
+    }
 }
 
 /// The full seam: choose how the server answers `tools/call`, wire the
@@ -188,12 +236,34 @@ pub(super) async fn serve_mock_behaving(
     behaviour: CallBehaviour,
     progress: Option<(String, super::progress::ProgressRegistry)>,
 ) -> (Arc<McpClient>, CallLog, MockControl) {
+    serve_mock_options(MockOptions {
+        tools,
+        page_size,
+        behaviour,
+        progress,
+        ..MockOptions::default()
+    })
+    .await
+}
+
+/// Serve a mock configured by [`MockOptions`].
+pub(super) async fn serve_mock_options(
+    options: MockOptions,
+) -> (Arc<McpClient>, CallLog, MockControl) {
+    let MockOptions {
+        tools,
+        page_size,
+        endless_cursor,
+        behaviour,
+        progress,
+    } = options;
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
     let control = MockControl::default();
     let server = MockToolServer {
         tools,
         page_size,
+        endless_cursor,
         calls: Arc::clone(&calls),
         behaviour,
         control: control.clone(),

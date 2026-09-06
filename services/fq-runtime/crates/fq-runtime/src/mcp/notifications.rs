@@ -64,10 +64,19 @@ pub enum ServerNotification {
 /// hand-rolled poll-merge this replaced always started at index 0 and
 /// returned the first ready channel, so one chatty server held the loop
 /// for as long as it kept a message queued and every server behind it
-/// waited (#191). `StreamMap` also drops an exhausted stream and yields
-/// `None` once the map is empty, which is the shutdown condition.
+/// waited (#191).
+///
+/// `late` carries servers that came up *after* the drain started — the
+/// retry loop's successes (#548). Each one joins the same merge and
+/// triggers the same rebuild a `tools/list_changed` would, because from
+/// the registry's point of view a server appearing is a tool list
+/// changing. The loop ends when `late` is closed and every channel has
+/// drained, which is shutdown: while a retry loop is still running,
+/// zero connected servers is a state to wait in rather than a reason to
+/// stop.
 pub async fn drain_server_notifications<F, G>(
     channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+    mut late: mpsc::UnboundedReceiver<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
     refresher: McpToolRefresher,
     on_tools_changed: F,
     on_log: G,
@@ -79,8 +88,33 @@ pub async fn drain_server_notifications<F, G>(
         .into_iter()
         .map(|(server, rx)| (server, UnboundedReceiverStream::new(rx)))
         .collect();
+    let mut late_closed = false;
 
-    while let Some((server, notification)) = channels.next().await {
+    loop {
+        if late_closed && channels.is_empty() {
+            return;
+        }
+        let next = tokio::select! {
+            arrival = late.recv(), if !late_closed => match arrival {
+                Some((server, rx)) => {
+                    info!(server = %server, "MCP server joined after boot: rebuilding the shared registry");
+                    channels.insert(server, UnboundedReceiverStream::new(rx));
+                    on_tools_changed(refresher.rebuild_registry().await);
+                    continue;
+                }
+                None => {
+                    late_closed = true;
+                    continue;
+                }
+            },
+            next = channels.next(), if !channels.is_empty() => next,
+        };
+        // `StreamMap` drops an exhausted stream and yields `None` once
+        // the map is empty; with a retry loop still open that is not the
+        // end, so go round and let the guard above decide.
+        let Some((server, notification)) = next else {
+            continue;
+        };
         match notification {
             ServerNotification::ToolListChanged => {
                 info!(server = %server, "tools/list_changed: rebuilding the shared registry");
