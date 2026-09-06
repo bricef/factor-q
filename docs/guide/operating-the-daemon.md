@@ -437,6 +437,48 @@ widening the report during a live incident; a workload that needs it
 permanently is telling you the call deadlines are wrong, and those are
 what should move.
 
+## When an MCP server will not start
+
+The daemon does not wait for one. Shared MCP servers start
+concurrently at boot, each under `[mcp] startup_timeout_secs` (default
+30) for its handshake and `discovery_timeout_secs` for its tool list,
+and a server that misses either is marked **unavailable** while boot
+carries on. `fq doctor` is where that shows:
+
+```text
+MCP servers: 2 declared, 1 unavailable
+  github: ok (14 tools)
+  internal-search: ✗ unavailable after 3 attempt(s) — failed to start MCP
+    server 'https://search.internal/mcp': no initialize response within the
+    30s start-up deadline ([mcp] startup_timeout_secs)
+  -> agents declaring it are refused at dispatch; next retry in 2m
+```
+
+**An unavailable server is not a stopped daemon, and not a silent
+degradation either.** Its tools are absent from the registry, and every
+agent that declares it fails at once with a terminal `failed` event
+whose message names the server and the reason — so the agent does not
+run half-equipped and fail later for an unrelated-looking reason. Every
+other agent runs normally.
+
+You usually do not have to do anything. The daemon dials an unavailable
+server again on a doubling backoff (`[mcp] retry_initial_secs`, default
+30, up to `retry_max_secs`, default 600), and the moment it answers its
+tools are rebuilt into the shared registry — the same path a
+`tools/list_changed` takes. No `fq reload`, no restart. Set
+`retry_initial_secs = 0` if you would rather a server that is down stay
+down until you restart.
+
+What to fix is whatever the reason names. A `no initialize response`
+means the peer accepted the connection and said nothing: check the
+endpoint, or the stdio command's own logs, which reach the daemon log
+under `mcp.server.stderr` with the server's name. A message naming
+`max_discovery_pages` or `max_tools` means the server's tool list is
+pathological rather than slow — a cursor that never advances, or a list
+that never ends — and raising the cap is rarely the fix. A message
+naming `max_line_bytes` means it wrote a single JSON-RPC message longer
+than the transport will read.
+
 ## When a consumer stops making progress
 
 `fq doctor` reports every durable consumer this daemon expects, by

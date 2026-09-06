@@ -271,6 +271,49 @@ the call is in flight
   attributes to the right invocation's budget, grant, and event chain,
   and request-scoped state can't leak across agents.
 
+## Boot never blocks on a server
+
+Shared servers start **concurrently at daemon boot**, each under its own
+deadline, so start-up waits for the slowest server rather than the sum
+of all of them. A server that does not answer is marked **unavailable**
+and the daemon finishes booting. That is the whole trade: before it, one
+remote server that accepted the connection and never answered froze
+`fqd` at startup with every agent down
+([#548](https://github.com/bricef/factor-q/issues/548)).
+
+What "unavailable" costs is paid where it is visible, never silently:
+
+- Its tools are **absent from the registry**.
+- Every agent that **declares** it is **refused at dispatch** with a
+  terminal `failed` event naming the server, the reason, and when it
+  will next be dialled. Agents that do not declare it run normally.
+- `fq doctor` reports it as an issue; `fq status` lists it without a
+  verdict.
+- The daemon **keeps retrying** it on a doubling backoff, so a server
+  whose package was still installing, or whose host was rebooting, is
+  picked up without `fq reload`. Its tools then reach the shared
+  registry through the same rebuild a `tools/list_changed` uses.
+
+A grant-bearing server is not part of this: it runs per-invocation, so
+there is no standing state to report and a failure to start one stays a
+warning against that single run.
+
+Four bounds keep a misbehaving server from costing the daemon
+unboundedly, and every one of them is `[mcp]` in `fqd.toml`:
+
+| Key | Default | What it bounds |
+| --- | --- | --- |
+| `startup_timeout_secs` | 30 | the `initialize` handshake |
+| `discovery_timeout_secs` | 30 | the whole `tools/list` walk |
+| `max_discovery_pages` | 100 | a server that returns a `next_cursor` for ever |
+| `max_tools` | 1000 | a server that advertises without end |
+| `max_line_bytes` | 1048576 | one JSON-RPC message on the stdio transport |
+| `retry_initial_secs` / `retry_max_secs` | 30 / 600 | how patiently an unavailable server is dialled again |
+
+The discovery bounds apply on **every** discovery, not just the one at
+boot: `notifications/tools/list_changed` is how a server that spins the
+cursor gets a second go at it.
+
 ## Current limits
 
 - **No mid-invocation tool hot-swap.** A `tools/list_changed` refreshes

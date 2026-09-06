@@ -333,6 +333,59 @@ models = ["claude-haiku-4-5"]
 # 5 — the daemon refuses to start otherwise, rather than let the host cut
 # a teardown short and leave the process group alive.
 
+[mcp]
+# What an MCP server is allowed to cost the daemon. Without these, one
+# server that accepts a connection and never answers held `fqd` at
+# startup with every agent down, and one that returned a `next_cursor`
+# for ever spun tool discovery with no bound on memory.
+#
+# Shared servers start CONCURRENTLY, so boot waits for the slowest of
+# them rather than the sum. A server that fails or times out is marked
+# unavailable and boot carries on: its tools are absent, every agent
+# that declares it is refused at dispatch with a terminal failure
+# naming it, and `fq doctor` reports it with the reason and the next
+# retry. Agents that do not declare it are unaffected.
+#
+# How long the `initialize` handshake may take, in seconds. Default 30.
+# Raise it for a remote server behind a cold serverless endpoint; lower
+# it for locally-installed stdio servers, which answer in milliseconds.
+# startup_timeout_secs = 30
+#
+# How long discovering a server's tools may take, in seconds — the
+# whole walk across every page of `tools/list`, not one request.
+# Default 30.
+# discovery_timeout_secs = 30
+#
+# The most `tools/list` pages one discovery may follow. Default 100. A
+# server that keeps returning a `next_cursor` — by design, or through a
+# cursor bug that never advances — is cut off here and marked
+# unavailable.
+# max_discovery_pages = 100
+#
+# The most tools one server may advertise, counted across pages.
+# Default 1000. Every tool becomes a schema in every prompt the agents
+# using that server send, so a runaway list costs tokens on every turn
+# as well as memory.
+# max_tools = 1000
+#
+# The longest line the stdio transport will read from a server before
+# refusing the connection, in bytes. Default 1048576 (1 MiB). One
+# JSON-RPC message is one line, so this bounds what a single message
+# can make the daemon buffer.
+# max_line_bytes = 1048576
+#
+# How long to wait before the first retry of an unavailable server, in
+# seconds, doubling per attempt. Default 30. A server that comes up
+# later — its package finished installing, its host finished rebooting
+# — is picked up without `fq reload`. Set to 0 to disable retrying,
+# which is the only way to ask for "unavailable until restart".
+# retry_initial_secs = 30
+#
+# The ceiling the doubling saturates at, in seconds. Default 600, so a
+# server that is down for an afternoon is dialled once every ten
+# minutes rather than twice a minute.
+# retry_max_secs = 600
+
 [edge]
 # The authenticated operator surface — every `fq` verb speaks it, so a
 # daemon without one can be neither inspected nor stopped except by a

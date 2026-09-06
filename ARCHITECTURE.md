@@ -227,7 +227,17 @@ HTTP transports; tools, resources, and prompts; the server-initiated
 capabilities (sampling, elicitation, roots) resolved autonomously
 under declarative per-server grants that default to nothing. MCP tool
 calls emit the same canonical event sequence as built-ins, and cost
-controls apply (ADR-0021). See the [MCP guide](docs/guide/mcp.md).
+controls apply (ADR-0021).
+
+Shared servers start concurrently at daemon boot, each under a start-up
+and a discovery deadline, so **boot is bounded by the slowest server
+rather than the sum** and never by one that does not answer. Each server
+carries a state — starting, ready, or unavailable — that `fq doctor` and
+`control.status` report; an unavailable server is retried on a doubling
+backoff, and an agent that declares one is refused at dispatch with a
+terminal event naming it. Discovery has a page cap and a tool-count cap,
+and the stdio transport a bounded line length; every bound is `[mcp]` in
+`fqd.toml`. See the [MCP guide](docs/guide/mcp.md).
 
 ### Projection consumer (`fq-runtime/src/control_plane/projection/`)
 
