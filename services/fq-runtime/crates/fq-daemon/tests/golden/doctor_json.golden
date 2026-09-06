@@ -25,5 +25,67 @@
   ],
   "dead_letters": {
     "exhausted_triggers": 0
-  }
+  },
+  "consumers": [
+    {
+      "active": {
+        "name": "fq-projector",
+        "delivered": #,
+        "lag": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false
+      }
+    },
+    {
+      "active": {
+        "name": "fq-coordination",
+        "delivered": #,
+        "lag": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false
+      }
+    },
+    {
+      "active": {
+        "name": "fq-heartbeat",
+        "delivered": #,
+        "lag": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false
+      }
+    },
+    {
+      "active": {
+        "name": "fq-dispatcher",
+        "delivered": #,
+        "lag": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false
+      }
+    },
+    {
+      "active": {
+        "name": "fq-advisory-watch",
+        "delivered": #,
+        "lag": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false
+      }
+    }
+  ]
 }

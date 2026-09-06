@@ -959,14 +959,37 @@ fn golden_costs_json() {
 // heartbeats freshened last), the same ones the roster golden depends
 // on.
 
+/// The consumer block's per-consumer counters are machinery readings —
+/// how far each durable has been delivered, and how far behind the
+/// stream head that leaves it — and they move with the fixture's own
+/// timers (the daemon heartbeats on a schedule while the golden runs).
+/// The names, the verdicts and the checked/unhealthy summary are what
+/// the golden is pinning; the digits behind them are collapsed (#549).
+const VOLATILE_CONSUMER_FIGURES: &[&str] = &[
+    ": ok (lag ",
+    "\"delivered\":",
+    "\"lag\":",
+    "\"ack_pending\":",
+    "\"num_pending\":",
+    "\"num_redelivered\":",
+    "\"redeliveries\":",
+];
+
 #[test]
 fn golden_doctor_human() {
-    check_golden_edge("doctor_human", &["doctor"], &["for "]);
+    let markers: Vec<&str> = std::iter::once("for ")
+        .chain(VOLATILE_CONSUMER_FIGURES.iter().copied())
+        .collect();
+    check_golden_edge("doctor_human", &["doctor"], &markers);
 }
 
 #[test]
 fn golden_doctor_json() {
-    check_golden_edge("doctor_json", &["doctor", "--json"], &[]);
+    check_golden_edge(
+        "doctor_json",
+        &["doctor", "--json"],
+        VOLATILE_CONSUMER_FIGURES,
+    );
 }
 
 /// What the flip costs, stated: `fq doctor` reports the daemon's
