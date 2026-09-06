@@ -96,10 +96,26 @@ impl<R: AsyncRead + Unpin> AsyncRead for LineCapped<R> {
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Ready(Ok(())) => {}
         }
-        let fresh = &buf.filled()[before..];
-        match fresh.iter().rposition(|&b| b == b'\n') {
-            Some(at) => me.since_newline = fresh.len() - at - 1,
-            None => me.since_newline += fresh.len(),
+        // Every line *inside* the chunk is measured, not just the one
+        // it ends on: a single read can carry a whole oversized line
+        // between two newlines, and looking only at the tail would let
+        // it through.
+        let mut rest = &buf.filled()[before..];
+        loop {
+            match rest.iter().position(|&b| b == b'\n') {
+                Some(at) => {
+                    me.since_newline += at;
+                    if me.since_newline > me.cap {
+                        break;
+                    }
+                    me.since_newline = 0;
+                    rest = &rest[at + 1..];
+                }
+                None => {
+                    me.since_newline += rest.len();
+                    break;
+                }
+            }
         }
         if me.since_newline > me.cap {
             me.tripped = true;

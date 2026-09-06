@@ -440,62 +440,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
         // Start grant-bearing MCP servers only after the sandbox has been
         // materialised, so roots use the same bound paths tools enforce.
-        let mut manager = self.config.mcp_manager();
-        let grant_decls: Vec<_> = agent
-            .mcp_servers()
-            .iter()
-            .filter(|decl| agent.grants_inbound_capability(&decl.server))
-            .collect();
-        // The common no-grants invocation keeps the shared registry —
-        // no clone, no per-invocation registry (the pre-#179 fast
-        // path). `Some` only when a grant server will layer tools on.
-        let mut invocation_tools: Option<ToolRegistry> =
-            (!grant_decls.is_empty()).then(|| (*tools).clone());
-        let mut sampling = sampling.unwrap_or_default();
-        for decl in grant_decls {
-            let capabilities = AdvertisedCapabilities {
-                sampling: agent
-                    .sampling_grant()
-                    .is_some_and(|g| g.permits(&decl.server)),
-                elicitation: agent
-                    .elicitation_grant()
-                    .is_some_and(|g| g.permits(&decl.server)),
-                roots: agent.roots_grant().is_some_and(|g| g.permits(&decl.server)),
-            };
-            let roots = advertised_roots_from_tool_sandbox(
-                &sandbox,
-                agent.roots_grant(),
-                &decl.server,
-                &ValidatorChain::new(),
-            );
-            let config = McpServerConfig {
-                name: decl.server.clone(),
-                command: decl.command.clone().unwrap_or_default(),
-                args: decl.args.clone(),
-                env: decl.env.clone(),
-                url: decl.url.clone(),
-            };
-            match manager
-                .start_server_with_requests(config, roots, capabilities)
-                .await
-            {
-                Ok((server_tools, rx, _)) => {
-                    for tool in server_tools {
-                        let registry = invocation_tools
-                            .as_mut()
-                            .expect("cloned above: grant_decls is non-empty on this path");
-                        if let Err(error) = registry.register(tool) {
-                            warn!(server = %decl.server, %error, "refusing per-invocation MCP tool registration");
-                        }
-                    }
-                    sampling.insert(decl.server.clone(), rx);
-                }
-                Err(err) => {
-                    warn!(agent_id = %agent_id, server = %decl.server, error = %err, "failed to start grant-bearing MCP server per-invocation; skipping it")
-                }
-            }
-        }
-        let sampling = (!sampling.is_empty()).then_some(sampling);
+        let GrantServers {
+            mut manager,
+            tools: invocation_tools,
+            sampling,
+        } = self
+            .start_grant_servers(agent, &sandbox, tools, sampling)
+            .await;
         // From here on, `tools` is the effective registry for this
         // invocation: the base one, or the clone with server tools
         // layered on.
@@ -604,7 +555,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // agree; a fresh `unix_now_ms()` here also perturbs the sim
         // clock sequence.
 
-        let outcome = self
+        // A shared MCP server this agent needs is down: refuse here,
+        // naming it, rather than running an invocation whose tools are
+        // missing (#548). The refusal is terminal and emitted after
+        // `triggered`, so the trail reads as one invocation that could
+        // not start rather than as an orphan failure.
+        let outcome = match self.unavailable_mcp_servers(agent) {
+            Some(why) => {
+                self.refuse_for_unavailable_mcp(&agent_id, invocation_id, why, totals, &mut cursor)
+                    .await
+            }
+            None => self
             .run_loop_inner(
                 agent,
                 llm,
@@ -629,7 +590,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // recorded for the first step.
                 Vec::new(),
             )
-            .await;
+                .await,
+        };
         manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
@@ -2568,8 +2530,11 @@ mod config;
 mod deadline;
 mod failure;
 mod llm;
+mod mcp;
 mod replay;
 mod server_request;
+
+use mcp::GrantServers;
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};
 

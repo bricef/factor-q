@@ -13,11 +13,16 @@ use crate::mcp::McpClientManager;
 
 /// A server that will never answer: `sleep` holds its stdin open for
 /// far longer than any deadline under test.
-fn hung(name: &str) -> McpServerConfig {
+///
+/// `seconds` distinguishes one stub from another, because a shared
+/// server's identity is the process it would spawn: two declarations
+/// with the same command *and* arguments are one server by design, so
+/// a test that wants two must ask for two different processes.
+fn hung(name: &str, seconds: &str) -> McpServerConfig {
     McpServerConfig {
         name: name.to_string(),
         command: "sleep".to_string(),
-        args: vec!["120".to_string()],
+        args: vec![seconds.to_string()],
         env: Vec::new(),
         url: None,
     }
@@ -49,7 +54,7 @@ async fn a_server_that_never_answers_initialize_is_unavailable_not_fatal() {
     let (mut manager, _root) = manager(quick_startup(Duration::from_millis(300)));
     let started = Instant::now();
     let outcomes = manager
-        .start_shared_servers(vec![hung("wedged")])
+        .start_shared_servers(vec![hung("wedged", "120")])
         .await;
     let elapsed = started.elapsed();
 
@@ -79,7 +84,7 @@ async fn two_hung_servers_cost_one_deadline_between_them() {
     let (mut manager, _root) = manager(quick_startup(deadline));
     let started = Instant::now();
     let outcomes = manager
-        .start_shared_servers(vec![hung("first"), hung("second")])
+        .start_shared_servers(vec![hung("first", "120"), hung("second", "121")])
         .await;
     let elapsed = started.elapsed();
 
@@ -126,10 +131,11 @@ async fn a_server_with_no_transport_is_refused_by_name() {
 async fn one_transport_declared_twice_is_dialled_once() {
     let (mut manager, _root) = manager(quick_startup(Duration::from_millis(300)));
     let outcomes = manager
-        .start_shared_servers(vec![hung("first"), hung("second")])
+        .start_shared_servers(vec![hung("first", "120"), hung("second", "120")])
         .await;
-    // `hung` builds the same command and args for both names, so the
-    // second is the duplicate: an empty `Ok`, and never dialled.
+    // Same command and same arguments, so the two names are one
+    // server: the second is the duplicate — an empty `Ok`, never
+    // dialled.
     let empty = outcomes
         .iter()
         .filter(|o| matches!(&o.outcome, Ok(tools) if tools.is_empty()))
