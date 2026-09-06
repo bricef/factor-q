@@ -229,8 +229,13 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 			w.Log.Error("trigger publish failed after relabel; reverting to ready so it retries",
 				"issue", pt.Issue, "agent", w.Config.TargetAgent, "err", err)
 			if rerr := w.Source.Relabel(ctx, pt.Issue, w.Config.InProgressLabel, w.Config.ReadyLabel); rerr != nil {
-				w.Log.Error("failed to revert label after publish failure; issue stranded in in-progress",
-					"issue", pt.Issue, "err", rerr)
+				if errors.Is(rerr, ErrClaimLost) {
+					w.Log.Warn("nothing to revert; another actor had already moved the issue off in-progress",
+						"issue", pt.Issue, "err", rerr)
+				} else {
+					w.Log.Error("failed to revert label after publish failure; issue stranded in in-progress",
+						"issue", pt.Issue, "err", rerr)
+				}
 			}
 			continue
 		}
@@ -262,6 +267,10 @@ func (w *Watcher) sweepReview(ctx context.Context) {
 			continue
 		}
 		if err := w.Source.Relabel(ctx, iss.Number, w.Config.InReviewLabel, w.Config.DoneLabel); err != nil {
+			if errors.Is(err, ErrClaimLost) {
+				w.Log.Warn("issue had already left in-review; not marking it done here", "issue", iss.Number, "err", err)
+				continue
+			}
 			w.Log.Error("relabel to done failed; issue left in review", "issue", iss.Number, "err", err)
 			continue
 		}

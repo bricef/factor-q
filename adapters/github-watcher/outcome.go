@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -296,6 +297,13 @@ func (r *OutcomeReactor) forget(invocationID string) {
 
 func (r *OutcomeReactor) relabel(ctx context.Context, issue int, remove, add, why string) {
 	if err := r.Source.Relabel(ctx, issue, remove, add); err != nil {
+		// A lost race is not a stranding: the label was already gone, so
+		// someone else made this transition and the issue moved on.
+		if errors.Is(err, ErrClaimLost) {
+			r.Log.Warn("outcome relabel found the issue already moved on",
+				"issue", issue, "from", remove, "to", add, "why", why, "err", err)
+			return
+		}
 		r.Log.Error("outcome relabel failed; issue may be stranded",
 			"issue", issue, "from", remove, "to", add, "err", err)
 		return
