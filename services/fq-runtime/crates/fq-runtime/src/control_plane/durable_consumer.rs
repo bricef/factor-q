@@ -33,10 +33,17 @@
 //!   cannot decode will never decode on retry; leaving it
 //!   un-acked would just create a redelivery loop.
 //! - **Handler `Ok`** → ACK'd.
-//! - **[`HandlerError::Transient`]** → logged and NAK'd.
-//!   JetStream redelivers after the ack deadline; transient
-//!   store/publish failures recover, persistent ones stay
-//!   visible in logs.
+//! - **[`HandlerError::Transient`]** → NAK'd with an escalating
+//!   delay, and logged at a bounded rate. The delay comes from the
+//!   bus's [`crate::bus::ConsumerRedeliveryPolicy`] — 1s doubling to
+//!   a 60s cap at the defaults — keyed on the message's delivery
+//!   count. A bare `Nak(None)` redelivers immediately, which on
+//!   durables with unlimited redelivery turned a persistent transient
+//!   fault (a full disk under the projection) into a hot loop at
+//!   broker round-trip speed with a frozen watermark behind it and
+//!   nothing in `control.status` saying so (review finding B4). The
+//!   delivery bound is *not* the answer to that: dropping the event
+//!   would skip it from the projection for good.
 //! - **[`HandlerError::Permanent`]** → logged and ACK'd. The
 //!   event can never be handled (malformed for this consumer's
 //!   purpose); redelivery would only repeat the failure.
@@ -60,7 +67,7 @@ use futures::StreamExt;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
-use crate::bus::{BusError, EventBus};
+use crate::bus::{BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog};
 use crate::events::Event;
 
 /// Where a durable consumer starts reading when it is *first
@@ -280,6 +287,12 @@ where
         .as_ref()
         .map(|(every, _)| tokio::time::interval(*every));
 
+    // The redelivery policy is the bus's, so a consumer cannot retry on
+    // terms its durable was not created with. The log limiter is this
+    // loop's own: two consumers failing at once each still say so.
+    let policy = bus.redelivery_policy();
+    let mut redelivery_log = RedeliveryLog::new(policy);
+
     loop {
         tokio::select! {
             biased;
@@ -289,7 +302,9 @@ where
             }
             msg = messages.next() => {
                 match msg {
-                    Some(Ok(msg)) => handle_message(&name, &handler, &msg).await,
+                    Some(Ok(msg)) => {
+                        handle_message(&name, &handler, &msg, policy, &mut redelivery_log).await
+                    }
                     Some(Err(err)) => {
                         warn!(consumer = %name, error = %err, "error reading next JetStream message");
                     }
@@ -326,8 +341,13 @@ async fn maybe_tick(timer: Option<&mut tokio::time::Interval>) {
 /// Deserialise one message and apply the ack policy to the
 /// handler's verdict. Never returns an error: per-message
 /// failures must not kill the loop.
-async fn handle_message<H, HFut>(name: &str, handler: &H, msg: &async_nats::jetstream::Message)
-where
+async fn handle_message<H, HFut>(
+    name: &str,
+    handler: &H,
+    msg: &async_nats::jetstream::Message,
+    policy: ConsumerRedeliveryPolicy,
+    redelivery_log: &mut RedeliveryLog,
+) where
     H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
 {
@@ -346,7 +366,16 @@ where
         }
     };
 
-    let stream_seq = msg.info().ok().map(|info| info.stream_sequence);
+    let info = msg.info().ok();
+    let stream_seq = info.as_ref().map(|info| info.stream_sequence);
+    // JetStream counts the first delivery as 1. A message whose
+    // metadata could not be read is treated as a first delivery, which
+    // costs the shortest delay rather than the longest — the wrong way
+    // to be wrong here would be to stall a healthy retry.
+    let delivered = info
+        .as_ref()
+        .and_then(|info| u64::try_from(info.delivered).ok())
+        .unwrap_or(1);
     let event_id = event.envelope.event_id;
     match handler(Delivery { event, stream_seq }).await {
         Ok(()) => {
@@ -376,14 +405,24 @@ where
             }
         }
         Err(HandlerError::Transient(err)) => {
-            error!(
-                consumer = name,
-                error = %err,
-                event_id = %event_id,
-                "handler failed; NAK for redelivery"
-            );
+            let delay = policy.nak_delay(delivered);
+            // One line per escalation step, then one per interval. A
+            // handler that fails forever is worth saying so about; it
+            // is not worth a line per broker round-trip, which is what
+            // buried the signal when the NAK had no delay at all.
+            if redelivery_log.admit(delivered, std::time::Instant::now()) {
+                error!(
+                    consumer = name,
+                    error = %err,
+                    event_id = %event_id,
+                    stream_seq = stream_seq.unwrap_or(0),
+                    delivered,
+                    retry_in_ms = delay.as_millis() as u64,
+                    "handler failed; NAK for redelivery"
+                );
+            }
             if let Err(nak_err) = msg
-                .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
                 .await
             {
                 error!(

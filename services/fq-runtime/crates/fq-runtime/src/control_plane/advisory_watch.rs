@@ -94,6 +94,8 @@ impl AdvisoryWatch {
     /// Run the watch loop until `shutdown` fires.
     pub async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), AdvisoryWatchError> {
         info!(stream = ADVISORY_STREAM_NAME, "advisory watch starting");
+        let policy = self.bus.redelivery_policy();
+        let mut redelivery_log = crate::bus::RedeliveryLog::new(policy);
         let consumer = self.bus.advisory_consumer(CONSUMER_NAME).await?;
         let mut messages = consumer
             .messages()
@@ -117,13 +119,29 @@ impl AdvisoryWatch {
                                 }
                             }
                             Err(err) => {
-                                // Transient bus/stream trouble: NAK for a
-                                // bounded retry (the advisory consumer
-                                // carries the same delivery bound and
-                                // backoff as the trigger consumer).
-                                warn!(error = %err, "advisory handling failed; nak for retry");
+                                // Transient bus/stream trouble: NAK with the
+                                // bus's escalating delay. The advisory
+                                // consumer redelivers without limit — an
+                                // advisory dropped to a delivery bound is an
+                                // exhausted trigger with no record of it — so
+                                // the delay is what keeps a persistent fault
+                                // from becoming a hot loop (#549).
+                                let delivered = msg
+                                    .info()
+                                    .ok()
+                                    .and_then(|info| u64::try_from(info.delivered).ok())
+                                    .unwrap_or(1);
+                                let delay = policy.nak_delay(delivered);
+                                if redelivery_log.admit(delivered, std::time::Instant::now()) {
+                                    warn!(
+                                        error = %err,
+                                        delivered,
+                                        retry_in_ms = delay.as_millis() as u64,
+                                        "advisory handling failed; nak for retry"
+                                    );
+                                }
                                 if let Err(nak_err) = msg
-                                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                                    .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
                                     .await
                                 {
                                     error!(error = %nak_err, "failed to nak advisory");

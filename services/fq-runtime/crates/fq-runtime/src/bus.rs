@@ -7,7 +7,7 @@
 //! See `docs/design/committed/event-schema.md` for the event schema and subject
 //! hierarchy.
 
-use async_nats::jetstream::{self, consumer, consumer::FromConsumer, stream};
+use async_nats::jetstream::{self, consumer, stream};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
@@ -16,6 +16,12 @@ use tracing::{debug, info, warn};
 
 use crate::events::Event;
 use crate::events::subjects::ALL_TRIGGERS;
+
+mod consumers;
+pub mod retry;
+
+pub use consumers::UNLIMITED_MAX_DELIVER;
+pub use retry::{ConsumerRedeliveryPolicy, RedeliveryLog};
 
 /// The narrowest seam over event publication (reducer verification
 /// plan, slice 3; widened to the archive sweeper in slice 5). The
@@ -190,6 +196,14 @@ pub struct EventBus {
     /// discovered through a runtime protocol violation (Design
     /// Principle 7; issue #4).
     max_payload: usize,
+    /// How every durable this bus creates paces redelivery, and how
+    /// long the server waits for an ack before redelivering on its own.
+    /// Held here because the bus is what *creates* the durables: the
+    /// policy has to be in scope wherever a consumer config is stamped
+    /// and wherever a transient handler failure is answered, and those
+    /// are both reached through this handle. Defaults until
+    /// [`Self::with_redelivery_policy`] applies `[bus]` from `fqd.toml`.
+    redelivery: ConsumerRedeliveryPolicy,
 }
 
 /// Connect options for the broker: token auth when a token is given,
@@ -246,11 +260,31 @@ impl EventBus {
             client,
             jetstream,
             max_payload,
+            redelivery: ConsumerRedeliveryPolicy::default(),
         };
         bus.ensure_event_stream().await?;
         bus.ensure_trigger_stream().await?;
         bus.ensure_advisory_stream().await?;
         Ok(bus)
+    }
+
+    /// Apply an operator's `[bus]` settings to this handle. Applied
+    /// after connect rather than passed through it because connecting
+    /// only ensures streams; nothing durable has been created yet, so
+    /// every consumer this bus goes on to make sees the policy.
+    ///
+    /// The handle is cloned into each consumer task, and the policy
+    /// travels with the clone — there is no way to hold a bus and reach
+    /// a different policy than the one its durables were stamped with.
+    pub fn with_redelivery_policy(mut self, policy: ConsumerRedeliveryPolicy) -> Self {
+        self.redelivery = policy;
+        self
+    }
+
+    /// This bus's redelivery policy — what a consumer loop NAKs with,
+    /// and what health measures "stuck" against.
+    pub fn redelivery_policy(&self) -> ConsumerRedeliveryPolicy {
+        self.redelivery
     }
 
     /// A clone of the bus's JetStream context, so co-resident consumers
@@ -357,34 +391,6 @@ impl EventBus {
         Ok(())
     }
 
-    /// Durable consumer over the advisory capture stream (#169).
-    /// Bounded like the trigger consumer — a poison advisory must not
-    /// redeliver forever either.
-    pub async fn advisory_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            "getting/creating durable advisory consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(ADVISORY_STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    max_deliver: TRIGGER_MAX_DELIVER,
-                    backoff: TRIGGER_RETRY_BACKOFF.to_vec(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))
-    }
-
     /// Publish an event to the bus.
     ///
     /// The event's subject is derived from its payload type via
@@ -414,341 +420,6 @@ impl EventBus {
             .await?
             .await?;
         Ok(ack.sequence)
-    }
-
-    /// Create (or open) a durable JetStream pull consumer on the
-    /// trigger stream, filtered to all trigger subjects.
-    pub async fn trigger_consumer(
-        &self,
-        name: &str,
-        max_ack_pending: i64,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        self.trigger_consumer_with_filter(name, ALL_TRIGGERS, max_ack_pending)
-            .await
-    }
-
-    /// Create (or open) a durable JetStream pull consumer on the
-    /// trigger stream with an explicit filter subject.
-    ///
-    /// Work-queue streams require every consumer to be "filtered".
-    /// Production callers use [`Self::trigger_consumer`] which
-    /// passes the broad `fq.trigger.>` pattern. Tests use
-    /// narrower filters (e.g. a specific agent's trigger subject)
-    /// so that parallel test consumers do not compete for each
-    /// other's messages on the same work-queue stream. NATS
-    /// delivers each published trigger to exactly one consumer
-    /// whose filter matches; with disjoint per-test filters, tests
-    /// do not cross-talk.
-    pub async fn trigger_consumer_with_filter(
-        &self,
-        name: &str,
-        filter_subject: &str,
-        max_ack_pending: i64,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            filter = filter_subject,
-            max_ack_pending,
-            "getting/creating durable trigger consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(TRIGGER_STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let config = consumer::pull::Config {
-            durable_name: Some(name.to_string()),
-            ack_policy: consumer::AckPolicy::Explicit,
-            filter_subject: filter_subject.to_string(),
-            // Explicit ack window, sized by the caller from its
-            // concurrency bound (see NATS_DEFAULT_MAX_ACK_PENDING
-            // for the floor rationale).
-            max_ack_pending,
-            // Never retry a poison trigger indefinitely. The dispatcher
-            // emits a terminal failure on the last delivery before
-            // acknowledging it.
-            max_deliver: TRIGGER_MAX_DELIVER,
-            // Paces ack-wait redelivery (a crashed dispatcher never
-            // reaches the explicit NAK delay in the handle path).
-            backoff: TRIGGER_RETRY_BACKOFF.to_vec(),
-            ..Default::default()
-        };
-        let mut consumer = stream
-            .get_or_create_consumer(name, config)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-
-        // Existing durable consumers retain their old configuration when
-        // opened. Upgrade their retry policy too, otherwise a deployment
-        // made before this limit would keep retrying poison triggers forever.
-        let existing = consumer
-            .info()
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?
-            .config
-            .clone();
-        if existing.max_deliver != TRIGGER_MAX_DELIVER
-            || existing.backoff != TRIGGER_RETRY_BACKOFF.to_vec()
-        {
-            let mut config = consumer::pull::Config::try_from_consumer_config(existing)
-                .map_err(|err| BusError::Stream(err.to_string()))?;
-            config.max_deliver = TRIGGER_MAX_DELIVER;
-            config.backoff = TRIGGER_RETRY_BACKOFF.to_vec();
-            return stream
-                .update_consumer(config)
-                .await
-                .map_err(|err| BusError::Stream(err.to_string()));
-        }
-        Ok(consumer)
-    }
-
-    /// Create (or open) a durable JetStream pull consumer on the
-    /// factor-q event stream.
-    ///
-    /// Durable consumers remember their position across restarts, so
-    /// the projection consumer can be stopped and restarted without
-    /// losing events or redelivering old ones. The returned
-    /// [`consumer::PullConsumer`] can be used with `.messages()` to
-    /// iterate over delivered messages.
-    pub async fn durable_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            "getting/creating durable JetStream consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        Ok(consumer)
-    }
-
-    /// [`EventBus::durable_consumer`], with **resolved-contiguous
-    /// delivery**: `max_ack_pending = 1`, so the server never delivers
-    /// a message until the previous one is resolved (acked — success
-    /// or permanent skip). After a NAK the next delivery is the retry
-    /// of the same message, which is what makes an advance-on-success
-    /// watermark contiguous by construction: sequence S is never
-    /// exposed while an earlier sequence is still pending redelivery.
-    /// Costs throughput — one outstanding message per round-trip —
-    /// which the projection's fold accepts as the price of
-    /// read-your-writes.
-    ///
-    /// `get_or_create` keeps an existing durable's settings, so a
-    /// pre-existing consumer is updated in place when its
-    /// `max_ack_pending` differs (the same drift-repair the trigger
-    /// consumer does for its retry policy).
-    pub async fn durable_consumer_strict(
-        &self,
-        name: &str,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            "getting/creating strict-order durable JetStream consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    max_ack_pending: 1,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let existing = consumer.cached_info().config.clone();
-        if existing.max_ack_pending != 1
-            || !existing.filter_subject.is_empty()
-            || !existing.filter_subjects.is_empty()
-        {
-            // Repair BOTH strictness and scope in place: a
-            // pre-existing filtered durable keeps its acked floor
-            // (no replay) but must widen to the whole stream — a
-            // mark-bearing consumer vouches for every sequence.
-            let mut config = consumer::pull::Config::try_from_consumer_config(existing)
-                .map_err(|err| BusError::Stream(err.to_string()))?;
-            config.max_ack_pending = 1;
-            config.filter_subject = String::new();
-            config.filter_subjects = Vec::new();
-            return stream
-                .update_consumer(config)
-                .await
-                .map_err(|err| BusError::Stream(err.to_string()));
-        }
-        Ok(consumer)
-    }
-
-    /// Durable JetStream consumer scoped to a subject filter.
-    ///
-    /// Used by the coordination consumer (step 7) which only
-    /// cares about a small subset of events
-    /// (`fq.agent.*.invocation.*`); subscribing to the whole
-    /// event stream would force every coordination consumer
-    /// instance to handle messages it doesn't act on.
-    pub async fn durable_consumer_with_filter(
-        &self,
-        name: &str,
-        filter_subject: &str,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            filter = filter_subject,
-            "getting/creating filtered durable JetStream consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    filter_subject: filter_subject.to_string(),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        Ok(consumer)
-    }
-
-    /// Durable JetStream consumer scoped to *several* subject
-    /// filters. Same shape as
-    /// [`Self::durable_consumer_with_filter`], for consumers that
-    /// react to a handful of unrelated event types (the summary
-    /// consumer, #216: triggered + llm_response + completed +
-    /// failed) — a single-wildcard filter would force it to churn
-    /// through the tool-event firehose it never acts on.
-    pub async fn durable_consumer_with_filters(
-        &self,
-        name: &str,
-        filter_subjects: &[&str],
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            filters = ?filter_subjects,
-            "getting/creating multi-filter durable JetStream consumer"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    filter_subjects: filter_subjects.iter().map(|s| s.to_string()).collect(),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        Ok(consumer)
-    }
-
-    /// Like [`Self::durable_consumer_with_filters`] but starting
-    /// from new messages only. Test-oriented, mirroring
-    /// [`Self::durable_consumer_with_filter_from_new`].
-    pub async fn durable_consumer_with_filters_from_new(
-        &self,
-        name: &str,
-        filter_subjects: &[String],
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            filters = ?filter_subjects,
-            "getting/creating multi-filter durable JetStream consumer (deliver_policy=new)"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    filter_subjects: filter_subjects.to_vec(),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    deliver_policy: consumer::DeliverPolicy::New,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        Ok(consumer)
-    }
-
-    /// Like [`Self::durable_consumer_with_filter`] but the
-    /// consumer starts from new messages only (skips the
-    /// stream's historical messages on first creation).
-    ///
-    /// Test-oriented: the acceptance harness needs fresh
-    /// consumers per test, but the stream is shared across
-    /// runs and contains thousands of historical messages.
-    /// Starting from `New` avoids the catch-up wait while
-    /// keeping production's recovery-from-history semantics
-    /// untouched.
-    ///
-    /// Note: `get_or_create_consumer` returns the existing
-    /// consumer's config if `name` already exists, so this
-    /// only affects the first creation. Pair with a unique
-    /// per-test consumer name to actually get the new
-    /// behaviour.
-    pub async fn durable_consumer_with_filter_from_new(
-        &self,
-        name: &str,
-        filter_subject: &str,
-    ) -> Result<consumer::PullConsumer, BusError> {
-        debug!(
-            consumer = name,
-            filter = filter_subject,
-            "getting/creating filtered durable JetStream consumer (deliver_policy=new)"
-        );
-        let stream = self
-            .jetstream
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let consumer = stream
-            .get_or_create_consumer(
-                name,
-                consumer::pull::Config {
-                    durable_name: Some(name.to_string()),
-                    filter_subject: filter_subject.to_string(),
-                    ack_policy: consumer::AckPolicy::Explicit,
-                    deliver_policy: consumer::DeliverPolicy::New,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        Ok(consumer)
     }
 
     /// Subscribe to events matching a subject filter.
