@@ -199,6 +199,7 @@ Concrete subjects:
 | `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
 | `fq.agent.{agent_id}.invocation.ambiguous` | An invocation is in recovery limbo — an ambiguous WAL row on restart, or a failed automatic resume — and needs operator attention |
+| `fq.agent.{agent_id}.invocation.stuck` | An in-flight invocation has crossed no step boundary within the daemon's derived stuck threshold — emitted by the control-plane sweep, once per crossing (#37) |
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
 | `fq.agent.{agent_id}.invocation.operator_resumed` | Operator → worker: interrupted-result injection (`fq invocation resume`), with completed call ids and optional reason |
@@ -498,6 +499,27 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 - **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
 - **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart.
 
+### `invocation.stuck`
+
+Published by the control plane's periodic sweep for an in-flight invocation that has stopped making progress: no step boundary within the daemon's stuck threshold, and no tool or model call open recently enough to explain the silence ([#37](https://github.com/bricef/factor-q/issues/37)).
+
+```json
+{
+  "last_step_at_ms": 1767323065000,
+  "stuck_after_ms": 4210000,
+  "phase": "awaiting_model",
+  "step_index": 7
+}
+```
+
+**Design notes:**
+
+- **The threshold is derived, not chosen.** `stuck_after_ms` is `2 × (timeout_max_attempts × llm_timeout_secs + tools.max_timeout_secs + 5s backstop grace)` — twice the longest a single reducer step can legitimately take, given the deadlines every call already runs under. At the shipped defaults that is 4,210 s. It rides the payload because a reader cannot recompute it: two daemons configured differently disagree about the same silent invocation, and both are right. `fq doctor` and `control.status` report the same number.
+- **Once per crossing, never once per tick.** The sweep remembers the step boundary it flagged each invocation at. A row still stuck at that same boundary is the same finding and is not re-sent; a row that advanced and stalled again has crossed a second time and is. The event's arrival rate is therefore the rate of *new* stalls.
+- **A report, not an intervention.** Nothing kills, re-dispatches or re-owns the invocation. The safety net under the call deadlines is meant to make a wedge visible, and an automatic remedy without a real stuck example to reason from would be a guess with the power to destroy work.
+- **Distinct from `invocation.ambiguous`**, which is a restart-time verdict about a WAL that cannot be replayed safely. This one is about a runtime that is still running.
+- **Not guaranteed once per invocation across restarts.** The crossing memory is in-process; a daemon restart re-reports any invocation still stuck. The WAL row is the source of truth for the condition, not the event.
+
 ### `completed`
 
 Published when an invocation finishes without a runtime failure. Note
@@ -741,7 +763,8 @@ The following invariants hold across the event stream and are assumed by consume
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
 9. **`invocation.operator_recovered` is operator-initiated** and rooted on its own envelope (the operator's `fq` process is not the original worker, so the chain is fresh). Terminal status set by this event is sticky — the coordination consumer's `invocation.archived` handler will not downgrade an already-terminal owner status if a still-alive worker emits `archived` after the operator's drop.
 10. **`worker.orphaned` fires exactly once per alive→stale transition** — the coordination sweep's conditional store update consumes the transition, and a publish failure after that is logged, not retried (at-most-once; the stale row remains visible via `fq workers list --stale-only`). The row is not kept forever: the daemon's retention sweep deletes stale registrations older than `state.stale_worker_retention_days` (default 7 days), but never one that still owns `in_flight` or `ambiguous` invocations.
-11. **A payload field added after events exist is optional on read, and
+11. **`invocation.stuck` fires once per crossing, not once per sweep tick.** The sweep records the step boundary it flagged an invocation at, so a row that is still stuck at that same boundary is not re-reported; a row that advanced and then stalled again is. The memory is in-process and deliberately not durable — a restart re-reports whatever is still stuck, because the WAL row is the condition's source of truth and the event is only its notice.
+12. **A payload field added after events exist is optional on read, and
     only for that reason.** Deserialisers accept its absence and readers
     treat absence as "not recorded", never as a default value that could
     be mistaken for a recorded one — the log is append-only, so a
@@ -810,6 +833,8 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | `usage` gains `reasoning_tokens` (additive, defaults to 0) | Splits `output_tokens` into thought-vs-spoken. A decomposition, not a new charge — `total_cost` is unchanged. |
 | *(2026-09-05, [#546](https://github.com/bricef/factor-q/issues/546), [#278](https://github.com/bricef/factor-q/issues/278))* `llm.failure.error_kind` gains `rejected` and `timeout` (additive), and `rate_limited` is produced for a 429 | The runtime classifies a failed call by the provider's status and by its own new deadline, instead of flattening everything but auth into `request_failed`. A consumer switching on the old set sees two new strings, and one it had never received. |
 | *(2026-09-06, [#547](https://github.com/bricef/factor-q/issues/547))* `tool.result.error_kind: timeout` becomes reachable, and `invocation.failed.error_kind: tool_error` is now also produced for a run of them | No shape change — both strings were already declared. Before this, only `exec` had a deadline and it reports its own timeout as an ordinary `is_error` result, so nothing ever emitted the `timeout` tool kind. A consumer switching on the set sees a value it had never received. |
+| *(2026-09-06, [#37](https://github.com/bricef/factor-q/issues/37))* A new event type, `invocation.stuck`, on `fq.agent.{agent_id}.invocation.stuck` | Additive. `schema_version` stays at 3: the `Unknown` landing pad means an older reader takes the envelope and no typed payload rather than failing, which is what adding a type was made safe for. |
+| *(2026-09-06, [#37](https://github.com/bricef/factor-q/issues/37))* `worker.heartbeat` gains `last_step_at` (nullable) | The newest `invocation_state.updated_at` across the worker's in-flight work. A beat reported process liveness only, so a worker wedged inside one invocation kept beating and never looked stale (review finding F). Nullable because a worker with no in-flight work has no boundary to report, and so does one whose WAL could not be read. |
 
 ## Changelog: v1 → v2
 

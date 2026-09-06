@@ -195,6 +195,27 @@ models = ["claude-haiku-4-5"]
 # answers fails here rather than after the whole budget. Default 10.
 # llm_connect_timeout_secs = 10
 #
+# When an in-flight invocation counts as STUCK (#37). Normally there is
+# nothing to set here: the threshold is DERIVED from the deadlines above
+# and the [tools] ceiling below, as
+#
+#   2 x (llm_retry.timeout_max_attempts x llm_timeout_secs
+#        + tools.max_timeout_secs
+#        + 5s backstop grace)
+#
+# — twice the longest a single reducer step can legitimately take. At
+# the defaults that is 4210s, a little over an hour. Retune any deadline
+# and the safety net under it moves with it, which is the whole point of
+# deriving it. `fq doctor` and `fq status` print the number this daemon
+# arrived at, and the control plane emits `invocation.stuck` for
+# anything past it (once per stall, not once per sweep).
+#
+# This key replaces that derivation outright. It is an emergency escape
+# hatch for an operator staring at a live wedge, not a tuning knob: a
+# workload that needs it permanently is telling you the deadlines are
+# wrong, and those are what should move. Unset by default.
+# stuck_threshold_override_secs = 4210
+#
 # Worker-side knobs for the archive hand-off retry sweeper. The
 # sweeper republishes `invocation.archived` for any terminal row
 # whose control-plane ack hasn't arrived yet.
