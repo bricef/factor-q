@@ -21,6 +21,9 @@ type Config struct {
 }
 
 type Limits struct {
+	// MaxFiresPerHour is the sliding-window ceiling on *fires* across
+	// every job in the file — not on jobs, so one runaway schedule trips
+	// it on its own. See DESIGN.md D6.
 	MaxFiresPerHour int `toml:"max_fires_per_hour"`
 }
 type Defaults struct {
