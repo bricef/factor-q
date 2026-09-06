@@ -39,6 +39,12 @@ pub(crate) struct SharedServers {
     /// `notify_waiters`: the permit persists, so a retry that is
     /// mid-handshake still sees it on its next turn.
     stop: Arc<tokio::sync::Notify>,
+    /// Where the per-connection watchers announce a server that has
+    /// gone away, held until [`supervise`](Self::supervise) hands it to
+    /// the supervisor. The sending half went to the manager before it
+    /// dialled anything, so a server that dies during boot is caught
+    /// too.
+    closures: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     /// The servers that did not answer at boot, held until
     /// [`supervise`](Self::supervise) hands them to the retry loop.
     /// Kept here rather than passed around so `assemble` does not have
@@ -62,8 +68,10 @@ pub(crate) async fn start_shared_servers(
     config: &Config,
 ) -> (SharedServers, ToolRegistry) {
     let exec = config.tools.exec.to_exec_config();
+    let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut manager = McpClientManager::with_server_root(config.state.directory.join("mcp"))
-        .with_limits(config.mcp.to_limits());
+        .with_limits(config.mcp.to_limits())
+        .announcing_closures(gone_tx);
     let declared = declared_shared_servers(registry);
     let outcomes = manager.start_shared_servers(declared.clone()).await;
 
@@ -98,6 +106,7 @@ pub(crate) async fn start_shared_servers(
             manager: Arc::new(tokio::sync::Mutex::new(manager)),
             states,
             stop: Arc::new(tokio::sync::Notify::new()),
+            closures: Some(gone_rx),
             pending: unavailable,
             declared,
             retry: None,
@@ -176,7 +185,10 @@ impl SharedServers {
             return; // no agent names a shared server: nothing to supervise
         }
         let (came_up_tx, came_up_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gone_rx = self
+            .closures
+            .take()
+            .expect("supervise is called once, by the assembly that built this");
         // Always spawned, even with every server ready: it is the only
         // thing watching for one of them losing its connection.
         self.retry = Some(tokio::spawn(fq_runtime::mcp::retry_unavailable(
@@ -190,7 +202,6 @@ impl SharedServers {
         tokio::spawn(fq_runtime::mcp::drain_server_notifications(
             channels,
             came_up_rx,
-            gone_tx,
             refresher,
             move |registry| context.install_tools(Arc::new(registry)),
             move |server, level, logger, data| {

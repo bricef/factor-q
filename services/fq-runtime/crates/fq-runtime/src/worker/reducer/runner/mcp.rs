@@ -193,14 +193,32 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         self.publish_chained(&mut cursor, triggered_event(agent, invocation_id, trigger))
             .await?;
         let kind = FailureKind::RuntimeError;
-        self.emit_failed(
-            &agent_id,
-            invocation_id,
-            kind,
-            message.clone(),
-            FailurePhase::Setup,
-            totals,
+        warn!(
+            agent_id = %agent_id,
+            invocation_id = %invocation_id,
+            error_kind = ?kind,
+            "refusing invocation: an MCP server it declares is not answering"
+        );
+        // The two events, and nothing else. The ordinary failure path
+        // also marks the WAL row terminal and publishes
+        // `invocation_archived`; both are about a run that started, and
+        // this one has not — there is no row to mark and nothing to
+        // archive. Routing through it would read the store for a row
+        // that cannot exist and warn that it was missing, calling a
+        // documented logic bug on a path where the absence is the
+        // point.
+        self.publish_chained(
             &mut cursor,
+            Event::new(
+                agent_id,
+                invocation_id,
+                EventPayload::Failed(crate::events::FailedPayload {
+                    error_kind: kind,
+                    error_message: message.clone(),
+                    phase: FailurePhase::Setup,
+                    partial_totals: totals,
+                }),
+            ),
         )
         .await?;
         Err(ExecutorError::InvocationFailed { kind, message })

@@ -281,6 +281,15 @@ async fn an_agent_needing_an_unavailable_mcp_server_is_refused_at_dispatch() {
             .any(|e| matches!(e.payload, EventPayload::Triggered(_))),
         "the refusal is chained to a triggered event, not an orphan failure"
     );
+    // Two events and no more. Nothing was provisioned, so there is no
+    // WAL row to mark terminal and nothing to archive; publishing an
+    // `invocation_archived` here would claim a run that never started.
+    assert_eq!(
+        events.len(),
+        2,
+        "a refusal costs `triggered` and `failed`, nothing else: {:?}",
+        events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+    );
 }
 
 /// A server mid-dial refuses too. `Starting` covers the whole of a

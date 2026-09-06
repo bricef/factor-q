@@ -86,6 +86,11 @@ pub struct McpClientManager {
     /// [`McpResourceReader`] and [`McpToolRefresher`] this manager
     /// makes.
     clients: SharedClients,
+    /// Where a connection's *end* is announced, if anyone is
+    /// supervising. `None` for a manager with no supervisor behind it —
+    /// the runner's per-invocation one, and every test that only starts
+    /// a server — where a connection ending is the invocation ending.
+    closures: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl Default for McpClientManager {
@@ -110,7 +115,21 @@ impl McpClientManager {
             limits: McpLimits::default(),
             states: McpServerStates::default(),
             clients: SharedClients::default(),
+            closures: None,
         }
+    }
+
+    /// Announce on `gone` when a connected server's transport ends.
+    ///
+    /// The daemon wires this before it dials anything, so every server
+    /// it registers — at boot and on every retry — gets a watcher.
+    /// Nothing else can see a connection end: rmcp keeps the handler
+    /// alive behind an `Arc`, so the notification stream of a dead
+    /// server stays open and silent
+    /// ([`watch_connection`](super::lifecycle::watch_connection)).
+    pub fn announcing_closures(mut self, gone: mpsc::UnboundedSender<String>) -> Self {
+        self.closures = Some(gone);
+        self
     }
 
     /// Apply an operator's `[mcp]` bounds instead of the defaults. The
@@ -364,6 +383,14 @@ impl McpClientManager {
             .write()
             .expect("MCP client view poisoned")
             .push((server.name.clone(), Arc::clone(&server.client)));
+        if let Some(gone) = &self.closures {
+            tokio::spawn(lifecycle::watch_connection(
+                Arc::downgrade(&server.client),
+                server.name.clone(),
+                self.states.clone(),
+                gone.clone(),
+            ));
+        }
         self.servers.push(server);
         tools
     }

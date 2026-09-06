@@ -44,6 +44,26 @@ while IFS= read -r line; do
 done
 "#;
 
+/// [`STUB_SERVER`], but it exits once it has answered a full start —
+/// the handshake and one `tools/list`. The host is then holding a
+/// client whose transport has closed, which is the shape of every
+/// post-boot death: a stdio child that crashed, an endpoint that hung
+/// up, a message that broke the line bound.
+const DYING_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"stub","version":"0.1.0"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"ping","description":"a stub tool","inputSchema":{"type":"object"}}]}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#;
+
 /// A server that writes far more than any sane `max_line_bytes` with
 /// no newline in it, before the host has said anything. The wedge the
 /// bound exists for: `read_until(b'\n')` on this grows the daemon's
@@ -231,7 +251,7 @@ fn spawn_retry(
     pending: Vec<McpServerConfig>,
 ) -> Supervisor {
     let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
-    spawn_supervisor(manager, pending, gone_rx, gone_tx)
+    spawn_supervisor(manager, pending.clone(), pending, gone_rx, gone_tx)
 }
 
 /// The stop signal, the task, the recovered-server channel, and the
@@ -252,6 +272,7 @@ type Supervisor = (
 /// server is announced on.
 fn spawn_supervisor(
     manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    pending: Vec<McpServerConfig>,
     declared: Vec<McpServerConfig>,
     gone_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     gone_tx: tokio::sync::mpsc::UnboundedSender<String>,
@@ -260,7 +281,7 @@ fn spawn_supervisor(
     let stop = Arc::new(tokio::sync::Notify::new());
     let handle = tokio::spawn(fq_runtime::mcp::retry_unavailable(
         Arc::clone(manager),
-        declared.clone(),
+        pending,
         declared,
         came_up_tx,
         gone_rx,
@@ -338,7 +359,10 @@ async fn the_attempt_count_climbs_with_each_retry() {
 #[tokio::test]
 async fn a_stop_during_a_retry_round_does_not_wait_out_its_deadlines() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let deadline = Duration::from_secs(4);
+    // Long enough that an unraced round could not finish inside the
+    // bound below: a stop that merely happened to arrive near the end
+    // of the round would pass a looser one.
+    let deadline = Duration::from_secs(20);
     let limits = McpLimits {
         startup_timeout: deadline,
         retry_initial: Duration::from_millis(80),
@@ -370,8 +394,9 @@ async fn a_stop_during_a_retry_round_does_not_wait_out_its_deadlines() {
         .expect("a stop mid-round must not wait out the round's deadlines")
         .expect("retry task");
     assert!(
-        stopped_at.elapsed() < deadline,
-        "the stop took {:?}, which is a whole start-up deadline",
+        stopped_at.elapsed() < Duration::from_secs(2),
+        "the stop took {:?}: a round that was merely allowed to finish \
+         would look like this",
         stopped_at.elapsed()
     );
     manager.lock().await.shutdown().await;
@@ -380,62 +405,72 @@ async fn a_stop_during_a_retry_round_does_not_wait_out_its_deadlines() {
 /// A server that answered at boot and later lost its connection must
 /// not stay `Ready`.
 ///
-/// Before this, a transport that died after boot — a stdio child that
-/// exited, a line past the cap, a remote endpoint that closed — left
-/// every health surface green while every call through it failed and
-/// nothing retried it. The supervisor now drops it, marks it
-/// unavailable, and dials it again like any other failure.
+/// The fixture dies of its own accord: it answers the handshake and one
+/// `tools/list`, then exits, so the host is left holding a client whose
+/// transport has closed. Nothing in the notification path can see that
+/// — rmcp owns the handler behind an `Arc`, so the stream stays open and
+/// silent — which is why the connection is watched from the transport
+/// side. Driven end to end here on purpose: an earlier version of this
+/// test fed the supervisor a name on a hand-made channel, which passed
+/// whether or not anything could ever detect a death.
 #[tokio::test]
-async fn a_server_that_loses_its_connection_is_marked_down_and_dialled_again() {
+async fn a_server_whose_connection_ends_is_marked_down_and_dialled_again() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let program = dir.path().join("flappy-server");
-    write_script(&program, STUB_SERVER);
+    let program = dir.path().join("dying-server");
+    write_script(&program, DYING_SERVER);
     let limits = McpLimits {
-        retry_initial: Duration::from_millis(80),
-        retry_max: Duration::from_millis(80),
+        retry_initial: Duration::from_millis(150),
+        retry_max: Duration::from_millis(300),
         ..McpLimits::default()
     };
-    let manager = manager(&dir.path().join("root"), limits);
-    let declared = config("flappy", &program);
+    let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+    let manager = Arc::new(tokio::sync::Mutex::new(
+        McpClientManager::with_server_root(dir.path().join("root"))
+            .with_limits(limits)
+            .announcing_closures(gone_tx.clone()),
+    ));
+    let declared = config("dying", &program);
 
     let outcomes = {
         let mut guard = manager.lock().await;
         guard.start_shared_servers(vec![declared.clone()]).await
     };
-    assert!(outcomes[0].outcome.is_ok(), "the stub answers at boot");
+    assert!(
+        outcomes[0].outcome.is_ok(),
+        "the fixture answers a full start before it exits"
+    );
     assert_eq!(
-        manager.lock().await.states().state("flappy"),
+        manager.lock().await.states().state("dying"),
         Some(McpServerState::Ready { tools: 1 })
     );
 
-    let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
-    // Nothing pending: the supervisor exists here only to watch, which
-    // is the case the loop used to exit on.
-    let (came_up_tx, came_up_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop = Arc::new(tokio::sync::Notify::new());
-    let supervisor = tokio::spawn(fq_runtime::mcp::retry_unavailable(
-        Arc::clone(&manager),
-        Vec::new(),
-        vec![declared],
-        came_up_tx,
-        gone_rx,
-        Arc::clone(&stop),
-    ));
-    let mut came_up_rx = came_up_rx;
+    // Nothing pending: the supervisor is here only to watch, which is
+    // the case the loop used to exit on.
+    let (stop, supervisor, mut came_up_rx, _gone) =
+        spawn_supervisor(&manager, Vec::new(), vec![declared], gone_rx, gone_tx);
 
-    // The drain saw its stream end.
-    gone_tx.send("flappy".to_string()).expect("announce");
+    // The watcher notices the closed transport and says so, without any
+    // help from this test.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut marked_down = false;
+    while std::time::Instant::now() < deadline && !marked_down {
+        marked_down = matches!(
+            manager.lock().await.states().state("dying"),
+            Some(McpServerState::Unavailable { .. })
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        marked_down,
+        "a server whose connection ended must not stay Ready"
+    );
 
+    // And the supervisor dials it again, so it recovers by itself.
     let (name, _notifications) = tokio::time::timeout(Duration::from_secs(30), came_up_rx.recv())
         .await
-        .expect("the supervisor must dial it again")
+        .expect("the supervisor must dial a dead server again")
         .expect("and announce it when it answers");
-    assert_eq!(name, "flappy");
-    assert_eq!(
-        manager.lock().await.states().state("flappy"),
-        Some(McpServerState::Ready { tools: 1 }),
-        "a server that came back is ready again"
-    );
+    assert_eq!(name, "dying");
 
     stop.notify_one();
     tokio::time::timeout(Duration::from_secs(10), supervisor)

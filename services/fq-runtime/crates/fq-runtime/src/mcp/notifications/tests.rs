@@ -21,14 +21,6 @@ fn refresher_over(clients: Vec<(String, Arc<crate::mcp::McpClient>)>) -> McpTool
     }
 }
 
-/// A gone-server sink nothing reads. The tests here are about what the
-/// drain does with notifications; the end-of-stream signal has its own
-/// test below.
-fn discard_gone() -> mpsc::UnboundedSender<String> {
-    let (tx, _rx) = mpsc::unbounded_channel();
-    tx
-}
-
 /// The late-arrival channel, already closed: the drain then behaves
 /// exactly as it did before retries existed — it ends when every
 /// notification channel has drained.
@@ -53,7 +45,6 @@ async fn drain_rebuilds_the_registry_on_tool_list_changed() {
     let drain = tokio::spawn(drain_server_notifications(
         vec![("mock".to_string(), notif_rx)],
         no_late_arrivals(),
-        discard_gone(),
         refresher,
         move |registry| {
             let _ = out_tx.send(registry);
@@ -160,7 +151,6 @@ async fn a_chatty_server_cannot_starve_a_quiet_one() {
             ("quiet".to_string(), quiet_rx),
         ],
         no_late_arrivals(),
-        discard_gone(),
         refresher_over(Vec::new()),
         |_registry| unreachable!("no tools/list_changed is sent"),
         move |server, _level, _logger, _data| {
@@ -189,53 +179,5 @@ async fn a_chatty_server_cannot_starve_a_quiet_one() {
     tokio::time::timeout(std::time::Duration::from_secs(5), drain)
         .await
         .expect("drain exits once both channels close")
-        .expect("drain task");
-}
-
-/// A server's stream ending is its connection ending: its handler was
-/// dropped, which means its rmcp service is gone. The drain is the only
-/// thing watching, so it has to say so — a `StreamMap` drops an
-/// exhausted entry silently, and before this the daemon's health
-/// surfaces stayed green over a dead server for ever.
-#[tokio::test]
-async fn a_server_whose_stream_ends_is_announced_as_gone() {
-    let (alive_tx, alive_rx) = mpsc::unbounded_channel();
-    let (dying_tx, dying_rx) = mpsc::unbounded_channel();
-    let (gone_tx, mut gone_rx) = mpsc::unbounded_channel();
-    let (late_tx, late_rx) = mpsc::unbounded_channel();
-
-    let drain = tokio::spawn(drain_server_notifications(
-        vec![
-            ("alive".to_string(), alive_rx),
-            ("dying".to_string(), dying_rx),
-        ],
-        late_rx,
-        gone_tx,
-        refresher_over(Vec::new()),
-        |_registry| unreachable!("no tools/list_changed is sent"),
-        |_server, _level, _logger, _data| {},
-    ));
-
-    drop(dying_tx);
-    let gone = tokio::time::timeout(std::time::Duration::from_secs(5), gone_rx.recv())
-        .await
-        .expect("the drain announces the end of a stream")
-        .expect("gone channel");
-    assert_eq!(gone, "dying");
-    assert!(
-        gone_rx.try_recv().is_err(),
-        "the server that is still connected must not be announced"
-    );
-
-    // And the drain keeps going for the servers that are still there.
-    alive_tx
-        .send(ServerNotification::ResourceListChanged)
-        .expect("the drain is still draining");
-
-    drop(alive_tx);
-    drop(late_tx);
-    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
-        .await
-        .expect("drain exits once every channel has closed")
         .expect("drain task");
 }

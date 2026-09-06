@@ -318,6 +318,67 @@ where
         })
 }
 
+/// How often a connected server is checked for having gone away.
+///
+/// Polled rather than awaited because rmcp exposes no signal for it:
+/// `is_transport_closed` reads the peer's own sender, and the service's
+/// cancellation token is cancelled by an explicit shutdown, never by
+/// the transport ending. A second is the right order — the fact this
+/// bounds is an agent being dispatched at a server that is not there,
+/// and dispatch is not sub-second work.
+const CLOSURE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Watch one connection for the moment it ends, and say so.
+///
+/// **Nothing else can see it.** rmcp's `RunningService` owns its
+/// handler behind an `Arc`, so the notification channel a server feeds
+/// stays open for as long as the host holds the client — a server whose
+/// child exited, whose endpoint closed, or whose line broke the length
+/// bound leaves a stream that is open and permanently silent. Without
+/// this the table said `Ready` for ever: every health surface green,
+/// every agent that declared it dispatched, every call through it
+/// failing with a closed transport, and no retry.
+///
+/// The state is flipped **here**, at detection, rather than left to the
+/// supervisor: the supervisor holds the manager's lock for the length
+/// of a retry round, and a server dying while others are being redialled
+/// would otherwise stay `Ready` — and keep being dispatched at — for
+/// the length of a round. Forgetting the server and dialling it again
+/// stay the supervisor's, which is why `gone` carries the name on.
+///
+/// Holds a `Weak`, never an `Arc`: a watcher that kept the connection
+/// alive would change what shutdown can reclaim, and a client the
+/// manager has already torn down needs no announcement.
+pub(super) async fn watch_connection(
+    client: std::sync::Weak<super::McpClient>,
+    server: String,
+    states: McpServerStates,
+    gone: mpsc::UnboundedSender<String>,
+) {
+    loop {
+        tokio::time::sleep(CLOSURE_POLL).await;
+        let Some(client) = client.upgrade() else {
+            return; // the manager tore it down: an orderly end, not a death
+        };
+        if !client.is_transport_closed() {
+            continue;
+        }
+        warn!(
+            server = %server,
+            "MCP server's connection ended; its tools are unavailable until it is dialled \
+             again, and agents that declare it are refused meanwhile"
+        );
+        states.unavailable(
+            &server,
+            "the connection to this server ended".to_string(),
+            1,
+            None,
+        );
+        let _ = gone.send(server);
+        return;
+    }
+}
+
 /// Retry every server in `unavailable` until it comes up, for the life
 /// of the daemon.
 ///
@@ -400,8 +461,10 @@ pub async fn retry_unavailable(
     }
 }
 
-/// A server whose connection ended: drop it from the manager, mark it
-/// unavailable, and hand back the config to dial it again with.
+/// A server whose connection ended: drop it from the manager and hand
+/// back the config to dial it again with. It is already marked
+/// unavailable — [`watch_connection`] did that at detection, which is
+/// the point of doing it there.
 ///
 /// `None` for a name this daemon does not declare as a shared server,
 /// or one the manager was no longer holding — either way there is
@@ -412,18 +475,7 @@ async fn mark_gone(
     server: &str,
 ) -> Option<McpServerConfig> {
     let config = declared.iter().find(|c| c.name == server)?.clone();
-    manager
-        .lock()
-        .await
-        .forget(server)
-        .then_some(config)
-        .inspect(|_| {
-            warn!(
-                server = %server,
-                "MCP server's connection ended; its tools are unavailable until it is dialled \
-                 again, and agents that declare it are refused meanwhile"
-            )
-        })
+    manager.lock().await.forget(server).then_some(config)
 }
 
 /// Dial one round: every pending server at once, as attempt number
