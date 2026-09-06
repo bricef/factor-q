@@ -310,6 +310,7 @@ fn a_stuck_consumer_is_named_counted_and_makes_the_report_an_issue() {
     let report = build_doctor_report(
         &[],
         &ExecutionsView::default(),
+        THRESHOLD_MS,
         0,
         &[],
         vec![

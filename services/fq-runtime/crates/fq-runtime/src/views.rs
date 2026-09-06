@@ -44,7 +44,7 @@ use crate::control_plane::projection::store::{
 };
 use crate::control_plane::store::{
     ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerRow, OwnerStatus,
-    WorkerRow, is_stale,
+    WorkerRow,
 };
 use crate::db::RuntimeDbPaths;
 use crate::worker::store::{LlmDispatchRow, ToolDispatchRow, WorkerStore, WorkerStoreError};
