@@ -10,30 +10,41 @@
 //! stdio transport needs (#25).
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use fq_tools::Tool;
 use fq_tools::builtin::ExecConfig;
-use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolResult, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
     LoggingLevel, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
     ResourceTemplate, Root, ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
 };
-use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
-use super::naming::{namespaced_tool_name, validate_server_name};
+use super::discovery;
+use super::lifecycle::{self, Connected, McpServerStates, SharedServerStart, StartContext};
+use super::limits::McpLimits;
 use super::progress::ProgressRegistry;
 use super::prompt_convert::prompt_seed_from_rmcp;
 use super::server_config::SharedServerKey;
 use super::{
-    AdvertisedCapabilities, FactorQClientHandler, McpClient, McpError, McpResourceReader,
-    McpResourceTool, McpServerConfig, McpTool, McpToolRefresher, RootsHandle, ServerNotification,
-    ServerRequest, default_server_root, stdio,
+    AdvertisedCapabilities, McpClient, McpError, McpResourceReader, McpServerConfig,
+    McpToolRefresher, RootsHandle, ServerNotification, ServerRequest, default_server_root,
 };
+
+/// The connected clients, by server name, shared with every handle a
+/// manager hands out.
+///
+/// Shared rather than snapshotted because a handle outlives the call
+/// that made it: the daemon takes its resource reader and tool
+/// refresher at boot, and a server that only comes up later — on the
+/// retry loop — has to be visible through both of them without either
+/// being rebuilt. A `Vec` rather than a map because it is read in
+/// declaration order and never has more entries than a definition
+/// directory declares servers.
+pub(super) type SharedClients = Arc<RwLock<Vec<(String, Arc<McpClient>)>>>;
 
 /// Tracks a running MCP server and its client handle.
 pub(super) struct RunningServer {
@@ -63,6 +74,17 @@ pub struct McpClientManager {
     /// [`McpTool`] this manager builds (which registers and clears
     /// entries), so both ends of the correlation share one table.
     progress: ProgressRegistry,
+    /// What a start is allowed to cost and what discovery is allowed to
+    /// return — `[mcp]` in `fqd.toml` (#548).
+    limits: McpLimits,
+    /// `server → starting | ready | unavailable`, read by every health
+    /// surface and by the dispatch check that refuses an agent whose
+    /// server is down (#548).
+    states: McpServerStates,
+    /// Live view of the connected clients, handed to every
+    /// [`McpResourceReader`] and [`McpToolRefresher`] this manager
+    /// makes.
+    clients: SharedClients,
 }
 
 impl Default for McpClientManager {
@@ -84,7 +106,37 @@ impl McpClientManager {
             started: HashSet::new(),
             server_root,
             progress: ProgressRegistry::default(),
+            limits: McpLimits::default(),
+            states: McpServerStates::default(),
+            clients: SharedClients::default(),
         }
+    }
+
+    /// Apply an operator's `[mcp]` bounds instead of the defaults. The
+    /// daemon passes `config.mcp.to_limits()`; a manager built without
+    /// one runs on the same numbers the shipped config documents, which
+    /// is what keeps a test or the sim honest about production
+    /// behaviour.
+    pub fn with_limits(mut self, limits: McpLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// The bounds this manager applies.
+    pub fn limits(&self) -> &McpLimits {
+        &self.limits
+    }
+
+    /// The `server → state` table. Cheap to clone; `fq doctor`,
+    /// `control.status` and the runner's dispatch check all read this
+    /// one.
+    ///
+    /// A grant-bearing server is deliberately absent from the daemon's
+    /// table: it runs per-invocation (ADR-0018) under a manager of its
+    /// own, so "unavailable" there would be a verdict about one
+    /// invocation reported as a standing fact about the daemon.
+    pub fn states(&self) -> McpServerStates {
+        self.states.clone()
     }
 
     /// The `(server, token) → call` table this manager's servers report
@@ -132,14 +184,126 @@ impl McpClientManager {
             );
             return Ok(Vec::new());
         }
-
+        let name = config.name.clone();
+        self.states.starting(&name);
         // Shared servers are tool-only: advertise no inbound capabilities
         // (a grant-bearing server runs per-invocation instead — ADR-0018).
-        let (tools, _roots) = self
+        let started = self
             .start_inner(config, None, Vec::new(), AdvertisedCapabilities::none())
-            .await?;
-        self.started.insert(key);
-        Ok(tools)
+            .await;
+        match started {
+            Ok((tools, _roots)) => {
+                self.states.ready(&name, tools.len() as u32);
+                self.started.insert(key);
+                Ok(tools)
+            }
+            Err(err) => {
+                // Not inserted into `started`: an unavailable server has
+                // no connection to deduplicate against, and the retry
+                // loop has to be able to dial the same transport again.
+                self.states.unavailable(&name, err.to_string(), 1, None);
+                Err(err)
+            }
+        }
+    }
+
+    /// Start every shared server at once, each under its own start-up
+    /// and discovery deadline (#548).
+    ///
+    /// This is what makes boot bounded by the slowest server rather
+    /// than by the sum of all of them, and what keeps one unresponsive
+    /// server from holding the daemon at startup with every agent down.
+    /// A server that fails is [`Unavailable`](McpServerState::Unavailable)
+    /// with its reason recorded; the returned outcome carries the same
+    /// error so the caller can log it against the agent that declared
+    /// it.
+    ///
+    /// Deduplication happens up front, on the transport identity, so
+    /// two agents naming one endpoint still dial it once — the
+    /// concurrent starts cannot race each other into two connections.
+    pub async fn start_shared_servers(
+        &mut self,
+        configs: Vec<McpServerConfig>,
+    ) -> Vec<SharedServerStart> {
+        let mut outcomes = Vec::with_capacity(configs.len());
+        let mut unique = Vec::with_capacity(configs.len());
+        for config in configs {
+            let server = config.name.clone();
+            match SharedServerKey::from_config(&config) {
+                Err(err) => outcomes.push(SharedServerStart {
+                    server,
+                    outcome: Err(err),
+                }),
+                Ok(key) if !self.started.insert(key.clone()) => {
+                    debug!(server = %server, "MCP server already started, skipping duplicate");
+                    outcomes.push(SharedServerStart {
+                        server,
+                        outcome: Ok(Vec::new()),
+                    });
+                }
+                Ok(_) => {
+                    self.states.starting(&server);
+                    unique.push(config);
+                }
+            }
+        }
+
+        let ctx = StartContext {
+            server_root: &self.server_root,
+            progress: &self.progress,
+            limits: &self.limits,
+        };
+        let started = futures::future::join_all(unique.into_iter().map(|config| async {
+            let connected = lifecycle::connect(
+                &config,
+                &ctx,
+                None,
+                Vec::new(),
+                AdvertisedCapabilities::none(),
+            )
+            .await;
+            (config, connected)
+        }))
+        .await;
+
+        for (config, connected) in started {
+            match connected {
+                Ok(Connected { server, tools, .. }) => {
+                    self.states.ready(&config.name, tools.len() as u32);
+                    outcomes.push(SharedServerStart {
+                        server: config.name,
+                        outcome: Ok(self.register(server, tools)),
+                    });
+                }
+                Err(err) => {
+                    // The identity stays out of `started` so the retry
+                    // loop can dial the same transport again.
+                    if let Ok(key) = SharedServerKey::from_config(&config) {
+                        self.started.remove(&key);
+                    }
+                    self.states
+                        .unavailable(&config.name, err.to_string(), 1, None);
+                    outcomes.push(SharedServerStart {
+                        server: config.name,
+                        outcome: Err(err),
+                    });
+                }
+            }
+        }
+        outcomes
+    }
+
+    /// Take ownership of a connected server: record its client in the
+    /// live handle view and keep the [`RunningServer`] for shutdown.
+    /// Returns `tools` unchanged, so a caller can register and forward
+    /// in one expression.
+    fn register(&mut self, server: RunningServer, tools: Vec<Arc<dyn Tool>>) -> Vec<Arc<dyn Tool>> {
+        self.clients
+            .write()
+            .expect("MCP client view poisoned")
+            .push((server.name.clone(), Arc::clone(&server.client)));
+        self.servers.push(server);
+        tools
     }
 
     /// Start a *per-invocation* MCP server instance with a wired
@@ -174,8 +338,9 @@ impl McpClientManager {
         Ok((tools, req_rx, roots_handle))
     }
 
-    /// Shared start path: spawn the child process, run the initialize
-    /// handshake, discover tools, and register the [`RunningServer`].
+    /// Shared start path: dial the server under the start-up deadline,
+    /// discover its tools under the discovery deadline, and register
+    /// the [`RunningServer`] ([`lifecycle::connect`] does the first two).
     /// `server_request_tx` wires the per-invocation sampling /
     /// elicitation bridge; `None` leaves the server tool-only (inbound
     /// requests decline). `roots` seeds the advertised workspace.
@@ -188,150 +353,17 @@ impl McpClientManager {
         roots: Vec<Root>,
         capabilities: AdvertisedCapabilities,
     ) -> Result<(Vec<Arc<dyn Tool>>, RootsHandle), McpError> {
-        info!(
-            server = %config.name,
-            // The endpoint or the command: `command` alone is empty for
-            // a remote server, so that log line named nothing.
-            target = %config.url.as_deref().unwrap_or(&config.command),
-            args = ?config.args,
-            "starting MCP server"
-        );
-
-        // The handler advertises factor-q's client capabilities
-        // (roots/sampling/elicitation), forwards resource notifications
-        // to `notif_rx`, and — on the per-invocation path — bridges
-        // server-initiated requests. It is then served over whichever
-        // transport the config selects; the MCP initialize handshake and
-        // every subsequent operation are transport-agnostic.
-        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-        let roots_cell = Arc::new(Mutex::new(roots));
-        let mut handler = FactorQClientHandler::with_notifications(notif_tx)
-            .with_roots(Arc::clone(&roots_cell))
-            .with_capabilities(capabilities)
-            .with_progress(config.name.clone(), self.progress.clone());
-        if let Some(req_tx) = server_request_tx {
-            handler = handler.with_server_requests(req_tx);
-        }
-        let client = match &config.url {
-            // Streamable HTTP (remote) transport — the 2025-11-25 spec
-            // transport.
-            Some(url) => handler
-                .serve(StreamableHttpClientTransport::from_uri(url.clone()))
-                .await
-                .map_err(|err| McpError::ServerStart {
-                    command: url.clone(),
-                    reason: err.to_string(),
-                })?,
-            // stdio child process: cleared env, pinned PATH, own cwd (#541, `stdio`).
-            None => {
-                let transport = stdio::spawn_transport(&config, &self.server_root)?;
-                handler
-                    .serve(transport)
-                    .await
-                    .map_err(|err| McpError::ServerStart {
-                        command: config.command.clone(),
-                        reason: err.to_string(),
-                    })?
-            }
+        let ctx = StartContext {
+            server_root: &self.server_root,
+            progress: &self.progress,
+            limits: &self.limits,
         };
-
-        let client = Arc::new(client);
-        let roots_handle = RootsHandle {
-            server: config.name.clone(),
-            roots: roots_cell,
-            client: Arc::clone(&client),
-        };
-
-        // Discover tools (shared with `refresh_tools`).
-        let (tools, tool_names) =
-            Self::discover_tools(&client, &config.name, &self.progress).await?;
-
-        self.servers.push(RunningServer {
-            name: config.name,
-            client,
-            tool_names,
-            notifications: Mutex::new(notif_rx),
-        });
-
-        Ok((tools, roots_handle))
-    }
-
-    /// Discover a server's current tools: the regular MCP tools plus
-    /// the synthesized host-fulfilled resource tools (step 3b) when the
-    /// server advertises the resources capability. Shared by initial
-    /// startup, [`refresh_tools`](Self::refresh_tools) (Step 7,
-    /// `notifications/tools/list_changed`) and
-    /// [`McpToolRefresher`](super::McpToolRefresher)'s registry
-    /// rebuild. Returns the tool wrappers and their names.
-    pub(super) async fn discover_tools(
-        client: &Arc<McpClient>,
-        server_name: &str,
-        progress: &ProgressRegistry,
-    ) -> Result<(Vec<Arc<dyn Tool>>, Vec<String>), McpError> {
-        validate_server_name(server_name)?;
-        let mcp_tools = client
-            .list_all_tools()
-            .await
-            .map_err(|err| McpError::ToolDiscovery {
-                command: server_name.to_string(),
-                reason: err.to_string(),
-            })?;
-
-        info!(
-            server = %server_name,
-            tool_count = mcp_tools.len(),
-            "discovered MCP tools"
-        );
-
-        let mut tools: Vec<Arc<dyn Tool>> = Vec::with_capacity(mcp_tools.len());
-        let mut tool_names: Vec<String> = Vec::with_capacity(mcp_tools.len());
-
-        for mcp_tool in mcp_tools {
-            let remote_name = mcp_tool.name.to_string();
-            let name = namespaced_tool_name(server_name, &remote_name)?;
-            let description = mcp_tool.description.as_deref().unwrap_or("").to_string();
-
-            // Convert the Arc<JsonObject> input_schema to a serde_json::Value.
-            let input_schema = serde_json::to_value(&*mcp_tool.input_schema)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-
-            debug!(server = %server_name, tool = %name, "registered MCP tool");
-
-            tool_names.push(name.clone());
-            tools.push(Arc::new(McpTool {
-                tool_name: name,
-                server_name: server_name.to_string(),
-                remote_tool_name: remote_name,
-                tool_description: description,
-                tool_input_schema: input_schema,
-                client: Arc::clone(client),
-                progress: progress.clone(),
-            }));
-        }
-
-        // Synthesize host-fulfilled resource tools (step 3b) when the
-        // server advertises the resources capability, so the agent's LLM
-        // can list/read its resources on demand.
-        let advertises_resources = client
-            .peer_info()
-            .is_some_and(|info| info.capabilities.resources.is_some());
-        if advertises_resources {
-            for resource_tool in [
-                McpResourceTool::list(server_name, Arc::clone(client)),
-                McpResourceTool::read(server_name, Arc::clone(client)),
-                McpResourceTool::list_templates(server_name, Arc::clone(client)),
-            ] {
-                debug!(
-                    server = %server_name,
-                    tool = %resource_tool.name(),
-                    "registered MCP resource tool"
-                );
-                tool_names.push(resource_tool.name().to_string());
-                tools.push(Arc::new(resource_tool));
-            }
-        }
-
-        Ok((tools, tool_names))
+        let Connected {
+            server,
+            tools,
+            roots,
+        } = lifecycle::connect(&config, &ctx, server_request_tx, roots, capabilities).await?;
+        Ok((self.register(server, tools), roots))
     }
 
     /// Re-discover a server's tools and refresh the cached tool-name
@@ -350,7 +382,8 @@ impl McpClientManager {
                 name: server.to_string(),
             })?;
         let client = Arc::clone(&self.servers[idx].client);
-        let (tools, tool_names) = Self::discover_tools(&client, server, &self.progress).await?;
+        let (tools, tool_names) =
+            discovery::discover_tools(&client, server, &self.progress, &self.limits).await?;
         self.servers[idx].tool_names = tool_names;
         Ok(tools)
     }
@@ -488,11 +521,7 @@ impl McpClientManager {
     /// at invocation start without sharing the manager's lifecycle.
     pub fn resource_reader(&self) -> McpResourceReader {
         McpResourceReader {
-            clients: self
-                .servers
-                .iter()
-                .map(|server| (server.name.clone(), Arc::clone(&server.client)))
-                .collect(),
+            clients: Arc::clone(&self.clients),
         }
     }
 
@@ -507,13 +536,10 @@ impl McpClientManager {
     /// reverting to the crate defaults on the next `tools/list_changed`.
     pub fn tool_refresher(&self, exec_config: ExecConfig) -> McpToolRefresher {
         McpToolRefresher {
-            clients: self
-                .servers
-                .iter()
-                .map(|server| (server.name.clone(), Arc::clone(&server.client)))
-                .collect(),
+            clients: Arc::clone(&self.clients),
             exec_config,
             progress: self.progress.clone(),
+            limits: self.limits.clone(),
         }
     }
 
@@ -533,6 +559,21 @@ impl McpClientManager {
             out.push((server.name.clone(), rx));
         }
         out
+    }
+
+    /// One server's notification receiver, for a server that came up
+    /// after the drain task was started (#548). Same replacement as
+    /// [`take_notifications`](Self::take_notifications): the server
+    /// keeps a closed dummy, so nothing else can consume the stream the
+    /// drain now owns. `None` for a server this manager does not hold.
+    pub async fn take_notifications_for(
+        &mut self,
+        server: &str,
+    ) -> Option<mpsc::UnboundedReceiver<ServerNotification>> {
+        let running = self.servers.iter().find(|s| s.name == server)?;
+        let mut guard = running.notifications.lock().await;
+        let (_closed_tx, closed_rx) = mpsc::unbounded_channel();
+        Some(std::mem::replace(&mut *guard, closed_rx))
     }
 
     /// Subscribe to update notifications for a resource on a server.
@@ -693,6 +734,13 @@ impl McpClientManager {
         }
         self.servers.clear();
         self.started.clear();
+        // The handles this manager handed out are live views, so they
+        // have to be emptied too — a rebuilt registry after shutdown
+        // would otherwise be built from clients whose transport is gone.
+        self.clients
+            .write()
+            .expect("MCP client view poisoned")
+            .clear();
     }
 
     /// After cancelling a service we can't `close().await` (outstanding

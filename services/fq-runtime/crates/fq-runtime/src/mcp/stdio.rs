@@ -30,13 +30,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use fq_tools::builtin::DEFAULT_CHILD_PATH;
-use rmcp::transport::TokioChildProcess;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tracing::info;
 
 use super::naming::validate_server_name;
 use super::{McpError, McpServerConfig};
+
+mod child;
+
+pub(super) use child::ChildTransport;
 
 /// The root under which servers get their working directories when the
 /// embedder names none. The daemon always names `<state dir>/mcp`
@@ -74,10 +77,16 @@ pub(super) fn stdio_command(config: &McpServerConfig, server_dir: &Path) -> io::
 /// Spawn the stdio transport for `config` with its working directory
 /// under `root`, forwarding the child's stderr into tracing for as long
 /// as the child lives.
+///
+/// `max_line_bytes` bounds one JSON-RPC message on the way in
+/// ([`child`], `[mcp] max_line_bytes`): past it the read fails and the
+/// connection ends, rather than the daemon buffering whatever a server
+/// chooses to write.
 pub(super) fn spawn_transport(
     config: &McpServerConfig,
     root: &Path,
-) -> Result<TokioChildProcess, McpError> {
+    max_line_bytes: usize,
+) -> Result<ChildTransport, McpError> {
     // The server's name is its directory name. Validate it here, before
     // any path is built or created — tool discovery validates it again
     // later, but by then `../x` would already have made a cwd outside
@@ -87,19 +96,29 @@ pub(super) fn spawn_transport(
         command: config.command.clone(),
         reason,
     };
-    let cmd = stdio_command(config, &root.join(&config.name))
+    let mut cmd = stdio_command(config, &root.join(&config.name))
         .map_err(|err| start_error(err.to_string()))?;
-    let (transport, stderr) = TokioChildProcess::builder(cmd)
+    // `kill_on_drop` is what makes an abandoned start safe: a handshake
+    // that times out drops the transport, and the child goes with it
+    // rather than living on unreachable (#548).
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| start_error(err.to_string()))?;
-    if let Some(stderr) = stderr {
+        .kill_on_drop(true);
+    let mut spawned = cmd.spawn().map_err(|err| start_error(err.to_string()))?;
+    let pipes = spawned
+        .stdin
+        .take()
+        .zip(spawned.stdout.take())
+        .ok_or_else(|| start_error("child stdio was already taken".to_string()))?;
+    if let Some(stderr) = spawned.stderr.take() {
         let server = config.name.clone();
         tokio::spawn(forward_stderr(stderr, move |line| {
             info!(target: "mcp.server.stderr", %server, "{line}");
         }));
     }
-    Ok(transport)
+    let (stdin, stdout) = pipes;
+    Ok(ChildTransport::new(spawned, stdout, stdin, max_line_bytes))
 }
 
 /// Forward `reader`'s lines to `emit` until EOF or an unrecoverable read

@@ -16,7 +16,10 @@
 //! | module | what lives there |
 //! | --- | --- |
 //! | `handler` | the rmcp client handler and the capabilities it advertises |
-//! | `manager` | server lifecycle: start, discover, call, shut down |
+//! | `manager` | the one owner of every running server, and its request surface |
+//! | `lifecycle` | starting / ready / unavailable, concurrent start, retry (#548) |
+//! | `discovery` | `tools/list` followed under a deadline and two caps (#548) |
+//! | `limits` | what a server is allowed to cost — the `[mcp]` table (#548) |
 //! | `tools` | the tool adapter, [`McpTool`] |
 //! | `resources` | synthesized resource tools and their rendering |
 //! | `roots` | workspace roots (ADR-0018) and the handle that updates them |
@@ -32,8 +35,11 @@
 use rmcp::service::{RoleClient, RunningService};
 
 mod call;
+mod discovery;
 mod handler;
 mod handles;
+mod lifecycle;
+mod limits;
 mod manager;
 mod naming;
 mod notifications;
@@ -50,6 +56,8 @@ mod mock;
 
 pub use handler::{AdvertisedCapabilities, FactorQClientHandler, ServerRequest};
 pub use handles::{McpResourceReader, McpToolRefresher};
+pub use lifecycle::{McpServerState, McpServerStates, SharedServerStart, retry_unavailable};
+pub use limits::McpLimits;
 pub use manager::McpClientManager;
 pub use notifications::{ServerNotification, drain_server_notifications};
 pub use progress::{InFlightCall, ProgressRegistry};
