@@ -462,6 +462,20 @@ fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
             Effort::High => provider::chat::ReasoningEffort::High,
             Effort::XHigh => provider::chat::ReasoningEffort::XHigh,
         }),
+        // Ask for the readable side of the model's reasoning. genai turns
+        // this one flag into a request-shape change on two wires:
+        // Gemini's `thinkingConfig.includeThoughts`, without which a
+        // thought summary is never returned, and Anthropic's
+        // `thinking.display: "summarized"` on adaptive-thinking models,
+        // without which every thinking block comes back with an empty
+        // text and only its signature — which is what the 2026-09-04 live
+        // matrix recorded for claude-opus-5, and what a probe on
+        // 2026-09-06 reproduced on the same question: no readable text
+        // without the flag, a summary with it. OpenAI-shaped wires are
+        // untouched by it on the non-streaming path. The continuity
+        // tokens were carried either way; this is the half an operator
+        // gets to read.
+        capture_reasoning_content: Some(true),
         ..Default::default()
     }
 }
@@ -472,22 +486,23 @@ fn from_provider_response(
 ) -> Result<ChatResponse, LlmError> {
     let usage = convert_usage(&response.usage);
 
-    // Build the turn's parts in the order the provider returned them.
-    // Ordering is a provider concern (ADR-0034 I6) — Anthropic requires
-    // thinking blocks first, OpenAI-compatible providers carry reasoning
-    // as a sibling field where position is meaningless — so we preserve
-    // what arrived rather than imposing an order of our own.
+    // The turn's parts are recorded in the order the provider returned
+    // them, reasoning included (ADR-0034 I6). Order is a provider concern
+    // we are not entitled to improve on: Anthropic puts its thinking
+    // blocks first and verifies them there; Gemini attaches a thought
+    // signature to the specific part it arrived on — text or function
+    // call — and wants it back on that part, and genai's request path
+    // attaches a signature to the next part it meets. A signature
+    // hoisted ahead of the text, which is what this adapter did before,
+    // would ride back on the text instead of the call it belongs to.
+    // Keeping what arrived is the one rule that is right for every
+    // provider, and the wire goldens check its output.
     //
     // Wrap tool_call_id at the provider->internal boundary. A provider
     // returning an empty string is a protocol bug we surface immediately
     // rather than letting it propagate.
     let mut parts: Vec<AssistantPart> = Vec::new();
 
-    // Reasoning first, which is where Anthropic requires it and where
-    // position is meaningless for OpenAI-compatible providers (they
-    // carry it as a sibling field, not in the content list) — so leading
-    // is correct for both.
-    //
     // The model we ASKED for, not the one the provider reported: the
     // strip compares against the next request's target, and that is
     // expressed in the same vocabulary.
@@ -563,6 +578,22 @@ fn from_provider_response(
                 // far as we know.
                 _ => continue,
             },
+            provider::chat::ContentPart::Text(text) => {
+                parts.push(AssistantPart::Text { text: text.clone() });
+                continue;
+            }
+            provider::chat::ContentPart::ToolCall(call) => {
+                let tool_call_id = crate::events::ToolCallId::new(call.call_id.clone())
+                    .map_err(|err| LlmError::InvalidResponse(err.to_string()))?;
+                parts.push(AssistantPart::ToolCall(MessageToolCall {
+                    tool_call_id,
+                    tool_name: call.fn_name.clone(),
+                    parameters: call.fn_arguments.clone(),
+                }));
+                continue;
+            }
+            // Everything else a provider may send is not part of an
+            // assistant turn as we model it.
             _ => continue,
         };
         // Signed and plain parts carry the readable text themselves; an
@@ -584,40 +615,35 @@ fn from_provider_response(
     // Providers that report readable reasoning as a sibling field rather
     // than as parts: Kimi, DeepSeek, anything OpenAI-shaped — and Gemini's
     // thought summary, which sits beside its opaque signature parts. genai
-    // populates `reasoning_content` unconditionally on the non-streaming
-    // path — no capture flag needed. Skipped when a part already carried
-    // the text, or the same reasoning would be recorded twice: once
+    // surfaces `reasoning_content` on the non-streaming path whenever the
+    // provider sent it; the capture flag in `convert_params` is what makes
+    // Gemini send one at all. Skipped when a part already carried the
+    // text, or the same reasoning would be recorded twice: once
     // replayable, once not.
+    //
+    // A sibling field has no position of its own. It is recorded where
+    // reasoning that arrived as parts would have been: after whatever
+    // reasoning already leads the turn and before the first spoken part
+    // — so a Kimi turn reads thought-then-answer, and a Gemini summary
+    // sits beside the signatures it summarises rather than after the
+    // call one of them belongs to.
     if !text_carried
         && let Some(text) = response
             .reasoning_content
             .as_ref()
             .filter(|t| !t.is_empty())
     {
-        parts.push(AssistantPart::Reasoning(crate::events::Reasoning {
-            model: model.clone(),
-            content: crate::events::ReasoningContent::Plain { text: text.clone() },
-        }));
-    }
-
-    for part in response.content.iter() {
-        match part {
-            provider::chat::ContentPart::Text(text) => {
-                parts.push(crate::events::AssistantPart::Text { text: text.clone() });
-            }
-            provider::chat::ContentPart::ToolCall(call) => {
-                let tool_call_id = crate::events::ToolCallId::new(call.call_id.clone())
-                    .map_err(|err| LlmError::InvalidResponse(err.to_string()))?;
-                parts.push(crate::events::AssistantPart::ToolCall(MessageToolCall {
-                    tool_call_id,
-                    tool_name: call.fn_name.clone(),
-                    parameters: call.fn_arguments.clone(),
-                }));
-            }
-            // Reasoning is read in phase 3. Everything else a provider
-            // may send is not part of an assistant turn as we model it.
-            _ => {}
-        }
+        let at = parts
+            .iter()
+            .take_while(|part| matches!(part, AssistantPart::Reasoning(_)))
+            .count();
+        parts.insert(
+            at,
+            AssistantPart::Reasoning(crate::events::Reasoning {
+                model: model.clone(),
+                content: crate::events::ReasoningContent::Plain { text: text.clone() },
+            }),
+        );
     }
 
     let has_tool_calls = parts
@@ -1139,6 +1165,90 @@ mod tests {
             kinds,
             ["opaque", "plain"],
             "signature first, then the summary"
+        );
+    }
+
+    fn part_kinds(parsed: &ChatResponse) -> Vec<&'static str> {
+        parsed
+            .parts
+            .iter()
+            .map(|part| match part {
+                AssistantPart::Text { .. } => "text",
+                AssistantPart::ToolCall(_) => "tool_call",
+                AssistantPart::Reasoning(r) => match r.content {
+                    crate::events::ReasoningContent::Opaque { .. } => "opaque",
+                    crate::events::ReasoningContent::Plain { .. } => "plain",
+                    crate::events::ReasoningContent::Signed { .. } => "signed",
+                },
+            })
+            .collect()
+    }
+
+    /// Order is the provider's (I6). A signature that arrived between
+    /// the text and the function call is recorded there, because that
+    /// is the only position from which it rides back on the call: genai
+    /// attaches a pending signature to the next part it meets, so a
+    /// signature hoisted ahead of the text — what this adapter did
+    /// before — would go back on the text instead. genai 0.7.0-beta.21
+    /// hoists Gemini's signatures itself, so today this shape only
+    /// reaches us from an adapter that does not; the signature-adjacency
+    /// fix proposed upstream makes it the normal one.
+    #[test]
+    fn parts_are_recorded_in_the_order_they_arrived() {
+        let response = gemini_response(
+            vec![
+                provider::chat::ContentPart::Text("Checking the runbook.".to_string()),
+                provider::chat::ContentPart::ThoughtSignature("sig-1".to_string()),
+                gemini_call(),
+            ],
+            None,
+        );
+
+        let parsed = from_provider_response(response).expect("parses");
+        assert_eq!(part_kinds(&parsed), ["text", "opaque", "tool_call"]);
+
+        // And it goes back in that order, the signature immediately
+        // before the call it belongs to.
+        let msg = convert_message(
+            Message::Assistant {
+                parts: parsed.parts,
+            },
+            "gemini-3-pro",
+        )
+        .expect("conversion succeeds");
+        let kinds: Vec<&str> = msg
+            .content
+            .parts()
+            .iter()
+            .map(|part| match part {
+                provider::chat::ContentPart::Text(_) => "text",
+                provider::chat::ContentPart::ThoughtSignature(_) => "signature",
+                provider::chat::ContentPart::ToolCall(_) => "tool_call",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["text", "signature", "tool_call"]);
+    }
+
+    /// A sibling-field summary has no position of its own. It is
+    /// recorded ahead of the first spoken part, after any reasoning that
+    /// already leads the turn — never after the call a signature belongs
+    /// to.
+    #[test]
+    fn a_sibling_summary_leads_the_spoken_parts() {
+        let response = gemini_response(
+            vec![
+                provider::chat::ContentPart::Text("Checking the runbook.".to_string()),
+                provider::chat::ContentPart::ThoughtSignature("sig-1".to_string()),
+                gemini_call(),
+            ],
+            Some("Consider the runbook first."),
+        );
+
+        let parsed = from_provider_response(response).expect("parses");
+        assert_eq!(
+            part_kinds(&parsed),
+            ["plain", "text", "opaque", "tool_call"]
         );
     }
 

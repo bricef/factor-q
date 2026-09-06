@@ -12,7 +12,10 @@
         }
       ],
       "generationConfig": {
-        "maxOutputTokens": 1024
+        "maxOutputTokens": 1024,
+        "thinkingConfig": {
+          "includeThoughts": true
+        }
       },
       "systemInstruction": {
         "parts": [
@@ -83,7 +86,10 @@
         }
       ],
       "generationConfig": {
-        "maxOutputTokens": 1024
+        "maxOutputTokens": 1024,
+        "thinkingConfig": {
+          "includeThoughts": true
+        }
       },
       "systemInstruction": {
         "parts": [

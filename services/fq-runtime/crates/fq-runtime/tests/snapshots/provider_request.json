@@ -3,7 +3,7 @@
     "cache_control": null,
     "capture_content": null,
     "capture_raw_body": null,
-    "capture_reasoning_content": null,
+    "capture_reasoning_content": true,
     "capture_tool_calls": null,
     "capture_usage": null,
     "extra_body": null,
