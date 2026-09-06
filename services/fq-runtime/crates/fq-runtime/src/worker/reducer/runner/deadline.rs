@@ -68,20 +68,31 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// the servicing is itself bounded.
     ///
     /// **A servicing that outlives the backstop hands the tool its full
-    /// grace back.** The gap between `allowed` and `armed` is not slack
-    /// in the deadline, it is the tool's teardown budget — `exec`'s
-    /// group kill and output drain, the MCP adapter's
-    /// `notifications/cancelled` — and a servicing bounded only by
-    /// `llm_timeout_secs` would otherwise spend all of it while the tool
-    /// future sits unpolled. The tool would then get exactly one poll
-    /// before an already-elapsed expiry won and dropped it: `exec`'s
-    /// child would die by `kill_on_drop` and the output it had captured
-    /// would reach the model as a bare "timed out" instead. So after
-    /// each servicing an expiry that has already passed is re-armed at
-    /// `now + (armed − allowed)`. The tool's *own* deadline never moves,
-    /// only the host's backstop, and only ever to one grace after the
-    /// last servicing — a chatty server buys the tool no extra running
-    /// time, just the teardown it was always owed (#617).
+    /// grace back, and is the last one this call services.** The gap
+    /// between `allowed` and `armed` is not slack in the deadline, it is
+    /// the tool's teardown budget — `exec`'s group kill and output
+    /// drain, the MCP adapter's `notifications/cancelled` — and a
+    /// servicing bounded only by `llm_timeout_secs` would otherwise
+    /// spend all of it while the tool future sits unpolled. The tool
+    /// would then get exactly one poll before an already-elapsed expiry
+    /// won and dropped it: `exec`'s child would die by `kill_on_drop`
+    /// and the output it had captured would reach the model as a bare
+    /// "timed out" instead. So a servicing that returns past the expiry
+    /// leaves the `select!` for a plain `timeout_at(now + (armed -
+    /// allowed))` on the tool alone (#617).
+    ///
+    /// Leaving is what keeps the call bounded. Re-arming *and* staying
+    /// in the loop would let a server that always has another request
+    /// ready push the expiry back for as long as it cared to, since a
+    /// queued request is ready whenever the timer is not — the call
+    /// would never time out at all. Handing the grace back once and
+    /// then waiting only for the tool costs one servicing:
+    /// **`armed` + one servicing + one grace** is the ceiling on the
+    /// whole wait, and `Config::stuck_after` (#37) already carries a
+    /// `llm_timeout_secs` term wide enough to cover it. Requests that
+    /// arrive during that last window stay queued, exactly as they do
+    /// after a timeout; the tool's *own* deadline never moves either
+    /// way.
     ///
     /// The outer `Err` is infrastructure (a server request that failed
     /// to publish); a timeout is an ordinary tool error in the inner
@@ -106,7 +117,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // The tool's teardown budget, held apart from the deadline
         // itself because a servicing can give it back (see below).
         let grace = deadline.armed.saturating_sub(deadline.allowed);
-        let mut expires_at = tokio::time::Instant::now() + deadline.armed;
+        let expires_at = tokio::time::Instant::now() + deadline.armed;
         let timed_out = || {
             warn!(
                 agent_id = %agent_id,
@@ -141,8 +152,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // Ordered, not random. The tool first: if it finished
                 // during the last servicing, that answer beats a
                 // deadline that has since passed. Then the deadline,
-                // so a chatty server cannot hold the call past it by
-                // always having another request ready. Requests last.
+                // so a queued request can never be preferred to an
+                // expiry that is already ready. Requests last — and
+                // the first servicing to outlive the expiry is the
+                // last one this call services, so a server with a
+                // request always ready cannot hold it open.
                 biased;
                 result = &mut tool_fut => break Ok(result),
                 _ = &mut expiry => break timed_out(),
@@ -158,12 +172,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         // The host was busy, not the tool. Give back the
                         // teardown budget this servicing consumed,
                         // measured from the moment the tool is polled
-                        // again, so a co-operative tool still gets to
-                        // stop its work and answer (#617).
+                        // again — and stop servicing, because the call
+                        // is over as far as the host is concerned and
+                        // the only thing left to wait for is the tool
+                        // stopping its own work (#617). Requests that
+                        // arrive during that window stay queued,
+                        // exactly as they do after a timeout.
                         let now = tokio::time::Instant::now();
                         if now >= expires_at {
-                            expires_at = now + grace;
-                            expiry.as_mut().reset(expires_at);
+                            break match timeout_at(now + grace, &mut tool_fut).await {
+                                Ok(result) => Ok(result),
+                                Err(_) => timed_out(),
+                            };
                         }
                     }
                     // All servers' channels closed: nothing left to

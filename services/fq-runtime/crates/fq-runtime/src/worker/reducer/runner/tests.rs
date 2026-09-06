@@ -4339,25 +4339,25 @@ async fn without_a_servicing_the_backstop_stays_at_the_armed_deadline() {
     drop(tx);
 }
 
-/// The extension is one grace after the *last* servicing, not one per
-/// servicing.
+/// A server with a request always ready cannot hold the call open.
 ///
-/// Three requests are serviced back to back, each answer outlasting
-/// what is left of the backstop. The rule re-arms the timer at one
-/// grace from the end of whichever servicing has just finished, so a
-/// chatty server cannot buy the tool extra *running* time — only the
-/// teardown window it was always owed. A reset that added `armed`, or
-/// that accumulated a grace per servicing, would show up here as a
-/// backstop firing much later than one grace after the last answer.
+/// The grace is given back **once**: the first servicing to end past
+/// the backstop is the last one this call services, and the host then
+/// waits only for the tool. Re-arming and staying in the `select!`
+/// would be unbounded — a queued request is ready whenever the timer
+/// is not, so each servicing would push the expiry back and the call
+/// would never end. Twenty requests are queued here and the deadline
+/// still lands at `armed` + one servicing + one grace; the other
+/// eighteen stay queued, exactly as they would after a timeout.
 #[tokio::test]
-async fn repeated_servicings_extend_the_backstop_by_one_grace_not_by_each() {
+async fn a_server_with_a_request_always_ready_cannot_hold_the_call_open() {
     let (sink, dir) = sampling_world();
     let runner = sampling_runner(&sink, &dir).await;
     let agent = sampling_agent(10.0, None);
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut replies = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..20 {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.send(crate::mcp::ServerRequest::Sampling {
             params: sampling_params(),
@@ -4368,30 +4368,29 @@ async fn repeated_servicings_extend_the_backstop_by_one_grace_not_by_each() {
     }
     let mut channel = SamplingChannel::new("srv", rx);
 
-    // 700 ms per answer against a 1 s deadline armed at 1.3 s: the
-    // first servicing ends inside the backstop, the second and third
-    // each outlive what is left of it and hand the grace back.
-    let llm = SlowLlmClient::new(
-        Duration::from_millis(700),
-        canned("sampled.", 100_000, 10_000),
-    );
+    // 300 ms per answer against a 200 ms deadline armed at 500 ms: the
+    // first servicing ends 200 ms inside the backstop, the second
+    // cannot help but cross it, and there the servicing stops. Both
+    // margins are wide enough that scheduling noise cannot change
+    // *which* servicing is the last one.
+    let servicing = Duration::from_millis(300);
+    let llm = SlowLlmClient::new(servicing, canned("sampled.", 100_000, 10_000));
 
     let grace = Duration::from_millis(300);
-    let allowed = Duration::from_secs(1);
+    let allowed = Duration::from_millis(200);
+    let armed = allowed + grace;
     let sandbox = fq_tools::ToolSandbox::new();
     let ctx = fq_tools::ToolContext::new(&sandbox);
     let mut totals = InvocationTotals::default();
     let mut cursor = None;
 
+    let started = tokio::time::Instant::now();
     let outcome = runner
         .await_tool_under_deadline(
             &NeverReturnsTool,
             &ctx,
             json!({}),
-            crate::tools::CallDeadline {
-                allowed,
-                armed: allowed + grace,
-            },
+            crate::tools::CallDeadline { allowed, armed },
             "wedge__hang",
             &agent,
             &llm,
@@ -4411,26 +4410,113 @@ async fn repeated_servicings_extend_the_backstop_by_one_grace_not_by_each() {
         "the host's backstop, which stopped nothing: {err}"
     );
 
+    // The ceiling the rest of the runtime is entitled to assume, plus
+    // scheduling slack. What it rules out is the unbounded loop, which
+    // would answer all twenty and take some six seconds.
+    let elapsed = fired_at.duration_since(started);
+    let slack = Duration::from_millis(300);
+    assert!(
+        elapsed <= armed + servicing + grace + slack,
+        "a call is bounded by `armed` + one servicing + one grace, took {elapsed:?}"
+    );
+
+    // Exactly one servicing after the one that crossed the backstop:
+    // none. An unbounded loop would have answered all twenty.
     let answers = llm.answers();
-    assert_eq!(answers.len(), 3, "every queued request was serviced");
-    for reply in replies {
-        assert!(
-            reply.await.expect("answered").is_ok(),
-            "each server got its answer"
+    assert_eq!(
+        answers.len(),
+        2,
+        "the servicing that outlived the backstop is the last one"
+    );
+    for (n, mut reply) in replies.into_iter().enumerate() {
+        let answered = reply.try_recv().is_ok();
+        assert_eq!(
+            answered,
+            n < 2,
+            "request {n} answered={answered}: the ones after the grace stay queued"
         );
     }
 
-    // The timeline, measured from the last answer rather than from the
-    // start: one grace, plus scheduling slack.
-    let after_last = fired_at.duration_since(answers[2]);
+    // And the grace was measured from the end of that last servicing.
+    let after_last = fired_at.duration_since(answers[1]);
     assert!(
-        after_last >= grace / 2,
-        "the tool must get a grace back after the last servicing, got {after_last:?}"
+        after_last >= grace / 2 && after_last < grace + Duration::from_millis(200),
+        "the backstop fires one grace ({grace:?}) after the last servicing, got {after_last:?}"
+    );
+    drop(tx);
+}
+
+/// The reset is for a servicing that outlived the backstop, and only
+/// for that one.
+///
+/// A servicing that ends *inside* the backstop has spent nothing that
+/// belongs to the tool, so the timer must not move: this call is
+/// serviced 100 ms in, under a deadline armed at 600 ms, and must
+/// still be cut off at 600 ms. Drop the `now >= expires_at` guard —
+/// re-arm after every servicing — and the call ends at 400 ms instead,
+/// a tool losing two thirds of the deadline it was promised because the
+/// host happened to answer a server early on.
+#[tokio::test]
+async fn a_servicing_inside_the_backstop_does_not_move_it() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = sampling_agent(10.0, None);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(crate::mcp::ServerRequest::Sampling {
+        params: sampling_params(),
+        reply: reply_tx,
+    })
+    .expect("channel open");
+    let mut channel = SamplingChannel::new("srv", rx);
+
+    let llm = SlowLlmClient::new(
+        Duration::from_millis(100),
+        canned("sampled.", 100_000, 10_000),
+    );
+
+    let armed = Duration::from_millis(600);
+    let sandbox = fq_tools::ToolSandbox::new();
+    let ctx = fq_tools::ToolContext::new(&sandbox);
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+
+    let started = tokio::time::Instant::now();
+    let outcome = runner
+        .await_tool_under_deadline(
+            &NeverReturnsTool,
+            &ctx,
+            json!({}),
+            crate::tools::CallDeadline {
+                allowed: Duration::from_millis(300),
+                armed,
+            },
+            "wedge__hang",
+            &agent,
+            &llm,
+            agent.id(),
+            Uuid::now_v7(),
+            &mut totals,
+            &mut cursor,
+            Some(&mut channel),
+        )
+        .await
+        .expect("infrastructure ok");
+    let elapsed = started.elapsed();
+
+    assert!(
+        reply_rx.await.expect("answered").is_ok(),
+        "the server was serviced"
+    );
+    let err = outcome.expect_err("the tool never answered");
+    assert!(
+        matches!(err, fq_tools::ToolError::TimedOut { output: None, .. }),
+        "the host's backstop, which stopped nothing: {err}"
     );
     assert!(
-        after_last < grace + Duration::from_millis(200),
-        "the backstop fires one grace ({grace:?}) after the last servicing, \
-         never one per servicing nor a fresh `armed`, got {after_last:?}"
+        elapsed >= armed,
+        "an early servicing must not shorten the deadline, took {elapsed:?}"
     );
     drop(tx);
 }
