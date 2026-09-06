@@ -4,9 +4,10 @@ Verdict: issues found — see below.
 
 Workers: 4 alive, 1 stale, 1 shutdown
   -> `fq workers list --stale-only` to inspect
-Current executions: 1 in-flight (0 working, 1 stuck)
-  -> 1 not advanced in >30s: 3a000000-0000-7000-8000-000000000003
+Current executions: 1 in-flight (0 working, 1 stuck after 4210s)
+  -> 1 not advanced in >4210s: 3a000000-0000-7000-8000-000000000003
   -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage
+  -> `fq events query --event-type invocation_stuck` for when each one was flagged
 Ambiguous invocations: 0
 Permanent failures: 1
   tool_error: 1

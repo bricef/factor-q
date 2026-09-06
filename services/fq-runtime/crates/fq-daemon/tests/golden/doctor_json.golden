@@ -14,7 +14,8 @@
     "stuck": 1,
     "stuck_ids": [
       "3a000000-0000-7000-8000-000000000003"
-    ]
+    ],
+    "stuck_after_ms": 4210000
   },
   "ambiguous": 0,
   "failures": [

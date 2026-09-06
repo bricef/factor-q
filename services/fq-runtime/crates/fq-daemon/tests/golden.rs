@@ -958,6 +958,22 @@ fn golden_costs_json() {
 // what pins it is the fixture's barriers (the sweep observed, the
 // heartbeats freshened last), the same ones the roster golden depends
 // on.
+//
+// REVIEWED GOLDEN CHANGE (2026-09-06, #37) — the threshold on the
+// executions line moves from 30s to 4210s, and the line now names it
+// whether or not anything is stuck.
+//
+// The old number was the stale-*worker* threshold, borrowed on the
+// reasoning that an invocation silent for as long as a worker had not
+// heartbeated was the same order of signal. It is not: minute-scale
+// invocations are what this runtime is for. The threshold is now
+// derived from the daemon's own call deadlines — twice the longest a
+// single reducer step can legitimately take — which at the fixture's
+// (default) configuration is 4210s. The verdict itself is unmoved:
+// `3a000000` was last touched in January and is stuck against either
+// number, which is why only the threshold text differs. The extra
+// `fq events query` line under it is the new pointer at the event the
+// sweep emits for the same row.
 
 /// The consumer block's per-consumer counters are machinery readings —
 /// how far each durable has been delivered, and how far behind the
@@ -1094,6 +1110,23 @@ fn fail_on_issues_exits_nonzero_and_still_prints_the_report() {
 // caller holds. That contract is declared on the atom itself, and
 // `edge_event_tail::a_list_row_walks_to_its_whole_event` executes the
 // walk.
+//
+// REVIEWED GOLDEN CHANGE (2026-09-06, #37) — one row added, at the top:
+// an `invocation_stuck` for `researcher` / `3a000000`.
+//
+// It is the same daemon-produced-it correction as the flip above, one
+// event later. The fixture seeds an in-flight WAL row whose last step
+// boundary is 2026-01-02, and the daemon now runs a stuck sweep on the
+// same tick as the stale-worker one — so a row eight months past any
+// threshold the daemon can derive is flagged, exactly as
+// `doctor_human.golden` has always said it is stuck. The two goldens
+// disagreeing would have been the defect; this is them agreeing.
+//
+// It sorts first because the sweep publishes it after the three
+// `worker.orphaned` events of the same tick, and the index is newest
+// first. The barrier in `start_with_agents` waits for it to reach the
+// projection, so its presence is a fact rather than a race — the same
+// treatment the orphan rows already get.
 #[test]
 fn golden_events_query_human() {
     check_golden_events("events_query_human", &["events", "query"]);
@@ -1513,6 +1546,37 @@ impl EdgeFixture {
                          these goldens pin all of them",
                         orphaned.len(),
                         SEEDED_ANCIENT_ALIVE.len()
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+
+                // The same tick runs the stuck-invocation sweep (#37),
+                // and it publishes *after* the roster sweep — so the
+                // barrier above can clear while this event is still in
+                // flight. The seeded in-flight row's last step boundary
+                // is eight months old against any threshold the daemon
+                // can derive, so exactly one `invocation.stuck` is due,
+                // and the event goldens pin it.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    let stuck = proj
+                        .query_events(
+                            &fq_runtime::control_plane::projection::store::EventFilter {
+                                agent: None,
+                                event_type: Some("invocation_stuck"),
+                                since: None,
+                            },
+                            100,
+                        )
+                        .await
+                        .expect("read projected stuck events");
+                    if !stuck.is_empty() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the daemon's stuck sweep never flagged the seeded in-flight row; \
+                         the event goldens pin it"
                     );
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }

@@ -2,6 +2,18 @@
   {
     "event_id": "<UUID>",
     "timestamp": "<TIME>",
+    "agent_id": "researcher",
+    "invocation_id": "3a000000-0000-7000-8000-000000000003",
+    "event_type": "invocation_stuck",
+    "model": null,
+    "total_cost": null,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "<UUID>",
+    "timestamp": "<TIME>",
     "agent_id": "system",
     "invocation_id": "<UUID>",
     "event_type": "worker_orphaned",
