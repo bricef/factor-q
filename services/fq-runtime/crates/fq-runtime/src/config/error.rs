@@ -78,4 +78,23 @@ pub enum ConfigError {
         default: u64,
         max: u64,
     },
+
+    /// `exec`'s teardown budget reaches or passes the host's backstop,
+    /// so the host would cancel the call part-way through the kill it
+    /// exists to perform. All three numbers are named: the operator
+    /// chose two of them and cannot see the third.
+    #[error(
+        "[tools.exec] kill_grace_secs = {kill_grace} + drain_grace_secs = {drain_grace} is \
+         {teardown}s, which is not below the host's {backstop}s backstop: both graces run \
+         after an exec call's deadline, and the host cancels the call {backstop}s after that \
+         same deadline — so a {teardown}s teardown is cut off part-way and the process group \
+         it was killing can survive. Lower kill_grace_secs or drain_grace_secs so their sum \
+         is under {backstop}"
+    )]
+    ExecTeardownExceedsBackstop {
+        kill_grace: u64,
+        drain_grace: u64,
+        teardown: u64,
+        backstop: u64,
+    },
 }

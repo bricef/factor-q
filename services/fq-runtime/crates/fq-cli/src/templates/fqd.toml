@@ -284,9 +284,10 @@ models = ["claude-haiku-4-5"]
 [tools.exec]
 # Timeouts for the built-in `exec` tool. Raise these for agents that run
 # long builds/test suites (e.g. a full `just ci`); a call that exceeds
-# the timeout is killed and returned as an error with partial output.
-# `exec` is the one built-in that times itself, so these win over
-# `[tools] default_timeout_secs` — up to `[tools] max_timeout_secs`.
+# the timeout has its whole process group killed — the command and
+# everything it started — and is returned as an error with partial
+# output. `exec` is the one built-in that times itself, so these win
+# over `[tools] default_timeout_secs` — up to `[tools] max_timeout_secs`.
 #
 # Timeout applied when a call doesn't set its own `timeout_secs`. Default 120.
 # default_timeout_secs = 120
@@ -294,6 +295,22 @@ models = ["claude-haiku-4-5"]
 # Hard ceiling on any single call. A caller-supplied `timeout_secs` above
 # this is clamped down (not rejected). Default 600.
 # max_timeout_secs = 600
+#
+# How long a timed-out process group gets to exit on SIGTERM before it is
+# SIGKILLed. Default 2. Raise it for commands that need to flush on their
+# way out; the window ends early once the group is gone, so it costs
+# nothing when nothing is ignoring SIGTERM.
+# kill_grace_secs = 2
+#
+# How long output capture continues after the child is gone. Default 2.
+# Bounds the drain so a descendant that inherited the pipe and left the
+# process group (`setsid`) cannot hold the call open.
+# drain_grace_secs = 2
+#
+# These two run back to back AFTER the deadline, and the host cancels a
+# call 5s after that same deadline, so their sum must stay strictly under
+# 5 — the daemon refuses to start otherwise, rather than let the host cut
+# a teardown short and leave the process group alive.
 
 [edge]
 # The authenticated operator surface — every `fq` verb speaks it, so a

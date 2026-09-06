@@ -1111,9 +1111,77 @@ sweep_interval_seconds = 300
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.tools.exec.default_timeout_secs, 120);
         assert_eq!(config.tools.exec.max_timeout_secs, 600);
+        assert_eq!(config.tools.exec.kill_grace_secs, 2);
+        assert_eq!(config.tools.exec.drain_grace_secs, 2);
         let exec = config.tools.exec.to_exec_config();
         assert_eq!(exec.default_timeout, Duration::from_secs(120));
         assert_eq!(exec.max_timeout, Duration::from_secs(600));
+        assert_eq!(exec.kill_grace, Duration::from_secs(2));
+        assert_eq!(exec.drain_grace, Duration::from_secs(2));
+    }
+
+    /// The two teardown graces are configuration like every other
+    /// number, and both reach the tool (#552).
+    #[test]
+    fn tools_exec_teardown_graces_parse_and_reach_the_tool() {
+        let toml = r#"
+[tools.exec]
+kill_grace_secs = 3
+drain_grace_secs = 1
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.tools.exec.kill_grace_secs, 3);
+        assert_eq!(config.tools.exec.drain_grace_secs, 1);
+        let exec = config.tools.exec.to_exec_config();
+        assert_eq!(exec.kill_grace, Duration::from_secs(3));
+        assert_eq!(exec.drain_grace, Duration::from_secs(1));
+        // The timeouts this section also owns keep their defaults.
+        assert_eq!(exec.max_timeout, Duration::from_secs(600));
+    }
+
+    /// Both graces run *after* an exec call's deadline, and the host
+    /// cancels the call 5s after that same deadline. A sum that reaches
+    /// the backstop would have the host drop the call mid-teardown,
+    /// leaving alive the process group the kill existed to end — so it
+    /// is refused at load, naming all three numbers (#552).
+    #[test]
+    fn exec_teardown_at_or_past_the_backstop_is_refused() {
+        let toml = r#"
+[tools.exec]
+kill_grace_secs = 4
+drain_grace_secs = 1
+"#;
+        let err = Config::from_toml_str(toml).unwrap_err();
+        let msg = err.to_string();
+        for fragment in [
+            "kill_grace_secs = 4",
+            "drain_grace_secs = 1",
+            "5s backstop",
+            "[tools.exec]",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "message must name {fragment}: {msg}"
+            );
+        }
+
+        // One second under the backstop is fine — the check is on the
+        // sum reaching it, not on either grace alone.
+        let ok = Config::from_toml_str("[tools.exec]\nkill_grace_secs = 3\ndrain_grace_secs = 1\n")
+            .unwrap();
+        assert_eq!(ok.tools.exec.kill_grace_secs, 3);
+    }
+
+    /// The shipped defaults must satisfy the invariant, or a daemon
+    /// with no `[tools.exec]` section would refuse to start.
+    #[test]
+    fn shipped_exec_teardown_defaults_fit_the_backstop() {
+        let config = Config::from_toml_str("").unwrap();
+        let teardown = config.tools.exec.kill_grace_secs + config.tools.exec.drain_grace_secs;
+        assert!(
+            teardown < crate::tools::ToolCallLimits::BACKSTOP_GRACE.as_secs(),
+            "default teardown {teardown}s must stay under the backstop"
+        );
     }
 
     #[test]

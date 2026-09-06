@@ -149,6 +149,14 @@ pub struct ExecConfig {
     /// before it is `SIGKILL`ed (#552). The window ends early once the
     /// group is empty, so this is the price of a tree that ignores
     /// `SIGTERM`, not of every timeout.
+    ///
+    /// **Invariant for hosts**: this and `drain_grace` both run *after*
+    /// the call's deadline has passed, so a host that cancels an
+    /// overdue tool call must allow more than their sum, or it drops
+    /// the call part-way through the kill and the group survives. The
+    /// runtime enforces that against its own backstop when it builds
+    /// this config from `[tools.exec]`; a caller constructing one
+    /// directly owns the same arithmetic.
     pub kill_grace: Duration,
 }
 
