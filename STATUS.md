@@ -237,10 +237,18 @@ makes `Message` an enum over turn kinds with reasoning as a first-class
 part, and the cross-model strip a multi-node graph needs (ADR-0003
 guarantees per-agent model selection, so cross-model edges exist by
 construction) is enforced at the adapter (PR #510). Reasoning now
-round-trips for OpenAI-compatible and Anthropic providers, confirmed live
-on 2026-09-04 (kimi-k3 via OpenRouter, `claude-opus-5`, `gpt-4o-mini` as
-control): every reasoning part was carried byte-for-byte into the next
-request (`experiments/reasoning-round-trip/`, live run section). The
+round-trips for OpenAI-compatible, Anthropic and Gemini providers. The
+first two are confirmed live on 2026-09-04 and again on 2026-09-05
+(kimi-k3 via OpenRouter, `claude-opus-5`, `gpt-4o-mini` as control):
+every reasoning part was carried byte-for-byte into the next request
+(`experiments/reasoning-round-trip/`, live run section). The Gemini row
+landed on 2026-09-05 (#600) and is **hermetic only** — a Gemini mock and
+wire goldens, since no Gemini key is held here. One route does not
+carry: signed or encrypted reasoning routed through OpenRouter is
+dropped on the way back, open as
+[#603](https://github.com/bricef/factor-q/issues/603). Per-provider
+detail, and how each row was verified, is in the
+[reasoning-models guide](docs/guide/reasoning-models.md). The
 Anthropic path no longer rides a fork of `genai`: upstream `0.7.0-beta.21`
 carries the signed-thinking fix, and the switch is pinned by wire goldens
 that did not move.
