@@ -14,10 +14,26 @@ type Fire struct {
 	ScheduledAt time.Time
 }
 
-// FireState is the persisted value for the last acknowledged fire of a job.
+// FireState is the persisted value for a job's fires. LastScheduled and
+// PublishedAt describe the last acknowledged one; RecentFires is the
+// valve's ledger — that job's recent publication instants, oldest first,
+// which is what the per-hour ceiling counts.
+//
+// The ledger exists because one timestamp per job cannot express a rate:
+// counting jobs whose last fire fell in the window, the ceiling only ever
+// closed when the file itself held `limit` jobs, and a single runaway
+// schedule fired for ever (issue #612). Its last entry is PublishedAt,
+// which is retained as the answer to "when did this job last fire?" for
+// anyone reading the bucket.
+//
+// A row written before the ledger existed decodes with RecentFires empty;
+// countedFires then reads its PublishedAt as the single fire it records,
+// so an existing bucket loads without a migration and folds into the
+// ledger the next time each job fires.
 type FireState struct {
-	LastScheduled time.Time `json:"last_scheduled"`
-	PublishedAt   time.Time `json:"published_at"`
+	LastScheduled time.Time   `json:"last_scheduled"`
+	PublishedAt   time.Time   `json:"published_at"`
+	RecentFires   []time.Time `json:"recent_fires,omitempty"`
 }
 
 // JobSet is the validated scheduler input. Keeping the global limit beside the
@@ -37,8 +53,9 @@ const valveWindow = time.Hour
 //
 // The second return value is the instant the valve re-opens: when the fire
 // count in the sliding window is at the ceiling there are no fires, and
-// this says when the oldest fire in the window leaves it and planning is
-// worth repeating. It is the zero time whenever the valve is not the
+// this says when enough of the window's oldest fires have left it for the
+// count to fall back under the ceiling and planning to be worth
+// repeating. It is the zero time whenever the valve is not the
 // reason — the caller has fires to wait for, or there is simply nothing to
 // schedule. Without it the loop waited only on a config reload, so a burst
 // that tripped the valve silenced the scheduler until someone edited the
@@ -97,31 +114,98 @@ func plan(now time.Time, jobs JobSet, state map[string]FireState) ([]Fire, time.
 		return candidates[i].ScheduledAt.Before(candidates[j].ScheduledAt)
 	})
 
-	limit := jobs.MaxFiresPerHour
-	if limit <= 0 {
-		limit = DefaultMaxFiresPerHour
-	}
-	windowStart := now.Add(-valveWindow)
-	used := 0
-	var oldestInWindow time.Time
-	for _, previous := range state {
-		if previous.PublishedAt.After(windowStart) && !previous.PublishedAt.After(now) {
-			used++
-			if oldestInWindow.IsZero() || previous.PublishedAt.Before(oldestInWindow) {
-				oldestInWindow = previous.PublishedAt
-			}
-		}
-	}
+	limit := effectiveLimit(jobs.MaxFiresPerHour)
+	inWindow := firesInWindow(state, now)
+	used := len(inWindow)
 	if used >= limit {
-		// The window slides: at oldestInWindow+valveWindow that fire is no
-		// longer inside it, `used` drops below the ceiling, and this plan
-		// is worth recomputing. (used >= limit implies at least one fire
-		// in the window for any limit >= 1, and limit is validated
-		// positive, so oldestInWindow is set.)
-		return nil, oldestInWindow.Add(valveWindow)
+		// The window slides: sorted oldest first, the fire at index
+		// used-limit is the one whose departure first brings the count
+		// back under the ceiling — everything older leaves before it, and
+		// once it has gone only limit-1 fires remain. With used == limit,
+		// the ordinary case, that is the oldest fire in the window. At
+		// that instant `used` is below the ceiling and this plan is worth
+		// recomputing. (used >= limit >= 1, so the index is in range.)
+		return nil, inWindow[used-limit].Add(valveWindow)
 	}
 	if remaining := limit - used; len(candidates) > remaining {
 		candidates = candidates[:remaining]
 	}
 	return candidates, time.Time{}
+}
+
+// firesInWindow is every fire the valve counts, oldest first: each job's
+// recorded publications that fall inside the sliding window. Fires are
+// counted one by one rather than one per job, so a single schedule
+// running away trips the ceiling on its own.
+func firesInWindow(state map[string]FireState, now time.Time) []time.Time {
+	windowStart := now.Add(-valveWindow)
+	var fires []time.Time
+	for _, previous := range state {
+		for _, at := range countedFires(previous) {
+			if at.After(windowStart) && !at.After(now) {
+				fires = append(fires, at)
+			}
+		}
+	}
+	sort.Slice(fires, func(i, j int) bool { return fires[i].Before(fires[j]) })
+	return fires
+}
+
+// countedFires is one job's fire history as the valve reads it, oldest
+// first: its ledger, or — for a row written before the ledger existed —
+// the single fire its PublishedAt records.
+func countedFires(state FireState) []time.Time {
+	if len(state.RecentFires) > 0 {
+		return state.RecentFires
+	}
+	if state.PublishedAt.IsZero() {
+		return nil
+	}
+	return []time.Time{state.PublishedAt}
+}
+
+// recordFire is the state a job carries after a publish acknowledged at
+// publishedAt: the slot advances and the fire joins the ledger, which is
+// then trimmed to what the ceiling can still count — fires inside the
+// window, and at most the newest `limit` of them, since no decision can
+// turn on an older one. Trimming per job is exact for the global count,
+// because the newest `limit` fires across the file are always inside the
+// union of each job's newest `limit`. It also bounds the stored value: at
+// one fire a minute — the validated schedule floor — a job's ledger holds
+// at most sixty instants, and a lower ceiling holds fewer.
+//
+// It is the ledger's only writer, which is what keeps it in publication
+// order.
+func recordFire(previous FireState, scheduled, publishedAt time.Time, configuredLimit int) FireState {
+	windowStart := publishedAt.Add(-valveWindow)
+	counted := countedFires(previous)
+	ledger := make([]time.Time, 0, len(counted)+1)
+	for _, at := range counted {
+		if at.After(windowStart) {
+			ledger = append(ledger, at)
+		}
+	}
+	ledger = append(ledger, publishedAt)
+	if limit := effectiveLimit(configuredLimit); len(ledger) > limit {
+		ledger = ledger[len(ledger)-limit:]
+	}
+	return FireState{LastScheduled: scheduled, PublishedAt: publishedAt, RecentFires: ledger}
+}
+
+// supersedeFire records a fire that was never published: the slot moves
+// on, but the job's publication history is untouched. Rebuilding the
+// record from scratch here would drop the ledger, and a job whose
+// publishes kept being superseded would launder its way past the valve.
+func supersedeFire(previous FireState, scheduled time.Time) FireState {
+	previous.LastScheduled = scheduled
+	return previous
+}
+
+// effectiveLimit resolves the configured ceiling. Validation guarantees a
+// positive value, so the fallback only covers a JobSet built in code.
+func effectiveLimit(configured int) int {
+	if configured <= 0 {
+		return DefaultMaxFiresPerHour
+	}
+	return configured
 }

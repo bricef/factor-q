@@ -101,7 +101,7 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 			if err := publishWithBackoff(ctx, publisher, fire, job, logger); err != nil {
 				if errors.Is(err, errFireSuperseded) {
 					logger.Printf("job=%s scheduled=%s missed: superseded by next slot", fire.Job, fire.ScheduledAt.Format(time.RFC3339))
-					record := FireState{LastScheduled: fire.ScheduledAt}
+					record := supersedeFire(state[fire.Job], fire.ScheduledAt)
 					if err := withBrokerRetry(ctx, logger, fmt.Sprintf("record superseded fire %q", fire.Job), func() error {
 						return store.Put(ctx, fire.Job, record)
 					}); err != nil {
@@ -119,7 +119,7 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 				}
 				return err
 			}
-			record := FireState{LastScheduled: fire.ScheduledAt, PublishedAt: time.Now()}
+			record := recordFire(state[fire.Job], fire.ScheduledAt, time.Now(), config.Limits.MaxFiresPerHour)
 			if err := withBrokerRetry(ctx, logger, fmt.Sprintf("record acknowledged fire %q", fire.Job), func() error {
 				return store.Put(ctx, fire.Job, record)
 			}); err != nil {

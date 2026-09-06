@@ -111,6 +111,54 @@ func TestSchedulerRefiresWhenTheValveWindowSlides(t *testing.T) {
 	}
 }
 
+// The valve can only count fires if the loop records them, so a published
+// fire must reach the job's ledger and not just its `published_at`.
+func TestSchedulerRecordsEachFireInTheLedger(t *testing.T) {
+	now := time.Now()
+	store := NewMemoryStateStore()
+	store.States["catch-up"] = FireState{LastScheduled: now.Add(-3 * time.Hour)}
+	config := &Config{
+		Limits: Limits{MaxFiresPerHour: 5},
+		Jobs: []Job{{
+			Name: "catch-up", Schedule: "0 * * * *", Subject: "cron.valve",
+			TZ: "UTC", CatchUp: "once", Enabled: boolPtr(true), Durable: boolPtr(false),
+		}},
+	}
+
+	published := make(chan time.Time, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runScheduler(ctx, config, nil, &signallingPublisher{at: published}, store, log.New(io.Discard, "", 0))
+	}()
+
+	select {
+	case <-published:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the catch-up fire never happened")
+	}
+	// The state write follows the publish with no cancellation point
+	// between them, so a clean stop means the record has landed.
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runScheduler = %v, want a clean stop", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runScheduler did not stop on cancellation")
+	}
+
+	state, ok, err := store.Get(context.Background(), "catch-up")
+	if err != nil || !ok {
+		t.Fatalf("state after the fire: ok=%v err=%v", ok, err)
+	}
+	if len(state.RecentFires) != 1 || !state.RecentFires[0].Equal(state.PublishedAt) {
+		t.Fatalf("ledger = %v with published_at %s; want the one fire recorded", state.RecentFires, state.PublishedAt)
+	}
+}
+
 // signallingPublisher reports the time of its first publish.
 type signallingPublisher struct {
 	at   chan time.Time
