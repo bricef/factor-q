@@ -41,9 +41,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use fq_runtime::events::{
-    Event, EventPayload, SystemShutdownPayload, SystemStartupPayload,
-};
+use fq_runtime::events::{Event, EventPayload, SystemShutdownPayload, SystemStartupPayload};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
@@ -583,7 +581,10 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     tokio::join!(
         teardown::join_fallible("projection consumer", projection_handle),
         teardown::join_fallible("coordination consumer", coord_handle),
-        teardown::join_optional("summary consumer", summary_handle.take_if(|_| !summary_joined)),
+        teardown::join_optional(
+            "summary consumer",
+            summary_handle.take_if(|_| !summary_joined)
+        ),
         teardown::join_fallible("heartbeat consumer", hb_consumer_handle),
         teardown::join_fallible("advisory watch", advisory_handle),
         teardown::join_fallible("heartbeat producer", hb_producer_handle),

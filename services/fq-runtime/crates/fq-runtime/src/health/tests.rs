@@ -22,7 +22,10 @@ use crate::worker::WorkerId;
 #[test]
 fn the_expected_roster_covers_every_durable_and_only_expects_a_configured_summariser() {
     let without = core_streams(false);
-    let names: Vec<&str> = without.iter().flat_map(|(_, c)| c.iter().copied()).collect();
+    let names: Vec<&str> = without
+        .iter()
+        .flat_map(|(_, c)| c.iter().copied())
+        .collect();
     assert_eq!(
         names,
         vec![
@@ -53,7 +56,10 @@ fn stuck_needs_outstanding_work_and_more_redeliveries_than_the_threshold() {
         stuck_after_redeliveries: 5,
         ..ConsumerRedeliveryPolicy::default()
     };
-    assert!(!is_stuck(0, 99, policy), "nothing pending is idle, not stuck");
+    assert!(
+        !is_stuck(0, 99, policy),
+        "nothing pending is idle, not stuck"
+    );
     assert!(!is_stuck(1, 4, policy), "under the threshold is retrying");
     assert!(is_stuck(1, 5, policy), "at the threshold is stuck");
 
@@ -299,12 +305,8 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
     let server = crate::test_support::nats::test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
 
-    let consumers = probe_core_consumers(
-        &bus.jetstream(),
-        true,
-        ConsumerRedeliveryPolicy::default(),
-    )
-    .await;
+    let consumers =
+        probe_core_consumers(&bus.jetstream(), true, ConsumerRedeliveryPolicy::default()).await;
     let names: Vec<&str> = consumers.iter().map(|c| c.name()).collect();
     assert_eq!(
         names,

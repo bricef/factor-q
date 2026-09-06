@@ -59,6 +59,19 @@ use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
 
+/// The name a trigger's ack or NAK line reports (review finding F).
+///
+/// `Some` once the dispatcher has taken responsibility for the message
+/// and named it. The reject-before-naming paths — a bad subject, an
+/// unknown agent, a payload that is not JSON — pass what the publisher
+/// stamped, if anything: on those the honest answer may be that the
+/// message never had a name. Rendered as `-` then, so the field is on
+/// every line and a log query for it can rely on being able to find it.
+fn trigger_name(id: Option<uuid::Uuid>) -> String {
+    id.map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 /// Whether the current JetStream delivery is the terminal retry. Kept pure so
 /// the delivery-limit boundary is testable without a live broker.
 fn trigger_retry_exhausted(delivery_attempt: u32) -> bool {
@@ -366,7 +379,12 @@ impl TriggerDispatcher {
                     subject = %msg.subject,
                     "trigger with unexpected subject format, dropping"
                 );
-                self.ack(msg, "bad subject").await;
+                self.ack(
+                    msg,
+                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    "bad subject",
+                )
+                .await;
                 return;
             }
         };
@@ -380,7 +398,12 @@ impl TriggerDispatcher {
                     error = %err,
                     "trigger for invalid agent id, dropping"
                 );
-                self.ack(msg, "invalid agent id").await;
+                self.ack(
+                    msg,
+                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    "invalid agent id",
+                )
+                .await;
                 return;
             }
         };
@@ -397,7 +420,12 @@ impl TriggerDispatcher {
                     agent_id = %agent_id,
                     "trigger for unknown agent, dropping"
                 );
-                self.ack(msg, "unknown agent").await;
+                self.ack(
+                    msg,
+                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    "unknown agent",
+                )
+                .await;
                 return;
             }
         };
@@ -414,7 +442,12 @@ impl TriggerDispatcher {
                         error = %err,
                         "trigger payload is not valid JSON, dropping"
                     );
-                    self.ack(msg, "invalid payload").await;
+                    self.ack(
+                        msg,
+                        crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                        "invalid payload",
+                    )
+                    .await;
                     return;
                 }
             }
@@ -491,7 +524,7 @@ impl TriggerDispatcher {
                     // stop waiting on this branch; the ack below (on
                     // return) covers the drop case.
                     if signal.is_ok() {
-                        self.ack(msg, "durably started").await;
+                        self.ack(msg, Some(trigger_id), "durably started").await;
                         acked = true;
                     }
                 }
@@ -525,15 +558,25 @@ impl TriggerDispatcher {
                         err,
                     )
                     .await;
-                    self.ack(msg, "transient retry limit exhausted").await;
+                    self.ack(msg, Some(trigger_id), "transient retry limit exhausted")
+                        .await;
                 }
                 (TriggerFate::Retry(delay), _) => {
-                    self.nak(msg, delay, "transient failure before first WAL write")
-                        .await;
+                    self.nak(
+                        msg,
+                        trigger_id,
+                        delay,
+                        "transient failure before first WAL write",
+                    )
+                    .await;
                 }
                 _ => {
-                    self.ack(msg, "invocation returned before durable start (permanent)")
-                        .await;
+                    self.ack(
+                        msg,
+                        Some(trigger_id),
+                        "invocation returned before durable start (permanent)",
+                    )
+                    .await;
                 }
             }
         }
@@ -551,11 +594,18 @@ impl TriggerDispatcher {
         }
     }
 
-    async fn ack(&self, msg: &async_nats::jetstream::Message, context: &str) {
+    async fn ack(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        trigger_id: Option<uuid::Uuid>,
+        context: &str,
+    ) {
         if let Err(err) = msg.ack().await {
             error!(
                 error = %err,
                 context,
+                subject = %msg.subject,
+                trigger_id = %trigger_name(trigger_id),
                 "failed to ack trigger message"
             );
         }
@@ -649,6 +699,7 @@ impl TriggerDispatcher {
     async fn nak(
         &self,
         msg: &async_nats::jetstream::Message,
+        trigger_id: uuid::Uuid,
         delay: std::time::Duration,
         context: &str,
     ) {
@@ -659,10 +710,18 @@ impl TriggerDispatcher {
             error!(
                 error = %err,
                 context,
+                subject = %msg.subject,
+                trigger_id = %trigger_id,
                 "failed to NAK trigger message"
             );
         } else {
-            warn!(context, "NAK'd trigger for redelivery");
+            warn!(
+                context,
+                subject = %msg.subject,
+                trigger_id = %trigger_id,
+                retry_in_ms = delay.as_millis() as u64,
+                "NAK'd trigger for redelivery"
+            );
         }
     }
 
