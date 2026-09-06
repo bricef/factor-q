@@ -109,11 +109,14 @@ func TestGraphQLQueryErrorsAreLoud(t *testing.T) {
 // `ready` and re-triggers next poll.
 func TestRelabelFailsLoudlyOnForbiddenRemoval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			w.Write([]byte("[]")) // the add succeeds; the removal is what fails
-			return
+		switch {
+		case r.Method == http.MethodPost: // the add succeeds
+			w.Write([]byte("[]"))
+		case r.URL.Path == "/repos/o/r/issues/7/labels/in-progress": // and rolls back
+			w.Write([]byte("[]"))
+		default: // the removal out of `ready` is what fails
+			http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
 		}
-		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
 	}))
 	defer server.Close()
 	client := github.NewClient(nil)
@@ -156,6 +159,71 @@ func TestRelabelAddsBeforeItRemoves(t *testing.T) {
 	}
 	if want := []string{"add in-progress", "remove ready"}; !slices.Equal(calls, want) {
 		t.Fatalf("call order = %v, want %v", calls, want)
+	}
+}
+
+// A 5xx on the removal is a failed transition, not a lost race. The add
+// must be rolled back: an issue left carrying both labels is skipped by
+// the planner on every later cycle, so "will retry next poll" would be a
+// lie and the issue would sit there until a human noticed. Removing first
+// — the old order — at least left it `ready` and retrying.
+func TestRelabelRollsBackTheAddWhenTheRemovalFails(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/o/r/issues/7/labels" && r.Method == http.MethodPost:
+			calls = append(calls, "add in-progress")
+			w.Write([]byte("[]"))
+		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
+			calls = append(calls, "remove ready")
+			http.Error(w, `{"message":"bad gateway"}`, http.StatusBadGateway)
+		case r.URL.Path == "/repos/o/r/issues/7/labels/in-progress" && r.Method == http.MethodDelete:
+			calls = append(calls, "roll back in-progress")
+			w.Write([]byte("[]"))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := github.NewClient(nil)
+	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
+	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token"}
+
+	err := source.Relabel(context.Background(), 7, "ready", "in-progress")
+	if err == nil {
+		t.Fatal("a 502 on the removal must fail the transition")
+	}
+	if errors.Is(err, ErrClaimLost) || errors.Is(err, ErrBothLabels) {
+		t.Fatalf("a rolled-back transition is a plain retryable failure: %v", err)
+	}
+	want := []string{"add in-progress", "remove ready", "roll back in-progress"}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("call order = %v, want %v", calls, want)
+	}
+}
+
+// When the rollback fails too, the issue really does carry both labels
+// and no poll will pick it up again. That is ErrBothLabels, and the
+// caller must say so instead of promising a retry.
+func TestRelabelReportsBothLabelsWhenTheRollbackFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte("[]"))
+			return
+		}
+		http.Error(w, `{"message":"bad gateway"}`, http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := github.NewClient(nil)
+	client.BaseURL, _ = client.BaseURL.Parse(server.URL + "/")
+	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token"}
+
+	err := source.Relabel(context.Background(), 7, "ready", "in-progress")
+	if !errors.Is(err, ErrBothLabels) {
+		t.Fatalf("Relabel = %v, want ErrBothLabels", err)
+	}
+	if !strings.Contains(err.Error(), "ready") || !strings.Contains(err.Error(), "in-progress") {
+		t.Errorf("error should name both labels so an operator knows what to remove: %v", err)
 	}
 }
 
