@@ -257,6 +257,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
             total_output_tokens: 10_095,
             total_cache_read_tokens: 6_554_327,
             total_cache_write_tokens: 0,
+            total_reasoning_tokens: None,
         }),
     };
     let html = invocation_detail(&detail, 1_000);
@@ -379,6 +380,7 @@ fn cost_view(agent: &str, calls: i64, cost: f64) -> CostView {
         total_output_tokens: 0,
         total_cache_read_tokens: 0,
         total_cache_write_tokens: 0,
+        total_reasoning_tokens: None,
         invocation_count: 1,
         framework_cost: 0.0,
     }
@@ -391,6 +393,9 @@ fn cost_report(agents: Vec<CostView>) -> CostReport {
         total_output_tokens: agents.iter().map(|a| a.total_output_tokens).sum(),
         total_cache_read_tokens: agents.iter().map(|a| a.total_cache_read_tokens).sum(),
         total_cache_write_tokens: agents.iter().map(|a| a.total_cache_write_tokens).sum(),
+        total_reasoning_tokens: agents
+            .iter()
+            .fold(None, |acc, a| sum_reported(acc, a.total_reasoning_tokens)),
         framework_cost: agents.iter().map(|a| a.framework_cost).sum(),
         agents,
         buckets: vec![],
@@ -636,6 +641,7 @@ fn agent_costs_render_models_and_linked_invocations() {
             total_output_tokens: 10_095,
             total_cache_read_tokens: 6_554_327,
             total_cache_write_tokens: 0,
+            total_reasoning_tokens: None,
         }],
     };
     let html = agent_costs(&d, Window::All, 1_860_000);
@@ -1263,4 +1269,159 @@ fn empty_reasoning_is_labelled_empty_not_opaque() {
             "nothing to disclose: {html}"
         );
     }
+}
+
+/// One agent's row on the fleet costs page: the `<tr>` that links to
+/// its drill-down.
+fn agent_row<'a>(html: &'a str, agent: &str) -> &'a str {
+    let start = html
+        .find(&format!(r#"<tr><td><a href="/costs/{agent}">"#))
+        .unwrap_or_else(|| panic!("{agent} has a row in: {html}"));
+    let end = html[start..].find("</tr>").expect("a row ends") + start;
+    &html[start..end]
+}
+
+/// The named-agents subtotal row.
+fn subtotal_row(html: &str) -> &str {
+    let start = html.find(r#"<tr class="sub">"#).expect("a subtotal row");
+    let end = html[start..].find("</tr>").expect("a row ends") + start;
+    &html[start..end]
+}
+
+/// The reasoning column: `n/a` is a provider that reported no split —
+/// every Anthropic call — and is not `0`, which is a provider that
+/// reported one and it was zero (#536). The named-agents subtotal folds
+/// the same way: an unreported split beside reported ones is the sum of
+/// the reported ones.
+#[test]
+fn costs_render_an_unreported_split_as_na_and_a_reported_zero_as_zero() {
+    let mut kimi = cost_view("kimi-agent", 10, 60.0);
+    kimi.total_reasoning_tokens = Some(1_234);
+    let mut openai = cost_view("openai-agent", 10, 20.0);
+    openai.total_reasoning_tokens = Some(0);
+    let anthropic = cost_view("anthropic-agent", 10, 20.0);
+    let html = costs_all(&cost_report(vec![kimi, openai, anthropic]));
+
+    assert!(
+        html.contains("<th class=\"n\">reasoning</th>"),
+        "got: {html}"
+    );
+    assert!(
+        agent_row(&html, "kimi-agent").contains(r#"<td class="n">1,234</td>"#),
+        "got: {html}"
+    );
+    assert!(
+        agent_row(&html, "anthropic-agent").contains(r#"<td class="n muted">n/a</td>"#),
+        "got: {html}"
+    );
+    assert!(
+        !agent_row(&html, "openai-agent").contains("n/a"),
+        "a reported zero is not `n/a`: {html}"
+    );
+    // Every other token column of these two rows is a zero, so count
+    // the zero cells: the reported zero is one more than the
+    // unreported split, which rendered as `n/a` instead.
+    let zeros = |row: &str| row.matches(r#"<td class="n">0</td>"#).count();
+    assert_eq!(
+        zeros(agent_row(&html, "openai-agent")),
+        zeros(agent_row(&html, "anthropic-agent")) + 1,
+        "a reported zero renders as a count: {html}"
+    );
+    // The subtotal: Some(1234) + Some(0) + None.
+    assert!(
+        subtotal_row(&html).contains(r#"<td class="n">1,234</td>"#),
+        "got: {html}"
+    );
+}
+
+/// A fleet where no agent reported a split — every Anthropic fleet —
+/// has `n/a` on its subtotal too, not a zero.
+#[test]
+fn costs_subtotal_is_na_when_no_agent_reported_a_split() {
+    let html = costs_all(&cost_report(vec![
+        cost_view("a", 1, 1.0),
+        cost_view("b", 1, 1.0),
+    ]));
+    assert!(
+        subtotal_row(&html).contains(r#"<td class="n muted">n/a</td>"#),
+        "got: {html}"
+    );
+}
+
+/// The drill-down's per-invocation table carries the same column with
+/// the same rendering.
+#[test]
+fn agent_costs_render_the_reasoning_column_per_invocation() {
+    let inv = |id: &str, reasoning: Option<i64>| fq_ops::views::InvocationCostView {
+        invocation_id: id.to_string(),
+        started_at_ms: 0,
+        event_count: 3,
+        total_cost: 0.5,
+        total_input_tokens: 1_000,
+        total_output_tokens: 100,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_reasoning_tokens: reasoning,
+    };
+    let mut totals = cost_view("kimi-agent", 6, 1.0);
+    totals.total_reasoning_tokens = Some(77);
+    let d = AgentCostDetailView {
+        agent_id: "kimi-agent".to_string(),
+        totals,
+        models: vec![],
+        invocations: vec![
+            inv("019f6176-78c3-7cb3-9f0a-73c98b760b70", Some(77)),
+            inv("019f6176-78c3-7cb3-9f0a-73c98b760b71", None),
+        ],
+    };
+    let html = agent_costs(&d, Window::All, 1_000);
+    assert!(
+        html.contains("<th class=\"n\">reasoning</th>"),
+        "got: {html}"
+    );
+    assert!(html.contains(r#"<td class="n">77</td>"#), "got: {html}");
+    assert!(
+        html.contains(r#"<td class="n muted">n/a</td>"#),
+        "got: {html}"
+    );
+}
+
+/// The invocation page's "cost so far" names the split only when a
+/// provider reported one: an Anthropic run says nothing there rather
+/// than `n/a`, the way the cache-read figure says nothing at zero.
+#[test]
+fn invocation_detail_names_reasoning_only_when_reported() {
+    let detail = |reasoning: Option<i64>| fq_ops::views::InvocationDetailView {
+        invocation_id: "inv-1".into(),
+        agent_id: Some("kimi-agent".into()),
+        owner: None,
+        archive: None,
+        live: None,
+        recent_events: vec![],
+        has_transcript: false,
+        summary: None,
+        cost: Some(fq_ops::views::InvocationCostView {
+            invocation_id: "inv-1".into(),
+            started_at_ms: 0,
+            event_count: 4,
+            total_cost: 0.25,
+            total_input_tokens: 2_000,
+            total_output_tokens: 300,
+            total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+            total_reasoning_tokens: reasoning,
+        }),
+    };
+    let html = invocation_detail(&detail(Some(12_500)), 1_000);
+    assert!(html.contains(" · 12.5K reasoning</span>"), "got: {html}");
+    let html = invocation_detail(&detail(Some(0)), 1_000);
+    assert!(
+        html.contains(" · 0 reasoning</span>"),
+        "a reported zero is shown: {html}"
+    );
+    let html = invocation_detail(&detail(None), 1_000);
+    assert!(
+        !html.contains("reasoning</span>"),
+        "an unreported split is not mentioned: {html}"
+    );
 }
