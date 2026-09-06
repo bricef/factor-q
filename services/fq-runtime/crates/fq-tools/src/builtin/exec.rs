@@ -1692,9 +1692,14 @@ mod tests {
         // `join!` drops the futures it owns as it returns, so the exec
         // future — and with it the group guard — is gone by the time
         // the assertions below run.
+        //
+        // Three seconds, not a few hundred milliseconds: the probe has
+        // to see the payload's pids before the drop, and on a saturated
+        // runner `bash` can take a while to reach its `printf`. The
+        // tool's own timeout is 300s, so nothing else can end this call.
         let (outcome, (leader, _background)) = tokio::join!(
             tokio::time::timeout(
-                Duration::from_millis(750),
+                Duration::from_secs(3),
                 tool.execute(
                     &ctx,
                     json!({

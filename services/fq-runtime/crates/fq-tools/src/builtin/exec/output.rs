@@ -63,7 +63,6 @@ where
     let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
     let mut scratch = [0u8; 8 * 1024];
     let mut total = 0usize;
-    let mut stop_open = true;
     loop {
         tokio::select! {
             read = reader.read(&mut scratch) => match read {
@@ -77,11 +76,14 @@ where
                 }
                 Err(_) => break,
             },
-            changed = stop.changed(), if stop_open => match changed {
+            changed = stop.changed() => match changed {
                 Ok(()) if *stop.borrow() => return (buf, total, true),
                 Ok(()) => {}
-                // Sender gone without a cut: drain to EOF as before.
-                Err(_) => stop_open = false,
+                // The sender only goes away without a cut when the exec
+                // future itself was dropped, so there is nobody left to
+                // read this stream: stop rather than hold the pipe open
+                // for a descendant that outlived the call (#618).
+                Err(_) => return (buf, total, true),
             },
         }
     }
@@ -104,7 +106,6 @@ where
     let mut buf: Vec<u8> = Vec::new();
     let mut scratch = [0u8; 8 * 1024];
     let mut total = 0usize;
-    let mut stop_open = true;
     let mut cut = false;
     loop {
         tokio::select! {
@@ -121,14 +122,17 @@ where
                 }
                 Err(_) => break,
             },
-            changed = stop.changed(), if stop_open => match changed {
+            changed = stop.changed() => match changed {
                 Ok(()) if *stop.borrow() => {
                     cut = true;
                     break;
                 }
                 Ok(()) => {}
-                // Sender gone without a cut: drain to EOF as before.
-                Err(_) => stop_open = false,
+                // As above (#618): the reader of this result is gone.
+                Err(_) => {
+                    cut = true;
+                    break;
+                }
             },
         }
     }
@@ -263,5 +267,32 @@ mod tests {
     fn last_lines_takes_tail_and_flags_dropped() {
         assert_eq!(last_lines("a\nb\nc\nd", 2), ("c\nd".to_string(), true));
         assert_eq!(last_lines("a\nb", 5), ("a\nb".to_string(), false));
+    }
+
+    /// #618: the cut sender is dropped without a send only when the
+    /// exec future itself was dropped, so nobody will ever read this
+    /// capture. Draining on to EOF there holds the child's pipe open
+    /// for a descendant that outlived the call — the capture stops
+    /// instead.
+    ///
+    /// The write half is held open for the whole test, so the stream
+    /// never reaches EOF: before the fix this call does not return.
+    #[tokio::test]
+    async fn capture_stops_when_the_cut_sender_is_dropped() {
+        for tail in [false, true] {
+            let (_writer, reader) = tokio::io::duplex(64);
+            let (stop_tx, stop_rx) = watch::channel(false);
+            drop(stop_tx);
+
+            let (kept, total, cut) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                capture_stream(reader, 1024, tail, stop_rx),
+            )
+            .await
+            .expect("capture must stop once nobody can read its result");
+
+            assert!(cut, "the capture was cut, not ended at EOF (tail = {tail})");
+            assert!(kept.is_empty() && total == 0);
+        }
     }
 }

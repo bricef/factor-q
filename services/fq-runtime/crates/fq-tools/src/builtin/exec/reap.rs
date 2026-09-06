@@ -29,10 +29,21 @@
 //! its place after a group kill, because a descendant that gave itself
 //! a new session (`setsid`) leaves the group and keeps the pipe.
 //!
-//! Addressing a group by id is safe here because the id is the leader's
-//! pid, and the kernel keeps a pid allocated while any process still
-//! carries it as a group id — so the id cannot be recycled under us
-//! while there is anything left to kill.
+//! Addressing a group by id is safe on the paths that matter because
+//! the id is the leader's pid, and the kernel keeps a pid allocated
+//! while any process still carries it as a group id — so while the
+//! leader is unreaped, which is exactly while [`GroupGuard`] is armed,
+//! the id cannot be recycled under us.
+//!
+//! One window is narrower than that. Inside [`kill_group`] the leader
+//! is reaped before the group can be observed empty, and if the future
+//! is dropped during a poll interval in which the last member exits,
+//! the guard's `SIGKILL` goes to an id nothing holds any more — which
+//! the kernel may by then have handed to an unrelated group. It is a
+//! sub-`POLL_INTERVAL` race against pid recycling on a machine that has
+//! wrapped `pid_max`, and closing it means pinning the id with a
+//! `waitid(WNOWAIT)` and reaping last, which is more machinery than the
+//! window is worth. Recorded rather than hidden.
 
 use std::time::{Duration, Instant};
 
