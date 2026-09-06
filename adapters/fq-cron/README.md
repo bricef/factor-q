@@ -56,7 +56,7 @@ Example `fq-cron.toml`:
 
 ```toml
 [limits]
-max_fires_per_hour = 120
+max_fires_per_hour = 120   # sliding-window ceiling on fires across every job
 
 [defaults]
 tz = "UTC"

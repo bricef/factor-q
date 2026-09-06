@@ -65,11 +65,24 @@ timezones), `fsnotify` (config watching). All pure Go, no CGO.
 
 Fire state lives in a JetStream **key-value bucket** (`fq-cron-state`),
 one entry per job, created idempotently by the adapter at startup. The
-entry records the last *acknowledged* fire:
+entry records the last *acknowledged* fire, and the recent ones the
+fire valve counts (D6):
 
 ```json
-{ "last_scheduled": "2026-07-17T02:00:00Z", "published_at": "2026-07-17T02:00:01Z" }
+{
+  "last_scheduled": "2026-07-17T02:00:00Z",
+  "published_at": "2026-07-17T02:00:01Z",
+  "recent_fires": ["2026-07-17T01:00:01Z", "2026-07-17T02:00:01Z"]
+}
 ```
+
+`recent_fires` is a per-job ledger of publication instants, oldest
+first, trimmed on every write to what the valve can still count: fires
+inside the window, and at most `max_fires_per_hour` of them. The
+one-fire-a-minute schedule floor bounds it at sixty instants per job. An
+entry written before the ledger existed has no `recent_fires`, and its
+`published_at` is read as the single fire it records — the bucket needs
+no migration.
 
 Why KV over the alternatives:
 
@@ -211,12 +224,18 @@ Three guard rails, same principle:
   seconds-resolution schedules are rejected.
 - A **global fire valve**: `[limits] max_fires_per_hour` (default 120)
   is a sliding-window ceiling over *all* fires in the file — durable or
-  not, catch-ups included. A fire over the ceiling is suppressed with a
-  loud log line and then treated as any other missed fire (this
-  section's policy governs), so a runaway schedule is clamped to the
-  valve rate rather than trusted to its own floor. The window is
+  not, catch-ups included. It counts **fires**, not jobs: each job's
+  recent publications are recorded (D2) and the ceiling applies to their
+  total, so a single `* * * * *` schedule trips it on its own. Counting
+  one entry per job — the last fire of each — as it did until
+  <https://github.com/bricef/factor-q/issues/612>, the valve only ever
+  closed when the file itself held `max_fires_per_hour` jobs, and a
+  runaway schedule was never clamped at all. A fire over the ceiling is
+  suppressed with a loud log line and then treated as any other missed
+  fire (this section's policy governs), so a runaway schedule is clamped
+  to the valve rate rather than trusted to its own floor. The window is
   sliding, so the valve reopens on its own: when it is shut the planner
-  reports the instant the oldest fire in the window leaves it, and the
+  reports the instant the oldest counted fire leaves the window, and the
   loop wakes then and re-plans. Nothing waits for a config reload — a
   burst used to leave the scheduler silent until someone edited the
   file. The 1-minute floor bounds each job; the valve bounds the file
@@ -240,7 +259,7 @@ reads as part of the `fqd` / `fq` family
 # fq-cron.toml — hot-reloaded; connection settings live on the command line.
 
 [limits]            # optional
-max_fires_per_hour = 120    # sliding-window ceiling across every job (D6)
+max_fires_per_hour = 120    # sliding-window ceiling on fires, across every job (D6)
 
 [defaults]          # optional; each key overridable per job
 tz = "UTC"
@@ -322,7 +341,7 @@ the returned fires.
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
 | Scheduler down across fires | Per-job catch-up policy: `skip` or one `once` fire (D6). |
-| Fire rate exceeds `max_fires_per_hour` | Fire suppressed, logged loudly, treated as missed; the valve clamps runaway schedules (D6). The scheduler re-plans by itself when the window slides — a burst never silences it until the next config edit. |
+| Fire rate exceeds `max_fires_per_hour` | Fire suppressed, logged loudly, treated as missed; the valve counts every fire in the window, not one per job, so it clamps a single runaway schedule (D6). The scheduler re-plans by itself when the window slides — a burst never silences it until the next config edit. |
 
 ## Operations
 
