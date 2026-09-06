@@ -196,6 +196,7 @@ impl From<CostSummary> for CostView {
             total_output_tokens: r.total_output_tokens,
             total_cache_read_tokens: r.total_cache_read_tokens,
             total_cache_write_tokens: r.total_cache_write_tokens,
+            total_reasoning_tokens: r.total_reasoning_tokens,
             invocation_count: r.invocation_count,
             framework_cost: r.framework_cost,
         }
@@ -215,6 +216,7 @@ impl From<InvocationCostSummary> for InvocationCostView {
             total_output_tokens: r.total_output_tokens,
             total_cache_read_tokens: r.total_cache_read_tokens,
             total_cache_write_tokens: r.total_cache_write_tokens,
+            total_reasoning_tokens: r.total_reasoning_tokens,
         }
     }
 }

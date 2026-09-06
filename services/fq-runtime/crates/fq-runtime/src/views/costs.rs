@@ -21,7 +21,7 @@
 
 use super::{
     AgentCostDetailView, CostBucketView, CostReport, CostView, InvocationCostView, ModelCostView,
-    Views, ViewsError,
+    Views, ViewsError, sum_reported,
 };
 
 impl Views {
@@ -41,6 +41,11 @@ impl Views {
             report.total_output_tokens += r.total_output_tokens;
             report.total_cache_read_tokens += r.total_cache_read_tokens;
             report.total_cache_write_tokens += r.total_cache_write_tokens;
+            // Not `+=`: an agent that reported no split contributes
+            // nothing and says nothing, and a fleet where none did has
+            // no total rather than a zero (#536).
+            report.total_reasoning_tokens =
+                sum_reported(report.total_reasoning_tokens, r.total_reasoning_tokens);
             report.framework_cost += r.framework_cost;
             report.agents.push(CostView::from(r));
         }

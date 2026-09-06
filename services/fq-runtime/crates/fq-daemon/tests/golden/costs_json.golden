@@ -8,6 +8,7 @@
       "total_output_tokens": 340,
       "total_cache_read_tokens": 0,
       "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": null,
       "invocation_count": 1,
       "framework_cost": 0.0
     },
@@ -19,6 +20,7 @@
       "total_output_tokens": 680,
       "total_cache_read_tokens": 0,
       "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": 40,
       "invocation_count": 1,
       "framework_cost": 0.0
     },
@@ -30,6 +32,7 @@
       "total_output_tokens": 20,
       "total_cache_read_tokens": 0,
       "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": null,
       "invocation_count": 1,
       "framework_cost": 0.0009
     }
@@ -61,5 +64,6 @@
   "total_output_tokens": 1040,
   "total_cache_read_tokens": 0,
   "total_cache_write_tokens": 0,
+  "total_reasoning_tokens": 40,
   "framework_cost": 0.0009
 }

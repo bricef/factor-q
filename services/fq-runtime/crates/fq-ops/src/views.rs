@@ -234,6 +234,13 @@ pub struct CostView {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Reasoning tokens over the calls that reported a thought-versus-
+    /// spoken split — part of `total_output_tokens`, not in addition to
+    /// it. `None` when no call in the aggregate reported one, which is
+    /// every Anthropic call; that is not `Some(0)`, a provider that
+    /// reported none were spent. `n/a` against `0` in a table, `null`
+    /// against `0` in JSON.
+    pub total_reasoning_tokens: Option<i64>,
     /// Distinct invocations behind the aggregate.
     pub invocation_count: i64,
     /// Summary costs: engine spend on this agent's behalf that belongs
@@ -264,6 +271,10 @@ pub struct InvocationCostView {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Reasoning tokens over this invocation's calls that reported a
+    /// thought-versus-spoken split; `None` (`null` on the wire) when
+    /// none did, which is not `0`.
+    pub total_reasoning_tokens: Option<i64>,
 }
 
 /// One model's share of an agent's spend.
@@ -319,6 +330,11 @@ pub struct CostReport {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Reasoning tokens over every call that reported a thought-versus-
+    /// spoken split, across agents; `None` (`null` on the wire) when no
+    /// call did, which is not `0`. Folded with the rule `sum_reported`
+    /// states, so an agent that reported nothing contributes nothing.
+    pub total_reasoning_tokens: Option<i64>,
     /// Summary costs across every agent. Included in `total_cost`, and
     /// named here so `total = invocations + framework` reads off the
     /// page rather than looking like a discrepancy.
@@ -404,3 +420,22 @@ pub struct InvocationDetailView {
     #[serde(default)]
     pub cost: Option<InvocationCostView>,
 }
+
+/// Fold two reasoning-token totals the way the projection's `SUM` does
+/// within a group: an unreported split (`None`) contributes nothing and
+/// says nothing.
+///
+/// `None + None = None` — a fleet of Anthropic agents has no total, not
+/// a zero. `Some(a) + None = Some(a)`, `Some(a) + Some(b) = Some(a + b)`.
+/// Every layer that adds cost rows together uses this, so a `None` can
+/// neither turn into a `0` nor swallow a real figure.
+pub fn sum_reported(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(x), Some(y)) => Some(x + y),
+    }
+}
+
+#[cfg(test)]
+mod tests;

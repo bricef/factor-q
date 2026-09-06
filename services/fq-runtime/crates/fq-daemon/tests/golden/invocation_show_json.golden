@@ -61,6 +61,7 @@
     "total_input_tokens": 1200,
     "total_output_tokens": 340,
     "total_cache_read_tokens": 0,
-    "total_cache_write_tokens": 0
+    "total_cache_write_tokens": 0,
+    "total_reasoning_tokens": null
   }
 }
