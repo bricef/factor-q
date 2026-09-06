@@ -239,10 +239,7 @@ pub(super) async fn connect(
     if let Some(req_tx) = server_request_tx {
         handler = handler.with_server_requests(req_tx);
     }
-    let target = config
-        .url
-        .clone()
-        .unwrap_or_else(|| config.command.clone());
+    let target = config.url.clone().unwrap_or_else(|| config.command.clone());
     let client = match &config.url {
         // Streamable HTTP (remote) transport — the 2025-11-25 spec
         // transport.
@@ -389,7 +386,10 @@ pub async fn retry_unavailable(
 /// How long until the earliest server in `pending` is due, stamping
 /// each one's next retry time into the state table on the way past so
 /// `fq doctor` can say when it will be. `None` disables retrying.
-fn next_due(pending: &[(McpServerConfig, u32)], manager: &McpClientManager) -> Option<std::time::Duration> {
+fn next_due(
+    pending: &[(McpServerConfig, u32)],
+    manager: &McpClientManager,
+) -> Option<std::time::Duration> {
     let limits = manager.limits();
     let states = manager.states();
     let mut soonest = None;
@@ -402,7 +402,8 @@ fn next_due(pending: &[(McpServerConfig, u32)], manager: &McpClientManager) -> O
         {
             states.unavailable(&config.name, reason, attempts, Some(due_ms));
         }
-        soonest = Some(soonest.map_or(backoff, |current: std::time::Duration| current.min(backoff)));
+        soonest =
+            Some(soonest.map_or(backoff, |current: std::time::Duration| current.min(backoff)));
     }
     soonest
 }

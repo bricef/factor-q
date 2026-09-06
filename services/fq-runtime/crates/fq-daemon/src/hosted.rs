@@ -45,8 +45,8 @@ use fq_runtime::events::{Event, EventPayload, SystemShutdownPayload, SystemStart
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
-    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionConsumer,
-    ProjectionStore, SharedRegistry, TriggerDispatcher,
+    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
+    SharedRegistry, TriggerDispatcher,
 };
 use uuid::Uuid;
 

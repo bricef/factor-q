@@ -209,7 +209,10 @@ async fn a_stdio_line_past_the_cap_is_refused_not_buffered() {
     };
     let elapsed = started.elapsed();
 
-    assert!(outcomes[0].outcome.is_err(), "the connection must be refused");
+    assert!(
+        outcomes[0].outcome.is_err(),
+        "the connection must be refused"
+    );
     assert!(
         elapsed < Duration::from_secs(15),
         "the refusal must come from the reader, not the deadline: {elapsed:?}"
