@@ -25,12 +25,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fq_tools::Tool;
 use fq_tools::builtin::{
     ExecConfig, ExecTool, FileListTool, FileReadTool, FileSearchTool, FileWriteTool,
     ReportOutcomeTool, SelfInspectTool,
 };
+use serde_json::Value;
 
 use crate::events::ToolSchema;
 
@@ -214,6 +216,72 @@ impl ToolRegistry {
             .cloned()
             .collect()
     }
+}
+
+/// What `[tools]` allows one call, as the runner takes it. Built from
+/// [`ToolsConfig`](crate::config::ToolsConfig); the default is that
+/// section's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCallLimits {
+    /// The deadline for a tool that manages none of its own.
+    pub default_timeout: Duration,
+    /// The ceiling on any single call, whatever the tool asked for.
+    pub max_timeout: Duration,
+    /// Consecutive timeouts before the invocation itself fails.
+    pub max_consecutive_timeouts: u32,
+}
+
+impl Default for ToolCallLimits {
+    fn default() -> Self {
+        Self {
+            default_timeout: Duration::from_secs(120),
+            max_timeout: Duration::from_secs(900),
+            max_consecutive_timeouts: 3,
+        }
+    }
+}
+
+impl ToolCallLimits {
+    /// The deadline for one call to `tool` with `params`: what the tool
+    /// asked for, or the general default, clamped to the ceiling.
+    pub fn for_call(&self, tool: &dyn Tool, params: &Value) -> CallDeadline {
+        let allowed = tool
+            .requested_deadline(params)
+            .unwrap_or(self.default_timeout)
+            .min(self.max_timeout);
+        CallDeadline {
+            allowed,
+            armed: allowed + Self::BACKSTOP_GRACE,
+        }
+    }
+
+    /// How long *after* the deadline the host's own timer fires.
+    ///
+    /// The host's timer is a backstop, not the deadline. Every
+    /// co-operative tool starts its own clock strictly after the host
+    /// starts its — `exec` after the spawn and the cwd check, the MCP
+    /// adapter after the request goes out — so an equal timer would
+    /// always fire first and replace the tool's answer with a bare
+    /// "timed out". `exec`'s answer names the command and carries the
+    /// output captured before the kill; the MCP adapter's cancels the
+    /// outbound request so the server stops. Both are worth five
+    /// seconds. A tool that ignores the deadline entirely is cut off
+    /// by the backstop, that much later.
+    const BACKSTOP_GRACE: Duration = Duration::from_secs(5);
+}
+
+/// The deadline the host applies to one tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallDeadline {
+    /// The deadline itself: what policy allows this call. Told to the
+    /// tool through
+    /// [`ToolContext::deadline`](fq_tools::ToolContext::deadline), and
+    /// quoted in the timeout the model is shown.
+    pub allowed: Duration,
+    /// When the host's own backstop timer fires — `allowed` plus a few
+    /// seconds, so a tool that acts on its deadline gets to answer
+    /// first.
+    pub armed: Duration,
 }
 
 #[cfg(test)]

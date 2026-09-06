@@ -29,6 +29,7 @@ pub mod harness;
 pub(crate) mod liveness;
 pub(crate) mod rounds;
 pub mod runner;
+pub(crate) mod timeouts;
 pub mod types;
 
 pub use harness::Harness;

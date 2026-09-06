@@ -188,6 +188,12 @@ pub struct RunnerConfig {
     /// passes `<state dir>/mcp`, the same root its shared servers use;
     /// the default is the temp-dir root, never the process cwd.
     pub(super) mcp_server_root: PathBuf,
+    /// What `[tools]` allows one tool call: the deadline, the ceiling
+    /// on a tool's own request, and how many consecutive timeouts end
+    /// the invocation (#547). Defaults to
+    /// [`ToolCallLimits::default`](crate::tools::ToolCallLimits), which
+    /// is that section's default.
+    pub(super) tool_limits: crate::tools::ToolCallLimits,
 }
 
 impl RunnerConfig {
@@ -212,6 +218,7 @@ pub struct RunnerConfigBuilder {
     enforce_pricing: Option<bool>,
     workspace: Option<Arc<dyn WorkspaceProvider>>,
     mcp_server_root: Option<PathBuf>,
+    tool_limits: Option<crate::tools::ToolCallLimits>,
 }
 
 impl RunnerConfigBuilder {
@@ -288,6 +295,15 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// The `[tools]` call bounds — deadline, ceiling, and the
+    /// consecutive-timeout limit (#547). Optional; defaults to
+    /// [`ToolCallLimits::default`](crate::tools::ToolCallLimits). The
+    /// daemon passes `config.tools.call_limits()`.
+    pub fn tool_limits(mut self, limits: crate::tools::ToolCallLimits) -> Self {
+        self.tool_limits = Some(limits);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -313,6 +329,7 @@ impl RunnerConfigBuilder {
             mcp_server_root: self
                 .mcp_server_root
                 .unwrap_or_else(crate::mcp::default_server_root),
+            tool_limits: self.tool_limits.unwrap_or_default(),
         }
     }
 }

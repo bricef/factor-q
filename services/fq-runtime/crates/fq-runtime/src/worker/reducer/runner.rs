@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use fq_tools::{ToolContext, ToolError, ToolSandbox};
+use fq_tools::{ToolContext, ToolSandbox};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -197,6 +197,9 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// The current Round per driven invocation (Phase 3d) — see
     /// [`super::rounds::RoundLedger`].
     rounds: super::rounds::RoundLedger,
+    /// Consecutive tool-call timeouts per driven invocation (#547) —
+    /// see [`super::timeouts::TimeoutLedger`].
+    timeouts: super::timeouts::TimeoutLedger,
     /// What this runner is driving right now, and the halts armed
     /// against it — see [`super::liveness::LiveRegistry`]. The zero-lag
     /// authority behind both operator preconditions: resume refuses a
@@ -220,6 +223,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             drain: DrainSignal::new(),
             pending_notices: std::sync::Mutex::new(std::collections::HashMap::new()),
             rounds: super::rounds::RoundLedger::default(),
+            timeouts: super::timeouts::TimeoutLedger::default(),
             live: super::liveness::LiveRegistry::default(),
         }
     }
@@ -250,7 +254,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         invocation_id: Uuid,
         agent_id: AgentId,
     ) -> super::liveness::ActiveInvocation<'_> {
-        self.live.enter(invocation_id, agent_id, &self.rounds)
+        self.live
+            .enter(invocation_id, agent_id, &self.rounds, &self.timeouts)
     }
 
     /// Queue a host notice for injection into `invocation_id`'s
@@ -1702,7 +1707,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
         };
 
-        let ctx = ToolContext::new(sandbox);
+        // Every tool call is bounded here, at the one place all of them
+        // pass through (#547). The tool is told the deadline so it can
+        // act on it; the host arms its own backstop a little later.
+        let deadline = self
+            .config
+            .tool_limits
+            .for_call(tool.as_ref(), &req.parameters);
+        let ctx = ToolContext::new(sandbox)
+            .with_deadline(deadline.allowed)
+            .with_call(inv_str.clone(), req.tool_call_id.as_str());
         let tool_start = Instant::now();
 
         // Mark dispatched BEFORE the handoff, durably. This is the
@@ -1734,50 +1748,27 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         )
         .await?;
 
-        // While the tool runs, the server it belongs to may initiate
-        // requests back at us (sampling) — those arrive *because* the
-        // agent called this tool, landing while we're parked at the
-        // await. Service them in a `select!` so the runner, the sole
-        // LLM arbiter, handles them without a second caller and
-        // without blocking the tool (ADR-0018 §2). With no channel
-        // wired, this is a plain await.
-        let outcome = match sampling {
-            None => tool.execute(&ctx, req.parameters.clone()).await,
-            Some(channel) => {
-                let tool_fut = tool.execute(&ctx, req.parameters.clone());
-                tokio::pin!(tool_fut);
-                loop {
-                    tokio::select! {
-                        // Bias toward completing the tool: if both are
-                        // ready, return the tool result rather than
-                        // starving it behind a backlog of requests.
-                        biased;
-                        result = &mut tool_fut => break result,
-                        maybe_req = channel.recv() => match maybe_req {
-                            Some((server, request)) => {
-                                let mut ctx = InvocationCtx::new(
-                                    llm, agent_id, invocation_id, totals, cursor,
-                                );
-                                self.handle_server_request(
-                                    &mut ctx,
-                                    agent,
-                                    &server,
-                                    request,
-                                )
-                                .await?;
-                            }
-                            // All servers' channels closed: just await
-                            // the tool to completion.
-                            None => break (&mut tool_fut).await,
-                        }
-                    }
-                }
-            }
-        };
+        let outcome = self
+            .await_tool_under_deadline(
+                tool.as_ref(),
+                &ctx,
+                req.parameters.clone(),
+                deadline,
+                &req.tool_name,
+                agent,
+                llm,
+                agent_id,
+                invocation_id,
+                totals,
+                cursor,
+                sampling,
+            )
+            .await?;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
         match outcome {
             Ok(result) => {
+                self.timeouts.record_answer(invocation_id);
                 self.config
                     .store
                     .write_tool_completed(
@@ -1812,7 +1803,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 })
             }
             Err(err) => {
-                let (kind, message) = classify_tool_error(&err);
+                let (kind, message) = super::emit::classify_tool_error(&err);
                 self.config
                     .store
                     .write_tool_completed(
@@ -1838,6 +1829,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     ),
                 )
                 .await?;
+                // The record of the timed-out call reaches the bus
+                // before the streak is judged, so a terminal failure
+                // never hides the call that caused it.
+                self.judge_timeout_streak(kind, agent_id, invocation_id, totals, start, cursor)
+                    .await?;
                 Ok(ToolCallResult {
                     tool_call_id: req.tool_call_id,
                     output: message,
@@ -2504,19 +2500,6 @@ fn map_store_err(err: crate::worker::WorkerStoreError) -> ExecutorError {
     ExecutorError::WorkerStore(err.to_string())
 }
 
-fn classify_tool_error(err: &ToolError) -> (ToolErrorKind, String) {
-    match err {
-        ToolError::PermissionDenied(msg) => (ToolErrorKind::SandboxViolation, msg.clone()),
-        ToolError::NotFound(path) => (
-            ToolErrorKind::ExecutionFailed,
-            format!("path not found: {}", path.display()),
-        ),
-        ToolError::InvalidParameters(msg) => (ToolErrorKind::InvalidParameters, msg.clone()),
-        ToolError::Io(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
-        ToolError::ExecutionFailed(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
-    }
-}
-
 fn harness_error_to_failure_kind(err: &HarnessError) -> FailureKind {
     use super::types::HarnessErrorKind::*;
     match err.kind {
@@ -2582,6 +2565,7 @@ fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> Tri
 }
 
 mod config;
+mod deadline;
 mod failure;
 mod llm;
 mod replay;

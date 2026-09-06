@@ -2,6 +2,7 @@
 //! (Phase 3d): one site per event shape, stamped with the Round.
 //! Split from `runner.rs` to keep that file inside its size budget.
 
+use fq_tools::ToolError;
 use uuid::Uuid;
 
 use super::types::ToolCallRequest;
@@ -10,6 +11,38 @@ use crate::events::{
     self, Event, EventPayload, LlmErrorKind, LlmFailurePayload, LlmResponsePayload, TokenUsage,
     ToolErrorKind, ToolResultPayload,
 };
+
+/// A failed tool call in the event vocabulary: the kind a consumer
+/// filters on, and the message the model is shown.
+///
+/// Lives beside [`tool_result_event`], which is the only thing that
+/// consumes it — the pair is the whole boundary between `fq-tools`'
+/// error type and what the record says happened.
+pub(crate) fn classify_tool_error(err: &ToolError) -> (ToolErrorKind, String) {
+    match err {
+        ToolError::PermissionDenied(msg) => (ToolErrorKind::SandboxViolation, msg.clone()),
+        ToolError::NotFound(path) => (
+            ToolErrorKind::ExecutionFailed,
+            format!("path not found: {}", path.display()),
+        ),
+        ToolError::InvalidParameters(msg) => (ToolErrorKind::InvalidParameters, msg.clone()),
+        ToolError::Io(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
+        ToolError::ExecutionFailed(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
+        // The model is told what the limit was and that the work may
+        // yet be running — a timeout says nothing about whether the
+        // side effect happened, and an agent that assumes it did not
+        // will happily do it twice.
+        ToolError::TimedOut { after } => (
+            ToolErrorKind::Timeout,
+            format!(
+                "the tool did not answer within its {}s deadline and the call was abandoned; \
+                 it may still be running, so do not assume its effect did or did not happen — \
+                 try a smaller or different request, or another tool",
+                after.as_secs()
+            ),
+        ),
+    }
+}
 
 /// One tool-result event: the current Round, the restated tool name,
 /// and the outcome fields.
