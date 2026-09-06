@@ -79,8 +79,8 @@ pub enum ServerNotification {
 /// its handler behind an `Arc`, so the sender feeding these channels
 /// lives as long as the host's client handle does: a connection that
 /// ends leaves its stream open and silent. Detecting that is the
-/// transport's business, and belongs to the per-connection watcher in
-/// [`lifecycle`](super::lifecycle).
+/// transport's business, and belongs to the per-connection watcher the
+/// `lifecycle` module runs.
 pub async fn drain_server_notifications<F, G>(
     channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
     mut late: mpsc::UnboundedReceiver<(String, mpsc::UnboundedReceiver<ServerNotification>)>,

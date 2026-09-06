@@ -125,8 +125,8 @@ impl McpClientManager {
     /// it registers — at boot and on every retry — gets a watcher.
     /// Nothing else can see a connection end: rmcp keeps the handler
     /// alive behind an `Arc`, so the notification stream of a dead
-    /// server stays open and silent
-    /// ([`watch_connection`](super::lifecycle::watch_connection)).
+    /// server stays open and silent; the watcher polls the transport
+    /// instead (the `lifecycle` module's `watch_connection`).
     pub fn announcing_closures(mut self, gone: mpsc::UnboundedSender<String>) -> Self {
         self.closures = Some(gone);
         self
