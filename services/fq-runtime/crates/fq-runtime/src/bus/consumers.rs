@@ -3,9 +3,9 @@
 //! They were spread through `bus.rs` alongside the connection, the
 //! stream definitions and the publish path, and each one re-stated its
 //! own `get_or_create` + drift-repair dance. Collecting them is what
-//! makes the redelivery policy statable once: [`EventBus::durable`]
-//! stamps `ack_wait` and `max_deliver` onto every config that passes
-//! through it, and repairs an existing durable whose stamped fields
+//! makes the redelivery policy statable once: one private seam stamps
+//! `ack_wait` and `max_deliver` onto every config that passes through
+//! it, and repairs an existing durable whose stamped fields
 //! have drifted, so "explicit `ack_wait` on every durable" is a
 //! property of the seam rather than a thing five call sites remember.
 //!
@@ -129,7 +129,7 @@ impl EventBus {
     /// `max_ack_pending` or scope differs: a mark-bearing consumer
     /// vouches for every sequence, so a durable that was created
     /// filtered keeps its acked floor (no replay) but must widen to
-    /// the whole stream. [`Self::durable`] does the repair.
+    /// the whole stream. The shared get-or-create seam does the repair.
     pub async fn durable_consumer_strict(
         &self,
         name: &str,

@@ -435,9 +435,30 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
         "ambiguous",
         "failures",
         "dead_letters",
+        "consumers",
     ] {
         assert!(!report[section].is_null(), "missing {section}: {report}");
     }
+    // The Phase 1 exit criterion, verbatim: "`fq doctor` reports every
+    // consumer" (#549). Against a live daemon, not a fixture — the
+    // probe is a JetStream read only the serving process can make.
+    let consumers: Vec<&str> = report["consumers"]
+        .as_array()
+        .expect("consumers")
+        .iter()
+        .map(|c| c["active"]["name"].as_str().expect("a named consumer"))
+        .collect();
+    assert_eq!(
+        consumers,
+        vec![
+            "fq-projector",
+            "fq-coordination",
+            "fq-heartbeat",
+            "fq-dispatcher",
+            "fq-advisory-watch",
+        ],
+        "every durable this daemon runs is reported: {report}"
+    );
     assert_eq!(report["dead_letters"]["exhausted_triggers"], 0);
     assert_eq!(
         report["failures"].as_array().expect("failures").len(),
@@ -483,12 +504,41 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
     // The probe reached the daemon's own streams — the client never
     // connects to the broker, so this could not be here otherwise.
     let streams = report["streams"].as_array().expect("streams");
-    assert_eq!(streams.len(), 2, "both core streams are probed: {report}");
+    assert_eq!(
+        streams.len(),
+        3,
+        "all three core streams are probed — events, triggers, advisories: {report}"
+    );
+    // Every durable this daemon expects, named, and none of them stuck
+    // on a freshly-started fixture (#549). This used to be one
+    // "primary" consumer per stream, which is how a wedged coordination
+    // or advisory consumer stayed invisible to `control.status`.
+    let consumers: Vec<&str> = streams
+        .iter()
+        .flat_map(|s| {
+            s["available"]["consumers"]
+                .as_array()
+                .expect("a live daemon's streams carry their durable consumers")
+        })
+        .map(|c| c["active"]["name"].as_str().expect("a named consumer"))
+        .collect();
+    assert_eq!(
+        consumers,
+        vec![
+            "fq-projector",
+            "fq-coordination",
+            "fq-heartbeat",
+            "fq-dispatcher",
+            "fq-advisory-watch",
+        ],
+        "this fixture configures no summariser, so it is not expected: {report}"
+    );
     assert!(
-        streams.iter().all(|s| s
-            .get("available")
-            .is_some_and(|a| a["consumer"]["active"].get("name").is_some())),
-        "a live daemon's streams have their durable consumers: {report}"
+        streams
+            .iter()
+            .flat_map(|s| s["available"]["consumers"].as_array().expect("consumers"))
+            .all(|c| c["active"]["stuck"] == serde_json::json!(false)),
+        "nothing is wedged on a daemon that just started: {report}"
     );
     // This fixture's agents directory is empty, and an empty registry
     // is a zero rather than an omission.
