@@ -34,6 +34,10 @@
 //! - [`heartbeat_consumer`] — subscribes to
 //!   `fq.worker.*.heartbeat` and updates
 //!   `coordination_worker.last_heartbeat`.
+//! - [`liveness`] — what "not making progress" means: the
+//!   invocation-level verdict every health surface shares, and the
+//!   stuck sweep the coordination consumer runs beside its
+//!   stale-worker one (#37).
 //! - [`advisory_watch`] — drains the captured JetStream
 //!   MAX_DELIVERIES advisories for the trigger stream and emits
 //!   the dead-letter events the dispatcher's inline path cannot
@@ -49,6 +53,7 @@ pub mod coordination_consumer;
 pub mod dispatcher;
 pub mod durable_consumer;
 pub mod heartbeat_consumer;
+pub mod liveness;
 pub mod operator;
 pub mod projection;
 pub mod retention;

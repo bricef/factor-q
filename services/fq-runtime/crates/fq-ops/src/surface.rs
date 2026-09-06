@@ -379,6 +379,17 @@ pub struct StatusReport {
     /// real failure — and against a remote daemon it has no config to
     /// guess from at all.
     pub drain_deadline_ms: u64,
+    /// How long an in-flight invocation may go without crossing a step
+    /// boundary before this daemon reports it stuck, in milliseconds.
+    ///
+    /// Machinery state rather than a judgement — `control.doctor` is
+    /// where the verdict lives. It is here because the number is
+    /// derived from this daemon's own call deadlines and is therefore
+    /// something only the daemon can answer: an operator reading an
+    /// `invocation.stuck` event needs to know what threshold produced
+    /// it, and a reader with no access to the daemon's config cannot
+    /// work it out.
+    pub stuck_after_ms: i64,
     /// Where this daemon's three stores live, and whether it has
     /// created them yet.
     ///
@@ -438,6 +449,19 @@ pub struct DoctorExecutions {
     /// Ids of the stuck invocations, in full, for triage — same
     /// convention as `working_ids`.
     pub stuck_ids: Vec<String>,
+    /// How long an invocation may go without crossing a step boundary
+    /// before the two counts above call it stuck, in milliseconds.
+    ///
+    /// Reported rather than known, because it is *derived* from this
+    /// daemon's call deadlines — twice one worst-case step — and not a
+    /// constant a reader could quote. Two daemons configured
+    /// differently disagree about the same silent invocation, and both
+    /// are right; a client that assumed a number would tell an operator
+    /// the wrong thing about the daemon in front of them.
+    ///
+    /// It is not a parameter. A health report an operator can narrow is
+    /// one they can narrow past the problem.
+    pub stuck_after_ms: i64,
 }
 
 /// Dead-lettered triggers: transient pre-WAL failures that
@@ -621,29 +645,17 @@ pub const DEFAULT_STALE_THRESHOLD_MS: i64 = 30_000;
 /// The `error_kind` a dead-lettered trigger is recorded under.
 const DEAD_LETTER_KIND: &str = "trigger_exhausted";
 
-/// Stuck-work threshold: an in-flight invocation whose
-/// `invocation_state.updated_at` is older than this many ms is
-/// flagged "stuck" by `fq doctor`. Reuses the sibling
-/// [`DEFAULT_STALE_THRESHOLD_MS`] rather than inventing a second
-/// hard-coded constant — an invocation that has not touched its
-/// WAL row in as long as a worker has not heartbeated is the same
-/// order of "not making progress" signal.
-///
-/// Being a contract value here rather than the daemon's private
-/// choice is what lets the client render it back in the ">30s" line
-/// across the `fq`/`fqd` split: both halves quote the same number
-/// from the same declaration.
-pub const DOCTOR_STUCK_THRESHOLD_MS: i64 = DEFAULT_STALE_THRESHOLD_MS;
-
 /// Pure: assemble a [`DoctorReport`] from the already-fetched read
 /// views, so it can be unit-tested without a database. The stuck
 /// determination (threshold + clock-skew handling) lives in
-/// `fq_runtime::views::Views::executions` — the store handle, which
-/// this crate deliberately does not depend on; this builder only
-/// aggregates and shortens ids for triage.
+/// `fq_runtime::control_plane::liveness` — behind the store handles,
+/// which this crate deliberately does not depend on; this builder only
+/// aggregates and carries the threshold through so the client can say
+/// what the verdict meant.
 pub fn build_doctor_report(
     workers: &[crate::views::WorkerView],
     executions: &crate::views::ExecutionsView,
+    stuck_after_ms: i64,
     ambiguous: i64,
     failures: &[crate::views::FailureView],
     consumers: Vec<crate::health::ConsumerHealth>,
@@ -679,6 +691,7 @@ pub fn build_doctor_report(
         working_ids: executions.working_ids.clone(),
         stuck: executions.stuck,
         stuck_ids: executions.stuck_ids.clone(),
+        stuck_after_ms,
     };
 
     let failures: Vec<DoctorFailure> = failures

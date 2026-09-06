@@ -111,27 +111,6 @@ impl From<WorkerRow> for WorkerView {
 /// that value ever becomes load-bearing elsewhere.
 pub const DEFAULT_LONG_DISPATCH_THRESHOLD_MS: i64 = 600_000;
 
-/// One verdict for one in-flight row — the single classification the
-/// health counts and the row views all flow through.
-fn classify_liveness(
-    newest_open_dispatch_at: Option<i64>,
-    updated_at: i64,
-    now_ms: i64,
-    stuck_threshold_ms: i64,
-    long_dispatch_threshold_ms: i64,
-) -> Liveness {
-    if let Some(open_at) = newest_open_dispatch_at
-        && !is_stale(open_at, now_ms, long_dispatch_threshold_ms)
-    {
-        return Liveness::Working;
-    }
-    if is_stale(updated_at, now_ms, stuck_threshold_ms) {
-        Liveness::Stuck
-    } else {
-        Liveness::Advancing
-    }
-}
-
 /// Server-side cap on [`OpenToolView::command`] — long enough to read
 /// a real command, short enough that a pathological argv cannot bloat
 /// every active-table poll.
@@ -363,19 +342,11 @@ impl Views {
     }
 
     async fn coordination_is_terminal(&self, invocation_id: &str) -> Result<bool, ViewsError> {
-        let owner_terminal = self
-            .control_plane
-            .get_invocation_owner(invocation_id)
-            .await?
-            .is_some_and(|owner| {
-                matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
-            });
-        Ok(owner_terminal
-            || self
-                .control_plane
-                .get_archive(invocation_id)
-                .await?
-                .is_some())
+        Ok(crate::control_plane::liveness::is_closed_by_control_plane(
+            &self.control_plane,
+            invocation_id,
+        )
+        .await?)
     }
 
     /// Total event count in the projection.
@@ -519,7 +490,7 @@ impl Views {
                 .into_iter()
                 .map(|d| d.dispatched_at.unwrap_or(d.intent_at))
                 .max();
-            match classify_liveness(
+            match crate::control_plane::liveness::classify_liveness(
                 open_tool_at.max(open_llm_at),
                 row.updated_at,
                 now_ms,
@@ -574,7 +545,7 @@ impl Views {
                         .map(|d| d.dispatched_at.unwrap_or(d.intent_at)),
                 )
                 .max();
-            let liveness = classify_liveness(
+            let liveness = crate::control_plane::liveness::classify_liveness(
                 newest_open,
                 row.updated_at,
                 now_ms,
@@ -742,7 +713,7 @@ impl Views {
                     )
                     .max();
                 Some(LiveExecutionView {
-                    liveness: classify_liveness(
+                    liveness: crate::control_plane::liveness::classify_liveness(
                         newest_open,
                         s.updated_at,
                         now_ms,

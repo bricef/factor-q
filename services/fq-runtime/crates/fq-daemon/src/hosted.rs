@@ -228,6 +228,18 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         .with_runtime_id(runtime_id)
         .with_worker_store(worker_store.clone())
         .with_self_worker_id(worker_id.as_str().to_string())
+        // The stuck-invocation sweep (#37) rides the same tick as the
+        // stale-worker one, at the threshold derived from this
+        // daemon's call deadlines — the same number `fq doctor` and
+        // `control.status` report.
+        .with_stuck_sweep(std::sync::Arc::new(
+            fq_runtime::control_plane::liveness::StuckSweep::new(
+                bus.clone(),
+                worker_store.clone(),
+                cp_store.clone(),
+                config.stuck_after_ms(),
+            ),
+        ))
         // The coordination half of the read horizon (Phase 3c):
         // gated reads of the Invocation view wait on this mark too,
         // because the fold spans stores this consumer writes.
@@ -289,7 +301,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // the stale sweep is meant to report.
     let (hb_producer_shutdown_tx, hb_producer_shutdown_rx) = tokio::sync::oneshot::channel();
     let hb_producer =
-        fq_runtime::worker::HeartbeatProducer::new(bus.clone(), worker_id.clone(), runtime_id);
+        fq_runtime::worker::HeartbeatProducer::new(bus.clone(), worker_id.clone(), runtime_id)
+            // Each beat carries this worker's last step boundary
+            // (review finding F), so "alive" and "working" are
+            // separable without a second timestamp source.
+            .with_store(worker_store.clone());
     let mut hb_producer_handle =
         tokio::spawn(async move { hb_producer.run(hb_producer_shutdown_rx).await });
 
@@ -654,6 +670,7 @@ fn daemon_facts(config: &Config) -> crate::operator_surface::DaemonFacts {
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,
+        stuck_after_ms: config.stuck_after_ms(),
         summary_enabled: config.summary.model.is_some(),
     }
 }

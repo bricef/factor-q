@@ -24,6 +24,7 @@ pub(crate) fn status_report() -> StatusReport {
     StatusReport {
         version: "0.1.0+abc123def456".to_string(),
         drain_deadline_ms: 180_000,
+        stuck_after_ms: 4_210_000,
         // The daemon reports where its stores are; a fixture stands
         // in for a daemon, so it answers too.
         stores: fq_ops::surface::StatusStores {
@@ -122,6 +123,8 @@ pub(crate) fn doctor_report() -> DoctorReport {
             working_ids: vec!["019f5b3f-31fb-7ae0-b130-3d65ccf40375".to_string()],
             stuck: 1,
             stuck_ids: vec!["019f534f-4b3c-7f42-a619-b5e43a64fd38".to_string()],
+            // The default derivation: 2 x (2 x 600s + 900s + 5s).
+            stuck_after_ms: 4_210_000,
         },
         ambiguous: 3,
         failures: vec![

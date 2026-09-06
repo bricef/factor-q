@@ -63,6 +63,7 @@ pub(crate) fn register_status_report(
     let db_paths = facts.db_paths.clone();
     let legacy_events_db = facts.legacy_events_db.clone();
     let drain_deadline_ms_value = facts.drain_deadline_ms;
+    let stuck_after_ms_value = facts.stuck_after_ms;
     let summary_enabled = facts.summary_enabled;
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
@@ -77,6 +78,10 @@ pub(crate) fn register_status_report(
          and `is anything waiting on operator recovery`. It does not judge: stale workers \
          and ambiguous invocations are reported as counts, and deciding whether they \
          amount to a problem is `control.doctor`'s job. \
+         `stuck_after_ms` is here for the same reason as the drain deadline: it is \
+         derived from this daemon's call deadlines, so nothing outside the process can \
+         work it out, and a reader of an `invocation.stuck` event needs to know what \
+         threshold produced it. \
          The registry census is the daemon's in-memory handle — what it would run right \
          now, not what is on any caller's disk — so it reflects a reload without a \
          restart. Stream figures are a probe at the instant of the call, not a fold, so \
@@ -115,6 +120,7 @@ pub(crate) fn register_status_report(
                 Ok(StatusReport {
                     version: FQ_VERSION.to_string(),
                     drain_deadline_ms: drain_deadline_ms_value,
+                    stuck_after_ms: stuck_after_ms_value,
                     stores: fq_ops::surface::StatusStores {
                         worker_path: db_paths.worker.display().to_string(),
                         control_plane_path: db_paths.control_plane.display().to_string(),

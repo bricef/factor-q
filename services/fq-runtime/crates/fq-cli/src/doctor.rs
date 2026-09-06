@@ -26,7 +26,6 @@ use crate::cli::GlobalArgs;
 use fq_ops::surface::DoctorReport;
 
 use crate::edge_call::edge_client_for;
-use fq_ops::surface::DOCTOR_STUCK_THRESHOLD_MS;
 
 /// Pure: render the human-readable `fq doctor` report, mirroring
 /// `render_recovery_guidance` — an overall verdict, then per-failing-
@@ -53,20 +52,29 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
         out.push_str("  -> `fq workers list --stale-only` to inspect\n");
     }
 
-    // Executions.
+    // Executions. The threshold comes off the report rather than out of
+    // a constant here: the daemon derives it from its own call
+    // deadlines (#37), so the number a client quoted from its own build
+    // could be the wrong one for the daemon it is talking to.
     out.push_str(&format!(
-        "Current executions: {} in-flight ({} working, {} stuck)\n",
-        report.executions.in_flight, report.executions.working, report.executions.stuck
+        "Current executions: {} in-flight ({} working, {} stuck after {}s)\n",
+        report.executions.in_flight,
+        report.executions.working,
+        report.executions.stuck,
+        report.executions.stuck_after_ms / 1000,
     ));
     if report.executions.stuck > 0 {
         out.push_str(&format!(
             "  -> {} not advanced in >{}s: {}\n",
             report.executions.stuck,
-            DOCTOR_STUCK_THRESHOLD_MS / 1000,
+            report.executions.stuck_after_ms / 1000,
             report.executions.stuck_ids.join(", ")
         ));
         out.push_str(
             "  -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage\n",
+        );
+        out.push_str(
+            "  -> `fq events query --type invocation_stuck` for when each one was flagged\n",
         );
     }
 

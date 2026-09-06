@@ -41,6 +41,11 @@ pub struct DaemonFacts {
     /// A pre-split `events.db`, if one is still on disk.
     pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
     pub drain_deadline_ms: u64,
+    /// The stuck threshold this daemon derived from its call deadlines
+    /// (`Config::stuck_after`) — the one number `control.doctor`'s
+    /// verdict, `control.status`'s report of it, and the sweep that
+    /// emits `invocation.stuck` all use (#37).
+    pub stuck_after_ms: i64,
     /// Whether `[summary]` names a model. Health expects the summary
     /// durable only when one is configured — a daemon without a
     /// summariser has no such consumer, and reporting it missing would
