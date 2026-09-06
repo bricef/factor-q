@@ -61,14 +61,12 @@ impl FileSearchTool {
     }
 }
 
+/// The `root` a discovery tool walks: inside the read grant, and a
+/// directory. Both halves come back from the sandbox, so a root that
+/// is a file — or a FIFO — is refused with a message naming what it
+/// actually is (#547).
 fn validate_root(ctx: &ToolContext<'_>, root: &str) -> Result<PathBuf, ToolError> {
-    let root = ctx.sandbox.check_read(Path::new(root))?;
-    if !root.is_dir() {
-        return Err(ToolError::InvalidParameters(
-            "root must be a directory".to_string(),
-        ));
-    }
-    Ok(root)
+    Ok(ctx.sandbox.check_read_dir(Path::new(root))?)
 }
 
 fn files(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ToolError> {
@@ -115,7 +113,10 @@ impl Tool for FileListTool {
         let limit = params.limit.min(MAX_LIMIT);
         let mut paths = Vec::new();
         for path in files(&root, &params.glob)? {
-            // Re-check every hit so symlinks and glob traversal cannot escape the grant.
+            // Re-check every hit so symlinks and glob traversal cannot
+            // escape the grant. Since #547 the same check also keeps
+            // non-files out of the listing — a glob like `**/*` matches
+            // directories and FIFOs, and this tool lists files.
             if let Ok(path) = ctx.sandbox.check_read(&path) {
                 paths.push(path.display().to_string());
                 if paths.len() == limit {
@@ -160,6 +161,9 @@ impl Tool for FileSearchTool {
         let limit = params.limit.min(MAX_LIMIT);
         let mut hits = Vec::new();
         'files: for path in files(&root, &params.glob)? {
+            // Grant *and* shape (#547): the `read_to_string` below is
+            // the same open a FIFO would park in forever, and a glob
+            // reaches one as easily as `file_read` does.
             let Ok(path) = ctx.sandbox.check_read(&path) else {
                 continue;
             };

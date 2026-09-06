@@ -79,6 +79,14 @@ impl From<SandboxError> for ToolError {
             SandboxError::InvalidPath { target, reason } => {
                 ToolError::InvalidParameters(format!("{reason} ({})", target.display()))
             }
+            // The grant held; the path is simply the wrong shape. That
+            // is the caller's argument problem, so it reads as invalid
+            // parameters (with the full "is X, needs Y" message) and
+            // the model can pick a different path rather than
+            // concluding it lacks permission.
+            err @ SandboxError::NotRegularFile { .. } => {
+                ToolError::InvalidParameters(err.to_string())
+            }
             SandboxError::Io { path, source } => {
                 ToolError::Io(format!("{}: {source}", path.display()))
             }

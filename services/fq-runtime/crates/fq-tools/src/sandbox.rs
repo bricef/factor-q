@@ -126,20 +126,45 @@ impl ToolSandbox {
         &self.ambient_env
     }
 
-    /// Check that a target path is allowed for reading.
+    /// Check that a target path is allowed for reading **a file**.
     ///
     /// Returns the canonicalised target path on success. On failure,
-    /// classifies the outcome as either `NotFound` (the path itself
-    /// does not exist) or `PermissionDenied` (the path exists or its
-    /// parent exists but resolves outside every allowed prefix) — or,
-    /// when the failing path itself looks mangled, one of the
-    /// self-diagnosing variants (see `flag_mangled`).
+    /// classifies the outcome as `NotFound` (the path itself does not
+    /// exist), `PermissionDenied` (the path exists or its parent exists
+    /// but resolves outside every allowed prefix), `NotRegularFile`
+    /// (it resolves inside the grant but is a directory, a FIFO, a
+    /// socket or a device) — or, when the failing path itself looks
+    /// mangled, one of the self-diagnosing variants (see
+    /// `flag_mangled`).
+    ///
+    /// The regular-file requirement is not a nicety. Opening a FIFO
+    /// blocks in `open(2)` until a writer appears, so before this check
+    /// existed `file_read` on a `mkfifo` path parked the invocation
+    /// forever with no deadline anywhere above it (review finding B2,
+    /// <https://github.com/bricef/factor-q/issues/547>); a character
+    /// device such as `/dev/zero` reads without end. Canonicalisation
+    /// has already followed every symlink, so the check sees the real
+    /// target — a symlink pointing at a FIFO is refused too.
+    ///
+    /// A caller that wants a *directory* — the discovery tools' `root`
+    /// — asks [`check_read_dir`](Self::check_read_dir) instead. Both
+    /// enforce the same grant; they differ only in the shape of thing
+    /// they will hand back.
     pub fn check_read(&self, target: &Path) -> Result<PathBuf, SandboxError> {
-        self.check_read_impl(target)
+        self.check_read_impl(target, FileShape::Regular)
             .map_err(|err| flag_mangled(target, err))
     }
 
-    fn check_read_impl(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+    /// Check that a target path is allowed for reading and is a
+    /// **directory** — the grant check behind the discovery tools'
+    /// `root` parameter. See [`check_read`](Self::check_read) for the
+    /// file counterpart.
+    pub fn check_read_dir(&self, target: &Path) -> Result<PathBuf, SandboxError> {
+        self.check_read_impl(target, FileShape::Directory)
+            .map_err(|err| flag_mangled(target, err))
+    }
+
+    fn check_read_impl(&self, target: &Path, shape: FileShape) -> Result<PathBuf, SandboxError> {
         if self.fs_read.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
@@ -154,7 +179,13 @@ impl ToolSandbox {
                 source: err,
             },
         })?;
-        self.check_within(&canonical, &self.fs_read, target)
+        // Grant first, then shape: a path outside the grant must read
+        // as permission-denied whatever it happens to be, so the
+        // diagnosis never confirms the existence of a FIFO the agent
+        // was not allowed to look at in the first place.
+        let canonical = self.check_within(&canonical, &self.fs_read, target)?;
+        shape.check(&canonical, target)?;
+        Ok(canonical)
     }
 
     /// Check that a target directory is allowed as a command's working
@@ -239,6 +270,67 @@ impl ToolSandbox {
                 canonical.display()
             ),
         })
+    }
+}
+
+/// What a read check will accept at the end of the resolved path.
+///
+/// The sandbox's job is the *grant*; this is the second question every
+/// read has always had an implicit answer to and never asked out loud
+/// — "and is it the kind of thing I am about to open?". Naming it
+/// keeps one code path for both callers and puts the answer in the
+/// error the model reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileShape {
+    /// A regular file: what `file_read` and the discovery tools' hit
+    /// filter open and read to the end.
+    Regular,
+    /// A directory: what the discovery tools' `root` walks.
+    Directory,
+}
+
+impl FileShape {
+    fn check(self, canonical: &Path, original: &Path) -> Result<(), SandboxError> {
+        let metadata = std::fs::metadata(canonical).map_err(|err| SandboxError::Io {
+            path: original.to_path_buf(),
+            source: err,
+        })?;
+        let matches = match self {
+            FileShape::Regular => metadata.is_file(),
+            FileShape::Directory => metadata.is_dir(),
+        };
+        if matches {
+            return Ok(());
+        }
+        Err(SandboxError::NotRegularFile {
+            target: original.to_path_buf(),
+            wanted: match self {
+                FileShape::Regular => "a regular file",
+                FileShape::Directory => "a directory",
+            },
+            found: describe_file_type(&metadata.file_type()),
+        })
+    }
+}
+
+/// Name what a resolved path actually is, so the refusal tells the
+/// model something it can act on rather than "not a regular file".
+fn describe_file_type(kind: &std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    if kind.is_dir() {
+        "a directory"
+    } else if kind.is_file() {
+        "a regular file"
+    } else if kind.is_fifo() {
+        "a FIFO (named pipe), which would block forever waiting for a writer"
+    } else if kind.is_socket() {
+        "a socket"
+    } else if kind.is_char_device() {
+        "a character device"
+    } else if kind.is_block_device() {
+        "a block device"
+    } else {
+        "neither a file nor a directory"
     }
 }
 
@@ -332,6 +424,17 @@ pub enum SandboxError {
 
     #[error("invalid path: {target:?}: {reason}")]
     InvalidPath { target: PathBuf, reason: String },
+
+    /// The path resolves inside the grant but is not the kind of thing
+    /// the caller is about to open. Its own variant because the two
+    /// facts a model needs — what was wanted and what is actually
+    /// there — are what turn "read failed" into a next action.
+    #[error("{target:?} is {found}; this operation needs {wanted}")]
+    NotRegularFile {
+        target: PathBuf,
+        wanted: &'static str,
+        found: &'static str,
+    },
 
     #[error("io error for {path:?}: {source}")]
     Io {
@@ -473,6 +576,97 @@ mod tests {
         let sb = make_sandbox(&[dir.path()], &[]);
         let err = sb.check_read(&missing).unwrap_err();
         assert!(matches!(err, SandboxError::NotFound(_)));
+    }
+
+    // --- shape checks: what is actually at the end of the path -------
+    //
+    // Review finding B2 (#547). `check_read` used to answer only "is
+    // this inside the grant?", so `file_read` on a `mkfifo` path
+    // reached `open(2)` and parked there forever.
+
+    /// Create a FIFO. `mkfifo(1)` rather than a `libc` dependency —
+    /// this is the only place the crate needs one.
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo(1) is available");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
+    #[test]
+    fn read_of_a_fifo_is_refused_and_names_it() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        make_fifo(&fifo);
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb.check_read(&fifo).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("FIFO"), "message must name the FIFO: {msg}");
+        assert!(
+            msg.contains("regular file"),
+            "message must say what was needed: {msg}"
+        );
+    }
+
+    /// Canonicalisation follows symlinks, so the shape check sees the
+    /// real target: a link to a FIFO is refused exactly like the FIFO.
+    #[test]
+    fn read_of_a_symlink_to_a_fifo_is_refused() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        make_fifo(&fifo);
+        let link = dir.path().join("link");
+        symlink(&fifo, &link).unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb.check_read(&link).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("FIFO"), "{err}");
+    }
+
+    #[test]
+    fn read_of_a_directory_is_refused_and_says_so() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let sb = make_sandbox(&[dir.path()], &[]);
+        let err = sb.check_read(&sub).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("is a directory"), "{err}");
+    }
+
+    /// A path outside the grant stays permission-denied whatever it is:
+    /// the shape check must never confirm the existence of something
+    /// the agent was not allowed to look at.
+    #[test]
+    fn fifo_outside_the_grant_is_still_permission_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let fifo = other.path().join("pipe");
+        make_fifo(&fifo);
+        let sb = make_sandbox(&[allowed.path()], &[]);
+        let err = sb.check_read(&fifo).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PermissionDenied { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn check_read_dir_wants_a_directory_and_refuses_a_file() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let file = write_file(dir.path(), "a.txt", "x");
+        let sb = make_sandbox(&[dir.path()], &[]);
+        assert_eq!(
+            sb.check_read_dir(&sub).unwrap(),
+            fs::canonicalize(&sub).unwrap()
+        );
+        let err = sb.check_read_dir(&file).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("needs a directory"), "{err}");
     }
 
     #[test]
