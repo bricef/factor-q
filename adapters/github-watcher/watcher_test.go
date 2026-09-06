@@ -144,6 +144,36 @@ func TestPollOnceSkipsWhenRelabelFails(t *testing.T) {
 	}
 }
 
+// Losing the claim is not the same as failing to claim: the issue is
+// being worked by whoever won, so the trigger must not go out, and the
+// log must say which issue and why.
+func TestPollOnceDoesNotPublishALostClaim(t *testing.T) {
+	rec := &recorder{}
+	logs := &syncBuffer{}
+	w := &Watcher{
+		Source: &fakeSource{
+			rec:        rec,
+			issues:     []Issue{{1, []string{"ready"}}, {2, []string{"ready"}}},
+			relabelErr: map[int]error{1: fmt.Errorf("remove %q from #1: %w", "ready", ErrClaimLost)},
+		},
+		Publisher: &fakePublisher{rec: rec},
+		Config:    testConfig(),
+		Log:       slog.New(slog.NewTextHandler(logs, nil)),
+	}
+	if err := w.pollOnce(context.Background()); err != nil {
+		t.Fatalf("pollOnce: %v", err)
+	}
+	if slices.Contains(rec.ops, `publish m0-issue-fix "issue #1"`) {
+		t.Errorf("issue #1 was published although the claim was lost: %v", rec.ops)
+	}
+	if !slices.Contains(rec.ops, `publish m0-issue-fix "issue #2"`) {
+		t.Errorf("issue #2 should still have been published: %v", rec.ops)
+	}
+	if got := logs.String(); !strings.Contains(got, "claim lost") || !strings.Contains(got, "issue=1") {
+		t.Errorf("log = %q, want a claim-lost line naming issue 1", got)
+	}
+}
+
 func TestPollOnceRevertsOnPublishFailure(t *testing.T) {
 	rec := &recorder{}
 	w := newWatcher(
