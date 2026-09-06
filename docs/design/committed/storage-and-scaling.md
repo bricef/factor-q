@@ -165,6 +165,7 @@ CREATE TABLE events (
     output_tokens      INTEGER,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
+    reasoning_tokens   INTEGER,                -- NULL means "no split reported", which is not 0; never coalesced
     total_cost         REAL,                   -- NULL means "no known spend", and exempts the row from the sweep
     error_kind         TEXT,
     error_message      TEXT,
