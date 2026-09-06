@@ -61,6 +61,10 @@ pub struct McpToolRefresher {
     /// every rebuild, so a refresh never silently reverts to the crate
     /// defaults.
     pub(super) exec_config: ExecConfig,
+    /// The manager's progress-correlation table (#605), so tools
+    /// rebuilt on `tools/list_changed` record against the same one the
+    /// handlers route through.
+    pub(super) progress: super::progress::ProgressRegistry,
 }
 
 impl McpToolRefresher {
@@ -72,7 +76,7 @@ impl McpToolRefresher {
     pub async fn rebuild_registry(&self) -> ToolRegistry {
         let mut registry = ToolRegistry::with_builtins_exec(self.exec_config.clone());
         for (name, client) in &self.clients {
-            match McpClientManager::discover_tools(client, name).await {
+            match McpClientManager::discover_tools(client, name, &self.progress).await {
                 Ok((tools, _)) => {
                     for tool in tools {
                         if let Err(error) = registry.register(tool) {

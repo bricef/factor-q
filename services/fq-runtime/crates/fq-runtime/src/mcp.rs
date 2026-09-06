@@ -24,12 +24,14 @@
 //! | `handles` | cloneable reader / refresher handles over running servers |
 //! | `prompt_convert` | the rmcp → factor-q prompt boundary |
 //! | `naming` | the `<server>__<tool>` identifier rules |
-//! | `progress` | rendering the progress tokens rmcp mints (#605) |
+//! | `call` | issuing one `tools/call`, cancellably (#547) |
+//! | `progress` | correlating the progress tokens rmcp mints (#605) |
 //! | `server_config` | how a server is described, and what it is deduplicated on |
 //! | `stdio` | how a stdio server's child process is started |
 
 use rmcp::service::{RoleClient, RunningService};
 
+mod call;
 mod handler;
 mod handles;
 mod manager;
@@ -50,6 +52,7 @@ pub use handler::{AdvertisedCapabilities, FactorQClientHandler, ServerRequest};
 pub use handles::{McpResourceReader, McpToolRefresher};
 pub use manager::McpClientManager;
 pub use notifications::{ServerNotification, drain_server_notifications};
+pub use progress::{InFlightCall, ProgressRegistry};
 pub use resources::{McpResourceTool, render_resource_contents};
 pub use roots::{RootsHandle, advertised_roots_from_tool_sandbox, roots_from_tool_sandbox};
 pub use server_config::McpServerConfig;
