@@ -548,8 +548,8 @@ impl McpClientManager {
     /// This is the host's own cancellation — shutdown, budget, a
     /// superseded step. The agent's tool calls take the same path
     /// through [`McpTool`], which supplies its deadline as the `cancel`
-    /// future; both go through [`call`](super::call) so there is one
-    /// implementation of what cancelling a call means.
+    /// future; both go through the same private `call` module, so
+    /// there is one implementation of what cancelling a call means.
     pub async fn call_tool_cancellable<F>(
         &self,
         server: &str,
