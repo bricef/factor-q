@@ -88,5 +88,6 @@
         "stuck": false
       }
     }
-  ]
+  ],
+  "mcp_servers": []
 }
