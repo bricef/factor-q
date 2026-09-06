@@ -194,6 +194,22 @@ pub struct RunnerConfig {
     /// [`ToolCallLimits::default`](crate::tools::ToolCallLimits), which
     /// is that section's default.
     pub(super) tool_limits: crate::tools::ToolCallLimits,
+    /// The daemon's progress-correlation table (#605), shared into the
+    /// per-invocation MCP manager so a grant-bearing server's calls are
+    /// visible to the same liveness surface as a shared server's.
+    /// Defaults to a private one, which is right for a runner with no
+    /// daemon around it (tests, the sim).
+    pub(super) mcp_progress: crate::mcp::ProgressRegistry,
+}
+
+impl RunnerConfig {
+    /// The manager a single invocation's grant-bearing MCP servers run
+    /// under: its own lifecycle, the daemon's server root, and the
+    /// daemon's progress table.
+    pub(super) fn mcp_manager(&self) -> McpClientManager {
+        McpClientManager::with_server_root(self.mcp_server_root.clone())
+            .sharing_progress(self.mcp_progress.clone())
+    }
 }
 
 impl RunnerConfig {
@@ -219,6 +235,7 @@ pub struct RunnerConfigBuilder {
     workspace: Option<Arc<dyn WorkspaceProvider>>,
     mcp_server_root: Option<PathBuf>,
     tool_limits: Option<crate::tools::ToolCallLimits>,
+    mcp_progress: Option<crate::mcp::ProgressRegistry>,
 }
 
 impl RunnerConfigBuilder {
@@ -304,6 +321,15 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Share the daemon's MCP progress table (#605) so per-invocation
+    /// grant-bearing servers report into the same one as the shared
+    /// servers. Optional; defaults to a private table. The daemon
+    /// passes `mcp_manager.progress()`.
+    pub fn mcp_progress(mut self, progress: crate::mcp::ProgressRegistry) -> Self {
+        self.mcp_progress = Some(progress);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -330,6 +356,7 @@ impl RunnerConfigBuilder {
                 .mcp_server_root
                 .unwrap_or_else(crate::mcp::default_server_root),
             tool_limits: self.tool_limits.unwrap_or_default(),
+            mcp_progress: self.mcp_progress.unwrap_or_default(),
         }
     }
 }
