@@ -12,7 +12,10 @@
         }
       ],
       "generationConfig": {
-        "maxOutputTokens": 1024
+        "maxOutputTokens": 1024,
+        "thinkingConfig": {
+          "includeThoughts": true
+        }
       },
       "tools": [
         {
@@ -82,7 +85,10 @@
         }
       ],
       "generationConfig": {
-        "maxOutputTokens": 1024
+        "maxOutputTokens": 1024,
+        "thinkingConfig": {
+          "includeThoughts": true
+        }
       },
       "tools": [
         {
