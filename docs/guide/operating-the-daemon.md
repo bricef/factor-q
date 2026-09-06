@@ -347,12 +347,14 @@ something — a sampling completion, an elicitation — and the host
 answers it there and then, bounded only by `[worker] llm_timeout_secs`
 (default 600). An answer that outlasts the backstop would otherwise
 spend the whole grace before the tool is looked at again, leaving
-`exec` no time to kill its child and hand back what it captured. So a
-servicing that outlives the backstop re-arms it: five seconds from
-when the host turns back to the tool. The tool's own deadline does not
-move, and the extension is one grace after the *last* such answer
-however many there were, so a chatty server buys the tool no extra
-running time — only the teardown it was already owed.
+`exec` no time to kill its child and hand back what it captured. So an
+answer that ends past the backstop re-arms it — five seconds from when
+the host turns back to the tool — and is the **last** request that
+call services: from there the host is only waiting for the tool to
+stop. Anything the server sends in the meantime stays queued, as it
+does after any timeout. So one tool call takes at most its deadline,
+plus five seconds, plus one server request; the tool's own deadline
+does not move, and a chatty server buys it no extra running time.
 
 A call past its deadline is abandoned and reported to the model as a
 tool error with `error_kind: timeout`. What the model is told next
