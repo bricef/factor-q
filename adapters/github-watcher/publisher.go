@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -19,11 +20,13 @@ type NatsTriggerPublisher struct {
 }
 
 // NewNatsTriggerPublisher connects to NATS at url and opens a JetStream
-// context. The caller must Close it.
-func NewNatsTriggerPublisher(url string) (*NatsTriggerPublisher, error) {
-	nc, err := nats.Connect(url)
+// context. The connection reconnects for ever (connect.go), so the
+// returned publisher may not be connected yet — the poll loop checks
+// Connected before it claims anything. The caller must Close it.
+func NewNatsTriggerPublisher(url string, log *slog.Logger, extra ...nats.Option) (*NatsTriggerPublisher, error) {
+	nc, err := connectNATS(url, log, extra...)
 	if err != nil {
-		return nil, fmt.Errorf("connect to NATS at %s: %w", url, err)
+		return nil, err
 	}
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -54,6 +57,15 @@ func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID string, payl
 // share it (one connection for both publishing triggers and subscribing to
 // outcomes).
 func (p *NatsTriggerPublisher) Conn() *nats.Conn { return p.nc }
+
+// Connected reports whether the broker connection is established. It is
+// the poll loop's gate: a watcher that claims an issue while disconnected
+// relabels it ready → in-progress, fails to publish, reverts, and repeats
+// on every cycle — with the outcome subscriptions that would rescue the
+// issue gone as well.
+func (p *NatsTriggerPublisher) Connected() bool {
+	return p.nc != nil && p.nc.Status() == nats.CONNECTED
+}
 
 // Close closes the NATS connection.
 func (p *NatsTriggerPublisher) Close() {

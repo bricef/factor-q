@@ -120,6 +120,22 @@ outage there is logged per cycle and is not this process's fault. The
 bind must be loopback — the endpoint is for the supervisor on the same
 host or in the same container, not for the network.
 
+## Broker outages
+
+A broker outage is waited out, never a reason to exit, and never a reason
+to move a label. The connection retries the initial dial (so starting
+before the broker is up is fine, which is what the deploy does) and
+reconnects without an attempt limit — nats.go's default gives up after
+sixty tries two seconds apart, which left the watcher polling GitHub for
+ever with a dead connection: claiming issues it could not trigger,
+reverting them, and repeating every cycle, with the outcome subscriptions
+that would have rescued them gone too.
+
+While the connection is down each poll cycle is skipped whole — no claim,
+no trigger, no review sweep — with a log line saying so, and `/healthz`
+reports 503. Nothing is lost: a `ready` issue is still `ready` when the
+broker returns.
+
 The trigger payload follows the [task-oriented payload convention](../../docs/design/committed/trigger-wire-contract.md#task-oriented-payload-convention):
 it includes `task`, `refs`, `constraints`, and `done_criteria`, plus a `github`
 object with the repository and issue number. The `<agent>` interprets it. The
@@ -133,6 +149,11 @@ go test ./...   # pure planner, poll-loop dedup, outcome reactor, review sweep �
 go vet ./...
 go build .
 ```
+
+The reconnect policy is the exception: its tests start and stop a private
+broker, so they need the pinned `nats-server` the repository gate installs
+(`just install-nats`, then `FQ_TEST_NATS_SERVER=../../.tools/nats-server
+go test ./...`). Without it they skip rather than fail.
 
 The GitHub calls (`IssueSource` / `ReviewSource`), the NATS publish
 (`TriggerPublisher`), and the event stream (`OutcomeSource`) are all

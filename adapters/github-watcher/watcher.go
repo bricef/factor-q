@@ -167,6 +167,10 @@ type Watcher struct {
 	// Heartbeat, if set, is called after every poll cycle, succeeded or
 	// not — the liveness signal behind /healthz (health.go).
 	Heartbeat func()
+	// Connected, if set, reports whether the broker connection is up. A
+	// cycle that finds it down does nothing at all: see pollOnce. nil
+	// means "assume connected" (the pure-fake tests).
+	Connected func() bool
 }
 
 // pollOnce runs one poll cycle: list ready issues, plan, and for each
@@ -177,7 +181,18 @@ type Watcher struct {
 // the issue. Per-issue errors are logged and do not stop the others.
 //
 // After the trigger pass it runs the review sweep (merged PR → done).
+//
+// A cycle that finds the broker disconnected is skipped whole — no claim,
+// no trigger, no sweep. A label move is only safe if the trigger that
+// justifies it can be published: claiming while disconnected relabels
+// ready → in-progress, fails to publish, reverts, and does it again on
+// every cycle, churning the issue's label history while the outcome
+// subscriptions that would rescue it are down too.
 func (w *Watcher) pollOnce(ctx context.Context) error {
+	if w.Connected != nil && !w.Connected() {
+		w.Log.Warn("broker disconnected; skipping this poll cycle (no claim, no trigger, no sweep)")
+		return nil
+	}
 	issues, err := w.Source.ListReady(ctx, w.Config.ReadyLabel)
 	if err != nil {
 		return fmt.Errorf("list ready issues: %w", err)
