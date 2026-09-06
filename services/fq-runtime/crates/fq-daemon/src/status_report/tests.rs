@@ -77,14 +77,16 @@ fn the_report_roundtrips_through_its_declared_shape() {
                 bytes: 512,
                 first_seq: 1,
                 last_seq: 3,
-                consumer: fq_runtime::health::ConsumerHealth::Active {
+                consumers: vec![fq_runtime::health::ConsumerHealth::Active {
                     name: "fq-dispatcher".to_string(),
                     delivered: 3,
                     lag: 0,
                     ack_pending: 0,
                     num_pending: 0,
                     num_redelivered: 0,
-                },
+                    redeliveries: 0,
+                    stuck: false,
+                }],
             },
         ],
         registry: StatusRegistry {

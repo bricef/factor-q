@@ -57,6 +57,9 @@ pub(crate) fn register_status_report(
     db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
     legacy_events_db: std::sync::Arc<std::path::PathBuf>,
     drain_deadline_ms_value: u64,
+    // Whether this daemon runs a summariser, so health expects that
+    // durable only where one exists (#549).
+    summary_enabled: bool,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
@@ -90,7 +93,12 @@ pub(crate) fn register_status_report(
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
                 };
-                let streams = fq_runtime::health::probe_core_streams(&bus.jetstream()).await;
+                let streams = fq_runtime::health::probe_core_streams(
+                    &bus.jetstream(),
+                    summary_enabled,
+                    bus.redelivery_policy(),
+                )
+                .await;
                 let projection_rows = views.event_count().await.map_err(internal)?;
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 let recovery = views

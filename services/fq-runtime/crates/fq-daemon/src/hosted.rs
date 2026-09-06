@@ -658,5 +658,6 @@ fn daemon_facts(config: &Config) -> crate::operator_surface::DaemonFacts {
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,
+        summary_enabled: config.summary.model.is_some(),
     }
 }

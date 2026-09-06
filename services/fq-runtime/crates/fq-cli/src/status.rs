@@ -220,7 +220,7 @@ fn render_stores_human(stores: &StatusStores) -> String {
 /// the data is the same typed [`fq_ops::health::StreamHealth`] and
 /// the rendering is unchanged.
 fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
-    use fq_ops::health::{ConsumerHealth, StreamHealth};
+    use fq_ops::health::StreamHealth;
 
     let mut out = format!("\nStream: {}\n", health.stream());
     match health {
@@ -232,7 +232,7 @@ fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
             bytes,
             first_seq,
             last_seq,
-            consumer,
+            consumers,
             ..
         } => {
             out.push_str(&format!("  messages:         {messages}\n"));
@@ -242,50 +242,70 @@ fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
             ));
             out.push_str(&format!("  first seq:        {first_seq}\n"));
             out.push_str(&format!("  last seq:         {last_seq}\n"));
-            match consumer {
-                ConsumerHealth::Active {
-                    name,
-                    delivered,
-                    lag,
-                    ack_pending,
-                    num_pending,
-                    num_redelivered,
-                } => {
-                    let status = if *lag == 0 {
-                        "✓ caught up"
-                    } else if *lag < 10 {
-                        "◐ slightly behind"
-                    } else {
-                        "✗ lagging"
-                    };
-                    out.push_str(&format!(
-                        "  consumer {name}: {status} (delivered {delivered}, lag {lag})\n"
-                    ));
-                    if *ack_pending > 0 {
-                        out.push_str(&format!("    ack pending:    {ack_pending}\n"));
-                    }
-                    if *num_pending > 0 {
-                        out.push_str(&format!("    num pending:    {num_pending}\n"));
-                    }
-                    if *num_redelivered > 0 {
-                        out.push_str(&format!(
-                            "    redelivered:    {num_redelivered} (retrying; bound {})\n",
-                            fq_ops::surface::TRIGGER_MAX_DELIVER
-                        ));
-                    }
-                }
-                ConsumerHealth::Error { name, error } => {
-                    out.push_str(&format!("  consumer {name}: ✗ info failed: {error}\n"));
-                }
-                ConsumerHealth::Missing { name } => {
-                    out.push_str(&format!(
-                        "  consumer {name}: not present (no daemon has initialised it)\n"
-                    ));
-                }
+            for consumer in consumers {
+                out.push_str(&render_consumer_health_human(consumer));
             }
         }
     }
     out
+}
+
+/// Pure: render one durable's health. Every stream carries several, so
+/// this is per-consumer rather than folded into the stream block — and
+/// a stuck consumer is called stuck by name, because "something is
+/// wrong somewhere" is not a thing an operator can act on.
+fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> String {
+    use fq_ops::health::ConsumerHealth;
+
+    match consumer {
+        ConsumerHealth::Active {
+            name,
+            delivered,
+            lag,
+            ack_pending,
+            num_pending,
+            num_redelivered,
+            redeliveries,
+            stuck,
+        } => {
+            let status = if *stuck {
+                "✗ stuck redelivering"
+            } else if *lag == 0 {
+                "✓ caught up"
+            } else if *lag < 10 {
+                "◐ slightly behind"
+            } else {
+                "✗ lagging"
+            };
+            let mut out =
+                format!("  consumer {name}: {status} (delivered {delivered}, lag {lag})\n");
+            if *stuck {
+                out.push_str(&format!(
+                    "    -> {redeliveries} redeliveries past its acked floor; its handler \
+                     keeps failing\n"
+                ));
+            }
+            if *ack_pending > 0 {
+                out.push_str(&format!("    ack pending:    {ack_pending}\n"));
+            }
+            if *num_pending > 0 {
+                out.push_str(&format!("    num pending:    {num_pending}\n"));
+            }
+            if *num_redelivered > 0 {
+                out.push_str(&format!(
+                    "    redelivered:    {num_redelivered} (retrying; trigger bound {})\n",
+                    fq_ops::surface::TRIGGER_MAX_DELIVER
+                ));
+            }
+            out
+        }
+        ConsumerHealth::Error { name, error } => {
+            format!("  consumer {name}: ✗ info failed: {error}\n")
+        }
+        ConsumerHealth::Missing { name } => {
+            format!("  consumer {name}: not present (no daemon has initialised it)\n")
+        }
+    }
 }
 
 /// Pure: render the recovery-guidance block of `fq status`

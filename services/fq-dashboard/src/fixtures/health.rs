@@ -40,14 +40,41 @@ pub(crate) fn status_report() -> StatusReport {
                 bytes: 393_248_768,
                 first_seq: 1,
                 last_seq: 60_744,
-                consumer: ConsumerHealth::Active {
-                    name: "fq-projector".to_string(),
-                    delivered: 60_744,
-                    lag: 0,
-                    ack_pending: 0,
-                    num_pending: 0,
-                    num_redelivered: 0,
-                },
+                consumers: vec![
+                    ConsumerHealth::Active {
+                        name: "fq-projector".to_string(),
+                        delivered: 60_744,
+                        lag: 0,
+                        ack_pending: 0,
+                        num_pending: 0,
+                        num_redelivered: 0,
+                        redeliveries: 0,
+                        stuck: false,
+                    },
+                    ConsumerHealth::Active {
+                        name: "fq-coordination".to_string(),
+                        delivered: 60_744,
+                        lag: 0,
+                        ack_pending: 0,
+                        num_pending: 0,
+                        num_redelivered: 0,
+                        redeliveries: 0,
+                        stuck: false,
+                    },
+                    // The wedge finding B4 describes, so the fixture
+                    // exercises the red path the dashboard has to
+                    // render (#549).
+                    ConsumerHealth::Active {
+                        name: "fq-heartbeat".to_string(),
+                        delivered: 60_020,
+                        lag: 724,
+                        ack_pending: 1,
+                        num_pending: 724,
+                        num_redelivered: 1,
+                        redeliveries: 37,
+                        stuck: true,
+                    },
+                ],
             },
             StreamHealth::Available {
                 stream: "fq-triggers".to_string(),
@@ -55,14 +82,16 @@ pub(crate) fn status_report() -> StatusReport {
                 bytes: 333,
                 first_seq: 30,
                 last_seq: 32,
-                consumer: ConsumerHealth::Active {
+                consumers: vec![ConsumerHealth::Active {
                     name: "fq-dispatcher".to_string(),
                     delivered: 29,
                     lag: 3,
                     ack_pending: 1,
                     num_pending: 2,
                     num_redelivered: 4,
-                },
+                    redeliveries: 3,
+                    stuck: false,
+                }],
             },
         ],
         registry: StatusRegistry {
@@ -112,5 +141,32 @@ pub(crate) fn doctor_report() -> DoctorReport {
         dead_letters: DoctorDeadLetters {
             exhausted_triggers: 1,
         },
+        // The same roster `control.status` reports above, flattened —
+        // `fq doctor` answers "is every consumer alright" (#549).
+        consumers: vec![
+            ConsumerHealth::Active {
+                name: "fq-projector".to_string(),
+                delivered: 60_744,
+                lag: 0,
+                ack_pending: 0,
+                num_pending: 0,
+                num_redelivered: 0,
+                redeliveries: 0,
+                stuck: false,
+            },
+            ConsumerHealth::Active {
+                name: "fq-heartbeat".to_string(),
+                delivered: 60_020,
+                lag: 724,
+                ack_pending: 1,
+                num_pending: 724,
+                num_redelivered: 1,
+                redeliveries: 37,
+                stuck: true,
+            },
+            ConsumerHealth::Missing {
+                name: "fq-advisory-watch".to_string(),
+            },
+        ],
     }
 }

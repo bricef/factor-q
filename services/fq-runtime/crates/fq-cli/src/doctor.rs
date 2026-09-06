@@ -87,6 +87,13 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
         out.push_str("  -> `fq invocation list --status=failed` to inspect\n");
     }
 
+    // Consumers (#549): every durable this daemon expects, named. The
+    // Phase 1 exit criterion is "`fq doctor` reports every consumer",
+    // so the healthy ones are listed too — an operator reading this
+    // during an incident needs to know which consumers were *checked*,
+    // not only which ones complained.
+    out.push_str(&render_consumers(&report.consumers));
+
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
     if report.dead_letters.exhausted_triggers > 0 {
         out.push_str(&format!(
@@ -100,6 +107,58 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
         out.push_str("Dead-letters: none\n");
     }
 
+    out
+}
+
+/// Pure: the consumer block of `fq doctor`. One line per durable, its
+/// name first, and a next-step line under any that is not doing its
+/// job. A stuck consumer is the wedge finding B4 describes: unlimited
+/// redelivery means the event is not lost, the escalating NAK delay
+/// means the daemon is not spinning, and this line is the part that
+/// makes it something an operator can find.
+fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
+    use fq_ops::health::ConsumerHealth;
+
+    if consumers.is_empty() {
+        return "Consumers: none expected\n".to_string();
+    }
+    let faulty = consumers.iter().filter(|c| c.is_fault()).count();
+    let mut out = format!(
+        "Consumers: {} checked, {faulty} unhealthy\n",
+        consumers.len()
+    );
+    for consumer in consumers {
+        match consumer {
+            ConsumerHealth::Active {
+                name,
+                lag,
+                redeliveries,
+                stuck: true,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  {name}: ✗ stuck — {redeliveries} redeliveries past its acked floor, \
+                     lag {lag}\n"
+                ));
+                out.push_str(&format!(
+                    "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
+                     and free whatever it is blocked on (disk, store, broker)\n"
+                ));
+            }
+            ConsumerHealth::Active { name, lag, .. } => {
+                out.push_str(&format!("  {name}: ok (lag {lag})\n"));
+            }
+            ConsumerHealth::Missing { name } => {
+                out.push_str(&format!("  {name}: ✗ missing\n"));
+                out.push_str(
+                    "  -> the durable does not exist; the task that creates it never started\n",
+                );
+            }
+            ConsumerHealth::Error { name, error } => {
+                out.push_str(&format!("  {name}: ✗ unreadable: {error}\n"));
+            }
+        }
+    }
     out
 }
 

@@ -29,14 +29,16 @@ fn report() -> StatusReport {
             bytes: 2048,
             first_seq: 1,
             last_seq: 12,
-            consumer: ConsumerHealth::Active {
+            consumers: vec![ConsumerHealth::Active {
                 name: "fq-projector".to_string(),
                 delivered: 12,
                 lag: 0,
                 ack_pending: 0,
                 num_pending: 0,
                 num_redelivered: 0,
-            },
+                redeliveries: 0,
+                stuck: false,
+            }],
         }],
         registry: StatusRegistry {
             agents: 2,
@@ -248,14 +250,16 @@ fn active(lag: u64) -> StreamHealth {
         bytes: 4096,
         first_seq: 1,
         last_seq: 40,
-        consumer: ConsumerHealth::Active {
+        consumers: vec![ConsumerHealth::Active {
             name: "fq-projector".to_string(),
             delivered: 40u64.saturating_sub(lag),
             lag,
             ack_pending: 0,
             num_pending: 0,
             num_redelivered: 0,
-        },
+            redeliveries: 0,
+            stuck: false,
+        }],
     }
 }
 
@@ -284,9 +288,9 @@ fn a_missing_consumer_says_nothing_has_initialised_it() {
         bytes: 0,
         first_seq: 0,
         last_seq: 0,
-        consumer: ConsumerHealth::Missing {
+        consumers: vec![ConsumerHealth::Missing {
             name: "fq-projector".to_string(),
-        },
+        }],
     });
     assert!(out.contains("not present"), "got:\n{out}");
 }
@@ -301,20 +305,22 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
         bytes: 512,
         first_seq: 1,
         last_seq: 5,
-        consumer: ConsumerHealth::Active {
+        consumers: vec![ConsumerHealth::Active {
             name: "fq-dispatcher".to_string(),
             delivered: 5,
             lag: 0,
             ack_pending: 2,
             num_pending: 1,
             num_redelivered: 3,
-        },
+            redeliveries: 0,
+            stuck: false,
+        }],
     });
     assert!(out.contains("ack pending:    2"), "got:\n{out}");
     assert!(out.contains("num pending:    1"), "got:\n{out}");
     assert!(out.contains("redelivered:    3"), "got:\n{out}");
     assert!(
-        out.contains(&format!("bound {}", fq_ops::surface::TRIGGER_MAX_DELIVER)),
+        out.contains(&format!("trigger bound {}", fq_ops::surface::TRIGGER_MAX_DELIVER)),
         "got:\n{out}"
     );
 }

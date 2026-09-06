@@ -36,7 +36,7 @@ pub(crate) const NOW: i64 = 1_000_000;
 #[test]
 fn all_clear_when_everything_healthy() {
     let workers = vec![worker("w1", "alive", NOW)];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
+    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
 
     assert!(!report.has_issues());
     assert_eq!(report.workers.alive, 1);
@@ -54,7 +54,7 @@ fn all_clear_when_everything_healthy() {
 #[test]
 fn running_in_flight_work_is_not_an_issue() {
     // In-flight but not stuck is healthy.
-    let report = build_doctor_report(&[], &executions(1, &[]), 0, &[]);
+    let report = build_doctor_report(&[], &executions(1, &[]), 0, &[], Vec::new());
     assert_eq!(report.executions.in_flight, 1);
     assert_eq!(report.executions.stuck, 0);
     assert!(!report.has_issues());
@@ -67,7 +67,7 @@ fn stale_workers_flagged_with_ids() {
         worker("stale-1", "stale", NOW - 60_000),
         worker("gone-1", "shutdown", 0),
     ];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
+    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
 
     assert_eq!(report.workers.alive, 1);
     assert_eq!(report.workers.stale, 1);
@@ -82,7 +82,7 @@ fn stale_workers_flagged_with_ids() {
 #[test]
 fn an_unknown_worker_status_surfaces_rather_than_vanishing() {
     let workers = vec![worker("odd-1", "quiescent", NOW)];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
+    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
 
     assert_eq!(report.workers.alive, 0);
     assert_eq!(report.workers.stale, 1);
@@ -92,7 +92,7 @@ fn an_unknown_worker_status_surfaces_rather_than_vanishing() {
 
 #[test]
 fn stuck_in_flight_flagged() {
-    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[]);
+    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[], Vec::new());
 
     assert_eq!(report.executions.in_flight, 2);
     assert_eq!(report.executions.stuck, 1);
@@ -118,7 +118,7 @@ fn working_in_flight_counted_but_not_an_issue() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, 0, &[]);
+    let report = build_doctor_report(&[], &ex, 0, &[], Vec::new());
 
     assert!(!report.has_issues());
     // Whole, same convention as stuck_ids — this is the id the
@@ -144,7 +144,7 @@ fn dead_lettered_triggers_are_counted() {
             count: 1,
         },
     ];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
     assert_eq!(
         report.dead_letters,
         DoctorDeadLetters {
@@ -156,7 +156,7 @@ fn dead_lettered_triggers_are_counted() {
 
 #[test]
 fn ambiguous_flagged() {
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[]);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[], Vec::new());
     assert_eq!(report.ambiguous, 3);
     assert!(report.has_issues());
 }
@@ -173,7 +173,7 @@ fn permanent_failures_grouped_by_kind() {
             count: 1,
         },
     ];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
 
     assert_eq!(report.failure_total(), 3);
     assert!(report.has_issues());
@@ -189,6 +189,7 @@ fn report_serialises_to_stable_json_shape() {
             error_kind: "runtimeerror".to_string(),
             count: 4,
         }],
+        Vec::new(),
     );
     let v = serde_json::to_value(&report).unwrap();
     assert_eq!(v["workers"]["alive"], 1);
@@ -212,6 +213,7 @@ fn the_report_survives_the_wire_round_trip() {
             error_kind: "trigger_exhausted".to_string(),
             count: 3,
         }],
+        Vec::new(),
     );
     let wire = serde_json::to_value(&report).unwrap();
     let back: DoctorReport = serde_json::from_value(wire).unwrap();
@@ -230,6 +232,7 @@ fn dead_letters_never_fabricates_a_count() {
             error_kind: "runtimeerror".to_string(),
             count: 7,
         }],
+        Vec::new(),
     );
     assert_eq!(report.dead_letters.exhausted_triggers, 0);
 }

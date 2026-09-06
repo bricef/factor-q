@@ -473,6 +473,17 @@ pub struct DoctorReport {
     /// projection `events` table, `event_type='failed'`).
     pub failures: Vec<DoctorFailure>,
     pub dead_letters: DoctorDeadLetters,
+    /// Every durable consumer this daemon expects, and how each one is
+    /// doing. The Phase 1 exit criterion, verbatim: "`fq doctor`
+    /// reports every consumer". Before this the report was a fold of
+    /// the stores alone, so a control-plane consumer stuck redelivering
+    /// — the wedge finding B4 describes — left every check green.
+    ///
+    /// A daemon that cannot be asked answers nothing at all, which is
+    /// why this is a plain list rather than an optional one: reaching
+    /// the report means the daemon probed its own broker.
+    #[serde(default)]
+    pub consumers: Vec<crate::health::ConsumerHealth>,
 }
 
 impl DoctorReport {
@@ -481,15 +492,24 @@ impl DoctorReport {
         self.failures.iter().map(|f| f.count).sum()
     }
 
+    /// Consumers an operator should act on — missing, unreadable, or
+    /// stuck redelivering.
+    pub fn faulty_consumers(&self) -> impl Iterator<Item = &crate::health::ConsumerHealth> {
+        self.consumers.iter().filter(|c| c.is_fault())
+    }
+
     /// True when any check reports a problem worth an operator's
     /// attention: stale workers, stuck in-flight work, ambiguous
-    /// invocations, or permanent failures. In-flight work that is
-    /// merely running (not stuck) is healthy, not an issue.
+    /// invocations, permanent failures, or a consumer that has stopped
+    /// making progress. In-flight work that is merely running (not
+    /// stuck) is healthy, not an issue, and so is a consumer that is
+    /// merely behind.
     pub fn has_issues(&self) -> bool {
         self.workers.stale > 0
             || self.executions.stuck > 0
             || self.ambiguous > 0
             || self.failure_total() > 0
+            || self.faulty_consumers().next().is_some()
     }
 }
 
@@ -626,6 +646,7 @@ pub fn build_doctor_report(
     executions: &crate::views::ExecutionsView,
     ambiguous: i64,
     failures: &[crate::views::FailureView],
+    consumers: Vec<crate::health::ConsumerHealth>,
 ) -> DoctorReport {
     let mut w = DoctorWorkers::default();
     for row in workers {
@@ -682,6 +703,7 @@ pub fn build_doctor_report(
         ambiguous,
         failures,
         dead_letters,
+        consumers,
     }
 }
 
