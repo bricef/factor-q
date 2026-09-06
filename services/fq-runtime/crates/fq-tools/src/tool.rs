@@ -1,20 +1,74 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::sandbox::{SandboxError, ToolSandbox};
 
+/// Which tool call this is: the invocation it belongs to and the
+/// model-issued id of the call within it.
+///
+/// Carried so a tool that hands work to something outside this process
+/// can label it — the MCP adapter records it against the progress token
+/// rmcp mints, which is what lets an inbound `notifications/progress`
+/// be attributed back to the invocation and call that caused it
+/// (<https://github.com/bricef/factor-q/issues/605>). Strings, not
+/// typed ids: `fq-tools` is the primitive layer and does not know the
+/// runtime's event vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallIdentity {
+    pub invocation_id: String,
+    pub call_id: String,
+}
+
 /// Context passed to a tool for each invocation. Carries the agent's
 /// sandbox plus anything else the tool needs that is scoped to a
 /// particular agent run.
 pub struct ToolContext<'a> {
     pub sandbox: &'a ToolSandbox,
+    /// How long the host will wait for this call before it gives up
+    /// and reports a timeout to the model. `None` in the bare
+    /// constructor — the tool then runs to completion on its own terms.
+    ///
+    /// A tool that can *act* on the deadline should: the MCP adapter
+    /// uses it to cancel the outbound request at the deadline, so the
+    /// server is told to stop rather than left working on a result
+    /// nobody will read. The host arms its own timer as well, a little
+    /// later, as the backstop for tools that cannot (see
+    /// [`Tool::requested_deadline`]).
+    pub deadline: Option<Duration>,
+    /// Which call this is. `None` outside a real invocation (tests,
+    /// direct tool use).
+    pub call: Option<ToolCallIdentity>,
 }
 
 impl<'a> ToolContext<'a> {
     pub fn new(sandbox: &'a ToolSandbox) -> Self {
-        Self { sandbox }
+        Self {
+            sandbox,
+            deadline: None,
+            call: None,
+        }
+    }
+
+    /// Tell the tool how long the host will wait for it.
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Label this call with the invocation and call id it belongs to.
+    pub fn with_call(
+        mut self,
+        invocation_id: impl Into<String>,
+        call_id: impl Into<String>,
+    ) -> Self {
+        self.call = Some(ToolCallIdentity {
+            invocation_id: invocation_id.into(),
+            call_id: call_id.into(),
+        });
+        self
     }
 }
 
@@ -29,6 +83,24 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema for the tool's parameters.
     fn parameters_schema(&self) -> Value;
+
+    /// The deadline this tool asks for on *this* call, when it manages
+    /// one of its own.
+    ///
+    /// `None` — every tool but `exec` — means "the host decides", and
+    /// the host applies its configured default. `Some(d)` is a
+    /// *request*: the host clamps it to its ceiling and never grants
+    /// more. Returning `Some` also tells the host this tool will report
+    /// its own timeout, so the host arms its timer slightly later and
+    /// stays a backstop rather than racing the tool's own error, which
+    /// is the more useful one (it names the command and keeps the
+    /// output captured so far).
+    ///
+    /// Answered from the parameters because a per-call `timeout_secs`
+    /// is part of the request, not of the tool.
+    fn requested_deadline(&self, _params: &Value) -> Option<Duration> {
+        None
+    }
 
     /// Execute the tool with the given parameters.
     async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError>;
@@ -67,6 +139,19 @@ pub enum ToolError {
 
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+
+    /// The call did not finish inside the deadline the host allowed it
+    /// (`[tools] default_timeout_secs`, or the tool's own request
+    /// clamped to `[tools] max_timeout_secs`).
+    ///
+    /// Its own variant because a deadline is not an execution failure:
+    /// the host learns nothing about whether the work happened, the
+    /// model is told to try something else, and the runtime counts
+    /// consecutive ones so a permanently unresponsive tool ends the
+    /// invocation instead of burning its budget one error at a time
+    /// (<https://github.com/bricef/factor-q/issues/547>).
+    #[error("timed out after {}s", .after.as_secs())]
+    TimedOut { after: Duration },
 }
 
 impl From<SandboxError> for ToolError {

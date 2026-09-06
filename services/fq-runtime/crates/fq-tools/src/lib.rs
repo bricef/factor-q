@@ -12,4 +12,4 @@ pub mod sandbox;
 pub mod tool;
 
 pub use sandbox::{SandboxError, ToolSandbox};
-pub use tool::{Tool, ToolContext, ToolError, ToolResult};
+pub use tool::{Tool, ToolCallIdentity, ToolContext, ToolError, ToolResult};

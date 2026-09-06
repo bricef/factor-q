@@ -162,6 +162,25 @@ impl ExecTool {
     pub fn with_config(config: ExecConfig) -> Self {
         Self { config }
     }
+
+    /// This call's wall-clock timeout: what the caller asked for,
+    /// clamped down to [`ExecConfig::max_timeout`], or the configured
+    /// default when the caller asked for nothing. Clamped rather than
+    /// rejected so an over-ambitious `timeout_secs` does not trap the
+    /// agent in a retry loop.
+    ///
+    /// One function so `execute` and
+    /// [`requested_deadline`](Tool::requested_deadline) can never
+    /// disagree — the host arms its backstop off the second and the
+    /// child dies by the first.
+    fn call_timeout(&self, requested_secs: Option<u64>) -> Duration {
+        match requested_secs {
+            // Zero is rejected in `execute`; here it is simply not a
+            // request for a longer deadline.
+            None | Some(0) => self.config.default_timeout,
+            Some(secs) => Duration::from_secs(secs).min(self.config.max_timeout),
+        }
+    }
 }
 
 impl Default for ExecTool {
@@ -198,6 +217,18 @@ impl Tool for ExecTool {
          only the first or last N lines instead of piping to head/tail. \
          Non-zero exit codes are returned as errors but still include \
          stdout/stderr."
+    }
+
+    /// `exec` is the one built-in that times itself: it kills the child
+    /// and returns the output captured so far, which is far more useful
+    /// than the host's bare "timed out". Declaring the deadline here
+    /// lets the host clamp it to `[tools] max_timeout_secs` and arm its
+    /// own timer as a backstop rather than a competitor.
+    fn requested_deadline(&self, params: &Value) -> Option<Duration> {
+        let requested = params
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64);
+        Some(self.call_timeout(requested))
     }
 
     fn parameters_schema(&self) -> Value {
@@ -285,22 +316,12 @@ impl Tool for ExecTool {
         let canonical_cwd = ctx.sandbox.check_exec_cwd(&cwd_path)?;
 
         // Clamp timeout.
-        let timeout_duration = match params.timeout_secs {
-            Some(0) => {
-                return Err(ToolError::InvalidParameters(
-                    "timeout_secs must be > 0".to_string(),
-                ));
-            }
-            Some(secs) => {
-                let requested = Duration::from_secs(secs);
-                if requested > self.config.max_timeout {
-                    self.config.max_timeout
-                } else {
-                    requested
-                }
-            }
-            None => self.config.default_timeout,
-        };
+        if params.timeout_secs == Some(0) {
+            return Err(ToolError::InvalidParameters(
+                "timeout_secs must be > 0".to_string(),
+            ));
+        }
+        let timeout_duration = self.call_timeout(params.timeout_secs);
 
         // Build the child's environment. Start from a small fixed
         // baseline (just PATH), then copy each variable the agent
@@ -1039,6 +1060,22 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(4));
         assert!(result.is_error);
         assert!(result.output.contains("timed out"));
+    }
+
+    /// The deadline `exec` declares to the host is exactly the one it
+    /// will enforce on the child (#547) — clamped, defaulted, and
+    /// unmoved by a zero it is about to reject.
+    #[test]
+    fn declared_deadline_matches_the_one_exec_enforces() {
+        let tool = make_tool_fast(); // default 5s, max 10s
+        let deadline = |params: Value| tool.requested_deadline(&params).unwrap();
+        assert_eq!(deadline(json!({})), Duration::from_secs(5));
+        assert_eq!(deadline(json!({"timeout_secs": 3})), Duration::from_secs(3));
+        assert_eq!(
+            deadline(json!({"timeout_secs": 9999})),
+            Duration::from_secs(10)
+        );
+        assert_eq!(deadline(json!({"timeout_secs": 0})), Duration::from_secs(5));
     }
 
     /// #176 regression: a grandchild that inherited the output pipe
