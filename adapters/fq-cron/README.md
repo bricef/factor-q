@@ -34,12 +34,19 @@ process, which the supervisor sees directly. The bind must be loopback.
 A broker outage is waited out, never a reason to exit. The connection
 retries the initial dial (so starting before the broker is up is fine,
 which is what the deploy does) and reconnects without an attempt limit —
-nats.go's default gives up after sixty tries two seconds apart, which
-turned two minutes of downtime into a scheduler that never fired again.
-Every state-store call retries with capped backoff for the same reason:
-the state store *is* the broker, and its first read is the first thing
-each loop iteration does. Disconnects, reconnects and a closed connection
-each get a log line, and `/healthz` reports 503 throughout.
+nats.go's default gives up after sixty tries two seconds apart, so two
+minutes of downtime killed the process and compose restarted it into the
+same outage, over and over, for as long as it lasted. Every state-store
+call retries with capped backoff for the same reason, from the bucket
+opened at startup onwards: the state store *is* the broker, and its first
+read is the first thing each loop iteration does. Disconnects, reconnects
+and a closed connection each get a log line, and `/healthz` reports 503
+throughout.
+
+A publish attempted while the connection is down fails immediately rather
+than being buffered for delivery on reconnect (`ReconnectBufSize(-1)`), so
+a fire is never both recorded as failed and delivered later; what is
+re-sent stays the retry policy's decision.
 
 Fires are not queued across the outage: the per-job `catch_up` policy
 ([DESIGN.md D6](DESIGN.md#d6--missed-fires-per-job-skip-or-once-default-skip))

@@ -151,9 +151,18 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create JetStream context: %w", err)
 	}
-	store, err := NewKVStateStore(ctx, js, cli.KVBucket)
-	if err != nil {
+	// waitConnected only proves the broker was there a moment ago: it can
+	// drop again between that check and this call, which is the same
+	// JetStream request the loop retries for ever once it is running.
+	// Retry it here too, or the startup window stays the one place a
+	// broker blip still ends the process.
+	var store *KVStateStore
+	if err := withBrokerRetry(ctx, log.Default(), "open state bucket", func() error {
+		var err error
+		store, err = NewKVStateStore(ctx, js, cli.KVBucket)
 		return err
+	}); err != nil {
+		return nil // ctx cancelled: a clean stop
 	}
 	watcher := NewConfigWatcher(cli.ConfigPath, config, ConfigWatcherOptions{Logger: log.Default()})
 	return runScheduler(ctx, config, watcher.Run(ctx), publisher, store, log.Default())
