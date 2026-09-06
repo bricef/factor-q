@@ -27,10 +27,23 @@ type JobSet struct {
 	MaxFiresPerHour int
 }
 
+// valveWindow is the width of the sliding window `max_fires_per_hour`
+// counts over.
+const valveWindow = time.Hour
+
 // plan computes at most one fire per job. Replanning therefore supersedes an
 // older, unexecuted plan instead of building a queue. It is deliberately pure:
 // now and all publication history are supplied by the caller.
-func plan(now time.Time, jobs JobSet, state map[string]FireState) []Fire {
+//
+// The second return value is the instant the valve re-opens: when the fire
+// count in the sliding window is at the ceiling there are no fires, and
+// this says when the oldest fire in the window leaves it and planning is
+// worth repeating. It is the zero time whenever the valve is not the
+// reason — the caller has fires to wait for, or there is simply nothing to
+// schedule. Without it the loop waited only on a config reload, so a burst
+// that tripped the valve silenced the scheduler until someone edited the
+// file.
+func plan(now time.Time, jobs JobSet, state map[string]FireState) ([]Fire, time.Time) {
 	candidates := make([]Fire, 0, len(jobs.Jobs))
 	for _, job := range jobs.Jobs {
 		if job.Enabled != nil && !*job.Enabled {
@@ -88,18 +101,27 @@ func plan(now time.Time, jobs JobSet, state map[string]FireState) []Fire {
 	if limit <= 0 {
 		limit = DefaultMaxFiresPerHour
 	}
-	windowStart := now.Add(-time.Hour)
+	windowStart := now.Add(-valveWindow)
 	used := 0
+	var oldestInWindow time.Time
 	for _, previous := range state {
 		if previous.PublishedAt.After(windowStart) && !previous.PublishedAt.After(now) {
 			used++
+			if oldestInWindow.IsZero() || previous.PublishedAt.Before(oldestInWindow) {
+				oldestInWindow = previous.PublishedAt
+			}
 		}
 	}
 	if used >= limit {
-		return nil
+		// The window slides: at oldestInWindow+valveWindow that fire is no
+		// longer inside it, `used` drops below the ceiling, and this plan
+		// is worth recomputing. (used >= limit implies at least one fire
+		// in the window for any limit >= 1, and limit is validated
+		// positive, so oldestInWindow is set.)
+		return nil, oldestInWindow.Add(valveWindow)
 	}
 	if remaining := limit - used; len(candidates) > remaining {
 		candidates = candidates[:remaining]
 	}
-	return candidates
+	return candidates, time.Time{}
 }

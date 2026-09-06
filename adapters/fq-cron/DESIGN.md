@@ -214,8 +214,12 @@ Three guard rails, same principle:
   not, catch-ups included. A fire over the ceiling is suppressed with a
   loud log line and then treated as any other missed fire (this
   section's policy governs), so a runaway schedule is clamped to the
-  valve rate rather than trusted to its own floor. The 1-minute floor
-  bounds each job; the valve bounds the file
+  valve rate rather than trusted to its own floor. The window is
+  sliding, so the valve reopens on its own: when it is shut the planner
+  reports the instant the oldest fire in the window leaves it, and the
+  loop wakes then and re-plans. Nothing waits for a config reload — a
+  burst used to leave the scheduler silent until someone edited the
+  file. The 1-minute floor bounds each job; the valve bounds the file
   ([ADR-0004](../../docs/adrs/accepted/0004-cost-controls-from-day-one.md):
   cost controls from day one).
 
@@ -292,15 +296,17 @@ The scheduler core follows github-watcher's shape: the decision logic is
 a **pure planning function** —
 
 ```go
-plan(now time.Time, jobs JobSet, state map[string]FireState) []Fire
+plan(now time.Time, jobs JobSet, state map[string]FireState) ([]Fire, time.Time)
 ```
 
-— which owns next-fire computation, catch-up evaluation, and supersession,
+— which owns next-fire computation, catch-up evaluation, supersession, and
+(in the second return value) the instant a shut valve reopens,
 against an **injected clock**. `Publisher` (JetStream / core publish) and
 `StateStore` (KV) are interfaces with in-memory fakes, so every semantic
 in this document is exercised in table tests with no broker and no real
-time. The main loop is a thin shell: wait until the earliest next fire or
-a reload event, call `plan`, execute the returned fires.
+time. The main loop is a thin shell: wait until the earliest next fire, a
+reload event, or the instant a shut valve reopens; call `plan`; execute
+the returned fires.
 
 ## Failure modes
 
@@ -316,7 +322,7 @@ a reload event, call `plan`, execute the returned fires.
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
 | Scheduler down across fires | Per-job catch-up policy: `skip` or one `once` fire (D6). |
-| Fire rate exceeds `max_fires_per_hour` | Fire suppressed, logged loudly, treated as missed; the valve clamps runaway schedules (D6). |
+| Fire rate exceeds `max_fires_per_hour` | Fire suppressed, logged loudly, treated as missed; the valve clamps runaway schedules (D6). The scheduler re-plans by itself when the window slides — a burst never silences it until the next config edit. |
 
 ## Operations
 
