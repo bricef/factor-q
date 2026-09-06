@@ -29,7 +29,11 @@ struct Fixture {
 impl Fixture {
     async fn new(server_url: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let worker = Arc::new(WorkerStore::open(&dir.path().join("worker.db")).await.unwrap());
+        let worker = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
         let control_plane = Arc::new(
             ControlPlaneStore::open(&dir.path().join("cp.db"))
                 .await
@@ -148,7 +152,11 @@ async fn a_stale_in_flight_row_is_reported_once() {
     // Re-sending it would make the event's arrival rate the tick rate,
     // which is what makes an alert worthless.
     sweep.tick(NOW).await.expect("second tick");
-    assert_quiet(&mut sub, "a second tick must not re-emit for the same stall").await;
+    assert_quiet(
+        &mut sub,
+        "a second tick must not re-emit for the same stall",
+    )
+    .await;
 }
 
 /// A row that advanced recently is the healthy case, and a row that
@@ -256,7 +264,13 @@ async fn the_doctor_and_the_sweep_agree_on_the_same_invocation() {
 fn the_classifier_gives_one_verdict_per_row() {
     let long = 600_000;
     assert_eq!(
-        classify_liveness(Some(NOW - 1_000), NOW - 10 * THRESHOLD_MS, NOW, THRESHOLD_MS, long),
+        classify_liveness(
+            Some(NOW - 1_000),
+            NOW - 10 * THRESHOLD_MS,
+            NOW,
+            THRESHOLD_MS,
+            long
+        ),
         Liveness::Working,
         "a fresh open call explains the silence"
     );

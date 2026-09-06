@@ -34,7 +34,8 @@ fn the_default_configuration_derives_seventy_minutes() {
 #[test]
 fn halving_the_model_deadline_moves_the_threshold() {
     let base = Config::default().stuck_after();
-    let faster: Config = Config::from_toml_str("[worker]\nllm_timeout_secs = 300\n").expect("parse");
+    let faster: Config =
+        Config::from_toml_str("[worker]\nllm_timeout_secs = 300\n").expect("parse");
     assert!(
         faster.stuck_after() < base,
         "{:?} should be under {base:?}",
