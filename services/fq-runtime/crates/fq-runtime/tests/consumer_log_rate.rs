@@ -49,10 +49,17 @@ impl<'a> MakeWriter<'a> for SharedBuf {
     }
 }
 
-/// A handler that fails forever, with the escalation turned off: every
-/// redelivery is at the cap, so nothing is an escalation step and the
-/// interval alone decides. Dozens of redeliveries inside one interval
-/// must produce one line.
+/// A handler that fails forever on **two** messages, with the
+/// escalation turned off: every redelivery is at the cap, so nothing is
+/// an escalation step and the interval alone decides.
+///
+/// Two messages, not one, because the limiter is per consumer loop
+/// while the delivery count is per message: with one message a
+/// per-message limiter and a per-loop one are indistinguishable, and
+/// the flood this guards against is a handler failing on *everything*
+/// so that delivery 1 of a fresh message keeps arriving. Dozens of
+/// redeliveries across both, inside one interval, must produce one
+/// line.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
     let buf = SharedBuf::default();
@@ -82,14 +89,16 @@ async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
         .with_redelivery_policy(policy);
 
     let worker_id = WorkerId::new(format!("lograte-{}", Uuid::now_v7().simple())).unwrap();
-    bus.publish(&Event::system(
-        Uuid::now_v7(),
-        EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
-            worker_id: worker_id.clone(),
-        }),
-    ))
-    .await
-    .expect("publish");
+    for _ in 0..2 {
+        bus.publish(&Event::system(
+            Uuid::now_v7(),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: worker_id.clone(),
+            }),
+        ))
+        .await
+        .expect("publish");
+    }
 
     let attempts = Arc::new(AtomicUsize::new(0));
     let config = DurableConsumerConfig {
@@ -114,7 +123,8 @@ async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
         .await
     });
 
-    // Twenty redeliveries, all inside the one-hour log interval.
+    // Twenty deliveries across the two messages, all inside the
+    // one-hour log interval.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while attempts.load(Ordering::SeqCst) < 20 {
         assert!(

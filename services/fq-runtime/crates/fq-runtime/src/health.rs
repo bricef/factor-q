@@ -130,6 +130,7 @@ async fn probe_consumer(
 
     let delivered = info.delivered.stream_sequence;
     let ack_pending = info.num_ack_pending as u64;
+    let num_redelivered = info.num_redelivered as u64;
     let redeliveries = redeliveries(info);
     ConsumerHealth::Active {
         name: name.to_string(),
@@ -137,9 +138,9 @@ async fn probe_consumer(
         lag: last_seq.saturating_sub(delivered),
         ack_pending,
         num_pending: info.num_pending,
-        num_redelivered: info.num_redelivered as u64,
+        num_redelivered,
         redeliveries,
-        stuck: is_stuck(ack_pending, redeliveries, policy),
+        stuck: is_stuck(ack_pending, num_redelivered, redeliveries, policy),
     }
 }
 
@@ -154,6 +155,17 @@ async fn probe_consumer(
 /// That is exactly "the delivered count climbing while the watermark is
 /// frozen", readable from a single probe with no state kept between
 /// calls.
+///
+/// **It is an upper bound, not a count, on a consumer that acks out of
+/// order.** `ack_floor` is the lowest *contiguous* acked position, so
+/// every ack that lands above a lagging floor stays inside the
+/// difference and is counted here as though it were a redelivery. Every
+/// consumer built on [`crate::control_plane::durable_consumer`] resolves
+/// one message at a time, which makes the number exact for them; the
+/// dispatcher acks from concurrently spawned tasks, so on it five later
+/// triggers acking while an earlier one is still on its honest first
+/// delivery would read as five redeliveries. That is why the verdict
+/// below is gated on the server's own count as well.
 fn redeliveries(info: &async_nats::jetstream::consumer::Info) -> u64 {
     info.delivered
         .consumer_sequence
@@ -161,15 +173,28 @@ fn redeliveries(info: &async_nats::jetstream::consumer::Info) -> u64 {
         .saturating_sub(info.num_ack_pending as u64)
 }
 
-/// The stuck verdict: work is outstanding *and* it has been redelivered
-/// more times than the daemon's `[bus] stuck_after_redeliveries`
-/// tolerates. Both halves matter — a consumer with nothing pending is
-/// idle, not stuck, however many redeliveries it survived in the past.
+/// The stuck verdict: work is outstanding, the server says at least one
+/// outstanding message has been delivered more than once, *and* the
+/// deliveries past the acked floor exceed the daemon's
+/// `[bus] stuck_after_redeliveries`.
+///
+/// All three matter. A consumer with nothing pending is idle, not
+/// stuck, however many redeliveries it survived in the past. And
+/// `num_redelivered` — the server's own count of pending messages
+/// delivered more than once — is what keeps an out-of-order acker off
+/// the red list: a consumer that has never redelivered anything cannot
+/// be stuck retrying, whatever the arithmetic above makes of its
+/// contiguous floor.
 ///
 /// A threshold of zero would make every retry a fault, so one
 /// redelivery is the floor: the first redelivery of anything is normal.
-fn is_stuck(ack_pending: u64, redeliveries: u64, policy: ConsumerRedeliveryPolicy) -> bool {
-    ack_pending > 0 && redeliveries >= policy.stuck_after_redeliveries.max(1)
+fn is_stuck(
+    ack_pending: u64,
+    num_redelivered: u64,
+    redeliveries: u64,
+    policy: ConsumerRedeliveryPolicy,
+) -> bool {
+    ack_pending > 0 && num_redelivered > 0 && redeliveries >= policy.stuck_after_redeliveries.max(1)
 }
 
 /// Every expected durable's health, flattened across streams — what

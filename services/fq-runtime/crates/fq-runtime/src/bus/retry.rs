@@ -110,17 +110,29 @@ impl ConsumerRedeliveryPolicy {
     }
 }
 
-/// The rate limit on a consumer's redelivery error log: a line on every
-/// escalation step, and at most one per [`ConsumerRedeliveryPolicy::log_interval`]
-/// after that.
+/// The rate limit on a consumer's redelivery error log: the escalation
+/// ladder once, then at most one line per
+/// [`ConsumerRedeliveryPolicy::log_interval`].
 ///
 /// Held per consumer loop, so two consumers failing at once still each
 /// say so. The clock is passed in rather than read here, which is what
 /// makes the limit testable without sleeping through a minute.
+///
+/// **An escalation step only counts as new information once.** The
+/// limiter is per loop while the delivery count is per *message*, so a
+/// consumer whose handler fails on everything sees delivery 1 of a
+/// fresh message over and over. Admitting each of those as a first
+/// escalation step would make the rate `steps × arrival rate` — under a
+/// persistent `SQLITE_FULL` on a busy stream, exactly the flood the
+/// limiter exists to stop. So a step is admitted only when its delivery
+/// count is higher than any logged since the last interval line: the
+/// ladder is climbed once and the window then governs.
 #[derive(Debug)]
 pub struct RedeliveryLog {
     policy: ConsumerRedeliveryPolicy,
     last_logged: Option<std::time::Instant>,
+    /// The highest delivery count logged since the window last opened.
+    high_water: u64,
 }
 
 impl RedeliveryLog {
@@ -128,6 +140,7 @@ impl RedeliveryLog {
         Self {
             policy,
             last_logged: None,
+            high_water: 0,
         }
     }
 
@@ -135,14 +148,20 @@ impl RedeliveryLog {
     /// `now` is the caller's clock reading.
     pub fn admit(&mut self, delivered: u64, now: std::time::Instant) -> bool {
         let due = match self.last_logged {
+            // Nothing said yet: the first failure always speaks.
             None => true,
-            Some(last) => {
-                self.policy.escalates_at(delivered)
-                    || now.duration_since(last) >= self.policy.log_interval
-            }
+            // The window has elapsed. This line reopens it, so the
+            // ladder may be climbed again — a fault that outlives an
+            // interval deserves to show its escalation afresh.
+            Some(last) if now.duration_since(last) >= self.policy.log_interval => true,
+            // Inside the window: only a step past everything already
+            // said, which is what makes the ladder cost one line each
+            // rather than one line per message per step.
+            Some(_) => self.policy.escalates_at(delivered) && delivered > self.high_water,
         };
         if due {
             self.last_logged = Some(now);
+            self.high_water = delivered;
         }
         due
     }
