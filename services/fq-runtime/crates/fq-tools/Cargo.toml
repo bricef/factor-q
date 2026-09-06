@@ -20,6 +20,12 @@ async-trait = { workspace = true }
 glob = "0.3"
 regex = "1"
 
+[target.'cfg(unix)'.dependencies]
+# `killpg` for the exec tool's process-group teardown (#552). Process
+# groups are Unix-wide; every path that needs one degrades to the direct
+# child where they do not exist.
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

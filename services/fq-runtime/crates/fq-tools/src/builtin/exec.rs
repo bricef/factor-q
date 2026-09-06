@@ -26,13 +26,18 @@
 //! - **Timeout** — every call has a wall-clock timeout. The agent may
 //!   request a shorter timeout via `timeout_secs`; anything longer is
 //!   clamped to the runtime-configured maximum, as is the configured
-//!   default. On timeout the child is killed and the tool returns
-//!   [`ToolError::TimedOut`] carrying whatever output was captured up
-//!   to that point. A `TimedOut` and not an `is_error: true` result:
-//!   the host counts consecutive deadlines to end an invocation whose
-//!   tools have stopped answering, and a timeout dressed as an answer
-//!   left the one tool that can hang for fifteen minutes outside that
-//!   protection (#547).
+//!   default. On timeout the child's whole process group is killed and
+//!   the tool returns [`ToolError::TimedOut`] carrying whatever output
+//!   was captured up to that point. A `TimedOut` and not an
+//!   `is_error: true` result: the host counts consecutive deadlines to
+//!   end an invocation whose tools have stopped answering, and a
+//!   timeout dressed as an answer left the one tool that can hang for
+//!   fifteen minutes outside that protection (#547).
+//! - **Process-group teardown** — the child leads its own process
+//!   group, and a timed-out or dropped call ends the *group*, not just
+//!   the direct child (A9, #552). The `reap` submodule carries the
+//!   escalation, and why a cleanly exited command's descendants are
+//!   left alone.
 //! - **Bounded output drain** — once the child is gone (exited or
 //!   killed), legitimate leftover output is only what sits in the
 //!   kernel pipe buffer, so capture continues for a short grace window
@@ -40,10 +45,9 @@
 //!   that inherited the stdout/stderr pipe (anything daemonized — a
 //!   `nohup`-style spawn, a test runner leaving a child) holds EOF
 //!   hostage and the tool hangs forever *despite the timeout having
-//!   fired* (#176). Cut output carries an explicit note. The
-//!   longer-term fix is a process-group kill (`setpgid` +
-//!   `kill(-pgid)`) that ends the whole tree, not just the direct
-//!   child — worth doing when OS-level isolation lands (ADR-0010).
+//!   fired* (#176). Cut output carries an explicit note. The group kill
+//!   ends that standoff for the common case, but not for a descendant
+//!   that left the group (`setsid`), so the bound stays.
 //! - **Output cap & line limits** — stdout and stderr are each bounded
 //!   by a configurable byte cap (a safety backstop). When bytes are
 //!   dropped the returned text carries a marker showing how much (kept
@@ -87,10 +91,9 @@
 //!
 //! Container-level isolation (ADR-0010) is the path to closing these.
 //! Until then, the exec tool should be granted only to agents you
-//! trust with these capabilities, and tests for the tool itself
-//! should be run in a disposable container
-//! (see `services/fq-runtime/Dockerfile.shell-test` and
-//! `just test-shell-sandbox`).
+//! trust with these capabilities. The tool's own battery runs in
+//! `just runtime-ci`; it spawns real children, so it wants a machine
+//! you are happy to have `sleep` and `bash` on.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,6 +111,7 @@ use tracing::{debug, warn};
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 mod output;
+mod reap;
 
 use output::{LineLimit, capture_stream, format_output};
 // Re-exported at the path it has always had: `fq-cli`'s status view
@@ -141,6 +145,11 @@ pub struct ExecConfig {
     /// the inherited pipe open cannot hang the tool forever (#176);
     /// the kernel pipe buffer flushes in far less than this.
     pub drain_grace: Duration,
+    /// How long a timed-out process group gets to exit on `SIGTERM`
+    /// before it is `SIGKILL`ed (#552). The window ends early once the
+    /// group is empty, so this is the price of a tree that ignores
+    /// `SIGTERM`, not of every timeout.
+    pub kill_grace: Duration,
 }
 
 impl Default for ExecConfig {
@@ -151,6 +160,7 @@ impl Default for ExecConfig {
             max_output_bytes: 100 * 1024,
             default_path: DEFAULT_CHILD_PATH.to_string(),
             drain_grace: Duration::from_secs(2),
+            kill_grace: Duration::from_secs(2),
         }
     }
 }
@@ -234,7 +244,8 @@ impl Tool for ExecTool {
         "Run a single program as a child process. Takes an argv array \
          (NOT a shell string) plus a working directory that must be \
          within the agent's exec_cwd sandbox. Every call has a timeout \
-         and an output byte cap; set max_lines or tail_lines to keep \
+         (on expiry the command and every process it started are \
+         killed) and an output byte cap; set max_lines or tail_lines to keep \
          only the first or last N lines instead of piping to head/tail. \
          Non-zero exit codes are returned as errors but still include \
          stdout/stderr."
@@ -269,7 +280,7 @@ impl Tool for ExecTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds. Clamped to the runtime's configured maximum."
+                    "description": "Optional timeout in seconds. Clamped to the runtime's configured maximum. On expiry the command and every process it started are killed."
                 },
                 "max_lines": {
                     "type": "integer",
@@ -372,10 +383,18 @@ impl Tool for ExecTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group, so a timeout or a dropped future can
+        // end the whole tree rather than just the direct child (#552).
+        reap::lead_own_group(&mut cmd);
 
         let mut child = cmd
             .spawn()
             .map_err(|err| classify_spawn_error(program, err))?;
+
+        let pgid = reap::group_id(&child);
+        // Declared after `child` so it drops first: the group is killed
+        // while the leader is still unreaped and its id still ours.
+        let mut group = reap::GroupGuard::new(pgid);
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -418,18 +437,19 @@ impl Tool for ExecTool {
             }
             Err(_) => {
                 // Killing on drop is set, but be explicit so the
-                // captured output tasks finish promptly.
+                // captured output tasks finish promptly — and kill the
+                // whole group, or a `<payload> & sleep 999` outlives
+                // the call as an unwatched process (#552).
                 warn!(
                     timeout_ms = timeout_duration.as_millis() as u64,
-                    "exec timeout fired — killing child"
+                    "exec timeout fired — killing the child's process group"
                 );
-                if let Err(err) = child.start_kill() {
-                    warn!(error = %err, "failed to start_kill after timeout");
-                }
-                let _ = child.wait().await;
+                reap::kill_group(&mut child, pgid, self.config.kill_grace).await;
                 (None, true)
             }
         };
+        // The child is reaped on both branches: nothing left to guard.
+        group.disarm();
 
         // The child is gone on both branches above. Whatever output is
         // still legitimately owed sits in the kernel pipe buffer and
@@ -480,7 +500,13 @@ impl Tool for ExecTool {
         if timed_out {
             return Err(ToolError::TimedOut {
                 after: timeout_duration,
-                output: Some(body),
+                // `output: Some(..)` already tells the model the tool
+                // stopped the work itself; for `exec` that now covers
+                // everything the command started, not just the direct
+                // child (#552), which is worth saying in as many words.
+                output: Some(format!(
+                    "{body}(the command and every process it started were killed)\n"
+                )),
             });
         }
 
@@ -599,14 +625,20 @@ mod tests {
         ToolContext::new(sandbox)
     }
 
-    fn make_tool_fast() -> ExecTool {
-        ExecTool::with_config(ExecConfig {
+    /// Every grace shortened so the timing tests cost milliseconds.
+    fn fast_config() -> ExecConfig {
+        ExecConfig {
             default_timeout: Duration::from_secs(5),
             max_timeout: Duration::from_secs(10),
             max_output_bytes: 4 * 1024, // Small to make truncation tests fast
             default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
             drain_grace: Duration::from_millis(500),
-        })
+            kill_grace: Duration::from_millis(300),
+        }
+    }
+
+    fn make_tool_fast() -> ExecTool {
+        ExecTool::with_config(fast_config())
     }
 
     #[tokio::test]
@@ -808,10 +840,7 @@ mod tests {
         // Sleep 30s, timeout after 1s.
         let tool = ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(1),
-            max_timeout: Duration::from_secs(10),
-            max_output_bytes: 4 * 1024,
-            default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
-            drain_grace: Duration::from_millis(500),
+            ..fast_config()
         });
 
         let start = std::time::Instant::now();
@@ -846,9 +875,7 @@ mod tests {
         let tool = ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(30),
             max_timeout: Duration::from_secs(2),
-            max_output_bytes: 4 * 1024,
-            default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
-            drain_grace: Duration::from_millis(500),
+            ..fast_config()
         });
 
         let start = std::time::Instant::now();
@@ -890,21 +917,30 @@ mod tests {
     /// must not hold the tool hostage after the timeout kill — the
     /// drain is bounded, and what was captured before the cut is
     /// still returned with an honest note.
+    ///
+    /// The fault is injected with `setsid` since #552: the timeout now
+    /// kills the child's whole process group, so a plain `sleep 60 &`
+    /// dies with its parent and never reaches the pipe standoff. A
+    /// descendant that gave itself a new session is outside the group
+    /// and still can, which is exactly why the drain stays bounded.
     #[tokio::test]
     async fn timeout_with_pipe_holding_grandchild_returns_within_drain_grace() {
+        let Some(setsid) = setsid_path() else {
+            eprintln!("skipping: setsid not found on the child PATH");
+            return;
+        };
         let dir = tempdir().unwrap();
         let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
         let ctx = make_exec_ctx(&sandbox);
         let tool = ExecTool::with_config(ExecConfig {
             default_timeout: Duration::from_secs(1),
-            max_timeout: Duration::from_secs(10),
-            max_output_bytes: 4 * 1024,
-            default_path: "/usr/local/bin:/usr/bin:/bin".to_string(),
             drain_grace: Duration::from_secs(1),
+            ..fast_config()
         });
 
         let start = std::time::Instant::now();
-        // `sleep 60 &` inherits the stdout/stderr pipes; `wait` keeps
+        // The `setsid`ed `sleep 60` inherits the stdout/stderr pipes
+        // and leaves the process group; the foreground `sleep 60` keeps
         // the direct child alive past the timeout so the kill path
         // fires. Without the bounded drain this call hangs ~60s.
         // (Operator characters inside ONE argv element are legitimate
@@ -913,7 +949,7 @@ mod tests {
             .execute(
                 &ctx,
                 json!({
-                    "command": ["sh", "-c", "echo hi; sleep 60 & wait"],
+                    "command": ["sh", "-c", format!("echo hi; {setsid} sleep 10 & sleep 60")],
                     "cwd": dir.path().to_string_lossy(),
                 }),
             )
@@ -1513,5 +1549,261 @@ mod tests {
             standalone_shell_operator(&["echo".into(), "hello".into()]),
             None
         );
+    }
+
+    // ---- process-group teardown (#552, review finding A9) ----------
+
+    /// `setsid` if it is on the child's PATH — the only way a test
+    /// payload can put a descendant *outside* the child's process
+    /// group now that the group is killed as one.
+    fn setsid_path() -> Option<String> {
+        DEFAULT_CHILD_PATH
+            .split(':')
+            .map(|dir| format!("{dir}/setsid"))
+            .find(|path| std::path::Path::new(path).is_file())
+    }
+
+    /// A payload that publishes `<leader-pid> <background-pid>` to
+    /// `pids` in the cwd, backgrounds a process, and then blocks. One
+    /// `printf` so the file is never read half-written.
+    const GROUP_PAYLOAD: &str = "sleep 999 & printf '%s %s\\n' \"$$\" \"$!\" > pids; sleep 999";
+
+    /// The process group `pid` belongs to, or `None` if there is no
+    /// such process. Answers for zombies too, so a `Some` here is not
+    /// on its own proof that anything is running.
+    fn pgid_of(pid: i32) -> Option<i32> {
+        // SAFETY: `getpgid` reads scheduler bookkeeping for one pid and
+        // reports failure through errno.
+        let rc = unsafe { libc::getpgid(pid) };
+        (rc >= 0).then_some(rc)
+    }
+
+    /// Wait for [`GROUP_PAYLOAD`] to publish its pids, and assert the
+    /// child really leads a group of its own.
+    ///
+    /// This is the half that fails if `process_group(0)` is dropped:
+    /// without it the child and its descendant sit in the *test
+    /// process's* group, so every "is the group gone?" assertion below
+    /// would pass for the wrong reason.
+    async fn probe_group(pid_file: &std::path::Path) -> (i32, i32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = fs::read_to_string(pid_file) {
+                let mut fields = text.split_whitespace();
+                if let (Some(Ok(leader)), Some(Ok(background))) = (
+                    fields.next().map(str::parse::<i32>),
+                    fields.next().map(str::parse::<i32>),
+                ) {
+                    assert_eq!(
+                        pgid_of(leader),
+                        Some(leader),
+                        "the exec child must lead its own process group"
+                    );
+                    assert_eq!(
+                        pgid_of(background),
+                        Some(leader),
+                        "a process the command started must inherit that group"
+                    );
+                    return (leader, background);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the payload never published its pids"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Poll until nothing — running or zombie — is left in the group.
+    async fn assert_group_reaped(pgid: i32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while reap::group_alive(pgid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group {pgid} outlived the exec call"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// #552 / A9: a timed-out call ends the whole process group. Before
+    /// the fix, `bash -c '<payload> & sleep 999'` left `<payload>`
+    /// running as the daemon's user indefinitely, invisible to the
+    /// runtime, because only the direct child was killed.
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_group() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let pid_file = dir.path().join("pids");
+        let tool = ExecTool::with_config(ExecConfig {
+            default_timeout: Duration::from_secs(1),
+            ..fast_config()
+        });
+
+        let start = std::time::Instant::now();
+        let (result, (leader, _background)) = tokio::join!(
+            tool.execute(
+                &ctx,
+                json!({
+                    "command": ["bash", "-c", GROUP_PAYLOAD],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            ),
+            probe_group(&pid_file),
+        );
+
+        let result = result.expect_err("a deadline is a TimedOut error (#547)");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "the timeout, the kill grace and the drain are all bounded, took {elapsed:?}"
+        );
+        let ToolError::TimedOut { output, .. } = &result else {
+            panic!("expected TimedOut, got: {result}");
+        };
+        let output = output.as_deref().unwrap_or_default();
+        assert!(
+            output.contains("every process it started were killed"),
+            "the model is told the whole tree went: {output}"
+        );
+        assert_group_reaped(leader).await;
+    }
+
+    /// The same kill has to happen when the tool's future is dropped
+    /// from outside — the runner is gaining a host-side deadline
+    /// (<https://github.com/bricef/factor-q/issues/547>), and
+    /// `kill_on_drop` alone would reap only the direct child.
+    #[tokio::test]
+    async fn dropping_the_call_kills_the_whole_process_group() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        // Far longer than the outer deadline: the tool's own timeout
+        // must not be what ends this call.
+        let tool = ExecTool::with_config(ExecConfig {
+            default_timeout: Duration::from_secs(300),
+            max_timeout: Duration::from_secs(300),
+            ..fast_config()
+        });
+
+        let pid_file = dir.path().join("pids");
+        // `join!` drops the futures it owns as it returns, so the exec
+        // future — and with it the group guard — is gone by the time
+        // the assertions below run.
+        let (outcome, (leader, _background)) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_millis(750),
+                tool.execute(
+                    &ctx,
+                    json!({
+                        "command": ["bash", "-c", GROUP_PAYLOAD],
+                        "cwd": dir.path().to_string_lossy(),
+                    }),
+                )
+            ),
+            probe_group(&pid_file),
+        );
+
+        assert!(outcome.is_err(), "the outer deadline must fire first");
+        assert_group_reaped(leader).await;
+    }
+
+    /// A tree that ignores `SIGTERM` is escalated to `SIGKILL` once the
+    /// kill grace runs out, rather than outliving the call.
+    #[tokio::test]
+    async fn a_group_ignoring_sigterm_is_killed_after_the_grace() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = ExecTool::with_config(ExecConfig {
+            default_timeout: Duration::from_secs(1),
+            ..fast_config()
+        });
+        let pid_file = dir.path().join("pids");
+
+        // `trap '' TERM` is inherited as SIG_IGN across the fork *and*
+        // the exec, so nothing in this group answers SIGTERM. Only the
+        // escalation to SIGKILL can end it.
+        let payload = format!("trap '' TERM; {GROUP_PAYLOAD}");
+        let start = std::time::Instant::now();
+        let (result, (leader, _background)) = tokio::join!(
+            tool.execute(
+                &ctx,
+                json!({
+                    "command": ["bash", "-c", payload],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            ),
+            probe_group(&pid_file),
+        );
+
+        let result = result.expect_err("a deadline is a TimedOut error (#547)");
+        assert!(
+            matches!(result, ToolError::TimedOut { .. }),
+            "expected TimedOut, got: {result}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "the escalation is bounded by the kill grace"
+        );
+        assert_group_reaped(leader).await;
+    }
+
+    /// A command that exits on its own leaves the guard with nothing to
+    /// kill: the guard disarms on the reap, so a descendant the agent
+    /// deliberately daemonized keeps running and the result carries no
+    /// teardown error.
+    ///
+    /// Asserted by outcome, not by liveness: the descendant only
+    /// touches `alive` *after* the call has returned, so a group kill
+    /// on the clean path would leave the file missing rather than
+    /// racing a signal against a `getpgid`.
+    #[tokio::test]
+    async fn clean_exit_leaves_its_own_descendants_alone() {
+        let dir = tempdir().unwrap();
+        let sandbox = ToolSandbox::new().allow_exec_cwd(dir.path());
+        let ctx = make_exec_ctx(&sandbox);
+        let tool = make_tool_fast();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "command": [
+                        "bash",
+                        "-c",
+                        "sh -c 'sleep 1; touch alive' & printf '%s %s\\n' \"$$\" \"$!\" > pids",
+                    ],
+                    "cwd": dir.path().to_string_lossy(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("Exit code: 0"), "{}", result.output);
+
+        let text = fs::read_to_string(dir.path().join("pids")).unwrap();
+        let mut fields = text.split_whitespace();
+        let leader: i32 = fields.next().unwrap().parse().unwrap();
+        let background: i32 = fields.next().unwrap().parse().unwrap();
+        assert_eq!(
+            pgid_of(background),
+            Some(leader),
+            "the backgrounded process must be in the child's group — otherwise \
+             surviving the call proves nothing"
+        );
+
+        let alive = dir.path().join("alive");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !alive.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a descendant of a cleanly exited command must outlive the call"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        reap::signal_group(leader, libc::SIGKILL);
     }
 }
