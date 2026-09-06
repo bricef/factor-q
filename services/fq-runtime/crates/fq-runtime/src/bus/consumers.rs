@@ -365,13 +365,25 @@ fn event_stream_config() -> consumer::pull::Config {
 /// Whether an existing durable's configuration differs from this
 /// daemon's in any field [`EventBus::durable`] owns.
 ///
-/// `max_ack_pending` is compared only when the caller asked for one: a
-/// zero in the Rust config means "the server's default", which comes
-/// back from the server as its actual number, and comparing those two
-/// would report drift on every start and rewrite the consumer for
-/// nothing.
+/// Two fields are compared conditionally, and both conditions are the
+/// server's rules rather than ours:
+///
+/// * `max_ack_pending` only when the caller asked for one — a zero in
+///   the Rust config means "the server's default", which comes back
+///   from the server as its actual number, and comparing those two
+///   would report drift on every start and rewrite the consumer for
+///   nothing.
+/// * `ack_wait` only when there is no `backoff` schedule. JetStream
+///   *replaces* a consumer's `ack_wait` with the first `backoff` entry,
+///   so a consumer with a schedule always reads back an `ack_wait` it
+///   was not given, and comparing them would rewrite it forever. The
+///   trigger consumer is the only durable with a schedule, and the
+///   consequence — its effective first-delivery ack window is
+///   `TRIGGER_RETRY_BACKOFF[0]`, not `[bus] ack_wait_ms` — belongs to
+///   exactly-once dispatch (<https://github.com/bricef/factor-q/issues/327>),
+///   not here.
 fn drifted(existing: &consumer::Config, desired: &consumer::pull::Config) -> bool {
-    existing.ack_wait != desired.ack_wait
+    (desired.backoff.is_empty() && existing.ack_wait != desired.ack_wait)
         || existing.max_deliver != desired.max_deliver
         || existing.backoff != desired.backoff
         || (desired.max_ack_pending != 0 && existing.max_ack_pending != desired.max_ack_pending)

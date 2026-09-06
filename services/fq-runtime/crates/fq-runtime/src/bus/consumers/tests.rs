@@ -11,7 +11,7 @@ async fn server_config(
     stream: &str,
     consumer: &str,
 ) -> async_nats::jetstream::consumer::Config {
-    let mut stream = bus.jetstream().get_stream(stream).await.expect("stream");
+    let stream = bus.jetstream().get_stream(stream).await.expect("stream");
     let mut consumer = stream
         .get_consumer::<consumer::pull::Config>(consumer)
         .await
@@ -71,12 +71,20 @@ async fn every_durable_carries_an_explicit_ack_wait_and_a_considered_delivery_bo
         .await
         .expect("trigger");
     let trigger = server_config(&bus, TRIGGER_STREAM_NAME, "t-trigger").await;
-    assert_eq!(trigger.ack_wait, Duration::from_secs(45));
     assert_eq!(
         trigger.max_deliver, TRIGGER_MAX_DELIVER,
         "the trigger consumer dead-letters, so its bound stays finite"
     );
     assert_eq!(trigger.backoff, TRIGGER_RETRY_BACKOFF.to_vec());
+    // The server's rule, asserted so nobody reads the explicit
+    // `ack_wait` above it and believes it: a consumer with a `backoff`
+    // schedule has its ack window *replaced* by the schedule's first
+    // entry. This is the trigger consumer's real first-delivery
+    // deadline, and moving it belongs to exactly-once dispatch (#327).
+    assert_eq!(
+        trigger.ack_wait, TRIGGER_RETRY_BACKOFF[0],
+        "JetStream overrides ack_wait with backoff[0] where a schedule is set"
+    );
 }
 
 /// `get_or_create` keeps an existing durable's configuration, which is

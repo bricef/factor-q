@@ -7,7 +7,7 @@
 //! See `docs/design/committed/event-schema.md` for the event schema and subject
 //! hierarchy.
 
-use async_nats::jetstream::{self, consumer, stream};
+use async_nats::jetstream::{self, stream};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;

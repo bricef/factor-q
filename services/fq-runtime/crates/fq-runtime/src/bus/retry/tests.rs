@@ -78,13 +78,16 @@ fn redelivery_log_admits_every_escalation_then_one_per_interval() {
         );
         at += policy.nak_delay(delivered);
     }
+    // `at` has run past the last admitted line by one cap interval;
+    // the suppression window is measured from the line itself.
+    let last_line = at - policy.nak_delay(7);
 
     // Capped: a redelivery arriving before the interval has elapsed is
     // suppressed, and the one after it is not.
-    assert!(!log.admit(8, at + Duration::from_secs(30)));
-    assert!(!log.admit(9, at + Duration::from_secs(59)));
-    assert!(log.admit(10, at + Duration::from_secs(60)));
-    assert!(!log.admit(11, at + Duration::from_secs(61)));
+    assert!(!log.admit(8, last_line + Duration::from_secs(30)));
+    assert!(!log.admit(9, last_line + Duration::from_secs(59)));
+    assert!(log.admit(10, last_line + Duration::from_secs(60)));
+    assert!(!log.admit(11, last_line + Duration::from_secs(61)));
 }
 
 /// The hot-loop case the rate limit exists for: a thousand
