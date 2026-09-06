@@ -187,7 +187,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             bus: bus.clone(),
             projection: store.clone(),
             control_plane: cp_store.clone(),
-            facts: daemon_facts(&config),
+            facts: daemon_facts(&config, mcp.states()),
             // The same runner the dispatcher and startup recovery
             // drive invocations with — `invocation.drop` asks it
             // whether the target is live, and arms its halt.
@@ -667,12 +667,16 @@ fn edge_limits(config: &Config) -> fq_edge::EdgeLimits {
 /// lives and how long it will take to stop. All three come from the
 /// config it was started with, so the report describes the process
 /// reporting rather than the machine asking.
-fn daemon_facts(config: &Config) -> crate::operator_surface::DaemonFacts {
+fn daemon_facts(
+    config: &Config,
+    mcp_servers: fq_runtime::McpServerStates,
+) -> crate::operator_surface::DaemonFacts {
     crate::operator_surface::DaemonFacts {
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,
         stuck_after_ms: config.stuck_after_ms(),
         summary_enabled: config.summary.model.is_some(),
+        mcp_servers,
     }
 }

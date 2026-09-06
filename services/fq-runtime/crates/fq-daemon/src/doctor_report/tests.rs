@@ -48,6 +48,7 @@ fn all_clear_when_everything_healthy() {
         0,
         &[],
         Vec::new(),
+        Vec::new(),
     );
 
     assert!(!report.has_issues());
@@ -66,7 +67,7 @@ fn all_clear_when_everything_healthy() {
 #[test]
 fn running_in_flight_work_is_not_an_issue() {
     // In-flight but not stuck is healthy.
-    let report = build_doctor_report(&[], &executions(1, &[]), THRESHOLD_MS, 0, &[], Vec::new());
+    let report = build_doctor_report(&[], &executions(1, &[]), THRESHOLD_MS, 0, &[], Vec::new(), Vec::new());
     assert_eq!(report.executions.in_flight, 1);
     assert_eq!(report.executions.stuck, 0);
     assert!(!report.has_issues());
@@ -85,6 +86,7 @@ fn stale_workers_flagged_with_ids() {
         THRESHOLD_MS,
         0,
         &[],
+        Vec::new(),
         Vec::new(),
     );
 
@@ -108,6 +110,7 @@ fn an_unknown_worker_status_surfaces_rather_than_vanishing() {
         0,
         &[],
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(report.workers.alive, 0);
@@ -124,6 +127,7 @@ fn stuck_in_flight_flagged() {
         THRESHOLD_MS,
         0,
         &[],
+        Vec::new(),
         Vec::new(),
     );
 
@@ -151,7 +155,7 @@ fn working_in_flight_counted_but_not_an_issue() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new());
+    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new(), Vec::new());
 
     assert!(!report.has_issues());
     // Whole, same convention as stuck_ids — this is the id the
@@ -184,6 +188,7 @@ fn dead_lettered_triggers_are_counted() {
         0,
         &failures,
         Vec::new(),
+        Vec::new(),
     );
     assert_eq!(
         report.dead_letters,
@@ -202,6 +207,7 @@ fn ambiguous_flagged() {
         THRESHOLD_MS,
         3,
         &[],
+        Vec::new(),
         Vec::new(),
     );
     assert_eq!(report.ambiguous, 3);
@@ -227,6 +233,7 @@ fn permanent_failures_grouped_by_kind() {
         0,
         &failures,
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(report.failure_total(), 3);
@@ -244,6 +251,7 @@ fn report_serialises_to_stable_json_shape() {
             error_kind: "runtimeerror".to_string(),
             count: 4,
         }],
+        Vec::new(),
         Vec::new(),
     );
     let v = serde_json::to_value(&report).unwrap();
@@ -270,6 +278,7 @@ fn the_report_survives_the_wire_round_trip() {
             count: 3,
         }],
         Vec::new(),
+        Vec::new(),
     );
     let wire = serde_json::to_value(&report).unwrap();
     let back: DoctorReport = serde_json::from_value(wire).unwrap();
@@ -289,6 +298,7 @@ fn dead_letters_never_fabricates_a_count() {
             error_kind: "runtimeerror".to_string(),
             count: 7,
         }],
+        Vec::new(),
         Vec::new(),
     );
     assert_eq!(report.dead_letters.exhausted_triggers, 0);

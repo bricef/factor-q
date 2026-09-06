@@ -405,6 +405,11 @@ pub struct StatusReport {
     /// Ambiguous invocations awaiting triage and workers past the
     /// stale threshold, with their ids.
     pub recovery: RecoveryView,
+    /// Every shared MCP server this daemon declares and whether it is
+    /// up (#548) — the same list `fq doctor` judges, reported here
+    /// without a verdict, exactly as this report treats stale workers.
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::health::McpServerHealth>,
 }
 
 // ---------------------------------------------------------------------
@@ -508,6 +513,14 @@ pub struct DoctorReport {
     /// the report means the daemon probed its own broker.
     #[serde(default)]
     pub consumers: Vec<crate::health::ConsumerHealth>,
+    /// Every shared MCP server a loaded agent declares, and whether it
+    /// is up (#548). An unavailable server is not a daemon-level
+    /// failure — boot carries on without it — so it is exactly the kind
+    /// of standing degradation only a health report surfaces: the
+    /// agents that need it are refused at dispatch, and nothing else
+    /// says why.
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::health::McpServerHealth>,
 }
 
 impl DoctorReport {
@@ -522,6 +535,11 @@ impl DoctorReport {
         self.consumers.iter().filter(|c| c.is_fault())
     }
 
+    /// MCP servers an operator should act on — the unavailable ones.
+    pub fn unavailable_mcp_servers(&self) -> impl Iterator<Item = &crate::health::McpServerHealth> {
+        self.mcp_servers.iter().filter(|s| s.is_fault())
+    }
+
     /// True when any check reports a problem worth an operator's
     /// attention: stale workers, stuck in-flight work, ambiguous
     /// invocations, permanent failures, or a consumer that has stopped
@@ -534,6 +552,7 @@ impl DoctorReport {
             || self.ambiguous > 0
             || self.failure_total() > 0
             || self.faulty_consumers().next().is_some()
+            || self.unavailable_mcp_servers().next().is_some()
     }
 }
 
@@ -659,6 +678,7 @@ pub fn build_doctor_report(
     ambiguous: i64,
     failures: &[crate::views::FailureView],
     consumers: Vec<crate::health::ConsumerHealth>,
+    mcp_servers: Vec<crate::health::McpServerHealth>,
 ) -> DoctorReport {
     let mut w = DoctorWorkers::default();
     for row in workers {
@@ -717,6 +737,7 @@ pub fn build_doctor_report(
         failures,
         dead_letters,
         consumers,
+        mcp_servers,
     }
 }
 

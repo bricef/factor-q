@@ -22,6 +22,10 @@ use fq_ops::views::RecoveryView;
 /// doing.
 pub(crate) fn status_report() -> StatusReport {
     StatusReport {
+        // No shared MCP servers in the fixture: the health page's job
+        // here is the stream/consumer block, and an empty list is the
+        // shape a daemon with no MCP declarations reports.
+        mcp_servers: Vec::new(),
         version: "0.1.0+abc123def456".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
@@ -111,6 +115,7 @@ pub(crate) fn status_report() -> StatusReport {
 /// `control.doctor` — whether anything needs an operator.
 pub(crate) fn doctor_report() -> DoctorReport {
     DoctorReport {
+        mcp_servers: Vec::new(),
         workers: DoctorWorkers {
             alive: 1,
             stale: 2,

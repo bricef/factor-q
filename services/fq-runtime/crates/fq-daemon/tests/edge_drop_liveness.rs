@@ -249,6 +249,7 @@ impl Surface {
                     drain_deadline_ms: 180_000,
                     stuck_after_ms: 4_210_000,
                     summary_enabled: false,
+                mcp_servers: Default::default(),
                 },
                 bus: bus.clone(),
                 projection: projection.clone(),

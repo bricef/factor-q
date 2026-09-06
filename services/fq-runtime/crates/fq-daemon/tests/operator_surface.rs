@@ -99,6 +99,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 drain_deadline_ms: 180_000,
                 stuck_after_ms: 4_210_000,
                 summary_enabled: false,
+                mcp_servers: Default::default(),
             },
             bus,
             projection: projection_store,

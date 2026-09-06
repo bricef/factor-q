@@ -20,6 +20,7 @@ fn stores(initialised: bool) -> StatusStores {
 
 fn report() -> StatusReport {
     StatusReport {
+        mcp_servers: Vec::new(),
         version: "0.1.0+deadbee".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,

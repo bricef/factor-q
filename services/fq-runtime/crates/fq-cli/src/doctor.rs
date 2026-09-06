@@ -102,6 +102,13 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // not only which ones complained.
     out.push_str(&render_consumers(&report.consumers));
 
+    // MCP servers (#548): every shared server the daemon declares.
+    // Boot no longer stops for one that will not start, so this line is
+    // where "the daemon is up but half its tools are not" becomes
+    // visible — and the agents that need an unavailable server are
+    // being refused at dispatch with the same reason.
+    out.push_str(&render_mcp_servers(&report.mcp_servers));
+
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
     if report.dead_letters.exhausted_triggers > 0 {
         out.push_str(&format!(
@@ -168,6 +175,64 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
         }
     }
     out
+}
+
+/// Pure: the MCP block of `fq doctor`. Silent when no agent declares a
+/// shared server — a daemon that runs none has nothing to report, and a
+/// line saying so on every install would be noise. Otherwise one line
+/// per server, named, with the reason and the next retry under any that
+/// is down.
+fn render_mcp_servers(servers: &[fq_ops::health::McpServerHealth]) -> String {
+    use fq_ops::health::McpServerHealth;
+
+    if servers.is_empty() {
+        return String::new();
+    }
+    let down = servers.iter().filter(|s| s.is_fault()).count();
+    let mut out = format!("MCP servers: {} declared, {down} unavailable\n", servers.len());
+    for server in servers {
+        match server {
+            McpServerHealth::Ready { name, tools } => {
+                out.push_str(&format!("  {name}: ok ({tools} tools)\n"));
+            }
+            McpServerHealth::Starting { name } => {
+                out.push_str(&format!("  {name}: starting\n"));
+            }
+            McpServerHealth::Unavailable {
+                name,
+                reason,
+                attempts,
+                next_retry_at_ms,
+            } => {
+                out.push_str(&format!(
+                    "  {name}: ✗ unavailable after {attempts} attempt(s) — {reason}\n"
+                ));
+                out.push_str(&match next_retry_at_ms {
+                    Some(at) => format!(
+                        "  -> agents declaring it are refused at dispatch; next retry {}\n",
+                        render_when(*at)
+                    ),
+                    None => "  -> agents declaring it are refused at dispatch; retrying is \
+                             disabled ([mcp] retry_initial_secs = 0), so this needs a restart \
+                             once the server is back\n"
+                        .to_string(),
+                },);
+            }
+        }
+    }
+    out
+}
+
+/// An epoch-millisecond instant as a relative phrase. Relative because
+/// the reader is deciding whether to wait: "in 4m" answers that and a
+/// timestamp in the daemon's timezone does not.
+fn render_when(at_ms: i64) -> String {
+    let delta = (at_ms - chrono::Utc::now().timestamp_millis()) / 1000;
+    match delta {
+        ..=0 => "due now".to_string(),
+        1..=90 => format!("in {delta}s"),
+        _ => format!("in {}m", delta / 60),
+    }
 }
 
 /// Dial the daemon for a report that is *about* the daemon.

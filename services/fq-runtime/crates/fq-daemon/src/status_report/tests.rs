@@ -52,6 +52,7 @@ fn an_empty_registry_is_a_zero_not_a_gap() {
 #[test]
 fn the_report_roundtrips_through_its_declared_shape() {
     let report = StatusReport {
+        mcp_servers: Vec::new(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
         version: "0.1.0+deadbee".to_string(),
