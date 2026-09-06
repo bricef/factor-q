@@ -745,6 +745,51 @@ mod tests {
         );
     }
 
+    /// #548: every `[mcp]` bound is reachable from `fqd.toml`, and the
+    /// defaults are the ones the template and the guide document. An
+    /// operator reading "default 30" has to get 30 from an empty file.
+    #[test]
+    fn mcp_bounds_default_and_parse() {
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.mcp.startup_timeout_secs, 30);
+        assert_eq!(config.mcp.discovery_timeout_secs, 30);
+        assert_eq!(config.mcp.max_discovery_pages, 100);
+        assert_eq!(config.mcp.max_tools, 1_000);
+        assert_eq!(config.mcp.max_line_bytes, 1024 * 1024);
+        assert_eq!(config.mcp.retry_initial_secs, 30);
+        assert_eq!(config.mcp.retry_max_secs, 600);
+        assert_eq!(config.mcp.to_limits(), crate::mcp::McpLimits::default());
+
+        let config = Config::from_toml_str(
+            "[mcp]\nstartup_timeout_secs = 5\ndiscovery_timeout_secs = 7\n\
+             max_discovery_pages = 3\nmax_tools = 11\nmax_line_bytes = 4096\n\
+             retry_initial_secs = 1\nretry_max_secs = 9\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.mcp.to_limits(),
+            crate::mcp::McpLimits {
+                startup_timeout: Duration::from_secs(5),
+                discovery_timeout: Duration::from_secs(7),
+                max_discovery_pages: 3,
+                max_tools: 11,
+                max_line_bytes: 4096,
+                retry_initial: Duration::from_secs(1),
+                retry_max: Duration::from_secs(9),
+            },
+            "every key must reach the value the manager applies"
+        );
+    }
+
+    /// A misspelled `[mcp]` key is refused rather than ignored: the
+    /// daemon reads its config once, so silence here would mean running
+    /// for weeks on a bound nobody set.
+    #[test]
+    fn a_misspelled_mcp_key_is_named() {
+        let err = Config::from_toml_str("[mcp]\nstartup_timeout = 5\n").unwrap_err();
+        assert!(err.to_string().contains("mcp.startup_timeout"), "{err}");
+    }
+
     /// #546: the call deadlines and the `Retry-After` cap are `[worker]`
     /// keys with the documented defaults, and an operator's values reach
     /// the client's own type.

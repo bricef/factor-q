@@ -99,18 +99,24 @@ impl McpServerStates {
     }
 
     /// The server is being dialled.
-    pub(super) fn starting(&self, server: &str) {
+    ///
+    /// The three writers are `pub(crate)` rather than `pub(super)`: the
+    /// manager is the only production writer, and a test elsewhere in
+    /// the crate needs to *seed* a table (the runner's refusal check
+    /// reads one it never fills). Not `pub`: nothing outside the
+    /// runtime may assert a server's state.
+    pub(crate) fn starting(&self, server: &str) {
         self.set(server, McpServerState::Starting);
     }
 
     /// The server answered and its tools are registered.
-    pub(super) fn ready(&self, server: &str, tools: u32) {
+    pub(crate) fn ready(&self, server: &str, tools: u32) {
         self.set(server, McpServerState::Ready { tools });
     }
 
     /// The server did not start. `attempts` counts from the boot
     /// attempt, and `next_retry_at_ms` is when it will be tried again.
-    pub(super) fn unavailable(
+    pub(crate) fn unavailable(
         &self,
         server: &str,
         reason: String,
