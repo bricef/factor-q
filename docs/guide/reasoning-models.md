@@ -24,10 +24,10 @@ is a continuity token with no readable text (see
 
 | Model family | Route | The provider returns | Recorded as | Carried to the next turn | Verified |
 |---|---|---|---|---|---|
-| Claude, extended thinking | native, `[providers.anthropic]` | `thinking` blocks with a `signature`; `redacted_thinking` | `signed`; `opaque` | yes — the block goes back verbatim, ahead of the turn's tool calls, and Anthropic verifies it | live 2026-09-04 and 2026-09-05 (Opus 5); wire goldens |
+| Claude, extended thinking | native, `[providers.anthropic]` | `thinking` blocks with a `signature`, their text a summary because the request asks for one (`thinking.display: summarized` on adaptive models — without it every block comes back empty, signature only); `redacted_thinking` | `signed`; `opaque` | yes — the block goes back verbatim, ahead of the turn's tool calls, and Anthropic verifies it | live 2026-09-04 and 2026-09-05 (Opus 5, empty-text blocks: the display flag was not yet set); probe 2026-09-06 (summaries with it); wire goldens |
 | Kimi, DeepSeek and other `reasoning_content` models | native OpenAI-compatible endpoint | `reasoning_content` text | `plain` | yes — as `reasoning_content`, which is those APIs' own field | wire goldens |
 | The same models through OpenRouter | `[providers.openrouter]`, `api_shape = "openai-compatible"` | `reasoning` text, plus an unsigned `reasoning_details` entry | `plain` | yes — as `reasoning_content`, which OpenRouter documents as the mechanism for raw-string reasoning | live 2026-09-04 and 2026-09-05 (kimi-k3) |
-| Gemini, thinking | native, `api_shape = "gemini"` | a `thoughtSignature` on the function-call part; a thought summary when requested | `opaque` (a `thought_signature` token); `plain` for the summary | yes — the token goes back as a signature part that genai attaches to the call it came with | **hermetic only**: Gemini mock and wire goldens (#600); no Gemini key is held, so no live run |
+| Gemini, thinking | native, `api_shape = "gemini"` | a `thoughtSignature` on the function-call part; a thought summary, which the request asks for (`includeThoughts`) | `opaque` (a `thought_signature` token); `plain` for the summary | yes — the token goes back as a signature part that genai attaches to the call it came with | **hermetic only**: Gemini mock and wire goldens (#600); no Gemini key is held, so no live run |
 | Claude, Gemini or OpenAI encrypted reasoning through OpenRouter | `[providers.openrouter]` | `reasoning` text plus a signed or encrypted `reasoning_details` entry | `plain` — the signed or encrypted entry is **dropped** | **no**. The text goes back as `reasoning_content`, which OpenRouter cannot turn back into a signed block. The provider accepts the turn and continues without its prior reasoning; nothing errors | live probe 2026-09-05; open as [#603](https://github.com/bricef/factor-q/issues/603) |
 | OpenAI o-series and gpt-5 on chat completions | native | no reasoning text; only `reasoning_tokens` in usage | nothing but the token count | nothing to carry | not verified live |
 
@@ -38,6 +38,10 @@ Two things are true of every row:
 - **Parallel tool calls keep it.** A turn that calls several tools is
   answered by one tool-results turn, and the reasoning part stays ahead
   of the calls (#511; live-verified on all three arms on 2026-09-05).
+- **Order is the provider's.** Parts are recorded in the order they
+  arrived, reasoning included, and go back in that order — so a
+  signature stays next to the part it belongs to, which is what Gemini
+  checks and what Anthropic's leading thinking blocks already satisfy.
 
 ## Absence versus opacity
 
@@ -81,11 +85,13 @@ The Claude 5 family thinks adaptively by default when no effort is set.
 - **#603** — signed and encrypted reasoning through OpenRouter, above. The
   fix needs genai's OpenAI adapter to carry `reasoning_details`; the data
   model here is ready for it.
-- **Gemini is not live-verified**, and genai's Gemini adapter approximates
-  signature placement when a turn has both text and a call (it attaches
-  the signature to the next part it meets). The wire golden
-  `gemini_text_and_signed_call` pins that approximation so a change in it
-  is visible.
+- **Gemini is not live-verified.** genai's Gemini adapter also hoists
+  every signature ahead of the text on the way in and attaches it to the
+  next part it meets on the way out, so a text-plus-call turn's signature
+  can land on the text. The adapter here already records and replays parts
+  in arrival order, so the signature-adjacency fix proposed upstream needs
+  nothing on this side; the wire golden `gemini_text_and_signed_call` pins
+  today's approximation and moves when that fix lands.
 - **#536** — the reasoning-token split is recorded and not shown.
 
 ## Verifying a provider yourself
@@ -95,6 +101,10 @@ the hermetic proof: each drives a conversation through the real adapter
 against an in-process mock of the provider and pins both what was
 recorded and the bytes sent back. The live proof is
 [`experiments/reasoning-round-trip/`](../../experiments/reasoning-round-trip/),
-whose harness runs three models through a scratch daemon and checks, from
-the event log, that every reasoning part reappears in the following
-request. Adding a provider means adding both.
+whose harness runs three models through a scratch daemon and judges the
+event log itself (`verify-carry.py`): every arm completed, every assistant
+turn was replayed verbatim into the following request, the reasoning arms
+carried a reasoning part and the control carried none. It runs nightly as
+the `reasoning-matrix` job of the Live suites workflow, with the evidence
+kept as a workflow artifact for two weeks. Adding a provider means adding
+both.
