@@ -94,6 +94,7 @@ async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
             Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
+                last_step_at: None,
             }),
         ))
         .await

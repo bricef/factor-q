@@ -848,6 +848,7 @@ fn population_corpus(base_ms: i64) -> Vec<Event> {
             base_ms + 500,
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker(),
+                last_step_at: None,
             }),
         ),
     ]
@@ -1138,6 +1139,7 @@ fn a_transient_still_reaches_the_daemons_own_consumers() {
             Uuid::parse_str(SYS_INV).unwrap(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: WorkerId::new(worker_id.clone()).unwrap(),
+                last_step_at: None,
             }),
         ),
         70,

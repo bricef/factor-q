@@ -274,6 +274,11 @@ impl ToolCallLimits {
     /// strictly below this or the host cancels the call mid-kill. The
     /// daemon refuses to start on a config that breaks that
     /// ([`ToolsConfig::validate`](crate::config::ToolsConfig)).
+    ///
+    /// And it is one of the four numbers the stuck threshold is derived
+    /// from (`Config::stuck_after`, #37): the longest a single tool call
+    /// can take is its ceiling plus this. `pub(crate)` reaches that
+    /// caller — it is in this crate — so the constant stays crate-local.
     pub(crate) const BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 }
 

@@ -703,6 +703,7 @@ mod tests {
         fq_runtime::events::EventPayload::WorkerHeartbeat(
             fq_runtime::events::WorkerHeartbeatPayload {
                 worker_id: fq_runtime::worker::WorkerId::new("w-1".to_string()).unwrap(),
+                last_step_at: None,
             },
         )
     }

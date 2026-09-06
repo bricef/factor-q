@@ -418,6 +418,7 @@ impl EventPayload {
             Self::ToolResult(_) => subjects::agent_tool_result(agent),
             Self::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
             Self::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
+            Self::InvocationStuck(_) => subjects::agent_invocation_stuck(agent),
             Self::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
             Self::InvocationOperatorRecovered(_) => {
                 subjects::agent_invocation_operator_recovered(agent)
@@ -458,6 +459,7 @@ impl EventPayload {
             Self::Failed(_) => "factor-q/failed@1",
             Self::HostNotice(_) => "factor-q/host_notice@1",
             Self::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
+            Self::InvocationStuck(_) => "factor-q/invocation_stuck@1",
             Self::InvocationArchived(_) => "factor-q/invocation_archived@1",
             Self::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
             Self::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
@@ -576,6 +578,24 @@ pub enum EventPayload {
     /// control-plane consumes the event to surface the case
     /// via `fq invocation resume`/`drop` (step 9).
     InvocationAmbiguous(InvocationAmbiguousPayload),
+
+    /// An in-flight invocation has stopped making progress: no step
+    /// boundary within the runtime's derived stuck threshold, and no
+    /// tool or model call open long enough to explain the silence
+    /// (<https://github.com/bricef/factor-q/issues/37>).
+    ///
+    /// The safety net under the call deadlines rather than a second
+    /// deadline: every individual call is already bounded, so an
+    /// invocation quiet for twice the worst legitimate step is quiet
+    /// for a reason none of those bounds covers. Emitted by the control
+    /// plane's periodic sweep, once per crossing — not once per tick —
+    /// and it is a report, not an intervention: nothing recovers the
+    /// invocation, an operator decides.
+    ///
+    /// Distinct from [`Self::InvocationAmbiguous`], which is a
+    /// *restart-time* verdict about a WAL that cannot be replayed
+    /// safely. This one is about a runtime that is still running.
+    InvocationStuck(InvocationStuckPayload),
 
     /// Worker → control-plane archive hand-off (step 8 of
     /// data-architecture.md). Emitted after an invocation

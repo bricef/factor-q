@@ -112,6 +112,7 @@ impl HeartbeatProducer {
             self.runtime_id,
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: self.worker_id.clone(),
+                last_step_at: None,
             }),
         );
         match self.bus.publish(&event).await {

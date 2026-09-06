@@ -100,6 +100,15 @@ pub fn agent_invocation_ambiguous(agent_id: &str) -> String {
     format!("fq.agent.{agent_id}.invocation.ambiguous")
 }
 
+/// An in-flight invocation has stopped crossing step boundaries.
+/// Emitted by the control plane's stuck sweep, once per crossing.
+/// Agent-scoped, like `invocation.ambiguous`: it is a fact about one
+/// invocation, and it rides the same `fq.agent.*.invocation.*`
+/// namespace.
+pub fn agent_invocation_stuck(agent_id: &str) -> String {
+    format!("fq.agent.{agent_id}.invocation.stuck")
+}
+
 /// Worker → control-plane archive hand-off (step 8 of
 /// data-architecture.md). Emitted by the worker after an
 /// invocation reaches terminal state, carrying the final
