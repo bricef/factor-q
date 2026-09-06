@@ -177,12 +177,10 @@ func withBrokerRetry(ctx context.Context, logger *log.Logger, what string, op fu
 	}
 }
 
-// nextBackoff doubles backoff up to maximumRetryBackoff.
+// nextBackoff doubles backoff, capped at maximumRetryBackoff.
 func nextBackoff(backoff time.Duration) time.Duration {
-	if backoff >= maximumRetryBackoff {
-		return maximumRetryBackoff
-	}
-	if backoff *= 2; backoff > maximumRetryBackoff {
+	backoff *= 2
+	if backoff > maximumRetryBackoff {
 		return maximumRetryBackoff
 	}
 	return backoff

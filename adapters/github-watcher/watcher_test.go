@@ -68,10 +68,19 @@ type fakeSource struct {
 	rec        *recorder
 	issues     []Issue
 	relabelErr map[int]error
+	// relabelHook, if set, decides each call's outcome from the arguments
+	// — for tests that need one transition of an issue to fail and
+	// another to succeed.
+	relabelHook func(number int, remove, add string) error
 }
 
 func (f *fakeSource) ListReady(context.Context, string) ([]Issue, error) { return f.issues, nil }
 func (f *fakeSource) Relabel(_ context.Context, number int, remove, add string) error {
+	if f.relabelHook != nil {
+		if err := f.relabelHook(number, remove, add); err != nil {
+			return err
+		}
+	}
 	if f.relabelErr != nil {
 		if err := f.relabelErr[number]; err != nil {
 			return err
@@ -172,6 +181,64 @@ func TestPollOnceDoesNotPublishALostClaim(t *testing.T) {
 	if got := logs.String(); !strings.Contains(got, "claim lost") || !strings.Contains(got, "issue=1") {
 		t.Errorf("log = %q, want a claim-lost line naming issue 1", got)
 	}
+}
+
+// "Stranded" is what the log says when a transition leaves an issue
+// nowhere. A lost race leaves it somewhere — wherever the winner put it —
+// so it must not be reported the same way, at any of the relabel sites.
+func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
+	lost := fmt.Errorf("remove %q from #7: %w", "in-progress", ErrClaimLost)
+
+	t.Run("revert after a failed publish", func(t *testing.T) {
+		logs := &syncBuffer{}
+		// The claim succeeds and the publish fails; the revert then finds
+		// the label already gone.
+		source := &fakeSource{rec: &recorder{}, issues: []Issue{{7, []string{"ready"}}}}
+		source.relabelHook = func(_ int, remove, _ string) error {
+			if remove == testConfig().InProgressLabel {
+				return lost
+			}
+			return nil
+		}
+		w := &Watcher{
+			Source:    source,
+			Publisher: &fakePublisher{rec: &recorder{}, fail: true},
+			Config:    testConfig(),
+			Log:       slog.New(slog.NewTextHandler(logs, nil)),
+		}
+		if err := w.pollOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := logs.String(); strings.Contains(got, "stranded") || !strings.Contains(got, "nothing to revert") {
+			t.Errorf("log = %q, want the revert reported as a lost race", got)
+		}
+	})
+
+	t.Run("outcome reaction", func(t *testing.T) {
+		logs := &syncBuffer{}
+		src := &labelSource{relErr: lost}
+		r := NewOutcomeReactor(src, outcomeConfig(), slog.New(slog.NewTextHandler(logs, nil)))
+		triggeredThen(r, "inv", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "inv", ErrorKind: "budget_exceeded"})
+		if got := logs.String(); strings.Contains(got, "stranded") || !strings.Contains(got, "already moved on") {
+			t.Errorf("log = %q, want the outcome relabel reported as a lost race", got)
+		}
+	})
+
+	t.Run("review sweep", func(t *testing.T) {
+		logs := &syncBuffer{}
+		cfg := outcomeConfig()
+		w := &Watcher{
+			Source:    &labelSource{relErr: lost},
+			Publisher: &fakePublisher{rec: &recorder{}},
+			Reviewer:  &labelSource{inReview: []Issue{{7, []string{"in-review"}}}, merged: map[int]bool{7: true}},
+			Config:    cfg,
+			Log:       slog.New(slog.NewTextHandler(logs, nil)),
+		}
+		w.sweepReview(context.Background())
+		if got := logs.String(); strings.Contains(got, "left in review") || !strings.Contains(got, "already left in-review") {
+			t.Errorf("log = %q, want the sweep reported as a lost race", got)
+		}
+	})
 }
 
 func TestPollOnceRevertsOnPublishFailure(t *testing.T) {
