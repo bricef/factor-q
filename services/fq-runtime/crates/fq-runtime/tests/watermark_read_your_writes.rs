@@ -177,6 +177,7 @@ async fn a_transient_failure_never_lets_the_watermark_expose_a_gap() {
                 filter_subjects: Vec::new(),
                 deliver_from: DeliverFrom::Beginning,
                 strict_order: true,
+                ack_wait: None,
             };
             run_durable_consumer(&bus, config, shutdown_rx, |delivery| {
                 let seq = delivery.stream_seq.expect("jetstream metadata");

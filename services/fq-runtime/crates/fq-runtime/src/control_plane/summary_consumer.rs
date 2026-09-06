@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -98,6 +99,10 @@ pub struct SummaryConsumer {
     /// Test-only agent scope: narrows the filter subjects to one
     /// agent id so parallel tests never summarise each other's events.
     test_agent_scope: Option<String>,
+    /// The response budget [`Self::handle_event`]'s inline LLM call
+    /// runs under — the worker's `llm_timeout_secs`. The durable's ack
+    /// window is sized from it; see [`Self::ack_wait`].
+    llm_deadline: Duration,
 }
 
 impl SummaryConsumer {
@@ -117,7 +122,32 @@ impl SummaryConsumer {
             summaries: Mutex::new(HashMap::new()),
             test_consumer_name: None,
             test_agent_scope: None,
+            llm_deadline: crate::llm::LlmTimeouts::default().request,
         }
+    }
+
+    /// The response budget this consumer's model calls run under —
+    /// `[worker] llm_timeout_secs`, which the daemon passes in because
+    /// the summariser shares the worker's LLM client and therefore its
+    /// deadlines. Without it the durable's ack window would be sized
+    /// for a handler that only writes to SQLite.
+    pub fn with_llm_deadline(mut self, deadline: Duration) -> Self {
+        self.llm_deadline = deadline;
+        self
+    }
+
+    /// The ack window this consumer's durable needs.
+    ///
+    /// **Not the bus default.** `handle_event` calls the model inline,
+    /// so a summary may legitimately be in flight for the whole
+    /// response budget. At the bus-wide `ack_wait` — sized for a SQLite
+    /// write — a slow summary is redelivered *behind the one still
+    /// generating it*, and the sequential loop then regenerates it and
+    /// pays for it twice (#611 review). The budget plus the bus window
+    /// is the honest bound: the model call, plus the ordinary
+    /// allowance for everything around it.
+    fn ack_wait(&self) -> Duration {
+        self.llm_deadline + self.bus.redelivery_policy().ack_wait
     }
 
     /// Test-only isolation: a unique durable name (deliver-new-only)
@@ -153,6 +183,7 @@ impl SummaryConsumer {
             filter_subjects,
             deliver_from,
             strict_order: false,
+            ack_wait: Some(self.ack_wait()),
         };
         run_durable_consumer(&self.bus, config, shutdown, |delivery| {
             self.handle_event(delivery.event)

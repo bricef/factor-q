@@ -79,6 +79,7 @@ impl ProjectionConsumer {
             // it a NAK'd sequence can be leapfrogged by a later one
             // and the mark would expose a gap.
             strict_order: true,
+            ack_wait: None,
         };
         run_durable_consumer(&self.bus, config, shutdown, |delivery| {
             self.handle_event(delivery)
@@ -243,6 +244,7 @@ mod tests {
             filter_subjects: vec![format!("fq.agent.{agent_id}.>")],
             deliver_from: DeliverFrom::Beginning,
             strict_order: false,
+            ack_wait: None,
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

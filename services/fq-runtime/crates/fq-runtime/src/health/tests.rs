@@ -124,6 +124,7 @@ async fn a_consumer_that_acks_out_of_order_is_not_stuck() {
         .durable_consumer_with_filter(
             &durable,
             &format!("fq.worker.{}.heartbeat", worker_id.as_str()),
+            None,
         )
         .await
         .expect("consumer");
@@ -225,6 +226,7 @@ async fn a_permanently_failing_handler_backs_off_logs_at_a_bounded_rate_and_repo
         filter_subjects: vec![format!("fq.worker.{}.heartbeat", worker_id.as_str())],
         deliver_from: DeliverFrom::Beginning,
         strict_order: false,
+        ack_wait: None,
     };
 
     // Every delivery instant, so the growing gaps are measured rather
@@ -359,6 +361,7 @@ async fn a_healthy_consumer_is_never_reported_stuck() {
         filter_subjects: vec![format!("fq.worker.{}.heartbeat", worker_id.as_str())],
         deliver_from: DeliverFrom::Beginning,
         strict_order: false,
+        ack_wait: None,
     };
     let handled = Arc::new(AtomicUsize::new(0));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

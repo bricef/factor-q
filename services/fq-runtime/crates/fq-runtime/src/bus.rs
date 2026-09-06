@@ -91,13 +91,6 @@ pub const NATS_DEFAULT_MAX_ACK_PENDING: i64 = 1000;
 /// applies it read the same constant; what lives here is the applying.
 pub use fq_ops::surface::TRIGGER_MAX_DELIVER;
 
-/// Escalating redelivery schedule paired with [`TRIGGER_MAX_DELIVER`]:
-/// entry N delays redelivery N+1. Applied twice — as the consumer's
-/// `backoff` (paces ack-wait redelivery when a dispatcher crashes
-/// mid-delivery) and as the dispatcher's explicit NAK delay (a bare
-/// `Nak(None)` redelivers immediately, overriding the consumer
-/// schedule). JetStream requires `max_deliver` > the schedule length,
-/// so four entries cover the four retries after the first delivery.
 /// JetStream stream capturing `MAX_DELIVERIES` advisories for the
 /// trigger stream (#169). Advisories are core-NATS fire-and-forget,
 /// and the crash that exhausts a trigger also kills any live
@@ -115,6 +108,23 @@ pub fn trigger_max_deliveries_advisory_subject() -> String {
     format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.>")
 }
 
+/// Escalating redelivery schedule paired with [`TRIGGER_MAX_DELIVER`]:
+/// entry N delays redelivery N+1. Applied twice — as the consumer's
+/// `backoff` (paces ack-wait redelivery when a dispatcher crashes
+/// mid-delivery) and as the dispatcher's explicit NAK delay (a bare
+/// `Nak(None)` redelivers immediately, overriding the consumer
+/// schedule). JetStream requires `max_deliver` > the schedule length,
+/// so four entries cover the four retries after the first delivery.
+///
+/// **The first entry is also the trigger durable's real first-delivery
+/// deadline.** JetStream *replaces* a consumer's `ack_wait` with
+/// `backoff[0]` wherever a schedule is set, so the trigger consumer's
+/// ack window is one second — not `[bus] ack_wait_ms` — and a
+/// dispatcher that takes longer than that to reach its first WAL write
+/// has its trigger redelivered underneath it. That is the duplicate
+/// -invocation storm of <https://github.com/bricef/factor-q/issues/327>,
+/// which owns its own design; moving this number belongs there and not
+/// to whoever is next reading this line.
 pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(5),
