@@ -342,13 +342,17 @@ models = ["claude-haiku-4-5"]
 # nak_max_ms = 60000
 #
 # How long the server waits for an ack before redelivering by itself,
-# in ms. Size it so a healthy handler never trips it — the
-# control-plane handlers are single SQLite writes, and the dispatcher
-# acks at an invocation's first WAL write. Default 30000.
+# in ms. Size it so a healthy handler never trips it — the projection,
+# coordination and heartbeat handlers are single SQLite writes.
+# Default 30000.
 #
-# Note: the trigger consumer carries a retry backoff schedule, and
-# JetStream replaces a consumer's ack window with that schedule's first
-# entry, so this value does not apply there.
+# Two durables do not take this value, both deliberately. The
+# summariser calls a model inline, so its window is `[worker]
+# llm_timeout_secs` plus this one — otherwise a slow summary is
+# redelivered behind the one still generating it and paid for twice.
+# And the trigger consumer carries a retry backoff schedule, which
+# JetStream uses to *replace* a consumer's ack window with the
+# schedule's first entry.
 # ack_wait_ms = 30000
 #
 # Floor on the gap between two error lines about one consumer's

@@ -259,7 +259,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             pricing.clone(),
             model,
             config.summary.max_line_chars,
-        );
+        )
+        // It shares the worker's LLM client, so it runs under the
+        // worker's response budget — and its durable's ack window has
+        // to allow for that (#611 review).
+        .with_llm_deadline(config.worker.llm_timeouts().request);
         tokio::spawn(async move { sc.run(summary_shutdown_rx).await })
     });
 

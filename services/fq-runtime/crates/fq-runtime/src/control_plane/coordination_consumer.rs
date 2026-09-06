@@ -232,6 +232,7 @@ impl CoordinationConsumer {
             // (Strict refuses deliver-from-new, so test consumers
             // never combine the two.)
             strict_order: self.watermark.is_some(),
+            ack_wait: None,
         };
         let this = &self;
         run_durable_consumer_with_tick(

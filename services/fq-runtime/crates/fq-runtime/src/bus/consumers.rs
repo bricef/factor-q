@@ -24,6 +24,8 @@
 //! redelivery is only tolerable *because* the NAK delay escalates: see
 //! [`super::retry`].
 
+use std::time::Duration;
+
 use async_nats::jetstream::consumer::{self, FromConsumer};
 use tracing::debug;
 
@@ -54,15 +56,23 @@ impl EventBus {
     /// repair edits the *existing* config rather than sending the
     /// desired one whole, so a durable's acked floor and delivery
     /// policy are never disturbed by a policy change.
+    ///
+    /// `ack_wait` overrides the bus-wide window for one durable. The
+    /// bus default is sized for a handler that writes to SQLite and
+    /// returns; a consumer whose handler can legitimately take longer
+    /// — the summariser calls an LLM inline — has to say so, or its
+    /// message is redelivered while the first attempt is still running
+    /// and the work is done, and paid for, twice.
     async fn durable(
         &self,
         stream_name: &str,
         name: &str,
+        ack_wait: Option<Duration>,
         mut desired: consumer::pull::Config,
     ) -> Result<consumer::PullConsumer, BusError> {
         desired.durable_name = Some(name.to_string());
         desired.ack_policy = consumer::AckPolicy::Explicit;
-        desired.ack_wait = self.redelivery.ack_wait;
+        desired.ack_wait = ack_wait.unwrap_or(self.redelivery.ack_wait);
 
         let stream = self
             .jetstream
@@ -105,12 +115,17 @@ impl EventBus {
     /// losing events or redelivering old ones. The returned
     /// [`consumer::PullConsumer`] can be used with `.messages()` to
     /// iterate over delivered messages.
-    pub async fn durable_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
+    pub async fn durable_consumer(
+        &self,
+        name: &str,
+        ack_wait: Option<Duration>,
+    ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
             "getting/creating durable JetStream consumer"
         );
-        self.durable(STREAM_NAME, name, event_stream_config()).await
+        self.durable(STREAM_NAME, name, ack_wait, event_stream_config())
+            .await
     }
 
     /// [`EventBus::durable_consumer`], with **resolved-contiguous
@@ -133,6 +148,7 @@ impl EventBus {
     pub async fn durable_consumer_strict(
         &self,
         name: &str,
+        ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
@@ -141,6 +157,7 @@ impl EventBus {
         self.durable(
             STREAM_NAME,
             name,
+            ack_wait,
             consumer::pull::Config {
                 max_ack_pending: 1,
                 ..event_stream_config()
@@ -160,6 +177,7 @@ impl EventBus {
         &self,
         name: &str,
         filter_subject: &str,
+        ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
@@ -169,6 +187,7 @@ impl EventBus {
         self.durable(
             STREAM_NAME,
             name,
+            ack_wait,
             consumer::pull::Config {
                 filter_subject: filter_subject.to_string(),
                 ..event_stream_config()
@@ -188,6 +207,7 @@ impl EventBus {
         &self,
         name: &str,
         filter_subjects: &[&str],
+        ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
@@ -197,6 +217,7 @@ impl EventBus {
         self.durable(
             STREAM_NAME,
             name,
+            ack_wait,
             consumer::pull::Config {
                 filter_subjects: filter_subjects.iter().map(|s| s.to_string()).collect(),
                 ..event_stream_config()
@@ -212,6 +233,7 @@ impl EventBus {
         &self,
         name: &str,
         filter_subjects: &[String],
+        ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
@@ -221,6 +243,7 @@ impl EventBus {
         self.durable(
             STREAM_NAME,
             name,
+            ack_wait,
             consumer::pull::Config {
                 filter_subjects: filter_subjects.to_vec(),
                 deliver_policy: consumer::DeliverPolicy::New,
@@ -250,6 +273,7 @@ impl EventBus {
         &self,
         name: &str,
         filter_subject: &str,
+        ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
@@ -259,6 +283,7 @@ impl EventBus {
         self.durable(
             STREAM_NAME,
             name,
+            ack_wait,
             consumer::pull::Config {
                 filter_subject: filter_subject.to_string(),
                 deliver_policy: consumer::DeliverPolicy::New,
@@ -284,7 +309,7 @@ impl EventBus {
             consumer = name,
             "getting/creating durable advisory consumer"
         );
-        self.durable(ADVISORY_STREAM_NAME, name, event_stream_config())
+        self.durable(ADVISORY_STREAM_NAME, name, None, event_stream_config())
             .await
     }
 
@@ -331,6 +356,7 @@ impl EventBus {
         self.durable(
             TRIGGER_STREAM_NAME,
             name,
+            None,
             consumer::pull::Config {
                 filter_subject: filter_subject.to_string(),
                 // Explicit ack window, sized by the caller from its

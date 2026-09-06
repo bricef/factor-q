@@ -37,9 +37,17 @@ pub const DEFAULT_NAK_MAX: Duration = Duration::from_secs(60);
 /// How long the server waits for an ack before redelivering by itself.
 /// This is the NATS server's own default, made explicit: every durable
 /// carried it implicitly, which meant nothing in this tree said what it
-/// was or that it had been considered. Sized so a healthy handler never
-/// trips it — the control-plane handlers are single SQLite writes, and
-/// the dispatcher acks at the invocation's first WAL write, seconds in.
+/// was or that it had been considered.
+///
+/// Sized for the handlers it actually covers — the projection,
+/// coordination and heartbeat consumers write to SQLite and return,
+/// and the advisory watch publishes one event. **It is not a blanket
+/// claim about every durable.** The summariser's handler calls a model
+/// inline and runs under the worker's response budget, so its durable
+/// overrides this window rather than tripping it and having the summary
+/// regenerated behind the one still running
+/// ([`crate::control_plane::summary_consumer`]); a consumer whose
+/// handler can legitimately outlast this window must do the same.
 pub const DEFAULT_ACK_WAIT: Duration = Duration::from_secs(30);
 
 /// Floor on the gap between two error lines about the same stuck

@@ -20,6 +20,7 @@
 //!     filter_subjects: vec!["fq.agent.*.mything".to_string()],
 //!     deliver_from: DeliverFrom::Beginning,
 //!     strict_order: false,
+//!     ack_wait: None,
 //! };
 //! run_durable_consumer(&bus, config, shutdown, |delivery| async move {
 //!     handle(&delivery.event).await.map_err(HandlerError::transient)
@@ -109,6 +110,16 @@ pub struct DurableConsumerConfig {
     /// for the gaps between its matches. Costs throughput — one
     /// outstanding message per server round-trip.
     pub strict_order: bool,
+    /// Ack window for this durable, when the bus-wide `[bus]
+    /// ack_wait_ms` is too short for what this handler does.
+    ///
+    /// `None` — every consumer but the summariser — takes the bus
+    /// default, which is sized for a handler that writes to SQLite and
+    /// returns. The summariser's handler makes an LLM call inline and
+    /// runs under the worker's response budget, so a summary slower
+    /// than the default window would be redelivered *behind the one
+    /// still generating it* and then paid for twice (#611 review).
+    pub ack_wait: Option<Duration>,
 }
 
 impl DurableConsumerConfig {
@@ -132,29 +143,42 @@ impl DurableConsumerConfig {
                     self.durable_name
                 )));
             }
-            return bus.durable_consumer_strict(&self.durable_name).await;
+            return bus
+                .durable_consumer_strict(&self.durable_name, self.ack_wait)
+                .await;
         }
         match self.deliver_from {
             DeliverFrom::Beginning => match self.filter_subjects.as_slice() {
-                [] => bus.durable_consumer(&self.durable_name).await,
+                [] => {
+                    bus.durable_consumer(&self.durable_name, self.ack_wait)
+                        .await
+                }
                 [filter] => {
-                    bus.durable_consumer_with_filter(&self.durable_name, filter)
+                    bus.durable_consumer_with_filter(&self.durable_name, filter, self.ack_wait)
                         .await
                 }
                 filters => {
                     let refs: Vec<&str> = filters.iter().map(|s| s.as_str()).collect();
-                    bus.durable_consumer_with_filters(&self.durable_name, &refs)
+                    bus.durable_consumer_with_filters(&self.durable_name, &refs, self.ack_wait)
                         .await
                 }
             },
             DeliverFrom::New => match self.filter_subjects.as_slice() {
                 [filter] => {
-                    bus.durable_consumer_with_filter_from_new(&self.durable_name, filter)
-                        .await
+                    bus.durable_consumer_with_filter_from_new(
+                        &self.durable_name,
+                        filter,
+                        self.ack_wait,
+                    )
+                    .await
                 }
                 filters => {
-                    bus.durable_consumer_with_filters_from_new(&self.durable_name, filters)
-                        .await
+                    bus.durable_consumer_with_filters_from_new(
+                        &self.durable_name,
+                        filters,
+                        self.ack_wait,
+                    )
+                    .await
                 }
             },
         }
@@ -467,6 +491,7 @@ mod tests {
             filter_subjects: vec![format!("fq.worker.{}.heartbeat", worker_id.as_str())],
             deliver_from: DeliverFrom::Beginning,
             strict_order: false,
+            ack_wait: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let bus_for_loop = bus.clone();
@@ -533,6 +558,7 @@ mod tests {
             filter_subjects: vec!["fq.worker.*.heartbeat".to_string()],
             deliver_from: DeliverFrom::Beginning,
             strict_order: false,
+            ack_wait: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let bus_for_loop = bus.clone();

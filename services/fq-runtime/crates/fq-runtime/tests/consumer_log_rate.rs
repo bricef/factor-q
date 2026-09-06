@@ -106,6 +106,7 @@ async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
         filter_subjects: vec![format!("fq.worker.{}.heartbeat", worker_id.as_str())],
         deliver_from: DeliverFrom::Beginning,
         strict_order: false,
+        ack_wait: None,
     };
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let bus_for_loop = bus.clone();

@@ -395,6 +395,21 @@ message counts and lag beside them. The thresholds are `[bus]` in
 `fqd.toml`: `stuck_after_redeliveries` decides when retrying becomes
 stuck, and the escalation and log rate are configured there too.
 
+### Deleting a durable under a running daemon restarts it
+
+Every consumer the daemon hosts is supervised: if one exits — for any
+reason, including cleanly — the daemon publishes `system.task_failed`,
+tears the rest down and exits non-zero, so a supervisor restarts it
+into a working state rather than leaving it half-running. The
+summariser joined that group, which closes a real gap (its stream
+ending used to stop summaries silently) and has one consequence worth
+knowing before you meet it: **deleting a durable consumer out from
+under a running daemon now stops the daemon.** The deleted durable
+ends its consumer's message stream, the supervised arm observes the
+exit, and the process comes down. This is deliberate and matches every
+other consumer; if you need to reset a durable, stop the daemon with
+`fq down` first, delete it, and start again.
+
 ## Quick reference
 
 | Goal | Command |
