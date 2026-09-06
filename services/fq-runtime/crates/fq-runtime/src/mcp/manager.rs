@@ -95,6 +95,22 @@ impl McpClientManager {
         self.progress.clone()
     }
 
+    /// Report progress into an existing table instead of a fresh one.
+    ///
+    /// The runner builds a second, short-lived manager per invocation
+    /// for the grant-bearing servers that run as their own process
+    /// (ADR-0018). Left to mint its own table, those servers' calls
+    /// would be invisible to the daemon's liveness surface — and they
+    /// are precisely the long-running ones, since a server granted
+    /// sampling is doing work worth reporting progress on. One table
+    /// across both kinds of manager is what makes
+    /// [`progress`](Self::progress) an answer to "is anything still
+    /// moving?" rather than "is anything shared still moving?".
+    pub fn sharing_progress(mut self, progress: ProgressRegistry) -> Self {
+        self.progress = progress;
+        self
+    }
+
     /// Start an MCP server, discover its tools, and return them as
     /// `Arc<dyn Tool>` values ready for registration in a [`ToolRegistry`](crate::tools::ToolRegistry).
     ///

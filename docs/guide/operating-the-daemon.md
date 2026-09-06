@@ -332,21 +332,38 @@ to it, never refused. `exec` is the one built-in that times itself, so
 would silently cap exec while its own section still read the higher
 number, so the daemon refuses to start and names both keys.
 
+The deadline is what the tool is told and what the timeout message
+quotes; the runtime's own backstop timer fires **five seconds later**.
+The grace is there because every co-operative tool starts its clock
+after the host starts its, so an equal timer would always fire first
+and replace the tool's own answer — which names the command and
+carries the output captured before the kill — with a bare "timed out".
+A tool that ignores its deadline is therefore cut off at deadline plus
+five, not at the deadline.
+
 A call past its deadline is abandoned and reported to the model as a
-tool error with `error_kind: timeout`, saying the work may still be
-running — a deadline says nothing about whether the side effect
-happened, and an agent that assumes it did not will happily do it
-twice. An MCP call is additionally *cancelled*: the host sends
-`notifications/cancelled`, so the server stops rather than finishing a
-result nobody will read.
+tool error with `error_kind: timeout`. What the model is told next
+depends on who stopped: a tool that timed *itself* out killed the work
+and hands over the output it captured, so the effect is bounded by
+what that output shows. The host's backstop stopped nothing but the
+waiting, so the model is told the work may still be running — a
+deadline says nothing about whether the side effect happened, and an
+agent that assumes it did not will happily do it twice. An MCP call is
+additionally *cancelled*: the host sends `notifications/cancelled`, so
+the server is asked to stop rather than finish a result nobody will
+read.
 
 One timeout is something an agent can route around. A run of them is
 not: against a dead MCP server every call times out, and an agent left
 to keep trying spends its whole budget one deadline at a time.
 `[tools] max_consecutive_timeouts` (default 3) ends the invocation
 instead, with a terminal `failed` whose message names the count and
-the setting. Any call that returns — success, or a tool-reported error
-— clears the run, because it proves the machinery is alive.
+the setting; setting it to `0` disables the limit. Any call that
+returns — success, or a tool-reported error — clears the run, because
+it proves the machinery is alive. An `exec` that hits its own timeout
+counts as a timeout, not as an answer: it is the tool most able to sit
+for minutes at a time, so exempting it would exempt the case the limit
+is for.
 
 `file_read` and the discovery tools refuse a path that is not a
 regular file, naming what it actually is. That is a deadline question

@@ -70,12 +70,21 @@ fn identical_tokens_from_two_servers_do_not_collide() {
 /// The rate limit is on the log line, never on the fact: a stuck-call
 /// detector reads `last_progress_at`, so every notification must stamp
 /// it however few of them are logged.
+///
+/// Strictly increasing, with a sleep between notifications, because
+/// `>=` on same-instant stamps is satisfied by the regression this
+/// exists to catch — one that stamps only when a line is logged, and
+/// so leaves the stamp unchanged for the nine notifications the rate
+/// limit swallows.
 #[test]
 fn every_notification_stamps_liveness_even_when_the_log_is_rate_limited() {
     let registry = ProgressRegistry::default();
     let _guard = issue(&registry, "docs", 7, "call-a");
     let mut stamps = Vec::new();
     for step in 1..=5 {
+        // The clock has to move, or "unchanged" and "advanced" are the
+        // same observation.
+        std::thread::sleep(Duration::from_millis(2));
         stamps.push(
             registry
                 .record_progress("docs", "7", f64::from(step), None)
@@ -85,8 +94,8 @@ fn every_notification_stamps_liveness_even_when_the_log_is_rate_limited() {
         );
     }
     assert!(
-        stamps.windows(2).all(|pair| pair[1] >= pair[0]),
-        "liveness advances on every notification"
+        stamps.windows(2).all(|pair| pair[1] > pair[0]),
+        "liveness must advance on every notification, not only the logged ones: {stamps:?}"
     );
     assert_eq!(registry.in_flight().len(), 1);
     assert!(registry.in_flight()[0].silent_for() < Duration::from_secs(1));

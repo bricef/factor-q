@@ -440,7 +440,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
         // Start grant-bearing MCP servers only after the sandbox has been
         // materialised, so roots use the same bound paths tools enforce.
-        let mut manager = McpClientManager::with_server_root(self.config.mcp_server_root.clone());
+        let mut manager = self.config.mcp_manager();
         let grant_decls: Vec<_> = agent
             .mcp_servers()
             .iter()

@@ -97,7 +97,8 @@ impl Tool for FileListTool {
         "file_list"
     }
     fn description(&self) -> &str {
-        "List files matching a glob below a readable directory. Results are capped."
+        "List files matching a glob below a readable directory. Only regular files \
+         are listed — directories a glob matches are not returned. Results are capped."
     }
     fn parameters_schema(&self) -> Value {
         json!({"type":"object","properties":{

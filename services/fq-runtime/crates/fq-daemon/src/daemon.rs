@@ -415,6 +415,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
                     .workspace(workspace.clone())
                     .mcp_server_root(config.state.directory.join("mcp"))
                     .tool_limits(config.tools.call_limits())
+                    .mcp_progress(mcp_manager.progress())
                     .build(),
             ),
             fq_runtime::Harness::new(),

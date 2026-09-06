@@ -258,14 +258,27 @@ models = ["claude-haiku-4-5"]
 # 900. This may not be set BELOW `[tools.exec] max_timeout_secs` — the
 # daemon refuses to start if it is, because a lower general ceiling
 # would cap every exec call while the exec section still read the
-# higher number.
+# higher number. Nor may either section's default_timeout_secs exceed
+# its own max_timeout_secs.
 # max_timeout_secs = 900
 #
+# Note on elapsed time: the deadline above is what a tool is told and
+# what the timeout message quotes, but the runtime's own backstop timer
+# fires FIVE SECONDS LATER, so a tool that ignores its deadline is cut
+# off at deadline + 5s. The grace exists because every co-operative
+# tool starts its clock after the host starts its, and an equal timer
+# would always replace the tool's own (more useful) answer with a bare
+# "timed out".
+#
 # How many tool calls may time out in a row before the invocation itself
-# fails. Default 3. One timeout reaches the model as a tool error it can
-# route around; a run of them means nothing is answering, and without
-# this an agent spends its whole budget one deadline at a time. Any call
-# that returns — success, or a tool-reported error — clears the count.
+# fails. Default 3; 0 disables the limit entirely and lets an agent keep
+# trying against a dead tool for as long as its budget lasts. One
+# timeout reaches the model as a tool error it can route around; a run
+# of them means nothing is answering, and without this an agent spends
+# its whole budget one deadline at a time. Any call that returns —
+# success, or a tool-reported error — clears the count. `exec` timing
+# ITSELF out counts too: it is the tool most able to hang for minutes
+# at a time, so exempting it would exempt the case that matters.
 # max_consecutive_timeouts = 3
 
 [tools.exec]
