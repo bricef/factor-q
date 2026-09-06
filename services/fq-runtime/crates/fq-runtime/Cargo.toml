@@ -76,6 +76,12 @@ test-support = ["dep:axum"]
 # The shared private-broker guard, re-exported as `test_support::nats` for
 # this crate's `#[cfg(test)]` code and used directly by tests/*.rs (#233).
 fq-test-support = { workspace = true }
+# `tests/consumer_log_rate.rs` counts the lines a wedged consumer emits,
+# which means capturing them: the rate limit on the redelivery log is a
+# claim about output, and asserting it any other way would be asserting
+# the limiter rather than the loop (#549). A whole test binary of its
+# own, because a captured subscriber has to be the process-global one.
+tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 axum = { workspace = true }
