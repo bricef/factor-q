@@ -20,6 +20,7 @@ mod doctor_report;
 mod edge_identity;
 mod event_atom;
 mod health_surface;
+mod invocation_view;
 mod operator_surface;
 mod pricing;
 mod recovery;

@@ -10,10 +10,7 @@
 
 use std::sync::Arc;
 
-use fq_runtime::surface::{
-    AgentListFilter, AgentViewKey, InvocationListFilter, InvocationViewKey, TURN_LIST_MAX_LIMIT,
-    TurnFilter,
-};
+use fq_runtime::surface::{AgentListFilter, AgentViewKey, TURN_LIST_MAX_LIMIT, TurnFilter};
 use fq_runtime::views::Views;
 
 // ---------------------------------------------------------------------
@@ -42,9 +39,15 @@ pub struct DaemonFacts {
     pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
     pub drain_deadline_ms: u64,
     /// The stuck threshold this daemon derived from its call deadlines
-    /// (`Config::stuck_after`) — the one number `control.doctor`'s
-    /// verdict, `control.status`'s report of it, and the sweep that
-    /// emits `invocation.stuck` all use (#37).
+    /// (`Config::stuck_after`) — the one number every liveness verdict
+    /// this surface serves is judged against (#37).
+    ///
+    /// `control.doctor`'s executions block, the Invocation view's
+    /// detail (`fq invocation show`, the dashboard's detail page),
+    /// `invocation.active` (`fq active`, the dashboard's active table)
+    /// and the control plane's stuck sweep are all handed this, and
+    /// `control.status` reports it. Anything given a different number
+    /// would call the same invocation something else.
     pub stuck_after_ms: i64,
     /// Whether `[summary]` names a model. Health expects the summary
     /// durable only when one is configured — a daemon without a
@@ -203,11 +206,7 @@ pub fn operator_registry(
     let status_registry = deps.agents.clone();
     let agent_registry = deps.agents.clone();
     let machinery = deps.machinery;
-    // One threshold across every liveness verdict this surface serves
-    // (#37): the Invocation view's detail, `invocation.active`, and
-    // `control.doctor`. Derived from the daemon's call deadlines and
-    // carried on `DaemonFacts`, so none of them can quote a different
-    // number for the same invocation.
+    // One threshold across every liveness verdict here — see the field.
     let stuck_after_ms = deps.facts.stuck_after_ms;
 
     let mut registry = fq_edge::EdgeRegistry::new().with_read_gate(Arc::new(move |min_seq| {
@@ -224,65 +223,7 @@ pub fn operator_registry(
         })
     }));
 
-    let decl = fq_ops::View::new::<
-        InvocationViewKey,
-        fq_runtime::views::InvocationDetailView,
-        fq_runtime::views::InvocationSummaryView,
-        InvocationListFilter,
-    >(
-        fq_ops::Domain::Invocation,
-        "An agent invocation: the fold of its lifecycle events.",
-        fq_ops::Stability::Experimental,
-    );
-
-    let get_views = views.clone();
-    registry
-        .view::<InvocationViewKey, fq_runtime::views::InvocationDetailView, fq_runtime::views::InvocationSummaryView, InvocationListFilter, _, _, _, _>(
-            decl,
-            move |key: InvocationViewKey| {
-                let views = get_views.clone();
-                async move {
-                    let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
-                        message: e.to_string(),
-                    };
-                    let detail = views
-                        .invocation(
-                            &key.invocation_id,
-                            chrono::Utc::now().timestamp_millis(),
-                            stuck_after_ms,
-                            fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
-                        )
-                        .await
-                        .map_err(internal)?;
-                    detail.ok_or_else(|| WireError::NotFound {
-                        op: "invocation.get".into(),
-                        message: format!("no invocation `{}`", key.invocation_id),
-                    })
-                }
-            },
-            move |filter: InvocationListFilter| {
-                let views = views.clone();
-                async move {
-                    let status = filter
-                        .status
-                        .as_deref()
-                        .map(parse_invocation_status_filter)
-                        .transpose()
-                        .map_err(|e| WireError::InvalidInput {
-                            op: "invocation.list".into(),
-                            message: e.to_string(),
-                        })?;
-                    views
-                        .invocation_index(status, filter.include_archived, filter.limit)
-                        .await
-                        .map_err(|e| WireError::Internal {
-                            message: e.to_string(),
-                        })
-                }
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
-
+    crate::invocation_view::register_invocation_view(&mut registry, views, stuck_after_ms)?;
     crate::active_report::register_active_report(&mut registry, active_views, stuck_after_ms)?;
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
