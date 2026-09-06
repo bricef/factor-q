@@ -119,7 +119,7 @@ fn the_stuck_line_names_the_threshold_the_daemon_reported() {
         "got: {out}"
     );
     assert!(
-        out.contains("fq events query --type invocation_stuck"),
+        out.contains("fq events query --event-type invocation_stuck"),
         "the report points at the event that fired: {out}"
     );
 }

@@ -2,7 +2,7 @@
 //! invocations, in the same module as the one for workers.
 //!
 //! The control plane already owns the worker half of this question:
-//! [`is_stale`](super::store::is_stale) is the predicate behind the
+//! [`is_stale`] is the predicate behind the
 //! stale-worker sweep. This module is the invocation half. The two are
 //! deliberately siblings — a worker that stops beating and an
 //! invocation that stops stepping are the same class of finding, found

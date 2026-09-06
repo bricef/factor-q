@@ -420,7 +420,7 @@ $ fq doctor
 Current executions: 2 in-flight (1 working, 1 stuck after 4210s)
   -> 1 not advanced in >4210s: 019f534f-4b3c-7f42-a619-b5e43a64fd38
   -> `fq invocation show <id>` to inspect, `fq invocation drop <id>` to triage
-  -> `fq events query --type invocation_stuck` for when each one was flagged
+  -> `fq events query --event-type invocation_stuck` for when each one was flagged
 ```
 
 Nothing is done about it automatically. The event is a report: it says
@@ -502,7 +502,7 @@ other consumer; if you need to reset a durable, stop the daemon with
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | See which consumers are keeping up | `fq doctor` (names every durable and any that is stuck) |
 | See the stuck threshold this daemon derived | `fq status` (the `stuck after` line) |
-| Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --type invocation_stuck` |
+| Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --event-type invocation_stuck` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |
