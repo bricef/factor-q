@@ -51,17 +51,29 @@ fn the_expected_roster_covers_every_durable_and_only_expects_a_configured_summar
 }
 
 #[test]
-fn stuck_needs_outstanding_work_and_more_redeliveries_than_the_threshold() {
+fn stuck_needs_outstanding_work_a_real_redelivery_and_more_than_the_threshold() {
     let policy = ConsumerRedeliveryPolicy {
         stuck_after_redeliveries: 5,
         ..ConsumerRedeliveryPolicy::default()
     };
     assert!(
-        !is_stuck(0, 99, policy),
+        !is_stuck(0, 1, 99, policy),
         "nothing pending is idle, not stuck"
     );
-    assert!(!is_stuck(1, 4, policy), "under the threshold is retrying");
-    assert!(is_stuck(1, 5, policy), "at the threshold is stuck");
+    assert!(
+        !is_stuck(1, 1, 4, policy),
+        "under the threshold is retrying"
+    );
+    assert!(is_stuck(1, 1, 5, policy), "at the threshold is stuck");
+
+    // The out-of-order acker's guard: the arithmetic over the
+    // contiguous floor can run high on a consumer that acks
+    // concurrently, but the server says nothing has been delivered
+    // twice, so nothing is being retried.
+    assert!(
+        !is_stuck(1, 0, 99, policy),
+        "a consumer that has redelivered nothing cannot be stuck retrying"
+    );
 
     // A threshold of zero would call the first delivery of anything a
     // fault; one redelivery is the floor.
@@ -69,8 +81,103 @@ fn stuck_needs_outstanding_work_and_more_redeliveries_than_the_threshold() {
         stuck_after_redeliveries: 0,
         ..policy
     };
-    assert!(!is_stuck(1, 0, zeroed));
-    assert!(is_stuck(1, 1, zeroed));
+    assert!(!is_stuck(1, 1, 0, zeroed));
+    assert!(is_stuck(1, 1, 1, zeroed));
+}
+
+/// The dispatcher's shape, against a live broker: a consumer with room
+/// for several in-flight messages acks later ones while an earlier one
+/// is still on its honest **first** delivery. The contiguous acked
+/// floor lags, so the arithmetic over it counts those acks — and the
+/// verdict must not, because nothing has been redelivered.
+///
+/// Without the `num_redelivered` gate this reads `stuck` on a healthy
+/// dispatcher as soon as `stuck_after_redeliveries` later triggers ack.
+#[tokio::test]
+async fn a_consumer_that_acks_out_of_order_is_not_stuck() {
+    let server = crate::test_support::nats::test_nats();
+    let policy = ConsumerRedeliveryPolicy {
+        stuck_after_redeliveries: 2,
+        ..ConsumerRedeliveryPolicy::default()
+    };
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect NATS")
+        .with_redelivery_policy(policy);
+
+    let worker_id = WorkerId::new(format!("ooo-{}", Uuid::now_v7().simple())).unwrap();
+    for _ in 0..5 {
+        bus.publish(&Event::system(
+            Uuid::now_v7(),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: worker_id.clone(),
+            }),
+        ))
+        .await
+        .expect("publish");
+    }
+
+    // Room for every message at once — the dispatcher's window, not
+    // the projection's resolved-contiguous one.
+    let durable = format!("fq-ooo-{}", Uuid::now_v7().simple());
+    let consumer = bus
+        .durable_consumer_with_filter(
+            &durable,
+            &format!("fq.worker.{}.heartbeat", worker_id.as_str()),
+        )
+        .await
+        .expect("consumer");
+
+    // Take all five, then ack every one but the first. The first is
+    // still on delivery one: honestly in flight, never redelivered.
+    let mut batch = consumer
+        .fetch()
+        .max_messages(5)
+        .messages()
+        .await
+        .expect("fetch");
+    let mut taken = Vec::new();
+    while let Some(msg) = futures::StreamExt::next(&mut batch).await {
+        taken.push(msg.expect("message"));
+    }
+    assert_eq!(taken.len(), 5, "all five must be delivered at once");
+    for msg in taken.iter().skip(1) {
+        msg.ack().await.expect("ack");
+    }
+
+    let health = probe_stream(
+        &bus.jetstream(),
+        crate::bus::STREAM_NAME,
+        &[durable.as_str()],
+        policy,
+    )
+    .await;
+    let StreamHealth::Available { consumers, .. } = &health else {
+        panic!("the event stream must be available: {health:?}");
+    };
+    let ConsumerHealth::Active {
+        stuck,
+        redeliveries,
+        num_redelivered,
+        ..
+    } = &consumers[0]
+    else {
+        panic!("the durable exists, so it is Active: {:?}", consumers[0]);
+    };
+    assert_eq!(
+        *num_redelivered, 0,
+        "nothing was redelivered — every message is on its first delivery"
+    );
+    assert!(
+        !stuck,
+        "acking out of order is not a wedge; the arithmetic over the contiguous \
+         floor read {redeliveries} but nothing is being retried"
+    );
+    assert!(
+        !consumers[0].is_fault(),
+        "a healthy concurrent consumer must not reach the red list: {:?}",
+        consumers[0]
+    );
 }
 
 /// The `SQLITE_FULL` class from the Phase 1 exit criterion, injected: a

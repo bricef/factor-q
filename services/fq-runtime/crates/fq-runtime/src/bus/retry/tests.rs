@@ -116,3 +116,75 @@ fn redelivery_log_bounds_a_hot_loop_to_one_line() {
         "a thousand redeliveries inside one interval is one line"
     );
 }
+
+/// The flood the per-loop limiter has to stop but a single-message test
+/// cannot see: a handler failing on *every* message means delivery 1 of
+/// a fresh message arrives over and over, and each one looks like a
+/// first escalation step. Admitting them all would make the rate
+/// `steps × arrival rate` — on a busy stream under a persistent
+/// `SQLITE_FULL`, precisely the flood being prevented.
+#[test]
+fn a_second_message_does_not_climb_the_ladder_again() {
+    let policy = ConsumerRedeliveryPolicy::default();
+    let mut log = RedeliveryLog::new(policy);
+    let t0 = std::time::Instant::now();
+
+    // Message A climbs its ladder: seven lines.
+    let mut at = t0;
+    let mut admitted = 0;
+    for delivered in 1..=7 {
+        if log.admit(delivered, at) {
+            admitted += 1;
+        }
+        at += policy.nak_delay(delivered);
+    }
+    assert_eq!(admitted, 7, "the first fault shows its whole escalation");
+    // The window is measured from the last line, not from the end of
+    // the ladder — the seventh step's own delay has not elapsed yet.
+    let last_line = at - policy.nak_delay(7);
+
+    // Message B, interleaved inside the same window, starts at
+    // delivery 1 again. Not one of its steps is new information.
+    let mut b_admitted = 0;
+    for delivered in 1..=7 {
+        if log.admit(delivered, last_line + Duration::from_millis(delivered)) {
+            b_admitted += 1;
+        }
+    }
+    assert_eq!(
+        b_admitted, 0,
+        "a second failing message inside the window says nothing new"
+    );
+
+    // A hundred more messages, same window, same silence.
+    let mut flood = 0;
+    for i in 0..100u64 {
+        for delivered in 1..=7 {
+            if log.admit(delivered, last_line + Duration::from_millis(10 + i)) {
+                flood += 1;
+            }
+        }
+    }
+    assert_eq!(flood, 0, "the flood is the case; it must cost nothing");
+}
+
+/// The window reopening is not a licence to flood either: one line, and
+/// then the ladder may be climbed again only as far as it actually goes.
+#[test]
+fn the_window_reopening_admits_one_line_then_resumes_the_ladder() {
+    let policy = ConsumerRedeliveryPolicy::default();
+    let mut log = RedeliveryLog::new(policy);
+    let t0 = std::time::Instant::now();
+
+    assert!(log.admit(1, t0), "the first failure speaks");
+    assert!(!log.admit(1, t0 + Duration::from_secs(1)), "same step");
+
+    // A minute later the window reopens: one line.
+    let reopened = t0 + policy.log_interval;
+    assert!(log.admit(1, reopened));
+    // And immediately after it, a fresh message's delivery 1 is not a
+    // second line.
+    assert!(!log.admit(1, reopened + Duration::from_millis(1)));
+    // A genuinely higher step inside the new window is.
+    assert!(log.admit(2, reopened + Duration::from_millis(2)));
+}
