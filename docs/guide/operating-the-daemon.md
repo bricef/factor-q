@@ -341,6 +341,19 @@ carries the output captured before the kill — with a bare "timed out".
 A tool that ignores its deadline is therefore cut off at deadline plus
 five, not at the deadline.
 
+Those five seconds belong to the tool, and one thing moves them. While
+a tool runs, the MCP server it came from may ask the host for
+something — a sampling completion, an elicitation — and the host
+answers it there and then, bounded only by `[worker] llm_timeout_secs`
+(default 600). An answer that outlasts the backstop would otherwise
+spend the whole grace before the tool is looked at again, leaving
+`exec` no time to kill its child and hand back what it captured. So a
+servicing that outlives the backstop re-arms it: five seconds from
+when the host turns back to the tool. The tool's own deadline does not
+move, and the extension is one grace after the *last* such answer
+however many there were, so a chatty server buys the tool no extra
+running time — only the teardown it was already owed.
+
 A call past its deadline is abandoned and reported to the model as a
 tool error with `error_kind: timeout`. What the model is told next
 depends on who stopped: a tool that timed *itself* out killed the work
