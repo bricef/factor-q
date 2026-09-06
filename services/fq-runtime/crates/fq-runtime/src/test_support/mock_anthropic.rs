@@ -721,6 +721,7 @@ mod tests {
             GenAiClient::with_base_url(mock.base_url()).expect("client builds"),
             RetryConfig {
                 max_attempts: 3,
+                timeout_max_attempts: 2,
                 base_delay_ms: 0,
                 max_delay_ms: 0,
                 max_retry_after_ms: 10_000,
@@ -757,6 +758,7 @@ mod tests {
             GenAiClient::with_base_url(mock.base_url()).expect("client builds"),
             RetryConfig {
                 max_attempts: 3,
+                timeout_max_attempts: 2,
                 base_delay_ms: 0,
                 max_delay_ms: 0,
                 max_retry_after_ms: 1_000,

@@ -185,14 +185,15 @@ models = ["claude-haiku-4-5"]
 # minutes): what the Anthropic and OpenAI SDKs default to, and enough
 # for a large extended-thinking answer, which a shorter budget would cut
 # off after the provider has billed it. A call past the deadline fails
-# as a transient `timeout` that the retry policy below retries, so a
-# provider that never answers holds a worker for at most
-# llm_retry.max_attempts times this. Trim it for fast models.
+# as a transient `timeout` that the retry policy below retries under its
+# own cap, so a provider that never answers holds a worker for at most
+# llm_retry.timeout_max_attempts (default 2) times this — twenty minutes
+# at the defaults. Trim it for fast models.
 # llm_timeout_secs = 600
 #
 # Establishing the connection, in seconds. An endpoint that never
-# answers fails here rather than after the whole budget. Default 5.
-# llm_connect_timeout_secs = 5
+# answers fails here rather than after the whole budget. Default 10.
+# llm_connect_timeout_secs = 10
 #
 # Worker-side knobs for the archive hand-off retry sweeper. The
 # sweeper republishes `invocation.archived` for any terminal row
@@ -217,8 +218,15 @@ models = ["claude-haiku-4-5"]
 # than 429 is never retried: the provider has rejected the request, and
 # the same bytes would be rejected again.
 [worker.llm_retry]
-# Total attempts including the first; 1 disables retry. Default 4.
+# Total attempts including the first, for every transient failure except
+# a timeout; 1 disables retry. Default 4.
 # max_attempts = 4
+#
+# Total attempts including the first for a call that times out; 1
+# disables retrying timeouts. Separate and smaller, because each attempt
+# at a hung provider costs the whole llm_timeout_secs: the general cap
+# would turn one hang into four. Default 2.
+# timeout_max_attempts = 2
 #
 # Delay before the first retry, in ms, doubling each attempt, with full
 # jitter so a fleet does not retry in lockstep. Default 500.

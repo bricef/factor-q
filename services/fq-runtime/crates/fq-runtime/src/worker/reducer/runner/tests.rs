@@ -3427,11 +3427,14 @@ async fn parallel_tool_results_reach_anthropic_as_one_user_message() {
 
 /// #546, the "hung provider" wedge class (review finding B1): a
 /// provider that accepts the connection and never answers ends the
-/// invocation in a terminal event within the retry policy's attempts
-/// times the call budget, instead of parking it until a restart. The
-/// client is the daemon's own stack — `RetryingLlmClient` over
-/// `GenAiClient` — against the mock, with a one-second budget and two
-/// attempts, so the bound under test is two seconds plus slack.
+/// invocation in a terminal event within `timeout_max_attempts` times
+/// the call budget, instead of parking it until a restart. The client
+/// is the daemon's own stack — `RetryingLlmClient` over `GenAiClient`
+/// — against the mock, with a one-second budget and the **default**
+/// attempt policy (#607): only the backoff delays are zeroed, so the
+/// bound under test is the shipped one, two attempts, and a change to
+/// the timeout cap's default fails this test rather than a test-local
+/// `max_attempts` hiding it.
 #[tokio::test]
 async fn a_hung_provider_ends_the_invocation_within_the_timeout() {
     use crate::llm::{GenAiClient, LlmTimeouts, RetryConfig, RetryingLlmClient};
@@ -3459,11 +3462,15 @@ async fn a_hung_provider_ends_the_invocation_within_the_timeout() {
         )
         .expect("client builds"),
         RetryConfig {
-            max_attempts: 2,
             base_delay_ms: 0,
             max_delay_ms: 0,
-            max_retry_after_ms: 0,
+            ..RetryConfig::default()
         },
+    );
+    assert_eq!(
+        RetryConfig::default().timeout_max_attempts,
+        2,
+        "the bound this test proves is the default one"
     );
 
     let agent_id_str = unique_agent_id("hung-provider");
