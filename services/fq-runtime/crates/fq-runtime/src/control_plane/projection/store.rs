@@ -160,8 +160,8 @@ impl ProjectionStore {
             r#"
             INSERT OR IGNORE INTO events
                 (event_id, seq, timestamp, agent_id, invocation_id, event_type,
-                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost, error_kind, error_message, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_cost, error_kind, error_message, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.envelope.event_id.to_string())
@@ -175,6 +175,7 @@ impl ProjectionStore {
         .bind(fields.output_tokens)
         .bind(fields.cache_read_tokens)
         .bind(fields.cache_write_tokens)
+        .bind(fields.reasoning_tokens)
         .bind(fields.total_cost)
         .bind(fields.error_kind)
         .bind(fields.error_message)

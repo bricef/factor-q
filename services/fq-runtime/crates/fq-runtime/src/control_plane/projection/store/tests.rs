@@ -373,6 +373,18 @@ async fn a_date_since_selects_that_whole_day_and_nothing_before_it() {
 /// of the envelope-refactor plan, cost rides on the
 /// `llm.response` envelope rather than as its own event.
 fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
+    sample_llm_response_reporting(agent, inv, cost, None)
+}
+
+/// As above, with the provider's thought-versus-spoken split: `None`
+/// is a provider that reported none (Anthropic never does), `Some(n)`
+/// one that did — `Some(0)` included, which is a report (#536).
+fn sample_llm_response_reporting(
+    agent: &str,
+    inv: Uuid,
+    cost: f64,
+    reasoning_tokens: Option<u32>,
+) -> Event {
     Event::new(
         aid(agent),
         inv,
@@ -389,7 +401,7 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
                 output_tokens: 50,
                 cache_read_tokens: 20,
                 cache_write_tokens: 10,
-                reasoning_tokens: None,
+                reasoning_tokens,
             },
         }),
     )
@@ -406,7 +418,7 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
         cumulative_invocation_cost: cost,
         cumulative_agent_cost: cost,
         origin: crate::events::LlmCallOrigin::AgentTurn,
-        reasoning_tokens: None,
+        reasoning_tokens,
     })
 }
 
@@ -2179,4 +2191,171 @@ async fn an_older_triggers_table_gains_the_requeue_column_before_its_index() {
     ProjectionStore::open_read_only(&path)
         .await
         .expect("a migrated database reads");
+}
+
+/// **The split sums over the calls that reported one, and a NULL is
+/// not a zero** (#536). One call with no reported split beside one
+/// that reported 45 aggregates to 45 — on the per-agent, per-invocation
+/// and single-invocation reads alike — because `SUM` skips NULL the way
+/// the operator needs: an unreported split contributes nothing, and
+/// says nothing.
+#[tokio::test]
+async fn reasoning_tokens_sum_over_the_calls_that_reported_a_split() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    store
+        .insert_event(
+            &sample_llm_response_reporting("alpha", inv, 0.10, None),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .insert_event(
+            &sample_llm_response_reporting("alpha", inv, 0.05, Some(45)),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let summary = store.cost_summary(None, None).await.unwrap();
+    assert_eq!(summary[0].total_reasoning_tokens, Some(45));
+    let by_invocation = store.cost_by_invocation("alpha", None, 10).await.unwrap();
+    assert_eq!(by_invocation[0].total_reasoning_tokens, Some(45));
+    let one = store
+        .cost_of_invocation(&inv.to_string())
+        .await
+        .unwrap()
+        .expect("the invocation has cost-bearing events");
+    assert_eq!(one.total_reasoning_tokens, Some(45));
+}
+
+/// **A group in which no call reported a split has no total — `None`,
+/// not `Some(0)`** (#536). Anthropic never reports one, so every
+/// Anthropic agent is this case, and a `0` here would tell the operator
+/// the model did no thinking. A provider that reported a zero is the
+/// other case, and stays apart: `Some(0)`.
+#[tokio::test]
+async fn a_group_with_no_reported_split_has_no_reasoning_total() {
+    let (store, _dir) = open_store().await;
+    let unreported = Uuid::now_v7();
+    let reported_zero = Uuid::now_v7();
+    for (inv, cost) in [(unreported, 0.10), (unreported, 0.05)] {
+        store
+            .insert_event(
+                &sample_llm_response_reporting("anthropic-agent", inv, cost, None),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .insert_event(
+            &sample_llm_response_reporting("openai-agent", reported_zero, 0.10, Some(0)),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let summary = store.cost_summary(None, None).await.unwrap();
+    let anthropic = summary
+        .iter()
+        .find(|s| s.agent_id == "anthropic-agent")
+        .unwrap();
+    assert_eq!(
+        anthropic.total_reasoning_tokens, None,
+        "two unreported splits are still no split, not zero"
+    );
+    let openai = summary
+        .iter()
+        .find(|s| s.agent_id == "openai-agent")
+        .unwrap();
+    assert_eq!(
+        openai.total_reasoning_tokens,
+        Some(0),
+        "a reported zero is a report"
+    );
+
+    let by_invocation = store
+        .cost_by_invocation("anthropic-agent", None, 10)
+        .await
+        .unwrap();
+    assert_eq!(by_invocation[0].total_reasoning_tokens, None);
+    let one = |inv: Uuid| {
+        let store = &store;
+        async move {
+            store
+                .cost_of_invocation(&inv.to_string())
+                .await
+                .unwrap()
+                .expect("costed")
+                .total_reasoning_tokens
+        }
+    };
+    assert_eq!(one(unreported).await, None);
+    assert_eq!(one(reported_zero).await, Some(0));
+}
+
+/// **A database from before the column reads NULL for its history**,
+/// which is the honest value: those rows carried a `0` the wire could
+/// not distinguish from a report, and the projection does not reproject
+/// to find out (#536). The column arrives by `ALTER`, and a call
+/// projected after it reports as itself beside the old rows.
+#[tokio::test]
+async fn migrates_existing_projection_with_a_reasoning_column() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    std::fs::File::create(&path).unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE events (event_id TEXT PRIMARY KEY, seq INTEGER, timestamp TEXT NOT NULL, \
+         agent_id TEXT NOT NULL, invocation_id TEXT NOT NULL, event_type TEXT NOT NULL, \
+         model TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, \
+         cache_write_tokens INTEGER, total_cost REAL, error_kind TEXT, error_message TEXT, \
+         duration_ms INTEGER)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // A cost-bearing row written by the older build.
+    sqlx::query(
+        "INSERT INTO events (event_id, timestamp, agent_id, invocation_id, event_type, model, \
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_cost) \
+         VALUES ('old-1', '2026-01-01T00:00:00+00:00', 'alpha', 'inv-old', 'llm_response', \
+         'claude-haiku-4-5', 100, 50, 0, 0, 0.01)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let store = ProjectionStore::open(&path).await.unwrap();
+    let old = store
+        .cost_of_invocation("inv-old")
+        .await
+        .unwrap()
+        .expect("the old row still costs");
+    assert_eq!(
+        old.total_reasoning_tokens, None,
+        "history reads NULL, never 0"
+    );
+
+    store
+        .insert_event(
+            &sample_llm_response_reporting("alpha", Uuid::now_v7(), 0.01, Some(7)),
+            None,
+        )
+        .await
+        .unwrap();
+    let summary = store.cost_summary(Some("alpha"), None).await.unwrap();
+    assert_eq!(
+        summary[0].total_reasoning_tokens,
+        Some(7),
+        "the new call's split, with the old row contributing nothing"
+    );
+    // And the read-only handle accepts the migrated file: the new column
+    // is on the same list the check reads.
+    ProjectionStore::open_read_only(&path).await.unwrap();
 }

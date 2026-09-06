@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS events (
     output_tokens   INTEGER,
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER,
     total_cost      REAL,
     error_kind      TEXT,
     error_message   TEXT,
@@ -109,10 +110,10 @@ const TRIGGER_REQUEUE_INDEX_SQL: &str =
 
 /// The columns `events` has gained since its first shape.
 ///
-/// `CREATE TABLE` above already names all four, so a database created
-/// by this build has them from the start. They are listed here for the
-/// databases that were not: `CREATE TABLE IF NOT EXISTS` cannot widen
-/// a table that already exists, so an older file needs them added.
+/// `CREATE TABLE` above already names every one of them, so a database
+/// created by this build has them from the start. They are listed here
+/// for the databases that were not: `CREATE TABLE IF NOT EXISTS` cannot
+/// widen a table that already exists, so an older file needs them added.
 ///
 /// One list, two consumers, and they must not drift.
 /// [`ProjectionStore::run_migrations`] adds whichever are absent, and
@@ -120,7 +121,7 @@ const TRIGGER_REQUEUE_INDEX_SQL: &str =
 /// handle that cannot add anything. A column added to the table but
 /// not to this list would be missing from old databases and unnoticed
 /// by both.
-const ADDED_EVENT_COLUMNS: [(&str, &str); 4] = [
+const ADDED_EVENT_COLUMNS: [(&str, &str); 5] = [
     ("cache_read_tokens", "INTEGER"),
     ("cache_write_tokens", "INTEGER"),
     ("error_message", "TEXT"),
@@ -130,6 +131,14 @@ const ADDED_EVENT_COLUMNS: [(&str, &str); 4] = [
     // which is why "we do not know where its payload is" is a state
     // `event.get` names rather than rounds down to "no such event".
     ("seq", "INTEGER"),
+    // The thought-versus-spoken split, where the provider reported one
+    // (#536). NULL is the column's own meaning — "no split reported",
+    // which is every Anthropic call — and the honest value for the rows
+    // written before it existed: those events carried a `0` that could
+    // not say whether it was reported or merely defaulted, and the
+    // projection does not reproject to find out. Never coalesced to 0
+    // on the way out, for the same reason.
+    ("reasoning_tokens", "INTEGER"),
 ];
 
 /// The same story for `triggers`: columns the table has gained since
@@ -198,7 +207,9 @@ impl ProjectionStore {
         // reports cache usage only from this migration forward. A proper
         // projection-versioning + reproject story backfills history —
         // tracked in #139 (the phase-1 inline-schema comment above is
-        // now overdue).
+        // now overdue). `reasoning_tokens` is the one column that is not
+        // coalesced: NULL is its meaning — no split reported — and a 0
+        // would be a report the provider did not make.
         self.add_missing_columns("events", &ADDED_EVENT_COLUMNS)
             .await?;
         self.add_missing_columns("triggers", &ADDED_TRIGGER_COLUMNS)
@@ -235,8 +246,8 @@ impl ProjectionStore {
     /// further from the cause: the first query naming a missing column
     /// returns a driver error about SQL the operator never wrote, from
     /// whichever verb happened to ask first. `fq costs` selects the
-    /// two cache columns and `event.get` selects `seq`, so which error
-    /// you get depends on what you ran.
+    /// cache and reasoning columns and `event.get` selects `seq`, so
+    /// which error you get depends on what you ran.
     pub(super) async fn verify_readable(&self, path: &Path) -> Result<(), StoreError> {
         let columns: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_table_info('events')")

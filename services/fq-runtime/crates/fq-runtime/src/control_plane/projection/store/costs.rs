@@ -34,6 +34,11 @@ impl ProjectionStore {
         agent: Option<&str>,
         since: Option<&str>,
     ) -> Result<Vec<CostSummary>, StoreError> {
+        // No COALESCE on the split, unlike its neighbours: NULL is "no
+        // call in this group reported one", which is every Anthropic
+        // call, and a 0 would be a report nobody made (#536). SQLite's
+        // SUM skips NULLs and is NULL over a group of nothing else —
+        // the same fold the views apply across agents above this.
         let mut qb = QueryBuilder::new(
             "SELECT agent_id, \
              COUNT(*) AS event_count, \
@@ -42,6 +47,7 @@ impl ProjectionStore {
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
              COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
+             SUM(reasoning_tokens) AS total_reasoning_tokens, \
              COUNT(DISTINCT invocation_id) AS invocation_count, \
              COALESCE(SUM(CASE WHEN event_type = 'invocation_summary' \
              THEN total_cost ELSE 0.0 END), 0.0) AS framework_cost \
@@ -63,8 +69,9 @@ impl ProjectionStore {
                 total_output_tokens: row.get::<i64, _>(4),
                 total_cache_read_tokens: row.get::<i64, _>(5),
                 total_cache_write_tokens: row.get::<i64, _>(6),
-                invocation_count: row.get::<i64, _>(7),
-                framework_cost: row.get::<f64, _>(8),
+                total_reasoning_tokens: row.get::<Option<i64>, _>(7),
+                invocation_count: row.get::<i64, _>(8),
+                framework_cost: row.get::<f64, _>(9),
             })
             .collect())
     }
@@ -103,7 +110,8 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
-             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
+             SUM(reasoning_tokens) AS total_reasoning_tokens \
              FROM events \
              WHERE event_type IN ('llm_response', 'llm_failure') \
              AND total_cost IS NOT NULL",
@@ -124,6 +132,7 @@ impl ProjectionStore {
                 total_output_tokens: row.get::<i64, _>(5),
                 total_cache_read_tokens: row.get::<i64, _>(6),
                 total_cache_write_tokens: row.get::<i64, _>(7),
+                total_reasoning_tokens: row.get::<Option<i64>, _>(8),
             })
             .collect())
     }
@@ -149,7 +158,8 @@ impl ProjectionStore {
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
              COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
              COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
-             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
+             SUM(reasoning_tokens) AS total_reasoning_tokens \
              FROM events \
              WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL \
              AND invocation_id = ? \
@@ -167,6 +177,7 @@ impl ProjectionStore {
             total_output_tokens: row.get::<i64, _>(5),
             total_cache_read_tokens: row.get::<i64, _>(6),
             total_cache_write_tokens: row.get::<i64, _>(7),
+            total_reasoning_tokens: row.get::<Option<i64>, _>(8),
         }))
     }
 
@@ -281,6 +292,11 @@ pub struct CostSummary {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// Reasoning tokens over the calls that reported a thought-versus-
+    /// spoken split — part of `total_output_tokens`, not in addition to
+    /// it. `None` when no call in the group reported one, which is not
+    /// `Some(0)`: a provider that reported none were spent (#536).
+    pub total_reasoning_tokens: Option<i64>,
     /// Distinct invocations behind the aggregate — "how many runs did
     /// this spend buy".
     pub invocation_count: i64,
@@ -315,6 +331,8 @@ pub struct InvocationCostSummary {
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
+    /// As on [`CostSummary`]: `None` when no call reported a split.
+    pub total_reasoning_tokens: Option<i64>,
 }
 
 /// One time bucket's cost sum — a row from
