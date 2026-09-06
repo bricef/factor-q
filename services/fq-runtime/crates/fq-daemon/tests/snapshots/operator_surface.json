@@ -2092,11 +2092,127 @@
   },
   {
     "report": {
-      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation whose WAL row has not advanced within the same threshold that makes a worker stale — not hearing from either for that long is the same order of signal. The threshold is the daemon's and is not a parameter: a health report an operator can narrow is one they can narrow past the problem.",
+      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation whose WAL row has not advanced within the same threshold that makes a worker stale — not hearing from either for that long is the same order of signal. The threshold is the daemon's and is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one.",
       "domain": "control",
       "name": "doctor",
       "output_schema": {
         "$defs": {
+          "ConsumerHealth": {
+            "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The durable does not exist yet (no daemon has initialised it).",
+                "properties": {
+                  "missing": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "missing"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The durable exists but its info could not be fetched.",
+                "properties": {
+                  "error": {
+                    "properties": {
+                      "error": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "error"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "error"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "active": {
+                    "properties": {
+                      "ack_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "delivered": {
+                        "description": "Stream sequence the consumer has been delivered up to.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "lag": {
+                        "description": "`last_seq - delivered` — how far behind the stream head.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "num_pending": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "num_redelivered": {
+                        "description": "Outstanding redeliveries — messages delivered more than\nonce and not yet acked. The retry-pressure signal: a\nnon-zero value means work is being NAK'd or timing out and\nwalking toward the consumer's delivery bound, past which a\ntrigger is dead-lettered rather than retried again.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "redeliveries": {
+                        "description": "Deliveries this consumer has made past its acked floor,\nbeyond the first delivery of each still-pending message —\nthe \"delivered count climbing while the watermark is frozen\"\nthat a NAK loop looks like from outside. Zero on a healthy\nconsumer, however far behind it is.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "stuck": {
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "delivered",
+                      "lag",
+                      "ack_pending",
+                      "num_pending",
+                      "num_redelivered",
+                      "redeliveries",
+                      "stuck"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "active"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "DoctorDeadLetters": {
             "description": "Dead-lettered triggers: transient pre-WAL failures that\nexhausted the trigger consumer's delivery bound. The dispatcher\nconsumes the exhausted trigger and emits a terminal `failed` event\nwith the dead-letter kind; this counts that bucket, so the\nreport needs no extra query. The event's annotations carry the\ntrigger subject and payload for requeue/diagnosis.",
             "properties": {
@@ -2207,6 +2323,14 @@
             "description": "Ambiguous invocations needing operator triage (CP owner\ntable, `status='ambiguous'`).",
             "format": "int64",
             "type": "integer"
+          },
+          "consumers": {
+            "default": [],
+            "description": "Every durable consumer this daemon expects, and how each one is\ndoing. The Phase 1 exit criterion, verbatim: \"`fq doctor`\nreports every consumer\". Before this the report was a fold of\nthe stores alone, so a control-plane consumer stuck redelivering\n— the wedge finding B4 describes — left every check green.\n\nA daemon that cannot be asked answers nothing at all, which is\nwhy this is a plain list rather than an optional one: reaching\nthe report means the daemon probed its own broker.",
+            "items": {
+              "$ref": "#/$defs/ConsumerHealth"
+            },
+            "type": "array"
           },
           "dead_letters": {
             "$ref": "#/$defs/DoctorDeadLetters"
@@ -2337,6 +2461,16 @@
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
+                      },
+                      "redeliveries": {
+                        "description": "Deliveries this consumer has made past its acked floor,\nbeyond the first delivery of each still-pending message —\nthe \"delivered count climbing while the watermark is frozen\"\nthat a NAK loop looks like from outside. Zero on a healthy\nconsumer, however far behind it is.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "stuck": {
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "type": "boolean"
                       }
                     },
                     "required": [
@@ -2345,7 +2479,9 @@
                       "lag",
                       "ack_pending",
                       "num_pending",
-                      "num_redelivered"
+                      "num_redelivered",
+                      "redeliveries",
+                      "stuck"
                     ],
                     "type": "object"
                   }
@@ -2478,8 +2614,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
-                      "consumer": {
-                        "$ref": "#/$defs/ConsumerHealth"
+                      "consumers": {
+                        "description": "Every durable this daemon expects on the stream, in a fixed\norder. It was one — the stream's \"primary\" consumer — which\nmeant `control.status` reported two of the runtime's six\ndurables and a wedged coordination or summary consumer was\ninvisible to every health surface (review finding B4).\nA consumer the daemon does not expect is not listed: the\nsummariser only exists when `[summary]` names a model, and\nreporting it missing otherwise would be a permanent false\nred.",
+                        "items": {
+                          "$ref": "#/$defs/ConsumerHealth"
+                        },
+                        "type": "array"
                       },
                       "first_seq": {
                         "format": "uint64",
@@ -2506,7 +2646,7 @@
                       "bytes",
                       "first_seq",
                       "last_seq",
-                      "consumer"
+                      "consumers"
                     ],
                     "type": "object"
                   }
