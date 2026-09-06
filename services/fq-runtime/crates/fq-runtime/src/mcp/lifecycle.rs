@@ -357,15 +357,13 @@ pub async fn retry_unavailable(
         // Nothing pending is a state to wait in, not a reason to stop:
         // a server that is ready now can still lose its connection, and
         // this task is the only thing watching for that.
+        // Nothing to dial, or retrying disabled, both mean "no timer":
+        // servers are still marked unavailable when they die, they
+        // simply stay that way until something changes.
         let delay = if pending.is_empty() {
             None
         } else {
-            match due_in(&manager, &pending, attempts).await {
-                Some(delay) => Some(delay),
-                // Retrying is disabled. Servers still get marked
-                // unavailable when they die; they simply stay that way.
-                None => None,
-            }
+            due_in(&manager, &pending, attempts).await
         };
         tokio::select! {
             _ = stop.notified() => return,
