@@ -38,7 +38,13 @@ fn failure(kind: &str, count: i64) -> FailureView {
 
 #[test]
 fn all_clear_renders_a_verdict_and_still_shows_dead_letters() {
-    let report = build_doctor_report(&[worker("w1", "alive")], &ExecutionsView::default(), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &[worker("w1", "alive")],
+        &ExecutionsView::default(),
+        0,
+        &[],
+        Vec::new(),
+    );
     let out = render_doctor_report_human(&report);
     assert!(out.contains("All clear."), "got: {out}");
     // Dead-letter section is always shown.

@@ -19,7 +19,9 @@
 
 pub use fq_ops::health::{ConsumerHealth, StreamHealth};
 
-use crate::bus::{ADVISORY_STREAM_NAME, ConsumerRedeliveryPolicy, STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::bus::{
+    ADVISORY_STREAM_NAME, ConsumerRedeliveryPolicy, STREAM_NAME, TRIGGER_STREAM_NAME,
+};
 use crate::control_plane::advisory_watch::CONSUMER_NAME as ADVISORY_CONSUMER;
 use crate::control_plane::coordination_consumer::CONSUMER_NAME as COORDINATION_CONSUMER;
 use crate::control_plane::dispatcher::CONSUMER_NAME as DISPATCHER_CONSUMER;
@@ -188,11 +190,11 @@ pub async fn probe_core_consumers(
     for (stream, expected) in core_streams(summary_enabled) {
         match probe_stream(js, stream, &expected, policy).await {
             StreamHealth::Available { consumers, .. } => out.extend(consumers),
-            StreamHealth::Unavailable { .. } => out.extend(expected.into_iter().map(|name| {
-                ConsumerHealth::Missing {
+            StreamHealth::Unavailable { .. } => {
+                out.extend(expected.into_iter().map(|name| ConsumerHealth::Missing {
                     name: name.to_string(),
-                }
-            })),
+                }))
+            }
         }
     }
     out

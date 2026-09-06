@@ -134,8 +134,7 @@ async fn a_wedged_consumer_logs_once_per_interval_not_once_per_redelivery() {
         .filter(|line| line.contains("handler failed; NAK for redelivery"))
         .count();
     assert_eq!(
-        nak_lines,
-        1,
+        nak_lines, 1,
         "at least 20 redeliveries inside one log interval must produce one line, got \
          {nak_lines}:\n{captured}"
     );

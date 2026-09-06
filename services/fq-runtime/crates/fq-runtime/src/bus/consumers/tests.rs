@@ -37,7 +37,9 @@ async fn every_durable_carries_an_explicit_ack_wait_and_a_considered_delivery_bo
 
     // Every factory, including the shapes production uses.
     bus.durable_consumer("t-plain").await.expect("plain");
-    bus.durable_consumer_strict("t-strict").await.expect("strict");
+    bus.durable_consumer_strict("t-strict")
+        .await
+        .expect("strict");
     bus.durable_consumer_with_filter("t-filtered", "fq.agent.*.invocation.*")
         .await
         .expect("filtered");
