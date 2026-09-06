@@ -16,19 +16,17 @@ use fq_tools::Tool;
 use fq_tools::builtin::ExecConfig;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
-    ClientRequest, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
+    CallToolResult, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
     LoggingLevel, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceTemplate, Root, ServerCapabilities, ServerResult, SetLevelRequestParams,
-    SubscribeRequestParams,
+    ResourceTemplate, Root, ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
 };
-use rmcp::service::PeerRequestOptions;
 use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use super::naming::{namespaced_tool_name, validate_server_name};
+use super::progress::ProgressRegistry;
 use super::prompt_convert::prompt_seed_from_rmcp;
 use super::server_config::SharedServerKey;
 use super::{
@@ -59,6 +57,12 @@ pub struct McpClientManager {
     /// Root of the stdio servers' working directories,
     /// `<root>/<server>` (see [`stdio`](super::stdio)).
     server_root: std::path::PathBuf,
+    /// `(server, rmcp progress token) → the invocation and tool call
+    /// that issued the request` (#605). Handed to every handler (which
+    /// routes inbound `notifications/progress` through it) and to every
+    /// [`McpTool`] this manager builds (which registers and clears
+    /// entries), so both ends of the correlation share one table.
+    progress: ProgressRegistry,
 }
 
 impl Default for McpClientManager {
@@ -79,7 +83,16 @@ impl McpClientManager {
             servers: Vec::new(),
             started: HashSet::new(),
             server_root,
+            progress: ProgressRegistry::default(),
         }
+    }
+
+    /// The `(server, token) → call` table this manager's servers report
+    /// progress through (#605). Cheap to clone; a stuck-call detector
+    /// reads [`in_flight`](ProgressRegistry::in_flight) for each call's
+    /// last sign of life.
+    pub fn progress(&self) -> ProgressRegistry {
+        self.progress.clone()
     }
 
     /// Start an MCP server, discover its tools, and return them as
@@ -178,7 +191,8 @@ impl McpClientManager {
         let roots_cell = Arc::new(Mutex::new(roots));
         let mut handler = FactorQClientHandler::with_notifications(notif_tx)
             .with_roots(Arc::clone(&roots_cell))
-            .with_capabilities(capabilities);
+            .with_capabilities(capabilities)
+            .with_progress(config.name.clone(), self.progress.clone());
         if let Some(req_tx) = server_request_tx {
             handler = handler.with_server_requests(req_tx);
         }
@@ -213,7 +227,8 @@ impl McpClientManager {
         };
 
         // Discover tools (shared with `refresh_tools`).
-        let (tools, tool_names) = Self::discover_tools(&client, &config.name).await?;
+        let (tools, tool_names) =
+            Self::discover_tools(&client, &config.name, &self.progress).await?;
 
         self.servers.push(RunningServer {
             name: config.name,
@@ -235,6 +250,7 @@ impl McpClientManager {
     pub(super) async fn discover_tools(
         client: &Arc<McpClient>,
         server_name: &str,
+        progress: &ProgressRegistry,
     ) -> Result<(Vec<Arc<dyn Tool>>, Vec<String>), McpError> {
         validate_server_name(server_name)?;
         let mcp_tools = client
@@ -268,10 +284,12 @@ impl McpClientManager {
             tool_names.push(name.clone());
             tools.push(Arc::new(McpTool {
                 tool_name: name,
+                server_name: server_name.to_string(),
                 remote_tool_name: remote_name,
                 tool_description: description,
                 tool_input_schema: input_schema,
                 client: Arc::clone(client),
+                progress: progress.clone(),
             }));
         }
 
@@ -316,7 +334,7 @@ impl McpClientManager {
                 name: server.to_string(),
             })?;
         let client = Arc::clone(&self.servers[idx].client);
-        let (tools, tool_names) = Self::discover_tools(&client, server).await?;
+        let (tools, tool_names) = Self::discover_tools(&client, server, &self.progress).await?;
         self.servers[idx].tool_names = tool_names;
         Ok(tools)
     }
@@ -479,6 +497,7 @@ impl McpClientManager {
                 .map(|server| (server.name.clone(), Arc::clone(&server.client)))
                 .collect(),
             exec_config,
+            progress: self.progress.clone(),
         }
     }
 
@@ -521,13 +540,16 @@ impl McpClientManager {
         server.notifications.lock().await.recv().await
     }
 
-    /// Call a tool, racing it against a `cancel` future (Step 7). If
-    /// the tool completes first, return its result as `Some`. If
-    /// `cancel` fires first, send `notifications/cancelled` to the
-    /// server (asking it to abort) and return `None`, abandoning the
-    /// in-flight request. This is how a host aborts a stuck or
-    /// no-longer-needed tool call (timeout, shutdown, budget) without
-    /// blocking on it.
+    /// Call a tool, racing it against a `cancel` future. If the tool
+    /// completes first, return its result as `Some`. If `cancel` fires
+    /// first, send `notifications/cancelled` to the server (asking it
+    /// to abort) and return `None`, abandoning the in-flight request.
+    ///
+    /// This is the host's own cancellation — shutdown, budget, a
+    /// superseded step. The agent's tool calls take the same path
+    /// through [`McpTool`], which supplies its deadline as the `cancel`
+    /// future; both go through [`call`](super::call) so there is one
+    /// implementation of what cancelling a call means.
     pub async fn call_tool_cancellable<F>(
         &self,
         server: &str,
@@ -542,52 +564,22 @@ impl McpClientManager {
         let remote_tool_name = tool_name
             .strip_prefix(&canonical_prefix)
             .unwrap_or(tool_name);
-        // No `_meta` progress token: rmcp's peer layer mints one for
-        // every outbound request and overwrites any the host sets (#605).
-        let params =
-            CallToolRequestParams::new(remote_tool_name.to_string()).with_arguments(arguments);
-        let mut handle = self
-            .client_for(server)?
-            .peer()
-            .send_cancellable_request(
-                ClientRequest::CallToolRequest(CallToolRequest::new(params)),
-                PeerRequestOptions::no_options(),
-            )
-            .await
-            .map_err(|err| McpError::ToolCall {
-                tool_name: tool_name.to_string(),
-                reason: err.to_string(),
-            })?;
-
-        // Clone what's needed to cancel without consuming the handle
-        // (the `select!` borrows `handle.rx`).
-        let request_id = handle.id.clone();
-        let peer = handle.peer.clone();
-        let tool_call_error = |reason: String| McpError::ToolCall {
-            tool_name: tool_name.to_string(),
-            reason,
-        };
-
-        tokio::pin!(cancel);
-        tokio::select! {
-            result = &mut handle.rx => match result {
-                Ok(Ok(ServerResult::CallToolResult(result))) => Ok(Some(result)),
-                Ok(Ok(_)) => Err(tool_call_error("unexpected response type".to_string())),
-                Ok(Err(err)) => Err(tool_call_error(err.to_string())),
-                Err(_) => Err(tool_call_error("transport closed".to_string())),
+        super::call::call_tool_cancellable(
+            super::call::OutboundCall {
+                client: self.client_for(server)?,
+                server,
+                remote_tool_name,
+                tool_name,
+                arguments,
+                progress: &self.progress,
+                // The host's own cancellation is not an agent tool
+                // call, so there is no invocation to attribute
+                // progress to.
+                call: None,
             },
-            _ = &mut cancel => {
-                // Best-effort: tell the server to abort. We stop
-                // awaiting the response regardless.
-                let _ = peer
-                    .notify_cancelled(CancelledNotificationParam {
-                        request_id,
-                        reason: Some("cancelled by host".to_string()),
-                    })
-                    .await;
-                Ok(None)
-            }
-        }
+            cancel,
+        )
+        .await
     }
 
     /// Set the minimum logging level the server should send

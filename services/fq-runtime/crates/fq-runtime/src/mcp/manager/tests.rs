@@ -7,6 +7,7 @@
 //! nor mutates it, and cannot show a test what `_meta` arrived.
 
 use super::*;
+use crate::mcp::progress::ProgressRegistry;
 
 use crate::mcp::mock::{mock_tool, serve_mock, serve_mock_recording};
 
@@ -41,9 +42,10 @@ async fn discover_follows_the_pagination_cursor() {
             .collect::<Vec<_>>(),
     ));
     let client = serve_mock(tools, 2).await;
-    let (_, names) = McpClientManager::discover_tools(&client, "mock")
-        .await
-        .expect("discover");
+    let (_, names) =
+        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+            .await
+            .expect("discover");
     assert_eq!(names.len(), 5, "all pages should be walked");
 }
 
@@ -69,9 +71,10 @@ async fn concurrent_callers_multiplex_over_one_shared_client() {
     for caller in 0..4 {
         let client = Arc::clone(&client);
         set.spawn(async move {
-            let (_, names) = McpClientManager::discover_tools(&client, "mock")
-                .await
-                .expect("concurrent discover");
+            let (_, names) =
+                McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+                    .await
+                    .expect("concurrent discover");
             (caller, names)
         });
     }
@@ -90,17 +93,19 @@ async fn concurrent_callers_multiplex_over_one_shared_client() {
 async fn rediscovery_reflects_a_mutated_tool_list() {
     let tools = Arc::new(Mutex::new(vec![mock_tool("a"), mock_tool("b")]));
     let client = serve_mock(tools.clone(), 10).await;
-    let (_, before) = McpClientManager::discover_tools(&client, "mock")
-        .await
-        .expect("discover");
+    let (_, before) =
+        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+            .await
+            .expect("discover");
     assert_eq!(before.len(), 2);
 
     // The server mutates its tool list (what tools/list_changed
     // signals); a re-discovery (the refresh path) must reflect it.
     tools.lock().await.push(mock_tool("c"));
-    let (_, after) = McpClientManager::discover_tools(&client, "mock")
-        .await
-        .expect("re-discover");
+    let (_, after) =
+        McpClientManager::discover_tools(&client, "mock", &ProgressRegistry::default())
+            .await
+            .expect("re-discover");
     assert_eq!(
         after.len(),
         3,

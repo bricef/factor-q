@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use super::ServerNotification;
-use super::progress::progress_token_string;
+use super::progress::{ProgressRegistry, progress_token_string};
 
 /// A request a connected MCP server initiates back toward the host
 /// *mid-invocation* (ADR-0018).
@@ -129,6 +129,12 @@ pub struct FactorQClientHandler {
     /// and fire `roots/list_changed`. Empty by default — roots are
     /// nothing-by-default and derived from the agent's sandbox grant.
     roots: Arc<Mutex<Vec<Root>>>,
+    /// This server's name and the shared `(server, token) → call`
+    /// table, so an inbound `notifications/progress` is attributed to
+    /// the invocation and tool call that issued the request (#605).
+    /// `None` for a handler built outside a manager (tests): progress
+    /// is then still traced and forwarded, just uncorrelated.
+    progress: Option<(String, ProgressRegistry)>,
 }
 
 impl FactorQClientHandler {
@@ -161,6 +167,14 @@ impl FactorQClientHandler {
     /// [`RootsHandle`](super::RootsHandle).
     pub(super) fn with_roots(mut self, roots: Arc<Mutex<Vec<Root>>>) -> Self {
         self.roots = roots;
+        self
+    }
+
+    /// Wire the manager's progress-correlation table and tell the
+    /// handler which server it speaks for (#605). Without it, inbound
+    /// progress is traced and forwarded but attributed to nothing.
+    pub(super) fn with_progress(mut self, server: String, registry: ProgressRegistry) -> Self {
+        self.progress = Some((server, registry));
         self
     }
 
@@ -379,17 +393,29 @@ impl ClientHandler for FactorQClientHandler {
         std::future::ready(())
     }
 
-    /// Forward `notifications/progress` for an in-flight request: trace
-    /// it and forward a [`ServerNotification::Progress`] on the sink.
+    /// Handle `notifications/progress` for an in-flight request.
+    ///
+    /// Attribution happens here rather than in the notification drain
+    /// so it holds whether or not anyone is draining: the correlation
+    /// table is consulted at the point of arrival, which is also where
+    /// the call's *last progress at* stamp has to land for a stuck-call
+    /// detector to trust it (#605). A token with no entry — progress
+    /// against a call that already finished — is traced and forwarded
+    /// like any other, just unattributed.
     fn on_progress(
         &self,
         params: ProgressNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
         let token = progress_token_string(&params.progress_token);
+        let attributed = self.progress.as_ref().and_then(|(server, registry)| {
+            registry.record_progress(server, &token, params.progress, params.total)
+        });
         debug!(
             target: "mcp.server.progress",
             token = %token,
+            invocation_id = attributed.as_ref().map(|call| call.invocation_id.as_str()),
+            call_id = attributed.as_ref().map(|call| call.call_id.as_str()),
             progress = params.progress,
             total = ?params.total,
             "progress"

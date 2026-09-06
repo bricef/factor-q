@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use fq_tools::{Tool, ToolContext, ToolError, ToolResult};
-use rmcp::model::CallToolRequestParams;
 use serde_json::Value;
 
 use super::McpClient;
+use super::call::{OutboundCall, call_tool_cancellable};
+use super::progress::ProgressRegistry;
 
 /// A single tool from an MCP server, adapted to the fq-tools [`Tool`] trait.
 ///
@@ -16,10 +17,16 @@ use super::McpClient;
 /// same server share one connection.
 pub struct McpTool {
     pub(super) tool_name: String,
+    /// The server's factor-q name. Needed apart from `tool_name`
+    /// because the progress-correlation key is `(server, token)` —
+    /// rmcp numbers its tokens per peer, so two servers both issue a
+    /// token `0`.
+    pub(super) server_name: String,
     pub(super) remote_tool_name: String,
     pub(super) tool_description: String,
     pub(super) tool_input_schema: Value,
     pub(super) client: Arc<McpClient>,
+    pub(super) progress: ProgressRegistry,
 }
 
 #[async_trait::async_trait]
@@ -36,11 +43,22 @@ impl Tool for McpTool {
         self.tool_input_schema.clone()
     }
 
-    async fn execute(
-        &self,
-        _ctx: &ToolContext<'_>,
-        params: Value,
-    ) -> Result<ToolResult, ToolError> {
+    /// Send the call and wait — but only as long as the host said, and
+    /// cancellably.
+    ///
+    /// This used to be a bare `call_tool(...).await`, so a server that
+    /// accepted the request and never answered parked the invocation
+    /// for as long as the daemon lived (review finding B2). The
+    /// deadline the host puts on the context is now the cancellation
+    /// trigger: at it, the request is abandoned *and the server is told
+    /// so* with `notifications/cancelled`, which is the difference
+    /// between a deadline and merely looking away — a server left
+    /// working produces a result nobody will read, and on a stdio
+    /// server that is a child process still burning CPU.
+    ///
+    /// With no deadline on the context (direct or test use) the call
+    /// waits indefinitely, exactly as before.
+    async fn execute(&self, ctx: &ToolContext<'_>, params: Value) -> Result<ToolResult, ToolError> {
         let arguments = match params.as_object() {
             Some(obj) => obj.clone(),
             None if params.is_null() => serde_json::Map::new(),
@@ -51,16 +69,34 @@ impl Tool for McpTool {
             }
         };
 
-        // No `_meta` progress token: rmcp's peer layer mints one for
-        // every outbound request and overwrites any the host sets (#605).
-        let request =
-            CallToolRequestParams::new(self.remote_tool_name.clone()).with_arguments(arguments);
+        let deadline = ctx.deadline;
+        let cancel = async move {
+            match deadline {
+                Some(after) => tokio::time::sleep(after).await,
+                None => std::future::pending().await,
+            }
+        };
 
-        let result = self
-            .client
-            .call_tool(request)
-            .await
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        let outcome = call_tool_cancellable(
+            OutboundCall {
+                client: &self.client,
+                server: &self.server_name,
+                remote_tool_name: &self.remote_tool_name,
+                tool_name: &self.tool_name,
+                arguments,
+                progress: &self.progress,
+                call: ctx.call.as_ref(),
+            },
+            cancel,
+        )
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+
+        let Some(result) = outcome else {
+            return Err(ToolError::TimedOut {
+                after: deadline.unwrap_or_default(),
+            });
+        };
 
         // Extract text content from the response. Non-text content
         // (images, resources) is noted but not included — the LLM

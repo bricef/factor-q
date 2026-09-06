@@ -19,6 +19,7 @@ async fn drain_rebuilds_the_registry_on_tool_list_changed() {
     let refresher = McpToolRefresher {
         clients: vec![("mock".to_string(), client)],
         exec_config: fq_tools::builtin::ExecConfig::default(),
+        progress: Default::default(),
     };
 
     let (notif_tx, notif_rx) = mpsc::unbounded_channel();
@@ -134,6 +135,7 @@ async fn a_chatty_server_cannot_starve_a_quiet_one() {
         McpToolRefresher {
             clients: Vec::new(),
             exec_config: fq_tools::builtin::ExecConfig::default(),
+            progress: Default::default(),
         },
         |_registry| unreachable!("no tools/list_changed is sent"),
         move |server, _level, _logger, _data| {
