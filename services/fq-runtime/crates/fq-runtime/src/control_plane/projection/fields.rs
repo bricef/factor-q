@@ -22,6 +22,10 @@ pub(super) struct Fields {
     pub(super) output_tokens: Option<i64>,
     pub(super) cache_read_tokens: Option<i64>,
     pub(super) cache_write_tokens: Option<i64>,
+    /// The thought-versus-spoken split, where the provider reported
+    /// one. `None` projects as NULL — never as 0, which would be a
+    /// report the provider did not make (#536).
+    pub(super) reasoning_tokens: Option<i64>,
     pub(super) total_cost: Option<f64>,
     pub(super) error_kind: Option<String>,
     pub(super) error_message: Option<String>,
@@ -56,6 +60,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
                 output_tokens: Some(p.usage.output_tokens as i64),
                 cache_read_tokens: Some(p.usage.cache_read_tokens as i64),
                 cache_write_tokens: Some(p.usage.cache_write_tokens as i64),
+                reasoning_tokens: p.usage.reasoning_tokens.map(i64::from),
                 ..Default::default()
             };
             if let Some(cost) = &event.envelope.cost {
@@ -85,6 +90,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
                 f.output_tokens = Some(usage.output_tokens as i64);
                 f.cache_read_tokens = Some(usage.cache_read_tokens as i64);
                 f.cache_write_tokens = Some(usage.cache_write_tokens as i64);
+                f.reasoning_tokens = usage.reasoning_tokens.map(i64::from);
             }
             f
         }
@@ -100,6 +106,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
                 f.output_tokens = Some(cost.output_tokens as i64);
                 f.cache_read_tokens = Some(cost.cache_read_tokens as i64);
                 f.cache_write_tokens = Some(cost.cache_write_tokens as i64);
+                f.reasoning_tokens = cost.reasoning_tokens.map(i64::from);
                 f.total_cost = Some(cost.total_cost);
             }
             f

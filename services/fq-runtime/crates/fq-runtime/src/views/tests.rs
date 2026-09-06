@@ -92,6 +92,7 @@ fn invocation_cost_view_parses_rfc3339_start() {
         total_output_tokens: 5,
         total_cache_read_tokens: 0,
         total_cache_write_tokens: 0,
+        total_reasoning_tokens: None,
     };
     let v = InvocationCostView::from(summary("1970-01-01T00:00:01+00:00"));
     assert_eq!(v.started_at_ms, 1_000);
