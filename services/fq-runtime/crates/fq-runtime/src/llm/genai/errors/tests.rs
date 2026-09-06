@@ -217,3 +217,12 @@ fn an_unreadable_retry_after_reads_as_absent() {
         );
     }
 }
+
+/// A 408 is the server's own timeout, not a verdict on the request —
+/// so it is retried like a 5xx, not refused like the other 4xx.
+#[test]
+fn a_408_is_a_transient_request_failure() {
+    let err = map(model_call_failed(408, HeaderMap::new()));
+    assert!(matches!(&err, LlmError::RequestFailed(_)), "got {err:?}");
+    assert!(err.is_transient(), "408 is retried");
+}

@@ -592,7 +592,9 @@ mod retry_tests {
         assert_eq!(calls(&client), 1);
     }
 
-    /// The cap is inclusive: a wait exactly at it is still honoured.
+    /// The cap is inclusive: a wait exactly at it is still honoured —
+    /// waited, then retried. Both halves are asserted; the count alone
+    /// would pass a layer that retried at once.
     #[tokio::test]
     async fn a_retry_after_at_the_cap_is_still_waited() {
         let config = RetryConfig {
@@ -603,7 +605,13 @@ mod retry_tests {
             scripted(vec![rate_limited(Some(Duration::from_millis(100)))]),
             config,
         );
+        let started = std::time::Instant::now();
         assert!(client.chat(request()).await.is_ok());
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "the wait at the cap was skipped: {:?}",
+            started.elapsed()
+        );
         assert_eq!(calls(&client), 2);
     }
 
