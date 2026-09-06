@@ -461,11 +461,11 @@ whose message names the server and the reason — so the agent does not
 run half-equipped and fail later for an unrelated-looking reason. Every
 other agent runs normally.
 
-**This is not only a start-up check.** A server that answered at boot
-and later loses its connection is marked unavailable with that reason
-the moment its notification stream ends, and dialled again like any
-other failure — so `fq doctor` going green is a claim about now, not
-about start-up.
+**This is not only a start-up check.** Every connected server is
+watched, so one that answered at boot and later loses its connection is
+marked unavailable within a second of the transport ending, and dialled
+again like any other failure — `fq doctor` going green is a claim about
+now, not about start-up.
 
 You usually do not have to do anything. The daemon dials an unavailable
 server again on a doubling backoff (`[mcp] retry_initial_secs`, default

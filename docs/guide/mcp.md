@@ -294,11 +294,11 @@ What "unavailable" costs is paid where it is visible, never silently:
   picked up without `fq reload`. Its tools then reach the shared
   registry through the same rebuild a `tools/list_changed` uses.
 
-The same applies **after** boot. A server that answered at start-up and
-later loses its connection — a stdio child that exited, a remote
-endpoint that closed, a message past the line bound — is noticed the
-moment its notification stream ends: it is marked unavailable with that
-reason, agents that declare it are refused from then on, and it is
+The same applies **after** boot. Every connected server is watched, so
+one that answered at start-up and later loses its connection — a stdio
+child that exited, a remote endpoint that closed, a message past the
+line bound — is marked unavailable within a second of the transport
+ending, agents that declare it are refused from then on, and it is
 dialled again on the same backoff. A server being dialled *right now*
 refuses too, so there is no window in which an agent runs with tools
 that are not registered.

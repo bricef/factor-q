@@ -74,10 +74,16 @@ pub enum ServerNotification {
 /// drained, which is shutdown: while a retry loop is still running,
 /// zero connected servers is a state to wait in rather than a reason to
 /// stop.
+///
+/// **A server dying is not visible here.** rmcp's `RunningService` owns
+/// its handler behind an `Arc`, so the sender feeding these channels
+/// lives as long as the host's client handle does: a connection that
+/// ends leaves its stream open and silent. Detecting that is the
+/// transport's business, and belongs to the per-connection watcher in
+/// [`lifecycle`](super::lifecycle).
 pub async fn drain_server_notifications<F, G>(
     channels: Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
     mut late: mpsc::UnboundedReceiver<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
-    gone: mpsc::UnboundedSender<String>,
     refresher: McpToolRefresher,
     on_tools_changed: F,
     on_log: G,
@@ -85,7 +91,10 @@ pub async fn drain_server_notifications<F, G>(
     F: Fn(ToolRegistry) + Send + Sync + 'static,
     G: Fn(String, String, Option<String>, Value) + Send + Sync + 'static,
 {
-    let mut channels: ServerStreams = channels.into_iter().map(watched).collect();
+    let mut channels: StreamMap<String, UnboundedReceiverStream<ServerNotification>> = channels
+        .into_iter()
+        .map(|(server, rx)| (server, UnboundedReceiverStream::new(rx)))
+        .collect();
     let mut late_closed = false;
 
     loop {
@@ -96,8 +105,7 @@ pub async fn drain_server_notifications<F, G>(
             arrival = late.recv(), if !late_closed => match arrival {
                 Some((server, rx)) => {
                     info!(server = %server, "MCP server joined after boot: rebuilding the shared registry");
-                    let (server, stream) = watched((server, rx));
-                    channels.insert(server, stream);
+                    channels.insert(server, UnboundedReceiverStream::new(rx));
                     on_tools_changed(refresher.rebuild_registry().await);
                     continue;
                 }
@@ -112,17 +120,6 @@ pub async fn drain_server_notifications<F, G>(
         // the map is empty; with a retry loop still open that is not the
         // end, so go round and let the guard above decide.
         let Some((server, notification)) = next else {
-            continue;
-        };
-        // The end of a server's stream, not a notification: its
-        // handler was dropped, which means its rmcp service ended and
-        // the connection is gone. Say so, so the supervisor can mark it
-        // unavailable and start dialling it again. Without this a
-        // transport that died after boot left every health surface
-        // green while every call through it failed.
-        let Some(notification) = notification else {
-            info!(server = %server, "MCP server's connection ended");
-            let _ = gone.send(server);
             continue;
         };
         match notification {
@@ -151,33 +148,6 @@ pub async fn drain_server_notifications<F, G>(
             }
         }
     }
-}
-
-/// The merged per-server streams. `None` is the end of one server's
-/// stream — a `StreamMap` drops an exhausted entry silently, and the
-/// end is exactly the event the supervisor needs, so each stream is
-/// given one final item to say so.
-type ServerStreams = StreamMap<
-    String,
-    std::pin::Pin<
-        Box<dyn tokio_stream::Stream<Item = Option<ServerNotification>> + Send + 'static>,
-    >,
->;
-
-/// One server's channel, as a stream that yields `None` once when it
-/// closes.
-fn watched(
-    (server, rx): (String, mpsc::UnboundedReceiver<ServerNotification>),
-) -> (
-    String,
-    std::pin::Pin<
-        Box<dyn tokio_stream::Stream<Item = Option<ServerNotification>> + Send + 'static>,
-    >,
-) {
-    let stream = UnboundedReceiverStream::new(rx)
-        .map(Some)
-        .chain(tokio_stream::once(None));
-    (server, Box::pin(stream))
 }
 
 #[cfg(test)]
