@@ -451,11 +451,14 @@ the state to carry is the `~/fq-dogfood` tree minus `releases/`,
 volume. Rotating the edge identity is simpler than moving it and costs
 one re-pair and one dashboard token; the steps below move it.
 
-1. **Stop the old shape.** `./current/fq down` (or `deploy.sh` of the
-   launcher era with nothing to deploy), then SIGTERM the watcher, cron
-   and dashboard, then `docker compose -f infra/docker-compose.yml
-   down` for the old broker and proxy. Confirm with `fq workers list`
-   beforehand that the worker ends `shutdown`, not `stale`.
+1. **Stop the old shape, in this order.** SIGTERM the watcher and cron
+   first, so nothing is claimed or fired mid-drain; then `./current/fq
+   down` (the drain); then `docker compose -f infra/docker-compose.yml
+   down` for the old broker and proxy; the dashboard last or never.
+   Confirm with `fq workers list` that the worker ended `shutdown`, not
+   `stale`. Never run two watchers or two schedulers against one
+   repository — the old pair is down before the new pair is up, and
+   the reverse on a rollback.
 2. **Bootstrap the new shape** (above) on the target host, with the same
    secrets and the same broker token. Do not run `deploy.sh` yet.
 3. **Seed the volume from the tree**: `fqd.toml` (with the three
@@ -465,6 +468,10 @@ one re-pair and one dashboard token; the steps below move it.
    — `~/.local/state/factor-q/edge/` by default, or `[state] directory`
    if set — as `state/edge/`. Copy in through the image as in Bootstrap;
    the copy runs as the runtime user, so ownership comes out right.
+   Across hosts, package the same files and the broker volume as a
+   `restore.sh` set instead and let it do steps 3–5 — the
+   [migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md)
+   has the packaging, the rehearsal and the day's order.
 4. **Move the event log.** The old compose project's volume is
    `infra_nats-data`; the new one is `fq-dogfood_nats-data`:
 
@@ -483,8 +490,7 @@ one re-pair and one dashboard token; the steps below move it.
    old `infra/docker-compose.yml`; the host's `gh` login is no longer
    read by anything (GH_TOKEN is literal in `.secrets/env`).
 
-Not built yet: probes on the adapter and dashboard images
-([#587](https://github.com/bricef/factor-q/issues/587)), and a
-notification channel for the warnings `hygiene.sh` and `deploy.sh
---auto` write to their logs and cron mail — the metrics and alerting of
-[#342](https://github.com/bricef/factor-q/issues/342).
+The move itself — pre-flight, the set from the launcher shape, the
+day's sequence, acceptance, rollback and retirement — is the
+[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md);
+[#587](https://github.com/bricef/factor-q/issues/587) tracks it.
