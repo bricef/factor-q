@@ -245,3 +245,71 @@ fn an_escalated_reason_names_the_stop_and_the_escalator() {
         "down_escalated_by_down_now"
     );
 }
+
+// ------------------------------------------------------------------
+// The optional task's supervision (#549, review finding F). The
+// summariser used to be spawned outside the supervised `select!`, so
+// its stream ending exited the task in silence.
+// ------------------------------------------------------------------
+
+/// The summariser's actual failure mode: `SummaryConsumer::run` returns
+/// `Ok(())` when its JetStream message stream ends. Unsupervised that
+/// was a silent stop; supervised it resolves the arm, and
+/// `describe_task_result` turns it into a line that says a task exited
+/// without being asked to.
+#[tokio::test]
+async fn an_optional_tasks_stream_ending_is_observed_and_described() {
+    let mut handle: tokio::task::JoinHandle<Result<(), String>> =
+        tokio::spawn(async { Ok(()) });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        supervise_optional(Some(&mut handle)),
+    )
+    .await
+    .expect("a finished task must resolve the supervising arm");
+
+    let described = crate::signals::describe_task_result("summary consumer", result);
+    assert_eq!(
+        described,
+        "summary consumer exited before a shutdown signal was sent",
+        "the silent exit has to become a sentence somebody can read"
+    );
+}
+
+/// A panicking optional task is observed too, and named.
+#[tokio::test]
+async fn an_optional_task_that_panics_is_observed() {
+    let mut handle: tokio::task::JoinHandle<Result<(), String>> =
+        tokio::spawn(async { panic!("summariser blew up") });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        supervise_optional(Some(&mut handle)),
+    )
+    .await
+    .expect("a panicked task must resolve the supervising arm");
+
+    let described = crate::signals::describe_task_result("summary consumer", result);
+    assert!(
+        described.starts_with("summary consumer task panicked"),
+        "got: {described}"
+    );
+}
+
+/// With no summariser configured there is no task, and the arm must
+/// never fire — otherwise every daemon without `[summary]` would shut
+/// itself down the moment the `select!` polled it.
+#[tokio::test]
+async fn a_task_that_was_never_spawned_never_resolves_the_arm() {
+    let mut absent: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        supervise_optional(absent.as_mut()),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "an unspawned optional task must leave its arm pending forever"
+    );
+}
