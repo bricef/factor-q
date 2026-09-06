@@ -47,7 +47,7 @@ func TestPlanCronEdgesAndCatchUp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fires := plan(tt.now, JobSet{Jobs: []Job{tt.job}, MaxFiresPerHour: 10}, tt.state)
+			fires, _ := plan(tt.now, JobSet{Jobs: []Job{tt.job}, MaxFiresPerHour: 10}, tt.state)
 			if len(fires) != 1 || !fires[0].ScheduledAt.Equal(tt.want) {
 				t.Fatalf("plan() = %#v, want one fire at %s", fires, tt.want)
 			}
@@ -81,7 +81,7 @@ func TestPlanDST(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fires := plan(tt.now, JobSet{Jobs: []Job{testJob(tt.spec, location.String(), "skip")}, MaxFiresPerHour: 10}, nil)
+			fires, _ := plan(tt.now, JobSet{Jobs: []Job{testJob(tt.spec, location.String(), "skip")}, MaxFiresPerHour: 10}, nil)
 			if len(fires) != 1 || !fires[0].ScheduledAt.Equal(tt.want) {
 				t.Fatalf("plan() = %#v, want one fire at %s", fires, tt.want)
 			}
@@ -91,7 +91,7 @@ func TestPlanDST(t *testing.T) {
 
 func TestPlanSupersedesOlderSlots(t *testing.T) {
 	now := time.Date(2026, time.July, 17, 12, 30, 0, 0, time.UTC)
-	fires := plan(now, JobSet{Jobs: []Job{testJob("*/5 * * * *", "UTC", "once")}, MaxFiresPerHour: 10}, map[string]FireState{
+	fires, _ := plan(now, JobSet{Jobs: []Job{testJob("*/5 * * * *", "UTC", "once")}, MaxFiresPerHour: 10}, map[string]FireState{
 		"job": {LastScheduled: now.Add(-30 * time.Minute)},
 	})
 	if len(fires) != 1 || !fires[0].ScheduledAt.Equal(time.Date(2026, time.July, 17, 12, 30, 0, 0, time.UTC)) {
@@ -107,14 +107,52 @@ func TestPlanValveIncludesCatchUps(t *testing.T) {
 	state := map[string]FireState{
 		"catch-up": {LastScheduled: now.Add(-3 * time.Hour)},
 	}
-	fires := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 1}, state)
+	fires, _ := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 1}, state)
 	if len(fires) != 1 || fires[0].Job != "catch-up" {
 		t.Fatalf("plan() = %#v; want catch-up to consume the only valve slot", fires)
 	}
 
 	state["recent"] = FireState{PublishedAt: now.Add(-10 * time.Minute)}
-	if fires := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 1}, state); len(fires) != 0 {
+	if fires, _ := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 1}, state); len(fires) != 0 {
 		t.Fatalf("plan() = %#v; want recent fire to close valve", fires)
+	}
+}
+
+// A closed valve must say when it reopens, or the scheduler has nothing
+// to wake up for: the oldest fire in the window leaves it exactly one
+// window after it was published.
+func TestPlanReportsWhenTheValveReopens(t *testing.T) {
+	now := time.Date(2026, time.July, 17, 12, 30, 0, 0, time.UTC)
+	oldest := now.Add(-50 * time.Minute)
+	state := map[string]FireState{
+		"job":   {PublishedAt: oldest},
+		"other": {PublishedAt: now.Add(-10 * time.Minute)},
+	}
+	jobs := []Job{testJob("0 * * * *", "UTC", "skip")}
+	jobs = append(jobs, testJob("0 * * * *", "UTC", "skip"))
+	jobs[1].Name = "other"
+
+	fires, reopens := plan(now, JobSet{Jobs: jobs, MaxFiresPerHour: 2}, state)
+	if len(fires) != 0 {
+		t.Fatalf("plan() = %#v; want the valve closed", fires)
+	}
+	want := oldest.Add(time.Hour)
+	if !reopens.Equal(want) {
+		t.Fatalf("valve reopens at %s, want %s (the oldest in-window fire leaving it)", reopens, want)
+	}
+	// And at that instant the valve is open again, with no reload.
+	if fires, reopens := plan(want, JobSet{Jobs: jobs, MaxFiresPerHour: 2}, state); len(fires) == 0 || !reopens.IsZero() {
+		t.Fatalf("plan() at the reopen instant = %#v, %s; want a fire and no further wait", fires, reopens)
+	}
+}
+
+// An open valve reports no re-plan instant: the caller has fires to wait
+// for, and a timer would only wake it for nothing.
+func TestPlanReportsNoValveWaitWhenOpen(t *testing.T) {
+	now := time.Date(2026, time.July, 17, 12, 30, 0, 0, time.UTC)
+	fires, reopens := plan(now, JobSet{Jobs: []Job{testJob("0 * * * *", "UTC", "skip")}, MaxFiresPerHour: 10}, nil)
+	if len(fires) != 1 || !reopens.IsZero() {
+		t.Fatalf("plan() = %#v, %s; want one fire and no valve wait", fires, reopens)
 	}
 }
 

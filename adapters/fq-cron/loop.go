@@ -31,12 +31,24 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 		}); err != nil {
 			return nil // withBrokerRetry only fails on a cancelled context
 		}
-		fires := plan(time.Now(), JobSet{Jobs: config.Jobs, MaxFiresPerHour: config.Limits.MaxFiresPerHour}, state)
+		fires, valveReopensAt := plan(time.Now(), JobSet{Jobs: config.Jobs, MaxFiresPerHour: config.Limits.MaxFiresPerHour}, state)
 		if len(fires) == 0 {
+			// Nothing to fire. If the valve is what is holding the plan
+			// back, wake when the window slides; otherwise only a reload
+			// can change the answer.
+			valve, stopValve := timerUntil(valveReopensAt)
+			if valve != nil {
+				logger.Printf("valve=closed reopens=%s: fires suppressed until the window slides", valveReopensAt.Format(time.RFC3339))
+			}
 			select {
 			case <-ctx.Done():
+				stopValve()
 				return nil
+			case <-valve:
+				logger.Printf("valve=open replanning")
+				continue
 			case event, ok := <-reloads:
+				stopValve()
 				if !ok {
 					reloads = nil
 					continue
@@ -116,6 +128,17 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 			logger.Printf("job=%s scheduled=%s published", fire.Job, fire.ScheduledAt.Format(time.RFC3339))
 		}
 	}
+}
+
+// timerUntil returns a channel that fires at at, and a stop func. A zero
+// `at` yields a nil channel — a select case that never fires — so the
+// caller can offer the case unconditionally.
+func timerUntil(at time.Time) (<-chan time.Time, func()) {
+	if at.IsZero() {
+		return nil, func() {}
+	}
+	timer := time.NewTimer(time.Until(at))
+	return timer.C, func() { timer.Stop() }
 }
 
 // withBrokerRetry runs op with capped exponential backoff for as long as
