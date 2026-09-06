@@ -11,7 +11,6 @@ import (
 	"runtime/debug"
 	"syscall"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -112,14 +111,17 @@ func run(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	nc, err := nats.Connect(cli.NATSURL)
+	nc, err := connectNATS(cli.NATSURL, log.Default())
 	if err != nil {
-		return fmt.Errorf("connect to NATS: %w", err)
+		return err
 	}
 	defer nc.Close()
 	// Liveness for the supervisor: the broker connection (health.go).
 	// Bound before the scheduler starts, so a taken port is a startup
-	// error rather than a process that shows unhealthy for ever.
+	// error rather than a process that shows unhealthy for ever — and
+	// before the broker wait below, so a scheduler waiting out an outage
+	// answers the probe (503, "nats: RECONNECTING") instead of refusing
+	// the connection.
 	if cli.HealthBind != "" {
 		ln, err := listenHealth(cli.HealthBind)
 		if err != nil {
@@ -131,6 +133,15 @@ func run(args []string) error {
 				log.Printf("health endpoint stopped: %v", err)
 			}
 		}()
+	}
+	// A broker that is not up yet is a wait, not a startup failure: the
+	// deploy launches every process at once and only the daemon waits for
+	// the broker's health endpoint.
+	if err := waitConnected(ctx, nc, log.Default()); err != nil {
+		if ctx.Err() != nil {
+			return nil // signalled while waiting: a clean stop
+		}
+		return err
 	}
 	publisher, err := NewNATSPublisher(nc)
 	if err != nil {

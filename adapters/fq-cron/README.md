@@ -29,6 +29,22 @@ The scheduler loop is not age-checked: between fires it sleeps for as
 long as the schedule says, and a loop that exits on error ends the
 process, which the supervisor sees directly. The bind must be loopback.
 
+## Broker outages
+
+A broker outage is waited out, never a reason to exit. The connection
+retries the initial dial (so starting before the broker is up is fine,
+which is what the deploy does) and reconnects without an attempt limit —
+nats.go's default gives up after sixty tries two seconds apart, which
+turned two minutes of downtime into a scheduler that never fired again.
+Every state-store call retries with capped backoff for the same reason:
+the state store *is* the broker, and its first read is the first thing
+each loop iteration does. Disconnects, reconnects and a closed connection
+each get a log line, and `/healthz` reports 503 throughout.
+
+Fires are not queued across the outage: the per-job `catch_up` policy
+([DESIGN.md D6](DESIGN.md#d6--missed-fires-per-job-skip-or-once-default-skip))
+decides what happens on the way back, exactly as it does after a restart.
+
 Example `fq-cron.toml`:
 
 ```toml

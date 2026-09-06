@@ -307,6 +307,8 @@ a reload event, call `plan`, execute the returned fires.
 | Failure | Behaviour |
 |---|---|
 | Broker unreachable at fire time | Backoff retries until acked or superseded by the job's next fire (D5); never a queue. |
+| Broker unreachable at startup | Startup waits for it (the connection retries the initial dial); `/healthz` reports 503 meanwhile. |
+| Broker unreachable for longer than the client's patience | There is no limit: the connection reconnects for ever and every state-store call retries with capped backoff, so the scheduler resumes by itself. nats.go's default — sixty attempts two seconds apart, then a closed connection — would have ended the process. |
 | Crash between publish ack and state write | Restart re-publishes; broker dedup via `Nats-Msg-Id` discards inside the window; documented at-least-once beyond it. |
 | Invalid config on reload | Logged with job + line; old config keeps running in full (D4). |
 | Config file deleted | Treated as an invalid reload: running jobs continue; recreating the file resumes normal reloads. |

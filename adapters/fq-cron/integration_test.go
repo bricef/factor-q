@@ -3,10 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,27 +11,13 @@ import (
 )
 
 func TestNATSIntegration(t *testing.T) {
-	server := os.Getenv("FQ_TEST_NATS_SERVER")
-	if server == "" {
-		server = "../../.tools/nats-server"
-	}
-	if _, err := os.Stat(server); err != nil {
-		t.Skipf("private nats-server unavailable (%s): %v", server, err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	server := natsServerBinary(t)
+	port := freePort(t)
 	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
-	cmd := exec.Command(server, "-js", "-p", fmt.Sprint(port), "-sd", filepath.Join(t.TempDir(), "nats"))
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	startBroker(t, server, port)
 
 	var nc *nats.Conn
+	var err error
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		nc, err = nats.Connect(url, nats.Timeout(100*time.Millisecond))
