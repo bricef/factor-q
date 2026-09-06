@@ -111,13 +111,24 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Why this agent cannot run, if a shared MCP server it declares is
-    /// unavailable — `None` when every one of them is up, which is
+    /// not answering — `None` when every one of them is ready, which is
     /// every invocation on a healthy daemon.
     ///
+    /// **`Starting` refuses too.** A dial takes up to the start-up plus
+    /// discovery deadlines — a minute at the defaults, and all of it
+    /// against a server that never answers — and the table says
+    /// `Starting` for the whole of it, on every retry round as well as
+    /// at boot. Treating that as "not refused" would let an agent
+    /// dispatched inside any of those windows run with its tools
+    /// missing, which is the silent degradation this check exists to
+    /// close; the reason says a dial is in progress, so an operator
+    /// reading the failure knows to try again rather than to
+    /// investigate.
+    ///
     /// Only *shared* servers can answer here. A grant-bearing server
-    /// runs per-invocation under the manager built above, so it has no
-    /// standing state to consult and a failure to start it stays what
-    /// it was: a warning against that one run.
+    /// runs per-invocation under its own manager, so it has no standing
+    /// state to consult and a failure to start it stays what it was: a
+    /// warning against that one run.
     pub(super) fn unavailable_mcp_servers(&self, agent: &Agent) -> Option<String> {
         let now_ms = self.config.clock.unix_now_ms();
         let refused: Vec<String> = agent
@@ -137,14 +148,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         None => "no further retries configured".to_string(),
                     }
                 )),
+                Some(crate::mcp::McpServerState::Starting) => Some(format!(
+                    "'{}' (being dialled now — a start-up or retry attempt is in progress, \
+                     so its tools are not registered yet)",
+                    decl.server
+                )),
                 _ => None,
             })
             .collect();
         (!refused.is_empty()).then(|| {
             format!(
-                "MCP server(s) this agent declares are unavailable, so the tools it needs are \
-                 not registered: {}. The daemon retries them in the background; `fq doctor` \
-                 reports their state.",
+                "MCP server(s) this agent declares are not answering, so the tools it needs \
+                 are not registered: {}. The daemon retries them in the background; \
+                 `fq doctor` reports their state.",
                 refused.join(", ")
             )
         })

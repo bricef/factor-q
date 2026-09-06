@@ -16,7 +16,8 @@
 //! | module | what lives there |
 //! | --- | --- |
 //! | `handler` | the rmcp client handler and the capabilities it advertises |
-//! | `manager` | the one owner of every running server, and its request surface |
+//! | `manager` | the one owner of every running server: register, refresh, shut down |
+//! | `requests` | what the host asks a server that is already connected |
 //! | `lifecycle` | starting / ready / unavailable, concurrent start, retry (#548) |
 //! | `discovery` | `tools/list` followed under a deadline and two caps (#548) |
 //! | `limits` | what a server is allowed to cost — the `[mcp]` table (#548) |
@@ -45,6 +46,7 @@ mod naming;
 mod notifications;
 mod progress;
 mod prompt_convert;
+mod requests;
 mod resources;
 mod roots;
 mod server_config;

@@ -15,10 +15,12 @@
 //!
 //! The bound is on the *stream*, not on the parser. A line past the cap
 //! fails the read, which ends the transport and takes the connection
-//! with it — the server is then marked unavailable like any other
-//! failure. Refusing the connection is the point: a host that skipped
-//! the oversized line and carried on would be resynchronising with a
-//! peer that had already broken the frame contract.
+//! with it — at boot that is a start that failed, and after boot the
+//! notification drain sees the server's stream end and hands it to the
+//! supervisor, so either way it is marked unavailable and dialled
+//! again. Refusing the connection is the point: a host that skipped the
+//! oversized line and carried on would be resynchronising with a peer
+//! that had already broken the frame contract.
 
 use std::io;
 use std::pin::Pin;

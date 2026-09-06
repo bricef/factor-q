@@ -9,17 +9,12 @@
 //! cancellable tool calls), and owns the graceful-shutdown ordering the
 //! stdio transport needs (#25).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use fq_tools::Tool;
 use fq_tools::builtin::ExecConfig;
-use rmcp::model::{
-    CallToolResult, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
-    LoggingLevel, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceTemplate, Root, ServerCapabilities, SetLevelRequestParams, SubscribeRequestParams,
-};
-use serde_json::Value;
+use rmcp::model::{Root, ServerCapabilities};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
@@ -27,7 +22,6 @@ use super::discovery;
 use super::lifecycle::{self, Connected, McpServerStates, SharedServerStart, StartContext};
 use super::limits::McpLimits;
 use super::progress::ProgressRegistry;
-use super::prompt_convert::prompt_seed_from_rmcp;
 use super::server_config::SharedServerKey;
 use super::{
     AdvertisedCapabilities, McpClient, McpError, McpResourceReader, McpServerConfig,
@@ -64,8 +58,12 @@ pub(super) struct RunningServer {
 /// — so the same server declared by multiple agents starts only once.
 pub struct McpClientManager {
     pub(super) servers: Vec<RunningServer>,
-    /// Transport identities already started, to deduplicate.
-    started: HashSet<SharedServerKey>,
+    /// Transport identities already started, to deduplicate, each
+    /// against the name it was started under. The name is what
+    /// [`forget`](Self::forget) removes by: a server whose connection
+    /// died has to leave the deduplication set, or the retry that would
+    /// bring it back is skipped as a duplicate of itself.
+    started: HashMap<SharedServerKey, String>,
     /// Root of the stdio servers' working directories,
     /// `<root>/<server>` (see [`stdio`](super::stdio)).
     server_root: std::path::PathBuf,
@@ -74,7 +72,9 @@ pub struct McpClientManager {
     /// routes inbound `notifications/progress` through it) and to every
     /// [`McpTool`] this manager builds (which registers and clears
     /// entries), so both ends of the correlation share one table.
-    progress: ProgressRegistry,
+    /// `pub(super)` for the request surface, which attaches every
+    /// outbound `tools/call` to it.
+    pub(super) progress: ProgressRegistry,
     /// What a start is allowed to cost and what discovery is allowed to
     /// return — `[mcp]` in `fqd.toml` (#548).
     limits: McpLimits,
@@ -104,7 +104,7 @@ impl McpClientManager {
     pub fn with_server_root(server_root: std::path::PathBuf) -> Self {
         Self {
             servers: Vec::new(),
-            started: HashSet::new(),
+            started: HashMap::new(),
             server_root,
             progress: ProgressRegistry::default(),
             limits: McpLimits::default(),
@@ -177,7 +177,7 @@ impl McpClientManager {
         config: McpServerConfig,
     ) -> Result<Vec<Arc<dyn Tool>>, McpError> {
         let key = SharedServerKey::from_config(&config)?;
-        if self.started.contains(&key) {
+        if self.started.contains_key(&key) {
             debug!(
                 server = %config.name,
                 target = %key.target(),
@@ -195,7 +195,7 @@ impl McpClientManager {
         match started {
             Ok((tools, _roots)) => {
                 self.states.ready(&name, tools.len() as u32);
-                self.started.insert(key);
+                self.started.insert(key, name.clone());
                 Ok(tools)
             }
             Err(err) => {
@@ -227,6 +227,31 @@ impl McpClientManager {
         &mut self,
         configs: Vec<McpServerConfig>,
     ) -> Vec<SharedServerStart> {
+        self.dial_round(configs, 1).await
+    }
+
+    /// Dial a set of servers that failed earlier, concurrently, as
+    /// attempt number `attempt` — the boot attempt counting as 1.
+    ///
+    /// The count is the caller's because only the retry loop knows it,
+    /// and every health surface quotes it: a table that said "1
+    /// attempt(s)" for ever would tell an operator the daemon had
+    /// stopped trying when it had not.
+    pub async fn retry_shared_servers(
+        &mut self,
+        configs: Vec<McpServerConfig>,
+        attempt: u32,
+    ) -> Vec<SharedServerStart> {
+        self.dial_round(configs, attempt).await
+    }
+
+    /// One concurrent dial of `configs`, recording each outcome against
+    /// `attempt`.
+    async fn dial_round(
+        &mut self,
+        configs: Vec<McpServerConfig>,
+        attempt: u32,
+    ) -> Vec<SharedServerStart> {
         let mut outcomes = Vec::with_capacity(configs.len());
         let mut unique = Vec::with_capacity(configs.len());
         for config in configs {
@@ -236,7 +261,7 @@ impl McpClientManager {
                     server,
                     outcome: Err(err),
                 }),
-                Ok(key) if !self.started.insert(key.clone()) => {
+                Ok(key) if self.started.insert(key.clone(), server.clone()).is_some() => {
                     debug!(server = %server, "MCP server already started, skipping duplicate");
                     outcomes.push(SharedServerStart {
                         server,
@@ -284,7 +309,7 @@ impl McpClientManager {
                         self.started.remove(&key);
                     }
                     self.states
-                        .unavailable(&config.name, err.to_string(), 1, None);
+                        .unavailable(&config.name, err.to_string(), attempt, None);
                     outcomes.push(SharedServerStart {
                         server: config.name,
                         outcome: Err(err),
@@ -293,6 +318,41 @@ impl McpClientManager {
             }
         }
         outcomes
+    }
+
+    /// Drop a server this manager can no longer talk to: its
+    /// connection ended, so its client, its place in the deduplication
+    /// set and its `ready` state all have to go.
+    ///
+    /// Without this a transport that dies *after* boot — a stdio child
+    /// that exited, a line past the cap, a remote endpoint that closed
+    /// — left the table saying `Ready`, so every health surface stayed
+    /// green while every call through it failed and nothing retried
+    /// it. Returns whether this manager was holding it.
+    ///
+    /// The tools it contributed stay in the registry until the next
+    /// rebuild. That is deliberate rather than an omission: an agent
+    /// declaring this server is refused at dispatch from here on, so
+    /// nothing reaches those tools, and a rebuild costs a discovery
+    /// round-trip against every *other* server for no gain.
+    pub fn forget(&mut self, server: &str) -> bool {
+        let held = self.servers.iter().any(|s| s.name == server);
+        if !held {
+            return false;
+        }
+        self.servers.retain(|s| s.name != server);
+        self.started.retain(|_, name| name != server);
+        self.clients
+            .write()
+            .expect("MCP client view poisoned")
+            .retain(|(name, _)| name != server);
+        self.states.unavailable(
+            server,
+            "the connection to this server ended".to_string(),
+            1,
+            None,
+        );
+        true
     }
 
     /// Take ownership of a connected server: record its client in the
@@ -401,123 +461,6 @@ impl McpClientManager {
             .map(|info| info.capabilities.clone())
     }
 
-    /// Find the client handle for a running server by name.
-    fn client_for(&self, name: &str) -> Result<&Arc<McpClient>, McpError> {
-        self.servers
-            .iter()
-            .find(|server| server.name == name)
-            .map(|server| &server.client)
-            .ok_or_else(|| McpError::UnknownServer {
-                name: name.to_string(),
-            })
-    }
-
-    /// List all resources a running server exposes (auto-paginated).
-    pub async fn list_resources(&self, server: &str) -> Result<Vec<Resource>, McpError> {
-        self.client_for(server)?
-            .list_all_resources()
-            .await
-            .map_err(|err| McpError::ResourceOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
-    /// Read a single resource from a running server by URI.
-    pub async fn read_resource(
-        &self,
-        server: &str,
-        uri: &str,
-    ) -> Result<ReadResourceResult, McpError> {
-        self.client_for(server)?
-            .read_resource(ReadResourceRequestParams::new(uri))
-            .await
-            .map_err(|err| McpError::ResourceOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
-    /// List the resource templates a running server exposes (auto-paginated).
-    pub async fn list_resource_templates(
-        &self,
-        server: &str,
-    ) -> Result<Vec<ResourceTemplate>, McpError> {
-        self.client_for(server)?
-            .list_all_resource_templates()
-            .await
-            .map_err(|err| McpError::ResourceOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
-    /// List the prompts a running server exposes (auto-paginated).
-    /// Returns rmcp's discovery type, mirroring [`Self::list_resources`];
-    /// the owned, lossless representation is reserved for the fetched
-    /// prompt itself (see [`Self::get_prompt`]).
-    pub async fn list_prompts(&self, server: &str) -> Result<Vec<Prompt>, McpError> {
-        self.client_for(server)?
-            .list_all_prompts()
-            .await
-            .map_err(|err| McpError::PromptOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
-    /// Fetch a prompt by name with bound arguments and materialise it
-    /// into an owned, reusable [`PromptSeed`](crate::prompt::PromptSeed)
-    /// (Step 4's seed value: message sequence + bound args + provenance).
-    /// This is the rmcp boundary — the seed itself is provider-neutral.
-    pub async fn get_prompt(
-        &self,
-        server: &str,
-        name: &str,
-        arguments: BTreeMap<String, String>,
-    ) -> Result<crate::prompt::PromptSeed, McpError> {
-        let mut params = GetPromptRequestParams::new(name);
-        if !arguments.is_empty() {
-            let obj: JsonObject = arguments
-                .iter()
-                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                .collect();
-            params = params.with_arguments(obj);
-        }
-        let result = self
-            .client_for(server)?
-            .get_prompt(params)
-            .await
-            .map_err(|err| McpError::PromptOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })?;
-        Ok(prompt_seed_from_rmcp(server, name, arguments, result))
-    }
-
-    /// Request argument completion for a prompt argument
-    /// (`completion/complete`). Per ADR-0017 prompts are
-    /// model-controlled, so this is the agent's tool, not a human menu.
-    /// `context` carries previously-resolved arguments for
-    /// dependent completions (e.g. the everything server's `name`
-    /// argument depends on `department`).
-    pub async fn complete_prompt(
-        &self,
-        server: &str,
-        prompt: &str,
-        argument: &str,
-        value: &str,
-        context: Option<CompletionContext>,
-    ) -> Result<CompletionInfo, McpError> {
-        self.client_for(server)?
-            .complete_prompt_argument(prompt, argument, value, context)
-            .await
-            .map_err(|err| McpError::PromptOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
     /// A cloneable read-only handle for reading resources from the
     /// currently-running servers — used to inject `static_resources`
     /// at invocation start without sharing the manager's lifecycle.
@@ -578,88 +521,12 @@ impl McpClientManager {
         Some(std::mem::replace(&mut *guard, closed_rx))
     }
 
-    /// Subscribe to update notifications for a resource on a server.
-    /// Updates arrive via [`Self::recv_notification`].
-    pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
-        self.client_for(server)?
-            .subscribe(SubscribeRequestParams::new(uri))
-            .await
-            .map(|_| ())
-            .map_err(|err| McpError::ResourceOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
-    }
-
     /// Await the next out-of-band notification a server's handler
     /// forwarded (resource change, list-changed, log, progress).
     /// `None` if the server is unknown or its channel closed.
     pub async fn recv_notification(&self, server: &str) -> Option<ServerNotification> {
         let server = self.servers.iter().find(|s| s.name == server)?;
         server.notifications.lock().await.recv().await
-    }
-
-    /// Call a tool, racing it against a `cancel` future. If the tool
-    /// completes first, return its result as `Some`. If `cancel` fires
-    /// first, send `notifications/cancelled` to the server (asking it
-    /// to abort) and return `None`, abandoning the in-flight request.
-    ///
-    /// This is the host's own cancellation — shutdown, budget, a
-    /// superseded step. The agent's tool calls take the same path
-    /// through [`McpTool`](super::McpTool), which supplies its deadline
-    /// as the `cancel` future; both go through the same private `call`
-    /// module, so
-    /// there is one implementation of what cancelling a call means.
-    pub async fn call_tool_cancellable<F>(
-        &self,
-        server: &str,
-        tool_name: &str,
-        arguments: JsonObject,
-        cancel: F,
-    ) -> Result<Option<CallToolResult>, McpError>
-    where
-        F: std::future::Future<Output = ()>,
-    {
-        let canonical_prefix = format!("{server}__");
-        let remote_tool_name = tool_name
-            .strip_prefix(&canonical_prefix)
-            .unwrap_or(tool_name);
-        super::call::call_tool_cancellable(
-            super::call::OutboundCall {
-                client: self.client_for(server)?,
-                server,
-                remote_tool_name,
-                tool_name,
-                arguments,
-                progress: &self.progress,
-                // The host's own cancellation is not an agent tool
-                // call, so there is no invocation to attribute
-                // progress to.
-                call: None,
-            },
-            cancel,
-        )
-        .await
-    }
-
-    /// Set the minimum logging level the server should send
-    /// (`logging/setLevel`); only messages at or above `level` reach the
-    /// notification sink thereafter. MCP deprecated the request in
-    /// SEP-2577 (rmcp 1.8 flags it); allowed until servers drop it.
-    #[allow(deprecated)]
-    pub async fn set_logging_level(
-        &self,
-        server: &str,
-        level: LoggingLevel,
-    ) -> Result<(), McpError> {
-        self.client_for(server)?
-            .set_level(SetLevelRequestParams::new(level))
-            .await
-            .map(|_| ())
-            .map_err(|err| McpError::LoggingOp {
-                server: server.to_string(),
-                reason: err.to_string(),
-            })
     }
 
     /// How long [`shutdown`](Self::shutdown) waits for a stdio child to
