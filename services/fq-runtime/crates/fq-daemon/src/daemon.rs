@@ -410,6 +410,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
                     .enforce_pricing(true)
                     .workspace(workspace.clone())
                     .mcp_server_root(config.state.directory.join("mcp"))
+                    .tool_limits(config.tools.call_limits())
                     .build(),
             ),
             fq_runtime::Harness::new(),

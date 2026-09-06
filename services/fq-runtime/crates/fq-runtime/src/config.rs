@@ -21,9 +21,11 @@ use serde::Deserialize;
 mod edge;
 mod error;
 mod nats;
+mod tools;
 pub use edge::EdgeConfig;
 pub use error::ConfigError;
 pub use nats::NatsConfig;
+pub use tools::{ExecToolConfig, ToolsConfig};
 
 /// Runtime configuration for the factor-q daemon.
 #[derive(Debug, Clone, Deserialize)]
@@ -62,65 +64,6 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
-}
-
-/// Built-in tool configuration — `[tools]` in `fqd.toml`. Today only the
-/// `exec` tool exposes knobs; future built-ins add their own subsections
-/// here.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ToolsConfig {
-    #[serde(default)]
-    pub exec: ExecToolConfig,
-}
-
-/// Timeouts for the built-in `exec` tool — `[tools.exec]` in `fqd.toml`.
-///
-/// The `fq-tools` crate keeps its own conservative defaults (30s default
-/// / 300s max) so the primitive is safe in isolation; the runtime raises
-/// them here (120s / 600s) because a fleet agent running a full `just ci`
-/// legitimately needs headroom the crate-level ceiling would clamp away.
-/// Tunable parameters are configuration, not code (Design Principle 8).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecToolConfig {
-    /// Timeout applied when a caller does not request one, in seconds.
-    #[serde(default = "default_exec_default_timeout_secs")]
-    pub default_timeout_secs: u64,
-    /// Hard ceiling on any single `exec` call, in seconds. A
-    /// caller-supplied `timeout_secs` above this is clamped down, not
-    /// rejected, to avoid trapping an agent in a retry loop.
-    #[serde(default = "default_exec_max_timeout_secs")]
-    pub max_timeout_secs: u64,
-}
-
-fn default_exec_default_timeout_secs() -> u64 {
-    120
-}
-
-fn default_exec_max_timeout_secs() -> u64 {
-    600
-}
-
-impl Default for ExecToolConfig {
-    fn default() -> Self {
-        Self {
-            default_timeout_secs: default_exec_default_timeout_secs(),
-            max_timeout_secs: default_exec_max_timeout_secs(),
-        }
-    }
-}
-
-impl ExecToolConfig {
-    /// Convert to the `fq-tools` [`ExecConfig`](fq_tools::builtin::ExecConfig),
-    /// mapping the two configured timeouts and preserving the crate's
-    /// defaults for the fields this section does not expose
-    /// (`max_output_bytes`, `default_path`).
-    pub fn to_exec_config(&self) -> fq_tools::builtin::ExecConfig {
-        fq_tools::builtin::ExecConfig {
-            default_timeout: Duration::from_secs(self.default_timeout_secs),
-            max_timeout: Duration::from_secs(self.max_timeout_secs),
-            ..fq_tools::builtin::ExecConfig::default()
-        }
-    }
 }
 
 /// `[state]` — durable runtime state: where it lives, and how long
@@ -680,7 +623,8 @@ impl Config {
     /// environment overrides are merged, since `FQ_NATS_URL` can carry
     /// the same mistake the file can.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.nats.validate()
+        self.nats.validate()?;
+        self.tools.validate()
     }
 
     /// Load configuration from a file, returning an error if the file is
@@ -1153,6 +1097,79 @@ default_timeout_secs = 45
         let config = Config::from_toml_str(toml).unwrap();
         assert_eq!(config.tools.exec.default_timeout_secs, 45);
         assert_eq!(config.tools.exec.max_timeout_secs, 600);
+    }
+
+    #[test]
+    fn tool_call_limits_default_when_absent() {
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.tools.default_timeout_secs, 120);
+        assert_eq!(config.tools.max_timeout_secs, 900);
+        assert_eq!(config.tools.max_consecutive_timeouts, 3);
+        assert_eq!(
+            config.tools.call_limits(),
+            crate::tools::ToolCallLimits::default()
+        );
+        // The shipped defaults must satisfy their own rule, or every
+        // daemon with no `[tools]` section would refuse to start.
+        assert!(config.tools.max_timeout_secs >= config.tools.exec.max_timeout_secs);
+    }
+
+    #[test]
+    fn tool_call_limits_parse_from_toml() {
+        let toml = r#"
+[tools]
+default_timeout_secs = 30
+max_timeout_secs = 300
+max_consecutive_timeouts = 5
+
+[tools.exec]
+max_timeout_secs = 300
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let limits = config.tools.call_limits();
+        assert_eq!(limits.default_timeout, Duration::from_secs(30));
+        assert_eq!(limits.max_timeout, Duration::from_secs(300));
+        assert_eq!(limits.max_consecutive_timeouts, 5);
+    }
+
+    /// The dogfood host's shape: `[tools.exec] max_timeout_secs = 900`
+    /// under a lower general ceiling. Refused at load, naming both keys
+    /// and both values (#547).
+    #[test]
+    fn tool_ceiling_below_exec_ceiling_is_refused() {
+        let toml = r#"
+[tools]
+max_timeout_secs = 60
+
+[tools.exec]
+max_timeout_secs = 900
+"#;
+        let err = Config::from_toml_str(toml).unwrap_err();
+        let msg = err.to_string();
+        for fragment in [
+            "[tools] max_timeout_secs",
+            "[tools.exec] max_timeout_secs",
+            "60",
+            "900",
+        ] {
+            assert!(
+                msg.contains(fragment),
+                "message must name {fragment}: {msg}"
+            );
+        }
+    }
+
+    /// Equal ceilings are fine — the rule is "not below".
+    #[test]
+    fn tool_ceiling_equal_to_exec_ceiling_is_accepted() {
+        let toml = r#"
+[tools]
+max_timeout_secs = 900
+
+[tools.exec]
+max_timeout_secs = 900
+"#;
+        assert!(Config::from_toml_str(toml).is_ok());
     }
 
     #[test]

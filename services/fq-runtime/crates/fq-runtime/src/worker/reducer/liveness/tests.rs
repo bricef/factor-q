@@ -13,13 +13,14 @@ fn agent(name: &str) -> AgentId {
 fn a_drive_is_live_and_named_for_exactly_its_own_lifetime() {
     let live = LiveRegistry::default();
     let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
     let id = Uuid::now_v7();
 
     assert_eq!(live.agent_for(&id), None);
     assert!(!live.is_active(&id));
 
     {
-        let _drive = live.enter(id, agent("researcher"), &rounds);
+        let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
         assert!(live.is_active(&id));
         assert_eq!(
             live.agent_for(&id).map(AgentId::into_inner).as_deref(),
@@ -42,6 +43,7 @@ fn a_drive_is_live_and_named_for_exactly_its_own_lifetime() {
 fn a_halt_needs_a_live_drive_and_dies_with_it() {
     let live = LiveRegistry::default();
     let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
     let id = Uuid::now_v7();
 
     // Nothing to halt: refused, and nothing recorded.
@@ -49,7 +51,7 @@ fn a_halt_needs_a_live_drive_and_dies_with_it() {
     assert!(!live.take_halt(id));
 
     {
-        let _drive = live.enter(id, agent("researcher"), &rounds);
+        let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
         assert!(live.request_halt(id));
         // Consumed once.
         assert!(live.take_halt(id));
@@ -64,6 +66,6 @@ fn a_halt_needs_a_live_drive_and_dies_with_it() {
     );
 
     // A fresh drive of the same id starts clean.
-    let _drive = live.enter(id, agent("researcher"), &rounds);
+    let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
     assert!(!live.take_halt(id));
 }

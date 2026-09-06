@@ -95,6 +95,7 @@ impl LiveRegistry {
         invocation_id: Uuid,
         agent_id: AgentId,
         rounds: &'a super::rounds::RoundLedger,
+        timeouts: &'a super::timeouts::TimeoutLedger,
     ) -> ActiveInvocation<'a> {
         self.active
             .lock()
@@ -103,6 +104,7 @@ impl LiveRegistry {
         ActiveInvocation {
             live: self,
             rounds,
+            timeouts,
             id: invocation_id,
         }
     }
@@ -122,6 +124,9 @@ impl LiveRegistry {
 pub(crate) struct ActiveInvocation<'a> {
     live: &'a LiveRegistry,
     rounds: &'a super::rounds::RoundLedger,
+    /// The consecutive-timeout run (#547) — invocation-scoped, so it
+    /// is forgotten on the same edge as the Round counter.
+    timeouts: &'a super::timeouts::TimeoutLedger,
     id: Uuid,
 }
 
@@ -138,6 +143,7 @@ impl Drop for ActiveInvocation<'_> {
             .expect("halt set poisoned")
             .remove(&self.id);
         self.rounds.forget(self.id);
+        self.timeouts.forget(self.id);
     }
 }
 

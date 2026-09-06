@@ -48,4 +48,17 @@ pub enum ConfigError {
          export the token in an environment variable and name that variable in [nats] token_env"
     )]
     NatsUrlCarriesCredential,
+
+    /// The general tool ceiling sits below the `exec` ceiling, so it
+    /// would silently override the one per-tool timeout that already
+    /// worked. Both keys and both values are named: the fix is to raise
+    /// one or lower the other, and the operator has to know which is
+    /// which.
+    #[error(
+        "[tools] max_timeout_secs = {tools_max} is below [tools.exec] max_timeout_secs = \
+         {exec_max}: the general ceiling bounds every tool call, so this would cap exec at \
+         {tools_max}s while its own section still said {exec_max}s — raise [tools] \
+         max_timeout_secs to at least {exec_max}, or lower [tools.exec] max_timeout_secs"
+    )]
+    ToolCeilingBelowExec { tools_max: u64, exec_max: u64 },
 }
