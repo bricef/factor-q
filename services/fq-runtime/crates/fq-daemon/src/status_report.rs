@@ -65,6 +65,7 @@ pub(crate) fn register_status_report(
     let drain_deadline_ms_value = facts.drain_deadline_ms;
     let stuck_after_ms_value = facts.stuck_after_ms;
     let summary_enabled = facts.summary_enabled;
+    let mcp_servers = facts.mcp_servers.clone();
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
         "Machinery state: the daemon's build, its stream health, its live registry, \
@@ -88,7 +89,10 @@ pub(crate) fn register_status_report(
          two calls a second apart legitimately differ. \
          This report cannot describe a daemon that is not running, and a caller that \
          cannot reach one has learned the single most important thing about the \
-         machinery rather than failed to learn anything: absence is the finding.",
+         machinery rather than failed to learn anything: absence is the finding. \
+         The MCP lines are every shared server a loaded agent declares and whether it is \
+         up; as with stale workers, whether that amounts to a problem is \
+         `control.doctor`'s call.",
     );
     registry
         .report::<StatusParams, StatusReport, _, _>(decl, move |_params: StatusParams| {
@@ -97,6 +101,7 @@ pub(crate) fn register_status_report(
             let agents = agents.clone();
             let db_paths = db_paths.clone();
             let legacy_events_db = legacy_events_db.clone();
+            let mcp_servers = mcp_servers.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -137,6 +142,7 @@ pub(crate) fn register_status_report(
                     registry: StatusRegistry::from(snapshot.as_ref()),
                     projection_rows,
                     recovery,
+                    mcp_servers: fq_runtime::health::mcp_server_health(&mcp_servers),
                 })
             }
         })

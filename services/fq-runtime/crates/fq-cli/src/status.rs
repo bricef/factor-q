@@ -164,6 +164,7 @@ fn render_status_human(doc: &StatusDocument) -> String {
         out.push_str(&render_stream_health_human(stream));
     }
     out.push_str(&render_stores_human(&report.stores));
+    out.push_str(&render_mcp_servers_human(&report.mcp_servers));
 
     // Recovery state: points the operator at the commands they'd need
     // if anything is off; renders "All clear." otherwise.
@@ -172,6 +173,32 @@ fn render_status_human(doc: &StatusDocument) -> String {
         report.recovery.ambiguous,
         report.recovery.stale_workers,
     ));
+    out
+}
+
+/// Pure: the shared MCP servers, one line each. Absent entirely when
+/// no agent declares one — a daemon that runs none has nothing to say,
+/// and this report does not judge: whether an unavailable server is a
+/// problem is `fq doctor`'s call, and it says so with the next retry
+/// time. Nothing is printed on the no-daemon branch either, for the
+/// same reason nothing else is: it is the daemon's answer to give.
+fn render_mcp_servers_human(servers: &[fq_ops::health::McpServerHealth]) -> String {
+    use fq_ops::health::McpServerHealth;
+
+    if servers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nMCP servers\n");
+    for server in servers {
+        let line = match server {
+            McpServerHealth::Ready { name, tools } => format!("{name}: ready ({tools} tools)"),
+            McpServerHealth::Starting { name } => format!("{name}: starting"),
+            McpServerHealth::Unavailable { name, reason, .. } => {
+                format!("{name}: ✗ unavailable — {reason}")
+            }
+        };
+        out.push_str(&format!("  {line}\n"));
+    }
     out
 }
 

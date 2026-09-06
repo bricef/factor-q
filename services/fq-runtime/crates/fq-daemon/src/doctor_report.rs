@@ -62,14 +62,16 @@ pub(crate) fn register_doctor_report(
     // report is a JetStream probe, and only this process holds one
     // (#549).
     bus: fq_runtime::EventBus,
-    // The threshold this daemon derived from its own call deadlines
-    // (#37). Passed in rather than read here, because the sweep that
-    // emits `invocation.stuck` is handed the same number: one
-    // definition of stuck, from one place, or the report and the event
-    // disagree.
-    stuck_after_ms: i64,
-    summary_enabled: bool,
+    // What this daemon knows about itself: the stuck threshold it
+    // derived from its own call deadlines (#37, shared with the sweep
+    // that emits `invocation.stuck` so the report and the event cannot
+    // disagree), whether a summariser durable is expected, and the live
+    // state of its shared MCP servers.
+    facts: &crate::operator_surface::DaemonFacts,
 ) -> anyhow::Result<()> {
+    let stuck_after_ms = facts.stuck_after_ms;
+    let summary_enabled = facts.summary_enabled;
+    let mcp_servers = facts.mcp_servers.clone();
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -99,6 +101,7 @@ pub(crate) fn register_doctor_report(
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
             let views = views.clone();
             let bus = bus.clone();
+            let mcp_servers = mcp_servers.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -145,6 +148,7 @@ pub(crate) fn register_doctor_report(
                     ambiguous,
                     &failures,
                     consumers,
+                    fq_runtime::health::mcp_server_health(&mcp_servers),
                 ))
             }
         })

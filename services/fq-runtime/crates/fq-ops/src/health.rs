@@ -126,3 +126,62 @@ impl ConsumerHealth {
         }
     }
 }
+
+/// Health of one shared MCP server, as every operator surface reads it
+/// (#548). Externally tagged, for the same encoding reason as
+/// [`StreamHealth`].
+///
+/// Only *shared* servers appear. A grant-bearing server runs
+/// per-invocation (ADR-0018), so "unavailable" about one would be a
+/// verdict on a single run reported as a standing fact about the
+/// daemon.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerHealth {
+    /// The handshake is in flight. Transient, and visible only if a
+    /// report lands during boot or during a retry attempt.
+    Starting { name: String },
+    /// Connected, with its tools registered.
+    Ready {
+        name: String,
+        /// How many tools it advertised, the host-synthesized resource
+        /// tools included.
+        tools: u32,
+    },
+    /// The server did not start, or its discovery was refused. Its
+    /// tools are absent and any agent declaring it is refused at
+    /// dispatch with this same reason.
+    Unavailable {
+        name: String,
+        /// Why, verbatim — a deadline, a cap, a spawn failure. The
+        /// message names the `[mcp]` key behind any bound it hit, so
+        /// the line says what to change.
+        reason: String,
+        /// How many times it has been dialled, the boot attempt
+        /// included.
+        attempts: u32,
+        /// When the next retry is due, epoch milliseconds. `None` when
+        /// `[mcp] retry_initial_secs` is 0, which is the one
+        /// configuration where unavailable means until restart.
+        next_retry_at_ms: Option<i64>,
+    },
+}
+
+impl McpServerHealth {
+    /// The server's declared name, whichever state it is in.
+    pub fn name(&self) -> &str {
+        match self {
+            McpServerHealth::Starting { name }
+            | McpServerHealth::Ready { name, .. }
+            | McpServerHealth::Unavailable { name, .. } => name,
+        }
+    }
+
+    /// True when this server is something to act on. `Starting` is not:
+    /// it is bounded by the start-up deadline and resolves either way
+    /// within it, so reporting it as a fault would make every boot look
+    /// unhealthy for a moment.
+    pub fn is_fault(&self) -> bool {
+        matches!(self, McpServerHealth::Unavailable { .. })
+    }
+}

@@ -17,7 +17,7 @@
 //! has stopped making progress is reported as such — by name, so an
 //! operator reads which one rather than that something is wrong.
 
-pub use fq_ops::health::{ConsumerHealth, StreamHealth};
+pub use fq_ops::health::{ConsumerHealth, McpServerHealth, StreamHealth};
 
 use crate::bus::{
     ADVISORY_STREAM_NAME, ConsumerRedeliveryPolicy, STREAM_NAME, TRIGGER_STREAM_NAME,
@@ -241,3 +241,30 @@ pub async fn probe_core_streams(
 
 #[cfg(test)]
 mod tests;
+
+/// The shared MCP servers as a health surface reports them (#548).
+///
+/// The translation from the manager's live table to the declared wire
+/// shape lives here, beside the JetStream probe, for the same reason:
+/// `fq-ops` declares what health *is*, and this crate is where the
+/// daemon's own state gets read into it.
+pub fn mcp_server_health(states: &crate::mcp::McpServerStates) -> Vec<McpServerHealth> {
+    states
+        .snapshot()
+        .into_iter()
+        .map(|(name, state)| match state {
+            crate::mcp::McpServerState::Starting => McpServerHealth::Starting { name },
+            crate::mcp::McpServerState::Ready { tools } => McpServerHealth::Ready { name, tools },
+            crate::mcp::McpServerState::Unavailable {
+                reason,
+                attempts,
+                next_retry_at_ms,
+            } => McpServerHealth::Unavailable {
+                name,
+                reason,
+                attempts,
+                next_retry_at_ms,
+            },
+        })
+        .collect()
+}

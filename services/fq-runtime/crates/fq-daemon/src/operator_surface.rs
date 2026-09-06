@@ -55,6 +55,13 @@ pub struct DaemonFacts {
     /// summariser has no such consumer, and reporting it missing would
     /// be a permanent red nobody can clear (#549).
     pub summary_enabled: bool,
+    /// The live `server → starting | ready | unavailable` table for the
+    /// shared MCP servers (#548). Both health reports name the
+    /// unavailable ones, because an unavailable server is a standing
+    /// degradation nothing else reports: boot carried on without it,
+    /// and the only other place it surfaces is the terminal refusal of
+    /// an agent that needed it.
+    pub mcp_servers: fq_runtime::McpServerStates,
 }
 
 /// What the operator surface's handlers reach for beyond [`Views`]:

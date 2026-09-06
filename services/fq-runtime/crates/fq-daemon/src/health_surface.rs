@@ -36,12 +36,6 @@ pub(crate) fn register_health_reports(
 ) -> anyhow::Result<()> {
     let (doctor_views, status_views) = views;
     let (doctor_bus, status_bus) = buses;
-    crate::doctor_report::register_doctor_report(
-        registry,
-        doctor_views,
-        doctor_bus,
-        facts.stuck_after_ms,
-        facts.summary_enabled,
-    )?;
+    crate::doctor_report::register_doctor_report(registry, doctor_views, doctor_bus, facts)?;
     crate::status_report::register_status_report(registry, status_views, status_bus, agents, facts)
 }

@@ -50,6 +50,7 @@ fn all_clear_renders_a_verdict_and_still_shows_dead_letters() {
         0,
         &[],
         Vec::new(),
+        Vec::new(),
     );
     let out = render_doctor_report_human(&report);
     assert!(out.contains("All clear."), "got: {out}");
@@ -71,6 +72,7 @@ fn stale_workers_render_with_their_remediation() {
         0,
         &[],
         Vec::new(),
+        Vec::new(),
     );
 
     let out = render_doctor_report_human(&report);
@@ -87,6 +89,7 @@ fn stuck_in_flight_renders_with_its_remediation() {
         THRESHOLD_MS,
         0,
         &[],
+        Vec::new(),
         Vec::new(),
     );
 
@@ -111,6 +114,7 @@ fn the_stuck_line_names_the_threshold_the_daemon_reported() {
         THRESHOLD_MS,
         0,
         &[],
+        Vec::new(),
         Vec::new(),
     );
     let out = render_doctor_report_human(&report);
@@ -155,7 +159,7 @@ fn working_in_flight_shown_but_offered_no_remedy() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new());
+    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new(), Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(
@@ -174,6 +178,7 @@ fn dead_lettered_triggers_render_with_both_next_steps() {
         THRESHOLD_MS,
         0,
         &failures,
+        Vec::new(),
         Vec::new(),
     );
 
@@ -195,6 +200,7 @@ fn ambiguous_renders_with_its_remediation() {
         3,
         &[],
         Vec::new(),
+        Vec::new(),
     );
 
     let out = render_doctor_report_human(&report);
@@ -214,6 +220,7 @@ fn permanent_failures_render_per_kind() {
         THRESHOLD_MS,
         0,
         &failures,
+        Vec::new(),
         Vec::new(),
     );
 
@@ -237,6 +244,7 @@ fn a_non_dead_letter_failure_still_renders_dead_letters_none() {
         THRESHOLD_MS,
         0,
         &[failure("runtimeerror", 7)],
+        Vec::new(),
         Vec::new(),
     );
     let out = render_doctor_report_human(&report);
@@ -282,6 +290,7 @@ fn every_consumer_is_named_in_the_report() {
         0,
         &[],
         consumers,
+        Vec::new(),
     );
     let out = render_doctor_report_human(&report);
 
@@ -317,6 +326,7 @@ fn a_stuck_consumer_is_named_counted_and_makes_the_report_an_issue() {
             active("fq-projector", false, 0),
             active("fq-coordination", true, 37),
         ],
+        Vec::new(),
     );
     assert!(
         report.has_issues(),
@@ -354,6 +364,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         0,
         &[],
         vec![behind],
+        Vec::new(),
     );
     assert!(!report.has_issues(), "catching up is not a fault");
     let out = render_doctor_report_human(&report);
