@@ -200,6 +200,14 @@ pub struct RunnerConfig {
     /// Defaults to a private one, which is right for a runner with no
     /// daemon around it (tests, the sim).
     pub(super) mcp_progress: crate::mcp::ProgressRegistry,
+    /// The daemon's `server → starting | ready | unavailable` table
+    /// (#548), consulted before an invocation starts: an agent that
+    /// declares a shared server which is down is refused with a
+    /// terminal event naming it, rather than running without the tools
+    /// it asked for. Defaults to an empty table, where every declared
+    /// server is unknown and so nothing is refused — right for a runner
+    /// with no daemon around it (tests, the sim).
+    pub(super) mcp_states: crate::mcp::McpServerStates,
 }
 
 impl RunnerConfig {
@@ -236,6 +244,7 @@ pub struct RunnerConfigBuilder {
     mcp_server_root: Option<PathBuf>,
     tool_limits: Option<crate::tools::ToolCallLimits>,
     mcp_progress: Option<crate::mcp::ProgressRegistry>,
+    mcp_states: Option<crate::mcp::McpServerStates>,
 }
 
 impl RunnerConfigBuilder {
@@ -330,6 +339,14 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// Share the daemon's MCP server-state table (#548) so an
+    /// invocation is refused when a shared server it declares is
+    /// unavailable. Optional; the default empty table refuses nothing.
+    pub fn mcp_states(mut self, states: crate::mcp::McpServerStates) -> Self {
+        self.mcp_states = Some(states);
+        self
+    }
+
     /// Finalise the config. Panics if any required field was not set
     /// (`clock` is optional and defaults to [`SystemClock`]).
     pub fn build(self) -> RunnerConfig {
@@ -357,6 +374,7 @@ impl RunnerConfigBuilder {
                 .unwrap_or_else(crate::mcp::default_server_root),
             tool_limits: self.tool_limits.unwrap_or_default(),
             mcp_progress: self.mcp_progress.unwrap_or_default(),
+            mcp_states: self.mcp_states.unwrap_or_default(),
         }
     }
 }

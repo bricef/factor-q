@@ -21,12 +21,14 @@ use serde::Deserialize;
 mod bus;
 mod edge;
 mod error;
+mod mcp;
 mod nats;
 mod stuck;
 mod tools;
 pub use bus::BusConfig;
 pub use edge::EdgeConfig;
 pub use error::ConfigError;
+pub use mcp::McpConfig;
 pub use nats::NatsConfig;
 pub use tools::{ExecToolConfig, ToolsConfig};
 
@@ -65,6 +67,11 @@ pub struct Config {
     pub edge: EdgeConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// What an MCP server is allowed to cost: the deadlines a start
+    /// runs under, the caps discovery and the stdio transport refuse
+    /// past, and how often an unavailable server is tried again (#548).
+    #[serde(default)]
+    pub mcp: McpConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
     /// How every durable consumer on the event bus paces redelivery of
@@ -605,6 +612,7 @@ impl Default for Config {
             drain_deadline_ms: default_drain_deadline_ms(),
             edge: EdgeConfig::default(),
             tools: ToolsConfig::default(),
+            mcp: McpConfig::default(),
             bus: BusConfig::default(),
         }
     }

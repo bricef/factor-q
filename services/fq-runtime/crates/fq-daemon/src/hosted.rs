@@ -45,7 +45,7 @@ use fq_runtime::events::{Event, EventPayload, SystemShutdownPayload, SystemStart
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
-    Config, ControlPlaneStore, EventBus, McpClientManager, PricingTable, ProjectionConsumer,
+    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionConsumer,
     ProjectionStore, SharedRegistry, TriggerDispatcher,
 };
 use uuid::Uuid;
@@ -91,7 +91,9 @@ pub(crate) struct Assembled {
     /// The signal streams, installed at startup and held open so a
     /// second one during the drain means something (#509).
     pub signals: ShutdownSignals,
-    pub mcp_manager: McpClientManager,
+    /// The shared MCP servers: the manager, the retry loop, and the
+    /// shutdown that stops both in the right order (#548).
+    pub mcp: crate::shared_servers::SharedServers,
     pub agents_loaded: u32,
     pub pricing_entries: u32,
     pub resume_handles: Vec<tokio::task::JoinHandle<()>>,
@@ -117,7 +119,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         registration,
         edge_listener,
         mut signals,
-        mut mcp_manager,
+        mcp,
         agents_loaded,
         pricing_entries,
         resume_handles,
@@ -614,7 +616,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     );
 
     // Shut down MCP server processes.
-    mcp_manager.shutdown().await;
+    mcp.shutdown().await;
 
     // On a clean shutdown, deregister the worker so its coordination
     // row reflects a graceful exit (`shutdown`) instead of being left

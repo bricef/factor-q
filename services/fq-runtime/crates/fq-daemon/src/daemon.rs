@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::{ControlPlaneStore, EventBus, McpClientManager, PricingTable, ProjectionStore};
+use fq_runtime::{ControlPlaneStore, EventBus, PricingTable, ProjectionStore};
 use uuid::Uuid;
 
 use crate::boot::{ensure_split_dbs, local_host_label, workspace_provider};
@@ -366,14 +366,11 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         pricing_cache.display()
     );
 
-    // Build tool registry: built-ins + MCP servers from all agents.
-    let mut mcp_manager = McpClientManager::with_server_root(config.state.directory.join("mcp"));
-    let tools = crate::shared_servers::start_shared_servers(
-        &registry,
-        &mut mcp_manager,
-        config.tools.exec.to_exec_config(),
-    )
-    .await;
+    // Build tool registry: built-ins + MCP servers from all agents. The
+    // servers start concurrently, each under its own deadline, and one
+    // that does not answer is recorded unavailable rather than holding
+    // boot (#548).
+    let (mut mcp, tools) = crate::shared_servers::start_shared_servers(&registry, &config).await;
     let mcp_tool_count = tools.len() - fq_runtime::tools::BUILTIN_TOOL_COUNT;
     if mcp_tool_count > 0 {
         println!("  MCP tools:        {mcp_tool_count}");
@@ -395,7 +392,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     let context = Arc::new(
         fq_runtime::ReducerContext::builder()
             .tools(tools)
-            .resources(mcp_manager.resource_reader())
+            .resources(mcp.resource_reader().await)
             .build(),
     );
     // The `${workspace}` binding (parallel-workers Phase 0): a fresh
@@ -415,7 +412,8 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
                     .workspace(workspace.clone())
                     .mcp_server_root(config.state.directory.join("mcp"))
                     .tool_limits(config.tools.call_limits())
-                    .mcp_progress(mcp_manager.progress())
+                    .mcp_progress(mcp.progress().await)
+                    .mcp_states(mcp.states())
                     .build(),
             ),
             fq_runtime::Harness::new(),
@@ -440,17 +438,13 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // its `&mut` lifecycle here for shutdown.
     // Bridging a server's log record onto the event bus as a
     // daemon-scoped event (ADR-0020 / plan B2) happens in there too.
-    let notification_channels = mcp_manager.take_notifications().await;
-    if !notification_channels.is_empty() {
-        crate::shared_servers::drain_notifications(
-            &mut mcp_manager,
-            context.clone(),
-            bus.clone(),
-            runtime_id,
-            config.tools.exec.to_exec_config(),
-            notification_channels,
-        );
-    }
+    mcp.supervise(
+        context.clone(),
+        bus.clone(),
+        runtime_id,
+        config.tools.exec.to_exec_config(),
+    )
+    .await;
 
     // Spawn auto-resume tasks for each safe-resume / safe-replay
     // invocation found by the recovery scan.
@@ -491,7 +485,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         registration,
         edge_listener,
         signals,
-        mcp_manager,
+        mcp,
         agents_loaded,
         pricing_entries,
         resume_handles,

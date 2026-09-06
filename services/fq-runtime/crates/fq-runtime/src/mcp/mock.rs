@@ -106,6 +106,7 @@ impl ServerHandler for MockToolServer {
             .and_then(|r| r.cursor)
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
+        let start = start.min(tools.len());
         let end = (start + self.page_size).min(tools.len());
         let next_cursor = if self.endless_cursor {
             Some((start + self.page_size).to_string())
