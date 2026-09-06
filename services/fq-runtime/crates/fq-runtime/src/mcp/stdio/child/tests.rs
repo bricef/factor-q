@@ -33,7 +33,7 @@ async fn every_line_within_the_cap_passes_however_many_there_are() {
 #[tokio::test]
 async fn a_line_past_the_cap_fails_the_read() {
     let input: &'static [u8] = Box::leak(
-        [&b"short\n"[..], &vec![b'x'; CAP + 1], b"\n"]
+        [&b"short\n"[..], &[b'x'; CAP + 1], b"\n"]
             .concat()
             .into_boxed_slice(),
     );
@@ -46,7 +46,7 @@ async fn a_line_past_the_cap_fails_the_read() {
 /// documented number is a length a server may actually send.
 #[tokio::test]
 async fn a_line_of_exactly_the_cap_is_allowed() {
-    let input: &'static [u8] = Box::leak([&vec![b'x'; CAP][..], b"\n"].concat().into_boxed_slice());
+    let input: &'static [u8] = Box::leak([&[b'x'; CAP][..], b"\n"].concat().into_boxed_slice());
     assert_eq!(read_all(input).await.expect("at the cap").len(), CAP + 1);
 }
 

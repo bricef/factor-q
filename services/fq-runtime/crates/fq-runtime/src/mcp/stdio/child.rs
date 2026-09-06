@@ -176,24 +176,22 @@ impl Transport<RoleClient> for ChildTransport {
     /// stdio transport installs no socket `error` handler, so Node
     /// throws and the process exits non-zero after every request has
     /// already succeeded.
-    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        async move {
-            self.transport.close().await?;
-            let Some(mut child) = self.child.take() else {
-                return Ok(());
-            };
-            match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
-                Ok(Ok(status)) => debug!(%status, "MCP stdio server exited on EOF"),
-                Ok(Err(err)) => warn!(error = %err, "waiting for MCP stdio server failed"),
-                Err(_) => {
-                    debug!("MCP stdio server did not exit on EOF within the grace; killing it");
-                    if let Err(err) = child.kill().await {
-                        warn!(error = %err, "killing MCP stdio server failed");
-                    }
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.transport.close().await?;
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
+            Ok(Ok(status)) => debug!(%status, "MCP stdio server exited on EOF"),
+            Ok(Err(err)) => warn!(error = %err, "waiting for MCP stdio server failed"),
+            Err(_) => {
+                debug!("MCP stdio server did not exit on EOF within the grace; killing it");
+                if let Err(err) = child.kill().await {
+                    warn!(error = %err, "killing MCP stdio server failed");
                 }
             }
-            Ok(())
         }
+        Ok(())
     }
 }
 
