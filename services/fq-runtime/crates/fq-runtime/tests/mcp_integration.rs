@@ -762,7 +762,7 @@ async fn static_resource_pin_appears_in_first_model_request() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
 
@@ -1235,7 +1235,7 @@ async fn run_sampling_scenario(
             output_tokens: 4,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let llm = FixtureClient::new();
@@ -1254,7 +1254,7 @@ async fn run_sampling_scenario(
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
     // Input-evaluator judge verdicts (if any) are answered before the
@@ -1278,7 +1278,7 @@ async fn run_sampling_scenario(
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
 
@@ -1830,7 +1830,7 @@ async fn run_elicitation_scenario(
             output_tokens: 4,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
 
@@ -1851,7 +1851,7 @@ async fn run_elicitation_scenario(
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
     // (2) the elicitation completion attempts.
@@ -1874,7 +1874,7 @@ async fn run_elicitation_scenario(
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
 
@@ -2398,7 +2398,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             output_tokens: 4,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let llm = FixtureClient::new();
@@ -2417,7 +2417,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
     llm.push_response(canned("SAMPLED-ANSWER"));
@@ -2436,7 +2436,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
 

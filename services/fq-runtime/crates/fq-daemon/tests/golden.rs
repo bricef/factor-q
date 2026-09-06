@@ -144,7 +144,7 @@ fn cost(call: u32, total: f64, cumulative: f64) -> CostMetadata {
         cumulative_invocation_cost: cumulative,
         cumulative_agent_cost: cumulative,
         origin: LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     }
 }
 
@@ -162,7 +162,7 @@ fn llm_response(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost:
             output_tokens: 340,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
         origin: LlmCallOrigin::AgentTurn,
     });
@@ -193,7 +193,7 @@ fn llm_failure(agent: &str, invocation: &str, seq: u32, at_ms: i64, total_cost: 
             output_tokens: 340,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         }),
         origin: LlmCallOrigin::AgentTurn,
     });
@@ -237,7 +237,7 @@ fn invocation_summary(invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -
         cumulative_invocation_cost: total_cost,
         cumulative_agent_cost: total_cost,
         origin: LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     })
 }
 
@@ -377,7 +377,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             output_tokens: 340,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     })
     .unwrap();
@@ -392,7 +392,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             output_tokens: 120,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     })
     .unwrap();
@@ -1206,7 +1206,7 @@ fn conversation_events() -> Vec<Event> {
                         output_tokens: 340,
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
-                        reasoning_tokens: 0,
+                        reasoning_tokens: None,
                     },
                     origin: LlmCallOrigin::AgentTurn,
                 }),
@@ -1249,7 +1249,7 @@ fn conversation_events() -> Vec<Event> {
                         output_tokens: 120,
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
-                        reasoning_tokens: 0,
+                        reasoning_tokens: None,
                     },
                     origin: LlmCallOrigin::AgentTurn,
                 }),

@@ -445,7 +445,7 @@ fn canned(text: &str, input: u32, output: u32) -> ChatResponse {
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     }
 }
@@ -466,7 +466,7 @@ fn tool_use(name: &str, call_id: &str, params: Value, tokens: (u32, u32)) -> Cha
             output_tokens: tokens.1,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     }
 }
@@ -1319,7 +1319,7 @@ fn tool_call_response(tool: &str, call_id: &str, params: serde_json::Value) -> C
             output_tokens: 10,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     }
 }
@@ -1711,7 +1711,7 @@ async fn budget_exceeded_emits_failed_event_on_reducer_path() {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
 
@@ -1955,7 +1955,7 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
 
@@ -2027,7 +2027,7 @@ async fn empty_response_bills_its_prefill_on_the_failure_event() {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let (_store, events, _outcome) =
@@ -2203,7 +2203,7 @@ async fn bare_text_only_model_fails_at_the_iteration_ceiling() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let responses: Vec<ChatResponse> = (0..5).map(|_| text_turn()).collect();
@@ -2532,7 +2532,7 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     store
@@ -2743,7 +2743,7 @@ async fn resume_with_same_ms_interleave(
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let end_turn = canned("done.", 60, 4);
@@ -2951,7 +2951,7 @@ async fn resume_enforces_lifetime_budget() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     };
     let response_json = serde_json::to_string(&response).unwrap();
@@ -3005,7 +3005,7 @@ async fn resume_enforces_lifetime_budget() {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         },
     });
 

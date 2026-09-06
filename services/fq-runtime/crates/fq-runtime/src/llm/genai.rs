@@ -732,16 +732,26 @@ fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
     // already have — reading it cannot change what anything costs, and
     // the pricing table is deliberately not told about it.
     //
-    // Most providers omit `completion_tokens_details` entirely, which
-    // reads as 0: not "no thinking happened", but "not reported". The
-    // two are indistinguishable on this wire and the distinction is not
-    // worth an Option here, because nothing branches on it.
+    // Straight through, `Option` and all. A provider that sends no
+    // `completion_tokens_details` — Anthropic never does — reported no
+    // split, and that is `None`: not `0`, which would say the model did
+    // no thinking, a claim nobody made. The two stay apart from here to
+    // the operator (#536). A negative count is a provider bug, not a
+    // split, and reads as unreported too.
     let reasoning_tokens = usage
         .completion_tokens_details
         .as_ref()
         .and_then(|d| d.reasoning_tokens)
-        .unwrap_or(0)
-        .max(0) as u32;
+        .and_then(|n| match u32::try_from(n) {
+            Ok(n) => Some(n),
+            Err(_) => {
+                tracing::debug!(
+                    reasoning_tokens = n,
+                    "provider reported a negative reasoning token count; recording no split"
+                );
+                None
+            }
+        });
 
     TokenUsage {
         input_tokens,
@@ -1444,7 +1454,7 @@ mod tests {
         let converted = convert_usage(&usage);
 
         assert_eq!(converted.output_tokens, 500);
-        assert_eq!(converted.reasoning_tokens, 400);
+        assert_eq!(converted.reasoning_tokens, Some(400));
         assert_eq!(
             converted.spoken_tokens(),
             100,
@@ -1473,15 +1483,20 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 200,
             cache_write_tokens: 100,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         };
         let with_split = TokenUsage {
-            reasoning_tokens: 400,
+            reasoning_tokens: Some(400),
+            ..without
+        };
+        let reported_zero = TokenUsage {
+            reasoning_tokens: Some(0),
             ..without
         };
 
         let (in_a, out_a, total_a) = pricing.calculate(&without);
         let (in_b, out_b, total_b) = pricing.calculate(&with_split);
+        let (in_c, out_c, total_c) = pricing.calculate(&reported_zero);
 
         assert_eq!(
             total_a.to_bits(),
@@ -1494,13 +1509,21 @@ mod tests {
             out_b.to_bits(),
             "output cost is priced on output_tokens, which already includes reasoning"
         );
+        assert_eq!(
+            total_a.to_bits(),
+            total_c.to_bits(),
+            "a reported zero split must not change total_cost either"
+        );
+        assert_eq!(in_a.to_bits(), in_c.to_bits());
+        assert_eq!(out_a.to_bits(), out_c.to_bits());
     }
 
-    /// A provider that does not report the split reads as 0 rather than
-    /// failing the conversion — most of them do not report it, and an
-    /// unreported split is not an error.
+    /// A provider that reports no split — no `completion_tokens_details`
+    /// at all, which is every Anthropic response — reads as `None`: not
+    /// an error, and not a zero. `0` would say the model did no
+    /// thinking, which is a claim nobody made.
     #[test]
-    fn absent_completion_details_read_as_no_reported_reasoning() {
+    fn absent_completion_details_read_as_no_reported_split() {
         let usage = provider::chat::Usage {
             prompt_tokens: Some(10),
             completion_tokens: Some(20),
@@ -1508,8 +1531,78 @@ mod tests {
             ..Default::default()
         };
         let converted = convert_usage(&usage);
-        assert_eq!(converted.reasoning_tokens, 0);
-        assert_eq!(converted.spoken_tokens(), 20);
+        assert_eq!(converted.reasoning_tokens, None);
+        assert_eq!(
+            converted.spoken_tokens(),
+            20,
+            "with no split reported, every output token counts as spoken"
+        );
+    }
+
+    /// **`None` and `Some(0)` are different facts, and both survive the
+    /// adapter.** A provider that reports a split of zero is saying
+    /// something Anthropic never says; collapsing the two would make
+    /// every Anthropic call look like a model that did no thinking,
+    /// and every summed total a claim about calls that reported
+    /// nothing (#536).
+    #[test]
+    fn a_reported_zero_split_is_not_an_unreported_one() {
+        let with_details = |reasoning_tokens: Option<i32>| provider::chat::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            completion_tokens_details: Some(provider::chat::CompletionTokensDetails {
+                reasoning_tokens,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let unreported = provider::chat::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            completion_tokens_details: None,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            convert_usage(&with_details(Some(0))).reasoning_tokens,
+            Some(0),
+            "a provider that reported zero reasoning tokens reported a split"
+        );
+        assert_eq!(
+            convert_usage(&with_details(Some(400))).reasoning_tokens,
+            Some(400)
+        );
+        assert_eq!(
+            convert_usage(&unreported).reasoning_tokens,
+            None,
+            "no details at all is no split"
+        );
+        // Details present with no reasoning figure inside them — the
+        // shape OpenAI sends when only its other detail counts apply —
+        // is an unreported split too.
+        assert_eq!(convert_usage(&with_details(None)).reasoning_tokens, None);
+        assert_ne!(
+            convert_usage(&with_details(Some(0))).reasoning_tokens,
+            convert_usage(&unreported).reasoning_tokens,
+            "a reported zero and an unreported split must stay distinguishable"
+        );
+    }
+
+    /// A negative count is a provider bug, not a split. It reads as
+    /// unreported rather than as four billion — or as zero, which
+    /// would dress the bug up as a report.
+    #[test]
+    fn a_negative_reported_split_reads_as_unreported() {
+        let usage = provider::chat::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            completion_tokens_details: Some(provider::chat::CompletionTokensDetails {
+                reasoning_tokens: Some(-5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(convert_usage(&usage).reasoning_tokens, None);
     }
 
     /// Defence against a provider reporting more reasoning than
@@ -1523,7 +1616,7 @@ mod tests {
             output_tokens: 10,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 99,
+            reasoning_tokens: Some(99),
         };
         assert_eq!(usage.spoken_tokens(), 0);
     }

@@ -312,7 +312,7 @@ mod tests {
             cumulative_invocation_cost: 0.01,
             cumulative_agent_cost: 0.01,
             origin: Default::default(),
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         })
     }
 

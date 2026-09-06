@@ -67,9 +67,15 @@ pub struct CostMetadata {
     /// is most of the answer** — it was invisible in the cost data
     /// entirely (#437). It changes no figure: reasoning is already
     /// inside `output_tokens`, so `output_cost` and `total_cost` are what
-    /// they always were. `0` where the provider does not report it.
-    #[serde(default)]
-    pub reasoning_tokens: u32,
+    /// they always were.
+    ///
+    /// `None` where the provider reported no split (Anthropic never
+    /// does), which is not `Some(0)` — a provider that reported one and
+    /// it was zero. The projection keeps the two apart as NULL against
+    /// `0`, and every surface above it as `n/a` against `0` (#536).
+    /// Absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
     pub input_cost: f64,
     pub output_cost: f64,
     pub total_cost: f64,

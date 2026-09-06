@@ -158,8 +158,7 @@
         "cache_read_tokens": 0,
         "cache_write_tokens": 1648,
         "input_tokens": 1650,
-        "output_tokens": 179,
-        "reasoning_tokens": 0
+        "output_tokens": 179
       }
     },
     {
@@ -174,8 +173,7 @@
         "cache_read_tokens": 1648,
         "cache_write_tokens": 246,
         "input_tokens": 1898,
-        "output_tokens": 30,
-        "reasoning_tokens": 0
+        "output_tokens": 30
       }
     }
   ]
