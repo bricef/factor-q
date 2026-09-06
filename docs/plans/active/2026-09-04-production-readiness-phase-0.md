@@ -287,7 +287,14 @@ one place so a hand-off prompt can point at them.
   `just lint-docs` whenever any markdown changes — the Rust gates do not
   run markdownlint. Bare `cargo test` at workspace level produces
   phantom NATS failures; go through `just`. A Node `EPIPE` trace from an
-  MCP stdio child is a known flake; trust the exit code.
+  MCP stdio child is a known flake; trust the exit code. The reference
+  server's *startup* flake is retried once inside the test harness
+  (<https://github.com/bricef/factor-q/issues/115>); anything after
+  startup still fails on the first try. The retry prints the first
+  failure's reason, but libtest captures it while the test passes, so it
+  surfaces only when the retry fails to save the run — or on demand, via
+  `cargo test -p fq-runtime --test mcp_integration -- --nocapture`, which
+  is how to find out how often it is firing.
 - **Size ratchets go one way.** Never raise a budget in
   `.file-size-baseline`; pay by extracting a module. Never run
   `just sizes-bless`; it destroys the hand-written rationale.
