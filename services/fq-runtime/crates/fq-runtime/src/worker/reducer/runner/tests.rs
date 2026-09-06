@@ -168,6 +168,172 @@ async fn enforce_pricing_refuses_to_dispatch_an_unpriced_model() {
     }
 }
 
+/// A runner whose shared MCP server table says `server` is
+/// unavailable, and an agent that declares it. The states table is the
+/// daemon's; here it is constructed directly, which is the honest
+/// fixture — the runner's job is to *read* it, and how it came to say
+/// that is `mcp::lifecycle`'s test.
+async fn runner_with_unavailable_server(
+    dir: &std::path::Path,
+    sink: Arc<crate::test_support::sim::RecordingSink>,
+    unavailable: &[&str],
+) -> ReducerRunner<Harness> {
+    let store = Arc::new(WorkerStore::open(&dir.join("events.db")).await.unwrap());
+    let states = crate::mcp::McpServerStates::default();
+    for server in unavailable {
+        states.unavailable(
+            server,
+            "no initialize response within the 30s start-up deadline ([mcp] \
+             startup_timeout_secs)"
+                .to_string(),
+            2,
+            Some(chrono::Utc::now().timestamp_millis() + 45_000),
+        );
+    }
+    ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(sink as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .mcp_states(states)
+                .build(),
+        ),
+        Harness::new(),
+    )
+}
+
+fn agent_declaring(id: &str, server: &str) -> Agent {
+    Agent::builder()
+        .id(unique_agent_id(id))
+        .model("claude-haiku")
+        .system_prompt("be brief")
+        .mcp_servers(vec![crate::agent::McpServerDeclaration {
+            server: server.to_string(),
+            command: Some("some-server".to_string()),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: None,
+        }])
+        .build()
+        .unwrap()
+}
+
+/// #548 decision 3: an agent that needs an unavailable shared MCP
+/// server is refused at dispatch with a terminal event naming the
+/// server — not left to run without the tools it declared, and not
+/// hung. The message carries the reason and the next retry, because
+/// the operator reading the failure is deciding whether to wait.
+#[tokio::test]
+async fn an_agent_needing_an_unavailable_mcp_server_is_refused_at_dispatch() {
+    let dir = tempdir().unwrap();
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let runner = runner_with_unavailable_server(dir.path(), sink.clone(), &["wedged"]).await;
+    // Queued but must never be consumed — the refusal fires first.
+    let llm = FixtureClient::new();
+    llm.push_response(canned("should not be used", 10, 5));
+
+    let outcome = runner
+        .run(
+            &agent_declaring("needs-wedged", "wedged"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await;
+
+    let message = match outcome {
+        Err(ExecutorError::InvocationFailed { kind, message }) => {
+            assert!(
+                matches!(kind, crate::events::FailureKind::RuntimeError),
+                "{kind:?}"
+            );
+            message
+        }
+        other => panic!("expected a terminal refusal, got {other:?}"),
+    };
+    assert!(message.contains("'wedged'"), "{message}");
+    assert!(message.contains("startup_timeout_secs"), "{message}");
+    assert!(message.contains("next retry in"), "{message}");
+
+    // A terminal `failed` event, in the setup phase, is what makes the
+    // refusal visible to an operator and to the projection.
+    let events = sink.events();
+    let failed = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::Failed(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("a terminal failed event");
+    assert!(matches!(
+        failed.phase,
+        crate::events::FailurePhase::Setup
+    ));
+    assert!(failed.error_message.contains("'wedged'"));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::Triggered(_))),
+        "the refusal is chained to a triggered event, not an orphan failure"
+    );
+}
+
+/// The other half of the same decision: an agent that does not need the
+/// unavailable server runs normally. A refusal that grounded the whole
+/// fleet would be a worse wedge than the one it replaces.
+#[tokio::test]
+async fn an_agent_that_needs_no_unavailable_server_runs_normally() {
+    let dir = tempdir().unwrap();
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let runner = runner_with_unavailable_server(dir.path(), sink.clone(), &["wedged"]).await;
+    let llm = FixtureClient::new();
+    llm.push_response(canned("done.", 10, 5));
+
+    let agent = Agent::builder()
+        .id(unique_agent_id("needs-nothing"))
+        .model("claude-haiku")
+        .system_prompt("be brief")
+        .build()
+        .unwrap();
+    let outcome = runner
+        .run(&agent, &llm, TriggerSource::Manual, None, json!({}))
+        .await
+        .expect("an agent declaring no MCP server is unaffected");
+    assert!(matches!(outcome, InvocationOutcome::Completed { .. }));
+}
+
+/// A grant-bearing server is not in the shared table at all, so it can
+/// never be the reason for a refusal: it runs per-invocation, and a
+/// failure to start it is a warning against that one run.
+#[tokio::test]
+async fn a_server_the_daemon_does_not_share_cannot_refuse_an_invocation() {
+    let dir = tempdir().unwrap();
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let runner = runner_with_unavailable_server(dir.path(), sink, &["other"]).await;
+    let llm = FixtureClient::new();
+    llm.push_response(canned("done.", 10, 5));
+
+    let outcome = runner
+        .run(
+            &agent_declaring("needs-unknown", "not-in-the-table"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({}),
+        )
+        .await
+        .expect("a server with no recorded state refuses nothing");
+    assert!(matches!(outcome, InvocationOutcome::Completed { .. }));
+}
+
 #[tokio::test]
 async fn sampling_channel_merges_servers_and_drains() {
     use crate::mcp::ServerRequest;
