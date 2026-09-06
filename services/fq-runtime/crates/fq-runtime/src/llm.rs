@@ -192,16 +192,19 @@ pub struct LlmTimeouts {
 }
 
 impl Default for LlmTimeouts {
-    /// 5 s to connect and 10 minutes for the call — what the official
-    /// Anthropic and OpenAI SDKs default to. The request budget is long
-    /// because a large extended-thinking answer takes minutes to
+    /// 10 s to connect and 10 minutes for the call. The connect budget
+    /// covers a slow DNS answer and a TLS handshake to a far provider
+    /// without tripping on them; the official SDKs use 5 s, and the
+    /// maintainer chose the wider number (#607). The request budget is
+    /// long because a large extended-thinking answer takes minutes to
     /// produce, and cutting it off costs twice: the provider has billed
     /// the tokens, and the retry pays for them again. A hang, by
     /// contrast, costs only time, and the point of the budget is that
-    /// the time is bounded. Operators running fast models can trim it.
+    /// the time is bounded — see `RetryConfig::timeout_max_attempts` for
+    /// how many of them. Operators running fast models can trim both.
     fn default() -> Self {
         Self {
-            connect: Duration::from_secs(5),
+            connect: Duration::from_secs(10),
             request: Duration::from_secs(600),
         }
     }
@@ -213,8 +216,18 @@ impl Default for LlmTimeouts {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RetryConfig {
-    /// Total attempts including the first; `1` disables retry.
+    /// Total attempts including the first; `1` disables retry. Governs
+    /// every transient error except a timeout, which has its own cap.
     pub max_attempts: u32,
+    /// Total attempts, including the first, for a call that ends in
+    /// [`LlmError::Timeout`]; `1` disables retrying timeouts. Separate
+    /// from `max_attempts` because a timeout costs a whole
+    /// `llm_timeout_secs` per attempt: retrying a hang three more times
+    /// is not the same thing as retrying a flaky request three more
+    /// times. Default 2, so a provider that never answers holds a
+    /// worker for at most twice the call budget (#607, deciding #546's
+    /// bound at twenty minutes rather than forty).
+    pub timeout_max_attempts: u32,
     /// Delay before the first retry; doubles each subsequent attempt.
     pub base_delay_ms: u64,
     /// Cap on any single backoff delay.
@@ -231,9 +244,25 @@ impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_attempts: 4,
+            timeout_max_attempts: 2,
             base_delay_ms: 500,
             max_delay_ms: 30_000,
             max_retry_after_ms: 120_000,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// The attempt cap that applies after `err`: timeouts have their
+    /// own, everything else shares `max_attempts`. One counter runs
+    /// across kinds, so a call that failed twice on the wire and then
+    /// timed out is judged against the timeout cap at that count — a
+    /// hang ends a call no later than `timeout_max_attempts` attempts
+    /// in, whatever came before it.
+    fn attempt_cap_for(&self, err: &LlmError) -> u32 {
+        match err {
+            LlmError::Timeout { .. } => self.timeout_max_attempts,
+            _ => self.max_attempts,
         }
     }
 }
@@ -249,6 +278,11 @@ impl Default for RetryConfig {
 /// floor on the wait, with the jittered backoff added on top so a fleet
 /// told the same number does not come back in lockstep. Past
 /// `RetryConfig::max_retry_after_ms` the call is given up at once.
+///
+/// A timeout is retried under its own, smaller cap
+/// (`RetryConfig::timeout_max_attempts`): each attempt at a hung
+/// provider costs the whole call budget, so the general `max_attempts`
+/// would turn one hang into four.
 pub struct RetryingLlmClient<C> {
     inner: C,
     config: RetryConfig,
@@ -267,7 +301,7 @@ impl<C: LlmClient> LlmClient for RetryingLlmClient<C> {
         loop {
             match self.inner.chat(request.clone()).await {
                 Ok(response) => return Ok(response),
-                Err(err) if err.is_transient() && attempt < self.config.max_attempts => {
+                Err(err) if err.is_transient() && attempt < self.config.attempt_cap_for(&err) => {
                     let Some(delay) = retry_delay(&err, attempt, &self.config) else {
                         tracing::warn!(
                             attempt,
@@ -280,7 +314,7 @@ impl<C: LlmClient> LlmClient for RetryingLlmClient<C> {
                     };
                     tracing::warn!(
                         attempt,
-                        max_attempts = self.config.max_attempts,
+                        max_attempts = self.config.attempt_cap_for(&err),
                         delay_ms = delay.as_millis() as u64,
                         error = %err,
                         "transient LLM error; retrying after backoff"
@@ -423,6 +457,7 @@ mod retry_tests {
     fn fast() -> RetryConfig {
         RetryConfig {
             max_attempts: 4,
+            timeout_max_attempts: 2,
             base_delay_ms: 0,
             max_delay_ms: 0,
             max_retry_after_ms: 120_000,
@@ -572,20 +607,73 @@ mod retry_tests {
         assert_eq!(calls(&client), 2);
     }
 
-    /// #546: a timeout is transient, and the attempt cap is what stops
-    /// it being retried forever.
-    #[tokio::test]
-    async fn timeouts_are_retried_up_to_the_attempt_cap() {
-        let timeout = || LlmError::Timeout {
+    fn timeout() -> LlmError {
+        LlmError::Timeout {
             budget: Duration::from_secs(1),
-        };
+        }
+    }
+
+    /// #546/#607: a timeout is transient, but it is retried under its
+    /// own cap, not the general one — at the defaults a provider that
+    /// never answers is asked twice, not four times.
+    #[tokio::test]
+    async fn timeouts_are_retried_up_to_their_own_attempt_cap() {
         let client = RetryingLlmClient::new(scripted((0..99).map(|_| timeout()).collect()), fast());
         let err = client
             .chat(request())
             .await
             .expect_err("every attempt timed out");
         assert!(matches!(err, LlmError::Timeout { .. }), "{err:?}");
-        assert_eq!(calls(&client), 4, "bounded at max_attempts");
+        assert_eq!(
+            calls(&client),
+            RetryConfig::default().timeout_max_attempts,
+            "bounded at timeout_max_attempts, which defaults to 2"
+        );
+        assert_eq!(RetryConfig::default().timeout_max_attempts, 2);
+    }
+
+    /// The timeout cap is configuration like the rest: raising it is
+    /// honoured, and it leaves the general cap alone.
+    #[tokio::test]
+    async fn the_timeout_cap_is_its_own_knob() {
+        let config = RetryConfig {
+            timeout_max_attempts: 3,
+            ..fast()
+        };
+        let hung = RetryingLlmClient::new(
+            scripted((0..99).map(|_| timeout()).collect()),
+            config.clone(),
+        );
+        hung.chat(request()).await.expect_err("still hung");
+        assert_eq!(calls(&hung), 3, "the configured timeout cap");
+
+        let flaky =
+            RetryingLlmClient::new(scripted((0..99).map(|_| transient()).collect()), config);
+        flaky.chat(request()).await.expect_err("still failing");
+        assert_eq!(
+            calls(&flaky),
+            4,
+            "wire failures keep the general max_attempts"
+        );
+    }
+
+    /// One counter runs across kinds: a wire failure followed by a
+    /// timeout is judged against the timeout cap at that count, so a
+    /// hang never gets more attempts than `timeout_max_attempts`
+    /// however the earlier attempts failed.
+    #[tokio::test]
+    async fn a_timeout_after_a_wire_failure_ends_at_the_timeout_cap() {
+        let client = RetryingLlmClient::new(
+            scripted(vec![transient(), timeout(), timeout(), timeout()]),
+            fast(),
+        );
+        let err = client.chat(request()).await.expect_err("timed out");
+        assert!(matches!(err, LlmError::Timeout { .. }), "{err:?}");
+        assert_eq!(
+            calls(&client),
+            2,
+            "attempt 2 timed out and 2 is the timeout cap"
+        );
     }
 
     #[tokio::test]

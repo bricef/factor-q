@@ -297,15 +297,18 @@ you would rather start from a summary.
 ## When a provider hangs or throttles
 
 Every model call has a deadline — `[worker] llm_timeout_secs` (default
-600) for the whole call, `llm_connect_timeout_secs` (default 5) for
+600) for the whole call, `llm_connect_timeout_secs` (default 10) for
 the connection — so a provider that accepts the connection and never
 answers cannot park an invocation, or at `max_concurrent_invocations =
 1` the daemon, until someone restarts it. A call past the deadline
 fails as a transient `timeout`; the retry policy under
-`[worker.llm_retry]` tries it again, so a provider that never answers
-holds a worker for at most `max_attempts` times the budget before the
-invocation fails with `llm_error`. Both live in `fqd.toml`, with the
-reasoning behind the defaults.
+`[worker.llm_retry]` tries it again under its own cap,
+`timeout_max_attempts` (default 2, separate from the general
+`max_attempts` because every attempt at a hang costs the whole budget),
+so a provider that never answers holds a worker for at most twice the
+budget — twenty minutes at the defaults — before the invocation fails
+with `llm_error`. Every one of these numbers lives in `fqd.toml`, with
+the reasoning behind the defaults.
 
 A 429 is retried after the wait the provider's `Retry-After` names, up
 to `max_retry_after_ms` (default 120 s); a provider asking for longer

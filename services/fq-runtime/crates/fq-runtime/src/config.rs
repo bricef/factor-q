@@ -233,14 +233,15 @@ pub struct WorkerConfig {
     /// The deadline on every model call, in seconds (#546, review
     /// finding B1): the whole call, connect to last byte, applied on the
     /// HTTP client and again around the call. A call past it fails as a
-    /// transient timeout that `llm_retry` retries, so a provider that
-    /// never answers holds a worker for at most `max_attempts` times
-    /// this. Default 600; [`crate::llm::LlmTimeouts`] says why so long.
+    /// transient timeout that `llm_retry` retries under its own cap, so
+    /// a provider that never answers holds a worker for at most
+    /// `llm_retry.timeout_max_attempts` (default 2) times this. Default
+    /// 600; [`crate::llm::LlmTimeouts`] says why so long.
     #[serde(default = "default_llm_timeout_secs")]
     pub llm_timeout_secs: u64,
     /// How long establishing the connection may take, in seconds, so an
     /// endpoint that never answers fails in seconds rather than after
-    /// the whole budget. Default 5.
+    /// the whole budget. Default 10.
     #[serde(default = "default_llm_connect_timeout_secs")]
     pub llm_connect_timeout_secs: u64,
     /// How many invocations one daemon runs concurrently (#70, the
@@ -780,13 +781,17 @@ mod tests {
 
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.worker.llm_timeout_secs, 600);
-        assert_eq!(config.worker.llm_connect_timeout_secs, 5);
+        assert_eq!(config.worker.llm_connect_timeout_secs, 10);
         assert_eq!(config.worker.llm_timeouts(), LlmTimeouts::default());
         assert_eq!(config.worker.llm_retry.max_retry_after_ms, 120_000);
+        assert_eq!(
+            config.worker.llm_retry.timeout_max_attempts, 2,
+            "a hung provider is asked twice at the defaults (#607)"
+        );
 
         let config = Config::from_toml_str(
             "[worker]\nllm_timeout_secs = 45\nllm_connect_timeout_secs = 2\n\n\
-             [worker.llm_retry]\nmax_retry_after_ms = 9000\n",
+             [worker.llm_retry]\nmax_retry_after_ms = 9000\ntimeout_max_attempts = 1\n",
         )
         .unwrap();
         assert_eq!(
@@ -797,6 +802,10 @@ mod tests {
             }
         );
         assert_eq!(config.worker.llm_retry.max_retry_after_ms, 9000);
+        assert_eq!(
+            config.worker.llm_retry.timeout_max_attempts, 1,
+            "every retry number is reachable from fqd.toml"
+        );
         assert_eq!(
             config.worker.llm_retry.max_attempts, 4,
             "the other retry knobs keep their defaults"
