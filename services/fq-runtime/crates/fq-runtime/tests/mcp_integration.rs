@@ -4,15 +4,22 @@
 //! These tests require `npx` to be on the PATH and the package to be
 //! installed (or auto-fetched). They exercise the full MCP lifecycle:
 //! server startup, tool discovery, tool invocation, and shutdown.
+//!
+//! Every start of that server goes through [`start_with_retry`], which
+//! absorbs the reference server's known startup flake and nothing else
+//! — see the comment above it for what that means and why.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use fq_runtime::mcp::{
-    AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpServerConfig,
-    ServerNotification, ServerRequest,
+    AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpError, McpServerConfig,
+    RootsHandle, ServerNotification, ServerRequest,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
 use rmcp::model::{CreateMessageResult, LoggingLevel, Root, SamplingMessage};
+use tokio::sync::mpsc;
 
 /// Skip the test if `npx` is not available.
 fn require_npx() -> bool {
@@ -66,6 +73,131 @@ fn everything_config() -> McpServerConfig {
         env: vec![],
         url: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Starting the reference server: retry the flaky phase, and only that (#115).
+//
+// The `npx`-launched everything server fails its own `initialize` often
+// enough to tax the fleet's PR pipeline — roughly one CI run in three
+// over 2026-09-05/06, each costing a human re-run on a PR that had
+// nothing to do with MCP. Two signatures have been seen:
+//
+//   * **2026-07-11** — a zod validation error thrown inside the MCP
+//     SDK while the server was initializing, killing the child
+//     mid-handshake (PR #113, run 29171341246).
+//   * **2026-09-05/06** — `ServerStart { command: "npx", reason:
+//     "connection closed: initialize response" }`, on three runs across
+//     two unrelated PRs (#597 runs 33973344760 / 33974578135, #604 run
+//     33987350130).
+//
+// Both are startup, and only startup. So `start_with_retry` retries
+// exactly one thing: [`McpError::ServerStart`], which the shared start
+// path (`mcp::lifecycle::connect`, #621) raises for a failed spawn or a
+// failed `initialize` handshake and for nothing else. `tools/list` runs
+// *after* the handshake and fails as `ToolDiscovery`; every tool call,
+// prompt, resource read and assertion in the tests below happens later
+// still, and none of them go anywhere near this helper. The retry is
+// there to absorb a flaky server — it must never absorb a regression in
+// the code under test, which is what
+// `start_retry_does_not_retry_a_post_startup_failure` pins down.
+//
+// The first failure's reason is printed whenever the retry fires. Where
+// it is *visible* is narrower than it looks: libtest captures stdout and
+// stderr for a test that passes, and every `just` recipe here is a bare
+// `cargo test` with no `--nocapture`, so a green run does not show the
+// line. It reaches a reader in the two cases that matter — when the
+// retry does not save the test, because libtest replays a failing test's
+// captured output; and on demand, `cargo test … -- --nocapture`, when
+// someone is asking how often this fires. So a persistent upstream
+// breakage is legible when it finally breaks the run, rather than in
+// every green log before it.
+//
+// Out of scope here and left to a human (issue #115 item 3): quarantining
+// the server-dependent tests into their own, non-blocking CI tier.
+// ---------------------------------------------------------------------------
+
+/// How long to wait before the single retry — long enough for a
+/// half-dead `npx` process tree to finish dying, short enough to be
+/// invisible next to the server's own start-up cost.
+const START_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Run `start`, and if it failed *at startup* run it exactly once more.
+///
+/// Returns the failures rather than panicking, so the retry's scope is
+/// itself testable: a caller can count attempts and assert which errors
+/// were retried and which were not.
+async fn try_start_with_retry<T>(
+    what: &str,
+    mut start: impl AsyncFnMut() -> Result<T, McpError>,
+) -> Result<T, Vec<McpError>> {
+    let first = match start().await {
+        Ok(started) => return Ok(started),
+        Err(err) => err,
+    };
+    if !matches!(first, McpError::ServerStart { .. }) {
+        // The handshake succeeded and something later refused: a real
+        // failure of the code under test. Retrying would mask it.
+        return Err(vec![first]);
+    }
+    eprintln!("{what}: MCP server startup failed, retrying once ({first})");
+    tokio::time::sleep(START_RETRY_BACKOFF).await;
+    match start().await {
+        Ok(started) => Ok(started),
+        Err(second) => Err(vec![first, second]),
+    }
+}
+
+/// [`try_start_with_retry`], failing the test when the server does not
+/// come up — with *every* reason seen, because one startup failure
+/// followed by an identical second one reads as a genuine breakage
+/// where two different ones read as noise.
+///
+/// The panic is what carries the reasons into a captured-output run: the
+/// `eprintln!` above is only replayed by libtest once a test fails, so a
+/// helper that swallowed the first reason would leave the failure
+/// showing the second one alone.
+async fn start_with_retry<T>(what: &str, start: impl AsyncFnMut() -> Result<T, McpError>) -> T {
+    match try_start_with_retry(what, start).await {
+        Ok(started) => started,
+        Err(errors) => {
+            let reasons: Vec<String> = errors
+                .iter()
+                .enumerate()
+                .map(|(i, err)| format!("attempt {}: {err}", i + 1))
+                .collect();
+            panic!("{what} failed to start:\n  {}", reasons.join("\n  "));
+        }
+    }
+}
+
+/// Start the pinned everything server as a shared, tool-only server,
+/// retrying the startup handshake once.
+async fn start_everything(manager: &mut McpClientManager) -> Vec<Arc<dyn Tool>> {
+    start_with_retry("server-everything", async || {
+        manager.start_server(everything_config()).await
+    })
+    .await
+}
+
+/// Start the pinned everything server *per-invocation* — its own child,
+/// with the inbound request channel and `roots` wired (ADR-0018) —
+/// retrying the startup handshake once.
+async fn start_everything_with_requests(
+    manager: &mut McpClientManager,
+    roots: Vec<Root>,
+    capabilities: AdvertisedCapabilities,
+) -> (
+    Vec<Arc<dyn Tool>>,
+    mpsc::UnboundedReceiver<ServerRequest>,
+    RootsHandle,
+) {
+    start_with_retry("server-everything (per-invocation)", async || {
+        manager
+            .start_server_with_requests(everything_config(), roots.clone(), capabilities)
+            .await
+    })
+    .await
 }
 
 /// Start the pinned everything server in `streamableHttp` mode on a
@@ -281,10 +413,7 @@ async fn discovers_tools_from_everything_server() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     // The everything server exposes many tools; verify we got at least
     // the echo tool.
@@ -314,10 +443,7 @@ async fn calls_echo_tool_end_to_end() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     let echo: Arc<dyn Tool> = tools
         .into_iter()
@@ -350,17 +476,11 @@ async fn duplicate_server_is_deduplicated() {
 
     let mut manager = McpClientManager::new();
 
-    let tools_first = manager
-        .start_server(everything_config())
-        .await
-        .expect("first start");
+    let tools_first = start_everything(&mut manager).await;
     assert!(!tools_first.is_empty());
 
     // Starting the same server again should be a no-op.
-    let tools_second = manager
-        .start_server(everything_config())
-        .await
-        .expect("duplicate start");
+    let tools_second = start_everything(&mut manager).await;
     assert!(
         tools_second.is_empty(),
         "duplicate server should return empty tool list"
@@ -404,10 +524,7 @@ async fn negotiates_full_capability_set() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     // The everything server advertises the full server-side surface.
     let server = manager
@@ -451,10 +568,7 @@ async fn lists_and_reads_resources_from_everything_server() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let resources = manager
         .list_resources("everything")
@@ -492,10 +606,7 @@ async fn resource_tools_let_the_agent_list_and_read() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     let list_tool = tools
         .iter()
@@ -552,10 +663,7 @@ async fn subscribe_delivers_resource_update_notifications() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     // Subscribe to the first resource.
     let uri = manager
@@ -616,10 +724,7 @@ async fn resource_template_tool_lists_templates() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     let templates_tool = tools
         .iter()
@@ -653,10 +758,7 @@ async fn resource_reader_reads_by_server_and_uri() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let uri = manager
         .list_resources("everything")
@@ -707,10 +809,7 @@ async fn static_resource_pin_appears_in_first_model_request() {
 
     // Start the everything server and pick a concrete resource to pin.
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
     let uri = manager
         .list_resources("everything")
         .await
@@ -854,10 +953,7 @@ async fn lists_prompts_from_everything_server() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let prompts = manager
         .list_prompts("everything")
@@ -894,10 +990,7 @@ async fn gets_parameterised_prompt_as_seed() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let args = BTreeMap::from([
         ("city".to_string(), "London".to_string()),
@@ -940,10 +1033,7 @@ async fn embedded_text_resource_prompt_renders() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let args = BTreeMap::from([
         ("resourceType".to_string(), "Text".to_string()),
@@ -992,10 +1082,7 @@ async fn embedded_blob_resource_prompt_is_not_implemented() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     let args = BTreeMap::from([
         ("resourceType".to_string(), "Blob".to_string()),
@@ -1033,10 +1120,7 @@ async fn completes_prompt_argument() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     // department completions starting with "S" → Sales, Support.
     let completion = manager
@@ -1071,10 +1155,8 @@ async fn sampling_request_bridges_to_the_host() {
     }
 
     let mut manager = McpClientManager::new();
-    let (tools, mut requests, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (per-invocation)");
+    let (tools, mut requests, _roots) =
+        start_everything_with_requests(&mut manager, vec![], AdvertisedCapabilities::all()).await;
 
     let trigger: Arc<dyn Tool> = tools
         .into_iter()
@@ -1196,10 +1278,8 @@ async fn run_sampling_scenario(
 
     // Per-invocation everything server with its inbound request channel.
     let mut manager = McpClientManager::new();
-    let (tools, rx, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (per-invocation)");
+    let (tools, rx, _roots) =
+        start_everything_with_requests(&mut manager, vec![], AdvertisedCapabilities::all()).await;
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
@@ -1593,10 +1673,8 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
     assert_eq!(roots.len(), 2, "both sandbox paths become roots");
 
     let mut manager = McpClientManager::new();
-    let (tools, _rx, roots_handle) = manager
-        .start_server_with_requests(everything_config(), roots, AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (per-invocation)");
+    let (tools, _rx, roots_handle) =
+        start_everything_with_requests(&mut manager, roots, AdvertisedCapabilities::all()).await;
 
     let get_roots: Arc<dyn Tool> = tools
         .into_iter()
@@ -1691,10 +1769,8 @@ async fn workspace_placeholder_roots_advertise_the_bound_path() {
         return;
     }
     let mut manager = McpClientManager::new();
-    let (tools, _rx, _handle) = manager
-        .start_server_with_requests(everything_config(), roots, AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (per-invocation)");
+    let (tools, _rx, _handle) =
+        start_everything_with_requests(&mut manager, roots, AdvertisedCapabilities::all()).await;
     let get_roots: Arc<dyn Tool> = tools
         .into_iter()
         .find(|t| t.name() == "everything__get-roots-list")
@@ -1797,10 +1873,8 @@ async fn run_elicitation_scenario(
     let nats_url = server.url().to_string();
 
     let mut manager = McpClientManager::new();
-    let (tools, rx, _roots) = manager
-        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (per-invocation)");
+    let (tools, rx, _roots) =
+        start_everything_with_requests(&mut manager, vec![], AdvertisedCapabilities::all()).await;
 
     let mut registry = ToolRegistry::with_builtins();
     for tool in tools {
@@ -2083,10 +2157,7 @@ async fn server_log_messages_are_forwarded_after_set_level() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     // Ask for everything (debug+) so the immediate message — whatever
     // random level it is — is not filtered server-side.
@@ -2144,10 +2215,7 @@ async fn progress_notifications_track_a_long_running_operation() {
     }
 
     let mut manager = McpClientManager::new();
-    let tools = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let tools = start_everything(&mut manager).await;
 
     let op: &Arc<dyn Tool> = tools
         .iter()
@@ -2204,10 +2272,7 @@ async fn refresh_tools_rediscovers_the_tool_list() {
     }
 
     let mut manager = McpClientManager::new();
-    let initial = manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    let initial = start_everything(&mut manager).await;
     let initial_names: BTreeSet<String> = initial.iter().map(|t| t.name().to_string()).collect();
     assert!(
         initial_names.contains("everything__echo"),
@@ -2249,10 +2314,7 @@ async fn in_flight_tool_call_can_be_cancelled() {
     }
 
     let mut manager = McpClientManager::new();
-    manager
-        .start_server(everything_config())
-        .await
-        .expect("start server-everything");
+    start_everything(&mut manager).await;
 
     // A 10-second operation, cancelled after 200ms.
     let args = serde_json::json!({"duration": 10, "steps": 10})
@@ -2303,10 +2365,8 @@ async fn advertised_capabilities_gate_what_the_server_registers() {
 
     // Advertise nothing inbound: the capability-gated tools are absent.
     let mut none = McpClientManager::new();
-    let (tools, _rx, _roots) = none
-        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::none())
-        .await
-        .expect("start server-everything (no caps)");
+    let (tools, _rx, _roots) =
+        start_everything_with_requests(&mut none, vec![], AdvertisedCapabilities::none()).await;
     let names = tool_names(&tools);
     assert!(
         names.contains("everything__echo"),
@@ -2322,10 +2382,8 @@ async fn advertised_capabilities_gate_what_the_server_registers() {
 
     // Advertise all three: the server now registers each gated tool.
     let mut all = McpClientManager::new();
-    let (gtools, _grx, _groots) = all
-        .start_server_with_requests(everything_config(), vec![], AdvertisedCapabilities::all())
-        .await
-        .expect("start server-everything (all caps)");
+    let (gtools, _grx, _groots) =
+        start_everything_with_requests(&mut all, vec![], AdvertisedCapabilities::all()).await;
     let gnames = tool_names(&gtools);
     assert!(
         gnames.contains("everything__trigger-sampling-request")
@@ -2534,10 +2592,7 @@ async fn stdio_shutdown_with_outstanding_tool_arc_is_graceful() {
     // fire; each previously had a minority chance of the EPIPE crash.
     for _ in 0..3 {
         let mut manager = McpClientManager::new();
-        let tools = manager
-            .start_server(everything_config())
-            .await
-            .expect("start server-everything");
+        let tools = start_everything(&mut manager).await;
 
         // Drive the server so it is actively producing output (and thus
         // liable to be mid-write at teardown): call the echo tool.
@@ -2564,4 +2619,202 @@ async fn stdio_shutdown_with_outstanding_tool_arc_is_graceful() {
 
         drop(_held);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #115 — the startup retry, and the line it must not cross.
+//
+// Three deterministic tests pin the helper's scope with no server at
+// all (so they run everywhere, per #258): what is retried, that the
+// bound is two, and that a post-startup error is not retried. A fourth
+// drives the real thing through a `sh` stand-in for `npx` that counts
+// how many times it is asked to start — twice, because the first start
+// dies mid-handshake.
+// ---------------------------------------------------------------------------
+
+/// A startup failure — the flake — is retried, and the second attempt's
+/// success is the helper's answer.
+#[tokio::test(start_paused = true)]
+async fn start_retry_absorbs_one_startup_failure() {
+    let attempts = AtomicUsize::new(0);
+    let started = try_start_with_retry("stub", async || {
+        match attempts.fetch_add(1, Ordering::SeqCst) {
+            0 => Err(McpError::ServerStart {
+                command: "npx".to_string(),
+                reason: "connection closed: initialize response".to_string(),
+            }),
+            _ => Ok("tools"),
+        }
+    })
+    .await;
+
+    assert_eq!(started.map_err(|e| format!("{e:?}")), Ok("tools"));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "the flaky start should have been tried exactly twice"
+    );
+}
+
+/// Twice is the bound: a server that will not start fails the test, and
+/// fails it carrying both reasons, so a persistent upstream breakage is
+/// distinguishable from noise.
+#[tokio::test(start_paused = true)]
+async fn start_retry_gives_up_after_the_second_startup_failure() {
+    let attempts = AtomicUsize::new(0);
+    let started: Result<(), _> = try_start_with_retry("stub", async || {
+        let n = attempts.fetch_add(1, Ordering::SeqCst);
+        Err(McpError::ServerStart {
+            command: "npx".to_string(),
+            reason: format!("failure {}", n + 1),
+        })
+    })
+    .await;
+
+    let errors = started.expect_err("a server that never starts must fail");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "no third attempt");
+    let reasons: Vec<String> = errors.iter().map(|err| err.to_string()).collect();
+    assert!(
+        reasons.len() == 2 && reasons[0].contains("failure 1") && reasons[1].contains("failure 2"),
+        "both attempts' reasons should be reported, got {reasons:?}"
+    );
+}
+
+/// The line: a failure *after* the handshake — `tools/list`, and by
+/// extension every tool call, prompt and assertion the tests above make
+/// — is surfaced on the first try. Retrying it would turn a regression
+/// in the code under test into a green run.
+#[tokio::test(start_paused = true)]
+async fn start_retry_does_not_retry_a_post_startup_failure() {
+    let attempts = AtomicUsize::new(0);
+    let started: Result<(), _> = try_start_with_retry("stub", async || {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        Err(McpError::ToolDiscovery {
+            command: "npx".to_string(),
+            reason: "tools/list refused".to_string(),
+        })
+    })
+    .await;
+
+    let errors = started.expect_err("a discovery failure must still fail");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a post-startup failure must not be retried"
+    );
+    assert_eq!(errors.len(), 1, "and must be reported once, not twice");
+}
+
+/// Where `npx` sits on the *test process's* PATH. The stand-in below
+/// needs the absolute path: the child runs with a cleared environment
+/// and a pinned PATH (`mcp::stdio`), so a bare `npx` would not resolve
+/// from a wrapper the way it does from a `command:`.
+#[cfg(unix)]
+fn npx_program() -> Option<std::path::PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("npx"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Write a `sh` stand-in for `npx` into `dir`. It counts its own
+/// invocations into `dir/attempts` and dies on the first one, before it
+/// can answer `initialize` — the flake of #115, made deterministic.
+/// Returns the stand-in's path and the counter's.
+///
+/// It puts `npx`'s own directory on the PATH before exec'ing it, which
+/// is exactly what `mcp::stdio` does for a real `command: npx` so the
+/// sibling `node` is found.
+#[cfg(unix)]
+fn write_npx_wrapper(
+    dir: &std::path::Path,
+    npx: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let attempts = dir.join("attempts");
+    let wrapper = dir.join("npx-stand-in");
+    let script = format!(
+        "#!/bin/sh\n\
+         # Test double for `npx` (factor-q issue #115).\n\
+         attempts='{attempts}'\n\
+         n=$(cat \"$attempts\" 2>/dev/null || printf 0)\n\
+         n=$((n + 1))\n\
+         printf '%s' \"$n\" > \"$attempts\"\n\
+         if [ \"$n\" -eq 1 ]; then\n\
+        \x20 echo 'simulated startup flake (#115)' >&2\n\
+        \x20 exit 1\n\
+         fi\n\
+         PATH='{npx_dir}':\"$PATH\"\n\
+         export PATH\n\
+         exec '{npx}' \"$@\"\n",
+        attempts = attempts.display(),
+        npx_dir = npx.parent().expect("npx has a directory").display(),
+        npx = npx.display(),
+    );
+    std::fs::write(&wrapper, script).expect("write the npx stand-in");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make the npx stand-in executable");
+    (wrapper, attempts)
+}
+
+/// How many times the stand-in has been asked to start the server.
+#[cfg(unix)]
+fn spawn_attempts(counter: &std::path::Path) -> usize {
+    std::fs::read_to_string(counter)
+        .map(|text| text.trim().parse().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// The everything server behind a given `command`, under its own name
+/// so it gets its own working directory.
+#[cfg(unix)]
+fn config_via(name: &str, command: &std::path::Path) -> McpServerConfig {
+    McpServerConfig {
+        name: name.to_string(),
+        command: command.display().to_string(),
+        args: vec!["-y".to_string(), EVERYTHING_SERVER.to_string()],
+        env: vec![],
+        url: None,
+    }
+}
+
+/// End to end: a server that dies during its own `initialize` is
+/// started again, comes up, and the test that asked for it never knows
+/// — which is the whole point. Two spawns, one working server.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_flaky_startup_is_retried_and_the_server_comes_up() {
+    if !require_npx() {
+        eprintln!("skipping: npx not found");
+        return;
+    }
+    let Some(npx) = npx_program() else {
+        eprintln!("skipping: npx did not resolve on PATH");
+        return;
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (wrapper, counter) = write_npx_wrapper(dir.path(), &npx);
+
+    let mut manager = McpClientManager::new();
+    let tools = start_with_retry("flaky server-everything", async || {
+        manager.start_server(config_via("flaky", &wrapper)).await
+    })
+    .await;
+
+    assert_eq!(
+        spawn_attempts(&counter),
+        2,
+        "the first start must have failed and been retried exactly once"
+    );
+    assert!(
+        tools.iter().any(|t| t.name() == "flaky__echo"),
+        "the retried start must have discovered the server's tools, got {:?}",
+        tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    manager.shutdown().await;
 }
