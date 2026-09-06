@@ -174,6 +174,7 @@ mod tests {
             Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
+                last_step_at: None,
             }),
         );
         bus.publish(&event).await.expect("publish heartbeat");

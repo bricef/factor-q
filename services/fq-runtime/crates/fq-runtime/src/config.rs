@@ -22,6 +22,7 @@ mod bus;
 mod edge;
 mod error;
 mod nats;
+mod stuck;
 mod tools;
 pub use bus::BusConfig;
 pub use edge::EdgeConfig;
@@ -204,6 +205,17 @@ pub struct WorkerConfig {
     /// raise deliberately.
     #[serde(default = "default_max_concurrent_invocations")]
     pub max_concurrent_invocations: usize,
+    /// Override the derived stuck threshold (see [`Config::stuck_after`]),
+    /// in seconds. `None` by default, and nothing in this repository
+    /// sets it.
+    ///
+    /// An emergency escape hatch, not a tuning knob: it exists so an
+    /// operator staring at a live wedge can widen or narrow the report
+    /// without a rebuild. A workload that needs it permanently is
+    /// telling you the deadlines it is derived from are wrong, and
+    /// those are what should move.
+    #[serde(default)]
+    pub stuck_threshold_override_secs: Option<u64>,
 }
 
 fn default_max_concurrent_invocations() -> usize {
@@ -235,6 +247,7 @@ impl Default for WorkerConfig {
             llm_timeout_secs: default_llm_timeout_secs(),
             llm_connect_timeout_secs: default_llm_connect_timeout_secs(),
             max_concurrent_invocations: default_max_concurrent_invocations(),
+            stuck_threshold_override_secs: None,
         }
     }
 }

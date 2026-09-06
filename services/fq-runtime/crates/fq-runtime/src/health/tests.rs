@@ -111,6 +111,7 @@ async fn a_consumer_that_acks_out_of_order_is_not_stuck() {
             Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
+                last_step_at: None,
             }),
         ))
         .await
@@ -215,6 +216,7 @@ async fn a_permanently_failing_handler_backs_off_logs_at_a_bounded_rate_and_repo
         Uuid::now_v7(),
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: worker_id.clone(),
+            last_step_at: None,
         }),
     ))
     .await
@@ -349,6 +351,7 @@ async fn a_healthy_consumer_is_never_reported_stuck() {
             Uuid::now_v7(),
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
+                last_step_at: None,
             }),
         ))
         .await

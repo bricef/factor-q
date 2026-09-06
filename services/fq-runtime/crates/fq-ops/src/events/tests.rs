@@ -146,7 +146,36 @@ fn subjects_for_all_event_types() {
         subjects::agent_invocation_ambiguous(agent),
         "fq.agent.test-agent.invocation.ambiguous"
     );
+    assert_eq!(
+        subjects::agent_invocation_stuck(agent),
+        "fq.agent.test-agent.invocation.stuck"
+    );
     assert_eq!(subjects::worker_orphaned("w1"), "fq.worker.w1.orphaned");
+}
+
+/// `invocation.stuck` must land inside `fq.agent.*.invocation.*` — the
+/// coordination consumer's filter — and name the invocation on the
+/// envelope rather than in the payload, so it reads like every other
+/// per-invocation fact.
+#[test]
+fn invocation_stuck_is_agent_scoped_and_names_the_invocation_on_the_envelope() {
+    let invocation_id = Uuid::now_v7();
+    let event = Event::new(
+        AgentId::new("researcher").unwrap(),
+        invocation_id,
+        EventPayload::InvocationStuck(crate::events::InvocationStuckPayload {
+            last_step_at_ms: 1_700_000_000_000,
+            stuck_after_ms: 4_210_000,
+            phase: "awaiting_model".to_string(),
+            step_index: 7,
+        }),
+    );
+    assert_eq!(event.subject(), "fq.agent.researcher.invocation.stuck");
+    assert_eq!(event.envelope.schema_id, "factor-q/invocation_stuck@1");
+    assert_eq!(event.envelope.invocation_id, invocation_id);
+    assert_eq!(event.payload.event_type(), "invocation_stuck");
+    // It is history, not a ping: the operator surface serves it.
+    assert!(!event.payload.is_transient());
 }
 
 #[test]
@@ -278,6 +307,7 @@ fn worker_heartbeat_subject_reads_from_payload_not_envelope() {
         runtime_id,
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: worker_id.clone(),
+            last_step_at: None,
         }),
     );
     assert_eq!(event.subject(), "fq.worker.worker-007.heartbeat");
@@ -1305,6 +1335,12 @@ fn schema_id_for_every_payload_variant() {
             stuck_call_id: "tc".into(),
             note: String::new(),
         }),
+        EventPayload::InvocationStuck(crate::events::InvocationStuckPayload {
+            last_step_at_ms: 0,
+            stuck_after_ms: 0,
+            phase: String::new(),
+            step_index: 0,
+        }),
         EventPayload::SystemStartup(SystemStartupPayload {
             runtime_id: inv,
             version: String::new(),
@@ -1332,6 +1368,7 @@ fn schema_id_for_every_payload_variant() {
         }),
         EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
             worker_id: crate::worker::WorkerId::new("w").unwrap(),
+            last_step_at: None,
         }),
         EventPayload::WorkerOrphaned(WorkerOrphanedPayload {
             worker_id: crate::worker::WorkerId::new("w").unwrap(),

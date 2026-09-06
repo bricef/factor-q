@@ -458,6 +458,7 @@ mod tests {
                 Uuid::now_v7(),
                 EventPayload::WorkerHeartbeat(crate::events::WorkerHeartbeatPayload {
                     worker_id: crate::worker::WorkerId::new("w-1".to_string()).unwrap(),
+                    last_step_at: None,
                 }),
             ))
             .is_none()

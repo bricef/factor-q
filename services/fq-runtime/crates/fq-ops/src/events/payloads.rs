@@ -476,16 +476,27 @@ pub struct SystemRecoveryPayload {
 /// Payload for [`EventPayload::WorkerHeartbeat`](super::EventPayload::WorkerHeartbeat). Identifies
 /// which worker the heartbeat is for; the timestamp lives on
 /// the envelope.
-///
-/// The payload is deliberately minimal. Future "what is this
-/// worker up to" fields (in-flight invocation count, load,
-/// version, host info) belong here when there's a consumer
-/// that uses them — today the only consumer is the
-/// coordination consumer's `last_heartbeat` update, which
-/// reads only the `worker_id` and the envelope timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHeartbeatPayload {
     pub worker_id: WorkerId,
+    /// The newest step boundary across this worker's in-flight
+    /// invocations, in unix ms — the largest `updated_at` in its WAL —
+    /// or `None` when it holds no in-flight work.
+    ///
+    /// A beat says the *process* is alive. Without this field that is
+    /// all it says, so a worker wedged inside one invocation goes on
+    /// beating and never looks stale to anything (production-readiness
+    /// review, finding F). With it, a reader can tell a busy worker from
+    /// a stopped one without a second timestamp source: the beat is
+    /// fresh and the step boundary is old.
+    ///
+    /// Worker-scoped rather than per-invocation on purpose. Which
+    /// invocation is the offender is a question the WAL already answers
+    /// row by row, and the sweep that asks it reads that WAL directly;
+    /// putting a per-invocation list on a 10-second ping would put the
+    /// same rows on the wire ~8,600 times a day to answer a question
+    /// nothing asks of the beat.
+    pub last_step_at: Option<i64>,
 }
 
 /// Payload for [`EventPayload::WorkerOrphaned`](super::EventPayload::WorkerOrphaned).
@@ -493,6 +504,30 @@ pub struct WorkerHeartbeatPayload {
 pub struct WorkerOrphanedPayload {
     pub worker_id: WorkerId,
     pub last_heartbeat_ms: i64,
+}
+
+/// Payload for [`EventPayload::InvocationStuck`](super::EventPayload::InvocationStuck):
+/// an in-flight invocation that has not crossed a step boundary within
+/// the runtime's stuck threshold. The invocation and its agent ride the
+/// envelope; this carries what an operator needs to judge the report
+/// without a second call — when it last moved, how long it was given,
+/// and where it stopped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationStuckPayload {
+    /// The last step boundary: `invocation_state.updated_at`, in unix
+    /// ms. Subtract it from the envelope timestamp for the stall's age.
+    pub last_step_at_ms: i64,
+    /// The threshold that was crossed, in ms. Carried on the event
+    /// because it is *derived* from the daemon's timeouts rather than
+    /// fixed, so a reader cannot recompute it and two daemons with
+    /// different configuration legitimately disagree about the same
+    /// stall.
+    pub stuck_after_ms: i64,
+    /// The reducer phase the invocation stopped in — `awaiting_model`,
+    /// `awaiting_tool`, and so on.
+    pub phase: String,
+    /// How many reducer steps it had taken when it stopped.
+    pub step_index: u32,
 }
 
 /// A log record a connected MCP server emitted (`notifications/message`),

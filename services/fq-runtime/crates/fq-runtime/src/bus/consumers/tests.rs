@@ -113,6 +113,7 @@ async fn an_existing_durable_is_repaired_without_losing_its_place() {
             uuid::Uuid::now_v7(),
             crate::events::EventPayload::WorkerHeartbeat(crate::events::WorkerHeartbeatPayload {
                 worker_id: worker_id.clone(),
+                last_step_at: None,
             }),
         ))
         .await
