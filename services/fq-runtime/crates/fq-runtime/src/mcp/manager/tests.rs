@@ -232,3 +232,156 @@ async fn a_cancellable_call_carries_a_progress_token() {
          progress at all"
     );
 }
+
+/// Fault injection for review finding B2 (#547): a server that accepts
+/// a `tools/call` and never answers.
+///
+/// The agent's path — `McpTool::execute` with a deadline on the tool
+/// context — must give up at the deadline, tell the server to stop, and
+/// leave nothing behind. Each of those three is a separate way the old
+/// bare `call_tool(...).await` failed: it waited forever, the server
+/// never learned to stop, and there was no table to leave clean.
+#[tokio::test]
+async fn a_held_mcp_call_is_cancelled_at_the_deadline_and_leaves_no_entry() {
+    use fq_tools::{ToolContext, ToolError, ToolSandbox};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let progress = ProgressRegistry::default();
+    let (client, calls, control) = crate::mcp::mock::serve_mock_behaving(
+        Arc::new(Mutex::new(vec![mock_tool("hang")])),
+        10,
+        crate::mcp::mock::CallBehaviour::HoldUntilCancelled,
+        Some(("mock".to_string(), progress.clone())),
+    )
+    .await;
+
+    let (tools, _) = McpClientManager::discover_tools(&client, "mock", &progress)
+        .await
+        .expect("discover");
+    let tool = tools
+        .iter()
+        .find(|t| t.name() == "mock__hang")
+        .expect("the held tool is registered");
+
+    let sandbox = ToolSandbox::new();
+    let ctx = ToolContext::new(&sandbox)
+        .with_deadline(Duration::from_millis(250))
+        .with_call("inv-hang", "call-hang");
+
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        tool.execute(&ctx, serde_json::json!({})),
+    )
+    .await
+    .expect("the call must not outlive the deadline by seconds")
+    .expect_err("a held call ends as a timeout");
+    assert!(
+        matches!(err, ToolError::TimedOut { .. }),
+        "expected a timeout, got: {err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the deadline, not the test's own timeout, ended the call"
+    );
+
+    // The server was asked to stop, not merely abandoned.
+    for _ in 0..100 {
+        if control.cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        control.cancelled.load(Ordering::SeqCst),
+        "the mock must observe notifications/cancelled"
+    );
+    assert_eq!(calls.lock().await.len(), 1, "one call reached the server");
+
+    // And the host is not still holding the call open anywhere.
+    assert!(
+        progress.is_empty(),
+        "a cancelled call must leave no in-flight entry: {:?}",
+        progress.in_flight()
+    );
+}
+
+/// #605 end to end through the mock: the server reports progress
+/// against the token *rmcp* minted, and the host attributes it to the
+/// invocation and tool call that issued the request — then forgets it.
+///
+/// The mock holds the call open after reporting, so the correlation is
+/// observed while it exists rather than raced against the guard that
+/// clears it.
+#[tokio::test]
+async fn progress_from_the_server_is_attributed_to_the_issuing_call() {
+    use fq_tools::{ToolContext, ToolSandbox};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let progress = ProgressRegistry::default();
+    let (client, calls, control) = crate::mcp::mock::serve_mock_behaving(
+        Arc::new(Mutex::new(vec![mock_tool("slow")])),
+        10,
+        crate::mcp::mock::CallBehaviour::ReportProgressThenHold,
+        Some(("mock".to_string(), progress.clone())),
+    )
+    .await;
+
+    let (tools, _) = McpClientManager::discover_tools(&client, "mock", &progress)
+        .await
+        .expect("discover");
+    let tool = Arc::clone(
+        tools
+            .iter()
+            .find(|t| t.name() == "mock__slow")
+            .expect("the tool is registered"),
+    );
+
+    let call = tokio::spawn(async move {
+        let sandbox = ToolSandbox::new();
+        let ctx = ToolContext::new(&sandbox)
+            .with_deadline(Duration::from_secs(30))
+            .with_call("inv-42", "call-7");
+        tool.execute(&ctx, serde_json::json!({})).await
+    });
+
+    // Wait for the notification to land, then read the correlation.
+    let mut attributed = None;
+    for _ in 0..600 {
+        if let Some(entry) = progress
+            .in_flight()
+            .into_iter()
+            .find(|c| c.last_progress_at.is_some())
+        {
+            attributed = Some(entry);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let attributed = attributed.expect("the progress notification must reach the registry");
+    assert_eq!(attributed.invocation_id, "inv-42");
+    assert_eq!(attributed.call_id, "call-7");
+    assert_eq!(attributed.tool_name, "mock__slow");
+
+    control.release.store(true, Ordering::SeqCst);
+    let result = call
+        .await
+        .expect("the call task joins")
+        .expect("the mock answers after reporting progress");
+    assert_eq!(result.output, "ok");
+
+    // The token the server reported under is rmcp's own, not one the
+    // host chose — the host attaches none (#605).
+    let recorded = calls.lock().await.clone();
+    assert!(
+        recorded[0].progress_token.is_some(),
+        "rmcp mints a token for every outbound request"
+    );
+    assert!(
+        progress.is_empty(),
+        "the entry is dropped when the call completes: {:?}",
+        progress.in_flight()
+    );
+}
