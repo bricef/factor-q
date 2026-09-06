@@ -445,25 +445,33 @@ pub struct TokenUsage {
     /// The share of `output_tokens` the model spent thinking rather than
     /// speaking. **A decomposition, not an addition** — providers already
     /// fold reasoning into the completion count, so this never changes
-    /// what a call costs. `0` where the provider does not report it,
-    /// which is most of them.
+    /// what a call costs.
+    ///
+    /// `None` is a provider that reported no thought-versus-spoken
+    /// split, which Anthropic never does; `Some(0)` is a provider that
+    /// reported one and it was zero. They are different facts and stay
+    /// distinguishable all the way to the operator — `n/a` in `fq costs`
+    /// is not `0` (#536). Absent on the wire when `None`.
     ///
     /// It exists because for a reasoning-first model that split is most
     /// of the bill, and it was invisible everywhere in the cost data
     /// (#437). Additive on the wire, so it needs no schema bump.
-    #[serde(default)]
-    pub reasoning_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
 }
 
 impl TokenUsage {
     /// The output tokens that were *spoken* rather than thought.
     ///
+    /// With no reported split every output token counts as spoken, so
+    /// for such a call this is an upper bound rather than a measurement.
     /// Saturating because the split is the provider's arithmetic, not
     /// ours: a provider reporting more reasoning than completion tokens
     /// is a provider bug (genai already corrects one such case for xAI),
     /// and this should read 0 rather than panic or wrap.
     pub fn spoken_tokens(&self) -> u32 {
-        self.output_tokens.saturating_sub(self.reasoning_tokens)
+        self.output_tokens
+            .saturating_sub(self.reasoning_tokens.unwrap_or(0))
     }
 }
 

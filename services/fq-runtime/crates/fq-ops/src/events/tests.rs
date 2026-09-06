@@ -831,7 +831,7 @@ fn llm_failure_omits_usage_when_unknown() {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            reasoning_tokens: None,
         }),
         origin: LlmCallOrigin::default(),
     });
@@ -1006,7 +1006,7 @@ fn event_with_cost_sets_envelope_cost() {
         cumulative_invocation_cost: 0.0006,
         cumulative_agent_cost: 0.0006,
         origin: LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     };
     let event = event.with_cost(cost.clone());
     assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
@@ -1028,7 +1028,7 @@ fn cost_metadata_round_trips_on_envelope() {
         cumulative_invocation_cost: 0.3,
         cumulative_agent_cost: 0.3,
         origin: LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     };
     let event = Event::new(
         AgentId::new("agent").unwrap(),
@@ -1388,4 +1388,69 @@ fn schema_id_for_every_payload_variant() {
             "schema_id_for produced {id:?}"
         );
     }
+}
+
+/// **An unreported split and a reported zero are different facts on
+/// the wire** (#536). `None` is absent from the JSON; `Some(0)` is a
+/// literal `0`; and each reads back as itself. A reader that collapsed
+/// the two would make every Anthropic call — which never reports a
+/// split — look like a model that did no thinking.
+#[test]
+fn reasoning_tokens_keep_unreported_apart_from_zero_on_the_wire() {
+    let unreported = TokenUsage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: None,
+    };
+    let reported_zero = TokenUsage {
+        reasoning_tokens: Some(0),
+        ..unreported
+    };
+
+    let unreported_json = serde_json::to_value(unreported).unwrap();
+    let zero_json = serde_json::to_value(reported_zero).unwrap();
+    assert!(
+        unreported_json.get("reasoning_tokens").is_none(),
+        "an unreported split is absent, not zero: {unreported_json}"
+    );
+    assert_eq!(zero_json["reasoning_tokens"], json!(0));
+
+    let back: TokenUsage = serde_json::from_value(unreported_json).unwrap();
+    assert_eq!(back.reasoning_tokens, None);
+    let back: TokenUsage = serde_json::from_value(zero_json).unwrap();
+    assert_eq!(back.reasoning_tokens, Some(0));
+
+    // The same on the cost record, which is what the projection reads.
+    let cost = CostMetadata {
+        call_id: Uuid::now_v7(),
+        model: "m".to_string(),
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        input_cost: 0.1,
+        output_cost: 0.2,
+        total_cost: 0.3,
+        cumulative_invocation_cost: 0.3,
+        cumulative_agent_cost: 0.3,
+        origin: LlmCallOrigin::AgentTurn,
+        reasoning_tokens: None,
+    };
+    let unreported_json = serde_json::to_value(&cost).unwrap();
+    assert!(
+        unreported_json.get("reasoning_tokens").is_none(),
+        "the cost record omits an unreported split too: {unreported_json}"
+    );
+    let zero_json = serde_json::to_value(CostMetadata {
+        reasoning_tokens: Some(0),
+        ..cost
+    })
+    .unwrap();
+    assert_eq!(zero_json["reasoning_tokens"], json!(0));
+    let back: CostMetadata = serde_json::from_value(unreported_json).unwrap();
+    assert_eq!(back.reasoning_tokens, None);
+    let back: CostMetadata = serde_json::from_value(zero_json).unwrap();
+    assert_eq!(back.reasoning_tokens, Some(0));
 }

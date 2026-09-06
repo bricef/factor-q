@@ -806,7 +806,8 @@ async fn gemini_signed_function_call_loop() {
         "a bare signature is recorded as opaque reasoning, not dropped"
     );
     assert_eq!(
-        first.usage.reasoning_tokens, 12,
+        first.usage.reasoning_tokens,
+        Some(12),
         "thoughtsTokenCount is the split"
     );
     continue_with_tool_result(&mut messages, &first, "runbook says: restart");

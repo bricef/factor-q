@@ -51,7 +51,7 @@ fn summary_event_costing(
         cumulative_invocation_cost: total_cost,
         cumulative_agent_cost: total_cost,
         origin: Default::default(),
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     })
 }
 
@@ -389,7 +389,7 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
                 output_tokens: 50,
                 cache_read_tokens: 20,
                 cache_write_tokens: 10,
-                reasoning_tokens: 0,
+                reasoning_tokens: None,
             },
         }),
     )
@@ -406,7 +406,7 @@ fn sample_llm_response_with_cost(agent: &str, inv: Uuid, cost: f64) -> Event {
         cumulative_invocation_cost: cost,
         cumulative_agent_cost: cost,
         origin: crate::events::LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     })
 }
 
@@ -481,7 +481,7 @@ fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
                 output_tokens: 3,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
-                reasoning_tokens: 0,
+                reasoning_tokens: None,
             },
         }),
     )
@@ -497,7 +497,7 @@ fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     });
     let event = Event::new(
         aid(agent),
@@ -529,7 +529,7 @@ fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
         cumulative_invocation_cost: total_cost,
         cumulative_agent_cost: total_cost,
         origin: crate::events::LlmCallOrigin::AgentTurn,
-        reasoning_tokens: 0,
+        reasoning_tokens: None,
     })
 }
 
