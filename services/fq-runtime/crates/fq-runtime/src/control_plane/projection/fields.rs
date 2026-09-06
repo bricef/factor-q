@@ -109,6 +109,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
         EventPayload::LlmDispatched(_) => Fields::default(),
         EventPayload::HostNotice(_) => Fields::default(),
         EventPayload::InvocationAmbiguous(_) => Fields::default(),
+        EventPayload::InvocationStuck(_) => Fields::default(),
         EventPayload::InvocationArchived(_) => Fields::default(),
         EventPayload::InvocationArchiveAcked(_) => Fields::default(),
         EventPayload::ToolResult(p) => Fields {

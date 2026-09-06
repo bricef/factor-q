@@ -21,6 +21,13 @@
 //! meaningful even if a worker process disappears without
 //! emitting a shutdown event.
 //!
+//! The same tick runs the stuck-invocation sweep (#37, see
+//! [`super::liveness`]), which answers the other half of the
+//! question: a healthy worker can host a wedged invocation, and
+//! the roster cannot see that. One timer for both, because they
+//! are one finding — nothing has moved for too long — read from
+//! two different stores.
+//!
 //! Delivery semantics (the loop and ack policy live in
 //! [`super::durable_consumer`]):
 //! - **At-least-once** from JetStream. Coordination updates
@@ -111,6 +118,15 @@ pub struct CoordinationConsumer {
     /// the read horizon: the Invocation view's fold spans stores this
     /// consumer writes, so gated reads wait on this mark too.
     watermark: Option<crate::watermark::WatermarkSender>,
+    /// The stuck-invocation sweep (#37), when this process hosts one.
+    /// Rides the same tick as the stale-worker sweep: the two are the
+    /// same class of finding — nothing has moved for too long — and
+    /// running them together means one timer, one serialisation point,
+    /// and no possibility of the roster and the work disagreeing about
+    /// what "now" was. `None` on a control plane with no co-located
+    /// worker WAL to read, and in the unit tests that only exercise the
+    /// handler.
+    stuck_sweep: Option<Arc<super::liveness::StuckSweep>>,
 }
 
 impl CoordinationConsumer {
@@ -126,7 +142,20 @@ impl CoordinationConsumer {
             test_filter_subject: None,
             runtime_id: Uuid::now_v7(),
             watermark: None,
+            stuck_sweep: None,
         }
+    }
+
+    /// Run the stuck-invocation sweep on this consumer's tick (#37).
+    ///
+    /// Given as a built sweep rather than a threshold because the
+    /// crossing memory is the sweep's, and it has to survive across
+    /// ticks: a sweep rebuilt each tick would re-emit for every
+    /// offender, every tick, which is the unbounded-noise mode this
+    /// design exists to avoid.
+    pub fn with_stuck_sweep(mut self, sweep: Arc<super::liveness::StuckSweep>) -> Self {
+        self.stuck_sweep = Some(sweep);
+        self
     }
 
     /// Attach the co-located worker store so authoritative operator
@@ -253,6 +282,14 @@ impl CoordinationConsumer {
             || async move {
                 if let Err(err) = this.sweep_stale_workers().await {
                     warn!(error = %err, "stale-worker sweep failed");
+                }
+                // Second, and never instead: a failed roster sweep must
+                // not take the work sweep with it. They read different
+                // stores and fail for different reasons.
+                if let Some(sweep) = &this.stuck_sweep
+                    && let Err(err) = sweep.tick(Utc::now().timestamp_millis()).await
+                {
+                    warn!(error = %err, "stuck-invocation sweep failed");
                 }
             },
         )

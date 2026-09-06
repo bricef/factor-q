@@ -180,6 +180,13 @@ fn event_summary(event: &Event) -> String {
             "invocation.ambiguous entity={} call_id={}",
             p.stuck_entity, p.stuck_call_id
         ),
+        EventPayload::InvocationStuck(p) => format!(
+            "invocation.stuck phase={} step={} last_step_at_ms={} stuck_after={}s",
+            p.phase,
+            p.step_index,
+            p.last_step_at_ms,
+            p.stuck_after_ms / 1000
+        ),
         EventPayload::InvocationArchived(p) => format!(
             "invocation.archived worker_id={} phase={}",
             p.worker_id, p.final_phase

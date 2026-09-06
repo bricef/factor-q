@@ -40,6 +40,7 @@ pub(crate) fn register_health_reports(
         registry,
         doctor_views,
         doctor_bus,
+        facts.stuck_after_ms,
         facts.summary_enabled,
     )?;
     crate::status_report::register_status_report(registry, status_views, status_bus, agents, facts)

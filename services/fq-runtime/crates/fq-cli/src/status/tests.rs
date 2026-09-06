@@ -22,6 +22,7 @@ fn report() -> StatusReport {
     StatusReport {
         version: "0.1.0+deadbee".to_string(),
         drain_deadline_ms: 180_000,
+        stuck_after_ms: 4_210_000,
         stores: stores(true),
         streams: vec![StreamHealth::Available {
             stream: "fq-events".to_string(),

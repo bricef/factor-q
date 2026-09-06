@@ -13,7 +13,17 @@
 //! sustained outage surfaces naturally — the worker just appears
 //! stale to the coordination view, which is the correct
 //! observable behaviour.
+//!
+//! Each beat also carries the worker's **last step boundary** — the
+//! newest `invocation_state.updated_at` across its in-flight work
+//! (production-readiness review, finding F). A beat on its own reports
+//! that the *process* is alive, which is exactly the signal a wedged
+//! invocation does not disturb: the worker keeps beating while nothing
+//! it holds advances. With the boundary on the beat, "alive but not
+//! working" is readable from the beat itself rather than needing a
+//! second timestamp source.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -42,6 +52,11 @@ pub struct HeartbeatProducer {
     worker_id: WorkerId,
     runtime_id: Uuid,
     interval_ms: u64,
+    /// The WAL this worker writes its step boundaries into. Absent in
+    /// the unit tests that only assert the cadence; a producer without
+    /// it beats with `last_step_at: None`, which reads as "this worker
+    /// is not saying", not as "this worker has no work".
+    store: Option<Arc<super::store::WorkerStore>>,
 }
 
 impl HeartbeatProducer {
@@ -51,7 +66,15 @@ impl HeartbeatProducer {
             worker_id,
             runtime_id,
             interval_ms: DEFAULT_INTERVAL_MS,
+            store: None,
         }
+    }
+
+    /// Report the last step boundary on every beat, read from this
+    /// worker's own WAL (finding F).
+    pub fn with_store(mut self, store: Arc<super::store::WorkerStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Override the cadence. Test-only — production callers should
@@ -105,6 +128,31 @@ impl HeartbeatProducer {
         Ok(())
     }
 
+    /// The newest step boundary across this worker's in-flight
+    /// invocations, or `None` when it has none — and also `None` when
+    /// the WAL cannot be read, because a beat that stopped arriving
+    /// would be a worse answer than a beat that reports nothing.
+    ///
+    /// Reads the in-flight rows rather than asking for one aggregate:
+    /// the population is bounded by `max_concurrent_invocations`
+    /// (default 1), the query already exists, and the alternative was a
+    /// new column-max query in a store file that is at its size budget
+    /// and may only shrink.
+    async fn last_step_at(&self) -> Option<i64> {
+        let store = self.store.as_ref()?;
+        match store.find_in_flight_invocations().await {
+            Ok(rows) => rows.iter().map(|r| r.updated_at).max(),
+            Err(err) => {
+                warn!(
+                    worker_id = %self.worker_id,
+                    error = %err,
+                    "could not read the last step boundary; beating without it"
+                );
+                None
+            }
+        }
+    }
+
     /// Build and publish a single heartbeat event. Logs on
     /// failure; does not propagate the error.
     async fn emit_one(&self) {
@@ -112,7 +160,7 @@ impl HeartbeatProducer {
             self.runtime_id,
             EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
                 worker_id: self.worker_id.clone(),
-                last_step_at: None,
+                last_step_at: self.last_step_at().await,
             }),
         );
         match self.bus.publish(&event).await {

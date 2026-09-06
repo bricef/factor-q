@@ -8,6 +8,11 @@ use super::*;
 use fq_ops::surface::build_doctor_report;
 use fq_ops::views::{ExecutionsView, FailureView, WorkerView};
 
+/// The derived threshold a daemon would have handed the report. An
+/// arbitrary value on purpose: the renderer must print what it is
+/// given, not a number it knows.
+const THRESHOLD_MS: i64 = 4_210_000;
+
 fn worker(id: &str, status: &str) -> WorkerView {
     WorkerView {
         worker_id: id.to_string(),
@@ -41,6 +46,7 @@ fn all_clear_renders_a_verdict_and_still_shows_dead_letters() {
     let report = build_doctor_report(
         &[worker("w1", "alive")],
         &ExecutionsView::default(),
+        THRESHOLD_MS,
         0,
         &[],
         Vec::new(),
@@ -58,7 +64,14 @@ fn stale_workers_render_with_their_remediation() {
         worker("stale-1", "stale"),
         worker("gone-1", "shutdown"),
     ];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &workers,
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("1 alive, 1 stale, 1 shutdown"), "got: {out}");
@@ -68,29 +81,65 @@ fn stale_workers_render_with_their_remediation() {
 
 #[test]
 fn stuck_in_flight_renders_with_its_remediation() {
-    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &executions(2, &["stuck-abcdef01"]),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("2 in-flight (0 working, 1 stuck)"),
+        out.contains("2 in-flight (0 working, 1 stuck after 4210s)"),
         "got: {out}"
     );
     assert!(out.contains("fq invocation drop"), "got: {out}");
 }
 
-/// The stuck line names the threshold the daemon applied. It reads it
-/// from the shared constant today; when Phase 5 splits the binaries,
-/// either the number travels in the report or this line stops naming
-/// one.
+/// The stuck line names the threshold the daemon applied — and takes it
+/// off the report rather than out of a constant of its own (#37). The
+/// number is derived from the daemon's call deadlines, so across the
+/// `fq`/`fqd` split a client that quoted its own build would print a
+/// threshold the daemon it is talking to never used.
 #[test]
-fn the_stuck_line_names_the_threshold_in_seconds() {
-    let report = build_doctor_report(&[], &executions(1, &["stuck-abcdef01"]), 0, &[], Vec::new());
+fn the_stuck_line_names_the_threshold_the_daemon_reported() {
+    let report = build_doctor_report(
+        &[],
+        &executions(1, &["stuck-abcdef01"]),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains(&format!(
-            "not advanced in >{}s",
-            DOCTOR_STUCK_THRESHOLD_MS / 1000
-        )),
+        out.contains(&format!("not advanced in >{}s", THRESHOLD_MS / 1000)),
+        "got: {out}"
+    );
+    assert!(
+        out.contains("fq events query --type invocation_stuck"),
+        "the report points at the event that fired: {out}"
+    );
+}
+
+/// The same number appears on the executions line whether or not
+/// anything is stuck, so an operator can read the daemon's threshold
+/// out of a clean report.
+#[test]
+fn a_clean_executions_line_still_names_the_threshold() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("0 in-flight (0 working, 0 stuck after 4210s)"),
         "got: {out}"
     );
 }
@@ -106,11 +155,11 @@ fn working_in_flight_shown_but_offered_no_remedy() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, 0, &[], Vec::new());
+    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("2 in-flight (1 working, 0 stuck)"),
+        out.contains("2 in-flight (1 working, 0 stuck after 4210s)"),
         "got: {out}"
     );
     assert!(!out.contains("fq invocation drop"), "got: {out}");
@@ -119,7 +168,14 @@ fn working_in_flight_shown_but_offered_no_remedy() {
 #[test]
 fn dead_lettered_triggers_render_with_both_next_steps() {
     let failures = vec![failure("trigger_exhausted", 2), failure("tool_error", 1)];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &failures,
+        Vec::new(),
+    );
 
     let out = render_doctor_report_human(&report);
     assert!(
@@ -132,7 +188,14 @@ fn dead_lettered_triggers_render_with_both_next_steps() {
 
 #[test]
 fn ambiguous_renders_with_its_remediation() {
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[], Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        3,
+        &[],
+        Vec::new(),
+    );
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Ambiguous invocations: 3"), "got: {out}");
@@ -145,7 +208,14 @@ fn ambiguous_renders_with_its_remediation() {
 #[test]
 fn permanent_failures_render_per_kind() {
     let failures = vec![failure("budget_exceeded", 2), failure("tool_error", 1)];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &failures,
+        Vec::new(),
+    );
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Permanent failures: 3"), "got: {out}");
@@ -164,6 +234,7 @@ fn a_non_dead_letter_failure_still_renders_dead_letters_none() {
     let report = build_doctor_report(
         &[],
         &ExecutionsView::default(),
+        THRESHOLD_MS,
         0,
         &[failure("runtimeerror", 7)],
         Vec::new(),
@@ -204,7 +275,14 @@ fn every_consumer_is_named_in_the_report() {
             name: "fq-advisory-watch".to_string(),
         },
     ];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &[], consumers);
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        consumers,
+    );
     let out = render_doctor_report_human(&report);
 
     for name in [
@@ -268,7 +346,14 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         redeliveries: 0,
         stuck: false,
     };
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &[], vec![behind]);
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![behind],
+    );
     assert!(!report.has_issues(), "catching up is not a fault");
     let out = render_doctor_report_human(&report);
     assert!(out.contains("fq-projector: ok (lag 9000)"), "got:\n{out}");

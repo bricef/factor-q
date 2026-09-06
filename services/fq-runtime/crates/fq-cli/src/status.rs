@@ -153,6 +153,12 @@ fn render_status_human(doc: &StatusDocument) -> String {
     out.push_str(&format!("  version:          {}\n", report.version));
     out.push_str(&render_registry_human(&report.registry));
     out.push_str(&format!("  projection rows:  {}\n", report.projection_rows));
+    // Derived from this daemon's call deadlines, so it is the daemon's
+    // to report and nothing here can compute it (#37).
+    out.push_str(&format!(
+        "  stuck after:      {}s\n",
+        report.stuck_after_ms / 1000
+    ));
 
     for stream in &report.streams {
         out.push_str(&render_stream_health_human(stream));

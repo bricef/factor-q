@@ -49,7 +49,8 @@
 use std::sync::Arc;
 
 use fq_edge::wire::WireError;
-use fq_ops::surface::{DOCTOR_STUCK_THRESHOLD_MS, build_doctor_report};
+use fq_ops::surface::build_doctor_report;
+use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
 use fq_runtime::surface::{DoctorParams, DoctorReport};
 use fq_runtime::views::Views;
 
@@ -61,6 +62,12 @@ pub(crate) fn register_doctor_report(
     // report is a JetStream probe, and only this process holds one
     // (#549).
     bus: fq_runtime::EventBus,
+    // The threshold this daemon derived from its own call deadlines
+    // (#37). Passed in rather than read here, because the sweep that
+    // emits `invocation.stuck` is handed the same number: one
+    // definition of stuck, from one place, or the report and the event
+    // disagree.
+    stuck_after_ms: i64,
     summary_enabled: bool,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
@@ -77,10 +84,12 @@ pub(crate) fn register_doctor_report(
          The checks that count as *issues* are stale workers, stuck in-flight work, \
          ambiguous invocations and permanent failures; in-flight work that is merely \
          running is healthy, and the dead-letter line is informational. `stuck` means an \
-         in-flight invocation whose WAL row has not advanced within the same threshold \
-         that makes a worker stale — not hearing from either for that long is the same \
-         order of signal. The threshold is the daemon's and is not a parameter: a health \
-         report an operator can narrow is one they can narrow past the problem. \
+         in-flight invocation that has crossed no step boundary within `stuck_after_ms`, \
+         with no tool or model call open recently enough to explain the silence. That \
+         threshold is derived from this daemon's own call deadlines — twice the longest \
+         a single step can legitimately take — so it is reported rather than assumed, \
+         and it is not a parameter: a health report an operator can narrow is one they \
+         can narrow past the problem. \
          The consumer lines are a probe of this daemon's broker at the instant of the \
          call: every durable it expects, named, with a stuck verdict for any that is \
          redelivering rather than progressing. A summariser durable is expected only \
@@ -99,13 +108,13 @@ pub(crate) fn register_doctor_report(
                 let executions = views
                     .executions(
                         now_ms,
-                        DOCTOR_STUCK_THRESHOLD_MS,
+                        stuck_after_ms,
                         fq_runtime::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
                     )
                     .await
                     .map_err(internal)?;
                 let ambiguous = views
-                    .recovery(now_ms, DOCTOR_STUCK_THRESHOLD_MS)
+                    .recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS)
                     .await
                     .map_err(internal)?
                     .ambiguous;
@@ -119,6 +128,7 @@ pub(crate) fn register_doctor_report(
                 Ok(build_doctor_report(
                     &workers,
                     &executions,
+                    stuck_after_ms,
                     ambiguous,
                     &failures,
                     consumers,
