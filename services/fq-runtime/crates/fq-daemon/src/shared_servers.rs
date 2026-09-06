@@ -44,6 +44,11 @@ pub(crate) struct SharedServers {
     /// Kept here rather than passed around so `assemble` does not have
     /// to carry a second value between the two calls.
     pending: Vec<McpServerConfig>,
+    /// Every shared server a loaded agent declares, ready or not. The
+    /// supervisor needs the whole list, not just the failures: a server
+    /// that is ready now can lose its connection later, and dialling it
+    /// again means having its config.
+    declared: Vec<McpServerConfig>,
     retry: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -94,6 +99,7 @@ pub(crate) async fn start_shared_servers(
             states,
             stop: Arc::new(tokio::sync::Notify::new()),
             pending: unavailable,
+            declared,
             retry: None,
         },
         tools,
@@ -165,22 +171,26 @@ impl SharedServers {
             let channels = manager.take_notifications().await;
             (channels, manager.tool_refresher(exec))
         };
+        let declared = std::mem::take(&mut self.declared);
+        if declared.is_empty() {
+            return; // no agent names a shared server: nothing to supervise
+        }
         let (came_up_tx, came_up_rx) = tokio::sync::mpsc::unbounded_channel();
-        let pending = std::mem::take(&mut self.pending);
-        if channels.is_empty() && pending.is_empty() {
-            return;
-        }
-        if !pending.is_empty() {
-            self.retry = Some(tokio::spawn(fq_runtime::mcp::retry_unavailable(
-                Arc::clone(&self.manager),
-                pending,
-                came_up_tx,
-                Arc::clone(&self.stop),
-            )));
-        }
+        let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Always spawned, even with every server ready: it is the only
+        // thing watching for one of them losing its connection.
+        self.retry = Some(tokio::spawn(fq_runtime::mcp::retry_unavailable(
+            Arc::clone(&self.manager),
+            std::mem::take(&mut self.pending),
+            declared,
+            came_up_tx,
+            gone_rx,
+            Arc::clone(&self.stop),
+        )));
         tokio::spawn(fq_runtime::mcp::drain_server_notifications(
             channels,
             came_up_rx,
+            gone_tx,
             refresher,
             move |registry| context.install_tools(Arc::new(registry)),
             move |server, level, logger, data| {

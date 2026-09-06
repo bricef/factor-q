@@ -321,91 +321,176 @@ where
 /// Retry every server in `unavailable` until it comes up, for the life
 /// of the daemon.
 ///
-/// One task for all of them rather than one each. The backoff is shared
-/// because the attempt counts are: every pending server failed at boot
-/// and they are tried together, so they escalate in lockstep and one
-/// timer answers for all of them.
+/// One task for all of them, and one *round* for all of them: a round
+/// dials the whole pending set concurrently through
+/// [`retry_shared_servers`](McpClientManager::retry_shared_servers), so
+/// a permanently hung server costs a recovering one nothing. Dialling
+/// them one after another put a full start-up deadline between a
+/// server that was ready to answer and the moment anyone asked it.
+///
+/// The backoff is shared because the attempt counts are: every pending
+/// server failed at boot and they are tried together, so they escalate
+/// in lockstep and one timer answers for all of them.
 ///
 /// A server that comes up is registered with `manager`, its tools are
 /// announced through `came_up` — the same channel a `tools/list_changed`
-/// rebuild travels on — and it leaves this loop for good. `stop` ends
-/// the loop; the caller signals it before shutting the manager down, so
-/// a retry cannot start a child the shutdown has already walked past.
+/// rebuild travels on — and it leaves this loop for good.
+///
+/// `stop` ends the loop, and it is raced against the round as well as
+/// against the sleep: a shutdown arriving mid-round must not wait out
+/// the deadlines of servers that are never going to answer. Dropping
+/// the round drops every transport with it, and a stdio child spawned
+/// with `kill_on_drop` goes with its transport, so abandoning a dial
+/// leaves nothing running.
 pub async fn retry_unavailable(
     manager: Arc<tokio::sync::Mutex<McpClientManager>>,
     unavailable: Vec<McpServerConfig>,
+    declared: Vec<McpServerConfig>,
     came_up: mpsc::UnboundedSender<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+    mut went_down: mpsc::UnboundedReceiver<String>,
     stop: Arc<tokio::sync::Notify>,
 ) {
-    // `attempts` counts the boot attempt, which already happened.
-    let mut pending: Vec<(McpServerConfig, u32)> =
-        unavailable.into_iter().map(|config| (config, 1)).collect();
-    while !pending.is_empty() {
-        let Some(delay) = next_due(&pending, &*manager.lock().await) else {
-            return; // retrying is disabled
+    let mut pending = unavailable;
+    // The boot attempt already happened, and is attempt 1.
+    let mut attempts = 1u32;
+    loop {
+        // Nothing pending is a state to wait in, not a reason to stop:
+        // a server that is ready now can still lose its connection, and
+        // this task is the only thing watching for that.
+        let delay = if pending.is_empty() {
+            None
+        } else {
+            match due_in(&manager, &pending, attempts).await {
+                Some(delay) => Some(delay),
+                // Retrying is disabled. Servers still get marked
+                // unavailable when they die; they simply stay that way.
+                None => None,
+            }
         };
         tokio::select! {
             _ = stop.notified() => return,
-            _ = tokio::time::sleep(delay) => {}
+            gone = went_down.recv() => {
+                let Some(server) = gone else {
+                    return; // the drain is gone: the daemon is stopping
+                };
+                if let Some(config) = mark_gone(&manager, &declared, &server).await {
+                    pending.push(config);
+                    // A server that was answering a moment ago is a
+                    // fresh failure, not the next step of an old one.
+                    attempts = 1;
+                }
+                continue;
+            }
+            _ = tokio::time::sleep(delay.unwrap_or_default()), if delay.is_some() => {}
         }
-        let mut still_pending = Vec::with_capacity(pending.len());
-        for (config, attempts) in pending {
-            let attempts = attempts + 1;
-            let mut guard = manager.lock().await;
-            match guard.start_server(config.clone()).await {
-                Ok(_) => {
-                    info!(
-                        server = %config.name,
-                        attempts,
-                        "MCP server came up on retry; its tools are available again"
-                    );
-                    let notifications = guard.take_notifications_for(&config.name).await;
-                    drop(guard);
-                    if let Some(rx) = notifications
-                        && came_up.send((config.name.clone(), rx)).is_err()
-                    {
-                        return; // the drain is gone: the daemon is stopping
-                    }
-                }
-                Err(err) => {
-                    drop(guard);
-                    warn!(
-                        server = %config.name,
-                        attempts,
-                        error = %err,
-                        "MCP server is still unavailable"
-                    );
-                    still_pending.push((config, attempts));
-                }
+        attempts += 1;
+        let (still_pending, came_up_now) = tokio::select! {
+            _ = stop.notified() => return,
+            round = dial_round(&manager, pending, attempts) => round,
+        };
+        for (server, notifications) in came_up_now {
+            info!(
+                server = %server,
+                attempts,
+                "MCP server came up on retry; its tools are available again"
+            );
+            if came_up.send((server, notifications)).is_err() {
+                return; // the drain is gone: the daemon is stopping
             }
         }
         pending = still_pending;
     }
 }
 
-/// How long until the earliest server in `pending` is due, stamping
-/// each one's next retry time into the state table on the way past so
-/// `fq doctor` can say when it will be. `None` disables retrying.
-fn next_due(
-    pending: &[(McpServerConfig, u32)],
-    manager: &McpClientManager,
+/// A server whose connection ended: drop it from the manager, mark it
+/// unavailable, and hand back the config to dial it again with.
+///
+/// `None` for a name this daemon does not declare as a shared server,
+/// or one the manager was no longer holding — either way there is
+/// nothing to retry.
+async fn mark_gone(
+    manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    declared: &[McpServerConfig],
+    server: &str,
+) -> Option<McpServerConfig> {
+    let config = declared.iter().find(|c| c.name == server)?.clone();
+    manager
+        .lock()
+        .await
+        .forget(server)
+        .then_some(config)
+        .inspect(|_| {
+            warn!(
+                server = %server,
+                "MCP server's connection ended; its tools are unavailable until it is dialled \
+                 again, and agents that declare it are refused meanwhile"
+            )
+        })
+}
+
+/// Dial one round: every pending server at once, as attempt number
+/// `attempt`. Returns the ones still down and the notification stream
+/// of each one that came up.
+///
+/// A server whose start succeeded but which has no stream of its own
+/// was deduplicated onto a transport already running under another
+/// name; its tools are registered and it leaves the pending set either
+/// way.
+async fn dial_round(
+    manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    pending: Vec<McpServerConfig>,
+    attempt: u32,
+) -> (
+    Vec<McpServerConfig>,
+    Vec<(String, mpsc::UnboundedReceiver<ServerNotification>)>,
+) {
+    let mut guard = manager.lock().await;
+    let outcomes = guard.retry_shared_servers(pending.clone(), attempt).await;
+    let mut still_pending = Vec::new();
+    let mut came_up = Vec::new();
+    for outcome in outcomes {
+        match outcome.outcome {
+            Ok(_) => {
+                if let Some(rx) = guard.take_notifications_for(&outcome.server).await {
+                    came_up.push((outcome.server, rx));
+                }
+            }
+            Err(err) => {
+                warn!(
+                    server = %outcome.server,
+                    attempts = attempt,
+                    error = %err,
+                    "MCP server is still unavailable"
+                );
+                if let Some(config) = pending.iter().find(|c| c.name == outcome.server) {
+                    still_pending.push(config.clone());
+                }
+            }
+        }
+    }
+    (still_pending, came_up)
+}
+
+/// How long until the next round is due, stamping each pending
+/// server's attempt count and next retry time into the state table on
+/// the way past so `fq doctor` can report both. `None` disables
+/// retrying.
+async fn due_in(
+    manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    pending: &[McpServerConfig],
+    attempts: u32,
 ) -> Option<std::time::Duration> {
-    let limits = manager.limits();
-    let states = manager.states();
-    let mut soonest = None;
-    for (config, attempts) in pending {
-        let backoff = limits.retry_backoff(*attempts)?;
-        let due_ms = chrono::Utc::now().timestamp_millis() + backoff.as_millis() as i64;
-        if let Some(McpServerState::Unavailable {
-            reason, attempts, ..
-        }) = states.state(&config.name)
-        {
+    let guard = manager.lock().await;
+    let backoff = guard.limits().retry_backoff(attempts)?;
+    let states = guard.states();
+    drop(guard);
+    let due_ms = chrono::Utc::now().timestamp_millis() + backoff.as_millis() as i64;
+    for config in pending {
+        if let Some(McpServerState::Unavailable { reason, .. }) = states.state(&config.name) {
             states.unavailable(&config.name, reason, attempts, Some(due_ms));
         }
-        soonest =
-            Some(soonest.map_or(backoff, |current: std::time::Duration| current.min(backoff)));
     }
-    soonest
+    Some(backoff)
 }
 
 #[cfg(test)]

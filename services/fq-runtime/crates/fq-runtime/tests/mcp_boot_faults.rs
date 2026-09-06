@@ -133,14 +133,7 @@ async fn a_server_that_appears_later_is_picked_up_by_the_retry() {
         Some(McpServerState::Unavailable { .. })
     ));
 
-    let (came_up_tx, mut came_up_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop = Arc::new(tokio::sync::Notify::new());
-    let retry = tokio::spawn(fq_runtime::mcp::retry_unavailable(
-        Arc::clone(&manager),
-        vec![declared],
-        came_up_tx,
-        Arc::clone(&stop),
-    ));
+    let (stop, retry, mut came_up_rx, _gone) = spawn_retry(&manager, vec![declared]);
 
     // The server arrives.
     write_script(&program, STUB_SERVER);
@@ -221,5 +214,233 @@ async fn a_stdio_line_past_the_cap_is_refused_not_buffered() {
         manager.lock().await.states().state("firehose"),
         Some(McpServerState::Unavailable { .. })
     ));
+    manager.lock().await.shutdown().await;
+}
+
+/// A never-arriving command: resolution fails immediately, so a round
+/// costs nothing and the loop's own bookkeeping is what is under test.
+fn absent(name: &str, dir: &Path) -> McpServerConfig {
+    config(name, &dir.join(format!("never-arrives-{name}")))
+}
+
+/// The supervisor task, with the stop signal and the channel it
+/// announces recovered servers on. `pending` doubles as the declared
+/// set here: every test's declarations are the ones it is watching.
+fn spawn_retry(
+    manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    pending: Vec<McpServerConfig>,
+) -> Supervisor {
+    let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+    spawn_supervisor(manager, pending, gone_rx, gone_tx)
+}
+
+/// The stop signal, the task, the recovered-server channel, and the
+/// sender a dying server is announced on. The sender is handed back
+/// rather than dropped on purpose: a closed one means "the drain is
+/// gone, the daemon is stopping", which ends the task.
+type Supervisor = (
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<(
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<fq_runtime::mcp::ServerNotification>,
+    )>,
+    tokio::sync::mpsc::UnboundedSender<String>,
+);
+
+/// [`spawn_retry`], with the caller supplying the channel a dying
+/// server is announced on.
+fn spawn_supervisor(
+    manager: &Arc<tokio::sync::Mutex<McpClientManager>>,
+    declared: Vec<McpServerConfig>,
+    gone_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    gone_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Supervisor {
+    let (came_up_tx, came_up_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let handle = tokio::spawn(fq_runtime::mcp::retry_unavailable(
+        Arc::clone(manager),
+        declared.clone(),
+        declared,
+        came_up_tx,
+        gone_rx,
+        Arc::clone(&stop),
+    ));
+    (stop, handle, came_up_rx, gone_tx)
+}
+
+/// The attempt count is what `fq doctor` and the dispatch refusal both
+/// quote, so it has to be the loop's own count rather than a constant.
+/// It said "1 attempt(s)" for ever, which told an operator the daemon
+/// had stopped trying when it had not.
+#[tokio::test]
+async fn the_attempt_count_climbs_with_each_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let limits = McpLimits {
+        retry_initial: Duration::from_millis(80),
+        retry_max: Duration::from_millis(80),
+        ..McpLimits::default()
+    };
+    let manager = manager(&dir.path().join("root"), limits);
+    let declared = absent("late", dir.path());
+
+    let outcomes = {
+        let mut guard = manager.lock().await;
+        guard.start_shared_servers(vec![declared.clone()]).await
+    };
+    assert!(outcomes[0].outcome.is_err());
+    assert!(
+        matches!(
+            manager.lock().await.states().state("late"),
+            Some(McpServerState::Unavailable { attempts: 1, .. })
+        ),
+        "the boot dial is attempt 1"
+    );
+
+    let (stop, retry, _came_up, _gone) = spawn_retry(&manager, vec![declared]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut seen = 1;
+    while std::time::Instant::now() < deadline && seen < 2 {
+        if let Some(McpServerState::Unavailable {
+            attempts,
+            next_retry_at_ms,
+            ..
+        }) = manager.lock().await.states().state("late")
+        {
+            seen = attempts;
+            if attempts >= 2 {
+                assert!(
+                    next_retry_at_ms.is_some(),
+                    "a pending server must say when it will next be dialled"
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        seen >= 2,
+        "two failed dials must read as 2 attempt(s), not 1 — saw {seen}"
+    );
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), retry)
+        .await
+        .expect("the retry loop stops when told")
+        .expect("retry task");
+    manager.lock().await.shutdown().await;
+}
+
+/// A retry round dials the whole pending set at once and is raced
+/// against the stop signal, so neither a permanently hung server nor a
+/// shutdown waits out the other's deadlines. Dialling sequentially put
+/// a full start-up deadline per hung server between `fq down` and the
+/// daemon actually stopping.
+#[tokio::test]
+async fn a_stop_during_a_retry_round_does_not_wait_out_its_deadlines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let deadline = Duration::from_secs(4);
+    let limits = McpLimits {
+        startup_timeout: deadline,
+        retry_initial: Duration::from_millis(80),
+        retry_max: Duration::from_millis(80),
+        ..McpLimits::default()
+    };
+    let manager = manager(&dir.path().join("root"), limits);
+    // Two servers that accept stdin and never answer. Different
+    // arguments, so they are two transports rather than one.
+    let pending: Vec<McpServerConfig> = ["120", "121"]
+        .iter()
+        .enumerate()
+        .map(|(i, seconds)| McpServerConfig {
+            name: format!("hung-{i}"),
+            command: "sleep".to_string(),
+            args: vec![seconds.to_string()],
+            env: Vec::new(),
+            url: None,
+        })
+        .collect();
+
+    let (stop, retry, _came_up, _gone) = spawn_retry(&manager, pending);
+    // Let the first round begin, then stop mid-dial.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stopped_at = std::time::Instant::now();
+    stop.notify_one();
+    tokio::time::timeout(deadline, retry)
+        .await
+        .expect("a stop mid-round must not wait out the round's deadlines")
+        .expect("retry task");
+    assert!(
+        stopped_at.elapsed() < deadline,
+        "the stop took {:?}, which is a whole start-up deadline",
+        stopped_at.elapsed()
+    );
+    manager.lock().await.shutdown().await;
+}
+
+/// A server that answered at boot and later lost its connection must
+/// not stay `Ready`.
+///
+/// Before this, a transport that died after boot — a stdio child that
+/// exited, a line past the cap, a remote endpoint that closed — left
+/// every health surface green while every call through it failed and
+/// nothing retried it. The supervisor now drops it, marks it
+/// unavailable, and dials it again like any other failure.
+#[tokio::test]
+async fn a_server_that_loses_its_connection_is_marked_down_and_dialled_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let program = dir.path().join("flappy-server");
+    write_script(&program, STUB_SERVER);
+    let limits = McpLimits {
+        retry_initial: Duration::from_millis(80),
+        retry_max: Duration::from_millis(80),
+        ..McpLimits::default()
+    };
+    let manager = manager(&dir.path().join("root"), limits);
+    let declared = config("flappy", &program);
+
+    let outcomes = {
+        let mut guard = manager.lock().await;
+        guard.start_shared_servers(vec![declared.clone()]).await
+    };
+    assert!(outcomes[0].outcome.is_ok(), "the stub answers at boot");
+    assert_eq!(
+        manager.lock().await.states().state("flappy"),
+        Some(McpServerState::Ready { tools: 1 })
+    );
+
+    let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Nothing pending: the supervisor exists here only to watch, which
+    // is the case the loop used to exit on.
+    let (came_up_tx, came_up_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let supervisor = tokio::spawn(fq_runtime::mcp::retry_unavailable(
+        Arc::clone(&manager),
+        Vec::new(),
+        vec![declared],
+        came_up_tx,
+        gone_rx,
+        Arc::clone(&stop),
+    ));
+    let mut came_up_rx = came_up_rx;
+
+    // The drain saw its stream end.
+    gone_tx.send("flappy".to_string()).expect("announce");
+
+    let (name, _notifications) = tokio::time::timeout(Duration::from_secs(30), came_up_rx.recv())
+        .await
+        .expect("the supervisor must dial it again")
+        .expect("and announce it when it answers");
+    assert_eq!(name, "flappy");
+    assert_eq!(
+        manager.lock().await.states().state("flappy"),
+        Some(McpServerState::Ready { tools: 1 }),
+        "a server that came back is ready again"
+    );
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), supervisor)
+        .await
+        .expect("the supervisor stops when told")
+        .expect("supervisor task");
     manager.lock().await.shutdown().await;
 }

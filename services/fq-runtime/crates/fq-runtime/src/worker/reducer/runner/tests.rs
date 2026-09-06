@@ -283,6 +283,39 @@ async fn an_agent_needing_an_unavailable_mcp_server_is_refused_at_dispatch() {
     );
 }
 
+/// A server mid-dial refuses too. `Starting` covers the whole of a
+/// start-up plus discovery deadline — a minute at the defaults, on
+/// every retry round as well as at boot — and letting an invocation
+/// through it would be the same silent degradation the refusal exists
+/// to close, just in a narrower window.
+#[tokio::test]
+async fn an_agent_whose_server_is_still_being_dialled_is_refused_too() {
+    let dir = tempdir().unwrap();
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let runner = runner_with_unavailable_server(dir.path(), sink, &[]).await;
+    runner.config.mcp_states.starting("wedged");
+
+    let llm = FixtureClient::new();
+    llm.push_response(canned("should not be used", 10, 5));
+    let outcome = runner
+        .run(
+            &agent_declaring("needs-wedged", "wedged"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({}),
+        )
+        .await;
+
+    match outcome {
+        Err(ExecutorError::InvocationFailed { message, .. }) => {
+            assert!(message.contains("'wedged'"), "{message}");
+            assert!(message.contains("being dialled now"), "{message}");
+        }
+        other => panic!("expected a terminal refusal, got {other:?}"),
+    }
+}
+
 /// The other half of the same decision: an agent that does not need the
 /// unavailable server runs normally. A refusal that grounded the whole
 /// fleet would be a worse wedge than the one it replaces.
