@@ -5,6 +5,12 @@
 //! filesystem. A path outside the agent's allowed read prefixes
 //! produces a permission-denied result, not a file-not-found one,
 //! even if the target happens not to exist.
+//!
+//! The same check requires the resolved path to be a **regular file**
+//! (#547). It is the sandbox, not this tool, that refuses a FIFO, a
+//! device or a directory — so every built-in that reads a file through
+//! the sandbox inherits the refusal, and none of them can reach the
+//! `open(2)` that would block forever on a named pipe.
 
 use std::path::PathBuf;
 
@@ -160,6 +166,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+    }
+
+    /// Fault injection for review finding B2 (#547): the read must be
+    /// refused by the sandbox check, never reach `open(2)`, and never
+    /// block. The whole test runs under a deadline so a regression that
+    /// re-introduces the blocking open fails the suite instead of
+    /// hanging it.
+    #[tokio::test]
+    async fn fifo_is_refused_immediately_and_never_blocks() {
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success(),
+            "mkfifo(1) must be available"
+        );
+        let link = dir.path().join("link-to-pipe");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        let regular = dir.path().join("real.txt");
+        fs::write(&regular, "still readable").unwrap();
+
+        let sandbox = ToolSandbox::new().allow_read(dir.path());
+        let ctx = make_tool_ctx(&sandbox);
+        let tool = FileReadTool::new();
+
+        for path in [&fifo, &link, &subdir] {
+            let err = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tool.execute(&ctx, json!({ "path": path.to_string_lossy() })),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("file_read blocked on {}", path.display()))
+            .unwrap_err();
+            assert!(
+                matches!(err, ToolError::InvalidParameters(ref msg) if msg.contains("needs a regular file")),
+                "{}: {err}",
+                path.display()
+            );
+        }
+
+        // The check refuses shapes, not paths: an ordinary file in the
+        // same directory still reads.
+        let ok = tool
+            .execute(&ctx, json!({ "path": regular.to_string_lossy() }))
+            .await
+            .unwrap();
+        assert_eq!(ok.output, "still readable");
     }
 
     #[tokio::test]
