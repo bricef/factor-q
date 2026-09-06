@@ -96,7 +96,6 @@ The Claude 5 family thinks adaptively by default when no effort is set.
   in arrival order, so the signature-adjacency fix proposed upstream needs
   nothing on this side; the wire golden `gemini_text_and_signed_call` pins
   today's approximation and moves when that fix lands.
-- **#536** — the reasoning-token split is recorded and not shown.
 
 ## Verifying a provider yourself
 
