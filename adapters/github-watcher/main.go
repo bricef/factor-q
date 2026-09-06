@@ -72,7 +72,7 @@ func run(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	pub, err := NewNatsTriggerPublisher(natsURL)
+	pub, err := NewNatsTriggerPublisher(natsURL, log)
 	if err != nil {
 		return err
 	}
@@ -101,6 +101,7 @@ func run(args []string) error {
 		Config:    cfg,
 		Log:       log,
 		Heartbeat: health.Tick,
+		Connected: pub.Connected,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
