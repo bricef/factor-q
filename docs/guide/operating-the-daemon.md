@@ -358,6 +358,43 @@ A server that reports progress makes a long call visible: the host
 logs one rate-limited line per call carrying the invocation, the tool
 call and the numbers, and records when each call last reported.
 
+## When a consumer stops making progress
+
+`fq doctor` reports every durable consumer this daemon expects, by
+name, and says which of them is stuck. The line to look for is
+
+```text
+Consumers: 5 checked, 1 unhealthy
+  fq-projector: ok (lag 0)
+  fq-coordination: ✗ stuck — 37 redeliveries past its acked floor, lag 724
+  -> its handler keeps failing; check the daemon log for
+     `consumer=fq-coordination` and free whatever it is blocked on
+     (disk, store, broker)
+```
+
+**Stuck means retrying, not lost.** These consumers redeliver without
+limit on purpose: an event dropped to a delivery bound is an event the
+projection skips for good. When a handler fails transiently the daemon
+NAKs with a delay that doubles from one second to a sixty-second cap,
+so a fault that does not clear costs one broker round-trip a minute
+rather than thousands a second, and the error line about it appears
+once per escalation step and then once a minute. The counter in the
+line — redeliveries past the acked floor — is the daemon delivering the
+same message again while its acked position stays where it was.
+
+What to do is not restart the daemon. The event is safe in JetStream
+and the consumer will drain the moment the handler can succeed, so fix
+what the handler is blocked on: `df -h` on the state directory first,
+since a full disk is the common cause and reaches the projection as
+`SQLITE_FULL`. A consumer reported `missing` is different — the durable
+does not exist, which means the task that creates it never started, and
+the daemon log at startup says why.
+
+`fq status` reports the same consumers under their streams, with the
+message counts and lag beside them. The thresholds are `[bus]` in
+`fqd.toml`: `stuck_after_redeliveries` decides when retrying becomes
+stuck, and the escalation and log rate are configured there too.
+
 ## Quick reference
 
 | Goal | Command |
@@ -369,6 +406,7 @@ call and the numbers, and records when each call last reported.
 | Redeploy (suspend for the next binary) | `fq down` |
 | Hot-reload agent definitions | `fq reload` |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
+| See which consumers are keeping up | `fq doctor` (names every durable and any that is stuck) |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |

@@ -322,3 +322,43 @@ models = ["claude-haiku-4-5"]
 # retrying immediately would spin a worker thread and starve the very
 # tasks holding the descriptors. Default 100.
 # accept_error_backoff_ms = 100
+
+[bus]
+# How every durable consumer on the event bus handles redelivery when
+# its handler fails transiently — a full disk under the projection, a
+# store that will not write, a broker that will not take an ack.
+#
+# None of these durables has a dead-letter path, so none of them has a
+# delivery limit: an event dropped to a bound is an event the projection
+# skips for good. What keeps a permanent fault from becoming a hot loop
+# is the delay below, not a bound.
+#
+# First NAK delay after a transient failure, in ms; doubles per
+# redelivery from there. Default 1000.
+# nak_initial_ms = 1000
+#
+# Ceiling the doubling saturates at, in ms. A handler failing forever
+# settles into one retry per this interval. Default 60000.
+# nak_max_ms = 60000
+#
+# How long the server waits for an ack before redelivering by itself,
+# in ms. Size it so a healthy handler never trips it — the
+# control-plane handlers are single SQLite writes, and the dispatcher
+# acks at an invocation's first WAL write. Default 30000.
+#
+# Note: the trigger consumer carries a retry backoff schedule, and
+# JetStream replaces a consumer's ack window with that schedule's first
+# entry, so this value does not apply there.
+# ack_wait_ms = 30000
+#
+# Floor on the gap between two error lines about one consumer's
+# redeliveries, once the delay has stopped escalating, in ms. Every
+# escalation step is logged regardless — each one is new information
+# about how bad the fault is. Default 60000.
+# log_interval_ms = 60000
+#
+# Redeliveries past which `control.status` and `fq doctor` report a
+# consumer as stuck rather than merely retrying, and name it. Five is
+# about thirty seconds of continuous failure at the default escalation.
+# Default 5.
+# stuck_after_redeliveries = 5
