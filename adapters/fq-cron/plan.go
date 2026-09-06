@@ -168,11 +168,13 @@ func countedFires(state FireState) []time.Time {
 // publishedAt: the slot advances and the fire joins the ledger, which is
 // then trimmed to what the ceiling can still count — fires inside the
 // window, and at most the newest `limit` of them, since no decision can
-// turn on an older one. Trimming per job is exact for the global count,
-// because the newest `limit` fires across the file are always inside the
-// union of each job's newest `limit`. It also bounds the stored value: at
-// one fire a minute — the validated schedule floor — a job's ledger holds
-// at most sixty instants, and a lower ceiling holds fewer.
+// turn on an older one. Trimming per job is exact for the global count
+// while the ceiling is unchanged, because the newest `limit` fires across
+// the file are always inside the union of each job's newest `limit`;
+// lowering the ceiling stays exact, and raising it under-counts for at
+// most one window, until the ledgers refill under the new one. The trim
+// is also what bounds the stored value — a job's ledger never holds more
+// than `limit` instants, whatever its schedule does.
 //
 // It is the ledger's only writer, which is what keeps it in publication
 // order.
