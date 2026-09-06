@@ -149,9 +149,10 @@ func timerUntil(at time.Time) (<-chan time.Time, func()) {
 // broker (JetStream KV). Returning those errors up the loop is exactly how
 // a broker outage used to end the process: the KV read is the first thing
 // each iteration does, so sixty failed reconnects later the scheduler
-// exited, and with `setsid … &` and no supervisor nothing brought it back.
-// A store that stays unreachable now keeps the process alive and loud
-// instead, and the fires resume by themselves when the broker returns.
+// exited — and, under compose's restart policy, came straight back to die
+// again, crash-looping for the length of the outage. A store that stays
+// unreachable now keeps one process alive and loud instead, and the fires
+// resume by themselves when the broker returns.
 func withBrokerRetry(ctx context.Context, logger *log.Logger, what string, op func() error) error {
 	backoff := initialRetryBackoff
 	for attempt := 1; ; attempt++ {

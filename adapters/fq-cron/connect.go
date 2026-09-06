@@ -3,12 +3,15 @@ package main
 // connect.go — the broker connection's reconnect policy.
 //
 // nats.go's defaults give up: sixty reconnect attempts two seconds apart,
-// then the connection is closed for good. A scheduler that is launched by
-// `setsid … &` with no supervisor and outlives its broker by two minutes
-// is a scheduler that never fires again, and nothing in the process says
-// so. So the connection reconnects for ever, says so in the log each time
-// the state changes, and startup waits for the broker rather than dying on
-// the first JetStream call.
+// then the connection is closed for good. Two minutes into a broker
+// outage the scheduler's next KV read therefore failed and the process
+// exited. Compose restarts it (`restart: unless-stopped`, ops/dogfood/
+// compose.yml), so what that produced was a crash loop for the length of
+// the outage: every restart re-read the config, re-opened the KV bucket,
+// died, and lost whatever slot fell in the gap. So the connection
+// reconnects for ever, says so in the log each time the state changes,
+// and startup waits for the broker rather than dying on the first
+// JetStream call.
 //
 // adapters/github-watcher/connect.go mirrors this file (the two are
 // separate Go modules by design; see the watcher README, "Why Go and why
@@ -44,6 +47,14 @@ func connectNATS(url string, logger *log.Logger, extra ...nats.Option) (*nats.Co
 	options := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
+		// No pending buffer. nats.go otherwise holds up to 8 MB of
+		// publishes made while reconnecting and flushes them on the way
+		// back, so a fire published during an outage would block until
+		// its ack timed out, be recorded as a failure, and then arrive
+		// anyway. Failing fast keeps the retry policy (D5) in charge of
+		// what is re-sent, and makes each KV request fail immediately
+		// instead of blocking five seconds per attempt.
+		nats.ReconnectBufSize(-1),
 		// The URL may carry a token in its userinfo, so no handler ever
 		// logs it: the connected URL is asked for redacted, and the
 		// handlers that have no connection to ask name no address at all.
@@ -53,8 +64,15 @@ func connectNATS(url string, logger *log.Logger, extra ...nats.Option) (*nats.Co
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			logger.Printf("nats=reconnected url=%s", nc.ConnectedUrlRedacted())
 		}),
-		nats.ClosedHandler(func(*nats.Conn) {
-			logger.Printf("nats=closed: the connection will not be reopened")
+		// nats.go calls this on our own Close() too, so a clean shutdown
+		// would otherwise log a failure every time. Only a connection that
+		// died of something reports one.
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			if err := nc.LastError(); err != nil {
+				logger.Printf("nats=closed err=%v: the connection will not be reopened", err)
+				return
+			}
+			logger.Printf("nats=closed: shut down cleanly")
 		}),
 	}
 	nc, err := nats.Connect(url, append(options, extra...)...)

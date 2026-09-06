@@ -144,6 +144,32 @@ func TestPublisherWaitsForABrokerThatIsNotUpYet(t *testing.T) {
 	}
 }
 
+// Connected is checked once per cycle, so a disconnect *mid*-cycle still
+// reaches the publish. It must fail there and then: with nats.go's 8 MB
+// pending buffer the trigger would sit in it, the publish would block
+// until its ack timed out, the watcher would revert the issue believing
+// it failed — and the buffered trigger would flush on reconnect, so the
+// next cycle claims and publishes it a second time.
+func TestPublishWhileDisconnectedFailsInsteadOfBuffering(t *testing.T) {
+	port := freePort(t) // nothing is listening on it
+	pub, err := NewNatsTriggerPublisher(fmt.Sprintf("nats://127.0.0.1:%d", port), discardLogger(), fastReconnect()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pub.Close()
+
+	started := time.Now()
+	err = pub.Publish(context.Background(), "m0-issue-fix", TriggerPayload{Task: "issue #1"})
+	if err == nil {
+		t.Fatal("a publish on a disconnected connection must fail, not be buffered for later delivery")
+	}
+	// The JetStream ack timeout is five seconds; failing fast is the
+	// point, so anything near it means the message was buffered.
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("publish took %s to fail; it was buffered rather than refused", took)
+	}
+}
+
 // nats.go's default policy gives up after sixty reconnect attempts and
 // closes the connection for good — two minutes of broker downtime and the
 // watcher polls GitHub for ever with a dead connection. MaxReconnects(-1)

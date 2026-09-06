@@ -6,10 +6,13 @@ package main
 // then the connection is closed for good. The watcher does not exit when
 // that happens — it keeps polling GitHub with a dead connection, claiming
 // issues it can no longer trigger and reverting them a moment later, while
-// the outcome subscriptions that would have moved them on are gone. So the
-// connection reconnects for ever, says so in the log each time the state
-// changes, and the poll loop refuses to touch a label while it is down
-// (watcher.go, pollOnce).
+// the outcome subscriptions that would have moved them on are gone. A
+// process that stays up is a process compose's restart policy cannot
+// rescue and the container's HEALTHCHECK reports on but no one reads
+// until the labels look wrong: a silent wedge, and the worse of the two
+// adapters' failures. So the connection reconnects for ever, says so in
+// the log each time the state changes, and the poll loop refuses to touch
+// a label while it is down (watcher.go, pollOnce).
 //
 // adapters/fq-cron/connect.go mirrors this file (the two are separate Go
 // modules by design; see the README, "Why Go and why standalone").
@@ -34,6 +37,15 @@ func connectNATS(url string, log *slog.Logger, extra ...nats.Option) (*nats.Conn
 	options := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
+		// No pending buffer. nats.go otherwise holds up to 8 MB of
+		// publishes made while reconnecting and flushes them on the way
+		// back, which turns a mid-cycle disconnect into a double trigger:
+		// the JetStream publish blocks until its ack times out, the
+		// watcher reverts the issue to `ready` believing it failed, the
+		// buffered trigger flushes on reconnect, and the next cycle
+		// claims and publishes the same issue again. Failing the publish
+		// immediately makes the revert honest.
+		nats.ReconnectBufSize(-1),
 		// The URL may carry a token in its userinfo, so no handler ever
 		// logs it: the connected URL is asked for redacted, and the
 		// handlers that have no connection to ask name no address at all.
@@ -43,8 +55,15 @@ func connectNATS(url string, log *slog.Logger, extra ...nats.Option) (*nats.Conn
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Info("nats reconnected", "url", nc.ConnectedUrlRedacted())
 		}),
-		nats.ClosedHandler(func(*nats.Conn) {
-			log.Error("nats connection closed; it will not be reopened")
+		// nats.go calls this on our own Close() too, so a clean shutdown
+		// would otherwise log an error every time. Only a connection that
+		// died of something is one.
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			if err := nc.LastError(); err != nil {
+				log.Error("nats connection closed; it will not be reopened", "err", err)
+				return
+			}
+			log.Info("nats connection closed")
 		}),
 	}
 	nc, err := nats.Connect(url, append(options, extra...)...)
