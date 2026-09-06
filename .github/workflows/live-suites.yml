@@ -22,6 +22,13 @@ name: Live suites
 # 4222, and a daemon holds the `fq-dispatcher` durable consumer: two
 # runs at once would ack each other's triggers, find no such agent, and
 # discard them. The failure looks exactly like a product bug.
+#
+# The reasoning matrix is a SEPARATE job, and may run alongside: it
+# brings its own broker on 14222 and a scratch daemon, so it cannot touch
+# the shared consumer. It spends about $0.07 a run, most of it on
+# claude-opus-5 directly — the one arm that proves a signed thinking
+# block survives a tool turn, which no OpenRouter model can stand in for
+# (#603).
 
 on:
   schedule:
@@ -120,3 +127,73 @@ jobs:
             kill -INT "$pid" || true
           done
           just infra-down || true
+
+  reasoning-matrix:
+    name: Reasoning round-trip matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same doctrine as above: a missing key fails here, with the fix in
+      # the message, rather than becoming a suite that quietly never runs.
+      # Two keys, because the matrix drives Anthropic directly and two
+      # models through OpenRouter.
+      - name: Check the API keys are configured
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          missing=""
+          [ -n "${OPENROUTER_API_KEY}" ] || missing="$missing OPENROUTER_API_KEY"
+          [ -n "${ANTHROPIC_API_KEY}" ] || missing="$missing ANTHROPIC_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::not set for this repository:$missing. \
+          Add them under Settings -> Secrets and variables -> Actions. \
+          The matrix calls claude-opus-5 and two OpenRouter models and cannot run without both."
+            exit 1
+          fi
+          echo "keys present"
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+      # The harness runs the debug binaries and the pinned broker the
+      # unit suites use; nothing from infra/ or the compose stack.
+      - name: Build the runtime and install the pinned broker
+        run: |
+          just build-runtime
+          just install-nats
+      # Three arms, one task each, then verify-carry.py judges the event
+      # log: every arm completed, every assistant turn replayed verbatim
+      # into the next request, the reasoning arms carried a reasoning
+      # part, the control carried none. That verdict is the exit status.
+      - name: Live matrix
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OUT: ${{ runner.temp }}/reasoning-matrix
+        run: bash experiments/reasoning-round-trip/harness/live-matrix.sh
+      # The evidence a red run needs: transcripts, the event log, costs,
+      # the daemon log. Kept for two weeks, which outlives the next run
+      # that would either confirm or clear it.
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reasoning-matrix-${{ github.run_id }}
+          path: ${{ runner.temp }}/reasoning-matrix
+          if-no-files-found: ignore
+          retention-days: 14
+      # The harness stops its own daemon and broker on exit; this is for
+      # the run that was killed by the job timeout instead.
+      - name: Reap stray processes
+        if: always()
+        run: |
+          for pid in $(pgrep -x fqd || true); do
+            echo "stray daemon $pid — stopping"
+            kill -INT "$pid" || true
+          done
+          for pid in $(pgrep -x nats-server || true); do
+            echo "stray broker $pid — stopping"
+            kill -INT "$pid" || true
+          done
