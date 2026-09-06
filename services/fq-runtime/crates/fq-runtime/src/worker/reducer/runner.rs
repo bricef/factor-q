@@ -409,6 +409,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             "starting reducer invocation"
         );
 
+        // A shared MCP server this agent needs is down (#548). Refused
+        // here, before anything is provisioned: a run that cannot start
+        // must not first take a workspace and a set of child processes
+        // only to give them back. The refusal still publishes
+        // `triggered` before `failed`, so the trail reads as one
+        // invocation that could not start rather than as an orphan
+        // failure.
+        if let Some(why) = self.unavailable_mcp_servers(agent) {
+            return self
+                .refuse_for_unavailable_mcp(agent, invocation_id, &trigger, why, totals)
+                .await;
+        }
+
         // Bind `${workspace}` for this invocation (parallel-workers
         // Phase 0). Provisioning precedes the Triggered event: a failure
         // here leaves nothing durable, so the dispatcher's pre-WAL
@@ -507,20 +520,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // exists, the trigger redelivers into a fresh workspace — so
         // route the error through the reclaim decision instead.
         if let Err(err) = self
-            .publish_chained(
-                &mut cursor,
-                Event::new(
-                    agent_id.clone(),
-                    invocation_id,
-                    EventPayload::Triggered(TriggeredPayload {
-                        trigger_id: Some(trigger.id),
-                        trigger_source: trigger.source,
-                        trigger_subject: trigger.subject,
-                        trigger_payload: trigger.payload,
-                        config_snapshot: agent.to_snapshot(),
-                    }),
-                ),
-            )
+            .publish_chained(&mut cursor, triggered_event(agent, invocation_id, &trigger))
             .await
         {
             // The grant servers started above must not outlive the
@@ -555,44 +555,32 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // agree; a fresh `unix_now_ms()` here also perturbs the sim
         // clock sequence.
 
-        // A shared MCP server this agent needs is down: refuse here,
-        // naming it, rather than running an invocation whose tools are
-        // missing (#548). The refusal is terminal and emitted after
-        // `triggered`, so the trail reads as one invocation that could
-        // not start rather than as an orphan failure.
-        let outcome = match self.unavailable_mcp_servers(agent) {
-            Some(why) => {
-                self.refuse_for_unavailable_mcp(&agent_id, invocation_id, why, totals, &mut cursor)
-                    .await
-            }
-            None => {
-                self.run_loop_inner(
-                    agent,
-                    llm,
-                    invocation_id,
-                    &agent_id,
-                    &agent_config,
-                    &step_trigger,
-                    &sandbox,
-                    tools,
-                    workspace.as_deref(),
-                    state,
-                    last_result,
-                    step_index_start,
-                    totals,
-                    start,
-                    started_at_ms,
-                    static_context,
-                    sampling,
-                    durable_start,
-                    &mut cursor,
-                    // Fresh invocation: no previous incarnation, nothing
-                    // recorded for the first step.
-                    Vec::new(),
-                )
-                .await
-            }
-        };
+        let outcome = self
+            .run_loop_inner(
+                agent,
+                llm,
+                invocation_id,
+                &agent_id,
+                &agent_config,
+                &step_trigger,
+                &sandbox,
+                tools,
+                workspace.as_deref(),
+                state,
+                last_result,
+                step_index_start,
+                totals,
+                start,
+                started_at_ms,
+                static_context,
+                sampling,
+                durable_start,
+                &mut cursor,
+                // Fresh invocation: no previous incarnation, nothing
+                // recorded for the first step.
+                Vec::new(),
+            )
+            .await;
         manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
@@ -2535,7 +2523,7 @@ mod mcp;
 mod replay;
 mod server_request;
 
-use mcp::GrantServers;
+use mcp::{GrantServers, triggered_event};
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};
 

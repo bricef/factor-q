@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::ConfigError;
 use crate::mcp::McpLimits;
 
 /// MCP configuration — `[mcp]` in `fqd.toml`.
@@ -108,6 +109,35 @@ impl Default for McpConfig {
 }
 
 impl McpConfig {
+    /// No bound may be zero.
+    ///
+    /// Checked rather than clamped for the reason `[tools]`' own
+    /// reconciliation is: the consequence of a zero here is invisible
+    /// at the setting — the daemon boots, and every MCP server is
+    /// simply unavailable for as long as it runs — so the operator
+    /// would read a number that was never in force. `retry_initial_secs`
+    /// is exempt: zero there is the documented way to ask for
+    /// "unavailable until restart".
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        let zero = |key| Err(ConfigError::McpZeroBound { key });
+        if self.startup_timeout_secs == 0 {
+            return zero("startup_timeout_secs");
+        }
+        if self.discovery_timeout_secs == 0 {
+            return zero("discovery_timeout_secs");
+        }
+        if self.max_discovery_pages == 0 {
+            return zero("max_discovery_pages");
+        }
+        if self.max_tools == 0 {
+            return zero("max_tools");
+        }
+        if self.max_line_bytes == 0 {
+            return zero("max_line_bytes");
+        }
+        Ok(())
+    }
+
     /// The bounds as the MCP manager takes them.
     pub fn to_limits(&self) -> McpLimits {
         McpLimits {

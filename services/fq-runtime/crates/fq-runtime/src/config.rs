@@ -653,7 +653,8 @@ impl Config {
     /// the same mistake the file can.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.nats.validate()?;
-        self.tools.validate()
+        self.tools.validate()?;
+        self.mcp.validate()
     }
 
     /// Load configuration from a file, returning an error if the file is
@@ -779,6 +780,31 @@ mod tests {
             },
             "every key must reach the value the manager applies"
         );
+    }
+
+    /// A zero bound is refused at load, naming the key. Every one of
+    /// them would make *every* MCP server unavailable rather than
+    /// bounding one that misbehaves, and the daemon would boot and run
+    /// that way silently. `retry_initial_secs = 0` is the one
+    /// meaningful zero and stays accepted.
+    #[test]
+    fn a_zero_mcp_bound_is_refused_by_name() {
+        for key in [
+            "startup_timeout_secs",
+            "discovery_timeout_secs",
+            "max_discovery_pages",
+            "max_tools",
+            "max_line_bytes",
+        ] {
+            let err = Config::from_toml_str(&format!("[mcp]\n{key} = 0\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key), "{key}: {err}");
+            assert!(err.contains("greater than zero"), "{key}: {err}");
+        }
+        let config = Config::from_toml_str("[mcp]\nretry_initial_secs = 0\n")
+            .expect("zero disables retrying, which is a real choice");
+        assert!(config.mcp.to_limits().retry_backoff(1).is_none());
     }
 
     /// A misspelled `[mcp]` key is refused rather than ignored: the
