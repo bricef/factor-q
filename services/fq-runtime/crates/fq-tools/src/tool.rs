@@ -150,8 +150,25 @@ pub enum ToolError {
     /// consecutive ones so a permanently unresponsive tool ends the
     /// invocation instead of burning its budget one error at a time
     /// (<https://github.com/bricef/factor-q/issues/547>).
+    ///
+    /// **Every** deadline arrives here, the ones a tool enforces on
+    /// itself included. `exec` used to answer its own timeout as an
+    /// ordinary `is_error` result, which read to the host as the tool
+    /// having *answered* — so a command that hung on every attempt
+    /// never advanced the consecutive-timeout count and the one tool
+    /// with a real chance of hanging for fifteen minutes at a time was
+    /// the one the limit did not protect.
+    ///
+    /// `output` is what the tool captured before it stopped, when it
+    /// stopped the work itself. `None` means nothing stopped but the
+    /// waiting — the host's backstop, or a cancelled MCP request the
+    /// server may still be working on — and the two cases give the
+    /// model opposite advice about whether the effect happened.
     #[error("timed out after {}s", .after.as_secs())]
-    TimedOut { after: Duration },
+    TimedOut {
+        after: Duration,
+        output: Option<String>,
+    },
 }
 
 impl From<SandboxError> for ToolError {

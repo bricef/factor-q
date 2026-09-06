@@ -28,18 +28,30 @@ pub(crate) fn classify_tool_error(err: &ToolError) -> (ToolErrorKind, String) {
         ToolError::InvalidParameters(msg) => (ToolErrorKind::InvalidParameters, msg.clone()),
         ToolError::Io(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
         ToolError::ExecutionFailed(msg) => (ToolErrorKind::ExecutionFailed, msg.clone()),
-        // The model is told what the limit was and that the work may
-        // yet be running — a timeout says nothing about whether the
-        // side effect happened, and an agent that assumes it did not
-        // will happily do it twice.
-        ToolError::TimedOut { after } => (
+        // Both deadlines are `Timeout`, but they give the model
+        // opposite advice, and getting that backwards is how an agent
+        // does a side effect twice. A tool that stopped its own work
+        // (`exec` killing the child) bounds what happened, and its
+        // captured output is the evidence. The host's backstop — and a
+        // cancelled MCP request, which the server is only *asked* to
+        // abandon — stopped nothing but the waiting.
+        ToolError::TimedOut { after, output } => (
             ToolErrorKind::Timeout,
-            format!(
-                "the tool did not answer within its {}s deadline and the call was abandoned; \
-                 it may still be running, so do not assume its effect did or did not happen — \
-                 try a smaller or different request, or another tool",
-                after.as_secs()
-            ),
+            match output {
+                Some(captured) => format!(
+                    "the tool hit its own {}s deadline and stopped: the command was killed, so \
+                     anything it had not finished by then did not happen (a background process \
+                     it started may survive). The output captured before the kill \
+                     follows.\n\n{captured}",
+                    after.as_secs()
+                ),
+                None => format!(
+                    "the tool did not answer within its {}s deadline and the call was \
+                     abandoned; it may still be running, so do not assume its effect did or \
+                     did not happen — try a smaller or different request, or another tool",
+                    after.as_secs()
+                ),
+            },
         ),
     }
 }

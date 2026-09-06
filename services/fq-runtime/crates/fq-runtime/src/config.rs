@@ -1207,6 +1207,31 @@ max_timeout_secs = 900
         }
     }
 
+    /// A default above its own ceiling states a deadline nothing
+    /// honours — and in `[tools.exec]` it would let the child outlive
+    /// the host's backstop. Refused in both sections, each naming
+    /// itself (#547 review).
+    #[test]
+    fn a_default_above_its_own_ceiling_is_refused_in_either_section() {
+        for (section, toml) in [
+            (
+                "[tools]",
+                "[tools]\ndefault_timeout_secs = 900\nmax_timeout_secs = 600\n\n\
+                 [tools.exec]\nmax_timeout_secs = 600\n",
+            ),
+            (
+                "[tools.exec]",
+                "[tools.exec]\ndefault_timeout_secs = 700\nmax_timeout_secs = 600\n",
+            ),
+        ] {
+            let msg = Config::from_toml_str(toml).unwrap_err().to_string();
+            assert!(
+                msg.contains(section) && msg.contains("default_timeout_secs"),
+                "the error must name the offending section and key: {msg}"
+            );
+        }
+    }
+
     /// Equal ceilings are fine — the rule is "not below".
     #[test]
     fn tool_ceiling_equal_to_exec_ceiling_is_accepted() {
