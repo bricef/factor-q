@@ -242,10 +242,38 @@ models = ["claude-haiku-4-5"]
 # rather than a worker parked (#278). Default 120000.
 # max_retry_after_ms = 120000
 
+[tools]
+# The deadline on every tool call — built-in and MCP alike — applied at
+# the one place all of them pass through. Without it, a tool that never
+# returns (an MCP server that accepts a request and never answers) holds
+# the invocation for as long as the daemon lives.
+#
+# The deadline for a tool that manages none of its own. Default 120: a
+# tool call is a single bounded action, and two minutes is already
+# generous for one. The tool that legitimately needs longer is `exec`,
+# which asks for its own below.
+# default_timeout_secs = 120
+#
+# The ceiling on any single call, whatever the tool asked for. Default
+# 900. This may not be set BELOW `[tools.exec] max_timeout_secs` — the
+# daemon refuses to start if it is, because a lower general ceiling
+# would cap every exec call while the exec section still read the
+# higher number.
+# max_timeout_secs = 900
+#
+# How many tool calls may time out in a row before the invocation itself
+# fails. Default 3. One timeout reaches the model as a tool error it can
+# route around; a run of them means nothing is answering, and without
+# this an agent spends its whole budget one deadline at a time. Any call
+# that returns — success, or a tool-reported error — clears the count.
+# max_consecutive_timeouts = 3
+
 [tools.exec]
 # Timeouts for the built-in `exec` tool. Raise these for agents that run
 # long builds/test suites (e.g. a full `just ci`); a call that exceeds
 # the timeout is killed and returned as an error with partial output.
+# `exec` is the one built-in that times itself, so these win over
+# `[tools] default_timeout_secs` — up to `[tools] max_timeout_secs`.
 #
 # Timeout applied when a call doesn't set its own `timeout_secs`. Default 120.
 # default_timeout_secs = 120

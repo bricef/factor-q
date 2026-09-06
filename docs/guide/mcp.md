@@ -247,6 +247,22 @@ shared server's notification stream**; a `tools/list_changed`
 re-discovers and installs a refreshed tool registry for the next
 invocation ([ADR-0020](../adrs/accepted/0020-mcp-notification-handling.md)).
 
+**Every tool call has a deadline** — `[tools] default_timeout_secs`,
+see [Operating the daemon](operating-the-daemon.md). At it the host
+sends `notifications/cancelled` and reports a `timeout` tool error to
+the model, so a server that accepts a request and never answers cannot
+hold an invocation open, and is told to stop rather than left working
+on a result nobody will read.
+
+**Progress is correlated to the call that caused it.** rmcp mints a
+progress token for every outbound request and overwrites any the host
+attaches, so factor-q attaches none and instead records the minted
+token against the invocation and tool call that issued the request.
+Progress then arrives attributed: one rate-limited log line per call
+naming both, and a per-call *last reported at* the daemon keeps while
+the call is in flight
+([#605](https://github.com/bricef/factor-q/issues/605)).
+
 ## Lifecycle
 
 - **Tool-only servers** are started once and shared across invocations.

@@ -454,7 +454,7 @@ Error case:
 }
 ```
 
-`error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`.
+`error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`. `timeout` is the host's own deadline on the call — `[tools] default_timeout_secs`, or the tool's own request clamped to `[tools] max_timeout_secs` ([#547](https://github.com/bricef/factor-q/issues/547)). It was previously unreachable: only `exec` had a deadline and it reports its own timeout as an ordinary `is_error` result, so nothing produced the kind. A run of `max_consecutive_timeouts` of them fails the invocation with `tool_error`.
 
 **Design notes:**
 
@@ -809,6 +809,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-05, [#600](https://github.com/bricef/factor-q/issues/600))* An `opaque` token may be a bare continuity token, `{"type": "thought_signature", "signature": …}`, beside the provider-block form | Behaviour, not shape — `opaque` was already any JSON token. Gemini returns its signature with no text and no surrounding block; the runtime mints this wrapper so the log says what it holds and the adapter replays it as a signature part rather than a block. |
 | `usage` gains `reasoning_tokens` (additive, defaults to 0) | Splits `output_tokens` into thought-vs-spoken. A decomposition, not a new charge — `total_cost` is unchanged. |
 | *(2026-09-05, [#546](https://github.com/bricef/factor-q/issues/546), [#278](https://github.com/bricef/factor-q/issues/278))* `llm.failure.error_kind` gains `rejected` and `timeout` (additive), and `rate_limited` is produced for a 429 | The runtime classifies a failed call by the provider's status and by its own new deadline, instead of flattening everything but auth into `request_failed`. A consumer switching on the old set sees two new strings, and one it had never received. |
+| *(2026-09-06, [#547](https://github.com/bricef/factor-q/issues/547))* `tool.result.error_kind: timeout` becomes reachable, and `invocation.failed.error_kind: tool_error` is now also produced for a run of them | No shape change — both strings were already declared. Before this, only `exec` had a deadline and it reports its own timeout as an ordinary `is_error` result, so nothing ever emitted the `timeout` tool kind. A consumer switching on the set sees a value it had never received. |
 
 ## Changelog: v1 → v2
 

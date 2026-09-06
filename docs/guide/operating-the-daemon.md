@@ -319,6 +319,45 @@ event's `error_kind` says which of these happened — `timeout`,
 a provider's limit in the first place is
 [#278](https://github.com/bricef/factor-q/issues/278).
 
+## When a tool hangs
+
+Every tool call has a deadline too, applied at the one place all of
+them pass through. `[tools] default_timeout_secs` (default 120) bounds
+a tool that manages none of its own — every built-in but `exec`, and
+every tool an MCP server advertises. `[tools] max_timeout_secs`
+(default 900) is the ceiling: a tool that asks for longer is clamped
+to it, never refused. `exec` is the one built-in that times itself, so
+`[tools.exec]` still decides its deadline within that ceiling; setting
+`[tools] max_timeout_secs` *below* `[tools.exec] max_timeout_secs`
+would silently cap exec while its own section still read the higher
+number, so the daemon refuses to start and names both keys.
+
+A call past its deadline is abandoned and reported to the model as a
+tool error with `error_kind: timeout`, saying the work may still be
+running — a deadline says nothing about whether the side effect
+happened, and an agent that assumes it did not will happily do it
+twice. An MCP call is additionally *cancelled*: the host sends
+`notifications/cancelled`, so the server stops rather than finishing a
+result nobody will read.
+
+One timeout is something an agent can route around. A run of them is
+not: against a dead MCP server every call times out, and an agent left
+to keep trying spends its whole budget one deadline at a time.
+`[tools] max_consecutive_timeouts` (default 3) ends the invocation
+instead, with a terminal `failed` whose message names the count and
+the setting. Any call that returns — success, or a tool-reported error
+— clears the run, because it proves the machinery is alive.
+
+`file_read` and the discovery tools refuse a path that is not a
+regular file, naming what it actually is. That is a deadline question
+as much as a correctness one: opening a FIFO blocks in `open(2)` until
+a writer appears, and before the check existed an agent could park an
+invocation on a named pipe with nothing above it able to intervene.
+
+A server that reports progress makes a long call visible: the host
+logs one rate-limited line per call carrying the invocation, the tool
+call and the numbers, and records when each call last reported.
+
 ## Quick reference
 
 | Goal | Command |
