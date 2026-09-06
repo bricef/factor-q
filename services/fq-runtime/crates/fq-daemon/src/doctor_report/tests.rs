@@ -33,10 +33,22 @@ pub(crate) fn executions(in_flight: i64, stuck_ids: &[&str]) -> ExecutionsView {
 
 pub(crate) const NOW: i64 = 1_000_000;
 
+/// The threshold a daemon derived from its call deadlines and handed
+/// the builder (#37). The builder carries it through; it does not know
+/// or check it, which is exactly why it is a fixture here.
+pub(crate) const THRESHOLD_MS: i64 = 4_210_000;
+
 #[test]
 fn all_clear_when_everything_healthy() {
     let workers = vec![worker("w1", "alive", NOW)];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &workers,
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     assert!(!report.has_issues());
     assert_eq!(report.workers.alive, 1);
@@ -54,7 +66,14 @@ fn all_clear_when_everything_healthy() {
 #[test]
 fn running_in_flight_work_is_not_an_issue() {
     // In-flight but not stuck is healthy.
-    let report = build_doctor_report(&[], &executions(1, &[]), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &executions(1, &[]),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
     assert_eq!(report.executions.in_flight, 1);
     assert_eq!(report.executions.stuck, 0);
     assert!(!report.has_issues());
@@ -67,7 +86,14 @@ fn stale_workers_flagged_with_ids() {
         worker("stale-1", "stale", NOW - 60_000),
         worker("gone-1", "shutdown", 0),
     ];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &workers,
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     assert_eq!(report.workers.alive, 1);
     assert_eq!(report.workers.stale, 1);
@@ -82,7 +108,14 @@ fn stale_workers_flagged_with_ids() {
 #[test]
 fn an_unknown_worker_status_surfaces_rather_than_vanishing() {
     let workers = vec![worker("odd-1", "quiescent", NOW)];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &workers,
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     assert_eq!(report.workers.alive, 0);
     assert_eq!(report.workers.stale, 1);
@@ -92,7 +125,14 @@ fn an_unknown_worker_status_surfaces_rather_than_vanishing() {
 
 #[test]
 fn stuck_in_flight_flagged() {
-    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[], Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &executions(2, &["stuck-abcdef01"]),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+    );
 
     assert_eq!(report.executions.in_flight, 2);
     assert_eq!(report.executions.stuck, 1);
@@ -118,7 +158,7 @@ fn working_in_flight_counted_but_not_an_issue() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, 0, &[], Vec::new());
+    let report = build_doctor_report(&[], &ex, THRESHOLD_MS, 0, &[], Vec::new());
 
     assert!(!report.has_issues());
     // Whole, same convention as stuck_ids — this is the id the
@@ -144,7 +184,14 @@ fn dead_lettered_triggers_are_counted() {
             count: 1,
         },
     ];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &failures,
+        Vec::new(),
+    );
     assert_eq!(
         report.dead_letters,
         DoctorDeadLetters {
@@ -156,7 +203,14 @@ fn dead_lettered_triggers_are_counted() {
 
 #[test]
 fn ambiguous_flagged() {
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[], Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        3,
+        &[],
+        Vec::new(),
+    );
     assert_eq!(report.ambiguous, 3);
     assert!(report.has_issues());
 }
@@ -173,7 +227,14 @@ fn permanent_failures_grouped_by_kind() {
             count: 1,
         },
     ];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &failures,
+        Vec::new(),
+    );
 
     assert_eq!(report.failure_total(), 3);
     assert!(report.has_issues());
@@ -184,6 +245,7 @@ fn report_serialises_to_stable_json_shape() {
     let report = build_doctor_report(
         &[worker("w1", "alive", NOW)],
         &executions(1, &[]),
+        THRESHOLD_MS,
         1,
         &[FailureView {
             error_kind: "runtimeerror".to_string(),
@@ -208,6 +270,7 @@ fn the_report_survives_the_wire_round_trip() {
     let report = build_doctor_report(
         &[worker("w1", "alive", NOW), worker("w2", "stale", 0)],
         &executions(2, &["stuck-abcdef01"]),
+        THRESHOLD_MS,
         1,
         &[FailureView {
             error_kind: "trigger_exhausted".to_string(),
@@ -227,6 +290,7 @@ fn dead_letters_never_fabricates_a_count() {
     let report = build_doctor_report(
         &[],
         &ExecutionsView::default(),
+        THRESHOLD_MS,
         0,
         &[FailureView {
             error_kind: "runtimeerror".to_string(),
