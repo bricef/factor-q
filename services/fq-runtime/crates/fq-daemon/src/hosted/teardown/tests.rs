@@ -259,8 +259,7 @@ fn an_escalated_reason_names_the_stop_and_the_escalator() {
 /// without being asked to.
 #[tokio::test]
 async fn an_optional_tasks_stream_ending_is_observed_and_described() {
-    let mut handle: tokio::task::JoinHandle<Result<(), String>> =
-        tokio::spawn(async { Ok(()) });
+    let mut handle: tokio::task::JoinHandle<Result<(), String>> = tokio::spawn(async { Ok(()) });
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
@@ -271,8 +270,7 @@ async fn an_optional_tasks_stream_ending_is_observed_and_described() {
 
     let described = crate::signals::describe_task_result("summary consumer", result);
     assert_eq!(
-        described,
-        "summary consumer exited before a shutdown signal was sent",
+        described, "summary consumer exited before a shutdown signal was sent",
         "the silent exit has to become a sentence somebody can read"
     );
 }

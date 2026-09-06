@@ -214,9 +214,15 @@ fn every_consumer_is_named_in_the_report() {
         "fq-dispatcher",
         "fq-advisory-watch",
     ] {
-        assert!(out.contains(name), "consumer {name} is missing from:\n{out}");
+        assert!(
+            out.contains(name),
+            "consumer {name} is missing from:\n{out}"
+        );
     }
-    assert!(out.contains("Consumers: 5 checked, 1 unhealthy"), "got:\n{out}");
+    assert!(
+        out.contains("Consumers: 5 checked, 1 unhealthy"),
+        "got:\n{out}"
+    );
 }
 
 /// The wedge of finding B4, as an operator reads it: the stuck consumer

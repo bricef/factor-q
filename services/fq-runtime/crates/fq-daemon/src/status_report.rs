@@ -52,15 +52,18 @@ pub(crate) fn register_status_report(
     views: Arc<Views>,
     bus: fq_runtime::EventBus,
     agents: fq_runtime::SharedRegistry,
-    // Where this daemon's stores are. Taken from the config it was
-    // started with, so the answer describes the process reporting it.
-    db_paths: std::sync::Arc<fq_runtime::RuntimeDbPaths>,
-    legacy_events_db: std::sync::Arc<std::path::PathBuf>,
-    drain_deadline_ms_value: u64,
-    // Whether this daemon runs a summariser, so health expects that
-    // durable only where one exists (#549).
-    summary_enabled: bool,
+    // What this daemon knows about itself that a reader cannot derive:
+    // where its stores are, how long it will take to stop, and whether
+    // it runs a summariser (so health expects that durable only where
+    // one exists). Passed as the group they already are — the three
+    // paths plus two flags were five positional arguments, which is
+    // both hard to call correctly and over clippy's bar.
+    facts: &crate::operator_surface::DaemonFacts,
 ) -> anyhow::Result<()> {
+    let db_paths = facts.db_paths.clone();
+    let legacy_events_db = facts.legacy_events_db.clone();
+    let drain_deadline_ms_value = facts.drain_deadline_ms;
+    let summary_enabled = facts.summary_enabled;
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
         "Machinery state: the daemon's build, its stream health, its live registry, \

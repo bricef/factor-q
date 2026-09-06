@@ -24,6 +24,9 @@ use crate::operator_surface::DaemonFacts;
 /// facts about the daemon that a reader cannot derive. Grouping them
 /// also keeps `operator_registry` under the function-size gate, which
 /// the second report's extra arguments had pushed it past.
+///
+/// The pairs are (doctor, status) — two handles of the same thing,
+/// because each registration takes ownership of its own clone.
 pub(crate) fn register_health_reports(
     registry: &mut fq_edge::EdgeRegistry,
     views: (Arc<Views>, Arc<Views>),
@@ -39,14 +42,5 @@ pub(crate) fn register_health_reports(
         doctor_bus,
         facts.summary_enabled,
     )?;
-    crate::status_report::register_status_report(
-        registry,
-        status_views,
-        status_bus,
-        agents,
-        facts.db_paths.clone(),
-        facts.legacy_events_db.clone(),
-        facts.drain_deadline_ms,
-        facts.summary_enabled,
-    )
+    crate::status_report::register_status_report(registry, status_views, status_bus, agents, facts)
 }
