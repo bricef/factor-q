@@ -262,10 +262,10 @@ async fn the_doctor_and_the_sweep_agree_on_the_same_invocation() {
     assert_eq!(executions.in_flight, 2);
     assert!(!executions.stuck_ids.contains(&fresh));
 
-    // `invocation.active` / `fq active` / the dashboard's active table
-    // and detail page, which read the same rows through a different
-    // call. A surface handed a different threshold would call the same
-    // invocation something else, which is the drift this pins.
+    // `invocation.active` — the dashboard's active table — which reads
+    // the same rows through a different call. A surface handed a
+    // different threshold would call the same invocation something
+    // else, which is the drift this pins.
     let active = views
         .active_invocations(
             NOW,

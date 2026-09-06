@@ -44,8 +44,9 @@ pub struct DaemonFacts {
     ///
     /// `control.doctor`'s executions block, the Invocation view's
     /// detail (`fq invocation show`, the dashboard's detail page),
-    /// `invocation.active` (`fq active`, the dashboard's active table)
-    /// and the control plane's stuck sweep are all handed this, and
+    /// `invocation.active` (the dashboard's active table; no `fq` verb
+    /// serves it yet) and the control plane's stuck sweep are all
+    /// handed this, and
     /// `control.status` reports it. Anything given a different number
     /// would call the same invocation something else.
     pub stuck_after_ms: i64,
