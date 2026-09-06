@@ -67,7 +67,15 @@ fn all_clear_when_everything_healthy() {
 #[test]
 fn running_in_flight_work_is_not_an_issue() {
     // In-flight but not stuck is healthy.
-    let report = build_doctor_report(&[], &executions(1, &[]), THRESHOLD_MS, 0, &[], Vec::new(), Vec::new());
+    let report = build_doctor_report(
+        &[],
+        &executions(1, &[]),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(report.executions.in_flight, 1);
     assert_eq!(report.executions.stuck, 0);
     assert!(!report.has_issues());

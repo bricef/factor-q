@@ -140,6 +140,7 @@ fn a_clean_executions_line_still_names_the_threshold() {
         0,
         &[],
         Vec::new(),
+        Vec::new(),
     );
     let out = render_doctor_report_human(&report);
     assert!(
