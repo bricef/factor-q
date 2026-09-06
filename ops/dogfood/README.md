@@ -270,18 +270,25 @@ rebuild replays every event and silently drops the ones it cannot parse
 both reconnect without an attempt limit and both may be started before
 the broker is up. Before #551 nats.go's default gave up after sixty
 attempts two seconds apart, so a broker down for more than two minutes
-left `fq-cron` exited and the watcher polling GitHub with a dead
-connection — churning issue labels it could not trigger. Two
-consequences for an operator:
+made `fq-cron` exit — and `restart: unless-stopped` brought it straight
+back into the same outage, crash-looping until the broker returned —
+while the watcher stayed up and kept polling GitHub with a dead
+connection, churning issue labels it could not trigger. A restart policy
+cannot rescue a process that does not fall over, which is why the
+watcher's half was the worse of the two. Three consequences for an
+operator:
 
 - Restarting `nats` alone no longer needs the adapters restarted with
   it, unless what changed is a value they read at startup (the token
   below).
-- An adapter that is gone after a broker blip is now a real fault worth
-  reading the logs for, not the expected outcome. During an outage both
-  log the disconnect and answer `/healthz` with 503; the watcher also
-  logs a skipped poll cycle each interval, and `fq-cron` logs the
-  state-store retries.
+- A restart loop on `fq-cron` during a broker outage is no longer
+  expected behaviour; `docker compose ps` showing it recently restarted
+  is now worth a look at the logs.
+- During an outage both log the disconnect and answer `/healthz` with
+  503; the watcher also logs a skipped poll cycle each interval, and
+  `fq-cron` logs its state-store retries. Neither publishes anything
+  while disconnected — a publish fails immediately rather than being
+  buffered and delivered on reconnect.
 
 ### Broker token (#542)
 

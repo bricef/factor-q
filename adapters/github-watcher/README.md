@@ -56,6 +56,14 @@ not publish a second trigger for the same issue. Two removals racing
 inside GitHub could still both report success; one watcher per repo is the
 definitive fix ([#553](https://github.com/bricef/factor-q/issues/553)).
 
+A removal that fails with anything *other* than a 404 — a 5xx, a timeout —
+is a failed transition rather than a lost race, and the add is rolled back
+before it is reported, so the issue is left where it started and the next
+poll tries again. An issue left carrying both labels would be skipped for
+ever. If that rollback fails too, the issue really is stuck: the watcher
+says so, names both labels, and asks for a hand repair instead of
+promising a retry.
+
 **Observing the outcome** (closes the gap that stranded issue #9). The
 watcher subscribes to the triggered agent's lifecycle events
 (`fq.agent.<agent>.triggered` / `.completed` / `.failed`), binds each
@@ -141,6 +149,12 @@ sixty tries two seconds apart, which left the watcher polling GitHub for
 ever with a dead connection: claiming issues it could not trigger,
 reverting them, and repeating every cycle, with the outcome subscriptions
 that would have rescued them gone too.
+
+The connection is checked once per cycle, so a disconnect *mid*-cycle
+still reaches the publish. That publish fails immediately rather than
+being buffered for delivery on reconnect (`ReconnectBufSize(-1)`): a
+buffered trigger would be reverted as failed and then delivered anyway,
+so the next cycle would claim the issue and trigger it a second time.
 
 While the connection is down each poll cycle is skipped whole — no claim,
 no trigger, no review sweep — with a log line saying so, and `/healthz`

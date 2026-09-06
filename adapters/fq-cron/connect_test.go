@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,6 +120,34 @@ func fastReconnect() []nats.Option {
 	return []nats.Option{nats.ReconnectWait(20 * time.Millisecond), nats.ReconnectJitter(0, 0)}
 }
 
+// countingReconnect shortens the reconnect interval and records how many
+// attempts nats.go has made since the disconnect, so a test can wait for
+// the sixtieth rather than sleep for a duration that ought to contain it:
+// under load a fixed sleep can deliver fewer than sixty attempts and pass
+// without ever testing the limit.
+func countingReconnect(attempts *atomic.Int64) []nats.Option {
+	return []nats.Option{
+		nats.ReconnectJitter(0, 0),
+		nats.CustomReconnectDelay(func(attempt int) time.Duration {
+			attempts.Store(int64(attempt))
+			return 20 * time.Millisecond
+		}),
+	}
+}
+
+// waitAttempts waits for at least n reconnect attempts to have been made.
+func waitAttempts(t *testing.T, attempts *atomic.Int64, n int64, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if attempts.Load() >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("only %d reconnect attempts in %s, want at least %d", attempts.Load(), within, n)
+}
+
 // --- the policy ---
 
 // A broker that is not up yet must be a wait, not a startup failure: the
@@ -176,7 +205,8 @@ func TestReconnectOutlastsSixtyAttempts(t *testing.T) {
 	port := freePort(t)
 	stop := startBroker(t, binary, port)
 	logs := &syncBuffer{}
-	nc, err := connectNATS(fmt.Sprintf("nats://127.0.0.1:%d", port), log.New(logs, "", 0), fastReconnect()...)
+	var attempts atomic.Int64
+	nc, err := connectNATS(fmt.Sprintf("nats://127.0.0.1:%d", port), log.New(logs, "", 0), countingReconnect(&attempts)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,12 +215,11 @@ func TestReconnectOutlastsSixtyAttempts(t *testing.T) {
 
 	stop()
 	waitForLog(t, logs, "nats=disconnected", 5*time.Second)
-	// 20ms reconnect interval, no jitter: three seconds is more than the
-	// sixty attempts the default policy allows, after which a default
-	// connection is CLOSED and never comes back.
-	time.Sleep(3 * time.Second)
+	// Wait for the sixty-first attempt to have actually happened, rather
+	// than for a stretch of time that ought to contain it.
+	waitAttempts(t, &attempts, 61, 30*time.Second)
 	if nc.IsClosed() {
-		t.Fatal("connection closed itself during the outage; MaxReconnects(-1) is not in force")
+		t.Fatalf("connection closed itself after %d attempts; MaxReconnects(-1) is not in force", attempts.Load())
 	}
 
 	startBroker(t, binary, port)
