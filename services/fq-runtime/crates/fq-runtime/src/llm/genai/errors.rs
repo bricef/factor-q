@@ -26,6 +26,7 @@ use crate::llm::LlmError;
 /// |---|---|---|
 /// | 429 | `RateLimited`, carrying `Retry-After` when sent | yes, honouring the header |
 /// | 401, 403 | `Auth` | no |
+/// | 408 | `RequestFailed` | yes — the server timed the request out, which says nothing about the request |
 /// | other 4xx | `Rejected` | no |
 /// | 5xx | `RequestFailed` | yes |
 ///
@@ -45,6 +46,9 @@ pub(super) fn map_error(model: &str, budget: Duration, err: provider::Error) -> 
                 retry_after: retry_after(&err),
             },
             401 | 403 => LlmError::Auth(message),
+            // The server's own timeout, not a verdict on the request; a
+            // fresh attempt answers it, the same as a 5xx.
+            408 => LlmError::RequestFailed(message),
             400..=499 => LlmError::Rejected(message),
             _ => LlmError::RequestFailed(message),
         };
