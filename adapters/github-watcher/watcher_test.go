@@ -214,8 +214,10 @@ func TestPollOnceRaisesAClaimStrandedWithBothLabels(t *testing.T) {
 }
 
 // "Stranded" is what the log says when a transition leaves an issue
-// nowhere. A lost race leaves it somewhere — wherever the winner put it —
-// so it must not be reported the same way, at any of the relabel sites.
+// nowhere. A lost race leaves it somewhere — wherever the winner put it,
+// plus the label we just added — so it must not be reported the same way,
+// and the line must say the add landed: that is how an issue someone had
+// moved to `failed` comes back as `ready`.
 func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 	lost := fmt.Errorf("remove %q from #7: %w", "in-progress", ErrClaimLost)
 
@@ -239,8 +241,12 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 		if err := w.pollOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if got := logs.String(); strings.Contains(got, "stranded") || !strings.Contains(got, "nothing to revert") {
+		got := logs.String()
+		if strings.Contains(got, "stranded") || !strings.Contains(got, "already gone") {
 			t.Errorf("log = %q, want the revert reported as a lost race", got)
+		}
+		if !strings.Contains(got, "added=ready") || !strings.Contains(got, "missing=in-progress") {
+			t.Errorf("log = %q, want it to say which label was applied and which was missing", got)
 		}
 	})
 
@@ -249,8 +255,12 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 		src := &labelSource{relErr: lost}
 		r := NewOutcomeReactor(src, outcomeConfig(), slog.New(slog.NewTextHandler(logs, nil)))
 		triggeredThen(r, "inv", 7, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "inv", ErrorKind: "budget_exceeded"})
-		if got := logs.String(); strings.Contains(got, "stranded") || !strings.Contains(got, "already moved on") {
+		got := logs.String()
+		if strings.Contains(got, "stranded") || !strings.Contains(got, "already gone") {
 			t.Errorf("log = %q, want the outcome relabel reported as a lost race", got)
+		}
+		if !strings.Contains(got, "added=failed") || !strings.Contains(got, "missing=in-progress") {
+			t.Errorf("log = %q, want it to say which label was applied and which was missing", got)
 		}
 	})
 
@@ -265,8 +275,12 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 			Log:       slog.New(slog.NewTextHandler(logs, nil)),
 		}
 		w.sweepReview(context.Background())
-		if got := logs.String(); strings.Contains(got, "left in review") || !strings.Contains(got, "already left in-review") {
+		got := logs.String()
+		if strings.Contains(got, "left in review") || !strings.Contains(got, "already gone") {
 			t.Errorf("log = %q, want the sweep reported as a lost race", got)
+		}
+		if !strings.Contains(got, "added=done") || !strings.Contains(got, "missing=in-review") {
+			t.Errorf("log = %q, want it to say which label was applied and which was missing", got)
 		}
 	})
 }

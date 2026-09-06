@@ -235,8 +235,11 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 				"issue", pt.Issue, "agent", w.Config.TargetAgent, "err", err)
 			if rerr := w.Source.Relabel(ctx, pt.Issue, w.Config.InProgressLabel, w.Config.ReadyLabel); rerr != nil {
 				if errors.Is(rerr, ErrClaimLost) {
-					w.Log.Warn("nothing to revert; another actor had already moved the issue off in-progress",
-						"issue", pt.Issue, "err", rerr)
+					// Not a no-op: the revert's add landed, so the issue
+					// now carries `ready` on top of wherever the other
+					// actor put it.
+					w.Log.Warn("revert applied its label, but the old one was already gone; another actor had moved the issue on",
+						"issue", pt.Issue, "added", w.Config.ReadyLabel, "missing", w.Config.InProgressLabel, "err", rerr)
 				} else {
 					w.Log.Error("failed to revert label after publish failure; issue stranded in in-progress",
 						"issue", pt.Issue, "err", rerr)
@@ -273,7 +276,9 @@ func (w *Watcher) sweepReview(ctx context.Context) {
 		}
 		if err := w.Source.Relabel(ctx, iss.Number, w.Config.InReviewLabel, w.Config.DoneLabel); err != nil {
 			if errors.Is(err, ErrClaimLost) {
-				w.Log.Warn("issue had already left in-review; not marking it done here", "issue", iss.Number, "err", err)
+				// The done label landed; only in-review was already gone.
+				w.Log.Warn("applied the done label, but the old one was already gone; another actor had moved the issue on",
+					"issue", iss.Number, "added", w.Config.DoneLabel, "missing", w.Config.InReviewLabel, "err", err)
 				continue
 			}
 			w.Log.Error("relabel to done failed; issue left in review", "issue", iss.Number, "err", err)

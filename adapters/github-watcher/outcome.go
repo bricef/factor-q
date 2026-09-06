@@ -298,10 +298,13 @@ func (r *OutcomeReactor) forget(invocationID string) {
 func (r *OutcomeReactor) relabel(ctx context.Context, issue int, remove, add, why string) {
 	if err := r.Source.Relabel(ctx, issue, remove, add); err != nil {
 		// A lost race is not a stranding: the label was already gone, so
-		// someone else made this transition and the issue moved on.
+		// someone else made this transition and the issue moved on. The
+		// add still landed, though — the retry paths re-add `ready`, so
+		// this line is also how an issue a person had moved to `failed`
+		// ends up queued again.
 		if errors.Is(err, ErrClaimLost) {
-			r.Log.Warn("outcome relabel found the issue already moved on",
-				"issue", issue, "from", remove, "to", add, "why", why, "err", err)
+			r.Log.Warn("applied the new label, but the old one was already gone; another actor had moved the issue on",
+				"issue", issue, "added", add, "missing", remove, "why", why, "err", err)
 			return
 		}
 		r.Log.Error("outcome relabel failed; issue may be stranded",

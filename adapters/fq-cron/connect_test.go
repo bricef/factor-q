@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -148,6 +149,22 @@ func TestConnectWaitsForABrokerThatIsNotUpYet(t *testing.T) {
 
 	nc.Close()
 	waitForLog(t, logs, "nats=closed", 5*time.Second)
+}
+
+// A publish made while the connection is down must fail there and then.
+// nats.go's 8 MB pending buffer would otherwise hold it and flush it on
+// reconnect — a fire recorded as failed and delivered anyway, outside the
+// retry policy that is supposed to decide what is re-sent.
+func TestPublishWhileDisconnectedFailsInsteadOfBuffering(t *testing.T) {
+	port := freePort(t) // nothing is listening on it
+	nc, err := connectNATS(fmt.Sprintf("nats://127.0.0.1:%d", port), log.New(io.Discard, "", 0), fastReconnect()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	if err := nc.Publish("cron.test", []byte("fire")); err == nil {
+		t.Fatal("a publish on a disconnected connection must fail, not be buffered for later delivery")
+	}
 }
 
 // nats.go's default policy gives up after sixty reconnect attempts and
