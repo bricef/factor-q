@@ -254,9 +254,10 @@ mod tests {
         let handle = tokio::spawn(producer.run(shutdown_rx));
 
         async fn next_boundary(
-            sub: &mut (impl futures::Stream<
-                Item = Result<crate::events::Event, crate::bus::BusError>,
-            > + Unpin),
+            sub: &mut (
+                     impl futures::Stream<Item = Result<crate::events::Event, crate::bus::BusError>>
+                     + Unpin
+                 ),
         ) -> Option<i64> {
             let event = tokio::time::timeout(Duration::from_secs(5), sub.next())
                 .await
