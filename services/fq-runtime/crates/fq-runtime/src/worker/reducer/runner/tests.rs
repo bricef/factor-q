@@ -4442,6 +4442,11 @@ async fn repeated_servicings_extend_the_backstop_by_one_grace_not_by_each() {
 /// a command that hung on every attempt reset the count every time, and
 /// the one tool that can legitimately sit for the whole ceiling was the
 /// one `max_consecutive_timeouts` did not protect.
+///
+/// The command says something before it hangs, so this also pins the
+/// other half of that error's contract end to end: what `exec` captured
+/// before the kill reaches the *model*, in the `tool.result` event, and
+/// not only the `ToolError` the exec unit tests read (#617).
 #[tokio::test]
 async fn exec_timing_itself_out_counts_toward_the_streak() {
     let sink = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
@@ -4494,7 +4499,10 @@ async fn exec_timing_itself_out_counts_toward_the_streak() {
         llm.push_response(tool_call_response(
             "builtin__exec",
             &format!("call-{n}"),
-            json!({"command": ["sleep", "30"], "cwd": work.to_string_lossy()}),
+            json!({
+                "command": ["sh", "-c", "echo the-command-spoke; sleep 30"],
+                "cwd": work.to_string_lossy(),
+            }),
         ));
     }
 
@@ -4538,6 +4546,11 @@ async fn exec_timing_itself_out_counts_toward_the_streak() {
         assert!(
             result.output.contains("the command was killed"),
             "a self-timed-out tool tells the model the work stopped: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("the-command-spoke"),
+            "and carries what the command had said before the kill: {}",
             result.output
         );
     }
