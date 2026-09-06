@@ -16,7 +16,7 @@ use fq_ops::surface::{DoctorReport, StatusReport};
 use fq_ops::transcript::TranscriptEntry;
 use fq_ops::views::{
     ActiveInvocationView, AgentCostDetailView, CostBucketView, CostReport, CostView, EventView,
-    InvocationDetailView, InvocationSummaryView, Liveness, ModelCostView,
+    InvocationDetailView, InvocationSummaryView, Liveness, ModelCostView, sum_reported,
 };
 
 // The two pages keep the paths they have always had: main.rs routes to
@@ -612,7 +612,7 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
     // spends, so the row doubles as a burn meter on in-flight work.
     if let Some(cost) = &d.cost {
         b.push_str(&format!(
-            r#"<tr><th>cost so far</th><td>${:.4} <span class="muted">· {} llm calls · {} in / {} out{}</span></td></tr>"#,
+            r#"<tr><th>cost so far</th><td>${:.4} <span class="muted">· {} llm calls · {} in / {} out{}{}</span></td></tr>"#,
             cost.total_cost,
             fmt_grouped(cost.event_count),
             fmt_tokens(cost.total_input_tokens),
@@ -621,6 +621,13 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
                 format!(" · {} cache read", fmt_tokens(cost.total_cache_read_tokens))
             } else {
                 String::new()
+            },
+            // Only when a provider reported the split: an Anthropic run
+            // says nothing here rather than `n/a`, the way the cache-read
+            // figure says nothing at zero. A reported zero is shown.
+            match cost.total_reasoning_tokens {
+                Some(n) => format!(" · {} reasoning", fmt_tokens(n)),
+                None => String::new(),
             },
         ));
     }
@@ -805,6 +812,17 @@ fn token_cell(n: i64) -> String {
         )
     } else {
         format!(r#"<td class="n">{}</td>"#, fmt_grouped(n))
+    }
+}
+
+/// A reasoning-token cell. `None` is a provider that reported no
+/// thought-versus-spoken split, which is every Anthropic call; it is
+/// not a zero, so it renders `n/a`, muted, where a reported `0` renders
+/// as the count it is.
+fn reasoning_cell(n: Option<i64>) -> String {
+    match n {
+        Some(n) => token_cell(n),
+        None => r#"<td class="n muted">n/a</td>"#.to_string(),
     }
 }
 
@@ -1048,10 +1066,11 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window, now_ms: i64)
     if !named.is_empty() {
         b.push_str("<h2>By agent</h2>");
         b.push_str(
-            "<table><tr><th>agent</th><th class=\"n\">invocations</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
+            "<table><tr><th>agent</th><th class=\"n\">invocations</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">reasoning</th><th class=\"n\">last 24h</th><th class=\"n\">total cost</th><th>share</th></tr>",
         );
         let mut sub = FamilyAgg::default();
         let (mut sub_in, mut sub_out, mut sub_cr, mut sub_cw) = (0i64, 0i64, 0i64, 0i64);
+        let mut sub_reasoning: Option<i64> = None;
         let mut sub_day = 0.0_f64;
         let mut sub_invs = 0i64;
         for a in &named {
@@ -1061,11 +1080,12 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window, now_ms: i64)
             sub_out += a.total_output_tokens;
             sub_cr += a.total_cache_read_tokens;
             sub_cw += a.total_cache_write_tokens;
+            sub_reasoning = sum_reported(sub_reasoning, a.total_reasoning_tokens);
             sub_invs += a.invocation_count;
             let day = day_costs.get(a.agent_id.as_str()).copied();
             sub_day += day.unwrap_or(0.0);
             b.push_str(&format!(
-                r#"<tr><td><a href="/costs/{}">{}</a></td><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
+                r#"<tr><td><a href="/costs/{}">{}</a></td><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
                 esc(&a.agent_id),
                 esc(&a.agent_id),
                 fmt_grouped(a.invocation_count),
@@ -1074,19 +1094,21 @@ pub fn costs(report: &CostReport, day: &CostReport, window: Window, now_ms: i64)
                 token_cell(a.total_output_tokens),
                 token_cell(a.total_cache_read_tokens),
                 token_cell(a.total_cache_write_tokens),
+                reasoning_cell(a.total_reasoning_tokens),
                 day_cell(day),
                 a.total_cost,
                 share_cell(a.total_cost, report.total_cost),
             ));
         }
         b.push_str(&format!(
-            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
+            r#"<tr class="sub"><th>named agents</th><td class="n">{}</td><td class="n">{}</td>{}{}{}{}{}{}<td class="n"><b>${:.4}</b></td>{}</tr>"#,
             fmt_grouped(sub_invs),
             fmt_grouped(sub.calls),
             token_cell(sub_in),
             token_cell(sub_out),
             token_cell(sub_cr),
             token_cell(sub_cw),
+            reasoning_cell(sub_reasoning),
             day_cell(Some(sub_day)),
             sub.cost,
             share_cell(sub.cost, report.total_cost),
@@ -1206,17 +1228,18 @@ pub fn agent_costs(d: &AgentCostDetailView, window: Window, now_ms: i64) -> Stri
         return b;
     }
     b.push_str(
-        "<table><tr><th>invocation</th><th>started</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cost</th></tr>",
+        "<table><tr><th>invocation</th><th>started</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">reasoning</th><th class=\"n\">cost</th></tr>",
     );
     for i in &d.invocations {
         b.push_str(&format!(
-            r#"<tr><td>{}</td><td>{}</td><td class="n">{}</td>{}{}{}<td class="n">${:.4}</td></tr>"#,
+            r#"<tr><td>{}</td><td>{}</td><td class="n">{}</td>{}{}{}{}<td class="n">${:.4}</td></tr>"#,
             inv_link(&i.invocation_id),
             esc(&age(i.started_at_ms, now_ms)),
             fmt_grouped(i.event_count),
             token_cell(i.total_input_tokens),
             token_cell(i.total_output_tokens),
             token_cell(i.total_cache_read_tokens),
+            reasoning_cell(i.total_reasoning_tokens),
             i.total_cost,
         ));
     }
