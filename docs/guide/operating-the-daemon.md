@@ -353,6 +353,15 @@ additionally *cancelled*: the host sends `notifications/cancelled`, so
 the server is asked to stop rather than finish a result nobody will
 read.
 
+`exec` is the strongest form of "killed the work", on both paths: its
+own timeout and a call the host drops each end the child's whole
+process group — the command and everything it started — so nothing
+outlives the call. `[tools.exec] kill_grace_secs` and
+`drain_grace_secs` (2s each) bound how long that teardown may take,
+and their sum must stay under the host's 5s backstop or the daemon
+refuses to start, because a backstop firing mid-teardown would leave
+the group alive.
+
 One timeout is something an agent can route around. A run of them is
 not: against a dead MCP server every call times out, and an agent left
 to keep trying spends its whole budget one deadline at a time.

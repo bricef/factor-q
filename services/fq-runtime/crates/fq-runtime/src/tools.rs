@@ -267,7 +267,14 @@ impl ToolCallLimits {
     /// outbound request so the server stops. Both are worth five
     /// seconds. A tool that ignores the deadline entirely is cut off
     /// by the backstop, that much later.
-    const BACKSTOP_GRACE: Duration = Duration::from_secs(5);
+    ///
+    /// It is also the budget `exec`'s teardown has to fit inside: its
+    /// group kill and output drain both run after the deadline, so
+    /// `[tools.exec] kill_grace_secs + drain_grace_secs` must stay
+    /// strictly below this or the host cancels the call mid-kill. The
+    /// daemon refuses to start on a config that breaks that
+    /// ([`ToolsConfig::validate`](crate::config::ToolsConfig)).
+    pub(crate) const BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 }
 
 /// The deadline the host applies to one tool call.

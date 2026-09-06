@@ -93,9 +93,9 @@ impl ToolsConfig {
         }
     }
 
-    /// Two orderings that must hold, both checked rather than silently
-    /// clamped, because a settings pair that disagrees is an operator
-    /// mistake with an invisible consequence.
+    /// Three orderings that must hold, all checked rather than
+    /// silently clamped, because a settings pair that disagrees is an
+    /// operator mistake with an invisible consequence.
     ///
     /// **The general ceiling must be at least the `exec` ceiling.**
     /// `[tools] max_timeout_secs = 60` under a `[tools.exec]
@@ -109,6 +109,16 @@ impl ToolsConfig {
     /// nothing honours; and in `[tools.exec]` specifically it would let
     /// the child outlive the host's backstop, inverting the ordering
     /// the backstop grace exists to guarantee.
+    ///
+    /// **`exec`'s teardown must fit inside the host's backstop.** The
+    /// group kill and the output drain both run *after* the call's
+    /// deadline has passed, and the host cancels the call
+    /// [`BACKSTOP_GRACE`](crate::tools::ToolCallLimits::BACKSTOP_GRACE)
+    /// after that same deadline. Set the two graces to 5s between them
+    /// and the host drops the call exactly as `exec` is escalating to
+    /// `SIGKILL` — the process group the teardown existed to end
+    /// survives, which is the defect this whole section is guarding
+    /// against (<https://github.com/bricef/factor-q/issues/552>).
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
         if self.max_timeout_secs < self.exec.max_timeout_secs {
             return Err(ConfigError::ToolCeilingBelowExec {
@@ -132,6 +142,15 @@ impl ToolsConfig {
                 });
             }
         }
+        let backstop_secs = crate::tools::ToolCallLimits::BACKSTOP_GRACE.as_secs();
+        if self.exec.teardown_budget_secs() >= backstop_secs {
+            return Err(ConfigError::ExecTeardownExceedsBackstop {
+                kill_grace: self.exec.kill_grace_secs,
+                drain_grace: self.exec.drain_grace_secs,
+                teardown: self.exec.teardown_budget_secs(),
+                backstop: backstop_secs,
+            });
+        }
         Ok(())
     }
 }
@@ -153,6 +172,30 @@ pub struct ExecToolConfig {
     /// rejected, to avoid trapping an agent in a retry loop.
     #[serde(default = "default_exec_max_timeout_secs")]
     pub max_timeout_secs: u64,
+    /// How long a timed-out process group gets to exit on `SIGTERM`
+    /// before it is `SIGKILL`ed, in seconds. Default 2.
+    ///
+    /// **Invariant**: `kill_grace_secs + drain_grace_secs` must be
+    /// strictly below the host's backstop grace (`BACKSTOP_GRACE` in
+    /// `crate::tools`, 5s), the delay after a call's deadline at which
+    /// the host cancels it. The two graces run back to back *after*
+    /// the deadline has already passed, so their sum is exactly how
+    /// long `exec` still needs; at or past the backstop the host drops
+    /// the call mid-teardown and the group being killed can outlive
+    /// it. Checked at load by [`ToolsConfig`]'s validation rather than
+    /// clamped, because an operator who raised a grace deliberately
+    /// should be told it does not fit, not quietly given a shorter
+    /// one.
+    #[serde(default = "default_exec_kill_grace_secs")]
+    pub kill_grace_secs: u64,
+    /// How long output capture may continue after the child is gone,
+    /// in seconds. Default 2. Bounds the drain so a descendant that
+    /// inherited the pipe and left the process group cannot hold the
+    /// tool open (<https://github.com/bricef/factor-q/issues/176>);
+    /// the kernel pipe buffer flushes in far less. Bound by the same
+    /// invariant as `kill_grace_secs`.
+    #[serde(default = "default_exec_drain_grace_secs")]
+    pub drain_grace_secs: u64,
 }
 
 fn default_exec_default_timeout_secs() -> u64 {
@@ -163,25 +206,43 @@ fn default_exec_max_timeout_secs() -> u64 {
     600
 }
 
+fn default_exec_kill_grace_secs() -> u64 {
+    2
+}
+
+fn default_exec_drain_grace_secs() -> u64 {
+    2
+}
+
 impl Default for ExecToolConfig {
     fn default() -> Self {
         Self {
             default_timeout_secs: default_exec_default_timeout_secs(),
             max_timeout_secs: default_exec_max_timeout_secs(),
+            kill_grace_secs: default_exec_kill_grace_secs(),
+            drain_grace_secs: default_exec_drain_grace_secs(),
         }
     }
 }
 
 impl ExecToolConfig {
     /// Convert to the `fq-tools` [`ExecConfig`](fq_tools::builtin::ExecConfig),
-    /// mapping the two configured timeouts and preserving the crate's
-    /// defaults for the fields this section does not expose
-    /// (`max_output_bytes`, `default_path`).
+    /// mapping the two timeouts and the two teardown graces, and
+    /// preserving the crate's defaults for the fields this section does
+    /// not expose (`max_output_bytes`, `default_path`).
     pub fn to_exec_config(&self) -> fq_tools::builtin::ExecConfig {
         fq_tools::builtin::ExecConfig {
             default_timeout: Duration::from_secs(self.default_timeout_secs),
             max_timeout: Duration::from_secs(self.max_timeout_secs),
+            kill_grace: Duration::from_secs(self.kill_grace_secs),
+            drain_grace: Duration::from_secs(self.drain_grace_secs),
             ..fq_tools::builtin::ExecConfig::default()
         }
+    }
+
+    /// How long a timed-out `exec` call still needs after its deadline:
+    /// the group kill, then the bounded output drain, back to back.
+    fn teardown_budget_secs(&self) -> u64 {
+        self.kill_grace_secs.saturating_add(self.drain_grace_secs)
     }
 }
