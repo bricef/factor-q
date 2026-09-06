@@ -68,10 +68,14 @@ collapsed disclosure, with "opaque — click to see raw" for a token.
 - The WAL and the invocation archive carry the same parts, so reasoning
   survives a crash and resume.
 - Cost metadata on each response carries `reasoning_tokens` when the
-  provider reports a split. It reaches no operator surface yet
-  ([#536](https://github.com/bricef/factor-q/issues/536)), and a provider
-  that reports no split (Anthropic) records `0`, which is not the same as
-  none.
+  provider reports a split, and omits it when the provider does not
+  (Anthropic never does): an unreported split is not a `0`, and the two
+  stay apart all the way down. `fq costs` has a `reasoning` column —
+  `n/a` where no call reported a split, `0` where a provider reported
+  zero — `fq costs --json` and `fq invocation show --json` carry
+  `total_reasoning_tokens` as `null` against `0`, and the dashboard's
+  cost pages render the same column with the same `n/a`. The figure is
+  a decomposition of the output tokens, never an addition to the bill.
 
 ## Asking for more or less reasoning
 
