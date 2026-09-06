@@ -41,6 +41,11 @@ pub struct DaemonFacts {
     /// A pre-split `events.db`, if one is still on disk.
     pub legacy_events_db: std::sync::Arc<std::path::PathBuf>,
     pub drain_deadline_ms: u64,
+    /// Whether `[summary]` names a model. Health expects the summary
+    /// durable only when one is configured — a daemon without a
+    /// summariser has no such consumer, and reporting it missing would
+    /// be a permanent red nobody can clear (#549).
+    pub summary_enabled: bool,
 }
 
 /// What the operator surface's handlers reach for beyond [`Views`]:
@@ -187,6 +192,7 @@ pub fn operator_registry(
     let worker_views = views.clone();
     let cost_views = views.clone();
     let doctor_views = views.clone();
+    let doctor_bus = deps.bus.clone();
     let status_views = views.clone();
     let status_bus = deps.bus.clone();
     let status_registry = deps.agents.clone();
@@ -279,7 +285,12 @@ pub fn operator_registry(
     crate::trigger_command::register_trigger_surface(&mut registry, trigger_bus, trigger_views)?;
     crate::control_commands::register_control_commands(&mut registry, machinery)?;
     crate::cost_report::register_cost_reports(&mut registry, cost_views)?;
-    crate::doctor_report::register_doctor_report(&mut registry, doctor_views)?;
+    crate::doctor_report::register_doctor_report(
+        &mut registry,
+        doctor_views,
+        doctor_bus,
+        deps.facts.summary_enabled,
+    )?;
     crate::status_report::register_status_report(
         &mut registry,
         status_views,
@@ -288,6 +299,7 @@ pub fn operator_registry(
         deps.facts.db_paths.clone(),
         deps.facts.legacy_events_db.clone(),
         deps.facts.drain_deadline_ms,
+        deps.facts.summary_enabled,
     )?;
 
     crate::resume::register_resume_command(&mut registry, deps.resume.clone())?;

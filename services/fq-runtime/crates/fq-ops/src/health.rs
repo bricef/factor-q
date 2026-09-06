@@ -29,7 +29,16 @@ pub enum StreamHealth {
         bytes: u64,
         first_seq: u64,
         last_seq: u64,
-        consumer: ConsumerHealth,
+        /// Every durable this daemon expects on the stream, in a fixed
+        /// order. It was one — the stream's "primary" consumer — which
+        /// meant `control.status` reported two of the runtime's six
+        /// durables and a wedged coordination or summary consumer was
+        /// invisible to every health surface (review finding B4).
+        /// A consumer the daemon does not expect is not listed: the
+        /// summariser only exists when `[summary]` names a model, and
+        /// reporting it missing otherwise would be a permanent false
+        /// red.
+        consumers: Vec<ConsumerHealth>,
     },
 }
 
@@ -40,6 +49,17 @@ impl StreamHealth {
             StreamHealth::Unavailable { stream, .. } => stream,
             StreamHealth::Available { stream, .. } => stream,
         }
+    }
+
+    /// Every consumer on this stream that an operator should act on.
+    /// An unavailable stream reports none of its own — the stream line
+    /// is the finding there.
+    pub fn faulty_consumers(&self) -> impl Iterator<Item = &ConsumerHealth> {
+        match self {
+            StreamHealth::Unavailable { .. } => [].iter(),
+            StreamHealth::Available { consumers, .. } => consumers.as_slice().iter(),
+        }
+        .filter(|c| c.is_fault())
     }
 }
 
@@ -66,5 +86,43 @@ pub enum ConsumerHealth {
         /// walking toward the consumer's delivery bound, past which a
         /// trigger is dead-lettered rather than retried again.
         num_redelivered: u64,
+        /// Deliveries this consumer has made past its acked floor,
+        /// beyond the first delivery of each still-pending message —
+        /// the "delivered count climbing while the watermark is frozen"
+        /// that a NAK loop looks like from outside. Zero on a healthy
+        /// consumer, however far behind it is.
+        redeliveries: u64,
+        /// True once `redeliveries` has passed the daemon's
+        /// `[bus] stuck_after_redeliveries`: the consumer is retrying
+        /// one message rather than making progress, and the fault
+        /// behind it has outlasted the whole escalation. The verdict
+        /// is computed daemon-side because the threshold is the
+        /// daemon's configuration — a reader that judged for itself
+        /// would be quoting a number it does not have.
+        stuck: bool,
     },
+}
+
+impl ConsumerHealth {
+    /// The durable's name, whichever state it is in. Every health
+    /// surface names the consumer it is talking about — a red line that
+    /// does not say which consumer is a red line an operator cannot act
+    /// on.
+    pub fn name(&self) -> &str {
+        match self {
+            ConsumerHealth::Missing { name }
+            | ConsumerHealth::Error { name, .. }
+            | ConsumerHealth::Active { name, .. } => name,
+        }
+    }
+
+    /// True when this consumer is something to act on: absent from a
+    /// daemon that expects it, unreadable, or stuck redelivering.
+    /// Lag alone is not a fault — a consumer catching up is working.
+    pub fn is_fault(&self) -> bool {
+        match self {
+            ConsumerHealth::Missing { .. } | ConsumerHealth::Error { .. } => true,
+            ConsumerHealth::Active { stuck, .. } => *stuck,
+        }
+    }
 }

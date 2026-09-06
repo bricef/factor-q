@@ -250,6 +250,58 @@ fn liveness_badge(liveness: Liveness) -> String {
 }
 
 /// The health page body.
+/// One durable's cells in the health table: name, state, lag, pending.
+/// A stuck consumer reads as stuck rather than as merely lagging — the
+/// two look alike in a lag column and are entirely different problems
+/// (#549).
+fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String, String) {
+    match consumer {
+        ConsumerHealth::Active {
+            name,
+            lag,
+            ack_pending,
+            num_pending,
+            num_redelivered,
+            redeliveries,
+            stuck,
+            ..
+        } => {
+            let state = if *stuck {
+                format!(r#"<span class="bad">✗ stuck ({redeliveries} redeliveries)</span>"#)
+            } else if *lag == 0 {
+                r#"<span class="ok">✓ caught up</span>"#.to_string()
+            } else if *lag < 10 {
+                r#"<span class="warn">◐ slightly behind</span>"#.to_string()
+            } else {
+                r#"<span class="bad">✗ lagging</span>"#.to_string()
+            };
+            let redelivery_suffix = if *num_redelivered > 0 {
+                format!(r#" / <span class="warn">redelivered {num_redelivered}</span>"#)
+            } else {
+                String::new()
+            };
+            (
+                esc(name),
+                state,
+                lag.to_string(),
+                format!("ack {ack_pending} / num {num_pending}{redelivery_suffix}"),
+            )
+        }
+        ConsumerHealth::Missing { name } => (
+            esc(name),
+            r#"<span class="muted">not present</span>"#.to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ),
+        ConsumerHealth::Error { name, error } => (
+            esc(name),
+            format!(r#"<span class="bad">✗ {}</span>"#, esc(error)),
+            "-".to_string(),
+            "-".to_string(),
+        ),
+    }
+}
+
 pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
     let mut b = String::new();
 
@@ -271,59 +323,24 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
             StreamHealth::Available {
                 stream,
                 messages,
-                consumer,
+                consumers,
                 ..
             } => {
-                let (cname, cstate, lag, pending) = match consumer {
-                    ConsumerHealth::Active {
-                        name,
+                // One row per durable, because a stream carries several
+                // and the row that matters during an incident is the
+                // one for the consumer that wedged (#549).
+                for consumer in consumers {
+                    let (cname, cstate, lag, pending) = consumer_row(consumer);
+                    b.push_str(&format!(
+                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        esc(stream),
+                        messages,
+                        cname,
+                        cstate,
                         lag,
-                        ack_pending,
-                        num_pending,
-                        num_redelivered,
-                        ..
-                    } => {
-                        let state = if *lag == 0 {
-                            r#"<span class="ok">✓ caught up</span>"#.to_string()
-                        } else if *lag < 10 {
-                            r#"<span class="warn">◐ slightly behind</span>"#.to_string()
-                        } else {
-                            r#"<span class="bad">✗ lagging</span>"#.to_string()
-                        };
-                        let redelivery_suffix = if *num_redelivered > 0 {
-                            format!(r#" / <span class="warn">redelivered {num_redelivered}</span>"#)
-                        } else {
-                            String::new()
-                        };
-                        (
-                            esc(name),
-                            state,
-                            lag.to_string(),
-                            format!("ack {ack_pending} / num {num_pending}{redelivery_suffix}"),
-                        )
-                    }
-                    ConsumerHealth::Missing { name } => (
-                        esc(name),
-                        r#"<span class="muted">not present</span>"#.to_string(),
-                        "-".to_string(),
-                        "-".to_string(),
-                    ),
-                    ConsumerHealth::Error { name, error } => (
-                        esc(name),
-                        format!(r#"<span class="bad">✗ {}</span>"#, esc(error)),
-                        "-".to_string(),
-                        "-".to_string(),
-                    ),
-                };
-                b.push_str(&format!(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                    esc(stream),
-                    messages,
-                    cname,
-                    cstate,
-                    lag,
-                    pending
-                ));
+                        pending
+                    ));
+                }
             }
         }
     }

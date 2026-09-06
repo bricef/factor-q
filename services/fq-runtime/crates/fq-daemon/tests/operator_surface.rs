@@ -97,6 +97,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 db_paths: Arc::new(paths.clone()),
                 legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
                 drain_deadline_ms: 180_000,
+                summary_enabled: false,
             },
             bus,
             projection: projection_store,

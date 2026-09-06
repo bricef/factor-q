@@ -57,6 +57,11 @@ use fq_runtime::views::Views;
 pub(crate) fn register_doctor_report(
     registry: &mut fq_edge::EdgeRegistry,
     views: Arc<Views>,
+    // The daemon's own broker connection: the consumer half of the
+    // report is a JetStream probe, and only this process holds one
+    // (#549).
+    bus: fq_runtime::EventBus,
+    summary_enabled: bool,
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
@@ -75,11 +80,16 @@ pub(crate) fn register_doctor_report(
          in-flight invocation whose WAL row has not advanced within the same threshold \
          that makes a worker stale — not hearing from either for that long is the same \
          order of signal. The threshold is the daemon's and is not a parameter: a health \
-         report an operator can narrow is one they can narrow past the problem.",
+         report an operator can narrow is one they can narrow past the problem. \
+         The consumer lines are a probe of this daemon's broker at the instant of the \
+         call: every durable it expects, named, with a stuck verdict for any that is \
+         redelivering rather than progressing. A summariser durable is expected only \
+         where `[summary]` configures one.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
             let views = views.clone();
+            let bus = bus.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -100,11 +110,18 @@ pub(crate) fn register_doctor_report(
                     .map_err(internal)?
                     .ambiguous;
                 let failures = views.failures().await.map_err(internal)?;
+                let consumers = fq_runtime::health::probe_core_consumers(
+                    &bus.jetstream(),
+                    summary_enabled,
+                    bus.redelivery_policy(),
+                )
+                .await;
                 Ok(build_doctor_report(
                     &workers,
                     &executions,
                     ambiguous,
                     &failures,
+                    consumers,
                 ))
             }
         })

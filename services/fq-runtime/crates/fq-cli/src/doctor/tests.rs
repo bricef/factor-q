@@ -38,7 +38,7 @@ fn failure(kind: &str, count: i64) -> FailureView {
 
 #[test]
 fn all_clear_renders_a_verdict_and_still_shows_dead_letters() {
-    let report = build_doctor_report(&[worker("w1", "alive")], &ExecutionsView::default(), 0, &[]);
+    let report = build_doctor_report(&[worker("w1", "alive")], &ExecutionsView::default(), 0, &[], Vec::new());
     let out = render_doctor_report_human(&report);
     assert!(out.contains("All clear."), "got: {out}");
     // Dead-letter section is always shown.
@@ -52,7 +52,7 @@ fn stale_workers_render_with_their_remediation() {
         worker("stale-1", "stale"),
         worker("gone-1", "shutdown"),
     ];
-    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[]);
+    let report = build_doctor_report(&workers, &ExecutionsView::default(), 0, &[], Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("1 alive, 1 stale, 1 shutdown"), "got: {out}");
@@ -62,7 +62,7 @@ fn stale_workers_render_with_their_remediation() {
 
 #[test]
 fn stuck_in_flight_renders_with_its_remediation() {
-    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[]);
+    let report = build_doctor_report(&[], &executions(2, &["stuck-abcdef01"]), 0, &[], Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(
@@ -78,7 +78,7 @@ fn stuck_in_flight_renders_with_its_remediation() {
 /// one.
 #[test]
 fn the_stuck_line_names_the_threshold_in_seconds() {
-    let report = build_doctor_report(&[], &executions(1, &["stuck-abcdef01"]), 0, &[]);
+    let report = build_doctor_report(&[], &executions(1, &["stuck-abcdef01"]), 0, &[], Vec::new());
     let out = render_doctor_report_human(&report);
     assert!(
         out.contains(&format!(
@@ -100,7 +100,7 @@ fn working_in_flight_shown_but_offered_no_remedy() {
         stuck: 0,
         stuck_ids: vec![],
     };
-    let report = build_doctor_report(&[], &ex, 0, &[]);
+    let report = build_doctor_report(&[], &ex, 0, &[], Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(
@@ -113,7 +113,7 @@ fn working_in_flight_shown_but_offered_no_remedy() {
 #[test]
 fn dead_lettered_triggers_render_with_both_next_steps() {
     let failures = vec![failure("trigger_exhausted", 2), failure("tool_error", 1)];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(
@@ -126,7 +126,7 @@ fn dead_lettered_triggers_render_with_both_next_steps() {
 
 #[test]
 fn ambiguous_renders_with_its_remediation() {
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[]);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 3, &[], Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Ambiguous invocations: 3"), "got: {out}");
@@ -139,7 +139,7 @@ fn ambiguous_renders_with_its_remediation() {
 #[test]
 fn permanent_failures_render_per_kind() {
     let failures = vec![failure("budget_exceeded", 2), failure("tool_error", 1)];
-    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures);
+    let report = build_doctor_report(&[], &ExecutionsView::default(), 0, &failures, Vec::new());
 
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Permanent failures: 3"), "got: {out}");
@@ -160,6 +160,7 @@ fn a_non_dead_letter_failure_still_renders_dead_letters_none() {
         &ExecutionsView::default(),
         0,
         &[failure("runtimeerror", 7)],
+        Vec::new(),
     );
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Dead-letters: none"), "got: {out}");
