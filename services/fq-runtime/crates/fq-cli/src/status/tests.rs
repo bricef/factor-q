@@ -548,7 +548,7 @@ fn throttled_models_render_their_pause_and_permits() {
     assert!(out.contains("\nThrottled models\n"), "got:\n{out}");
     assert!(
         out.contains(
-            "  moonshotai/kimi-k3: paused until 20:53:50Z; 2 of 4 permits, 1 in flight; \
+            "  moonshotai/kimi-k3: paused until 22:13:50Z; 2 of 4 permits, 1 in flight; \
              3 rate-limited this window (wave 2)\n"
         ),
         "got:\n{out}"
