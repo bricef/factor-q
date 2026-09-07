@@ -221,6 +221,45 @@ fq reload    # daemon re-reads the agents directory for the NEXT trigger
 In-flight invocations keep the config they snapshotted at trigger time
 (ADR-0020); the reload affects the next trigger only.
 
+## Rebuilding the projection: `fq projection rebuild`
+
+The projection (`projection.db`) is derived from the event stream, and
+it can be re-derived on demand:
+
+```sh
+fq projection rebuild --yes                      # drop, recreate, replay
+fq projection rebuild --yes --reason "backfill"  # with a note for `fq status`
+```
+
+The daemon stops its projection consumer, drops the projection tables,
+recreates them at its schema version, resets the `fq-projector`
+durable so the stream replays from the start of its retention, and
+starts the consumer again. Cost-bearing event rows, invocation
+summaries and trigger records are carried across before the replay
+begins — no spend figure is lost — and everything the stream still
+holds is re-derived whole, which is what fills in a column that was
+NULL for history. `--yes` is required: without it the command explains
+and stops.
+
+The command answers when the consumer is running again, not when the
+replay has finished. Until it catches up, reads answer over a partial
+fold — `fq status`'s `projection rows` climbs back, and a spend figure
+inside the stream's window can be short. `fq status` reports the
+rebuild for as long as the file lasts:
+
+```text
+  projection rebuild: in progress (replaying to stream sequence 60744) — started 2026-09-07T10:00:00+00:00, operator request: backfill
+```
+
+and `complete` once the durable's acked position has reached that
+sequence.
+
+The same rebuild happens by itself when a new build's projection
+schema version is higher than the file's: the daemon rebuilds on start
+and the replay follows. Do **not** delete `projection.db` to force one
+— that loses the cost rows older than stream retention, which exist
+nowhere else; the verb keeps them.
+
 ## Stale workers: nothing to do
 
 A worker that stops heartbeating for ~30s is marked `stale`. You will
@@ -552,7 +591,10 @@ under a running daemon now stops the daemon.** The deleted durable
 ends its consumer's message stream, the supervised arm observes the
 exit, and the process comes down. This is deliberate and matches every
 other consumer; if you need to reset a durable, stop the daemon with
-`fq down` first, delete it, and start again.
+`fq down` first, delete it, and start again. The one exception is the
+projector's: `fq projection rebuild` resets `fq-projector` under the
+running daemon, because the daemon stops that consumer itself before
+deleting the durable and starts it again after.
 
 ## Quick reference
 
@@ -564,6 +606,7 @@ other consumer; if you need to reset a durable, stop the daemon with
 | Stop now, skip the drain | `fq down --now` |
 | Redeploy (suspend for the next binary) | `fq down` |
 | Hot-reload agent definitions | `fq reload` |
+| Re-derive the projection from the event stream | `fq projection rebuild --yes` (`fq status` reports the replay) |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | See which consumers are keeping up | `fq doctor` (names every durable and any that is stuck) |
 | See the stuck threshold this daemon derived | `fq status` (the `stuck after` line) |

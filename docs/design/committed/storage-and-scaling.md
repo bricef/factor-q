@@ -190,6 +190,64 @@ There is no `cumulative_cost` and no `tool_name` column; running
 totals are computed at query time, and a tool's name is read from the
 payload in NATS rather than denormalised here.
 
+### Schema versioning: a bump is a rebuild
+
+The file carries a schema version — `PROJECTION_SCHEMA_VERSION` in the
+runtime, stamped into SQLite's `user_version` pragma — on the same
+rails the worker and control-plane stores use for theirs (the shared
+`db::schema` kit: read the recorded version, compare it with the
+binary's, act on the verdict). What differs is the verdict's action.
+Those two stores are sources of truth and migrate in place; the
+projection is derived, so its schema is one `CREATE TABLE` block at the
+current version and **a bump is answered by a rebuild, never a
+migration**:
+
+- **Fresh file** — the schema is created at the current version, and
+  the durable consumer is marked for a reset so a file recreated under
+  an existing durable replays from the beginning rather than resuming
+  from the durable's old position.
+- **Same version** — nothing runs. One forward-only path remains: a
+  column added to the `CREATE TABLE` block *and* to the
+  `ADDED_EVENT_COLUMNS` list is added by `ALTER` to a same-version
+  file, NULL for history. That is the right tool only for a column
+  whose value the events do not carry; a column they do carry gets a
+  version bump.
+- **Older version** — the projection tables are dropped and recreated
+  at the current version, the rows the retention sweep exempts are
+  carried across (below), the file is stamped, and the durable
+  consumer is marked for a reset. The daemon's consumer performs the
+  reset before it next reads: it deletes the `fq-projector` durable,
+  records the stream's last sequence as the replay's target, and
+  recreates the durable from the beginning of the stream
+  (`deliver_all`). Every event the stream still holds is re-derived,
+  which is what backfills a column that was NULL for history —
+  `reasoning_tokens` for every row written before the split was
+  recorded is the live example.
+- **Newer version** — refused, as the other stores refuse a file a
+  newer binary wrote. The error names the remedy: run that build, or
+  delete the file and let this one rebuild it.
+
+**What a rebuild keeps.** Three kinds of row outlive the log they were
+folded from by design, and a rebuild carries all three across before
+the replay starts: cost-bearing `events` rows (`total_cost IS NOT
+NULL`), every `invocation_summary` line, and every `triggers` record.
+The replay then refreshes whichever of them the stream still holds —
+`insert_event` is an upsert on `event_id` — so history inside retention
+is re-derived whole and history past it keeps the shape it had. No
+spend figure is lost to a rebuild.
+
+**While it runs**, reads answer over a partial fold: `projection_rows`
+climbs back and a spend figure inside the window can be short until the
+replay reaches its target. The projection watermark is not reset (it is
+monotonic, and the replay re-applies sequences below it), so a read
+gated at the old mark can find its row not yet re-derived. `fq status`
+reports the rebuild — when, why, the target sequence, and whether the
+replay has caught up — under `projection rebuild`.
+
+The replay assumes the events it reads are ones this build can parse.
+A rebuild across an event-envelope version boundary is the consumer's
+parse policy's concern, not the rebuild's.
+
 ## NATS backing store sizing
 
 NATS holds the full event stream, so storage must accommodate the
@@ -317,11 +375,23 @@ data, which is a different thing on the same scheduler.
 
 ### Rebuilding the projection
 
-If SQLite is lost, corrupted, or intentionally dropped, factor-q
-can replay the entire fq-events stream from NATS with a
-`deliver_all` consumer and re-materialise the projection. This is a
-first-class recovery path, not a fallback — we rely on it to let
-schema changes in the projection roll forward safely.
+The projection is rebuilt from the fq-events stream three ways, all
+the same mechanism ([schema versioning](#schema-versioning-a-bump-is-a-rebuild)
+above): the daemon does it on start when the file's schema version is
+older than its own; `fq projection rebuild --yes` does it on demand
+under a running daemon (the consumer is stopped, the tables dropped
+and recreated, the durable reset, the consumer started again); and a
+file that is lost or deleted is recreated on the next start with the
+durable reset, so it replays from the beginning rather than resuming
+where the old file's durable left off. This is a first-class recovery
+path, not a fallback — it is what lets the projection's schema roll
+forward with history backfilled rather than NULL.
+
+Cost-bearing rows, summary lines and trigger records survive the first
+two because the rebuild carries them across. A **deleted** file loses
+the cost rows older than stream retention with it — the projection is
+their only copy — which is why `fq projection rebuild` exists: it is
+the way to rebuild without paying that.
 
 ## Migration path
 
