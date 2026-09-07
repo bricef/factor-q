@@ -11,6 +11,8 @@
 #![cfg(unix)]
 
 use std::process::{Command, Output, Stdio};
+
+use fq_test_support::TestChild;
 use std::time::Duration;
 
 fn unique_scratch() -> std::path::PathBuf {
@@ -71,7 +73,7 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
     let log_path = scratch.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone log handle");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -79,8 +81,7 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let text = loop {
         if let Some(status) = daemon.try_wait().expect("poll fqd") {
@@ -282,8 +283,7 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         stderr_of(&out)
     );
 
-    let rc = unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+    daemon.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
     let status = daemon.wait().expect("wait for fqd");
     assert!(status.success(), "clean daemon exit, got {status:?}");
     let _ = std::fs::remove_dir_all(&scratch);

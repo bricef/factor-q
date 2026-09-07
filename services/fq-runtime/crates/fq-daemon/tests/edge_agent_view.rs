@@ -18,7 +18,9 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_ops::{Domain, OpId};
@@ -88,7 +90,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
     let log_path = scratch.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone log handle");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -98,8 +100,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
         .env("RUST_LOG", "off")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let text = loop {
         if let Some(status) = daemon.try_wait().expect("poll fqd") {
@@ -215,7 +216,6 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
         .expect_err("a rejected definition is not an agent");
     assert!(matches!(err, fq_edge::wire::WireError::NotFound { .. }));
 
-    unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
-    let _ = daemon.wait();
+    // The daemon is stopped by the fixture's Drop (#630).
     let _ = std::fs::remove_dir_all(&scratch);
 }
