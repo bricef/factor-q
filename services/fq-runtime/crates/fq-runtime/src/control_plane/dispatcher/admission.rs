@@ -97,7 +97,6 @@ impl TriggerDispatcher {
     /// Whether this dispatcher is on its way out: the worker is draining
     /// or the loop has seen its shutdown signal.
     fn stopping(&self) -> bool {
-        self.worker.drain_status() == DrainState::Draining
-            || self.stopping.load(Ordering::SeqCst)
+        self.worker.drain_status() == DrainState::Draining || self.stopping.load(Ordering::SeqCst)
     }
 }

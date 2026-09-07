@@ -202,7 +202,12 @@ impl ModelThrottle {
                 if pause.is_none() && state.in_flight < state.cap {
                     state.in_flight += 1;
                     if waited {
-                        tracing::debug!(model, in_flight = state.in_flight, cap = state.cap, "throttle permit granted after a wait");
+                        tracing::debug!(
+                            model,
+                            in_flight = state.in_flight,
+                            cap = state.cap,
+                            "throttle permit granted after a wait"
+                        );
                     }
                     return Permit::held(Arc::clone(self), model);
                 }
@@ -313,7 +318,11 @@ impl ModelThrottle {
                     state.rate_limited_in_window = 0;
                     let raised = (state.cap + 1).min(self.bounds.ceiling.max(1));
                     if raised != state.cap {
-                        tracing::info!(model, cap = raised, "throttle cap raised after a clean window");
+                        tracing::info!(
+                            model,
+                            cap = raised,
+                            "throttle cap raised after a clean window"
+                        );
                     }
                     state.cap = raised;
                 }

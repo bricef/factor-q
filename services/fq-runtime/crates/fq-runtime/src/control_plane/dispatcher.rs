@@ -496,7 +496,8 @@ impl TriggerDispatcher {
         // pause ends; a drain or shutdown meanwhile leaves it for the
         // next binary.
         let header_id = crate::trigger::trigger_id_in(msg.headers.as_ref());
-        if self.admit(msg, loaded.agent.model(), header_id).await == admission::Admission::Interrupted
+        if self.admit(msg, loaded.agent.model(), header_id).await
+            == admission::Admission::Interrupted
         {
             return;
         }
@@ -2213,9 +2214,12 @@ You are a test agent."#
                 .await
         });
 
-        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
-            .await
-            .expect("publish trigger");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish trigger");
 
         wait_for_starts(&worker, 1, Duration::from_secs(8)).await;
         let (started_at, attempt) = worker.starts.lock().unwrap()[0];
@@ -2224,7 +2228,11 @@ You are a test agent."#
             "started {:?} after the pause was set; the pause was {pause:?}",
             started_at - paused_at
         );
-        assert_eq!(attempt, Some(1), "held, not redelivered: still the first delivery");
+        assert_eq!(
+            attempt,
+            Some(1),
+            "held, not redelivered: still the first delivery"
+        );
 
         // Past another ack window: a redelivered copy would start now.
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -2271,9 +2279,12 @@ You are a test agent."#
             })
         };
 
-        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
-            .await
-            .expect("publish trigger");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish trigger");
         tokio::time::sleep(Duration::from_millis(600)).await;
         worker
             .request_drain(crate::worker::DrainRequest::new(
@@ -2385,13 +2396,19 @@ You are a test agent."#
                 .await
         });
 
-        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
-            .await
-            .expect("publish trigger");
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "hi"}),
+        )
+        .await
+        .expect("publish trigger");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(8);
         while worker.resumes.lock().unwrap().len() < 2 {
-            assert!(std::time::Instant::now() < deadline, "two resumes within 8s");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "two resumes within 8s"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let deferred_at = worker.deferred_at.lock().unwrap().expect("deferred");
@@ -2407,7 +2424,10 @@ You are a test agent."#
             resumes[1].0 - resumes[0].0
         );
         for (_, id, agent) in &resumes {
-            assert_eq!(*id, invocation_id, "the resume names the deferred invocation");
+            assert_eq!(
+                *id, invocation_id,
+                "the resume names the deferred invocation"
+            );
             assert_eq!(agent.as_str(), agent_id_str, "with the agent it belongs to");
         }
 
