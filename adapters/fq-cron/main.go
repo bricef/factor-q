@@ -133,7 +133,10 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	config, err := LoadConfig(cli.ConfigPath)
+	// The bytes come back with the parsed config so the watcher can be seeded
+	// from them below, after the broker wait, rather than re-reading the file
+	// there and missing anything written in between (#634).
+	loaded, err := LoadConfig(cli.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -197,8 +200,8 @@ func run(args []string) error {
 	}); err != nil {
 		return nil // ctx cancelled: a clean stop
 	}
-	watcher := NewConfigWatcher(cli.ConfigPath, config, ConfigWatcherOptions{Settle: cli.ReloadSettle, Logger: log.Default()})
-	return runScheduler(ctx, config, watcher.Run(ctx), publisher, store, log.Default())
+	watcher := NewConfigWatcher(cli.ConfigPath, loaded, ConfigWatcherOptions{Settle: cli.ReloadSettle, Logger: log.Default()})
+	return runScheduler(ctx, loaded.Config, watcher.Run(ctx), publisher, store, log.Default())
 }
 
 func main() {

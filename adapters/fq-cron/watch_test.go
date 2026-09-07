@@ -64,6 +64,72 @@ func TestConfigWatcherReloadPaths(t *testing.T) {
 	}
 }
 
+// The watcher starts from the configuration that is actually running, not
+// from a read of its own. fq-cron loads the file, then waits for the broker —
+// minutes, during an outage — and only then builds the watcher. A second read
+// there seeded lastSeen with the *new* bytes while the scheduler kept running
+// the old ones, so a write made inside that window was invisible: no diff, no
+// log line, nothing until the file was written again
+// (https://github.com/bricef/factor-q/issues/634).
+func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
+	// startupWindow is the gap the defect lives in: load the file, then let
+	// `written` be whatever the operator leaves on disk while fq-cron is
+	// still connecting to the broker. It returns the watcher fq-cron would
+	// build, seeded with what it is actually running, and its log.
+	startupWindow := func(t *testing.T, written string) (*ConfigWatcher, *syncBuffer) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "fq-cron.toml")
+		writeConfig(t, path, configText("first", "0 * * * *"))
+		running := mustLoad(t, path)
+		writeConfig(t, path, written)
+		logs := &syncBuffer{}
+		return NewConfigWatcher(path, running, ConfigWatcherOptions{
+			Settle: time.Millisecond,
+			Logger: log.New(logs, "", 0),
+		}), logs
+	}
+
+	t.Run("a write inside the window lands on the first check", func(t *testing.T) {
+		w, _ := startupWindow(t, configText("first", "0 * * * *")+configText("second", "0 * * * *"))
+		event, ok := w.Check()
+		if !ok {
+			t.Fatal("the first check missed a config written while fq-cron was starting")
+		}
+		if len(event.Diff.Added) != 1 || event.Diff.Added[0] != "second" || len(event.Diff.Removed) != 0 || len(event.Diff.Changed) != 0 {
+			t.Fatalf("first-check diff = %+v, want second added and nothing else", event.Diff)
+		}
+		if names := jobNames(w.current); names != "first,second" {
+			t.Fatalf("running config = %q, want both jobs", names)
+		}
+	})
+
+	t.Run("an untouched file is not a reload", func(t *testing.T) {
+		w, logs := startupWindow(t, configText("first", "0 * * * *"))
+		if event, ok := w.Check(); ok {
+			t.Fatalf("a file nobody touched was reloaded: %+v", event.Diff)
+		}
+		if strings.Contains(logs.String(), "config reload") {
+			t.Fatalf("an unchanged file must say nothing; log was:\n%s", logs.String())
+		}
+	})
+
+	// The seed composes with the reload rule rather than bypassing it: a first
+	// check that lands in a writer's truncate gap is refused like any other
+	// (#623), and the configuration loaded at startup keeps running.
+	t.Run("a torn write inside the window is refused, not applied", func(t *testing.T) {
+		w, logs := startupWindow(t, "")
+		if event, ok := w.Check(); ok {
+			t.Fatalf("a torn write was accepted: %+v", event.Diff)
+		}
+		if names := jobNames(w.current); names != "first" {
+			t.Fatalf("running config = %q, want the one loaded at startup (%q)", names, "first")
+		}
+		if !strings.Contains(logs.String(), "declaring no jobs") {
+			t.Fatalf("the refusal must say why; log was:\n%s", logs.String())
+		}
+	})
+}
+
 // A read landing between a writer's truncate and its write sees zero bytes,
 // which TOML parses as a perfectly valid config with no jobs at all. The
 // watcher used to accept that as "every job deleted"; it must refuse every
@@ -197,7 +263,8 @@ func startScheduler(t *testing.T, text string) *runningScheduler {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fq-cron.toml")
 	writeConfig(t, path, text)
-	config := mustLoad(t, path)
+	running := mustLoad(t, path)
+	config := running.Config
 	store := NewMemoryStateStore()
 	for _, job := range config.Jobs {
 		// A ledger with a recent slot: nothing to catch up, nothing to fire
@@ -206,7 +273,7 @@ func startScheduler(t *testing.T, text string) *runningScheduler {
 	}
 	logs := &syncBuffer{}
 	logger := log.New(logs, "", 0)
-	watcher := NewConfigWatcher(path, config, ConfigWatcherOptions{
+	watcher := NewConfigWatcher(path, running, ConfigWatcherOptions{
 		PollInterval: 20 * time.Millisecond,
 		Settle:       20 * time.Millisecond,
 		Logger:       logger,
@@ -280,13 +347,13 @@ func mustParse(t *testing.T, text string) *Config {
 	return c
 }
 
-func mustLoad(t *testing.T, path string) *Config {
+func mustLoad(t *testing.T, path string) *LoadedConfig {
 	t.Helper()
-	c, err := LoadConfig(path)
+	loaded, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return loaded
 }
 
 func writeConfig(t *testing.T, path, text string) {

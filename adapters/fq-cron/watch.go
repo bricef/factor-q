@@ -87,7 +87,19 @@ type fileSignature struct {
 	readErr string
 }
 
-func NewConfigWatcher(path string, current *Config, opts ConfigWatcherOptions) *ConfigWatcher {
+// NewConfigWatcher watches path, starting from the configuration that is
+// already running and from the bytes it was loaded from. It does not read the
+// file: seeding lastSeen from a read of its own would make the first Check a
+// comparison against whatever the file holds *now* rather than against what
+// the scheduler is running. fq-cron loads the config, then waits for the
+// broker — minutes, during an outage — and only then gets here, so a file
+// rewritten inside that window would otherwise be invisible until something
+// wrote it again (https://github.com/bricef/factor-q/issues/634).
+//
+// running.Raw may be nil, for a caller that has no bytes to offer — a config
+// built in memory by a test. Nothing has been seen then, and the first Check
+// treats whatever the file holds as a change.
+func NewConfigWatcher(path string, running *LoadedConfig, opts ConfigWatcherOptions) *ConfigWatcher {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = DefaultConfigPollInterval
 	}
@@ -97,12 +109,13 @@ func NewConfigWatcher(path string, current *Config, opts ConfigWatcherOptions) *
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
 	}
-	w := &ConfigWatcher{path: path, current: current, opts: opts}
-	if data, err := os.ReadFile(path); err == nil {
-		w.lastSeen = signature(data, nil)
-	} else {
-		w.lastSeen = signature(nil, err)
+	w := &ConfigWatcher{path: path, current: running.Config, opts: opts}
+	if running.Raw != nil {
+		w.lastSeen = signature(running.Raw, nil)
 	}
+	// Otherwise lastSeen keeps its zero value, which signature never returns
+	// — a successful read sets exists, a failed one sets readErr — so it
+	// stands for "nothing seen yet" and the first check finds a difference.
 	return w
 }
 
