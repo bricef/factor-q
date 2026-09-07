@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Live reasoning round-trip matrix (#437 verification).
 #
-# Three agents, three models, one task each: by default the sequential
+# Three agents, three models, one task each — four with a Google AI Studio
+# key, which switches the Gemini arm on (2026-09-07). By default the sequential
 # two-tool task of the 2026-09-04 run with a mental step in front of it
 # (2026-09-07; without it neither reasoning model reasons on the turns
 # that get replayed — see the README), or whatever `TASK=...` names (a
@@ -13,7 +14,8 @@
 # Needs raw TCP to localhost (private broker + edge): run it outside any sandbox
 # that proxies HTTP only, e.g. `mise exec -- bash harness/live-matrix.sh`.
 # Prereqs: `just build-runtime`, `just install-nats`, OPENROUTER_API_KEY and
-# ANTHROPIC_API_KEY in the env file. Spends well under $0.20.
+# ANTHROPIC_API_KEY in the env file; AISTUDIO_API_KEY there too for the Gemini
+# arm. Spends well under $0.20.
 set -euo pipefail
 
 W="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -44,6 +46,14 @@ ENV_FILE="${ENV_FILE:-$W/.env}"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY missing}"
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
+# The Gemini arm runs only with a Google AI Studio key, and says so either
+# way: a three-arm run must never pass for a four-arm one.
+GEMINI_ARM=""
+if [[ -n "${AISTUDIO_API_KEY:-}" ]]; then
+  GEMINI_ARM=gemini-3-thinker; log "AISTUDIO_API_KEY set — the Gemini arm runs (four arms)"
+else
+  log "AISTUDIO_API_KEY not set — the Gemini arm is OFF (three arms)"
+fi
 
 # ---------------------------------------------------------------- fixtures
 WORK="$TMP_ROOT/work"
@@ -104,10 +114,16 @@ write_agent kimi-k3-reasoner   "moonshotai/kimi-k3"  1.00 "effort: medium"
 write_agent opus-5-thinker     "claude-opus-5"       2.00 "effort: high"
 write_agent gpt4o-mini-control "openai/gpt-4o-mini"  0.20 ""
 ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control)
+# Gemini 3 thinks by default and signs every function call, so the arm
+# sets no effort; the readable summary rides on the adapter's capture flag.
+if [[ -n "$GEMINI_ARM" ]]; then
+  write_agent "$GEMINI_ARM" "gemini-3.8-flash" 0.50 ""
+  ARMS+=("$GEMINI_ARM")
+fi
 # What each arm must show for the run to pass (verify-carry.py): a
 # reasoning arm carries at least one reasoning part into its next turn,
 # the control records none.
-declare -A EXPECT=([kimi-k3-reasoner]=reasoning [opus-5-thinker]=reasoning [gpt4o-mini-control]=none)
+declare -A EXPECT=([kimi-k3-reasoner]=reasoning [opus-5-thinker]=reasoning [gpt4o-mini-control]=none [gemini-3-thinker]=reasoning)
 
 write_config() { # edge bind address
   cat > "$FQ_DAEMON_CONFIG" <<EOF
@@ -145,6 +161,22 @@ models = ["claude-opus-5"]
 input_per_mtok = 5.0
 output_per_mtok = 25.0
 EOF
+  # Native Gemini, only when the key is there: a provider whose key
+  # variable is unset is a daemon that will not start.
+  if [[ -n "$GEMINI_ARM" ]]; then
+    cat >> "$FQ_DAEMON_CONFIG" <<EOF
+
+[providers.gemini]
+api_shape = "gemini"
+api_key_env = "AISTUDIO_API_KEY"
+models = ["gemini-3.8-flash"]
+
+[providers.gemini.pricing."gemini-3.8-flash"]
+input_per_mtok = 0.75
+output_per_mtok = 3.75
+cache_read_per_mtok = 0.075
+EOF
+  fi
 }
 
 # ---------------------------------------------------------------- lifecycle
@@ -207,11 +239,13 @@ sleep 1
 
 # ---------------------------------------------------------------- arms
 declare -A RESULT
-for arm in "${ARMS[@]}"; do
+declare -A RETRIED
+run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
+  local arm="$1"
   mkdir -p "$OUT/$arm/events"
   log "=== $arm: trigger"
   t0=$SECONDS
-  fqc trigger "$arm" "$TASK" > "$OUT/$arm/trigger.txt" 2>&1 || { log "$arm: trigger failed"; cat "$OUT/$arm/trigger.txt"; RESULT[$arm]="trigger-failed"; continue; }
+  fqc trigger "$arm" "$TASK" > "$OUT/$arm/trigger.txt" 2>&1 || { log "$arm: trigger failed"; cat "$OUT/$arm/trigger.txt"; RESULT[$arm]="trigger-failed"; return 0; }
   id=""; status=""
   deadline=$((SECONDS + INVOCATION_TIMEOUT_S))
   while (( SECONDS < deadline )); do
@@ -223,7 +257,7 @@ for arm in "${ARMS[@]}"; do
   if [[ -z "$id" ]]; then
     log "$arm: TIMED OUT after ${INVOCATION_TIMEOUT_S}s"; RESULT[$arm]="timeout"
     fqc invocation list --json --include-archived > "$OUT/$arm/invocations-at-timeout.json" 2>>"$OUT/client-stderr.log" || true
-    continue
+    return 0
   fi
   log "$arm: invocation $id $status in $((SECONDS - t0))s"
   RESULT[$arm]="$status"
@@ -243,6 +277,27 @@ for arm in "${ARMS[@]}"; do
     fqc events get "$eid" --json > "$OUT/$arm/events/$(printf '%03d' "$n")-$eid.json" 2>>"$OUT/client-stderr.log" || true
   done < <(jq -r '(if type=="array" then . else (.events // .items // []) end)[] | (.event_id // .id // empty)' "$OUT/$arm/events-index.json" 2>/dev/null || true)
   log "$arm: collected transcript, costs, $n events via get"
+}
+
+# A provider that answered 5xx through every attempt of the runtime's
+# retry budget is unavailable, not wrong — Gemini's free tier says "high
+# demand" for minutes at a time. That is not a verdict on the round trip,
+# so such an arm gets one more attempt after a pause. Anything else that
+# fails stands as it fell.
+provider_unavailable() { # arm -> 0 when its invocation failed on a provider 5xx
+  local f="$OUT/$1/invocation.json"
+  [[ -f "$f" ]] || return 1
+  jq -e '(.. | strings) | select(test("status code .5[0-9][0-9].|UNAVAILABLE|overloaded|high demand"; "i"))' "$f" > /dev/null 2>&1
+}
+
+for arm in "${ARMS[@]}"; do
+  run_arm "$arm"
+  if [[ "${RESULT[$arm]:-}" == "failed" ]] && provider_unavailable "$arm"; then
+    log "$arm: the provider was unavailable (5xx through the retry budget) — one more attempt in 60s"
+    sleep 60
+    RETRIED[$arm]=1
+    run_arm "$arm"
+  fi
 done
 
 sleep 2
@@ -252,7 +307,7 @@ fqc costs --json > "$OUT/costs-all.json" 2>>"$OUT/client-stderr.log" || true
 fqc costs        > "$OUT/costs-all.txt"  2>&1 || true
 
 log "=== summary"
-for arm in "${ARMS[@]}"; do log "$arm: ${RESULT[$arm]:-unknown}"; done
+for arm in "${ARMS[@]}"; do log "$arm: ${RESULT[$arm]:-unknown}${RETRIED[$arm]:+ (second attempt; the first failed on a provider 5xx)}"; done
 log "events tailed: $(wc -l < "$OUT/events.ndjson") lines"
 log "expected word count: $EXPECTED_WORDS"
 

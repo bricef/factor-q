@@ -28,7 +28,8 @@ name: Live suites
 # the shared consumer. It spends about $0.07 a run, most of it on
 # claude-opus-5 directly — the one arm that proves a signed thinking
 # block survives a tool turn, which no OpenRouter model can stand in for
-# (#603).
+# (#603). A fourth arm, native Gemini, runs when AISTUDIO_API_KEY is set
+# and is announced as off when it is not.
 
 on:
   schedule:
@@ -143,6 +144,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AISTUDIO_API_KEY: ${{ secrets.AISTUDIO_API_KEY }}
         run: |
           missing=""
           [ -n "${OPENROUTER_API_KEY}" ] || missing="$missing OPENROUTER_API_KEY"
@@ -154,6 +156,13 @@ jobs:
             exit 1
           fi
           echo "keys present"
+          # Optional, and visibly so: the Gemini arm is the one live proof
+          # of the thought-signature path, and a run without it must read
+          # as three arms, not four.
+          if [ -z "${AISTUDIO_API_KEY}" ]; then
+            echo "::warning::AISTUDIO_API_KEY is not set — the Gemini arm is off (three arms run). \
+          Add a Google AI Studio key under Settings -> Secrets and variables -> Actions to run four."
+          fi
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v4
@@ -171,6 +180,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AISTUDIO_API_KEY: ${{ secrets.AISTUDIO_API_KEY }}
           OUT: ${{ runner.temp }}/reasoning-matrix
         run: bash experiments/reasoning-round-trip/harness/live-matrix.sh
       # The evidence a red run needs: transcripts, the event log, costs,
