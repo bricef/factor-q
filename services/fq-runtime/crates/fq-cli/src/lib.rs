@@ -19,7 +19,7 @@ use clap::Parser;
 use crate::agents::{list_agents, validate_agent};
 use crate::cli::{
     AgentCommands, Cli, Commands, DeadLetterCommands, EventCommands, InvocationCommands,
-    OpsCommands, TokenCommands, WorkerCommands, init_tracing,
+    OpsCommands, ProjectionCommands, TokenCommands, WorkerCommands, init_tracing,
 };
 use crate::connections::{connect, ops_list, token_attenuate};
 use crate::control::{down_daemon, reload_daemon};
@@ -31,6 +31,7 @@ use crate::invocations::{
     invocation_drop, invocation_list, invocation_resume, invocation_show, invocation_transcript,
 };
 use crate::project::init_project;
+use crate::projection::rebuild_projection;
 use crate::status::show_status;
 use crate::trigger::publish_trigger;
 use crate::version::print_version;
@@ -188,6 +189,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } => workers_list(&cli.global, stale_only, alive_only, json).await?,
             WorkerCommands::Show { id, json } => workers_show(&cli.global, &id, json).await?,
         },
+        Commands::Projection { command } => match command {
+            ProjectionCommands::Rebuild { yes, reason, json } => {
+                rebuild_projection(&cli.global, yes, reason.as_deref(), json).await?
+            }
+        },
         Commands::Connect {
             addr,
             token,
@@ -221,6 +227,7 @@ mod edge_call;
 mod events;
 mod invocations;
 mod project;
+mod projection;
 mod status;
 mod trigger;
 mod version;

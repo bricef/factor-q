@@ -267,6 +267,8 @@ impl Surface {
                     default_model: None,
                     worker: runner.clone(),
                     down: fq_daemon::DownSignal::new(),
+                    projection_rebuild:
+                        fq_runtime::control_plane::projection::ProjectionRebuildHandle::detached(),
                 },
             },
         )

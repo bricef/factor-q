@@ -120,6 +120,11 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 default_model: None,
                 worker: runner.clone(),
                 down: fq_daemon::DownSignal::new(),
+                // Detached: a handle with no supervisor behind it
+                // declares `control.projection_rebuild` just as well as
+                // one that would rebuild a projection.
+                projection_rebuild:
+                    fq_runtime::control_plane::projection::rebuild::ProjectionRebuildHandle::detached(),
             },
         },
     )

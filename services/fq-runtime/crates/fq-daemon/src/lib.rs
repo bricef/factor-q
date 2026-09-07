@@ -23,6 +23,7 @@ mod health_surface;
 mod invocation_view;
 mod operator_surface;
 mod pricing;
+mod projection_command;
 mod recovery;
 mod resume;
 mod shared_servers;

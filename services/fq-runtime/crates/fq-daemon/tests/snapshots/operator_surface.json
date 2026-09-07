@@ -1640,6 +1640,41 @@
         "scope": "control",
         "verb": "write"
       },
+      "description": "Requires `confirm`; refused otherwise. The projection is derived, so this is a recovery of the machinery rather than a write to any resource: the daemon stops its projection consumer, drops the projection tables and recreates them at this build's schema version, resets the durable consumer so the stream replays from the start of its retention, and starts the consumer again. Rows the retention sweep exempts — cost-bearing events, invocation summaries and trigger records — are carried across before the replay begins, so spend older than the stream's window is kept; everything the stream still holds is re-derived whole, which is what backfills a column that was NULL for history. Answers when the consumer is running again, not when the replay has finished: until it catches up, reads answer over a partial fold, and `control.status` reports the replay's progress under `projection_rebuild`. Appends no atom.",
+      "domain": "control",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed input of `control.projection_rebuild` on the wire.",
+        "properties": {
+          "confirm": {
+            "default": false,
+            "description": "Acknowledge that the projection's tables will be dropped and\nre-derived from the event stream. Refused when false: the\nrebuild is opt-in, never implied.",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": null,
+            "description": "Why, for the record `control.status` reports. Optional.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "ProjectionRebuildInput",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "Rebuild the projection from the event stream: drop its tables, recreate them, replay.",
+      "verb": "projection_rebuild",
+      "version": 1
+    }
+  },
+  {
+    "command": {
+      "authority": {
+        "scope": "control",
+        "verb": "write"
+      },
       "description": "Affects the NEXT trigger only: in-flight invocations keep the config they snapshotted at trigger time. Answers when the swap has happened, so a reload that could not read the directory is an error rather than a silence — and in that case the definitions already loaded are kept. Appends no atom: the registry is live machinery, not a fold.",
       "domain": "control",
       "input_schema": {
@@ -2557,7 +2592,7 @@
   },
   {
     "report": {
-      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call.",
+      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call. `projection_rebuild` is the projection's last rebuild — a schema bump on start, or `control.projection_rebuild` — and whether its replay has caught up; absent on a projection that has never been rebuilt.",
       "domain": "control",
       "name": "status",
       "output_schema": {
@@ -2773,6 +2808,61 @@
               }
             ]
           },
+          "ProjectionRebuild": {
+            "description": "The projection's last rebuild, as `control.status` reports it.\n\nA rebuild drops the projection's tables, recreates them at the\ndaemon's schema version, carries the sweep-exempt rows across\n(cost-bearing events, invocation summaries, trigger records), and\nreplays the event stream from the start of its retention into them.\nIt happens on start when the file's schema version is older than\nthe daemon's, and on demand through `control.projection_rebuild`.",
+            "properties": {
+              "consumer_reset_pending": {
+                "description": "True while the durable consumer has yet to be reset: the tables\nare recreated, the replay has not started.",
+                "type": "boolean"
+              },
+              "from_version": {
+                "default": null,
+                "description": "The schema version the file recorded before, when the rebuild\nwas a version change; absent for an operator's rebuild.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "in_progress": {
+                "description": "True until the replay has reached `target_seq`. Judged at the\ninstant of the call against the durable's acked position, so\ntwo calls a second apart legitimately differ.",
+                "type": "boolean"
+              },
+              "reason": {
+                "description": "Why: a schema version change, or an operator's request with\nthe reason they gave.",
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "The schema version the tables were recreated at.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "started_at": {
+                "description": "When the tables were dropped and recreated (RFC3339).",
+                "type": "string"
+              },
+              "target_seq": {
+                "default": null,
+                "description": "The stream's last sequence when the durable consumer was reset\n— the position the replay has to reach before every event the\nstream still holds is back in the file. Absent until the reset.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "started_at",
+              "reason",
+              "schema_version",
+              "consumer_reset_pending",
+              "in_progress"
+            ],
+            "type": "object"
+          },
           "RecoveryView": {
             "description": "Recovery-state counts — the data behind `fq status`'s recovery block and\nthe dashboard's health tile. Computed against a caller-supplied `now_ms`\nand threshold so the view stays pure (no wall-clock inside).\n\nSchema'd because `control.status` declares it as part of its output.",
             "properties": {
@@ -2955,6 +3045,18 @@
               "$ref": "#/$defs/McpServerHealth"
             },
             "type": "array"
+          },
+          "projection_rebuild": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProjectionRebuild"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The projection's last rebuild — a schema bump on start, or\n`control.projection_rebuild` — and whether its replay has\ncaught up. Absent on a projection that has never been rebuilt,\nwhich is the common case and not a finding. While it is in\nprogress, reads answer over a partial fold: `projection_rows`\nis climbing back, and a spend figure can be short until the\nreplay reaches its target."
           },
           "projection_rows": {
             "description": "Rows in the daemon's projection index — how much of the event\nlog has been folded into readable state.",
