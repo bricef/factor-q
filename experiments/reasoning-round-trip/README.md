@@ -172,10 +172,12 @@ request that followed it, at least one reasoning part carried for the two reason
 arms, and none at all for the control. Readable characters are reported, not asserted.
 Its exit status is the harness's, so the nightly `reasoning-matrix` job in
 `.github/workflows/live-suites.yml` goes red on a lost token and on a run that proved
-nothing — an Opus turn that never thought fails the Opus arm by design; adaptive
-thinking skips a task it finds trivial, so a red that says "no reasoning part was
-carried" is a rerun before it is a bug. `VERIFY=0` skips the verdict for a `TASK=`
-probe whose arms are being read some other way.
+nothing. A reasoning part is only ever carried from a turn that another request
+follows, so the default task opens with a mental step before the first tool call
+(see [the nightly's first run](#the-nightlys-first-run-and-the-task-that-reasons-2026-09-07));
+a red that still says "no reasoning part was carried" means the model chose not to
+think that night, so rerun once before treating it as a bug. `VERIFY=0` skips the
+verdict for a `TASK=` probe whose arms are being read some other way.
 
 `TASK=` replaces the default sequential task; a `{work}` token in it expands to the
 fixture directory, which holds `notes.txt` and `checklist.txt`. The default task
@@ -264,6 +266,39 @@ the text and the call would be replayed ahead of the text and attached to it. Pa
 now recorded in arrival order; a sibling-field summary goes after whatever reasoning
 already leads the turn and before the first spoken part; none of the fourteen goldens'
 recorded turns moved.
+
+## The nightly's first run, and the task that reasons (2026-09-07)
+
+The first CI run of the `reasoning-matrix` job (workflow run 34128058055, once the
+Anthropic key was in place) went red with both reasoning arms at zero: Kimi produced
+no reasoning part on any of four turns, Opus 5 none on any of three, and the verdict
+said what it is built to say — the run proved nothing. Everything else worked: keys,
+the private broker, the scratch daemon, three completed invocations at the usual cost.
+
+**It was the task, not the pipeline.** Replaying the recorded request shapes:
+
+- Opus 5's adaptive thinking never engaged on the first turn of the old task — 0 of 9
+  across `effort: high`, `xhigh` and `max`, and 0 of 9 more on three harder variants
+  of the same mechanical task. The 2026-09-06 run's one thinking block was a lucky
+  first turn. Forcing thinking is not available: `thinking.type: enabled` is rejected
+  by both Opus 5 and Sonnet 5 (`use adaptive and output_config.effort`).
+- Kimi K3 through OpenRouter returns reasoning for such turns as a few words or an
+  empty string (`"Read file."`, `""`), on Moonshot AI, DeepInfra and Sail Research
+  alike; an empty string records as no part. Routing was a red herring: pinned to
+  either provider, the genai-shaped request behaves the same.
+- A reasoning part is only ever *carried* from a turn that another request follows,
+  so reasoning on the final answer never counts. The turns that count are the
+  tool-calling ones, and those were the mechanical ones.
+
+**The change.** The default task now opens with a mental step — the smallest prime
+above 40 and its digit sum, no tool — before the two tool steps, and the answer gains
+a line. On that first turn Opus 5 thought 4 times in 4 (128–146 readable characters,
+52–56 thinking tokens) and Kimi returned 25–271 characters of reasoning 7 times in 7,
+pinned to DeepInfra, pinned to Moonshot AI, and unpinned. A full local run on the new
+task (`~/factor-q-live-runs/2026-09-07-task-that-reasons/`) passes the verdict: Kimi
+carried two plain parts (272 readable characters), Opus 5 one signed block (213), the
+control none. Nothing in the pipeline changed; the 2026-09-06 verdict on the old task
+stands as recorded.
 
 ## Traps this harness already hit
 

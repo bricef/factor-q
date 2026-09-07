@@ -2,7 +2,9 @@
 # Live reasoning round-trip matrix (#437 verification).
 #
 # Three agents, three models, one task each: by default the sequential
-# two-tool task of the 2026-09-04 run, or whatever `TASK=...` names (a
+# two-tool task of the 2026-09-04 run with a mental step in front of it
+# (2026-09-07; without it neither reasoning model reasons on the turns
+# that get replayed — see the README), or whatever `TASK=...` names (a
 # `{work}` token in it expands to the fixture directory) — which is how
 # the #511 parallel-tool-call probe ran on the same matrix. Everything
 # runs in a scratch daemon against a private JetStream broker so nothing
@@ -63,7 +65,14 @@ EOF
 # directory, which the caller cannot know in advance. The sequencing
 # steer ("one tool call at a time") lives in the task rather than the
 # agent prompt: a task that wants parallel calls must be free to ask.
-DEFAULT_TASK="Two steps, in order, one tool call at a time. First, read the file {work}/notes.txt with builtin__file_read. Second, run wc -w on that same file with builtin__exec, passing argv as an array. Then answer in exactly two short lines: line 1 is the first line of the file verbatim, line 2 is the word count as an integer."
+# The task opens with something to think about, before any tool is called.
+# A reasoning part is only ever *carried* from a turn that another request
+# follows, and on a purely mechanical first turn neither reasoning model
+# reasons: Opus 5's adaptive thinking skipped it 9 times in 9, and Kimi K3
+# returned a few words or an empty string. With the mental step in front,
+# Opus thought 4/4 and Kimi 7/7 across every provider OpenRouter routed to
+# (probes of 2026-09-07). The two tool steps and the answer are unchanged.
+DEFAULT_TASK="Three steps, in order, one tool call at a time. First, work out in your head the smallest prime number greater than 40 and the sum of its digits — no tool for this. Second, read the file {work}/notes.txt with builtin__file_read. Third, run wc -w on that same file with builtin__exec, passing argv as an array. Then answer in exactly three short lines: line 1 is the prime and its digit sum, line 2 is the first line of the file verbatim, line 3 is the word count as an integer."
 TASK="${TASK:-$DEFAULT_TASK}"
 TASK="${TASK//\{work\}/$WORK}"
 log "task: $TASK"
