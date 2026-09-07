@@ -1,0 +1,19 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000009",
+    "parent_event_id": "01990000-0000-7000-8000-000000000008",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/host_notice@1",
+    "timestamp": "2026-09-07T12:00:09Z"
+  },
+  "payload": {
+    "event_type": "host_notice",
+    "payload": {
+      "kind": "resume",
+      "body": "<host-notice>Resumed after a restart.</host-notice>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000021",
+    "trace_id": "01990000-0000-7000-8000-000000002000",
+    "agent_id": "system",
+    "invocation_id": "01990000-0000-7000-8000-000000002000",
+    "schema_id": "factor-q/system_task_failed@1",
+    "timestamp": "2026-09-07T12:00:21Z"
+  },
+  "payload": {
+    "event_type": "system_task_failed",
+    "payload": {
+      "runtime_id": "01990000-0000-7000-8000-000000002000",
+      "task_name": "projection_consumer",
+      "error_message": "store error: disk full"
+    }
+  }
+}

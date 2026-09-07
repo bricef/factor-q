@@ -1,0 +1,86 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000002",
+    "parent_event_id": "01990000-0000-7000-8000-000000000001",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/llm_request@1",
+    "timestamp": "2026-09-07T12:00:02Z"
+  },
+  "payload": {
+    "event_type": "llm_request",
+    "payload": {
+      "call_id": "01990000-0000-7000-8000-000000004001",
+      "model": "claude-haiku-4-5",
+      "messages": [
+        {
+          "kind": "system",
+          "text": "You are the corpus agent."
+        },
+        {
+          "kind": "user",
+          "text": "Read the docs."
+        },
+        {
+          "kind": "assistant",
+          "parts": [
+            {
+              "kind": "text",
+              "text": "Reading."
+            },
+            {
+              "kind": "reasoning",
+              "model": "claude-haiku-4-5",
+              "content": {
+                "kind": "plain",
+                "text": "The docs first."
+              }
+            },
+            {
+              "kind": "tool_call",
+              "tool_call_id": "toolu_corpus_01",
+              "tool_name": "read",
+              "parameters": {
+                "path": "/docs/README.md"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_results",
+          "results": [
+            {
+              "tool_call_id": "toolu_corpus_01",
+              "output": "# Docs",
+              "is_error": false
+            }
+          ]
+        }
+      ],
+      "tools_available": [
+        {
+          "name": "read",
+          "description": "Read a file.",
+          "parameters_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "request_params": {
+        "effort": "low",
+        "temperature": 0.0,
+        "max_tokens": 256
+      },
+      "origin": {
+        "kind": "agent_turn"
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000014",
+    "parent_event_id": "01990000-0000-7000-8000-000000000013",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/failed@1",
+    "timestamp": "2026-09-07T12:00:14Z"
+  },
+  "payload": {
+    "event_type": "failed",
+    "payload": {
+      "error_kind": "tool_error",
+      "error_message": "read: permission denied",
+      "phase": "tool_call",
+      "partial_totals": {
+        "total_llm_calls": 2,
+        "total_tool_calls": 1,
+        "total_cost": 0.000216,
+        "total_duration_ms": 4200,
+        "sampling_cost": 0.0,
+        "elicitation_cost": 0.0
+      }
+    }
+  }
+}

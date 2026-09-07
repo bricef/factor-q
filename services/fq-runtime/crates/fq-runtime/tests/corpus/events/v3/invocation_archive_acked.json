@@ -1,0 +1,18 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000016",
+    "parent_event_id": "01990000-0000-7000-8000-000000000015",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/invocation_archive_acked@1",
+    "timestamp": "2026-09-07T12:00:16Z"
+  },
+  "payload": {
+    "event_type": "invocation_archive_acked",
+    "payload": {
+      "worker_id": "corpus-worker"
+    }
+  }
+}

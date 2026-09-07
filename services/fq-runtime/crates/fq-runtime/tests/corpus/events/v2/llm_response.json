@@ -1,0 +1,55 @@
+{
+  "envelope": {
+    "schema_version": 2,
+    "event_id": "01980000-0000-7000-8000-000000000203",
+    "parent_event_id": "01980000-0000-7000-8000-000000000202",
+    "trace_id": "01980000-0000-7000-8000-000000000200",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01980000-0000-7000-8000-000000000200",
+    "schema_id": "factor-q/llm_response@1",
+    "timestamp": "2026-07-01T12:00:02Z",
+    "cost": {
+      "call_id": "01980000-0000-7000-8000-000000004001",
+      "model": "claude-haiku-4-5",
+      "input_tokens": 120,
+      "output_tokens": 30,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "input_cost": 0.000096,
+      "output_cost": 0.00012,
+      "total_cost": 0.000216,
+      "cumulative_invocation_cost": 0.000216,
+      "cumulative_agent_cost": 0.000216,
+      "origin": {
+        "kind": "agent_turn"
+      }
+    }
+  },
+  "payload": {
+    "event_type": "llm_response",
+    "payload": {
+      "round": 1,
+      "call_id": "01980000-0000-7000-8000-000000004001",
+      "content": "Reading the docs first.",
+      "tool_calls": [
+        {
+          "tool_call_id": "toolu_corpus_01",
+          "tool_name": "read",
+          "parameters": {
+            "path": "/docs/README.md"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "origin": {
+        "kind": "agent_turn"
+      }
+    }
+  }
+}

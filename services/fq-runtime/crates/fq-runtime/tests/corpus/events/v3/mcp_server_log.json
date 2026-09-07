@@ -1,0 +1,22 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000025",
+    "trace_id": "01990000-0000-7000-8000-000000002000",
+    "agent_id": "system",
+    "invocation_id": "01990000-0000-7000-8000-000000002000",
+    "schema_id": "factor-q/mcp_server_log@1",
+    "timestamp": "2026-09-07T12:00:25Z"
+  },
+  "payload": {
+    "event_type": "mcp_server_log",
+    "payload": {
+      "server": "docs",
+      "level": "info",
+      "logger": "docs.index",
+      "data": {
+        "message": "indexed 3 files"
+      }
+    }
+  }
+}
