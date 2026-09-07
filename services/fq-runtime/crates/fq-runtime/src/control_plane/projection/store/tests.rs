@@ -385,6 +385,18 @@ fn sample_llm_response_reporting(
     cost: f64,
     reasoning_tokens: Option<u32>,
 ) -> Event {
+    sample_llm_response_of_model(agent, inv, cost, "claude-haiku-4-5", reasoning_tokens)
+}
+
+/// As above, on a named model — for the per-model split, whose groups
+/// are models rather than agents.
+fn sample_llm_response_of_model(
+    agent: &str,
+    inv: Uuid,
+    cost: f64,
+    model: &str,
+    reasoning_tokens: Option<u32>,
+) -> Event {
     Event::new(
         aid(agent),
         inv,
@@ -407,7 +419,7 @@ fn sample_llm_response_reporting(
     )
     .with_cost(CostMetadata {
         call_id: Uuid::now_v7(),
-        model: "claude-haiku-4-5".to_string(),
+        model: model.to_string(),
         input_tokens: 100,
         output_tokens: 50,
         cache_read_tokens: 20,
@@ -1213,12 +1225,15 @@ async fn cost_detail_groups_by_invocation_and_model() {
             .is_none()
     );
 
-    // All fixture events carry the same model → one row, summed.
+    // All fixture events carry the same model → one row, summed — the
+    // cache figures with the rest.
     let models = store.cost_by_model(Some("alpha"), None).await.unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].model, "claude-haiku-4-5");
     assert_eq!(models[0].event_count, 3);
     assert!((models[0].total_cost - 0.35).abs() < 1e-9);
+    assert_eq!(models[0].total_cache_read_tokens, 60);
+    assert_eq!(models[0].total_cache_write_tokens, 30);
 
     // Unfiltered, the same GROUP BY spans every agent — the
     // top-level costs page's by-model split.
@@ -2195,10 +2210,10 @@ async fn an_older_triggers_table_gains_the_requeue_column_before_its_index() {
 
 /// **The split sums over the calls that reported one, and a NULL is
 /// not a zero** (#536). One call with no reported split beside one
-/// that reported 45 aggregates to 45 — on the per-agent, per-invocation
-/// and single-invocation reads alike — because `SUM` skips NULL the way
-/// the operator needs: an unreported split contributes nothing, and
-/// says nothing.
+/// that reported 45 aggregates to 45 — on the per-agent, per-model,
+/// per-invocation and single-invocation reads alike — because `SUM`
+/// skips NULL the way the operator needs: an unreported split
+/// contributes nothing, and says nothing.
 #[tokio::test]
 async fn reasoning_tokens_sum_over_the_calls_that_reported_a_split() {
     let (store, _dir) = open_store().await;
@@ -2220,6 +2235,8 @@ async fn reasoning_tokens_sum_over_the_calls_that_reported_a_split() {
 
     let summary = store.cost_summary(None, None).await.unwrap();
     assert_eq!(summary[0].total_reasoning_tokens, Some(45));
+    let by_model = store.cost_by_model(None, None).await.unwrap();
+    assert_eq!(by_model[0].total_reasoning_tokens, Some(45));
     let by_invocation = store.cost_by_invocation("alpha", None, 10).await.unwrap();
     assert_eq!(by_invocation[0].total_reasoning_tokens, Some(45));
     let one = store
@@ -2276,6 +2293,15 @@ async fn a_group_with_no_reported_split_has_no_reasoning_total() {
         "a reported zero is a report"
     );
 
+    // Per model, narrowed to each agent: the same model reads as no
+    // split under the one and as a reported zero under the other.
+    let per_model = |agent: &'static str| {
+        let store = &store;
+        async move { store.cost_by_model(Some(agent), None).await.unwrap()[0].total_reasoning_tokens }
+    };
+    assert_eq!(per_model("anthropic-agent").await, None);
+    assert_eq!(per_model("openai-agent").await, Some(0));
+
     let by_invocation = store
         .cost_by_invocation("anthropic-agent", None, 10)
         .await
@@ -2294,6 +2320,80 @@ async fn a_group_with_no_reported_split_has_no_reasoning_total() {
     };
     assert_eq!(one(unreported).await, None);
     assert_eq!(one(reported_zero).await, Some(0));
+}
+
+/// **The per-model split follows the same rule, per model** — the
+/// follow-up #536 left for #627. A model with one unreported call
+/// beside one that reported 45 sums to 45; a model none of whose calls
+/// reported a split has no total, not a zero; and the cache figures
+/// `COALESCE` the way every other aggregate's do, so a cost-bearing row
+/// that carries none reads as zero cache traffic rather than as NULL.
+#[tokio::test]
+async fn cost_by_model_sums_the_split_per_model_and_coalesces_the_cache_figures() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    for (model, cost, reasoning) in [
+        ("kimi-k3", 0.10, None),
+        ("kimi-k3", 0.05, Some(45)),
+        ("claude-haiku-4-5", 0.20, None),
+        ("claude-haiku-4-5", 0.20, None),
+    ] {
+        store
+            .insert_event(
+                &sample_llm_response_of_model("alpha", inv, cost, model, reasoning),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    // A cost-bearing row with no cache figures at all, on a model of
+    // its own — the shape of history from before those columns were
+    // filled, which no fixture event can produce.
+    sqlx::query(
+        "INSERT INTO events (event_id, timestamp, agent_id, invocation_id, event_type, model, \
+         input_tokens, output_tokens, total_cost) \
+         VALUES ('legacy-1', '2026-01-01T00:00:00+00:00', 'alpha', 'inv-legacy', \
+         'llm_response', 'legacy-model', 100, 50, 0.01)",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+
+    let by_model = store.cost_by_model(Some("alpha"), None).await.unwrap();
+    let row = |model: &str| {
+        by_model
+            .iter()
+            .find(|m| m.model == model)
+            .unwrap_or_else(|| panic!("{model} has a row in {by_model:?}"))
+    };
+
+    let kimi = row("kimi-k3");
+    assert_eq!(
+        kimi.total_reasoning_tokens,
+        Some(45),
+        "NULL + 45 is 45: the unreported call contributes nothing"
+    );
+    assert_eq!(kimi.total_cache_read_tokens, 40);
+    assert_eq!(kimi.total_cache_write_tokens, 20);
+
+    let haiku = row("claude-haiku-4-5");
+    assert_eq!(
+        haiku.total_reasoning_tokens, None,
+        "a model none of whose calls reported a split has no total, not zero"
+    );
+    assert_eq!(haiku.total_cache_read_tokens, 40);
+    assert_eq!(haiku.total_cache_write_tokens, 20);
+
+    let legacy = row("legacy-model");
+    assert_eq!(
+        (
+            legacy.total_cache_read_tokens,
+            legacy.total_cache_write_tokens
+        ),
+        (0, 0),
+        "no cache figures coalesce to zero, as on every other aggregate"
+    );
+    assert_eq!(legacy.total_reasoning_tokens, None);
 }
 
 /// **A database from before the column reads NULL for its history**,
