@@ -106,19 +106,28 @@ func (p *pendingRemovals) next() time.Time {
 	return earliest
 }
 
-// take removes and returns, in name order, every parked removal whose deadline
-// has passed. Taking them out is what stops a deadline that has come and gone
-// from waking the loop again.
-func (p *pendingRemovals) take(now time.Time) []string {
+// due is every parked removal whose deadline has passed, in name order. It
+// leaves them parked: a deletion interrupted by a shutdown has not happened,
+// and must still be counted as unconfirmed. forget is what drops them, once
+// their fate is settled.
+func (p *pendingRemovals) due(now time.Time) []string {
 	var due []string
 	for name, at := range p.deadline {
 		if !at.After(now) {
 			due = append(due, name)
-			delete(p.deadline, name)
 		}
 	}
 	sort.Strings(due)
 	return due
+}
+
+// forget drops these parked removals — carried out, or found to be moot.
+// Dropping them is also what stops a deadline that has come and gone from
+// waking the loop again.
+func (p *pendingRemovals) forget(names ...string) {
+	for _, name := range names {
+		delete(p.deadline, name)
+	}
 }
 
 // names is every job still parked, in name order.
