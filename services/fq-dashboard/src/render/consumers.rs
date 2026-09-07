@@ -24,6 +24,7 @@ pub(super) fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String
             redeliveries,
             stuck,
             malformed_acked,
+            ..
         } => {
             let state = if *stuck {
                 format!(r#"<span class="bad">✗ stuck ({redeliveries} redeliveries)</span>"#)
