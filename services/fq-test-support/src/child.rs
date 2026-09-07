@@ -341,12 +341,18 @@ fn arm_death_guard(command: &mut Command) {
 #[cfg(not(target_os = "linux"))]
 fn arm_death_guard(_command: &mut Command) {}
 
-/// Report — once per test binary — any process already running `program`.
+/// Report — once per program, per test binary — any **orphaned** process
+/// already running `program`.
 ///
-/// The tell that a previous run leaked. Deliberately *not* a kill: a
-/// concurrent `cargo test` in another worktree, or a developer's daemon,
-/// is not ours to end, and the failure mode of a wrong kill is far worse
-/// than the failure mode of a wrong warning.
+/// Orphaned, not merely present: cargo runs a crate's test binaries
+/// concurrently, so at any moment several live runs legitimately have a
+/// daemon up, and reporting those would be noise that trains the reader
+/// to ignore the line. A leak has a signature — the 42 orphans of #630
+/// were all reparented to PID 1 — and that is what this looks for.
+///
+/// Deliberately *not* a kill: a daemon that got there another way is not
+/// ours to end, and the failure mode of a wrong kill is far worse than
+/// the failure mode of a wrong warning.
 fn report_strays_once(program: &Path) {
     use std::sync::{Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
@@ -364,11 +370,33 @@ fn report_strays_once(program: &Path) {
 
 #[cfg(target_os = "linux")]
 fn report_strays(program: &Path) {
-    // The exe path is the only reliable identity here: the dogfood daemon
-    // and every other worktree's daemon are all called `fqd`, and killing
-    // — or even reporting — by name is how the wrong process gets hit.
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    let strays = orphans_running(program);
+    if strays.is_empty() {
         return;
+    }
+    // Straight to the file descriptor: libtest captures the `eprintln!`
+    // macro per test and shows it only when that test fails, which is
+    // precisely when nobody is looking for somebody else's leak.
+    let _ = writeln!(
+        std::io::stderr(),
+        "warning: {} orphaned process(es) are running {} — pid(s) {strays:?}, \
+         all reparented to PID 1. A previous run leaked them. Nothing was \
+         killed; see #630 and kill by exe path, never by name.",
+        strays.len(),
+        program.display(),
+    );
+}
+
+/// Every PID whose executable is exactly `program` and whose parent is
+/// PID 1.
+///
+/// The exe path is the only reliable identity here: the dogfood daemon
+/// and every other worktree's daemon are all called `fqd`, and acting on
+/// a name is how the wrong process gets hit.
+#[cfg(target_os = "linux")]
+fn orphans_running(program: &Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
     };
     let me = std::process::id();
     let mut strays = Vec::new();
@@ -381,24 +409,24 @@ fn report_strays(program: &Path) {
             continue;
         }
         // Unreadable (another user's, or exited under us) is not news.
-        if std::fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == program) {
+        if !std::fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == program) {
+            continue;
+        }
+        if parent_pid(pid) == Some(1) {
             strays.push(pid);
         }
     }
-    if strays.is_empty() {
-        return;
-    }
-    // Straight to the file descriptor: libtest captures the `eprintln!`
-    // macro per test and shows it only when that test fails, which is
-    // precisely when nobody is looking for somebody else's leak.
-    let _ = writeln!(
-        std::io::stderr(),
-        "warning: {} process(es) are already running {} — pid(s) {strays:?}. \
-         A previous run leaked them, or another run is live. Nothing was \
-         killed. See #630.",
-        strays.len(),
-        program.display(),
-    );
+    strays
+}
+
+/// The parent PID from `/proc/<pid>/stat` — the fourth field, after a
+/// `comm` that may itself contain spaces and parentheses, hence the split
+/// on the *last* `')'`.
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -479,6 +507,21 @@ mod tests {
         let status = child.wait().expect("wait");
         assert!(status.success());
         assert!(child.child.is_none(), "a reaped child must disarm the guard");
+    }
+
+    /// The stray report must not fire on a *live* run's children, or it
+    /// becomes noise: cargo runs a crate's test binaries concurrently, so
+    /// several daemons are legitimately up at any moment. Only an orphan
+    /// — reparented to PID 1 — is the tell.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_childs_process_is_not_reported_as_a_stray() {
+        let child = TestChild::builder("/bin/sleep").arg("600").spawn();
+        let pid = child.id();
+        assert!(
+            !orphans_running(Path::new("/bin/sleep")).contains(&pid),
+            "pid {pid} has a live parent and must not be reported as leaked"
+        );
     }
 
     /// `output()` is a spawn too, guard and all.

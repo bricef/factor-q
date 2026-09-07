@@ -7,7 +7,9 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_ops::{Domain, OpId};
@@ -94,7 +96,7 @@ async fn the_turn_atom_lives_end_to_end() {
     let log_path = scratch.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone log handle");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -102,8 +104,7 @@ async fn the_turn_atom_lives_end_to_end() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let text = loop {
         if let Some(status) = daemon.try_wait().expect("poll fqd") {
@@ -291,8 +292,7 @@ async fn the_turn_atom_lives_end_to_end() {
     assert!(idle.items.is_empty());
     assert!(idle.next_from_seq >= batch.next_from_seq);
 
-    let rc = unsafe { libc::kill(daemon.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0);
+    daemon.signal(libc::SIGTERM).expect("kill(SIGTERM)");
     let status = daemon.wait().expect("wait");
     assert!(status.success());
     let _ = std::fs::remove_dir_all(&scratch);

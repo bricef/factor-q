@@ -13,8 +13,10 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+
+use fq_test_support::TestChild;
 
 use fq_ops::{Domain, OpId};
 use serde_json::json;
@@ -38,11 +40,7 @@ fn unique_scratch() -> std::path::PathBuf {
     dir
 }
 
-fn spawn_daemon(
-    scratch: &std::path::Path,
-    nats_url: &str,
-    log: &std::path::Path,
-) -> std::process::Child {
+fn spawn_daemon(scratch: &std::path::Path, nats_url: &str, log: &std::path::Path) -> TestChild {
     spawn_daemon_with_state(scratch, &scratch.join("state"), nats_url, log)
 }
 
@@ -53,10 +51,10 @@ fn spawn_daemon_with_state(
     state_dir: &std::path::Path,
     nats_url: &str,
     log: &std::path::Path,
-) -> std::process::Child {
+) -> TestChild {
     let file = std::fs::File::create(log).expect("create daemon log");
     let file_err = file.try_clone().expect("clone log handle");
-    Command::new(env!("CARGO_BIN_EXE_fqd"))
+    TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -65,10 +63,9 @@ fn spawn_daemon_with_state(
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(file_err))
         .spawn()
-        .expect("spawn fqd")
 }
 
-async fn wait_for_ready(child: &mut std::process::Child, log: &std::path::Path) -> String {
+async fn wait_for_ready(child: &mut TestChild, log: &std::path::Path) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().expect("poll fqd") {
@@ -87,9 +84,8 @@ async fn wait_for_ready(child: &mut std::process::Child, log: &std::path::Path) 
     }
 }
 
-fn terminate(mut child: std::process::Child) {
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+fn terminate(mut child: TestChild) {
+    child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
     let status = child.wait().expect("wait for fqd");
     assert!(
         status.success(),
