@@ -5,9 +5,39 @@
 use tracing::{debug, info, warn};
 
 use super::TriggerDispatcher;
-use crate::worker::{DueResume, InvocationOutcome};
+use crate::agent::AgentId;
+use crate::worker::{DueResume, ExecutorError, InvocationOutcome};
 
 impl TriggerDispatcher {
+    /// What becomes of an invocation's outcome once its trigger's fate
+    /// is settled: a deferral goes on the queue (#278) — the trigger
+    /// was acked at the first WAL write, the row is in flight, and the
+    /// resume is this dispatcher's to run after the delay; an error is
+    /// logged — the executor already emitted `failed`, the trigger is
+    /// acked and the WAL owns recovery, so there is nothing to
+    /// redeliver.
+    pub(super) fn conclude(
+        &self,
+        agent_id: AgentId,
+        result: Result<InvocationOutcome, ExecutorError>,
+    ) {
+        match result {
+            Ok(InvocationOutcome::Deferred {
+                invocation_id,
+                resume_after,
+            }) => self.deferrals.defer(invocation_id, agent_id, resume_after),
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    agent_id = %agent_id,
+                    error = %err,
+                    "executor returned an error for NATS-triggered run"
+                );
+                self.log_executor_error(&err);
+            }
+        }
+    }
+
     /// Resume `due.invocation_id` now. The caller holds the concurrency
     /// permit; this is the invocation itself, however long it runs.
     pub(super) async fn resume_deferred(&self, due: DueResume) {

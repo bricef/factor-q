@@ -18,9 +18,14 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::{InvocationCtx, ReducerRunner, map_store_err};
-use crate::events::{DeferralReason, Event, EventPayload, InvocationDeferredPayload};
+use crate::agent::AgentId;
+use crate::events::{
+    DeferralReason, Event, EventPayload, FailureKind, FailurePhase, InvocationDeferredPayload,
+    InvocationTotals,
+};
 use crate::worker::ExecutorError;
 use crate::worker::reducer::types::Reducer;
+use crate::worker::store::LlmDispatchRow;
 
 /// The `invocation_state.phase` a deferred row carries. Recovery reads
 /// it: an errored LLM row under this phase is the recorded 429 the
@@ -64,6 +69,39 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ),
         )
         .await
+    }
+
+    /// The other reading of an errored LLM row on resume: a provider
+    /// failure whose `failed` terminal was lost to the crash — the
+    /// response column holds the error string, not a `ChatResponse`.
+    /// The invocation's fate was already determined; reproduce it
+    /// instead of trying to replay the row (finding 6, caught by the
+    /// slice-7 deep soak: resume previously died on a deserialise error
+    /// here). Always returns `Err`.
+    pub(super) async fn reproduce_lost_failure(
+        &self,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        row: &LlmDispatchRow,
+    ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+        let message = row
+            .response
+            .clone()
+            .unwrap_or_else(|| "provider error (no detail recorded)".to_string());
+        let mut cursor: Option<Uuid> = None;
+        self.emit_failed(
+            agent_id,
+            invocation_id,
+            FailureKind::LlmError,
+            format!("{message} (reproduced on resume)"),
+            FailurePhase::LlmRequest,
+            InvocationTotals::default(),
+            &mut cursor,
+        )
+        .await?;
+        Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(
+            message,
+        )))
     }
 
     /// Set `phase = "deferred"` on the invocation's state row, keeping

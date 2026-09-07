@@ -58,9 +58,7 @@ use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
-use crate::worker::{
-    DeferralQueue, DrainState, DueResume, DurableStart, ExecutorError, InvocationOutcome, Worker,
-};
+use crate::worker::{DeferralQueue, DrainState, DueResume, DurableStart, ExecutorError, Worker};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
@@ -653,27 +651,7 @@ impl TriggerDispatcher {
             }
         }
 
-        match result {
-            // Put down for a rate limit (#278): the trigger was acked at
-            // the first WAL write, the row is in flight, and the resume
-            // is this dispatcher's to run after the delay.
-            Ok(InvocationOutcome::Deferred {
-                invocation_id,
-                resume_after,
-            }) => self.deferrals.defer(invocation_id, agent_id, resume_after),
-            Ok(_) => {}
-            Err(err) => {
-                // The executor already emitted a Failed event; the
-                // trigger is acked and the WAL owns recovery, so there
-                // is nothing to redeliver.
-                warn!(
-                    agent_id = %agent_id,
-                    error = %err,
-                    "executor returned an error for NATS-triggered run"
-                );
-                self.log_executor_error(&err);
-            }
-        }
+        self.conclude(agent_id, result);
     }
 
     async fn ack(

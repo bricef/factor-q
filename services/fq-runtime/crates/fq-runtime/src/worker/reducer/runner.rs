@@ -749,39 +749,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             if r.status != DispatchStatus::Completed {
                 continue;
             }
-            // A completed-with-error row records a provider failure
-            // whose failed terminal was lost to the crash — the
-            // response column holds the error string, not a
-            // ChatResponse. The invocation's fate was already
-            // determined; reproduce it instead of trying to replay
-            // the row (finding 6, caught by the slice-7 deep soak:
-            // resume previously died on a deserialise error here).
-            //
-            // Unless the row was *deferred* (#278): then an errored
-            // call is the recorded 429 the deferral was decided on,
-            // nothing was determined, and the step re-issues the call.
-            if r.is_error == Some(true) && state_row.phase != deferral::DEFERRED_PHASE {
-                let message = r
-                    .response
-                    .clone()
-                    .unwrap_or_else(|| "provider error (no detail recorded)".to_string());
-                let mut cursor: Option<Uuid> = None;
-                self.emit_failed(
-                    &agent_id,
-                    invocation_id,
-                    FailureKind::LlmError,
-                    format!("{message} (reproduced on resume)"),
-                    FailurePhase::LlmRequest,
-                    InvocationTotals::default(),
-                    &mut cursor,
-                )
-                .await?;
-                return Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(
-                    message,
-                )));
-            }
+            // A completed-with-error row is either the 429 a deferral
+            // was decided on (#278) — nothing determined, the step
+            // re-issues the call — or a provider failure whose terminal
+            // was lost to the crash, to be reproduced rather than
+            // replayed (finding 6). The row's phase says which.
             if r.is_error == Some(true) {
-                continue;
+                if state_row.phase == deferral::DEFERRED_PHASE {
+                    continue;
+                }
+                return self
+                    .reproduce_lost_failure(&agent_id, invocation_id, r)
+                    .await;
             }
             completed.push((
                 replay_sort_key(r.seq, r.completed_at),
@@ -1319,23 +1298,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             &mut context,
                         )
                         .await?;
-                    match outcome {
-                        ModelOutcome::Response(resp) => {
-                            last_result = Some(CapabilityResult::ModelResult(resp));
-                        }
-                        ModelOutcome::BudgetExceeded(cost) => {
-                            return Ok(InvocationOutcome::BudgetExceeded {
-                                invocation_id,
-                                cost,
-                            });
-                        }
-                        ModelOutcome::Deferred(resume_after) => {
-                            return Ok(InvocationOutcome::Deferred {
-                                invocation_id,
-                                resume_after,
-                            });
-                        }
-                    }
+                    last_result = match outcome.into_step(invocation_id) {
+                        Ok(resp) => Some(CapabilityResult::ModelResult(resp)),
+                        Err(outcome) => return Ok(outcome),
+                    };
                 }
                 NextAction::CallTool(req) => {
                     let result = self
@@ -2378,6 +2344,25 @@ enum ModelOutcome {
     /// The model is rate-limited past what the retry layer waits in
     /// place: the invocation is put down for this long (#278).
     Deferred(std::time::Duration),
+}
+
+impl ModelOutcome {
+    /// Either the response the step continues with, or the outcome the
+    /// invocation returns with instead — a budget stop or a deferral,
+    /// both of which end this incarnation at the step boundary.
+    fn into_step(self, invocation_id: Uuid) -> Result<ModelResponse, InvocationOutcome> {
+        match self {
+            ModelOutcome::Response(resp) => Ok(resp),
+            ModelOutcome::BudgetExceeded(cost) => Err(InvocationOutcome::BudgetExceeded {
+                invocation_id,
+                cost,
+            }),
+            ModelOutcome::Deferred(resume_after) => Err(InvocationOutcome::Deferred {
+                invocation_id,
+                resume_after,
+            }),
+        }
+    }
 }
 
 /// Reconstruct a [`CapabilityResult::ToolResult`] from a
