@@ -140,6 +140,10 @@ pub(super) fn cost_report() -> CostReport {
         })
         .collect(),
         // The same spend split by model — the page's "By model" table.
+        // The cache figures sum to the agents' totals above, and the
+        // reasoning column shows all three cells: the opus calls report
+        // no split (`n/a`), the gpt calls report the agents' whole
+        // figure, and the glm calls reported zero.
         models: vec![
             ModelCostView {
                 model: "claude-opus-4-8".to_string(),
@@ -147,6 +151,9 @@ pub(super) fn cost_report() -> CostReport {
                 total_cost: 88.126_871,
                 total_input_tokens: 105_800_000,
                 total_output_tokens: 590_000,
+                total_cache_read_tokens: 98_600_000,
+                total_cache_write_tokens: 1_200_000,
+                total_reasoning_tokens: None,
             },
             ModelCostView {
                 model: "openai/gpt-5.6-terra".to_string(),
@@ -154,6 +161,9 @@ pub(super) fn cost_report() -> CostReport {
                 total_cost: 14.357_865,
                 total_input_tokens: 21_699_210,
                 total_output_tokens: 152_087,
+                total_cache_read_tokens: 5_900_000,
+                total_cache_write_tokens: 74_000,
+                total_reasoning_tokens: Some(98_400),
             },
             ModelCostView {
                 model: "z-ai/glm-5.2".to_string(),
@@ -161,6 +171,9 @@ pub(super) fn cost_report() -> CostReport {
                 total_cost: 2.880_260,
                 total_input_tokens: 4_813_382,
                 total_output_tokens: 31_677,
+                total_cache_read_tokens: 420_000,
+                total_cache_write_tokens: 5_000,
+                total_reasoning_tokens: Some(0),
             },
         ],
     }
@@ -248,6 +261,8 @@ pub(super) fn agent_cost_detail() -> AgentCostDetailView {
             invocation_count: 38,
             framework_cost: 0.0,
         },
+        // The two routes, splitting the totals above: the opus calls
+        // report no split, the gpt calls carry the whole figure.
         models: vec![
             ModelCostView {
                 model: "claude-opus-4-8".to_string(),
@@ -255,6 +270,9 @@ pub(super) fn agent_cost_detail() -> AgentCostDetailView {
                 total_cost: 81.512_004,
                 total_input_tokens: 98_712_640,
                 total_output_tokens: 511_220,
+                total_cache_read_tokens: 92_100_000,
+                total_cache_write_tokens: 1_126_000,
+                total_reasoning_tokens: None,
             },
             ModelCostView {
                 model: "openai/gpt-5.6-terra".to_string(),
@@ -262,6 +280,9 @@ pub(super) fn agent_cost_detail() -> AgentCostDetailView {
                 total_cost: 14.357_865,
                 total_input_tokens: 21_699_210,
                 total_output_tokens: 152_087,
+                total_cache_read_tokens: 5_900_000,
+                total_cache_write_tokens: 74_000,
+                total_reasoning_tokens: Some(98_400),
             },
         ],
         invocations: vec![
