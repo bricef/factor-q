@@ -32,6 +32,9 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 
+/// The envelope version this build writes. Reading is gated on
+/// [`SUPPORTED_SCHEMA_VERSIONS`], at [`Event::from_wire`]; the two are
+/// the same set until a reader learns a second version.
 pub const SCHEMA_VERSION: u32 = 3;
 /// Well-known annotation keys — a **reserved vocabulary, not an
 /// agent-facing channel** (#90). Nothing lets an agent annotate; every
@@ -86,6 +89,10 @@ mod payloads;
 /// surface does not serve, written down once.
 pub mod transient;
 
+/// The wire boundary: bytes into an event, version first. Re-exported
+/// below, so `crate::events` stays the import path.
+mod wire;
+
 pub use envelope::{CostMetadata, Envelope};
 pub use llm::{
     AssistantPart, Effort, LlmCallOrigin, LlmDispatchedPayload, LlmErrorKind, LlmFailurePayload,
@@ -94,6 +101,7 @@ pub use llm::{
     assistant_tool_calls, reduce_reasoning,
 };
 pub use payloads::*;
+pub use wire::{EventParseError, SUPPORTED_SCHEMA_VERSIONS};
 
 /// A complete event: envelope + payload + annotations.
 ///
@@ -524,8 +532,14 @@ impl Annotations {
 /// add a heap allocation to a value that is always serialized to NATS
 /// anyway).
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum::EnumDiscriminants)]
 #[serde(tag = "event_type", content = "payload", rename_all = "snake_case")]
+// `EventKind` is the set of event types as values — one per variant,
+// payload-free — so a test can ask "is every type covered?" of a corpus
+// or a renderer without a hand-maintained list that a new variant would
+// silently miss. `From<&EventPayload>` and `EnumIter` come with the
+// derive; the kind names are the variant names.
+#[strum_discriminants(name(EventKind), derive(Hash, PartialOrd, Ord, strum::EnumIter))]
 pub enum EventPayload {
     // Agent lifecycle
     Triggered(TriggeredPayload),
