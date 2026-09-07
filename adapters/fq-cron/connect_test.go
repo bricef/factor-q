@@ -240,7 +240,7 @@ func TestSchedulerSurvivesAnUnreadableStateStore(t *testing.T) {
 	logs := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- runScheduler(ctx, config, nil, &orderedPublisher{order: new([]string)}, store, log.New(logs, "", 0))
+		done <- runScheduler(ctx, config, nil, &orderedPublisher{order: new([]string)}, store, removalPolicy{}, log.New(logs, "", 0))
 	}()
 
 	// The store recovers on its third read; the scheduler must then be

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -233,21 +234,40 @@ func TestReloadRefusesAConfigThatDeclaresNoJobs(t *testing.T) {
 	}
 }
 
-// `job = []` is the one way a file says "no jobs" out loud, and it is
-// honoured in full: the jobs stop and their fire ledgers go with them.
+// testRemovalConfirm is the `--removal-confirm` window these tests run with:
+// long enough that "before the deadline" and "after it" are distinguishable on
+// a loaded machine, short enough to wait out several times in one test.
+const testRemovalConfirm = 400 * time.Millisecond
+
+// `job = []` is the one way a file says "no jobs" out loud, and it is honoured
+// in full — the jobs stop at once and their fire ledgers go with them. It
+// takes the same confirmation window as any other removal, though: one rule,
+// no fast path, because a file that says `job = []` is as capable of being
+// half-written as any other.
 func TestReloadAcceptsAnExplicitlyEmptyJobList(t *testing.T) {
-	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"), testRemovalConfirm)
 	defer s.stop(t)
 
+	removedAt := time.Now()
 	writeConfig(t, s.path, "job = []\n")
 	waitForLog(t, s.logs, "config reload accepted: added=[] removed=[alpha beta]", 2*time.Second)
-	waitForStateKeys(t, s.store, "", 2*time.Second)
+	// The jobs stop immediately; the ledgers do not go until the window does.
+	if keys := stateKeys(s.store); keys != "alpha,beta" {
+		t.Fatalf("state keys = %q the moment `job = []` landed, want both ledgers still parked", keys)
+	}
+	waitForStateKeys(t, s.store, "", 5*time.Second)
+	if elapsed := time.Since(removedAt); elapsed < testRemovalConfirm {
+		t.Fatalf("both ledgers were deleted %s after the reload, before the %s window closed", elapsed, testRemovalConfirm)
+	}
+	if got := strings.Join(s.store.deletions(), ","); got != "alpha,beta" {
+		t.Fatalf("deletions = %q, want exactly one per job", got)
+	}
 }
 
 // The same two jobs, the same store, and the intermediate state of a save
 // written on purpose: nothing may be removed, and nothing accepted.
 func TestATruncatedReadKeepsEveryJobsState(t *testing.T) {
-	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"), testRemovalConfirm)
 	defer s.stop(t)
 
 	writeConfig(t, s.path, "")
@@ -264,6 +284,69 @@ func TestATruncatedReadKeepsEveryJobsState(t *testing.T) {
 	waitForLog(t, s.logs, "config reload accepted: added=[] removed=[] changed=[alpha]", 2*time.Second)
 	if keys := stateKeys(s.store); keys != "alpha,beta" {
 		t.Fatalf("state after the completed save = %q, want both ledgers intact", keys)
+	}
+}
+
+// The sibling of TestATruncatedReadKeepsEveryJobsState, one stall later. A
+// writer that emits the *first* of two `[[job]]` blocks and then holds still
+// for longer than the settle gives the watcher two byte-identical reads of a
+// complete, valid, one-job file: the reload is accepted with the second job
+// removed, and nothing about the file can say otherwise
+// (https://github.com/bricef/factor-q/issues/635).
+//
+// Everything up to and including that acceptance still happens. What must not
+// happen is the deletion: beta stops firing at once, its ledger is parked, the
+// rest of the file arrives inside the confirmation window, and beta comes back
+// to the history it left with. The proof that it did is that beta fires at
+// all — a job whose state was deleted looks new to the planner, which gives it
+// its next *future* slot and publishes nothing for an hour.
+func TestAStalledWriteKeepsTheDroppedJobsLedger(t *testing.T) {
+	alpha := configText("alpha", "0 4 1 1 *")
+	beta := func(enabled string) string {
+		return "[[job]]\nname = \"beta\"\nschedule = \"0 * * * *\"\nsubject = \"fq.trigger.test\"\n" +
+			"catch_up = \"once\"\nenabled = " + enabled + "\n"
+	}
+	// A ledger with a slot three hours back (so beta has a fire to catch up
+	// on the moment it is enabled) and one publication inside the valve's
+	// sliding window (so a surviving ledger is visible in what is stored).
+	lastSlot := time.Now().Add(-3 * time.Hour)
+	inWindow := time.Now().Add(-30 * time.Minute)
+	s := startSchedulerSeeded(t, alpha+beta("false"), 3*time.Second, func(store *countingStore, _ *Config) {
+		store.States["alpha"] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
+		store.States["beta"] = FireState{LastScheduled: lastSlot, PublishedAt: inWindow, RecentFires: []time.Time{inWindow}}
+	})
+	defer s.stop(t)
+
+	// The stalled write: the first block, then nothing for well over a settle.
+	writeConfig(t, s.path, alpha)
+	waitForLog(t, s.logs, "config reload accepted: added=[] removed=[beta]", 2*time.Second)
+	waitForLog(t, s.logs, "job=beta removed from the configuration", 2*time.Second)
+	if keys := stateKeys(s.store); keys != "alpha,beta" {
+		t.Fatalf("state keys = %q after the stalled write, want beta's ledger parked, not deleted", keys)
+	}
+
+	// The writer finishes, inside the window.
+	writeConfig(t, s.path, alpha+beta("true"))
+	waitForLog(t, s.logs, "job=beta removal cancelled", 2*time.Second)
+
+	select {
+	case job := <-s.published:
+		if job != "beta" {
+			t.Fatalf("published %q, want beta catching up", job)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("beta never fired after it came back, so it came back empty; log was:\n%s", s.logs.String())
+	}
+
+	state, ok, err := s.store.Get(context.Background(), "beta")
+	if err != nil || !ok {
+		t.Fatalf("beta's state after it came back: ok=%v err=%v", ok, err)
+	}
+	if len(state.RecentFires) < 2 || !state.RecentFires[0].Equal(inWindow) {
+		t.Fatalf("beta's ledger = %v, want the seeded fire at %s still at its head with the catch-up appended", state.RecentFires, inWindow)
+	}
+	if got := s.store.deletions(); len(got) != 0 {
+		t.Fatalf("Delete was called for %v; a removal cancelled inside the window deletes nothing", got)
 	}
 }
 
@@ -313,25 +396,38 @@ func TestDiffConfigsSortedByName(t *testing.T) {
 // it can delete: a real ConfigWatcher over a real file, feeding runScheduler
 // over an in-memory store seeded with one ledger per job.
 type runningScheduler struct {
-	path   string
-	store  *MemoryStateStore
-	logs   *syncBuffer
-	cancel context.CancelFunc
-	done   chan error
+	path      string
+	store     *countingStore
+	published chan string
+	logs      *syncBuffer
+	cancel    context.CancelFunc
+	done      chan error
 }
 
-func startScheduler(t *testing.T, text string) *runningScheduler {
+// startScheduler seeds every job with a ledger whose slot is now: nothing to
+// catch up, nothing to fire for a year, so only a reload can move it.
+// removalConfirm is the real `--removal-confirm` window, shrunk to something a
+// test can wait out.
+func startScheduler(t *testing.T, text string, removalConfirm time.Duration) *runningScheduler {
+	t.Helper()
+	return startSchedulerSeeded(t, text, removalConfirm, func(store *countingStore, config *Config) {
+		for _, job := range config.Jobs {
+			store.States[job.Name] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
+		}
+	})
+}
+
+// startSchedulerSeeded is startScheduler with the store's contents chosen by
+// the caller — a test that wants a job to resume from a specific ledger has to
+// write that ledger before the loop's first read.
+func startSchedulerSeeded(t *testing.T, text string, removalConfirm time.Duration, seed func(*countingStore, *Config)) *runningScheduler {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fq-cron.toml")
 	writeConfig(t, path, text)
 	running := mustLoad(t, path)
 	config := running.Config
-	store := NewMemoryStateStore()
-	for _, job := range config.Jobs {
-		// A ledger with a recent slot: nothing to catch up, nothing to fire
-		// for a year, so only a reload can move this scheduler.
-		store.States[job.Name] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
-	}
+	store := &countingStore{MemoryStateStore: NewMemoryStateStore()}
+	seed(store, config)
 	logs := &syncBuffer{}
 	logger := log.New(logs, "", 0)
 	watcher := NewConfigWatcher(path, running, ConfigWatcherOptions{
@@ -341,10 +437,50 @@ func startScheduler(t *testing.T, text string) *runningScheduler {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	published := make(chan string, 16)
 	go func() {
-		done <- runScheduler(ctx, config, watcher.Run(ctx), &MemoryPublisher{}, store, logger)
+		done <- runScheduler(ctx, config, watcher.Run(ctx), &namingPublisher{jobs: published}, store,
+			removalPolicy{Confirm: removalConfirm, Recheck: watcher.Check}, logger)
 	}()
-	return &runningScheduler{path: path, store: store, logs: logs, cancel: cancel, done: done}
+	return &runningScheduler{path: path, store: store, published: published, logs: logs, cancel: cancel, done: done}
+}
+
+// namingPublisher reports the name of each job it publishes. MemoryPublisher
+// appends to a slice with no lock, which a test goroutine cannot read while
+// the loop runs; a channel can be read from anywhere.
+type namingPublisher struct{ jobs chan string }
+
+func (p *namingPublisher) Publish(_ context.Context, job, _ string, _ []byte, _ time.Time, _ bool) error {
+	select {
+	case p.jobs <- job:
+	default:
+	}
+	return nil
+}
+
+// countingStore is a MemoryStateStore that records every deletion, so a test
+// can assert not merely that a ledger survived but that nothing tried to
+// delete it.
+type countingStore struct {
+	*MemoryStateStore
+	// Named apart from the embedded store's own mutex, so `store.mu` in a
+	// helper still means the one guarding States.
+	deleteMu sync.Mutex
+	deleted  []string
+}
+
+func (s *countingStore) Delete(ctx context.Context, job string) error {
+	s.deleteMu.Lock()
+	s.deleted = append(s.deleted, job)
+	s.deleteMu.Unlock()
+	return s.MemoryStateStore.Delete(ctx, job)
+}
+
+// deletions is every job Delete has been called for, in call order.
+func (s *countingStore) deletions() []string {
+	s.deleteMu.Lock()
+	defer s.deleteMu.Unlock()
+	return append([]string(nil), s.deleted...)
 }
 
 func (s *runningScheduler) stop(t *testing.T) {
@@ -360,7 +496,7 @@ func (s *runningScheduler) stop(t *testing.T) {
 	}
 }
 
-func stateKeys(store *MemoryStateStore) string {
+func stateKeys(store *countingStore) string {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	names := make([]string, 0, len(store.States))
@@ -371,7 +507,7 @@ func stateKeys(store *MemoryStateStore) string {
 	return strings.Join(names, ",")
 }
 
-func waitForStateKeys(t *testing.T, store *MemoryStateStore, want string, within time.Duration) {
+func waitForStateKeys(t *testing.T, store *countingStore, want string, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for {

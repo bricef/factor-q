@@ -52,6 +52,41 @@ func TestReloadSettleIsConfigurable(t *testing.T) {
 	}
 }
 
+// The confirmation window is configuration on the same terms as the settle:
+// a default, a flag, an environment variable, the flag winning, a malformed
+// value an error — and zero rejected rather than quietly promoted, because the
+// loop reads a non-positive window as "use the default" and would run a
+// 60-second one while its operator believed removals were immediate.
+func TestRemovalConfirmIsConfigurable(t *testing.T) {
+	t.Setenv("FQCRON_CONFIG", "jobs.toml")
+	cfg, err := configFromArgs(nil)
+	if err != nil || cfg.RemovalConfirm != DefaultRemovalConfirm {
+		t.Fatalf("default window = %s (%v), want %s", cfg.RemovalConfirm, err, DefaultRemovalConfirm)
+	}
+	// The default is stated as two poll intervals, not as a number: the two
+	// must not be able to drift apart.
+	if DefaultRemovalConfirm != 2*DefaultConfigPollInterval {
+		t.Fatalf("default window = %s, want two config poll intervals (%s)", DefaultRemovalConfirm, 2*DefaultConfigPollInterval)
+	}
+	t.Setenv(removalConfirmEnv, "5m")
+	if cfg, err = configFromArgs(nil); err != nil || cfg.RemovalConfirm != 5*time.Minute {
+		t.Fatalf("window from the environment = %s (%v)", cfg.RemovalConfirm, err)
+	}
+	if cfg, err = configFromArgs([]string{"--removal-confirm", "90s"}); err != nil || cfg.RemovalConfirm != 90*time.Second {
+		t.Fatalf("window from the flag = %s (%v), and the flag must win over the environment", cfg.RemovalConfirm, err)
+	}
+	t.Setenv(removalConfirmEnv, "soon")
+	if _, err = configFromArgs(nil); err == nil || !strings.Contains(err.Error(), removalConfirmEnv) {
+		t.Fatalf("a malformed %s = %v, want an error naming it", removalConfirmEnv, err)
+	}
+	t.Setenv(removalConfirmEnv, "60s")
+	for _, window := range []string{"-1s", "0", "0s"} {
+		if _, err = configFromArgs([]string{"--removal-confirm", window}); err == nil || !strings.Contains(err.Error(), "greater than zero") {
+			t.Fatalf("a window of %s = %v, want a rejection", window, err)
+		}
+	}
+}
+
 func TestConfigFlagRequired(t *testing.T) {
 	for _, key := range []string{"FQCRON_CONFIG", "FQCRON_NATS_URL", "FQCRON_KV_BUCKET"} {
 		os.Unsetenv(key)

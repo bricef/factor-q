@@ -17,11 +17,63 @@ var errFireSuperseded = errors.New("fire superseded by next scheduled slot")
 
 // runScheduler is the adapter's thin orchestration loop. A fire is recorded
 // only after its publish has been acknowledged.
-func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEvent, publisher Publisher, store StateStore, logger *log.Logger) error {
+func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEvent, publisher Publisher, store StateStore, removal removalPolicy, logger *log.Logger) error {
 	if logger == nil {
 		logger = log.Default()
 	}
+	if removal.Confirm <= 0 {
+		removal.Confirm = DefaultRemovalConfirm
+	}
 	unhealthy := make(map[string]bool)
+	pending := newPendingRemovals(removal.Confirm, logger)
+	// Every exit from here is a shutdown: a cancelled context, or a publish
+	// failure that ends the process. A removal that has not been confirmed is
+	// not carried out on the way out — see logUnconfirmed.
+	defer pending.logUnconfirmed()
+
+	// applyReload puts an accepted reload into force. The configuration takes
+	// effect at once, so a dropped job stops firing immediately; only the
+	// deletion of its fire state is parked.
+	applyReload := func(event ReloadEvent) {
+		pending.retain(event.Config)
+		pending.park(event.Diff.Removed, time.Now())
+		config = event.Config
+		unhealthy = make(map[string]bool)
+	}
+
+	// confirmRemovals runs when the earliest parked removal falls due. A
+	// deletion happens only if the job is still absent from the configuration
+	// in force — and only after one last look at the file, so a completed
+	// write that has not yet produced a reload event gets the last word rather
+	// than the read that dropped the job (#635).
+	confirmRemovals := func() error {
+		if removal.Recheck != nil {
+			if event, ok := removal.Recheck(); ok {
+				applyReload(event)
+			}
+		}
+		jobs := jobsByName(config)
+		var confirmed []string
+		for _, name := range pending.take(time.Now()) {
+			if _, back := jobs[name]; back {
+				continue // restored in the meantime; retain logged it
+			}
+			confirmed = append(confirmed, name)
+		}
+		if len(confirmed) == 0 {
+			return nil
+		}
+		if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
+			return removeState(ctx, confirmed, store)
+		}); err != nil {
+			return err
+		}
+		for _, name := range confirmed {
+			logger.Printf("job=%s removal confirmed after %s: fire state deleted", name, removal.Confirm)
+		}
+		return nil
+	}
+
 	for {
 		var state map[string]FireState
 		if err := withBrokerRetry(ctx, logger, "load state", func() error {
@@ -40,26 +92,29 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 			if valve != nil {
 				logger.Printf("valve=closed reopens=%s: fires suppressed until the window slides", valveReopensAt.Format(time.RFC3339))
 			}
+			confirm, stopConfirm := timerUntil(pending.next())
 			select {
 			case <-ctx.Done():
 				stopValve()
+				stopConfirm()
 				return nil
 			case <-valve:
+				stopConfirm()
 				logger.Printf("valve=open replanning")
 				continue
+			case <-confirm:
+				stopValve()
+				if err := confirmRemovals(); err != nil {
+					return nil
+				}
 			case event, ok := <-reloads:
 				stopValve()
+				stopConfirm()
 				if !ok {
 					reloads = nil
 					continue
 				}
-				if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
-					return removeState(ctx, event.Diff.Removed, store)
-				}); err != nil {
-					return nil
-				}
-				config = event.Config
-				unhealthy = make(map[string]bool)
+				applyReload(event)
 			}
 			continue
 		}
@@ -67,25 +122,29 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 		wait := time.Until(fires[0].ScheduledAt)
 		if wait > 0 {
 			timer := time.NewTimer(wait)
+			confirm, stopConfirm := timerUntil(pending.next())
 			select {
 			case <-ctx.Done():
 				timer.Stop()
+				stopConfirm()
 				return nil
+			case <-confirm:
+				timer.Stop()
+				if err := confirmRemovals(); err != nil {
+					return nil
+				}
+				continue
 			case event, ok := <-reloads:
 				timer.Stop()
+				stopConfirm()
 				if ok {
-					if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
-						return removeState(ctx, event.Diff.Removed, store)
-					}); err != nil {
-						return nil
-					}
-					config = event.Config
-					unhealthy = make(map[string]bool)
+					applyReload(event)
 				} else {
 					reloads = nil
 				}
 				continue
 			case <-timer.C:
+				stopConfirm()
 			}
 		}
 
@@ -201,6 +260,10 @@ func loadState(ctx context.Context, config *Config, store StateStore) (map[strin
 	return state, nil
 }
 
+// removeState deletes these jobs' fire state. Its only caller is the
+// confirmation step: a reload that drops a job parks the deletion, and nothing
+// reaches here until the job has stayed out of the configuration for the whole
+// removal-confirm window (removal.go).
 func removeState(ctx context.Context, names []string, store StateStore) error {
 	for _, name := range names {
 		if err := store.Delete(ctx, name); err != nil {
