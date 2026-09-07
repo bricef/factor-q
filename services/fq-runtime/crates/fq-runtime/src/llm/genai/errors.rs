@@ -24,7 +24,7 @@ use crate::llm::LlmError;
 ///
 /// | status | error | retried |
 /// |---|---|---|
-/// | 429 | `RateLimited`, carrying `Retry-After` when sent | yes, honouring the header |
+/// | 429 | `RateLimited`, carrying `Retry-After` when sent, else the `RetryInfo.retryDelay` Google writes into the body | yes, honouring the wait |
 /// | 401, 403 | `Auth` | no |
 /// | 408 | `RequestFailed` | yes — the server timed the request out, which says nothing about the request |
 /// | other 4xx | `Rejected` | no |
@@ -76,24 +76,26 @@ fn timed_out(webc_error: &provider::webc::Error) -> bool {
 }
 
 /// The wait the provider asked for on a failed response, when it sent
-/// one the runtime can read. The headers ride on the error genai returns
-/// for every shape a failed chat call takes, and the variants' fields
-/// are public, so nothing upstream needs to change to reach them.
+/// one the runtime can read: the `Retry-After` header first, and when
+/// there is none, the delay Google writes into the body instead. Headers
+/// and body ride on the error genai returns for every shape a failed
+/// chat call takes, and the variants' fields are public, so nothing
+/// upstream needs to change to reach them.
 fn retry_after(err: &provider::Error) -> Option<Duration> {
     use provider::webc::Error::ResponseFailedStatus;
-    let headers = match err {
-        provider::Error::HttpError { headers, .. } => headers,
+    let (headers, body) = match err {
+        provider::Error::HttpError { headers, body, .. } => (headers, body),
         provider::Error::WebModelCall {
-            webc_error: ResponseFailedStatus { headers, .. },
+            webc_error: ResponseFailedStatus { headers, body, .. },
             ..
         }
         | provider::Error::WebAdapterCall {
-            webc_error: ResponseFailedStatus { headers, .. },
+            webc_error: ResponseFailedStatus { headers, body, .. },
             ..
-        } => headers,
+        } => (headers, body),
         _ => return None,
     };
-    parse_retry_after(headers)
+    parse_retry_after(headers).or_else(|| parse_retry_delay(body))
 }
 
 /// `Retry-After` as RFC 9110 §10.2.3 defines it — a number of seconds or
@@ -118,6 +120,34 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
     let wait = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
     Some(wait.to_std().unwrap_or(Duration::ZERO))
+}
+
+/// Google's answer to the same question, sent in the body rather than a
+/// header: a `google.rpc.RetryInfo` detail whose `retryDelay` is a
+/// protobuf duration in its JSON form — decimal seconds with an `s`
+/// suffix, `"42s"` or `"11.472599491s"`. Gemini's 429s carry it and no
+/// `Retry-After` (measured 2026-09-07), so before this was read the
+/// retry layer backed off in fractions of a second against a per-minute
+/// quota and spent its whole budget inside two seconds. Read only when
+/// the header is absent, so a provider that sends both is believed on
+/// the header as before. Anything else — not JSON, no such detail, a
+/// value that is not a duration — reads as absent.
+fn parse_retry_delay(body: &str) -> Option<Duration> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let delay = json
+        .get("error")?
+        .get("details")?
+        .as_array()?
+        .iter()
+        .find_map(|detail| {
+            let kind = detail.get("@type")?.as_str()?;
+            if !kind.ends_with("google.rpc.RetryInfo") {
+                return None;
+            }
+            detail.get("retryDelay")?.as_str()
+        })?;
+    let secs: f64 = delay.trim().strip_suffix('s')?.parse().ok()?;
+    (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs))
 }
 
 #[cfg(test)]
