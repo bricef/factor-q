@@ -279,21 +279,22 @@ run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
   log "$arm: collected transcript, costs, $n events via get"
 }
 
-# A provider that answered 5xx through every attempt of the runtime's
-# retry budget is unavailable, not wrong — Gemini's free tier says "high
-# demand" for minutes at a time. That is not a verdict on the round trip,
-# so such an arm gets one more attempt after a pause. Anything else that
-# fails stands as it fell.
-provider_unavailable() { # arm -> 0 when its invocation failed on a provider 5xx
+# A provider that answered 5xx or 429 through every attempt of the
+# runtime's retry budget had no capacity for us, and is not wrong —
+# Gemini's free tier says "high demand" for minutes at a time, and allows
+# five requests a minute per model, which three turns and a retry can
+# trip. Neither is a verdict on the round trip, so such an arm gets one
+# more attempt after a pause. Anything else that fails stands as it fell.
+capacity_failure() { # arm -> 0 when its invocation failed on a provider 5xx or 429
   local f="$OUT/$1/invocation.json"
   [[ -f "$f" ]] || return 1
-  jq -e '(.. | strings) | select(test("status code .5[0-9][0-9].|UNAVAILABLE|overloaded|high demand"; "i"))' "$f" > /dev/null 2>&1
+  jq -e '(.. | strings) | select(test("status code .5[0-9][0-9].|UNAVAILABLE|overloaded|high demand|rate.limited|status code .429.|RESOURCE_EXHAUSTED"; "i"))' "$f" > /dev/null 2>&1
 }
 
 for arm in "${ARMS[@]}"; do
   run_arm "$arm"
-  if [[ "${RESULT[$arm]:-}" == "failed" ]] && provider_unavailable "$arm"; then
-    log "$arm: the provider was unavailable (5xx through the retry budget) — one more attempt in 60s"
+  if [[ "${RESULT[$arm]:-}" == "failed" ]] && capacity_failure "$arm"; then
+    log "$arm: the provider had no capacity (5xx or 429 through the retry budget) — one more attempt in 60s"
     sleep 60
     RETRIED[$arm]=1
     run_arm "$arm"
@@ -307,7 +308,7 @@ fqc costs --json > "$OUT/costs-all.json" 2>>"$OUT/client-stderr.log" || true
 fqc costs        > "$OUT/costs-all.txt"  2>&1 || true
 
 log "=== summary"
-for arm in "${ARMS[@]}"; do log "$arm: ${RESULT[$arm]:-unknown}${RETRIED[$arm]:+ (second attempt; the first failed on a provider 5xx)}"; done
+for arm in "${ARMS[@]}"; do log "$arm: ${RESULT[$arm]:-unknown}${RETRIED[$arm]:+ (second attempt; the first failed on provider capacity, a 5xx or 429)}"; done
 log "events tailed: $(wc -l < "$OUT/events.ndjson") lines"
 log "expected word count: $EXPECTED_WORDS"
 
