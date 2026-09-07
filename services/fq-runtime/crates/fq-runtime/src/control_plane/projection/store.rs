@@ -1,9 +1,15 @@
 //! SQLite-backed event projection store.
 //!
 //! Opens a SQLite database in WAL mode with four indexes tuned for
-//! the queries we actually run. Inserts are idempotent (`INSERT OR
-//! IGNORE ON event_id`) so at-least-once delivery from the NATS
-//! consumer does not produce duplicates on re-delivery.
+//! the queries we actually run. Inserts are idempotent (an upsert on
+//! `event_id`) so at-least-once delivery from the NATS consumer does
+//! not produce duplicates on re-delivery, and a replay after a rebuild
+//! refreshes the rows the rebuild carried across.
+//!
+//! The file carries a schema version ([`PROJECTION_SCHEMA_VERSION`],
+//! in SQLite's `user_version`) and is rebuilt from the event stream
+//! when that version changes — see the `schema` module for the
+//! contract and the `rebuild` module for the mechanism.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -16,6 +22,7 @@ use crate::agent::AgentId;
 use crate::events::{Event, EventPayload};
 
 mod costs;
+mod rebuild;
 mod schema;
 mod triggers;
 
@@ -25,6 +32,8 @@ mod triggers;
 pub use self::costs::{
     CostBucketSummary, CostSummary, FailureSummary, InvocationCostSummary, ModelCostSummary,
 };
+pub use self::rebuild::{FRESH_FILE_REASON, RebuildRecord};
+pub use self::schema::PROJECTION_SCHEMA_VERSION;
 
 /// SQLite projection store. Cheap to clone (the underlying
 /// connection pool is `Arc`-reference-counted inside `sqlx`).
@@ -36,9 +45,14 @@ pub struct ProjectionStore {
 impl ProjectionStore {
     /// Open (or create) a projection database at the given path.
     ///
-    /// Runs schema migrations after connecting. WAL mode is enabled
-    /// so concurrent readers (the CLI's query commands) can run
-    /// alongside the projection consumer's writes.
+    /// Brings the file to [`PROJECTION_SCHEMA_VERSION`] after
+    /// connecting: a fresh file gets the schema, a current one is left
+    /// alone, an older one is **rebuilt** (its tables dropped and
+    /// recreated, the sweep-exempt rows carried across, and the durable
+    /// consumer marked for the reset that replays the stream into it),
+    /// and a newer one — written by a newer binary — is refused. WAL
+    /// mode is enabled so concurrent readers (the CLI's query commands)
+    /// can run alongside the projection consumer's writes.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -56,7 +70,7 @@ impl ProjectionStore {
             .await?;
 
         let store = Self { pool };
-        store.run_migrations().await?;
+        store.ensure_schema(path).await?;
         Ok(store)
     }
 
@@ -135,7 +149,15 @@ impl ProjectionStore {
     }
 
     /// Insert an event into the store. Idempotent on `event_id` —
-    /// re-delivery from a durable consumer is a no-op.
+    /// re-delivery from a durable consumer writes the same row again.
+    ///
+    /// An upsert rather than `INSERT OR IGNORE`, for the rebuild: the
+    /// cost-bearing rows a rebuild carries across keep the shape the
+    /// old file had (a column added since reads NULL), and the replay
+    /// that follows has to be able to refresh them from the event.
+    /// Every column but `seq` is overwritten — the same event derives
+    /// the same values — and `seq` is kept where a delivery carries no
+    /// position, so a redelivery cannot unlocate a row.
     ///
     /// `seq` is the event's position in the log this row indexes — an
     /// internal locator, never an identity. `event.get` takes the
@@ -158,10 +180,26 @@ impl ProjectionStore {
 
         sqlx::query(
             r#"
-            INSERT OR IGNORE INTO events
+            INSERT INTO events
                 (event_id, seq, timestamp, agent_id, invocation_id, event_type,
                  model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_cost, error_kind, error_message, duration_ms)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                seq = COALESCE(excluded.seq, events.seq),
+                timestamp = excluded.timestamp,
+                agent_id = excluded.agent_id,
+                invocation_id = excluded.invocation_id,
+                event_type = excluded.event_type,
+                model = excluded.model,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                cache_read_tokens = excluded.cache_read_tokens,
+                cache_write_tokens = excluded.cache_write_tokens,
+                reasoning_tokens = excluded.reasoning_tokens,
+                total_cost = excluded.total_cost,
+                error_kind = excluded.error_kind,
+                error_message = excluded.error_message,
+                duration_ms = excluded.duration_ms
             "#,
         )
         .bind(event.envelope.event_id.to_string())
@@ -412,6 +450,24 @@ pub enum StoreError {
          this state directory and it will bring the schema forward."
     )]
     SchemaOutdated { path: PathBuf, missing: String },
+
+    /// A database written by a newer build. Refused, as the worker and
+    /// control-plane stores refuse theirs: an older binary cannot know
+    /// what a newer schema means. The remedy differs because the
+    /// projection is derived — deleting it costs a replay, not data,
+    /// except for the cost rows past stream retention.
+    #[error(
+        "projection database at {path} records schema version {db_version}, newer than this \
+         binary's {binary_version}. Run the build that wrote it, or delete the projection \
+         store under `[cache] directory` in fqd.toml — this build recreates it and replays \
+         the event stream into it, which recovers everything the stream still holds; only \
+         cost-bearing rows older than stream retention are lost with the file."
+    )]
+    IncompatibleSchema {
+        path: PathBuf,
+        db_version: u32,
+        binary_version: u32,
+    },
 }
 
 impl From<sqlx::Error> for StoreError {

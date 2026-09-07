@@ -217,6 +217,7 @@ pub fn operator_registry(
         (doctor_views, status_views),
         (doctor_bus, status_bus),
         status_registry,
+        deps.projection.clone(),
         &deps.facts,
     )?;
 

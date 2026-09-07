@@ -409,6 +409,15 @@ pub struct StatusReport {
     /// Rows in the daemon's projection index — how much of the event
     /// log has been folded into readable state.
     pub projection_rows: i64,
+    /// The projection's last rebuild — a schema bump on start, or
+    /// `control.projection_rebuild` — and whether its replay has
+    /// caught up. Absent on a projection that has never been rebuilt,
+    /// which is the common case and not a finding. While it is in
+    /// progress, reads answer over a partial fold: `projection_rows`
+    /// is climbing back, and a spend figure can be short until the
+    /// replay reaches its target.
+    #[serde(default)]
+    pub projection_rebuild: Option<ProjectionRebuild>,
     /// Ambiguous invocations awaiting triage and workers past the
     /// stale threshold, with their ids.
     pub recovery: RecoveryView,
@@ -417,6 +426,41 @@ pub struct StatusReport {
     /// verdict, exactly as this report treats stale workers.
     #[serde(default)]
     pub mcp_servers: Vec<crate::health::McpServerHealth>,
+}
+
+/// The projection's last rebuild, as `control.status` reports it.
+///
+/// A rebuild drops the projection's tables, recreates them at the
+/// daemon's schema version, carries the sweep-exempt rows across
+/// (cost-bearing events, invocation summaries, trigger records), and
+/// replays the event stream from the start of its retention into them.
+/// It happens on start when the file's schema version is older than
+/// the daemon's, and on demand through `control.projection_rebuild`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRebuild {
+    /// When the tables were dropped and recreated (RFC3339).
+    pub started_at: String,
+    /// Why: a schema version change, or an operator's request with
+    /// the reason they gave.
+    pub reason: String,
+    /// The schema version the file recorded before, when the rebuild
+    /// was a version change; absent for an operator's rebuild.
+    #[serde(default)]
+    pub from_version: Option<u32>,
+    /// The schema version the tables were recreated at.
+    pub schema_version: u32,
+    /// The stream's last sequence when the durable consumer was reset
+    /// — the position the replay has to reach before every event the
+    /// stream still holds is back in the file. Absent until the reset.
+    #[serde(default)]
+    pub target_seq: Option<u64>,
+    /// True while the durable consumer has yet to be reset: the tables
+    /// are recreated, the replay has not started.
+    pub consumer_reset_pending: bool,
+    /// True until the replay has reached `target_seq`. Judged at the
+    /// instant of the call against the durable's acked position, so
+    /// two calls a second apart legitimately differ.
+    pub in_progress: bool,
 }
 
 /// List/Stream selection for DeadLetters — the typed, schema'd filter,

@@ -70,6 +70,19 @@ impl ProjectionConsumer {
         // tests/smoke/smoke.sh greps the daemon log for it before
         // driving the walking skeleton.
         info!("projection consumer starting");
+        // A file that was created or rebuilt since the durable last
+        // read must not resume from the durable's acked floor: the
+        // events before it would never reach the new tables. The store
+        // says so durably; the reset happens here, before the loop
+        // attaches, because this is the one place that holds the bus
+        // and is guaranteed not to be reading yet.
+        if let Some(reason) = self.store.consumer_reset_pending().await? {
+            info!(
+                reason,
+                "projection consumer: resetting the durable before reading"
+            );
+            super::rebuild::reset_projection_consumer(&self.bus, &self.store).await?;
+        }
         let config = DurableConsumerConfig {
             durable_name: CONSUMER_NAME.to_string(),
             filter_subjects: Vec::new(),

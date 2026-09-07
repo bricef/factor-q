@@ -104,6 +104,7 @@ pub(crate) fn status_report() -> StatusReport {
             load_errors: Vec::new(),
         },
         projection_rows: 64_016,
+        projection_rebuild: None,
         recovery: RecoveryView {
             ambiguous: 3,
             stale_workers: 2,

@@ -32,10 +32,21 @@ pub(crate) fn register_health_reports(
     views: (Arc<Views>, Arc<Views>),
     buses: (fq_runtime::EventBus, fq_runtime::EventBus),
     agents: fq_runtime::SharedRegistry,
+    // The writer's own handle on the projection: `control.status`
+    // reads the rebuild record the file keeps, which the read views
+    // do not serve.
+    projection: Arc<fq_runtime::ProjectionStore>,
     facts: &DaemonFacts,
 ) -> anyhow::Result<()> {
     let (doctor_views, status_views) = views;
     let (doctor_bus, status_bus) = buses;
     crate::doctor_report::register_doctor_report(registry, doctor_views, doctor_bus, facts)?;
-    crate::status_report::register_status_report(registry, status_views, status_bus, agents, facts)
+    crate::status_report::register_status_report(
+        registry,
+        status_views,
+        status_bus,
+        agents,
+        projection,
+        facts,
+    )
 }

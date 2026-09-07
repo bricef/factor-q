@@ -47,6 +47,7 @@ fn report() -> StatusReport {
             load_errors: Vec::new(),
         },
         projection_rows: 10,
+        projection_rebuild: None,
         recovery: fq_ops::views::RecoveryView::default(),
     }
 }
@@ -263,6 +264,58 @@ fn active(lag: u64) -> StreamHealth {
             stuck: false,
         }],
     }
+}
+
+fn rebuild(consumer_reset_pending: bool, in_progress: bool) -> fq_ops::surface::ProjectionRebuild {
+    fq_ops::surface::ProjectionRebuild {
+        started_at: "2026-09-07T10:00:00+00:00".to_string(),
+        reason: "schema version 0 -> 1".to_string(),
+        from_version: Some(0),
+        schema_version: 1,
+        target_seq: Some(4_242),
+        consumer_reset_pending,
+        in_progress,
+    }
+}
+
+/// A projection that was never rebuilt prints no rebuild line at all —
+/// the common case is not a finding — and one that was says where the
+/// replay stands: resetting, replaying to a named position, or done.
+#[test]
+fn the_rebuild_line_follows_the_replay() {
+    assert!(
+        !render_status_human(&answered()).contains("projection rebuild"),
+        "no rebuild, no line"
+    );
+
+    let with = |r: fq_ops::surface::ProjectionRebuild| {
+        render_status_human(&StatusDocument {
+            daemon: Some(StatusReport {
+                projection_rebuild: Some(r),
+                ..report()
+            }),
+            ..answered()
+        })
+    };
+    let resetting = with(rebuild(true, true));
+    assert!(
+        resetting.contains("projection rebuild: in progress (the consumer is resetting)"),
+        "{resetting}"
+    );
+    let replaying = with(rebuild(false, true));
+    assert!(
+        replaying.contains("in progress (replaying to stream sequence 4242)"),
+        "{replaying}"
+    );
+    assert!(
+        replaying.contains("schema version 0 -> 1"),
+        "the reason is on the line: {replaying}"
+    );
+    let done = with(rebuild(false, false));
+    assert!(
+        done.contains("projection rebuild: complete — started 2026-09-07T10:00:00+00:00"),
+        "{done}"
+    );
 }
 
 #[test]
