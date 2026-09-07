@@ -54,7 +54,22 @@ A saved file replaces the running configuration only when all of this holds
   ```
 
 Only `job = []` stops every job and deletes their state. Everything else that
-looks empty is a file being written, and is waited out.
+looks empty is a file being written, and is waited out. The two refusals an
+operator sees in the log are:
+
+```text
+config reload rejected: 0 bytes declaring no jobs, and no explicit `job = []`
+config changed while being read; reload deferred until it settles
+```
+
+The second is not a failure — the file is mid-save and the watcher looks
+again after another settle.
+
+**This rule governs reloads only.** `--check` and startup validate the file
+and stop there: a job-less file is *valid*, so `--check` passes on it and
+`fq-cron` will start with nothing scheduled. What it will never do is
+replace a **running** configuration, because that is the reload that deletes
+job state.
 
 ## Broker outages
 

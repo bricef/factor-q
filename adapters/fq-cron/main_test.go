@@ -41,9 +41,14 @@ func TestReloadSettleIsConfigurable(t *testing.T) {
 	if _, err = configFromArgs(nil); err == nil || !strings.Contains(err.Error(), reloadSettleEnv) {
 		t.Fatalf("a malformed %s = %v, want an error naming it", reloadSettleEnv, err)
 	}
+	// Zero is rejected too, not quietly promoted: the watcher reads a
+	// non-positive settle as "use the default", so accepting it would run
+	// the confirming read at 250 ms while the operator believed it off.
 	t.Setenv(reloadSettleEnv, "250ms")
-	if _, err = configFromArgs([]string{"--reload-settle", "-1s"}); err == nil || !strings.Contains(err.Error(), "negative") {
-		t.Fatalf("a negative settle = %v, want a rejection", err)
+	for _, settle := range []string{"-1s", "0", "0s"} {
+		if _, err = configFromArgs([]string{"--reload-settle", settle}); err == nil || !strings.Contains(err.Error(), "greater than zero") {
+			t.Fatalf("a settle of %s = %v, want a rejection", settle, err)
+		}
 	}
 }
 
