@@ -21,6 +21,7 @@ NATS.
 | `--kv-bucket` | `FQCRON_KV_BUCKET` | `fq-cron-state` |
 | `--check` | — | `false` |
 | `--health-bind` | `FQCRON_HEALTH_BIND` | `127.0.0.1:9474` — loopback address of `GET /healthz`; empty disables |
+| `--reload-settle` | `FQCRON_RELOAD_SETTLE` | `250ms` — quiet period a changed config file must hold before it is reloaded |
 | `--probe` | — | asks the running scheduler's `/healthz` and exits 0 on healthy — the container's `HEALTHCHECK`; needs no config |
 | `--version` | — | prints `fq-cron <commit>` and exits; needs no config |
 
@@ -28,6 +29,32 @@ NATS.
 The scheduler loop is not age-checked: between fires it sleeps for as
 long as the schedule says, and a loop that exits on error ends the
 process, which the supervisor sees directly. The bind must be loopback.
+
+## What counts as a reload
+
+A saved file replaces the running configuration only when all of this holds
+([DESIGN.md D4](DESIGN.md#d4--hot-reload-watch-validate-wholesale-diff-by-job-name)):
+
+- **It reads and parses and validates**, whole. A broken edit is logged with
+  its reason and the previous configuration keeps running, unchanged.
+- **It held still.** Every changed read is confirmed by a second read taken
+  `--reload-settle` later, and only byte-identical reads are trusted, so a
+  save that truncates then writes — an editor, `scp`, a config-management
+  tool — is read once, complete. Writes inside that window are one reload of
+  the finished file.
+- **It declares at least one job** — or declares that it has none, in as many
+  words, with a top-level `job = []`. A file with no `[[job]]` blocks and no
+  `job = []` is refused: zero bytes are valid TOML with no jobs, so accepting
+  it would let a read caught mid-save delete every job *and* its fire ledger
+  ([#623](https://github.com/bricef/factor-q/issues/623)). To run with no
+  jobs, say so:
+
+  ```toml
+  job = []
+  ```
+
+Only `job = []` stops every job and deletes their state. Everything else that
+looks empty is a file being written, and is waited out.
 
 ## Broker outages
 

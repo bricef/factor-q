@@ -154,6 +154,33 @@ Two configuration planes, deliberately separate:
   offending job and line, and the running config **stays in force
   unchanged**. A half-applied config never exists; a broken edit can
   never stop jobs that were previously valid.
+- **A file must hold still before it is read as final.** A save is not
+  atomic: `os.WriteFile` and most editors truncate before they write,
+  `scp` streams, and a watcher read landing in that gap sees a *prefix*
+  of the intended file — most often zero bytes. Every read whose content
+  differs from the last one seen is therefore confirmed by a second read
+  taken one **settle** later (`--reload-settle` /
+  `FQCRON_RELOAD_SETTLE`, default 250 ms), and only byte-identical reads
+  are trusted. This sits under *every* trigger — poll, `SIGHUP` and
+  fsnotify alike — because the poll is as capable of landing mid-write
+  as an event is; the same duration doubles as the fsnotify coalescing
+  window, so a multi-step save is one reload of the finished file. A
+  read caught mid-write concludes nothing and *records* nothing: the
+  watcher looks again after another settle rather than waiting out a
+  whole poll interval.
+- **A config says "no jobs" out loud, or not at all.** Zero bytes are
+  valid TOML declaring no jobs, so the truncate gap above parses as a
+  complete, valid config in which every job has been deleted — and the
+  diff below would delete every job's KV state to match, ledgers and all
+  ([#623](https://github.com/bricef/factor-q/issues/623)). A reload that
+  declares no jobs is therefore accepted only when the file declares the
+  top-level `job` key with zero entries (`job = []`); a file with no
+  `[[job]]` blocks and no `job = []` — empty, whitespace, comments, or
+  `[limits]` alone — is refused and logged, and the running config keeps
+  going. `job = []` is a *deliberate* state that any writer of the file
+  can express, and no prefix of a file containing `[[job]]` blocks can
+  produce it by accident; "the file happens to have no jobs in it right
+  now" is not, which is exactly why the two are not the same reload.
 - **Job identity is `name`.** The diff against the running config is
   keyed by job name: new names are scheduled, missing names are
   cancelled (and their KV entry deleted), changed jobs are rescheduled
@@ -346,6 +373,7 @@ the returned fires.
 | Crash between publish ack and state write | Restart re-publishes; broker dedup via `Nats-Msg-Id` discards inside the window; documented at-least-once beyond it. |
 | Invalid config on reload | Logged with job + line; old config keeps running in full (D4). |
 | Config file deleted | Treated as an invalid reload: running jobs continue; recreating the file resumes normal reloads. |
+| Config read mid-save (truncate gap, streamed copy) | The second read disagrees with the first, so nothing is concluded and nothing recorded; the watcher looks again after another settle and reads the finished file. A zero-byte or job-less read that reaches the parse anyway is refused rather than applied as "every job deleted" (D4, #623). |
 | KV bucket lost | All jobs start with no history: no catch-up, next scheduled fires only (D2, D6). |
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
