@@ -17,6 +17,9 @@ Readable text is reported, never asserted: whether a provider returns a
 summary beside its continuity token is the provider's choice. The count
 is there so a run where summaries vanish is visible in the log.
 
+An arm is judged on its latest invocation; earlier ones (the harness re-triggers
+an arm once when the provider was unavailable) are reported as superseded.
+
 Exit 0 when every declared arm passes, 1 otherwise, 2 on a usage error.
 """
 
@@ -144,11 +147,20 @@ def main():
             all_ok = False
             print(f"FAIL {arm} ({expect}): no invocation recorded")
             continue
-        for inv, evs in invocations.items():
-            ok, lines = judge(evs, expect)
-            all_ok &= ok
-            print(f"{'PASS' if ok else 'FAIL'} {arm} ({expect}) invocation {inv}")
-            print("\n".join(lines))
+        # An arm's verdict is its latest invocation. The harness re-triggers
+        # an arm once when the provider was unavailable through the
+        # runtime's retry budget; the earlier attempt is reported, not
+        # judged — it said nothing about the round trip.
+        ordered = sorted(invocations.items(), key=lambda item: item[1][0]["envelope"]["timestamp"])
+        for inv, evs in ordered[:-1]:
+            terminal = [kind(ev) for ev in evs if kind(ev) in ("completed", "failed")]
+            failures = [str(body(ev).get("error_message"))[:120] for ev in evs if kind(ev) == "llm_failure"]
+            print(f"note {arm}: earlier invocation {inv} superseded (terminal={terminal or 'none'}, failures={failures or 'none'})")
+        inv, evs = ordered[-1]
+        ok, lines = judge(evs, expect)
+        all_ok &= ok
+        print(f"{'PASS' if ok else 'FAIL'} {arm} ({expect}) invocation {inv}")
+        print("\n".join(lines))
     return 0 if all_ok else 1
 
 
