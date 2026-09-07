@@ -265,10 +265,41 @@ models = ["claude-haiku-4-5"]
 #
 # The longest `Retry-After` a rate-limited call is waited out in place,
 # in ms. A 429 that names a shorter wait is retried after at least that
-# long (plus the jitter above); one that asks for more fails at once as
-# rate-limited, still naming the wait, so the invocation can be deferred
-# rather than a worker parked (#278). Default 120000.
+# long (plus the jitter above); one that asks for more is not waited for:
+# the invocation is DEFERRED — put down at its step boundary with its WAL
+# row in flight, `invocation.deferred` published, no `failed` — and
+# resumed after the wait (#278). This is also the longest pause the
+# throttle below escalates to on its own. Default 120000.
 # max_retry_after_ms = 120000
+
+# The per-model provider throttle (#278): one shared state per model the
+# fleet talks to, so N concurrent invocations on one model do not hit a
+# rate limit in lockstep and burn every retry budget on the same wall.
+# A 429 PAUSES the model — for the `Retry-After` the provider named, or
+# for an escalating default when it named none — and HALVES the model's
+# in-flight cap; every call on the model waits for the pause, and the
+# dispatcher HOLDS triggers for agents on a paused model rather than
+# starting them (kept alive un-acked, so no redelivery and no trigger
+# retry is consumed). Ten consecutive clean calls earn one permit back,
+# up to max_concurrent_invocations. `fq status` and `fq doctor` list the
+# throttled models; the design is
+# docs/design/committed/provider-throttle-and-deferral.md.
+[worker.throttle]
+# Off makes the throttle inert: every permit is granted at once, no pause
+# is set, no trigger is held. The deferral above is not part of the
+# throttle and stays on. Default true.
+# enabled = true
+#
+# The pause a 429 without `Retry-After` sets, in ms. Doubles per
+# consecutive 429 wave (30s, 60s, 120s, ...) up to
+# llm_retry.max_retry_after_ms, and resets on a success. A provider's own
+# `Retry-After` is honoured as given, not capped by this. Default 30000.
+# default_pause_ms = 30000
+#
+# How many consecutive successes, with no 429 between them, earn the
+# model one more in-flight permit. The cap never exceeds
+# max_concurrent_invocations and never drops below 1. Default 10.
+# success_window = 10
 
 [tools]
 # The deadline on every tool call — built-in and MCP alike — applied at

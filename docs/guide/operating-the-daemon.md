@@ -364,14 +364,50 @@ the reasoning behind the defaults.
 
 A 429 is retried after the wait the provider names — `Retry-After`
 where one is sent, else the `RetryInfo.retryDelay` Google writes into
-the body — up to `max_retry_after_ms` (default 120 s); a provider asking
-for longer fails the call at once, still naming the wait, and one that
-names no wait is retried on the runtime's own backoff. Any other 4xx is the
+the body — up to `max_retry_after_ms` (default 120 s); one that names
+no wait is retried on the runtime's own backoff. Any other 4xx is the
 request being refused and is not retried at all. The `llm.failure`
 event's `error_kind` says which of these happened — `timeout`,
-`rate_limited`, `rejected` or `request_failed`. Keeping the fleet under
-a provider's limit in the first place is
-[#278](https://github.com/bricef/factor-q/issues/278).
+`rate_limited`, `rejected` or `request_failed`.
+
+A 429 also does three things fleet-wide, through the per-model provider
+throttle ([#278](https://github.com/bricef/factor-q/issues/278); design
+in
+[provider-throttle-and-deferral.md](../design/committed/provider-throttle-and-deferral.md)):
+
+- **It pauses the model.** For the wait the provider named
+  (`Retry-After`, or Google's `RetryInfo.retryDelay`), or an escalating
+  default when it named none (`[worker.throttle] default_pause_ms`,
+  30 s, doubling per consecutive 429 wave up to `max_retry_after_ms`,
+  reset by a success). Every call on that model
+  waits for the pause to end; a trigger for an agent on that model is
+  *held* by the dispatcher — pulled, un-acked, kept alive — and started
+  when the pause lifts, still as its first delivery. Nothing is
+  redelivered and no trigger retry is consumed.
+- **It halves the model's in-flight cap.** The cap is the most calls the
+  model may have open at once, halved per 429 wave (floor 1) and raised
+  by one after `success_window` (10) consecutive clean calls, up to
+  `max_concurrent_invocations`. A fleet of four told no once runs the
+  model two at a time until it has earned the permits back.
+- **It defers, never fails, an invocation the retry layer gave up on.** A
+  provider asking for longer than `max_retry_after_ms`, or a short ask
+  the attempts ran out on, puts the invocation down at its step
+  boundary: `invocation.deferred` is published, the WAL row stays in
+  flight under `phase = "deferred"`, no `failed` follows, and the
+  dispatcher resumes it after the wait — at least what the provider
+  asked for and at least the model's escalating default. A daemon that
+  stops first resumes it at startup like any in-flight row. The github
+  watcher's retry count never moves.
+
+`fq status` and `fq doctor` list the throttled models — the pause's end,
+the permits against the ceiling, the 429s in the current window — and
+the dashboard's health page shows the same line. It is not a doctor
+issue: a throttled model is the runtime absorbing a provider's
+backpressure, which is its job. `fq events query --event-type
+invocation_deferred` lists the invocations put down.
+`[worker.throttle] enabled = false` makes the throttle inert (every
+permit granted at once, no pause, no hold); the deferral is not part of
+the throttle and stays on.
 
 ## When a tool hangs
 
@@ -679,6 +715,8 @@ deleting the durable and starts it again after.
 | See whether a consumer halted on an event this build cannot read, and how many malformed messages it skipped | `fq doctor` (the `halted` line names the version found and the versions read; `malformed acked` is the skip count), `fq status` |
 | See the stuck threshold this daemon derived | `fq status` (the `stuck after` line) |
 | Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --event-type invocation_stuck` |
+| See which models a provider is throttling | `fq status`, `fq doctor` (the throttled-models block: pause end, permits, 429s) |
+| Find invocations put down for a rate limit | `fq events query --event-type invocation_deferred` (they resume on their own) |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |

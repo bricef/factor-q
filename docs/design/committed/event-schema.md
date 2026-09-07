@@ -537,6 +537,25 @@ Published by the control plane's periodic sweep for an in-flight invocation that
 - **Distinct from `invocation.ambiguous`**, which is a restart-time verdict about a WAL that cannot be replayed safely. This one is about a runtime that is still running.
 - **Not guaranteed once per invocation across restarts.** The crossing memory is in-process; a daemon restart re-reports any invocation still stuck. The WAL row is the source of truth for the condition, not the event.
 
+### `invocation.deferred`
+
+Published by the worker when it puts an in-flight invocation down rather than fail it ([#278](https://github.com/bricef/factor-q/issues/278)): the model is rate-limited past what the retry layer waits in place — the provider's `Retry-After` exceeded `[worker.llm_retry] max_retry_after_ms`, or the attempts ran out on a short one. Design: [provider throttle and deferral](provider-throttle-and-deferral.md).
+
+```json
+{
+  "reason": "rate_limited",
+  "model": "moonshotai/kimi-k3",
+  "retry_after_ms": 300000
+}
+```
+
+**Design notes:**
+
+- **A decision, not a failure.** The `llm.failure` immediately before it (`error_kind: rate_limited`) is the cause; this event is what the runtime decided to do about it. No `failed` follows, the invocation's WAL row stays in flight with `phase = "deferred"`, the workspace is kept, and the trigger — acked at the first WAL write, before any model call could be made — is neither NAK'd nor redelivered. Nothing that counts retries, in the runtime or in a trigger source such as the github watcher, sees anything.
+- **`retry_after_ms` is the runtime's wait, not the provider's.** It is the largest of what the provider asked for, the model's escalating default pause (`[worker.throttle] default_pause_ms`, doubling per consecutive 429 wave) and whatever pause is still in force, so an invocation that keeps meeting a two-second `Retry-After` backs off anyway. The provider's own number is on the preceding `llm.failure`'s message.
+- **The resume is not an event.** The invocation continues through the same recovery path a drain or a crash is followed by: after the dispatcher's timer, or at the next daemon start if the process stopped first. Its next `llm.request` starts a fresh chain, as every recovered incarnation does. A resume that meets another rate limit emits another `invocation.deferred`.
+- **One `reason` today.** The field is an enum so a reader switches on it; a future cause (a provider outage classified as such, say) is a new value, not a new event type.
+
 ### `completed`
 
 Published when an invocation finishes without a runtime failure. Note
@@ -855,6 +874,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-06, [#536](https://github.com/bricef/factor-q/issues/536))* `usage.reasoning_tokens` and `cost.reasoning_tokens` become optional: absent where the provider reported no thought-versus-spoken split, present — `0` included — where it did. Supersedes the "defaults to 0" row above | An unreported split and a reported zero are different facts, and a count defaulting to 0 conflated them: every Anthropic call recorded `0`, indistinguishable from a model that did no thinking. `schema_version` stays at 3 — the key was already optional on read. No shim: a v3 event written before this that carried the defaulted `0` now reads back as a reported zero, and the projection records that history as NULL rather than guess. |
 | *(2026-09-09)* `cost.reported_cost` (additive, optional): what the provider itself said the call cost, in USD — OpenRouter's `usage.cost` | The computed `total_cost` is a table rate applied to token counts and cannot see a gateway's fee, a cache discount, or which upstream the gateway chose; the provider's own figure can, and is the one to reconcile against. Absent where the provider reported nothing, which is not `0`. `total_cost` is unchanged — budgets are enforced on it, and it needs a rate before the call. `schema_version` stays at 3. |
 | *(2026-09-10, [#409](https://github.com/bricef/factor-q/issues/409))* `schema_version` is now **read**, not only written: a reader refuses any version outside its supported set — `{3}` today — before it looks at the body, as a distinct error from malformed JSON, and a durable consumer halts on one rather than acking it. See [How a reader treats the version](#how-a-reader-treats-the-version) | No shape change; `schema_version` stays at 3. Before this the field was stamped on every event and inspected by nothing, so a replay across a version boundary — a rebuild of the projection from a stream holding v2 history — acked every unreadable event as poison and completed silently incomplete. Now it stops at the first one and says so. |
+| *(2026-09-10, [#278](https://github.com/bricef/factor-q/issues/278))* A new event type, `invocation.deferred`, on `fq.agent.{agent_id}.invocation.deferred`, with `{ reason, model, retry_after_ms }` | Additive, like `invocation.stuck`; `schema_version` stays at 3. A rate limit the retry layer gave up on used to end the invocation in `failed` (`llm_error`); it now ends the *attempt* in this event, with the row left in flight for a resume. A consumer folding `llm.failure` into "the invocation failed" sees a rate-limited failure that is followed by this rather than by `failed`. |
 
 ## Changelog: v1 → v2
 
