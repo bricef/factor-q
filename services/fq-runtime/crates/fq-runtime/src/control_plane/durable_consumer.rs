@@ -424,8 +424,10 @@ enum Next {
 /// that test cannot disagree about what a version means.
 #[derive(Debug)]
 pub enum Admission {
-    /// An event this build reads: it goes to the handler.
-    Event(Event),
+    /// An event this build reads: it goes to the handler. Boxed
+    /// because an event is most of a kilobyte and the other two
+    /// outcomes are not, and the value is moved once.
+    Event(Box<Event>),
     /// Not an event in any version: acked, counted, skipped.
     AckMalformed(serde_json::Error),
     /// Well-formed history in a version this build does not read:
@@ -436,7 +438,7 @@ pub enum Admission {
 /// Decide a message's admission from its bytes and where it sat.
 pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admission {
     match Event::from_wire(payload) {
-        Ok(event) => Admission::Event(event),
+        Ok(event) => Admission::Event(Box::new(event)),
         Err(EventParseError::Malformed(err)) => Admission::AckMalformed(err),
         Err(EventParseError::UnsupportedSchemaVersion {
             found,
@@ -485,7 +487,7 @@ where
     let stream_seq = info.as_ref().map(|info| info.stream_sequence);
     let subject: &str = &msg.subject;
     let event = match admit(&msg.payload, subject, stream_seq) {
-        Admission::Event(event) => event,
+        Admission::Event(event) => *event,
         Admission::AckMalformed(err) => {
             warn!(
                 consumer = name,

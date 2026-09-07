@@ -501,7 +501,7 @@ async fn every_current_event_type_has_a_file_that_projects() {
         let path = dir.join(file_for(exemplar));
         let bytes = std::fs::read(&path).unwrap();
         let event = match admit(&bytes, &exemplar.subject(), Some(seq)) {
-            Admission::Event(event) => event,
+            Admission::Event(event) => *event,
             other => {
                 panic!("{path:?} must be admitted by the consumer's parse boundary, got {other:?}")
             }
