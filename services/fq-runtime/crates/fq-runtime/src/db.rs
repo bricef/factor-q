@@ -61,6 +61,12 @@ use crate::control_plane::store::{
 };
 use crate::worker::store::{SCHEMA_CLASS as WORKER_SCHEMA_CLASS, WORKER_SCHEMA_VERSION};
 
+// The versioning kit the three stores share — the compatibility verdict,
+// the `schema_meta` handling and the migration ladder. Beside the layout
+// because this is the one module that already knows every store's
+// schema class.
+pub mod schema;
+
 /// File name of the worker store (in-flight state and dispatch WAL).
 pub const WORKER_DB_FILE: &str = "worker.db";
 /// File name of the control-plane store (coordination, schedules, archive).

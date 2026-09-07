@@ -18,7 +18,9 @@
 //!
 //! The `control_plane` class in `schema_meta` tracks this
 //! store's schema version. Same refuse-and-flag semantics as
-//! [`crate::worker::WorkerStore`].
+//! [`crate::worker::WorkerStore`], on the same machinery
+//! ([`crate::db::schema`]): this module contributes its class,
+//! its version and its migration ladder.
 //!
 //! ## What this module does NOT do yet
 //!
@@ -33,9 +35,13 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
+
+use crate::db::schema::{self, Migration, SchemaError};
+// The verdict type and its check are the kit's; re-exported so the
+// tests keep the path they had when the copy lived here.
+pub use crate::db::schema::{Compatibility, check_compatibility};
 
 /// Schema class name used in the shared `schema_meta` table.
 pub const SCHEMA_CLASS: &str = "control_plane";
@@ -44,13 +50,9 @@ pub const SCHEMA_CLASS: &str = "control_plane";
 /// tables. Bump on incompatible schema changes.
 pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = 1;
 
-const SCHEMA_META_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_meta (
-    class       TEXT PRIMARY KEY,
-    version     INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-"#;
+/// The migration ladder, one rung per version. Future migrations:
+/// add a `(version, SQL)` rung and bump [`CONTROL_PLANE_SCHEMA_VERSION`].
+const MIGRATIONS: &[Migration] = &[(1, CONTROL_PLANE_TABLES_V1_SQL)];
 
 const CONTROL_PLANE_TABLES_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS coordination_worker (
@@ -286,70 +288,43 @@ impl ControlPlaneStore {
         Ok(Self { pool })
     }
 
+    /// Initialise schema_meta and run the control-plane migrations.
+    /// Idempotent. The protocol — create, leave alone, migrate, or
+    /// refuse — is the shared kit's; see [`crate::db::schema`].
     async fn bootstrap_schema(&self) -> Result<(), ControlPlaneStoreError> {
-        for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(stmt).execute(&self.pool).await?;
-        }
-
-        let recorded = self.read_schema_version().await?;
-        match check_compatibility(recorded, CONTROL_PLANE_SCHEMA_VERSION) {
-            Compatibility::FreshInstall => {
-                self.run_migrations(0, CONTROL_PLANE_SCHEMA_VERSION).await?;
-                self.write_schema_version(CONTROL_PLANE_SCHEMA_VERSION)
-                    .await?;
-            }
-            Compatibility::Current => {
-                // Recorded version matches the binary; nothing
-                // to do. Same reasoning as in the worker store:
-                // not every migration is idempotent.
-            }
-            Compatibility::NeedsUpgrade { from } => {
-                self.run_migrations(from, CONTROL_PLANE_SCHEMA_VERSION)
-                    .await?;
-                self.write_schema_version(CONTROL_PLANE_SCHEMA_VERSION)
-                    .await?;
-            }
-            Compatibility::BinaryTooOld { db_version } => {
-                return Err(ControlPlaneStoreError::IncompatibleSchema {
-                    db_version,
-                    binary_version: CONTROL_PLANE_SCHEMA_VERSION,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    async fn read_schema_version(&self) -> Result<Option<u32>, ControlPlaneStoreError> {
-        let row = sqlx::query("SELECT version FROM schema_meta WHERE class = ?")
-            .bind(SCHEMA_CLASS)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get::<i64, _>(0) as u32))
-    }
-
-    async fn write_schema_version(&self, version: u32) -> Result<(), ControlPlaneStoreError> {
-        let now = Utc::now().timestamp_millis();
-        sqlx::query(
-            r#"
-            INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(class) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at
-            "#,
+        schema::bootstrap_versioned(
+            &self.pool,
+            SCHEMA_CLASS,
+            CONTROL_PLANE_SCHEMA_VERSION,
+            MIGRATIONS,
         )
-        .bind(SCHEMA_CLASS)
-        .bind(version as i64)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|err| match err {
+            SchemaError::Backend(err) => ControlPlaneStoreError::from(err),
+            SchemaError::BinaryTooOld {
+                db_version,
+                binary_version,
+            } => ControlPlaneStoreError::IncompatibleSchema {
+                db_version,
+                binary_version,
+            },
+        })?;
         Ok(())
     }
 
-    async fn run_migrations(&self, from: u32, to: u32) -> Result<(), ControlPlaneStoreError> {
-        if from < 1 && to >= 1 {
-            for stmt in split_sql(CONTROL_PLANE_TABLES_V1_SQL) {
-                sqlx::query(stmt).execute(&self.pool).await?;
-            }
-        }
-        Ok(())
+    // The version row on its own, for the tests that stamp a file at
+    // a version `bootstrap_schema` would never write. Test-only because
+    // production has exactly one caller of each, and that caller is the
+    // kit.
+
+    #[cfg(test)]
+    async fn read_schema_version(&self) -> Result<Option<u32>, ControlPlaneStoreError> {
+        Ok(schema::read_schema_version(&self.pool, SCHEMA_CLASS).await?)
+    }
+
+    #[cfg(test)]
+    async fn write_schema_version(&self, version: u32) -> Result<(), ControlPlaneStoreError> {
+        Ok(schema::write_schema_version(&self.pool, SCHEMA_CLASS, version).await?)
     }
 
     // -----------------------------------------------------------
@@ -919,34 +894,6 @@ impl ControlPlaneStore {
         };
         rows.into_iter().map(row_to_owner).collect()
     }
-}
-
-// ---------------------------------------------------------------
-// Schema-version compatibility (mirrors the worker store).
-// ---------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compatibility {
-    FreshInstall,
-    Current,
-    NeedsUpgrade { from: u32 },
-    BinaryTooOld { db_version: u32 },
-}
-
-pub fn check_compatibility(recorded: Option<u32>, binary: u32) -> Compatibility {
-    match recorded {
-        None => Compatibility::FreshInstall,
-        Some(v) if v == binary => Compatibility::Current,
-        Some(v) if v < binary => Compatibility::NeedsUpgrade { from: v },
-        Some(v) => Compatibility::BinaryTooOld { db_version: v },
-    }
-}
-
-/// One statement at a time, so a failure names the statement. Slices of
-/// the `'static` script rather than copies: each is still compile-time
-/// SQL, which is what `sqlx::query` accepts without an audit marker.
-fn split_sql(sql: &'static str) -> impl Iterator<Item = &'static str> {
-    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn row_to_worker(row: sqlx::sqlite::SqliteRow) -> Result<WorkerRow, ControlPlaneStoreError> {
