@@ -22,6 +22,16 @@
 //! The binary is pinned by `.nats-version` at the repo root and installed by
 //! `just install-nats`; `FQ_TEST_NATS_SERVER` overrides the path. A missing
 //! binary is a hard failure, never a skip — that is the whole point.
+//!
+//! [`TestChild`] generalises the guard [`NatsServer`] already carried to
+//! every other process a test starts — `fqd` above all. See
+//! [`child`](mod@child) for the incident that made it necessary (#630).
+
+#[cfg(unix)]
+pub mod child;
+
+#[cfg(unix)]
+pub use child::{TestChild, TestChildBuilder};
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
