@@ -2054,9 +2054,7 @@ mod crash_dst {
     async fn llm_provider_error_fails_canonically() {
         let world = SimWorld::new(31, 5.0).await;
         let llm = FixtureClient::new();
-        llm.push_error(LlmError::RequestFailed(
-            "sim: provider gave up".to_string(),
-        ));
+        llm.push_error(LlmError::RequestFailed("sim: provider gave up".to_string()));
 
         let err = world.run(&llm).await.expect_err("provider error");
         assert!(matches!(err, ExecutorError::Llm(_)), "got {err:?}");
@@ -2574,9 +2572,7 @@ mod soak {
             load_fixture(&llm, &responses[..k]);
             // A failing provider, not a throttling one: a rate limit is
             // a deferral since #278, and this soak is about failures.
-            llm.push_error(LlmError::RequestFailed(
-                "sim: provider gave up".to_string(),
-            ));
+            llm.push_error(LlmError::RequestFailed("sim: provider gave up".to_string()));
         } else {
             load_fixture(&llm, &responses);
         }
