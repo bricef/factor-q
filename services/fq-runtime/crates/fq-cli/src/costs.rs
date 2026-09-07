@@ -16,7 +16,7 @@
 use crate::cli::GlobalArgs;
 use crate::edge_call::edge_invoke;
 use fq_ops::surface::CostSummaryParams;
-use fq_ops::views::CostReport;
+use fq_ops::views::{CostReport, CostView, ModelCostView};
 
 /// Show per-agent cost totals.
 pub(crate) async fn show_costs(
@@ -42,9 +42,9 @@ pub(crate) async fn show_costs(
 }
 
 /// The report as `fq costs` prints it: the JSON verbatim, or the
-/// per-agent table with its total and the allocation identity under
-/// it. A function of the report alone, so the rendering is pinned
-/// without an edge.
+/// per-agent table, the same spend by model, and the total with the
+/// allocation identity under it. A function of the report alone, so
+/// the rendering is pinned without an edge.
 fn render(report: &CostReport, json: bool) -> anyhow::Result<String> {
     if json {
         return Ok(format!("{}\n", serde_json::to_string_pretty(report)?));
@@ -54,28 +54,19 @@ fn render(report: &CostReport, json: bool) -> anyhow::Result<String> {
         return Ok("No cost events recorded.\n".to_string());
     }
 
-    let mut out = format!(
-        "{:<30} {:<10} {:<14} {:<14} {:<14} {:<14} {:<14} total_cost\n",
-        "agent",
-        "events",
-        "input_tokens",
-        "output_tokens",
-        "cache_read",
-        "cache_write",
-        "reasoning"
-    );
+    let mut out = Columns::header("agent");
     for row in &report.agents {
-        out.push_str(&format!(
-            "{:<30} {:<10} {:<14} {:<14} {:<14} {:<14} {:<14} ${:.6}\n",
-            row.agent_id,
-            row.event_count,
-            row.total_input_tokens,
-            row.total_output_tokens,
-            row.total_cache_read_tokens,
-            row.total_cache_write_tokens,
-            reasoning_cell(row.total_reasoning_tokens),
-            row.total_cost
-        ));
+        out.push_str(&Columns::from(row).line(&row.agent_id));
+    }
+    // The same spend by model, in the same columns: comparing models on
+    // one agent is where a reasoning-first model's bill shows as mostly
+    // thinking, which the agent rows above cannot say.
+    if !report.models.is_empty() {
+        out.push('\n');
+        out.push_str(&Columns::header("model"));
+        for row in &report.models {
+            out.push_str(&Columns::from(row).line(&row.model));
+        }
     }
     out.push('\n');
     out.push_str(&format!(
@@ -97,6 +88,71 @@ fn render(report: &CostReport, json: bool) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// The token columns the by-agent and by-model tables share — one
+/// shape fed from either view, so the two tables cannot drift apart in
+/// their column names or widths.
+struct Columns {
+    events: i64,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: Option<i64>,
+    cost: f64,
+}
+
+impl Columns {
+    /// The header line, over a key column named `key`.
+    fn header(key: &str) -> String {
+        format!(
+            "{key:<30} {:<10} {:<14} {:<14} {:<14} {:<14} {:<14} total_cost\n",
+            "events", "input_tokens", "output_tokens", "cache_read", "cache_write", "reasoning"
+        )
+    }
+
+    /// One row, keyed by an agent id or a model name.
+    fn line(&self, key: &str) -> String {
+        format!(
+            "{key:<30} {:<10} {:<14} {:<14} {:<14} {:<14} {:<14} ${:.6}\n",
+            self.events,
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_write,
+            reasoning_cell(self.reasoning),
+            self.cost
+        )
+    }
+}
+
+impl From<&CostView> for Columns {
+    fn from(a: &CostView) -> Self {
+        Columns {
+            events: a.event_count,
+            input: a.total_input_tokens,
+            output: a.total_output_tokens,
+            cache_read: a.total_cache_read_tokens,
+            cache_write: a.total_cache_write_tokens,
+            reasoning: a.total_reasoning_tokens,
+            cost: a.total_cost,
+        }
+    }
+}
+
+impl From<&ModelCostView> for Columns {
+    fn from(m: &ModelCostView) -> Self {
+        Columns {
+            events: m.event_count,
+            input: m.total_input_tokens,
+            output: m.total_output_tokens,
+            cache_read: m.total_cache_read_tokens,
+            cache_write: m.total_cache_write_tokens,
+            reasoning: m.total_reasoning_tokens,
+            cost: m.total_cost,
+        }
+    }
+}
+
 /// The reasoning column. `n/a` is a provider that reported no
 /// thought-versus-spoken split, which is every Anthropic call; it is
 /// not a `0`, which is a provider that reported one and it was zero.
@@ -108,7 +164,6 @@ fn reasoning_cell(tokens: Option<i64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fq_ops::views::CostView;
 
     fn agent(id: &str, reasoning: Option<i64>) -> CostView {
         CostView {
@@ -125,15 +180,31 @@ mod tests {
         }
     }
 
+    /// One model's row, with a little cache traffic so those columns
+    /// carry something.
+    fn model(name: &str, reasoning: Option<i64>) -> ModelCostView {
+        ModelCostView {
+            model: name.to_string(),
+            event_count: 1,
+            total_cost: 0.5,
+            total_input_tokens: 100,
+            total_output_tokens: 50,
+            total_cache_read_tokens: 40,
+            total_cache_write_tokens: 20,
+            total_reasoning_tokens: reasoning,
+        }
+    }
+
     /// Three agents, one per case: a provider that reported no split,
-    /// one that reported zero, one that reported a count.
+    /// one that reported zero, one that reported a count — and the
+    /// same three cases by model.
     fn report() -> CostReport {
         CostReport {
             total_cost: 1.5,
             total_input_tokens: 300,
             total_output_tokens: 150,
-            total_cache_read_tokens: 0,
-            total_cache_write_tokens: 0,
+            total_cache_read_tokens: 120,
+            total_cache_write_tokens: 60,
             total_reasoning_tokens: Some(1_234),
             framework_cost: 0.0,
             agents: vec![
@@ -142,16 +213,26 @@ mod tests {
                 agent("kimi-agent", Some(1_234)),
             ],
             buckets: vec![],
-            models: vec![],
+            models: vec![
+                model("claude-model", None),
+                model("openai-model", Some(0)),
+                model("kimi-model", Some(1_234)),
+            ],
         }
     }
 
-    /// The reasoning column of one agent's line — the seventh field.
-    fn reasoning_column<'a>(table: &'a str, agent: &str) -> &'a str {
+    /// The line keyed by `key` — an agent id or a model name.
+    fn line<'a>(table: &'a str, key: &str) -> &'a str {
         table
             .lines()
-            .find(|line| line.starts_with(agent))
-            .unwrap_or_else(|| panic!("{agent} has a line in:\n{table}"))
+            .find(|line| line.starts_with(key))
+            .unwrap_or_else(|| panic!("{key} has a line in:\n{table}"))
+    }
+
+    /// The reasoning column of one line — the seventh field, on both
+    /// tables.
+    fn reasoning_column<'a>(table: &'a str, key: &str) -> &'a str {
+        line(table, key)
             .split_whitespace()
             .nth(6)
             .expect("seven fields before the cost")
@@ -176,23 +257,68 @@ mod tests {
         assert_eq!(header.find("reasoning"), kimi.find("1234"), "{table}");
     }
 
+    /// The by-model table carries the same columns as the by-agent
+    /// table above it — the same names at the same widths — and the
+    /// same three cells: `n/a` for a model none of whose calls
+    /// reported a split, `0` for a reported zero, the count otherwise.
+    /// The cache figures are numbers in both.
+    #[test]
+    fn the_model_table_shares_the_agent_tables_columns_and_cells() {
+        let table = render(&report(), false).unwrap();
+        let agent_header = line(&table, "agent ");
+        let model_header = line(&table, "model ");
+        assert_eq!(
+            model_header,
+            agent_header.replacen("agent", "model", 1),
+            "the two headers differ only in their key column: {table}"
+        );
+        assert_eq!(reasoning_column(&table, "claude-model"), "n/a");
+        assert_eq!(reasoning_column(&table, "openai-model"), "0");
+        assert_eq!(reasoning_column(&table, "kimi-model"), "1234");
+        let fields: Vec<&str> = line(&table, "kimi-model").split_whitespace().collect();
+        assert_eq!(&fields[1..6], ["1", "100", "50", "40", "20"], "{table}");
+        assert_eq!(fields[7], "$0.500000", "{table}");
+        // The model rows sit under the model header, column for column.
+        assert_eq!(
+            model_header.find("reasoning"),
+            line(&table, "kimi-model").find("1234"),
+            "{table}"
+        );
+
+        // Without model rows there is no model table.
+        let mut bare = report();
+        bare.models.clear();
+        let table = render(&bare, false).unwrap();
+        assert!(
+            !table.lines().any(|l| l.starts_with("model ")),
+            "got: {table}"
+        );
+    }
+
     /// `--json` carries the same distinction as `null` against `0`,
-    /// with the key present either way.
+    /// with the key present either way — on the agent rows, the model
+    /// rows and the total; the cache totals are numbers throughout.
     #[test]
     fn the_json_carries_null_against_zero() {
         let json: serde_json::Value =
             serde_json::from_str(&render(&report(), true).unwrap()).unwrap();
-        let agents = &json["agents"];
-        assert!(
-            agents[0]
-                .get("total_reasoning_tokens")
-                .is_some_and(|v| v.is_null()),
-            "an unreported split is an explicit null: {json}"
-        );
-        assert_eq!(agents[1]["total_reasoning_tokens"], serde_json::json!(0));
+        for rows in [&json["agents"], &json["models"]] {
+            assert!(
+                rows[0]
+                    .get("total_reasoning_tokens")
+                    .is_some_and(|v| v.is_null()),
+                "an unreported split is an explicit null: {json}"
+            );
+            assert_eq!(rows[1]["total_reasoning_tokens"], serde_json::json!(0));
+            assert_eq!(rows[2]["total_reasoning_tokens"], serde_json::json!(1_234));
+        }
         assert_eq!(
-            agents[2]["total_reasoning_tokens"],
-            serde_json::json!(1_234)
+            json["models"][0]["total_cache_read_tokens"],
+            serde_json::json!(40)
+        );
+        assert_eq!(
+            json["models"][0]["total_cache_write_tokens"],
+            serde_json::json!(20)
         );
         assert_eq!(json["total_reasoning_tokens"], serde_json::json!(1_234));
     }
