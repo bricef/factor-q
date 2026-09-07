@@ -310,9 +310,11 @@ budget — twenty minutes at the defaults — before the invocation fails
 with `llm_error`. Every one of these numbers lives in `fqd.toml`, with
 the reasoning behind the defaults.
 
-A 429 is retried after the wait the provider's `Retry-After` names, up
-to `max_retry_after_ms` (default 120 s); a provider asking for longer
-fails the call at once, still naming the wait. Any other 4xx is the
+A 429 is retried after the wait the provider names — `Retry-After`
+where one is sent, else the `RetryInfo.retryDelay` Google writes into
+the body — up to `max_retry_after_ms` (default 120 s); a provider asking
+for longer fails the call at once, still naming the wait, and one that
+names no wait is retried on the runtime's own backoff. Any other 4xx is the
 request being refused and is not retried at all. The `llm.failure`
 event's `error_kind` says which of these happened — `timeout`,
 `rate_limited`, `rejected` or `request_failed`. Keeping the fleet under
