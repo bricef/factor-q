@@ -196,10 +196,26 @@ Two configuration planes, deliberately separate:
   now" is not, which is exactly why the two are not the same reload.
 - **Job identity is `name`.** The diff against the running config is
   keyed by job name: new names are scheduled, missing names are
-  cancelled (and their KV entry deleted), changed jobs are rescheduled
-  in place **keeping their fire state** — so editing a schedule or
-  payload does not reset the job's history, and catch-up (D6) is
-  evaluated against the *new* schedule.
+  cancelled, changed jobs are rescheduled in place **keeping their fire
+  state** — so editing a schedule or payload does not reset the job's
+  history, and catch-up (D6) is evaluated against the *new* schedule.
+- **Removals are slower than additions.** A missing name is cancelled at
+  once, but its KV entry is deleted only after it has stayed missing for
+  a **removal-confirm** window (`--removal-confirm` /
+  `FQCRON_REMOVAL_CONFIRM`, default two poll intervals), at the end of
+  which the file is read once more and the deletion carried out only if
+  the name is still absent. The settle above cannot see a writer that
+  emits the first of two `[[job]]` blocks and then stalls for longer than
+  it: both reads return the same complete, valid, one-job file, so the
+  reload is accepted and the second job's ledger — its D6 valve history
+  included — deleted, to be re-added empty by the next complete write
+  ([#635](https://github.com/bricef/factor-q/issues/635)). A stall is as
+  long as the writer chooses, so no settle closes this; a slower deletion
+  does, and costs nothing on the happy path. `job = []` takes the same
+  path — one rule, no fast path — and a shutdown with removals parked
+  deletes nothing, since an orderly stop and one that lands mid-save look
+  alike from inside. The residual is a stale KV row for a name that never
+  returns, which a job of the same name reclaims and nothing else reads.
 
 Names are `[a-z0-9][a-z0-9-]*`, unique, ≤ 64 chars — the name is the KV
 key and part of the dedup message ID, so it is a stable identifier, not a
