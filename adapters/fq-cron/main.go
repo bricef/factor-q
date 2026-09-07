@@ -69,8 +69,13 @@ func configFromArgs(args []string) (cliConfig, error) {
 	if c.ConfigPath == "" {
 		return c, fmt.Errorf("--config (or FQCRON_CONFIG) is required")
 	}
-	if c.ReloadSettle < 0 {
-		return c, fmt.Errorf("--reload-settle (or %s) must not be negative", reloadSettleEnv)
+	// Zero is rejected rather than treated as "no settle": the watcher reads
+	// a non-positive settle as "use the default", so accepting 0 here would
+	// start a scheduler running at 250 ms while its operator believed the
+	// confirming read was off. A setting must never look applied when it is
+	// not.
+	if c.ReloadSettle <= 0 {
+		return c, fmt.Errorf("--reload-settle (or %s) must be greater than zero", reloadSettleEnv)
 	}
 	return c, nil
 }
