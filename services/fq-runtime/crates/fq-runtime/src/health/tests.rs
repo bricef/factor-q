@@ -152,6 +152,7 @@ async fn a_consumer_that_acks_out_of_order_is_not_stuck() {
         crate::bus::STREAM_NAME,
         &[durable.as_str()],
         policy,
+        bus.consumer_ledger(),
     )
     .await;
     let StreamHealth::Available { consumers, .. } = &health else {
@@ -299,6 +300,7 @@ async fn a_permanently_failing_handler_backs_off_logs_at_a_bounded_rate_and_repo
             crate::bus::STREAM_NAME,
             &[durable.as_str()],
             policy,
+            bus.consumer_ledger(),
         )
         .await;
         let StreamHealth::Available { consumers, .. } = &health else {
@@ -395,6 +397,7 @@ async fn a_healthy_consumer_is_never_reported_stuck() {
         crate::bus::STREAM_NAME,
         &[durable.as_str()],
         bus.redelivery_policy(),
+        bus.consumer_ledger(),
     )
     .await;
     let StreamHealth::Available { consumers, .. } = &health else {
@@ -418,8 +421,13 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
     let server = crate::test_support::nats::test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
 
-    let consumers =
-        probe_core_consumers(&bus.jetstream(), true, ConsumerRedeliveryPolicy::default()).await;
+    let consumers = probe_core_consumers(
+        &bus.jetstream(),
+        true,
+        ConsumerRedeliveryPolicy::default(),
+        bus.consumer_ledger(),
+    )
+    .await;
     let names: Vec<&str> = consumers.iter().map(|c| c.name()).collect();
     assert_eq!(
         names,

@@ -319,4 +319,151 @@ mod tests {
         assert!(types.contains(&"triggered"));
         assert!(types.contains(&"completed"));
     }
+
+    /// The halt (#409): a v2 event on the stream stops the projector
+    /// where it is. Driven through `ProjectionConsumer::run` itself —
+    /// the durable the daemon creates, strict order, from the
+    /// beginning — on the private test broker. Four things must hold
+    /// together: the loop stops consuming (an event published after
+    /// the v2 one is never projected), the v2 message is left unacked
+    /// (the broker still counts it pending, and the acked floor stops
+    /// before it), the halt is on the ledger and the health probe with
+    /// the version found, and the task is still alive — a return would
+    /// be read by the daemon's supervisor as a task failure and take
+    /// the daemon down, which is the one state in which nothing could
+    /// report why.
+    #[tokio::test]
+    async fn a_v2_event_halts_the_projector_unacked_alive_and_reported() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ProjectionStore::open(&dir.path().join("projection.db"))
+                .await
+                .expect("open store"),
+        );
+
+        // One current event before the boundary, one after it.
+        let agent_id = format!("proj-halt-{}", Uuid::now_v7().simple());
+        let before = triggered(&agent_id);
+        let inv = before.envelope.invocation_id;
+        let before_seq = bus.publish(&before).await.expect("publish before");
+
+        // The v2 event: a current event with its envelope's version
+        // rewritten — a shape a v3 reader would parse happily, which is
+        // exactly what must not happen.
+        let mut older = serde_json::to_value(completed(&agent_id, inv)).unwrap();
+        older["envelope"]["schema_version"] = json!(2);
+        let older_id = older["envelope"]["event_id"].as_str().unwrap().to_string();
+        let subject = crate::events::subjects::agent_completed(&agent_id);
+        let older_seq = bus
+            .jetstream()
+            .publish(subject.clone(), bytes::Bytes::from(older.to_string()))
+            .await
+            .expect("publish v2")
+            .await
+            .expect("v2 stored")
+            .sequence;
+        assert_eq!(older_seq, before_seq + 1);
+        bus.publish(&completed(&agent_id, inv))
+            .await
+            .expect("publish after");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let consumer = ProjectionConsumer::new(bus.clone(), store.clone());
+        let handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
+
+        // The halt lands on the ledger, with what was found.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let halted_on = loop {
+            if let Some(on) = bus.consumer_ledger().record(CONSUMER_NAME).halted_on {
+                break on;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the projector never reported a halt"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(halted_on.schema_version, 2, "the version found");
+        assert_eq!(
+            halted_on.supported,
+            crate::events::SUPPORTED_SCHEMA_VERSIONS.to_vec(),
+            "the versions this build reads"
+        );
+        assert_eq!(halted_on.event_id.as_deref(), Some(older_id.as_str()));
+        assert_eq!(halted_on.subject, subject);
+        assert_eq!(halted_on.stream_seq, Some(older_seq));
+
+        // It stopped where it was: the event before the boundary is
+        // projected, the one after it is not, and stays not.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let filter = super::super::store::EventFilter {
+            agent: Some(&agent_id),
+            ..Default::default()
+        };
+        let rows = store.query_events(&filter, 100).await.unwrap();
+        let types: Vec<&str> = rows.iter().map(|r| r.event_type.as_str()).collect();
+        assert_eq!(
+            types,
+            vec!["triggered"],
+            "nothing at or after the halt is projected"
+        );
+
+        // The message is unacked: the broker still holds it pending,
+        // and the acked floor is the last current event before it.
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::STREAM_NAME)
+            .await
+            .unwrap();
+        let mut durable = stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(CONSUMER_NAME)
+            .await
+            .unwrap();
+        let info = durable.info().await.unwrap();
+        assert_eq!(
+            info.num_ack_pending, 1,
+            "the v2 message is delivered and unacked"
+        );
+        assert_eq!(
+            info.ack_floor.stream_sequence, before_seq,
+            "the acked floor stops before the v2 event"
+        );
+
+        // Alive, and reported as halted by the probe the daemon's
+        // health reports run.
+        assert!(
+            !handle.is_finished(),
+            "a halted loop parks; returning would take the daemon down"
+        );
+        let health = crate::health::probe_stream(
+            &bus.jetstream(),
+            crate::bus::STREAM_NAME,
+            &[CONSUMER_NAME],
+            bus.redelivery_policy(),
+            bus.consumer_ledger(),
+        )
+        .await;
+        let crate::health::StreamHealth::Available { consumers, .. } = health else {
+            panic!("the event stream is available: {health:?}");
+        };
+        assert!(
+            matches!(
+                &consumers[0],
+                crate::health::ConsumerHealth::Halted { halted_on, .. }
+                    if halted_on.schema_version == 2
+            ),
+            "the probe reports the halt over the broker's figures: {:?}",
+            consumers[0]
+        );
+        assert!(consumers[0].is_fault(), "a halt is something to act on");
+
+        shutdown_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the halted loop stops on shutdown")
+            .expect("join");
+        assert!(result.is_ok(), "shutdown is a clean stop: {result:?}");
+    }
 }

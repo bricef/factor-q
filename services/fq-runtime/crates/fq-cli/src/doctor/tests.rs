@@ -267,7 +267,127 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         num_redelivered: u64::from(stuck),
         redeliveries,
         stuck,
+        malformed_acked: 0,
     }
+}
+
+/// A consumer that stopped on a v2 event, with `malformed_acked`
+/// malformed messages acked before it did.
+fn halted(name: &str, malformed_acked: u64) -> fq_ops::health::ConsumerHealth {
+    fq_ops::health::ConsumerHealth::Halted {
+        name: name.to_string(),
+        halted_on: fq_ops::health::UnsupportedEvent {
+            schema_version: 2,
+            supported: vec![3],
+            event_id: Some("01990000-0000-7000-8000-000000000002".to_string()),
+            subject: "fq.agent.researcher.triggered".to_string(),
+            stream_seq: Some(4242),
+        },
+        malformed_acked,
+    }
+}
+
+/// A consumer halted on a version this build cannot read is named, the
+/// version found and the versions this build reads are both quoted,
+/// the event is located, and the report is an issue: the loss class
+/// the silent-ack path used to hide, made something an operator finds
+/// on the first screen.
+#[test]
+fn a_halted_consumer_is_named_with_the_version_found_and_the_versions_read() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![
+            active("fq-coordination", false, 0),
+            halted("fq-projector", 0),
+        ],
+        Vec::new(),
+    );
+    assert!(report.has_issues(), "a halted consumer is an issue");
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("Verdict: issues found"), "got:\n{out}");
+    assert!(
+        out.contains("Consumers: 2 checked, 1 unhealthy"),
+        "got:\n{out}"
+    );
+    assert!(out.contains("fq-projector: ✗ halted"), "got:\n{out}");
+    assert!(
+        out.contains("declares schema_version 2"),
+        "the version found: {out}"
+    );
+    assert!(
+        out.contains("this build reads [3]"),
+        "the versions this build reads: {out}"
+    );
+    assert!(
+        out.contains("01990000-0000-7000-8000-000000000002"),
+        "the event id: {out}"
+    );
+    assert!(
+        out.contains("fq.agent.researcher.triggered"),
+        "the subject: {out}"
+    );
+    assert!(out.contains("(seq 4242)"), "the stream position: {out}");
+    assert!(
+        out.contains("consumer=fq-projector"),
+        "the next step has to be greppable: {out}"
+    );
+    assert!(
+        !out.contains("malformed"),
+        "nothing malformed was acked, so nothing says so: {out}"
+    );
+}
+
+/// "Unparseable" and "a version this build cannot read" are two facts,
+/// and the report keeps them apart: the malformed count rides its
+/// consumer's line, halted or not, and on its own makes nothing an
+/// issue — poison acked and counted is the policy working.
+#[test]
+fn malformed_acks_are_counted_beside_the_halt_and_are_not_an_issue_alone() {
+    let mut counted = active("fq-coordination", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        malformed_acked, ..
+    } = &mut counted
+    {
+        *malformed_acked = 3;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "poison acked and counted is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("fq-coordination: ok (lag 0, 3 malformed acked)"),
+        "got:\n{out}"
+    );
+
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![halted("fq-projector", 2)],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("✗ halted"), "got:\n{out}");
+    assert!(
+        out.contains("2 malformed acked"),
+        "the count survives the halt, on the same line: {out}"
+    );
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
@@ -357,6 +477,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         num_redelivered: 0,
         redeliveries: 0,
         stuck: false,
+        malformed_acked: 0,
     };
     let report = build_doctor_report(
         &[],

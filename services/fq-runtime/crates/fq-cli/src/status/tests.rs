@@ -40,6 +40,7 @@ fn report() -> StatusReport {
                 num_redelivered: 0,
                 redeliveries: 0,
                 stuck: false,
+                malformed_acked: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -262,6 +263,7 @@ fn active(lag: u64) -> StreamHealth {
             num_redelivered: 0,
             redeliveries: 0,
             stuck: false,
+            malformed_acked: 0,
         }],
     }
 }
@@ -369,6 +371,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             num_redelivered: 3,
             redeliveries: 0,
             stuck: false,
+            malformed_acked: 0,
         }],
     });
     assert!(out.contains("ack pending:    2"), "got:\n{out}");
@@ -381,6 +384,47 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
         )),
         "got:\n{out}"
     );
+}
+
+/// A consumer halted on an event it cannot read is reported as halted
+/// — not as lagging, which is what its JetStream figures would say —
+/// with the version found, the versions this build reads, and where
+/// the event sits; and the malformed count it acked before halting is
+/// a separate line, because poison and unreadable history are two
+/// different facts.
+#[test]
+fn a_halted_consumer_names_the_version_gap_and_locates_the_event() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-events".to_string(),
+        messages: 50,
+        bytes: 4096,
+        first_seq: 1,
+        last_seq: 50,
+        consumers: vec![ConsumerHealth::Halted {
+            name: "fq-projector".to_string(),
+            halted_on: fq_ops::health::UnsupportedEvent {
+                schema_version: 2,
+                supported: vec![3],
+                event_id: Some("01990000-0000-7000-8000-000000000002".to_string()),
+                subject: "fq.agent.researcher.triggered".to_string(),
+                stream_seq: Some(42),
+            },
+            malformed_acked: 1,
+        }],
+    });
+    assert!(
+        out.contains("consumer fq-projector: ✗ halted on schema_version 2 (this build reads [3])"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "event 01990000-0000-7000-8000-000000000002 on fq.agent.researcher.triggered, seq 42"
+        ),
+        "got:\n{out}"
+    );
+    assert!(out.contains("unacked"), "got:\n{out}");
+    assert!(out.contains("malformed acked: 1"), "got:\n{out}");
+    assert!(!out.contains("lagging"), "a halt is not a lag: {out}");
 }
 
 // ------------------------------------------------------------------

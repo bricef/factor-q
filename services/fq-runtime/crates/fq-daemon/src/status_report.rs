@@ -118,6 +118,7 @@ pub(crate) fn register_status_report(
                     &bus.jetstream(),
                     summary_enabled,
                     bus.redelivery_policy(),
+                    bus.consumer_ledger(),
                 )
                 .await;
                 let projection_rows = views.event_count().await.map_err(internal)?;

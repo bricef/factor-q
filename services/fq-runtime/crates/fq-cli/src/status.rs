@@ -329,6 +329,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             num_redelivered,
             redeliveries,
             stuck,
+            malformed_acked,
         } => {
             let status = if *stuck {
                 "✗ stuck redelivering"
@@ -357,6 +358,42 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                 out.push_str(&format!(
                     "    redelivered:    {num_redelivered} (retrying; trigger bound {})\n",
                     fq_ops::surface::TRIGGER_MAX_DELIVER
+                ));
+            }
+            if *malformed_acked > 0 {
+                out.push_str(&format!(
+                    "    malformed acked: {malformed_acked} (not an event in any version; \
+                     skipped)\n"
+                ));
+            }
+            out
+        }
+        // Halted on an event it cannot read: the message is unacked
+        // and the consumer holds there, so the line locates the event
+        // and names the version gap rather than reporting a lag that
+        // will only grow.
+        ConsumerHealth::Halted {
+            name,
+            halted_on,
+            malformed_acked,
+        } => {
+            let mut out = format!(
+                "  consumer {name}: ✗ halted on schema_version {} (this build reads {:?})\n",
+                halted_on.schema_version, halted_on.supported
+            );
+            out.push_str(&format!(
+                "    -> event {} on {}, seq {}: unacked, and nothing after it is consumed \
+                 until a build that reads it runs\n",
+                halted_on.event_id.as_deref().unwrap_or("<no id>"),
+                halted_on.subject,
+                halted_on
+                    .stream_seq
+                    .map_or_else(|| "?".to_string(), |s| s.to_string()),
+            ));
+            if *malformed_acked > 0 {
+                out.push_str(&format!(
+                    "    malformed acked: {malformed_acked} (not an event in any version; \
+                     skipped)\n"
                 ));
             }
             out

@@ -18,9 +18,11 @@ use crate::events::Event;
 use crate::events::subjects::ALL_TRIGGERS;
 
 mod consumers;
+mod ledger;
 pub mod retry;
 
 pub use consumers::UNLIMITED_MAX_DELIVER;
+pub use ledger::{ConsumerLedger, ConsumerRecord};
 pub use retry::{ConsumerRedeliveryPolicy, RedeliveryLog};
 
 /// The narrowest seam over event publication (reducer verification
@@ -214,6 +216,14 @@ pub struct EventBus {
     /// are both reached through this handle. Defaults until
     /// [`Self::with_redelivery_policy`] applies `[bus]` from `fqd.toml`.
     redelivery: ConsumerRedeliveryPolicy,
+    /// What the consumer loops run on this bus report about their
+    /// parse boundary — a halt on a version this build cannot read,
+    /// and the count of malformed messages acked. Held here for the
+    /// same reason as the policy: every loop and every health probe
+    /// reaches the bus, so this is the one handle through which the
+    /// loop's account of itself can reach `fq doctor` without new
+    /// wiring. Shared by every clone.
+    ledger: ConsumerLedger,
 }
 
 /// Connect options for the broker: token auth when a token is given,
@@ -271,6 +281,7 @@ impl EventBus {
             jetstream,
             max_payload,
             redelivery: ConsumerRedeliveryPolicy::default(),
+            ledger: ConsumerLedger::default(),
         };
         bus.ensure_event_stream().await?;
         bus.ensure_trigger_stream().await?;
@@ -295,6 +306,12 @@ impl EventBus {
     /// and what health measures "stuck" against.
     pub fn redelivery_policy(&self) -> ConsumerRedeliveryPolicy {
         self.redelivery
+    }
+
+    /// What the consumer loops on this bus have reported about their
+    /// parse boundary: written by the loops, read by the health probe.
+    pub fn consumer_ledger(&self) -> &ConsumerLedger {
+        &self.ledger
     }
 
     /// A clone of the bus's JetStream context, so co-resident consumers

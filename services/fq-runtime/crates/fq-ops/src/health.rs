@@ -100,7 +100,50 @@ pub enum ConsumerHealth {
         /// daemon's configuration — a reader that judged for itself
         /// would be quoting a number it does not have.
         stuck: bool,
+        /// Messages this consumer acked because they were not an event
+        /// in any version — bytes that do not parse and never will —
+        /// since the consumer started. Poison, not history: skipping
+        /// one loses nothing readable. Reported apart from a halt
+        /// because "unparseable" and "a version this build cannot
+        /// read" are different facts calling for opposite responses.
+        malformed_acked: u64,
     },
+    /// The consumer stopped itself on an event whose schema version
+    /// this build does not read, and is holding there: the message is
+    /// delivered and unacked, nothing after it is consumed, and the
+    /// daemon keeps running so this can be reported. Acking it would
+    /// have dropped readable history from every projection built from
+    /// the stream; halting keeps it, at the cost of a consumer that
+    /// makes no progress until a build that reads that version runs.
+    Halted {
+        name: String,
+        /// The event it stopped on: where it sits, what it declared,
+        /// and what the reader would have accepted.
+        halted_on: UnsupportedEvent,
+        /// As on `Active`: the malformed messages acked before the
+        /// halt.
+        malformed_acked: u64,
+    },
+}
+
+/// An event a consumer could not read: its envelope declares a schema
+/// version outside the set this build parses. Carries where the event
+/// sits on the stream and how its envelope identified itself, so an
+/// operator can find it, and the versions the reader would have
+/// accepted, so the line says which side is behind.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct UnsupportedEvent {
+    /// The version the envelope declared.
+    pub schema_version: u32,
+    /// The versions this build reads.
+    pub supported: Vec<u32>,
+    /// The `event_id` as the envelope spelled it, when it carried one.
+    pub event_id: Option<String>,
+    /// The subject the message arrived on.
+    pub subject: String,
+    /// The message's sequence on its stream, when the delivery carried
+    /// one.
+    pub stream_seq: Option<u64>,
 }
 
 impl ConsumerHealth {
@@ -112,16 +155,20 @@ impl ConsumerHealth {
         match self {
             ConsumerHealth::Missing { name }
             | ConsumerHealth::Error { name, .. }
-            | ConsumerHealth::Active { name, .. } => name,
+            | ConsumerHealth::Active { name, .. }
+            | ConsumerHealth::Halted { name, .. } => name,
         }
     }
 
     /// True when this consumer is something to act on: absent from a
-    /// daemon that expects it, unreadable, or stuck redelivering.
-    /// Lag alone is not a fault — a consumer catching up is working.
+    /// daemon that expects it, unreadable, stuck redelivering, or
+    /// halted on an event it cannot read. Lag alone is not a fault — a
+    /// consumer catching up is working.
     pub fn is_fault(&self) -> bool {
         match self {
-            ConsumerHealth::Missing { .. } | ConsumerHealth::Error { .. } => true,
+            ConsumerHealth::Missing { .. }
+            | ConsumerHealth::Error { .. }
+            | ConsumerHealth::Halted { .. } => true,
             ConsumerHealth::Active { stuck, .. } => *stuck,
         }
     }
