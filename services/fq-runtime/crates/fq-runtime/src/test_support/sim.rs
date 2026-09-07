@@ -1407,6 +1407,113 @@ mod resume_equivalence {
         }
     }
 
+    /// The deferral's own events — the rate-limited call's triple and
+    /// the `invocation.deferred` that followed it — are the only thing a
+    /// deferred-and-resumed trace may add to the reference.
+    fn without_the_deferral(events: Vec<Event>) -> Vec<Event> {
+        use crate::events::EventPayload;
+        let failed_call = events.iter().find_map(|e| match &e.payload {
+            EventPayload::LlmFailure(p) => Some(p.call_id),
+            _ => None,
+        });
+        events
+            .into_iter()
+            .filter(|e| match &e.payload {
+                EventPayload::LlmRequest(p) => Some(p.call_id) != failed_call,
+                EventPayload::LlmDispatched(p) => Some(p.call_id) != failed_call,
+                EventPayload::LlmFailure(_) | EventPayload::InvocationDeferred(_) => false,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// A 429 wave that the retry layer gave up on, at model call `k`:
+    /// the fixture answers `RateLimited` there, the run comes back
+    /// `Deferred`, and a resume with the rest of the script continues it.
+    async fn run_deferred(seed: u64, turns: usize, deferred_call: usize) -> RunResult {
+        let world = SimWorld::new(seed, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let responses = script(turns);
+
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses[..deferred_call]);
+        llm.push_error(crate::llm::LlmError::RateLimited {
+            model: "sim-model".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(300)),
+        });
+        let outcome = world.run(&llm).await.expect("a deferral is not an error");
+        let InvocationOutcome::Deferred { resume_after, .. } = outcome else {
+            panic!("expected Deferred at call {deferred_call}, got {outcome:?}");
+        };
+        assert_eq!(resume_after, std::time::Duration::from_secs(300));
+        assert_eq!(
+            world.sink.events().len(),
+            1 + 3 * deferred_call * 2 + 3 + 1,
+            "the deferral adds exactly its triple and the deferred event (call {deferred_call})"
+        );
+
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[deferred_call..]);
+        let outcome = world.resume(&resume_llm).await.expect("resume");
+        let events = world.sink.events();
+
+        // The failed call was a round — a model turn that happened — so
+        // the rounds across the deferral stay contiguous, one per turn
+        // the model was asked, the deferred ask included.
+        let rounds: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                crate::events::EventPayload::LlmResponse(p) => Some(p.round),
+                crate::events::EventPayload::LlmFailure(p) => Some(p.round),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rounds,
+            (1..=rounds.len() as u64).collect::<Vec<_>>(),
+            "rounds stay contiguous across a deferral (call {deferred_call})"
+        );
+
+        RunResult {
+            observed: without_rounds(observational_trace(&without_the_deferral(events))),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    /// Drop `payload.round` from a projected trace. Because the deferred
+    /// ask was a round, every round after it is the reference's plus
+    /// one; that shift is asserted in `run_deferred`, and masked here so
+    /// everything else can be compared verbatim.
+    fn without_rounds(mut observed: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        for value in &mut observed {
+            if let Some(payload) = value.get_mut("payload").and_then(|p| p.as_object_mut()) {
+                payload.remove("round");
+            }
+        }
+        observed
+    }
+
+    /// #278 in the sim: a rate limit at any model call of a fixed script
+    /// defers the run, and the resumed run is observationally the
+    /// reference — same events under the mask, same outcome, every tool
+    /// run exactly once — plus the deferral's own four events and the
+    /// round they cost.
+    #[tokio::test]
+    async fn a_rate_limit_at_any_model_call_defers_and_resumes_to_the_reference() {
+        let turns = 2;
+        let reference = run_reference(4321, turns).await;
+        let reference = RunResult {
+            observed: without_rounds(reference.observed.clone()),
+            summary: reference.summary.clone(),
+            dispatches: reference.dispatches.clone(),
+        };
+        for call in 0..=turns {
+            let resumed = run_deferred(4321, turns, call).await;
+            assert_equivalent(&reference, &resumed, &format!("deferred at model call {call}"));
+        }
+    }
+
     // ---- Parallel-turn extension (guards the #103 batched-tool path) ----
 
     /// A script shaped by per-turn tool-call counts: turn `i` fires
@@ -2154,8 +2261,8 @@ mod budget_properties {
                             panic!("trace not canonical: {violations:?}");
                         }
                     }
-                    InvocationOutcome::Suspended { .. } => {
-                        panic!("unexpected drain-suspend in budget-accounting run");
+                    InvocationOutcome::Suspended { .. } | InvocationOutcome::Deferred { .. } => {
+                        panic!("unexpected suspend or deferral in budget-accounting run");
                     }
                 }
             });
@@ -2497,8 +2604,8 @@ mod soak {
                             assert!((cost - wal_sum).abs() < 1e-9, "seed {seed}");
                             label = "budget_exceeded";
                         }
-                        InvocationOutcome::Suspended { .. } => {
-                            panic!("unexpected drain-suspend at seed {seed}");
+                        InvocationOutcome::Suspended { .. } | InvocationOutcome::Deferred { .. } => {
+                            panic!("unexpected suspend or deferral at seed {seed}");
                         }
                     }
                     break;

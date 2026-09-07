@@ -109,6 +109,13 @@ pub fn agent_invocation_stuck(agent_id: &str) -> String {
     format!("fq.agent.{agent_id}.invocation.stuck")
 }
 
+/// Emitted by the worker when it puts an invocation down for a rate
+/// limit (<https://github.com/bricef/factor-q/issues/278>). Inside
+/// `fq.agent.*.invocation.*`, like every other per-invocation fact.
+pub fn agent_invocation_deferred(agent_id: &str) -> String {
+    format!("fq.agent.{agent_id}.invocation.deferred")
+}
+
 /// Worker → control-plane archive hand-off (step 8 of
 /// data-architecture.md). Emitted by the worker after an
 /// invocation reaches terminal state, carrying the final

@@ -172,6 +172,11 @@ fn check_with(
                 // Host notices are injected at step boundaries only, so
                 // between-actions is the one legal position (#155).
                 EventPayload::HostNotice(_) => State::Idle,
+                // A deferral (#278) follows the rate-limited call's
+                // `llm.failure` — the call is closed, the invocation is
+                // between actions — and the resumed incarnation carries
+                // on from the same state with a fresh `llm.request`.
+                EventPayload::InvocationDeferred(_) => State::Idle,
                 EventPayload::LlmRequest(_) => State::Llm { dispatched: false },
                 EventPayload::ToolCall(_) => State::Tool {
                     dispatched: false,

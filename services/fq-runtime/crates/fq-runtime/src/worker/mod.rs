@@ -24,6 +24,7 @@
 
 pub mod archive_ack;
 pub mod archive_retry;
+pub mod deferral;
 pub mod drain;
 pub mod heartbeat;
 pub mod introspection;
@@ -34,6 +35,7 @@ pub mod workspace;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
 pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
+pub use deferral::{DeferralQueue, DueResume};
 pub use drain::{DrainReason, DrainRequest, DrainSignal, DrainState};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
 // The identifier rides the wire — four event payloads name a worker,
@@ -126,6 +128,20 @@ pub enum InvocationOutcome {
     /// at that boundary, which recovery already handles.
     Suspended {
         invocation_id: Uuid,
+    },
+    /// The invocation was put down because its model is rate-limited
+    /// past what the retry layer waits in place (#278). **Not a terminal
+    /// outcome, and not a failure:** like [`Self::Suspended`], the WAL
+    /// row stays in flight — with `phase = "deferred"` — and the
+    /// `invocation.deferred` event says why. Whoever drives invocations
+    /// resumes it after `resume_after` ([`DeferralQueue`]); a daemon that
+    /// stops first resumes it at startup like any in-flight row. No
+    /// `failed` event is emitted and no trigger retry is consumed.
+    Deferred {
+        invocation_id: Uuid,
+        /// How long to wait before resuming: at least what the provider
+        /// asked for, and at least the model's escalating default pause.
+        resume_after: std::time::Duration,
     },
 }
 
@@ -231,6 +247,27 @@ pub trait Worker: Send + Sync {
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError>;
 
+    /// Continue an in-flight invocation from its WAL — the one this
+    /// worker put down as [`InvocationOutcome::Deferred`] and the
+    /// control plane is now handing back after the delay (#278). The
+    /// same recovery path a drain or a crash is followed by; a resume
+    /// that meets another rate limit comes back `Deferred` again.
+    ///
+    /// The default refuses: a worker that cannot resume says so rather
+    /// than pretending, and the test doubles that never defer keep
+    /// their two-method shape.
+    async fn resume_invocation(
+        &self,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        invocation_id: Uuid,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        let _ = (agent, llm);
+        Err(ExecutorError::WorkerStore(format!(
+            "this worker cannot resume invocation {invocation_id}"
+        )))
+    }
+
     /// Request that the worker drain: stop starting new steps and let
     /// each in-flight invocation suspend at its next step boundary,
     /// checkpointed to the WAL, to be resumed by the next binary's
@@ -263,6 +300,15 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.run_signalling(agent, llm, trigger, delivery_attempt, durable_start)
             .await
+    }
+
+    async fn resume_invocation(
+        &self,
+        agent: &Agent,
+        llm: &dyn LlmClient,
+        invocation_id: Uuid,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        self.resume(agent, llm, invocation_id).await
     }
 
     async fn request_drain(&self, _req: DrainRequest) {

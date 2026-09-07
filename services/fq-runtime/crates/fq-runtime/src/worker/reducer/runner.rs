@@ -617,7 +617,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let terminal = match outcome {
             Ok(InvocationOutcome::Completed { .. })
             | Ok(InvocationOutcome::BudgetExceeded { .. }) => true,
-            Ok(InvocationOutcome::Suspended { .. }) => false,
+            Ok(InvocationOutcome::Suspended { .. }) | Ok(InvocationOutcome::Deferred { .. }) => {
+                false
+            }
             Err(_) => match self
                 .config
                 .store
@@ -754,7 +756,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // determined; reproduce it instead of trying to replay
             // the row (finding 6, caught by the slice-7 deep soak:
             // resume previously died on a deserialise error here).
-            if r.is_error == Some(true) {
+            //
+            // Unless the row was *deferred* (#278): then an errored
+            // call is the recorded 429 the deferral was decided on,
+            // nothing was determined, and the step re-issues the call.
+            if r.is_error == Some(true) && state_row.phase != deferral::DEFERRED_PHASE {
                 let message = r
                     .response
                     .clone()
@@ -773,6 +779,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 return Err(ExecutorError::Llm(crate::llm::LlmError::RequestFailed(
                     message,
                 )));
+            }
+            if r.is_error == Some(true) {
+                continue;
             }
             completed.push((
                 replay_sort_key(r.seq, r.completed_at),
@@ -1318,6 +1327,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             return Ok(InvocationOutcome::BudgetExceeded {
                                 invocation_id,
                                 cost,
+                            });
+                        }
+                        ModelOutcome::Deferred(resume_after) => {
+                            return Ok(InvocationOutcome::Deferred {
+                                invocation_id,
+                                resume_after,
                             });
                         }
                     }
@@ -2360,6 +2375,9 @@ struct ContextTracker {
 enum ModelOutcome {
     Response(ModelResponse),
     BudgetExceeded(f64),
+    /// The model is rate-limited past what the retry layer waits in
+    /// place: the invocation is put down for this long (#278).
+    Deferred(std::time::Duration),
 }
 
 /// Reconstruct a [`CapabilityResult::ToolResult`] from a
@@ -2517,6 +2535,7 @@ fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> Tri
 
 mod config;
 mod deadline;
+mod deferral;
 mod failure;
 mod llm;
 mod mcp;

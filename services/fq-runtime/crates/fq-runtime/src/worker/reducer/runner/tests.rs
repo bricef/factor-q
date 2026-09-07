@@ -4652,3 +4652,183 @@ async fn exec_timing_itself_out_counts_toward_the_streak() {
         );
     }
 }
+
+/// #278, the mid-flight half: a rate limit the retry layer gives up on
+/// (`Retry-After: 300`, past the shipped 120s cap) defers the
+/// invocation rather than failing it. The trail records the cause
+/// (`llm.failure`, `rate_limited`) and the decision
+/// (`invocation.deferred`) and no `failed`; the WAL row stays in flight
+/// under `phase = "deferred"`; and a resume once the provider answers
+/// again completes the run with every tool run once and no `failed`
+/// anywhere. The client is the daemon's own stack.
+#[tokio::test]
+async fn a_rate_limit_past_the_cap_defers_the_invocation_and_a_resume_completes_it() {
+    use crate::llm::{GenAiClient, LlmTimeouts, RetryConfig, RetryingLlmClient};
+    use crate::test_support::fault::MockFault;
+    use crate::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
+
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+    unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-mock-not-real") };
+
+    let mock = MockAnthropicServer::start().await;
+    mock.push_fault(MockFault::status(429).with_retry_after("300"));
+    let llm = RetryingLlmClient::new(
+        GenAiClient::with_base_url_and_timeouts(mock.base_url(), LlmTimeouts::default())
+            .expect("client builds"),
+        RetryConfig {
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            ..RetryConfig::default()
+        },
+    );
+    assert!(
+        Duration::from_secs(300) > Duration::from_millis(RetryConfig::default().max_retry_after_ms),
+        "the ask is past the shipped cap, so the retry layer gives up at once"
+    );
+
+    let agent_id_str = unique_agent_id("deferred");
+    let agent = Agent::builder()
+        .id(&agent_id_str)
+        .model("claude-haiku-4-5")
+        .system_prompt("You are a test agent.")
+        .budget(5.0)
+        .build()
+        .unwrap();
+
+    let bus = EventBus::connect(&url).await.expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(test_pricing())
+                .store(store.clone())
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    // One subscription across both incarnations, drained to quiet each
+    // time, so a `failed` that followed either phase would be seen
+    // rather than missed by a fixed count.
+    let mut sub = bus
+        .subscribe(format!("fq.agent.{agent_id_str}.>"))
+        .await
+        .expect("subscribe");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    async fn drain(
+        sub: &mut (impl futures::Stream<Item = Result<crate::events::Event, crate::bus::BusError>>
+                  + Unpin),
+    ) -> Vec<crate::events::Event> {
+        let mut events = Vec::new();
+        while let Ok(Some(next)) = tokio::time::timeout(Duration::from_secs(2), sub.next()).await
+        {
+            events.push(next.expect("event deserialises"));
+        }
+        events
+    }
+
+    let outcome = runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await;
+    let events = drain(&mut sub).await;
+    crate::test_support::events::assert_kinds_in_order(
+        &events,
+        &[
+            "triggered",
+            "llm_request",
+            "llm_dispatched",
+            "llm_failure",
+            "invocation_deferred",
+        ],
+    );
+
+    let invocation_id = match outcome {
+        Ok(InvocationOutcome::Deferred {
+            invocation_id,
+            resume_after,
+        }) => {
+            assert_eq!(
+                resume_after,
+                Duration::from_secs(300),
+                "deferred for what the provider asked, which outranks the default pause"
+            );
+            invocation_id
+        }
+        other => panic!("expected Deferred, got {other:?}"),
+    };
+
+    let EventPayload::LlmFailure(failure) = &events[3].payload else {
+        unreachable!("asserted above")
+    };
+    assert_eq!(failure.error_kind, crate::events::LlmErrorKind::RateLimited);
+    let EventPayload::InvocationDeferred(deferred) = &events[4].payload else {
+        unreachable!("asserted above")
+    };
+    assert_eq!(deferred.reason, crate::events::DeferralReason::RateLimited);
+    assert_eq!(deferred.model, "claude-haiku-4-5");
+    assert_eq!(deferred.retry_after_ms, 300_000);
+
+    let row = store
+        .get_invocation_state(&invocation_id.to_string())
+        .await
+        .expect("read the row")
+        .expect("the row exists: the deferral came after the first WAL write");
+    assert_eq!(row.terminal_at, None, "in flight, not terminal");
+    assert_eq!(row.phase, "deferred");
+
+    // The provider answers again: the resume re-issues the turn.
+    mock.push_response(MockResponse::report_success("done after the wait", 20, 5));
+    let resumed = runner.resume(&agent, &llm, invocation_id).await;
+    let resume_events = drain(&mut sub).await;
+    assert!(
+        matches!(resumed, Ok(InvocationOutcome::Completed { .. })),
+        "the resumed invocation completes: {resumed:?}"
+    );
+    let kinds: Vec<&str> = resume_events
+        .iter()
+        .map(crate::test_support::events::event_kind)
+        .collect();
+    assert!(
+        kinds.contains(&"llm_response") && kinds.contains(&"completed"),
+        "the resume ran the turn to completion: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"failed") && !kinds.contains(&"invocation_deferred"),
+        "no failure and no second deferral: {kinds:?}"
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        2,
+        "one request before the deferral, one after"
+    );
+    let row = store
+        .get_invocation_state(&invocation_id.to_string())
+        .await
+        .expect("read the row")
+        .expect("still present until archived");
+    assert!(row.terminal_at.is_some(), "terminal after the resume completed");
+
+    // The whole trail, both incarnations, is one canonical invocation.
+    let mut trail = events;
+    trail.extend(resume_events);
+    crate::test_support::oracle::assert_valid_trace(&trail);
+}

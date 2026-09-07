@@ -34,6 +34,16 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await?
         {
             Ok((response, _cost)) => response,
+            // A rate limit the retry layer gave up on is a deferral, not
+            // a failure (#278, decided 2026-09-04): the turn is put down
+            // and re-issued after the delay the throttle names.
+            Err(crate::llm::LlmError::RateLimited { model, retry_after }) => {
+                ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
+                let resume_after = self.config.throttle.deferral_delay(&model, retry_after);
+                self.defer_invocation(ctx, &model, retry_after, resume_after)
+                    .await?;
+                return Ok(ModelOutcome::Deferred(resume_after));
+            }
             Err(err) => {
                 ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
                 self.emit_failed(
