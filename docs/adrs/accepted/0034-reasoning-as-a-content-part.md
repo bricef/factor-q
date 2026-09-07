@@ -29,8 +29,9 @@ Tool-result batching (D1b) is emitted since 2026-09-05 (#511): a parallel
 turn's results go out as one `tool_results` message, in call order. D2's
 Gemini row is built since 2026-09-05 (#600): a bare `thoughtSignature` is
 recorded as an opaque part and replayed on the function call it came with —
-hermetically verified against a Gemini mock and wire goldens only, no live
-run, since no Gemini key is held here. The recorded `reasoning_tokens`
+verified against a Gemini mock and wire goldens, and live on 2026-09-07
+against `gemini-3.8-flash` (AI Studio): every signature and thought summary
+carried, three tool turns in a row accepted. The recorded `reasoning_tokens`
 reaches no operator surface yet (#536). Since 2026-09-06 the adapter records
 an assistant turn's parts in the order they arrived, reasoning included — I6
 taken literally, and what a Gemini signature needs to ride back on the part

@@ -176,8 +176,12 @@ nothing. A reasoning part is only ever carried from a turn that another request
 follows, so the default task opens with a mental step before the first tool call
 (see [the nightly's first run](#the-nightlys-first-run-and-the-task-that-reasons-2026-09-07));
 a red that still says "no reasoning part was carried" means the model chose not to
-think that night, so rerun once before treating it as a bug. `VERIFY=0` skips the
-verdict for a `TASK=` probe whose arms are being read some other way.
+think that night, so rerun once before treating it as a bug. An arm whose invocation
+failed on a provider 5xx through the runtime's retry budget is triggered once more after
+a minute, and the verdict judges the arm's latest invocation, naming the superseded one.
+`VERIFY=0` skips the verdict for a `TASK=` probe whose arms are being read some other
+way. With `AISTUDIO_API_KEY` set the [Gemini arm](#gemini-live-2026-09-07-hermetic-only-from-2026-09-05)
+runs as well.
 
 `TASK=` replaces the default sequential task; a `{work}` token in it expands to the
 fixture directory, which holds `notes.txt` and `checklist.txt`. The default task
@@ -211,16 +215,41 @@ The adapter dropped nothing — its debug-level "dropping a thought signature" l
 fired — the model simply did not think on this task. That shape is pinned hermetically
 by the `anthropic_parallel_tool_calls_signed` wire golden.
 
-## Gemini: hermetic only (2026-09-05)
+## Gemini: live (2026-09-07; hermetic only from 2026-09-05)
 
 Gemini's continuity token is a `thoughtSignature` on the function-call part, with no
 readable text beside it. Since #600 factor-q records it as an opaque reasoning part and
 replays it on the call it came with; the wire goldens `gemini_*` under
 `fq-runtime/tests/snapshots/reasoning_wire/` pin both directions against an in-process
-Gemini mock. **No live run has been made**: this repository holds no Gemini key. The
-harness takes a fourth arm the moment one exists — add a `[providers.gemini]` block with
-`api_shape = "gemini"` to `write_config` and a `gemini-3-pro` agent — and the same
-per-turn check applies.
+Gemini mock. Until 2026-09-07 that was the only proof, this repository holding no key.
+
+**The fourth arm.** `gemini-3-thinker` runs `gemini-3.8-flash` natively
+(`[providers.gemini]`, `api_shape = "gemini"`, a Google AI Studio key as
+`AISTUDIO_API_KEY`). The arm switches on when the key is set and is announced as off
+when it is not, so a three-arm run can never pass for a four-arm one; the nightly job
+passes the secret through and warns while it is absent. No effort is set: Gemini 3
+thinks by default and signs every function call, and the readable summary rides on the
+adapter's capture flag (`includeThoughts`). The free tier is enough — the 3.1 Pro
+previews are quota-blocked on it, and the 2.5 generation is retired for new users — but
+it answers `503 UNAVAILABLE` ("high demand") for minutes at a time, which is why the
+harness re-triggers an arm once when the provider was unavailable through the runtime's
+whole retry budget, and the verdict judges an arm's latest invocation.
+
+**Two runs, same task as the other arms** (`~/factor-q-live-runs/2026-09-07-gemini-arm/`
+and `-2/`):
+
+| run | turns | reasoning produced / carried | kinds | readable chars | outcome |
+|---|---|---|---|---|---|
+| 1 | 2 | 4 / 4 | opaque 2, plain 2 | 1884 | failed on turn 3: Gemini 503 through four attempts (82 s) |
+| 2 | 3 | 6 / 4 | opaque 3, plain 3 | 2970 | completed, verdict green, $0.0103 |
+
+What each turn looks like, from the event log: Gemini returns a thought part and a
+`functionCall` carrying a signature (912 and 528 characters on run 1), recorded as
+`[opaque, plain, tool_call]` with `reasoning_tokens` from `thoughtsTokenCount` (234,
+119); the next request replays the assistant turn verbatim, genai puts the signature
+back on the `functionCall` part, and Gemini accepts it and continues — three times in a
+row on run 2. "Carried" is produced minus the final turn's parts. Run 1's failure was
+the provider's, not the round trip's: the two turns before it carried everything.
 
 ## Readable thinking, and arrival order (2026-09-06)
 

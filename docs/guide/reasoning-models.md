@@ -27,7 +27,7 @@ is a continuity token with no readable text (see
 | Claude, extended thinking | native, `[providers.anthropic]` | `thinking` blocks with a `signature`, their text a summary because the request asks for one (`thinking.display: summarized` on adaptive models — without it every block comes back empty, signature only); `redacted_thinking` | `signed`; `opaque` | yes — the block goes back verbatim, ahead of the turn's tool calls, and Anthropic verifies it | live 2026-09-04 and 2026-09-05 (Opus 5, empty-text blocks: the display flag was not yet set); probe 2026-09-06 (summaries with it); wire goldens |
 | Kimi, DeepSeek and other `reasoning_content` models | native OpenAI-compatible endpoint | `reasoning_content` text | `plain` | yes — as `reasoning_content`, which is those APIs' own field | wire goldens |
 | The same models through OpenRouter | `[providers.openrouter]`, `api_shape = "openai-compatible"` | `reasoning` text, plus an unsigned `reasoning_details` entry | `plain` | yes — as `reasoning_content`, which OpenRouter documents as the mechanism for raw-string reasoning | live 2026-09-04 and 2026-09-05 (kimi-k3) |
-| Gemini, thinking | native, `api_shape = "gemini"` | a `thoughtSignature` on the function-call part; a thought summary, which the request asks for (`includeThoughts`) | `opaque` (a `thought_signature` token); `plain` for the summary | yes — the token goes back as a signature part that genai attaches to the call it came with | **hermetic only**: Gemini mock and wire goldens (#600); no Gemini key is held, so no live run |
+| Gemini, thinking | native, `api_shape = "gemini"` | a `thoughtSignature` on the function-call part; a thought summary, which the request asks for (`includeThoughts`) | `opaque` (a `thought_signature` token); `plain` for the summary | yes — the token goes back as a signature part that genai attaches to the call it came with, and Gemini accepts it | live 2026-09-07 (`gemini-3.8-flash` via AI Studio, two runs: every signature and summary carried, three tool turns in a row accepted); Gemini mock and wire goldens (#600) |
 | Claude, Gemini or OpenAI encrypted reasoning through OpenRouter | `[providers.openrouter]` | `reasoning` text plus a signed or encrypted `reasoning_details` entry | `plain` — the signed or encrypted entry is **dropped** | **no**. The text goes back as `reasoning_content`, which OpenRouter cannot turn back into a signed block. The provider accepts the turn and continues without its prior reasoning; nothing errors | live probe 2026-09-05; open as [#603](https://github.com/bricef/factor-q/issues/603) |
 | OpenAI o-series and gpt-5 on chat completions | native | no reasoning text; only `reasoning_tokens` in usage | nothing but the token count | nothing to carry | not verified live |
 
@@ -89,13 +89,16 @@ The Claude 5 family thinks adaptively by default when no effort is set.
 - **#603** — signed and encrypted reasoning through OpenRouter, above. The
   fix needs genai's OpenAI adapter to carry `reasoning_details`; the data
   model here is ready for it.
-- **Gemini is not live-verified.** genai's Gemini adapter also hoists
-  every signature ahead of the text on the way in and attaches it to the
-  next part it meets on the way out, so a text-plus-call turn's signature
-  can land on the text. The adapter here already records and replays parts
-  in arrival order, so the signature-adjacency fix proposed upstream needs
-  nothing on this side; the wire golden `gemini_text_and_signed_call` pins
-  today's approximation and moves when that fix lands.
+- **Gemini turns with visible text before a signed call.** genai's Gemini
+  adapter hoists every signature ahead of the text on the way in and
+  attaches it to the next part it meets on the way out, so such a turn's
+  signature can land on the text. The live runs never produced that shape
+  (Gemini 3 returned a thought summary, not visible text, before each
+  call), so it stays unverified. The adapter here already records and
+  replays parts in arrival order, so the signature-adjacency fix proposed
+  upstream needs nothing on this side; the wire golden
+  `gemini_text_and_signed_call` pins today's approximation and moves when
+  that fix lands.
 
 ## Verifying a provider yourself
 
