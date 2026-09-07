@@ -54,20 +54,25 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 		}
 		jobs := jobsByName(config)
 		var confirmed []string
-		for _, name := range pending.take(time.Now()) {
+		for _, name := range pending.due(time.Now()) {
 			if _, back := jobs[name]; back {
-				continue // restored in the meantime; retain logged it
+				pending.forget(name) // restored in the meantime; retain logged it
+				continue
 			}
 			confirmed = append(confirmed, name)
 		}
 		if len(confirmed) == 0 {
 			return nil
 		}
+		// A failure here is a cancelled context and nothing else, so the
+		// deletions stay parked: the shutdown line must say they are still
+		// unconfirmed, because they are.
 		if err := withBrokerRetry(ctx, logger, "remove state for dropped jobs", func() error {
 			return removeState(ctx, confirmed, store)
 		}); err != nil {
 			return err
 		}
+		pending.forget(confirmed...)
 		for _, name := range confirmed {
 			logger.Printf("job=%s removal confirmed after %s: fire state deleted", name, removal.Confirm)
 		}
