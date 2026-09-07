@@ -70,12 +70,17 @@ collapsed disclosure, with "opaque — click to see raw" for a token.
 - Cost metadata on each response carries `reasoning_tokens` when the
   provider reports a split, and omits it when the provider does not
   (Anthropic never does): an unreported split is not a `0`, and the two
-  stay apart all the way down. `fq costs` has a `reasoning` column —
-  `n/a` where no call reported a split, `0` where a provider reported
-  zero — `fq costs --json` and `fq invocation show --json` carry
-  `total_reasoning_tokens` as `null` against `0`, and the dashboard's
-  cost pages render the same column with the same `n/a`. The figure is
-  a decomposition of the output tokens, never an addition to the bill.
+  stay apart all the way down. `fq costs` has a `reasoning` column on
+  both its tables, by agent and by model — `n/a` where no call reported
+  a split, `0` where a provider reported zero — `fq costs --json` and
+  `fq invocation show --json` carry `total_reasoning_tokens` as `null`
+  against `0` on every row, the per-model rows included, and the
+  dashboard's cost pages render the same column with the same `n/a` on
+  the by-agent, by-model and by-invocation tables. The per-model split
+  is the telling one: a reasoning-first model's bill is mostly
+  thinking, and comparing models on one agent (`fq costs --agent <id>`,
+  or the agent's drill-down) is where that shows. The figure is a
+  decomposition of the output tokens, never an addition to the bill.
 
 ## Asking for more or less reasoning
 
