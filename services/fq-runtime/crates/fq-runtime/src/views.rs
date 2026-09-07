@@ -229,6 +229,9 @@ impl From<ModelCostSummary> for ModelCostView {
             total_cost: r.total_cost,
             total_input_tokens: r.total_input_tokens,
             total_output_tokens: r.total_output_tokens,
+            total_cache_read_tokens: r.total_cache_read_tokens,
+            total_cache_write_tokens: r.total_cache_write_tokens,
+            total_reasoning_tokens: r.total_reasoning_tokens,
         }
     }
 }

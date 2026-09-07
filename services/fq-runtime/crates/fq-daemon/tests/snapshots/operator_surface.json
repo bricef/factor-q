@@ -1777,6 +1777,14 @@
               "model": {
                 "type": "string"
               },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
               "total_cost": {
                 "format": "double",
                 "type": "number"
@@ -1788,6 +1796,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over this model's calls that reported a\nthought-versus-spoken split — part of `total_output_tokens`, not\nin addition to it. `None` (`null` on the wire) when none did,\nwhich is every Anthropic model; that is not `0`, a provider that\nreported none were spent. Per model this is the telling split:\na reasoning-first model's bill is mostly thinking.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1795,7 +1811,9 @@
               "event_count",
               "total_cost",
               "total_input_tokens",
-              "total_output_tokens"
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
             ],
             "type": "object"
           }
@@ -2041,6 +2059,14 @@
               "model": {
                 "type": "string"
               },
+              "total_cache_read_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total_cache_write_tokens": {
+                "format": "int64",
+                "type": "integer"
+              },
               "total_cost": {
                 "format": "double",
                 "type": "number"
@@ -2052,6 +2078,14 @@
               "total_output_tokens": {
                 "format": "int64",
                 "type": "integer"
+              },
+              "total_reasoning_tokens": {
+                "description": "Reasoning tokens over this model's calls that reported a\nthought-versus-spoken split — part of `total_output_tokens`, not\nin addition to it. `None` (`null` on the wire) when none did,\nwhich is every Anthropic model; that is not `0`, a provider that\nreported none were spent. Per model this is the telling split:\na reasoning-first model's bill is mostly thinking.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -2059,7 +2093,9 @@
               "event_count",
               "total_cost",
               "total_input_tokens",
-              "total_output_tokens"
+              "total_output_tokens",
+              "total_cache_read_tokens",
+              "total_cache_write_tokens"
             ],
             "type": "object"
           }
