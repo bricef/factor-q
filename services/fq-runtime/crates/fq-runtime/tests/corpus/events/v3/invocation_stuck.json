@@ -1,0 +1,21 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000011",
+    "parent_event_id": "01990000-0000-7000-8000-000000000010",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/invocation_stuck@1",
+    "timestamp": "2026-09-07T12:00:11Z"
+  },
+  "payload": {
+    "event_type": "invocation_stuck",
+    "payload": {
+      "last_step_at_ms": 1788000000000,
+      "stuck_after_ms": 4210000,
+      "phase": "awaiting_model",
+      "step_index": 7
+    }
+  }
+}

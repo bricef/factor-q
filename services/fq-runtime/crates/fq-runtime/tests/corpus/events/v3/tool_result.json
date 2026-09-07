@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000008",
+    "parent_event_id": "01990000-0000-7000-8000-000000000007",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/tool_result@1",
+    "timestamp": "2026-09-07T12:00:08Z"
+  },
+  "payload": {
+    "event_type": "tool_result",
+    "payload": {
+      "round": 1,
+      "tool_name": "read",
+      "tool_call_id": "toolu_corpus_01",
+      "output": "# Docs",
+      "is_error": false,
+      "duration_ms": 3
+    }
+  }
+}

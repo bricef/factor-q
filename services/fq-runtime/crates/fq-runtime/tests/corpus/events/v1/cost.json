@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "event_id": "01980000-0000-7000-8000-000000000103",
+  "timestamp": "2026-05-01T12:00:02Z",
+  "agent_id": "corpus-agent",
+  "invocation_id": "01980000-0000-7000-8000-000000000100",
+  "event_type": "cost",
+  "payload": {
+    "call_id": "01980000-0000-7000-8000-000000004001",
+    "model": "claude-haiku",
+    "input_tokens": 80,
+    "output_tokens": 10,
+    "input_cost": 0.000064,
+    "output_cost": 0.00004,
+    "total_cost": 0.000104,
+    "cumulative_invocation_cost": 0.000104,
+    "cumulative_agent_cost": 0.000104
+  }
+}

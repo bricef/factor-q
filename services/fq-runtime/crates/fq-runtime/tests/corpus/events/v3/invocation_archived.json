@@ -1,0 +1,25 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000015",
+    "parent_event_id": "01990000-0000-7000-8000-000000000014",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/invocation_archived@1",
+    "timestamp": "2026-09-07T12:00:15Z"
+  },
+  "payload": {
+    "event_type": "invocation_archived",
+    "payload": {
+      "worker_id": "corpus-worker",
+      "final_phase": "completed",
+      "final_state_blob": [
+        123,
+        125
+      ],
+      "started_at_ms": 1788000000000,
+      "terminal_at_ms": 1788000004200
+    }
+  }
+}

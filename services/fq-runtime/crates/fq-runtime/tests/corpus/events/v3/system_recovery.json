@@ -1,0 +1,22 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000022",
+    "trace_id": "01990000-0000-7000-8000-000000002000",
+    "agent_id": "system",
+    "invocation_id": "01990000-0000-7000-8000-000000002000",
+    "schema_id": "factor-q/system_recovery@1",
+    "timestamp": "2026-09-07T12:00:22Z"
+  },
+  "payload": {
+    "event_type": "system_recovery",
+    "payload": {
+      "runtime_id": "01990000-0000-7000-8000-000000002000",
+      "worker_id": "corpus-worker",
+      "safe_resume": 1,
+      "safe_replay": 0,
+      "ambiguous": 0,
+      "total": 1
+    }
+  }
+}

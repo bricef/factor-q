@@ -1,0 +1,21 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000018",
+    "parent_event_id": "01990000-0000-7000-8000-000000000017",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/invocation_operator_resumed@1",
+    "timestamp": "2026-09-07T12:00:18Z"
+  },
+  "payload": {
+    "event_type": "invocation_operator_resumed",
+    "payload": {
+      "completed_call_ids": [
+        "toolu_corpus_01"
+      ],
+      "reason": "operator: result recovered"
+    }
+  }
+}

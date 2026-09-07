@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "event_id": "01980000-0000-7000-8000-000000000104",
+  "timestamp": "2026-05-01T12:00:03Z",
+  "agent_id": "corpus-agent",
+  "invocation_id": "01980000-0000-7000-8000-000000000100",
+  "event_type": "completed",
+  "payload": {
+    "result_summary": "Nothing to read.",
+    "total_llm_calls": 1,
+    "total_tool_calls": 0,
+    "total_cost": 0.000104,
+    "total_duration_ms": 900
+  }
+}

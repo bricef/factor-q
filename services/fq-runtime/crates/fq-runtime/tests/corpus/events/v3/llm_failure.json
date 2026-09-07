@@ -1,0 +1,26 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000005",
+    "parent_event_id": "01990000-0000-7000-8000-000000000004",
+    "trace_id": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
+    "schema_id": "factor-q/llm_failure@1",
+    "timestamp": "2026-09-07T12:00:05Z"
+  },
+  "payload": {
+    "event_type": "llm_failure",
+    "payload": {
+      "round": 2,
+      "call_id": "01990000-0000-7000-8000-000000004002",
+      "model": "claude-haiku-4-5",
+      "error_kind": "rate_limited",
+      "error_message": "429 Too Many Requests",
+      "duration_ms": 1500,
+      "origin": {
+        "kind": "agent_turn"
+      }
+    }
+  }
+}
