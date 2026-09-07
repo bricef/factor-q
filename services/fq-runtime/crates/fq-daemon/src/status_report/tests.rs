@@ -88,6 +88,7 @@ fn the_report_roundtrips_through_its_declared_shape() {
                     num_redelivered: 0,
                     redeliveries: 0,
                     stuck: false,
+                    malformed_acked: 0,
                 }],
             },
         ],

@@ -17,10 +17,11 @@
 //! has stopped making progress is reported as such — by name, so an
 //! operator reads which one rather than that something is wrong.
 
-pub use fq_ops::health::{ConsumerHealth, McpServerHealth, StreamHealth};
+pub use fq_ops::health::{ConsumerHealth, McpServerHealth, StreamHealth, UnsupportedEvent};
 
 use crate::bus::{
-    ADVISORY_STREAM_NAME, ConsumerRedeliveryPolicy, STREAM_NAME, TRIGGER_STREAM_NAME,
+    ADVISORY_STREAM_NAME, ConsumerLedger, ConsumerRecord, ConsumerRedeliveryPolicy, STREAM_NAME,
+    TRIGGER_STREAM_NAME,
 };
 use crate::control_plane::advisory_watch::CONSUMER_NAME as ADVISORY_CONSUMER;
 use crate::control_plane::coordination_consumer::CONSUMER_NAME as COORDINATION_CONSUMER;
@@ -60,11 +61,16 @@ pub fn core_streams(summary_enabled: bool) -> Vec<(&'static str, Vec<&'static st
 /// Probe one stream and each durable it is expected to carry. Never
 /// errors — every failure mode is a value, so a caller renders partial
 /// health rather than losing the whole report.
+///
+/// `ledger` is the loops' own account of their parse boundary, which
+/// the broker cannot give: a consumer halted on an event it cannot
+/// read looks, from JetStream, like one that is merely behind.
 pub async fn probe_stream(
     js: &async_nats::jetstream::Context,
     stream_name: &str,
     expected_consumers: &[&str],
     policy: ConsumerRedeliveryPolicy,
+    ledger: &ConsumerLedger,
 ) -> StreamHealth {
     let mut stream = match js.get_stream(stream_name).await {
         Ok(s) => s,
@@ -87,7 +93,16 @@ pub async fn probe_stream(
 
     let mut consumers = Vec::with_capacity(expected_consumers.len());
     for name in expected_consumers {
-        consumers.push(probe_consumer(&mut stream, name, info.state.last_sequence, policy).await);
+        consumers.push(
+            probe_consumer(
+                &mut stream,
+                name,
+                info.state.last_sequence,
+                policy,
+                ledger.record(name),
+            )
+            .await,
+        );
     }
 
     StreamHealth::Available {
@@ -100,12 +115,16 @@ pub async fn probe_stream(
     }
 }
 
-/// Probe one durable. `last_seq` is its stream's head, for the lag.
+/// Probe one durable. `last_seq` is its stream's head, for the lag;
+/// `record` is what the loop behind the durable has said about its own
+/// parse boundary, and a recorded halt is reported over whatever the
+/// broker's figures would have made of the consumer.
 async fn probe_consumer(
     stream: &mut async_nats::jetstream::stream::Stream,
     name: &str,
     last_seq: u64,
     policy: ConsumerRedeliveryPolicy,
+    record: ConsumerRecord,
 ) -> ConsumerHealth {
     let mut consumer = match stream
         .get_consumer::<async_nats::jetstream::consumer::pull::Config>(name)
@@ -128,6 +147,22 @@ async fn probe_consumer(
         }
     };
 
+    let ConsumerRecord {
+        malformed_acked,
+        halted_on,
+    } = record;
+    // The loop's own account wins over the broker's figures: a halted
+    // consumer has one message delivered and unacked and a lag that
+    // only grows, which the arithmetic below would call "behind" and
+    // never "stuck". The loop knows it stopped, and why.
+    if let Some(halted_on) = halted_on {
+        return ConsumerHealth::Halted {
+            name: name.to_string(),
+            halted_on,
+            malformed_acked,
+        };
+    }
+
     let delivered = info.delivered.stream_sequence;
     let ack_pending = info.num_ack_pending as u64;
     let num_redelivered = info.num_redelivered as u64;
@@ -141,6 +176,7 @@ async fn probe_consumer(
         num_redelivered,
         redeliveries,
         stuck: is_stuck(ack_pending, num_redelivered, redeliveries, policy),
+        malformed_acked,
     }
 }
 
@@ -210,10 +246,11 @@ pub async fn probe_core_consumers(
     js: &async_nats::jetstream::Context,
     summary_enabled: bool,
     policy: ConsumerRedeliveryPolicy,
+    ledger: &ConsumerLedger,
 ) -> Vec<ConsumerHealth> {
     let mut out = Vec::new();
     for (stream, expected) in core_streams(summary_enabled) {
-        match probe_stream(js, stream, &expected, policy).await {
+        match probe_stream(js, stream, &expected, policy, ledger).await {
             StreamHealth::Available { consumers, .. } => out.extend(consumers),
             StreamHealth::Unavailable { .. } => {
                 out.extend(expected.into_iter().map(|name| ConsumerHealth::Missing {
@@ -230,11 +267,12 @@ pub async fn probe_core_streams(
     js: &async_nats::jetstream::Context,
     summary_enabled: bool,
     policy: ConsumerRedeliveryPolicy,
+    ledger: &ConsumerLedger,
 ) -> Vec<StreamHealth> {
     let streams = core_streams(summary_enabled);
     let mut out = Vec::with_capacity(streams.len());
     for (stream, consumers) in streams {
-        out.push(probe_stream(js, stream, &consumers, policy).await);
+        out.push(probe_stream(js, stream, &consumers, policy, ledger).await);
     }
     out
 }

@@ -2279,6 +2279,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "malformed_acked": {
+                        "description": "Messages this consumer acked because they were not an event\nin any version — bytes that do not parse and never will —\nsince the consumer started. Poison, not history: skipping\none loses nothing readable. Reported apart from a halt\nbecause \"unparseable\" and \"a version this build cannot\nread\" are different facts calling for opposite responses.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "name": {
                         "type": "string"
                       },
@@ -2312,13 +2318,47 @@
                       "num_pending",
                       "num_redelivered",
                       "redeliveries",
-                      "stuck"
+                      "stuck",
+                      "malformed_acked"
                     ],
                     "type": "object"
                   }
                 },
                 "required": [
                   "active"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The consumer stopped itself on an event whose schema version\nthis build does not read, and is holding there: the message is\ndelivered and unacked, nothing after it is consumed, and the\ndaemon keeps running so this can be reported. Acking it would\nhave dropped readable history from every projection built from\nthe stream; halting keeps it, at the cost of a consumer that\nmakes no progress until a build that reads that version runs.",
+                "properties": {
+                  "halted": {
+                    "properties": {
+                      "halted_on": {
+                        "$ref": "#/$defs/UnsupportedEvent",
+                        "description": "The event it stopped on: where it sits, what it declared,\nand what the reader would have accepted."
+                      },
+                      "malformed_acked": {
+                        "description": "As on `Active`: the malformed messages acked before the\nhalt.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "halted_on",
+                      "malformed_acked"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "halted"
                 ],
                 "type": "object"
               }
@@ -2526,6 +2566,52 @@
                 "type": "object"
               }
             ]
+          },
+          "UnsupportedEvent": {
+            "description": "An event a consumer could not read: its envelope declares a schema\nversion outside the set this build parses. Carries where the event\nsits on the stream and how its envelope identified itself, so an\noperator can find it, and the versions the reader would have\naccepted, so the line says which side is behind.",
+            "properties": {
+              "event_id": {
+                "description": "The `event_id` as the envelope spelled it, when it carried one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema_version": {
+                "description": "The version the envelope declared.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stream_seq": {
+                "description": "The message's sequence on its stream, when the delivery carried\none.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "subject": {
+                "description": "The subject the message arrived on.",
+                "type": "string"
+              },
+              "supported": {
+                "description": "The versions this build reads.",
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema_version",
+              "supported",
+              "subject"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2668,6 +2754,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "malformed_acked": {
+                        "description": "Messages this consumer acked because they were not an event\nin any version — bytes that do not parse and never will —\nsince the consumer started. Poison, not history: skipping\none loses nothing readable. Reported apart from a halt\nbecause \"unparseable\" and \"a version this build cannot\nread\" are different facts calling for opposite responses.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "name": {
                         "type": "string"
                       },
@@ -2701,13 +2793,47 @@
                       "num_pending",
                       "num_redelivered",
                       "redeliveries",
-                      "stuck"
+                      "stuck",
+                      "malformed_acked"
                     ],
                     "type": "object"
                   }
                 },
                 "required": [
                   "active"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The consumer stopped itself on an event whose schema version\nthis build does not read, and is holding there: the message is\ndelivered and unacked, nothing after it is consumed, and the\ndaemon keeps running so this can be reported. Acking it would\nhave dropped readable history from every projection built from\nthe stream; halting keeps it, at the cost of a consumer that\nmakes no progress until a build that reads that version runs.",
+                "properties": {
+                  "halted": {
+                    "properties": {
+                      "halted_on": {
+                        "$ref": "#/$defs/UnsupportedEvent",
+                        "description": "The event it stopped on: where it sits, what it declared,\nand what the reader would have accepted."
+                      },
+                      "malformed_acked": {
+                        "description": "As on `Active`: the malformed messages acked before the\nhalt.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "halted_on",
+                      "malformed_acked"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "halted"
                 ],
                 "type": "object"
               }
@@ -3027,6 +3153,52 @@
                 "type": "object"
               }
             ]
+          },
+          "UnsupportedEvent": {
+            "description": "An event a consumer could not read: its envelope declares a schema\nversion outside the set this build parses. Carries where the event\nsits on the stream and how its envelope identified itself, so an\noperator can find it, and the versions the reader would have\naccepted, so the line says which side is behind.",
+            "properties": {
+              "event_id": {
+                "description": "The `event_id` as the envelope spelled it, when it carried one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema_version": {
+                "description": "The version the envelope declared.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stream_seq": {
+                "description": "The message's sequence on its stream, when the delivery carried\none.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "subject": {
+                "description": "The subject the message arrived on.",
+                "type": "string"
+              },
+              "supported": {
+                "description": "The versions this build reads.",
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema_version",
+              "supported",
+              "subject"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

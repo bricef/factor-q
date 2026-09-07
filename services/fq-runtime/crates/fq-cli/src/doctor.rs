@@ -149,19 +149,59 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
                 lag,
                 redeliveries,
                 stuck: true,
+                malformed_acked,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — {redeliveries} redeliveries past its acked floor, \
-                     lag {lag}\n"
+                     lag {lag}{}\n",
+                    malformed_suffix(*malformed_acked)
                 ));
                 out.push_str(&format!(
                     "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
                      and free whatever it is blocked on (disk, store, broker)\n"
                 ));
             }
-            ConsumerHealth::Active { name, lag, .. } => {
-                out.push_str(&format!("  {name}: ok (lag {lag})\n"));
+            ConsumerHealth::Active {
+                name,
+                lag,
+                malformed_acked,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  {name}: ok (lag {lag}{})\n",
+                    malformed_suffix(*malformed_acked)
+                ));
+            }
+            // The halt is the other outcome of the parse boundary, and
+            // the one that stops the consumer: an event in a version
+            // this build does not read is left unacked rather than
+            // skipped, because skipping it would drop history from every
+            // projection built from the stream. The line locates the
+            // event and says which side is behind.
+            ConsumerHealth::Halted {
+                name,
+                halted_on,
+                malformed_acked,
+            } => {
+                out.push_str(&format!(
+                    "  {name}: ✗ halted — event {} on {} (seq {}) declares schema_version {}; \
+                     this build reads {:?}{}\n",
+                    halted_on.event_id.as_deref().unwrap_or("<no id>"),
+                    halted_on.subject,
+                    halted_on
+                        .stream_seq
+                        .map_or_else(|| "?".to_string(), |s| s.to_string()),
+                    halted_on.schema_version,
+                    halted_on.supported,
+                    malformed_suffix(*malformed_acked)
+                ));
+                out.push_str(&format!(
+                    "  -> the message is unacked and nothing after it is consumed: run a build \
+                     that reads schema_version {} and restart; the daemon log has the line \
+                     under `consumer={name}`\n",
+                    halted_on.schema_version
+                ));
             }
             ConsumerHealth::Missing { name } => {
                 out.push_str(&format!("  {name}: ✗ missing\n"));
@@ -175,6 +215,20 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
         }
     }
     out
+}
+
+/// `, N malformed acked` when any were, else nothing: zero is the
+/// normal case, and a line that always said so would be noise. The
+/// count is the *other* outcome of the parse boundary — bytes that were
+/// not an event in any version, acked and skipped as poison — and it is
+/// shown beside the consumer, halted or not, so "unparseable" and "a
+/// version this build cannot read" never read as one thing.
+fn malformed_suffix(malformed_acked: u64) -> String {
+    if malformed_acked == 0 {
+        String::new()
+    } else {
+        format!(", {malformed_acked} malformed acked")
+    }
 }
 
 /// Pure: the MCP block of `fq doctor`. Silent when no agent declares a

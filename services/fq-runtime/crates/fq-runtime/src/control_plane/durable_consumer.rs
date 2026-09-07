@@ -30,9 +30,25 @@
 //!
 //! Ack policy — the decisions this module centralises:
 //!
-//! - **Deserialise failure** → logged and ACK'd. A payload we
-//!   cannot decode will never decode on retry; leaving it
+//! - **Malformed message** → logged, counted on the bus's
+//!   [`crate::bus::ConsumerLedger`], and ACK'd. Bytes that are not an
+//!   event in any version will never decode on retry; leaving them
 //!   un-acked would just create a redelivery loop.
+//! - **Unsupported schema version** → the loop **halts**. The message
+//!   is left unacked, the halt is recorded on the ledger with the
+//!   version found, the versions this build reads, the event id and
+//!   the subject, and the task parks until shutdown so the daemon
+//!   stays up and `fq doctor` can say so. Acking would drop readable
+//!   history from every projection built from the stream — the
+//!   silent-loss path of
+//!   <https://github.com/bricef/factor-q/issues/409>; NAKing would
+//!   retry a message this build can never parse. The version is read
+//!   before the shape ([`Event::from_wire`]), so an older envelope
+//!   whose body happens to parse against the current types halts the
+//!   loop too. Every consumer on this loop halts, not only the
+//!   projector: the version is a fact about the stream, and every
+//!   reader of it is behind the same binary. [`admit`] is that
+//!   decision as a value.
 //! - **Handler `Ok`** → ACK'd.
 //! - **[`HandlerError::Transient`]** → NAK'd with an escalating
 //!   delay, and logged at a bounded rate. The delay comes from the
@@ -64,12 +80,13 @@
 use std::future::Future;
 use std::time::Duration;
 
+use fq_ops::health::UnsupportedEvent;
 use futures::StreamExt;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
-use crate::bus::{BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog};
-use crate::events::Event;
+use crate::bus::{BusError, ConsumerLedger, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog};
+use crate::events::{Event, EventParseError};
 
 /// Where a durable consumer starts reading when it is *first
 /// created*. `get_or_create` semantics apply: an existing
@@ -316,25 +333,36 @@ where
     // loop's own: two consumers failing at once each still say so.
     let policy = bus.redelivery_policy();
     let mut redelivery_log = RedeliveryLog::new(policy);
+    // The parse-boundary record this loop reports to. It starts empty,
+    // so the figures describe this loop and not an earlier one on the
+    // same durable.
+    let ledger = bus.consumer_ledger().clone();
+    ledger.start(&name);
 
-    loop {
+    let halted = loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => {
                 info!(consumer = %name, "durable consumer received shutdown signal");
-                break;
+                break None;
             }
             msg = messages.next() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        handle_message(&name, &handler, &msg, policy, &mut redelivery_log).await
+                        let next = handle_message(
+                            &name, &handler, &msg, policy, &mut redelivery_log, &ledger,
+                        )
+                        .await;
+                        if let Next::Halt(on) = next {
+                            break Some(on);
+                        }
                     }
                     Some(Err(err)) => {
                         warn!(consumer = %name, error = %err, "error reading next JetStream message");
                     }
                     None => {
                         warn!(consumer = %name, "JetStream message stream ended unexpectedly");
-                        break;
+                        break None;
                     }
                 }
             }
@@ -344,10 +372,84 @@ where
                 }
             }
         }
+    };
+    // Release the pull before parking or returning: a halted loop must
+    // not keep fetching messages it will never resolve.
+    drop(messages);
+
+    if let Some(on) = halted {
+        park_halted(&name, on, &ledger, shutdown).await;
     }
 
     info!(consumer = %name, "durable consumer stopped");
     Ok(())
+}
+
+/// The halt: said once, at error level, with everything an operator
+/// needs to find the message; recorded where `fq doctor` reads; and
+/// then the task waits for shutdown. It must not return — the daemon
+/// supervises every consumer task and reads any exit, clean or not, as
+/// a task failure that takes the whole daemon down, which is exactly
+/// the state in which nothing could report why.
+async fn park_halted(
+    name: &str,
+    on: UnsupportedEvent,
+    ledger: &ConsumerLedger,
+    shutdown: oneshot::Receiver<()>,
+) {
+    error!(
+        consumer = name,
+        schema_version = on.schema_version,
+        supported = ?on.supported,
+        event_id = on.event_id.as_deref().unwrap_or("-"),
+        subject = %on.subject,
+        stream_seq = on.stream_seq.unwrap_or(0),
+        "event declares a schema version this build does not read; halting — the message \
+         stays unacked and nothing after it is consumed until a build that reads it runs"
+    );
+    ledger.halt(name, on);
+    let _ = shutdown.await;
+    info!(consumer = name, "halted consumer received shutdown signal");
+}
+
+/// Whether the loop goes on after a message.
+enum Next {
+    Continue,
+    Halt(UnsupportedEvent),
+}
+
+/// What the loop does with a delivered message before any handler sees
+/// it — the parse half of the ack policy, as a value, so the event
+/// corpus can be replayed through it without a broker and the loop and
+/// that test cannot disagree about what a version means.
+#[derive(Debug)]
+pub enum Admission {
+    /// An event this build reads: it goes to the handler.
+    Event(Event),
+    /// Not an event in any version: acked, counted, skipped.
+    AckMalformed(serde_json::Error),
+    /// Well-formed history in a version this build does not read:
+    /// left unacked, and the loop halts.
+    Halt(UnsupportedEvent),
+}
+
+/// Decide a message's admission from its bytes and where it sat.
+pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admission {
+    match Event::from_wire(payload) {
+        Ok(event) => Admission::Event(event),
+        Err(EventParseError::Malformed(err)) => Admission::AckMalformed(err),
+        Err(EventParseError::UnsupportedSchemaVersion {
+            found,
+            supported,
+            event_id,
+        }) => Admission::Halt(UnsupportedEvent {
+            schema_version: found,
+            supported: supported.to_vec(),
+            event_id,
+            subject: subject.to_string(),
+            stream_seq,
+        }),
+    }
 }
 
 /// Await the next tick, or forever when the consumer has no
@@ -362,36 +464,45 @@ async fn maybe_tick(timer: Option<&mut tokio::time::Interval>) {
     }
 }
 
-/// Deserialise one message and apply the ack policy to the
-/// handler's verdict. Never returns an error: per-message
-/// failures must not kill the loop.
+/// Admit one message and apply the ack policy to the handler's
+/// verdict. Never returns an error: per-message failures must not
+/// kill the loop. The one thing it can say besides "go on" is that
+/// the loop must halt, which is not a failure of this message but a
+/// fact about the stream.
 async fn handle_message<H, HFut>(
     name: &str,
     handler: &H,
     msg: &async_nats::jetstream::Message,
     policy: ConsumerRedeliveryPolicy,
     redelivery_log: &mut RedeliveryLog,
-) where
+    ledger: &ConsumerLedger,
+) -> Next
+where
     H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
 {
-    let event = match serde_json::from_slice::<Event>(&msg.payload) {
-        Ok(event) => event,
-        Err(err) => {
+    let info = msg.info().ok();
+    let stream_seq = info.as_ref().map(|info| info.stream_sequence);
+    let subject: &str = &msg.subject;
+    let event = match admit(&msg.payload, subject, stream_seq) {
+        Admission::Event(event) => event,
+        Admission::AckMalformed(err) => {
             warn!(
                 consumer = name,
                 error = %err,
-                "failed to deserialise event; acking to avoid a redelivery loop"
+                subject,
+                stream_seq = stream_seq.unwrap_or(0),
+                "message is not an event in any version; acking to avoid a redelivery loop"
             );
+            ledger.note_malformed(name);
             if let Err(ack_err) = msg.ack().await {
                 error!(consumer = name, error = %ack_err, "failed to ack malformed message");
             }
-            return;
+            return Next::Continue;
         }
+        Admission::Halt(on) => return Next::Halt(on),
     };
 
-    let info = msg.info().ok();
-    let stream_seq = info.as_ref().map(|info| info.stream_sequence);
     // JetStream counts the first delivery as 1. A message whose
     // metadata could not be read is treated as a first delivery, which
     // costs the shortest delay rather than the longest — the wrong way
@@ -458,6 +569,7 @@ async fn handle_message<H, HFut>(
             }
         }
     }
+    Next::Continue
 }
 
 #[cfg(test)]

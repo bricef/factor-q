@@ -37,7 +37,8 @@
         "num_pending": #,
         "num_redelivered": #,
         "redeliveries": #,
-        "stuck": false
+        "stuck": false,
+        "malformed_acked": 0
       }
     },
     {
@@ -49,7 +50,8 @@
         "num_pending": #,
         "num_redelivered": #,
         "redeliveries": #,
-        "stuck": false
+        "stuck": false,
+        "malformed_acked": 0
       }
     },
     {
@@ -61,7 +63,8 @@
         "num_pending": #,
         "num_redelivered": #,
         "redeliveries": #,
-        "stuck": false
+        "stuck": false,
+        "malformed_acked": 0
       }
     },
     {
@@ -73,7 +76,8 @@
         "num_pending": #,
         "num_redelivered": #,
         "redeliveries": #,
-        "stuck": false
+        "stuck": false,
+        "malformed_acked": 0
       }
     },
     {
@@ -85,7 +89,8 @@
         "num_pending": #,
         "num_redelivered": #,
         "redeliveries": #,
-        "stuck": false
+        "stuck": false,
+        "malformed_acked": 0
       }
     }
   ],

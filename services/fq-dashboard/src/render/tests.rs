@@ -33,6 +33,44 @@ fn health_shows_redelivery_pressure() {
     assert!(html.contains("redelivered 4"), "got: {html}");
 }
 
+/// A consumer halted on an event it cannot read is a red cell that
+/// names the version gap and where the consumer stopped — not a lag
+/// figure, which would only ever grow — and a consumer that acked
+/// malformed messages says how many beside its pending counts.
+#[test]
+fn health_shows_a_halted_consumer_and_the_malformed_count() {
+    use fq_ops::health::{ConsumerHealth, StreamHealth, UnsupportedEvent};
+
+    let mut status = crate::fixtures::status_report();
+    let Some(StreamHealth::Available { consumers, .. }) = status.streams.first_mut() else {
+        panic!("the fixture's first stream is available");
+    };
+    consumers.push(ConsumerHealth::Halted {
+        name: "fq-summary".to_string(),
+        halted_on: UnsupportedEvent {
+            schema_version: 2,
+            supported: vec![3],
+            event_id: Some("01990000-0000-7000-8000-000000000002".to_string()),
+            subject: "fq.agent.researcher.completed".to_string(),
+            stream_seq: Some(60_745),
+        },
+        malformed_acked: 0,
+    });
+    if let Some(ConsumerHealth::Active {
+        malformed_acked, ..
+    }) = consumers.first_mut()
+    {
+        *malformed_acked = 2;
+    }
+    let html = health(&status, &crate::fixtures::doctor_report());
+    assert!(
+        html.contains("✗ halted on schema_version 2 (reads [3])"),
+        "got: {html}"
+    );
+    assert!(html.contains("seq 60745 unacked"), "got: {html}");
+    assert!(html.contains("malformed acked 2"), "got: {html}");
+}
+
 #[test]
 fn esc_neutralises_html() {
     assert_eq!(

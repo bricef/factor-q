@@ -139,6 +139,7 @@ pub(crate) fn register_doctor_report(
                     &bus.jetstream(),
                     summary_enabled,
                     bus.redelivery_policy(),
+                    bus.consumer_ledger(),
                 )
                 .await;
                 Ok(build_doctor_report(
