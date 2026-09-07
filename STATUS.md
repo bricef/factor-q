@@ -101,7 +101,11 @@ it is the licence to keep changing shape quickly.
   one volume restorable — the build-out is
   [#587](https://github.com/bricef/factor-q/issues/587). The live
   dogfood instance has not been moved onto the stack yet; the runbook is
-  in [ops/dogfood](ops/dogfood/README.md).
+  in [ops/dogfood](ops/dogfood/README.md), and the move itself —
+  pre-flight, the restore set, the day's sequence, acceptance, rollback
+  and retirement — is the
+  [dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
+  (opened 2026-09-05).
 
 ## Where we are
 
