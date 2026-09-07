@@ -19,10 +19,10 @@
 #              beyond this is a defect in the daemon.
 #   dogfood    `minimal`'s binaries on Debian with the toolchain the fleet's
 #              agents run inside their invocations (`just ci`: cargo, go,
-#              node, just, gh, git, jq, nats-server, sccache). The
-#              transitional shape while worker and control plane share a
-#              process (clause 4); when they split, only the worker image
-#              carries this.
+#              node, just, gh, git, jq, nats-server, sccache, cargo-audit,
+#              cargo-deny). The transitional shape while worker and control
+#              plane share a process (clause 4); when they split, only the
+#              worker image carries this.
 #   watcher, cron, dashboard
 #              one static binary each on distroless/static.
 #
@@ -137,11 +137,24 @@ FROM node:20-bookworm-slim AS node-toolchain
 # Release binaries fetched with their published checksums. nats-server is
 # verified against the repo's own `.nats-checksums`, exactly as
 # `just install-nats` does; the others against the checksum file their
-# release publishes. Versions are ARGs so a bump is one line.
+# release publishes — except cargo-audit, whose release publishes none, so
+# its digest is recorded here beside the version the way `.nats-checksums`
+# records nats-server's. Versions are ARGs so a bump is one line.
+#
+# cargo-audit and cargo-deny are the audit phase of `just ci`, which the
+# fleet's agents run in this image: `just audit` refuses to run unless the
+# tools on PATH are EXACTLY the versions the justfile pins, so these two
+# ARGs are copies of `cargo_audit_version` / `cargo_deny_version` and
+# `just check-pins` fails when a copy drifts. cargo finds them as external
+# subcommands on PATH, so /usr/local/bin/cargo-{audit,deny} is all
+# `cargo audit` / `cargo deny` need.
 FROM debian:bookworm-slim AS tools
 ARG JUST_VERSION=1.40.0
 ARG GH_VERSION=2.74.0
 ARG SCCACHE_VERSION=0.10.0
+ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_AUDIT_SHA256=7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+ARG CARGO_DENY_VERSION=0.20.2
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
@@ -173,7 +186,21 @@ RUN set -eu; \
     echo "$(cut -d' ' -f1 sccache.sum)  ${file}" | sha256sum -c -; \
     tar -xzf "$file" --strip-components=1 "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache"; \
     \
-    mkdir -p /out && install -m 755 nats-server just gh sccache /out/
+    dir="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"; \
+    file="${dir}.tar.gz"; \
+    base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}"; \
+    curl -sfLO "${base}/${file}"; curl -sfL "${base}/${file}.sha256" -o deny.sum; \
+    echo "$(cut -d' ' -f1 deny.sum)  ${file}" | sha256sum -c -; \
+    tar -xzf "$file" --strip-components=1 "${dir}/cargo-deny"; \
+    \
+    dir="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"; \
+    file="${dir}.tgz"; \
+    base="https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}"; \
+    curl -sfLO "${base}/${file}"; \
+    echo "${CARGO_AUDIT_SHA256}  ${file}" | sha256sum -c -; \
+    tar -xzf "$file" --strip-components=1 "${dir}/cargo-audit"; \
+    \
+    mkdir -p /out && install -m 755 nats-server just gh sccache cargo-deny cargo-audit /out/
 
 # --- dogfood ------------------------------------------------------------------
 #
@@ -200,6 +227,15 @@ COPY --from=minimal /usr/local/bin/fqd /usr/local/bin/fqd
 COPY --from=minimal /usr/local/bin/fq  /usr/local/bin/fq
 COPY --from=layout --chown=65532:65532 /out/var/lib/factor-q /var/lib/factor-q
 COPY --from=tools /out/ /usr/local/bin/
+
+# A fresh volume has no git configuration, and `gh repo clone` authenticates
+# itself while a bare `git push` over HTTPS does not: git reads no GH_TOKEN
+# and asks for a username nobody is there to type. `gh auth git-credential`
+# is the bridge, wired in at the system level so it holds for every agent on
+# every fresh volume; the empty `helper =` first clears anything inherited.
+# Identity is NOT set here — who a commit is by belongs to the definition
+# that makes it, not to the image every definition shares.
+COPY --chmod=644 services/fq-runtime/gitconfig /etc/gitconfig
 
 # Rust: the toolchain's REAL binaries are linked into /usr/local/bin, not
 # rustup's proxies. The `exec` tool starts agents' processes with a fixed

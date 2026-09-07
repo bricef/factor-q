@@ -1,0 +1,13 @@
+# Shipped to /etc/gitconfig in the `dogfood` image (services/fq-runtime/
+# Dockerfile). `gh` holds the credential; plain `git` over HTTPS otherwise
+# has none and asks for a username no agent can answer. The empty helper
+# clears any inherited one so this is the only helper in play.
+#
+# Nothing else belongs here: user.name and user.email are the agent
+# definition's to set, per definition, not the image's for all of them.
+[credential "https://github.com"]
+	helper =
+	helper = !/usr/local/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper =
+	helper = !/usr/local/bin/gh auth git-credential
