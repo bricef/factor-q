@@ -49,14 +49,20 @@
       "event_count": 3,
       "total_cost": 0.016300000000000002,
       "total_input_tokens": 3600,
-      "total_output_tokens": 1020
+      "total_output_tokens": 1020,
+      "total_cache_read_tokens": 0,
+      "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": 40
     },
     {
       "model": "cheap-model",
       "event_count": 1,
       "total_cost": 0.0009,
       "total_input_tokens": 400,
-      "total_output_tokens": 20
+      "total_output_tokens": 20,
+      "total_cache_read_tokens": 0,
+      "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": null
     }
   ],
   "total_cost": 0.017200000000000003,

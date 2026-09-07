@@ -101,6 +101,34 @@ fn invocation_cost_view_parses_rfc3339_start() {
     assert_eq!(bad.started_at_ms, 0);
 }
 
+/// The per-model row reaches its view with the cache figures and the
+/// split intact: a reported split as itself, a reported zero as a
+/// zero, an unreported one as `None` — never as a zero.
+#[test]
+fn model_cost_row_maps_to_view() {
+    let row = |reasoning: Option<i64>| ModelCostSummary {
+        model: "kimi-k3".into(),
+        event_count: 2,
+        total_cost: 0.15,
+        total_input_tokens: 200,
+        total_output_tokens: 100,
+        total_cache_read_tokens: 40,
+        total_cache_write_tokens: 20,
+        total_reasoning_tokens: reasoning,
+    };
+    let view = ModelCostView::from(row(Some(45)));
+    assert_eq!(view.model, "kimi-k3");
+    assert_eq!(view.event_count, 2);
+    assert_eq!(view.total_cache_read_tokens, 40);
+    assert_eq!(view.total_cache_write_tokens, 20);
+    assert_eq!(view.total_reasoning_tokens, Some(45));
+    assert_eq!(ModelCostView::from(row(None)).total_reasoning_tokens, None);
+    assert_eq!(
+        ModelCostView::from(row(Some(0))).total_reasoning_tokens,
+        Some(0)
+    );
+}
+
 /// The command gist: argv arrays join, strings pass through,
 /// absent/odd shapes are None, and the cap truncates on a char
 /// boundary with an ellipsis.
@@ -677,6 +705,18 @@ fn costed_response(
     cost: f64,
     reasoning_tokens: Option<u32>,
 ) -> crate::events::Event {
+    costed_response_on("m", agent, inv, cost, reasoning_tokens)
+}
+
+/// As above, on a named model, with a little cache traffic (20 read,
+/// 10 written) so the per-model figures have something to carry.
+fn costed_response_on(
+    model: &str,
+    agent: &str,
+    inv: uuid::Uuid,
+    cost: f64,
+    reasoning_tokens: Option<u32>,
+) -> crate::events::Event {
     use crate::events::{
         AssistantPart, CostMetadata, Event, EventPayload, LlmCallOrigin, LlmResponsePayload,
         StopReason, TokenUsage,
@@ -695,19 +735,19 @@ fn costed_response(
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
+                cache_read_tokens: 20,
+                cache_write_tokens: 10,
                 reasoning_tokens,
             },
         }),
     )
     .with_cost(CostMetadata {
         call_id: uuid::Uuid::now_v7(),
-        model: "m".to_string(),
+        model: model.to_string(),
         input_tokens: 100,
         output_tokens: 50,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
+        cache_read_tokens: 20,
+        cache_write_tokens: 10,
         input_cost: cost / 2.0,
         output_cost: cost / 2.0,
         total_cost: cost,
@@ -803,4 +843,93 @@ async fn cost_report_reasoning_total_folds_unreported_splits_away() {
         None,
         "an Anthropic invocation shows no split, not a zero"
     );
+}
+
+/// The per-model rows of the fleet report and of the drill-down carry
+/// the split per model, under the rule the per-agent rows follow: the
+/// model whose calls reported one has their sum, the model none of
+/// whose calls did has `None`, a reported zero stays `Some(0)` — and a
+/// subtotal over the model rows folds with `sum_reported` to the same
+/// figure the agent rows fold to, never to a zero.
+#[tokio::test]
+async fn cost_report_models_carry_the_split_per_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = RuntimeDbPaths::under(dir.path());
+    {
+        let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+        let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+        let proj = ProjectionStore::open(&paths.projection).await.unwrap();
+        let inv = uuid::Uuid::now_v7;
+        for event in [
+            costed_response_on("claude-opus", "anthropic-agent", inv(), 0.1, None),
+            costed_response_on("kimi-k3", "kimi-agent", inv(), 0.2, Some(45)),
+            costed_response_on("kimi-k3", "kimi-agent", inv(), 0.2, None),
+            costed_response_on("gemini-pro", "gemini-agent", inv(), 0.3, Some(0)),
+        ] {
+            proj.insert_event(&event, None).await.unwrap();
+        }
+    }
+    let views = Views::open(&paths).await.unwrap();
+    let fold = |models: &[ModelCostView]| {
+        models
+            .iter()
+            .fold(None, |acc, m| sum_reported(acc, m.total_reasoning_tokens))
+    };
+
+    let report = views.costs(None, None, false).await.unwrap();
+    let by_model = |name: &str| {
+        report
+            .models
+            .iter()
+            .find(|m| m.model == name)
+            .unwrap_or_else(|| panic!("{name} has a model row"))
+    };
+    assert_eq!(
+        by_model("claude-opus").total_reasoning_tokens,
+        None,
+        "no call of this model reported a split"
+    );
+    assert_eq!(
+        by_model("kimi-k3").total_reasoning_tokens,
+        Some(45),
+        "None + Some(45) within the model"
+    );
+    assert_eq!(
+        by_model("gemini-pro").total_reasoning_tokens,
+        Some(0),
+        "a reported zero is a report"
+    );
+    // The cache figures ride along, summed per model.
+    assert_eq!(by_model("kimi-k3").total_cache_read_tokens, 40);
+    assert_eq!(by_model("kimi-k3").total_cache_write_tokens, 20);
+    // A subtotal over the model rows is the fleet's figure, by the
+    // same fold the agent rows use.
+    assert_eq!(fold(&report.models), Some(45));
+    assert_eq!(fold(&report.models), report.total_reasoning_tokens);
+
+    // Narrowed to the agent that reported nothing: its one model has no
+    // split, and neither has a subtotal over it — not a zero.
+    let report = views
+        .costs(Some("anthropic-agent"), None, false)
+        .await
+        .unwrap();
+    assert_eq!(report.models.len(), 1);
+    assert_eq!(report.models[0].total_reasoning_tokens, None);
+    assert_eq!(fold(&report.models), None);
+
+    // The drill-down's per-model rows are the same rows.
+    let detail = views
+        .agent_costs("kimi-agent", None, 10)
+        .await
+        .unwrap()
+        .expect("kimi-agent has cost rows");
+    assert_eq!(detail.models[0].model, "kimi-k3");
+    assert_eq!(detail.models[0].total_reasoning_tokens, Some(45));
+    assert_eq!(detail.models[0].total_cache_read_tokens, 40);
+    let detail = views
+        .agent_costs("anthropic-agent", None, 10)
+        .await
+        .unwrap()
+        .expect("anthropic-agent has cost rows");
+    assert_eq!(detail.models[0].total_reasoning_tokens, None);
 }

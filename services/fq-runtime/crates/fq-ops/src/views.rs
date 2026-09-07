@@ -285,6 +285,15 @@ pub struct ModelCostView {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
+    /// Reasoning tokens over this model's calls that reported a
+    /// thought-versus-spoken split — part of `total_output_tokens`, not
+    /// in addition to it. `None` (`null` on the wire) when none did,
+    /// which is every Anthropic model; that is not `0`, a provider that
+    /// reported none were spent. Per model this is the telling split:
+    /// a reasoning-first model's bill is mostly thinking.
+    pub total_reasoning_tokens: Option<i64>,
 }
 
 /// One agent's cost drill-down: its own totals plus per-model and
