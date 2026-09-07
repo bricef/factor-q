@@ -17,7 +17,10 @@ fn bounds(ceiling: usize) -> ThrottleBounds {
 }
 
 fn throttle(ceiling: usize) -> Arc<ModelThrottle> {
-    Arc::new(ModelThrottle::new(ThrottleConfig::default(), bounds(ceiling)))
+    Arc::new(ModelThrottle::new(
+        ThrottleConfig::default(),
+        bounds(ceiling),
+    ))
 }
 
 fn state(t: &ModelThrottle, model: &str) -> ModelState {
@@ -44,7 +47,11 @@ async fn succeeded(t: &Arc<ModelThrottle>, model: &str) {
 #[tokio::test(start_paused = true)]
 async fn a_retry_after_sets_the_pause_the_provider_asked_for() {
     let t = throttle(4);
-    assert_eq!(t.pause_remaining("m"), None, "nothing is paused to begin with");
+    assert_eq!(
+        t.pause_remaining("m"),
+        None,
+        "nothing is paused to begin with"
+    );
     rate_limited(&t, "m", Some(5 * SECOND)).await;
     assert_eq!(t.pause_remaining("m"), Some(5 * SECOND));
     tokio::time::advance(5 * SECOND).await;
@@ -273,14 +280,21 @@ async fn the_deferral_delay_is_the_largest_of_ask_escalation_and_pause() {
 async fn the_snapshot_lists_only_throttled_models() {
     let t = throttle(4);
     succeeded(&t, "clean").await;
-    assert!(t.snapshot(1_000).is_empty(), "a model that only succeeds is not listed");
+    assert!(
+        t.snapshot(1_000).is_empty(),
+        "a model that only succeeds is not listed"
+    );
 
     rate_limited(&t, "b-paused", Some(5 * SECOND)).await;
     let listed = t.snapshot(1_000);
     assert_eq!(listed.len(), 1);
     let m = &listed[0];
     assert_eq!(m.model, "b-paused");
-    assert_eq!(m.paused_until_ms, Some(6_000), "the pause end on the caller's clock");
+    assert_eq!(
+        m.paused_until_ms,
+        Some(6_000),
+        "the pause end on the caller's clock"
+    );
     assert_eq!((m.cap, m.ceiling, m.in_flight), (2, 4, 0));
     assert_eq!((m.rate_limited_in_window, m.waves), (1, 1));
 
@@ -290,7 +304,11 @@ async fn the_snapshot_lists_only_throttled_models() {
     succeeded(&t, "b-paused").await;
     let held = t.acquire("a-under").await;
     let listed = t.snapshot(1_000);
-    assert_eq!(listed.len(), 1, "an in-flight call on a clean model is not throttling");
+    assert_eq!(
+        listed.len(),
+        1,
+        "an in-flight call on a clean model is not throttling"
+    );
     assert_eq!(listed[0].paused_until_ms, None);
     assert_eq!(listed[0].cap, 2);
     drop(held);
@@ -363,15 +381,26 @@ async fn the_client_settles_every_outcome() {
     let err = client.chat(request("m")).await.expect_err("scripted 429");
     assert!(matches!(err, LlmError::RateLimited { .. }));
     let s = state(&t, "m");
-    assert_eq!((s.in_flight, s.cap), (0, 2), "the permit came back and the cap halved");
+    assert_eq!(
+        (s.in_flight, s.cap),
+        (0, 2),
+        "the permit came back and the cap halved"
+    );
     assert_eq!(t.pause_remaining("m"), Some(4 * SECOND));
 
     // The next call waits out the pause; the 503 is a plain failure.
     let started = Instant::now();
     client.chat(request("m")).await.expect_err("scripted 503");
-    assert!(started.elapsed() >= 4 * SECOND, "the call waited for the pause");
+    assert!(
+        started.elapsed() >= 4 * SECOND,
+        "the call waited for the pause"
+    );
     let s = state(&t, "m");
-    assert_eq!((s.in_flight, s.cap, s.waves), (0, 2, 1), "a 503 moves nothing");
+    assert_eq!(
+        (s.in_flight, s.cap, s.waves),
+        (0, 2, 1),
+        "a 503 moves nothing"
+    );
 
     client.chat(request("m")).await.expect("scripted success");
     let s = state(&t, "m");
@@ -444,7 +473,11 @@ async fn a_burst_against_a_rate_limited_provider_is_throttled_not_failed() {
         .filter(|a| a.rate_limits_served_before > 0)
         .map(|a| a.in_flight)
         .collect();
-    assert_eq!(after_first_429.len(), 5, "the five retries came after the first 429");
+    assert_eq!(
+        after_first_429.len(),
+        5,
+        "the five retries came after the first 429"
+    );
     let peak = after_first_429.iter().copied().max().unwrap_or(0);
     assert!(
         peak <= cap_after_one_wave,

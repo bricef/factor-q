@@ -34,7 +34,9 @@ impl TriggerDispatcher {
             Ok(InvocationOutcome::Deferred {
                 invocation_id,
                 resume_after,
-            }) => self.deferrals.defer(invocation_id, due.agent_id, resume_after),
+            }) => self
+                .deferrals
+                .defer(invocation_id, due.agent_id, resume_after),
             Ok(outcome) => debug!(
                 invocation_id = %due.invocation_id,
                 ?outcome,

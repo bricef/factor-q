@@ -1510,7 +1510,11 @@ mod resume_equivalence {
         };
         for call in 0..=turns {
             let resumed = run_deferred(4321, turns, call).await;
-            assert_equivalent(&reference, &resumed, &format!("deferred at model call {call}"));
+            assert_equivalent(
+                &reference,
+                &resumed,
+                &format!("deferred at model call {call}"),
+            );
         }
     }
 
@@ -2604,7 +2608,8 @@ mod soak {
                             assert!((cost - wal_sum).abs() < 1e-9, "seed {seed}");
                             label = "budget_exceeded";
                         }
-                        InvocationOutcome::Suspended { .. } | InvocationOutcome::Deferred { .. } => {
+                        InvocationOutcome::Suspended { .. }
+                        | InvocationOutcome::Deferred { .. } => {
                             panic!("unexpected suspend or deferral at seed {seed}");
                         }
                     }

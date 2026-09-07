@@ -4729,12 +4729,12 @@ async fn a_rate_limit_past_the_cap_defers_the_invocation_and_a_resume_completes_
         .expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
     async fn drain(
-        sub: &mut (impl futures::Stream<Item = Result<crate::events::Event, crate::bus::BusError>>
-                  + Unpin),
+        sub: &mut (
+                 impl futures::Stream<Item = Result<crate::events::Event, crate::bus::BusError>> + Unpin
+             ),
     ) -> Vec<crate::events::Event> {
         let mut events = Vec::new();
-        while let Ok(Some(next)) = tokio::time::timeout(Duration::from_secs(2), sub.next()).await
-        {
+        while let Ok(Some(next)) = tokio::time::timeout(Duration::from_secs(2), sub.next()).await {
             events.push(next.expect("event deserialises"));
         }
         events
@@ -4825,7 +4825,10 @@ async fn a_rate_limit_past_the_cap_defers_the_invocation_and_a_resume_completes_
         .await
         .expect("read the row")
         .expect("still present until archived");
-    assert!(row.terminal_at.is_some(), "terminal after the resume completed");
+    assert!(
+        row.terminal_at.is_some(),
+        "terminal after the resume completed"
+    );
 
     // The whole trail, both incarnations, is one canonical invocation.
     let mut trail = events;
