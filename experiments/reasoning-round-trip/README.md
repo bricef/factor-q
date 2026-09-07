@@ -177,8 +177,9 @@ follows, so the default task opens with a mental step before the first tool call
 (see [the nightly's first run](#the-nightlys-first-run-and-the-task-that-reasons-2026-09-07));
 a red that still says "no reasoning part was carried" means the model chose not to
 think that night, so rerun once before treating it as a bug. An arm whose invocation
-failed on a provider 5xx through the runtime's retry budget is triggered once more after
-a minute, and the verdict judges the arm's latest invocation, naming the superseded one.
+failed on a provider 5xx or 429 through the runtime's retry budget is triggered once more
+after a minute, and the verdict judges the arm's latest invocation, naming the superseded
+one.
 `VERIFY=0` skips the verdict for a `TASK=` probe whose arms are being read some other
 way. With `AISTUDIO_API_KEY` set the [Gemini arm](#gemini-live-2026-09-07-hermetic-only-from-2026-09-05)
 runs as well.
@@ -231,9 +232,12 @@ passes the secret through and warns while it is absent. No effort is set: Gemini
 thinks by default and signs every function call, and the readable summary rides on the
 adapter's capture flag (`includeThoughts`). The free tier is enough — the 3.1 Pro
 previews are quota-blocked on it, and the 2.5 generation is retired for new users — but
-it answers `503 UNAVAILABLE` ("high demand") for minutes at a time, which is why the
-harness re-triggers an arm once when the provider was unavailable through the runtime's
-whole retry budget, and the verdict judges an arm's latest invocation.
+it answers `503 UNAVAILABLE` ("high demand") for minutes at a time, and it allows 5
+requests a minute and 20 a day per model (measured 2026-09-07; the daily count resets at
+07:00 UTC, after the nightly), which is why the harness re-triggers an arm once when the
+provider had no capacity — a 5xx or a 429 — through the runtime's whole retry budget,
+and the verdict judges an arm's latest invocation. Probing by hand on the arm's model
+spends the nightly's day; probe on a sibling model instead.
 
 **Two runs, same task as the other arms** (`~/factor-q-live-runs/2026-09-07-gemini-arm/`
 and `-2/`):
