@@ -42,19 +42,25 @@
 //! event stream, so downstream consumers (the projection, tailers)
 //! see the failure even though the trigger is acked.
 
+mod admission;
+mod dead_letter;
+mod deferral;
+
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, Semaphore, oneshot};
+use tokio::sync::{RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
-use crate::events::{Event, EventPayload, FailureKind, FailurePhase, InvocationTotals};
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
-use crate::worker::{DrainState, DurableStart, ExecutorError, Worker};
+use crate::worker::{
+    DeferralQueue, DrainState, DueResume, DurableStart, ExecutorError, InvocationOutcome, Worker,
+};
 
 /// Name of the durable JetStream consumer the dispatcher creates.
 pub const CONSUMER_NAME: &str = "fq-dispatcher";
@@ -166,6 +172,20 @@ pub struct TriggerDispatcher {
     /// In-executor fan-out bound (#70): how many invocations this
     /// dispatcher runs concurrently. `1` is the serial behavior.
     max_concurrent: usize,
+    /// The worker's provider throttle (#278): asked before every
+    /// invocation starts, so a paused model's trigger is held rather
+    /// than run. Inert unless [`Self::with_throttle`] hands in the
+    /// daemon's.
+    throttle: Arc<ModelThrottle>,
+    /// Where a deferred invocation is put down and picked up again
+    /// (#278): `handle` defers into it, the consume loop drains it under
+    /// the same permit triggers run on.
+    deferrals: DeferralQueue,
+    /// The queue's drain end, taken by the loop when it starts.
+    due: std::sync::Mutex<Option<mpsc::Receiver<DueResume>>>,
+    /// Set once the loop has seen its shutdown signal, so a trigger held
+    /// for a paused model lets go rather than blocking the stop.
+    stopping: AtomicBool,
 }
 
 impl TriggerDispatcher {
@@ -176,13 +196,37 @@ impl TriggerDispatcher {
         llm: Arc<dyn LlmClient>,
         max_concurrent: usize,
     ) -> Self {
+        let (deferrals, due) = DeferralQueue::new();
         Self {
             bus,
             registry,
             worker,
             llm,
             max_concurrent: max_concurrent.max(1),
+            throttle: Arc::new(ModelThrottle::inert()),
+            deferrals,
+            due: std::sync::Mutex::new(Some(due)),
+            stopping: AtomicBool::new(false),
         }
+    }
+
+    /// Share the daemon's throttle, so the hold on a paused model's
+    /// triggers and the permits its calls take agree on one state.
+    pub fn with_throttle(mut self, throttle: Arc<ModelThrottle>) -> Self {
+        self.throttle = throttle;
+        self
+    }
+
+    /// Share the daemon's deferral queue, so a resume deferred by
+    /// startup recovery or `fq invocation resume` is drained here too.
+    pub fn with_deferrals(
+        mut self,
+        deferrals: DeferralQueue,
+        due: mpsc::Receiver<DueResume>,
+    ) -> Self {
+        self.deferrals = deferrals;
+        self.due = std::sync::Mutex::new(Some(due));
+        self
     }
 
     /// Run the dispatcher loop until `shutdown` fires.
@@ -255,6 +299,14 @@ impl TriggerDispatcher {
         let this = Arc::new(self);
         let semaphore = Arc::new(Semaphore::new(this.max_concurrent));
         let mut in_flight: JoinSet<()> = JoinSet::new();
+        // Deferred invocations come back through here (#278), under the
+        // same permit a trigger takes.
+        let mut due = this
+            .due
+            .lock()
+            .expect("dispatcher deferral lock poisoned")
+            .take()
+            .expect("a dispatcher runs its consume loop once");
 
         'consume: loop {
             // Reap finished invocations so the set doesn't accumulate
@@ -299,6 +351,13 @@ impl TriggerDispatcher {
                     info!("trigger dispatcher received shutdown signal");
                     break 'consume;
                 }
+                Some(resume) = due.recv() => {
+                    let dispatcher = Arc::clone(&this);
+                    in_flight.spawn(async move {
+                        dispatcher.resume_deferred(resume).await;
+                        drop(permit);
+                    });
+                }
                 msg = messages.next() => {
                     match msg {
                         Some(Ok(msg)) => {
@@ -330,7 +389,9 @@ impl TriggerDispatcher {
         // the shared signal), so this completes promptly; on shutdown it
         // mirrors the pre-fan-out behavior, where `run` never returned
         // mid-invocation. The daemon awaits `run` through its
-        // dispatcher handle, so teardown ordering is unchanged.
+        // dispatcher handle, so teardown ordering is unchanged. A
+        // trigger held for a paused model lets go on this flag.
+        this.stopping.store(true, Ordering::SeqCst);
         while let Some(joined) = in_flight.join_next().await {
             log_invocation_task(joined);
         }
@@ -429,6 +490,16 @@ impl TriggerDispatcher {
                 return;
             }
         };
+
+        // Admission (#278): a paused model starts no invocation. The
+        // trigger is held here, un-acked and un-started, until the
+        // pause ends; a drain or shutdown meanwhile leaves it for the
+        // next binary.
+        let header_id = crate::trigger::trigger_id_in(msg.headers.as_ref());
+        if self.admit(msg, loaded.agent.model(), header_id).await == admission::Admission::Interrupted
+        {
+            return;
+        }
 
         // Parse the payload as JSON. Empty body becomes null.
         let payload: serde_json::Value = if msg.payload.is_empty() {
@@ -581,16 +652,26 @@ impl TriggerDispatcher {
             }
         }
 
-        if let Err(err) = result {
-            // The executor already emitted a Failed event; the trigger is
-            // acked and the WAL owns recovery, so there is nothing to
-            // redeliver.
-            warn!(
-                agent_id = %agent_id,
-                error = %err,
-                "executor returned an error for NATS-triggered run"
-            );
-            self.log_executor_error(&err);
+        match result {
+            // Put down for a rate limit (#278): the trigger was acked at
+            // the first WAL write, the row is in flight, and the resume
+            // is this dispatcher's to run after the delay.
+            Ok(InvocationOutcome::Deferred {
+                invocation_id,
+                resume_after,
+            }) => self.deferrals.defer(invocation_id, agent_id, resume_after),
+            Ok(_) => {}
+            Err(err) => {
+                // The executor already emitted a Failed event; the
+                // trigger is acked and the WAL owns recovery, so there
+                // is nothing to redeliver.
+                warn!(
+                    agent_id = %agent_id,
+                    error = %err,
+                    "executor returned an error for NATS-triggered run"
+                );
+                self.log_executor_error(&err);
+            }
         }
     }
 
@@ -607,85 +688,6 @@ impl TriggerDispatcher {
                 subject = %msg.subject,
                 trigger_id = %trigger_name(trigger_id),
                 "failed to ack trigger message"
-            );
-        }
-    }
-
-    /// Emit a terminal failure event before consuming an exhausted transient
-    /// trigger. This is the dead-letter surface for the trigger consumer:
-    /// the original trigger remains available in JetStream until its normal
-    /// retention expiry, while the terminal event makes the exhaustion
-    /// visible to the projection and operators (`fq doctor` counts the
-    /// `trigger_exhausted` kind; the annotations carry what a requeue
-    /// needs).
-    ///
-    /// This is the *fast path*: it fires only when the final delivery
-    /// reaches a live dispatcher and fails there, and its ACK
-    /// suppresses the server's MAX_DELIVERIES advisory (probed
-    /// empirically, #169) — so the two emitters are mutually exclusive
-    /// in every non-crash path. Exhaustion this dispatcher never
-    /// observes (a crash during the final delivery; a pre-bound poison
-    /// trigger at upgrade time) is surfaced by the advisory watch
-    /// ([`super::advisory_watch`]) from the durable capture stream.
-    /// The shared `trigger_stream_seq` annotation reconciles the two.
-    #[allow(clippy::too_many_arguments)]
-    async fn dead_letter_exhausted(
-        &self,
-        agent_id: &AgentId,
-        trigger_subject: &str,
-        trigger_id: uuid::Uuid,
-        trigger_payload: &serde_json::Value,
-        stream_seq: u64,
-        delivery_attempt: u32,
-        err: &ExecutorError,
-    ) {
-        let event = Event::new(
-            agent_id.clone(),
-            uuid::Uuid::now_v7(),
-            EventPayload::Failed(crate::events::FailedPayload {
-                error_kind: FailureKind::TriggerExhausted,
-                error_message: format!(
-                    "trigger exhausted after {delivery_attempt} deliveries (limit {TRIGGER_MAX_DELIVER}): {err}"
-                ),
-                phase: FailurePhase::Setup,
-                partial_totals: InvocationTotals::default(),
-            }),
-        )
-        .annotate(
-            crate::dead_letter::DEAD_LETTER_SUBJECT_KEY,
-            serde_json::Value::String(trigger_subject.to_string()),
-        )
-        .annotate(
-            crate::dead_letter::DEAD_LETTER_PAYLOAD_KEY,
-            trigger_payload.clone(),
-        )
-        .annotate(
-            crate::dead_letter::DEAD_LETTER_STREAM_SEQ_KEY,
-            serde_json::json!(stream_seq),
-        )
-        // The name of the trigger that died, next to the position of
-        // it. This path always has one: the dispatcher honoured or
-        // assigned it before the invocation started.
-        .annotate(
-            crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY,
-            serde_json::Value::String(trigger_id.to_string()),
-        )
-        .annotate(
-            crate::dead_letter::DEAD_LETTER_SOURCE_KEY,
-            serde_json::Value::String("inline".to_string()),
-        );
-        if let Err(publish_err) = self.bus.publish(&event).await {
-            error!(
-                agent_id = %agent_id,
-                delivery_attempt,
-                error = %publish_err,
-                "failed to publish exhausted trigger dead-letter event"
-            );
-        } else {
-            error!(
-                agent_id = %agent_id,
-                delivery_attempt,
-                "trigger retry limit exhausted; emitted terminal dead-letter event"
             );
         }
     }
@@ -767,7 +769,7 @@ pub enum DispatcherError {
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
-    use crate::events::{StopReason, TokenUsage};
+    use crate::events::{EventPayload, FailureKind, StopReason, TokenUsage};
     use crate::llm::ChatResponse;
     use crate::llm::fixture::FixtureClient;
     use crate::pricing::{ModelPricing, PricingTable};
@@ -2080,5 +2082,344 @@ You are a test agent."#
             .expect("dispatcher joins in-flight work and exits")
             .expect("task joins");
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // ---- #278: admission for a paused model, and the deferral queue ----
+
+    /// A registry holding one agent on `claude-haiku`, and the tempdir
+    /// its definition was loaded from.
+    fn registry_with(agent_id_str: &str) -> (tempfile::TempDir, SharedRegistry) {
+        let mut registry = AgentRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join(format!("{agent_id_str}.md"));
+        std::fs::write(
+            &agent_path,
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+        registry.load_file(&agent_path);
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        (dir, shared_registry(registry))
+    }
+
+    /// A throttle whose `claude-haiku` is paused for `pause` from now.
+    async fn throttle_paused_for(pause: Duration) -> Arc<crate::llm::ModelThrottle> {
+        use crate::llm::{CallVerdict, ModelThrottle, ThrottleBounds, ThrottleConfig};
+        let throttle = Arc::new(ModelThrottle::new(
+            ThrottleConfig::default(),
+            ThrottleBounds {
+                ceiling: 1,
+                max_pause: Duration::from_secs(120),
+            },
+        ));
+        throttle
+            .acquire("claude-haiku")
+            .await
+            .settle(CallVerdict::RateLimited {
+                retry_after: Some(pause),
+            });
+        throttle
+    }
+
+    /// Records every start with its delivery attempt; drains on a flag.
+    #[derive(Default)]
+    struct RecordingWorker {
+        starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>)>>,
+        draining: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Worker for RecordingWorker {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            _trigger: Trigger,
+            delivery_attempt: Option<u32>,
+            mut durable_start: crate::worker::DurableStart,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            self.starts
+                .lock()
+                .unwrap()
+                .push((std::time::Instant::now(), delivery_attempt));
+            durable_start.fire();
+            Ok(crate::worker::InvocationOutcome::Completed {
+                invocation_id: Uuid::now_v7(),
+                response: canned_response(),
+                cost: 0.0,
+                duration_ms: 0,
+            })
+        }
+        async fn request_drain(&self, _req: crate::worker::DrainRequest) {
+            self.draining
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn drain_status(&self) -> crate::worker::DrainState {
+            if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::worker::DrainState::Draining
+            } else {
+                crate::worker::DrainState::Running
+            }
+        }
+    }
+
+    async fn wait_for_starts(worker: &RecordingWorker, n: usize, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        while worker.starts.lock().unwrap().len() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {n} start(s) within {within:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// #278 admission: a trigger for a paused model is not started while
+    /// the pause holds, is started once it lifts, and is still the first
+    /// delivery when it does. The pause is longer than the trigger
+    /// durable's one-second ack window and the dispatcher has a second
+    /// permit open, so this is also the proof that the hold keeps the
+    /// delivery alive: without the in-progress acks JetStream redelivers
+    /// at one second into that open pull and the worker sees a second
+    /// start (`a held trigger is started exactly once: left: 2`).
+    #[tokio::test]
+    async fn a_paused_models_trigger_is_held_and_started_once_after_the_pause() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("held-trigger");
+        let (_dir, registry) = registry_with(&agent_id_str);
+        let pause = Duration::from_millis(1500);
+        assert!(
+            pause > crate::bus::TRIGGER_RETRY_BACKOFF[0],
+            "the hold must outlast the ack window for this test to prove anything"
+        );
+        let throttle = throttle_paused_for(pause).await;
+        let paused_at = std::time::Instant::now();
+
+        let worker = Arc::new(RecordingWorker::default());
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let filter = crate::events::subjects::trigger(&agent_id_str);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        // Two permits, so a second pull is open while the first delivery
+        // is held: that is where a redelivered copy would land, which is
+        // the saturated-fleet shape of the redelivery storm.
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 2)
+            .with_throttle(throttle);
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, Some(&filter), shutdown_rx)
+                .await
+        });
+
+        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
+            .await
+            .expect("publish trigger");
+
+        wait_for_starts(&worker, 1, Duration::from_secs(8)).await;
+        let (started_at, attempt) = worker.starts.lock().unwrap()[0];
+        assert!(
+            started_at >= paused_at + pause - Duration::from_millis(50),
+            "started {:?} after the pause was set; the pause was {pause:?}",
+            started_at - paused_at
+        );
+        assert_eq!(attempt, Some(1), "held, not redelivered: still the first delivery");
+
+        // Past another ack window: a redelivered copy would start now.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            worker.starts.lock().unwrap().len(),
+            1,
+            "a held trigger is started exactly once"
+        );
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("dispatcher exits")
+            .expect("task joins")
+            .expect("clean exit");
+    }
+
+    /// A drain that lands during a hold releases the trigger un-acked
+    /// and un-started: the dispatcher exits on its own, the worker never
+    /// sees the invocation, and the broker still owns the delivery for
+    /// the next binary.
+    #[tokio::test]
+    async fn a_drain_during_a_hold_leaves_the_trigger_for_the_next_binary() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("held-then-drained");
+        let (_dir, registry) = registry_with(&agent_id_str);
+        let throttle = throttle_paused_for(Duration::from_secs(10)).await;
+
+        let worker = Arc::new(RecordingWorker::default());
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let filter = crate::events::subjects::trigger(&agent_id_str);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 1)
+            .with_throttle(throttle);
+        let run = {
+            let consumer_name = consumer_name.clone();
+            let filter = filter.clone();
+            tokio::spawn(async move {
+                dispatcher
+                    .run_on_consumer(&consumer_name, Some(&filter), shutdown_rx)
+                    .await
+            })
+        };
+
+        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
+            .await
+            .expect("publish trigger");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        worker
+            .request_drain(crate::worker::DrainRequest::new(
+                crate::worker::DrainReason::Deploy,
+            ))
+            .await;
+
+        // The hold notices the drain within a keepalive tick and the
+        // loop exits at its top, with no shutdown signal sent.
+        tokio::time::timeout(Duration::from_secs(3), run)
+            .await
+            .expect("a draining dispatcher lets a held trigger go and exits")
+            .expect("task joins")
+            .expect("clean exit");
+        assert!(
+            worker.starts.lock().unwrap().is_empty(),
+            "the held trigger must not start under a drain"
+        );
+
+        let mut consumer = bus
+            .trigger_consumer_with_filter(&consumer_name, &filter, 1000)
+            .await
+            .expect("the durable still exists");
+        let info = consumer.info().await.expect("consumer info");
+        assert_eq!(
+            info.num_ack_pending as u64 + info.num_pending,
+            1,
+            "the trigger is still the broker's to deliver: {info:?}"
+        );
+        drop(shutdown_tx);
+    }
+
+    /// Defers on its first start; records every resume; defers once
+    /// more on the first resume, then completes.
+    struct DeferringWorker {
+        invocation_id: Uuid,
+        deferred_at: std::sync::Mutex<Option<std::time::Instant>>,
+        resumes: std::sync::Mutex<Vec<(std::time::Instant, Uuid, AgentId)>>,
+    }
+    #[async_trait::async_trait]
+    impl Worker for DeferringWorker {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            _trigger: Trigger,
+            _delivery_attempt: Option<u32>,
+            mut durable_start: crate::worker::DurableStart,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            durable_start.fire();
+            *self.deferred_at.lock().unwrap() = Some(std::time::Instant::now());
+            Ok(crate::worker::InvocationOutcome::Deferred {
+                invocation_id: self.invocation_id,
+                resume_after: Duration::from_millis(400),
+            })
+        }
+        async fn resume_invocation(
+            &self,
+            agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            invocation_id: Uuid,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            let mut resumes = self.resumes.lock().unwrap();
+            resumes.push((std::time::Instant::now(), invocation_id, agent.id().clone()));
+            if resumes.len() == 1 {
+                return Ok(crate::worker::InvocationOutcome::Deferred {
+                    invocation_id,
+                    resume_after: Duration::from_millis(300),
+                });
+            }
+            Ok(crate::worker::InvocationOutcome::Completed {
+                invocation_id,
+                response: canned_response(),
+                cost: 0.0,
+                duration_ms: 0,
+            })
+        }
+        async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+        fn drain_status(&self) -> crate::worker::DrainState {
+            crate::worker::DrainState::Running
+        }
+    }
+
+    /// #278 deferral, the dispatcher's half: an invocation the worker
+    /// puts down is resumed by this dispatcher after its delay, with the
+    /// agent it belongs to; a resume that is deferred again is resumed
+    /// again. The trigger itself is acked at the first WAL write and
+    /// never redelivered.
+    #[tokio::test]
+    async fn a_deferred_invocation_is_resumed_by_the_dispatcher_after_its_delay() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("deferred");
+        let (_dir, registry) = registry_with(&agent_id_str);
+        let invocation_id = Uuid::now_v7();
+        let worker = Arc::new(DeferringWorker {
+            invocation_id,
+            deferred_at: std::sync::Mutex::new(None),
+            resumes: std::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let filter = crate::events::subjects::trigger(&agent_id_str);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 1);
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, Some(&filter), shutdown_rx)
+                .await
+        });
+
+        bus.publish_trigger(&AgentId::new(&agent_id_str).unwrap(), &json!({"input": "hi"}))
+            .await
+            .expect("publish trigger");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while worker.resumes.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "two resumes within 8s");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let deferred_at = worker.deferred_at.lock().unwrap().expect("deferred");
+        let resumes = worker.resumes.lock().unwrap().clone();
+        assert!(
+            resumes[0].0 >= deferred_at + Duration::from_millis(400) - Duration::from_millis(20),
+            "the first resume came {:?} after the deferral, before its 400ms delay",
+            resumes[0].0 - deferred_at
+        );
+        assert!(
+            resumes[1].0 >= resumes[0].0 + Duration::from_millis(300) - Duration::from_millis(20),
+            "the second resume came {:?} after the first, before its 300ms delay",
+            resumes[1].0 - resumes[0].0
+        );
+        for (_, id, agent) in &resumes {
+            assert_eq!(*id, invocation_id, "the resume names the deferred invocation");
+            assert_eq!(agent.as_str(), agent_id_str, "with the agent it belongs to");
+        }
+
+        // No redelivery: the trigger was acked at the durable start.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(worker.resumes.lock().unwrap().len(), 2);
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("dispatcher exits")
+            .expect("task joins")
+            .expect("clean exit");
     }
 }
