@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_runtime::control_plane::store::{
@@ -1290,7 +1292,7 @@ fn conversation_events() -> Vec<Event> {
 }
 
 struct EdgeFixture {
-    daemon: Option<std::process::Child>,
+    daemon: Option<TestChild>,
     dir: tempfile::TempDir,
     xdg: tempfile::TempDir,
     client_config: std::path::PathBuf,
@@ -1375,7 +1377,7 @@ impl EdgeFixture {
         let log_path = dir.path().join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let log_err = log.try_clone().expect("log handle");
-        let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+        let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
             .env("FQ_DAEMON_CONFIG", &daemon_config)
             .env("FQ_NATS_URL", broker.url())
             .env("FQ_CACHE_DIR", dir.path())
@@ -1385,8 +1387,7 @@ impl EdgeFixture {
             .env("NO_COLOR", "1")
             .stdout(std::process::Stdio::from(log))
             .stderr(std::process::Stdio::from(log_err))
-            .spawn()
-            .expect("spawn fqd");
+            .spawn();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let text = loop {
@@ -1707,9 +1708,7 @@ impl EdgeFixture {
     /// to nothing.
     fn stop_daemon(&mut self) {
         if let Some(mut daemon) = self.daemon.take() {
-            unsafe {
-                libc::kill(daemon.id() as i32, libc::SIGTERM);
-            }
+            let _ = daemon.signal(libc::SIGTERM);
             let _ = daemon.wait();
         }
     }
@@ -1751,17 +1750,6 @@ impl EdgeFixture {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
-    }
-}
-
-impl Drop for EdgeFixture {
-    fn drop(&mut self) {
-        if let Some(mut daemon) = self.daemon.take() {
-            unsafe {
-                libc::kill(daemon.id() as i32, libc::SIGTERM);
-            }
-            let _ = daemon.wait();
-        }
     }
 }
 
