@@ -177,10 +177,12 @@ fn invocation_deferred_is_agent_scoped_and_names_its_reason() {
     assert_eq!(event.envelope.invocation_id, invocation_id);
     assert_eq!(event.payload.event_type(), "invocation_deferred");
     assert!(!event.payload.is_transient(), "a deferral is history");
+    // Internally tagged: the wire shape is `{event_type, payload}`.
     let json = serde_json::to_value(&event.payload).unwrap();
-    assert_eq!(json["reason"], "rate_limited");
-    assert_eq!(json["model"], "moonshotai/kimi-k3");
-    assert_eq!(json["retry_after_ms"], 300_000);
+    assert_eq!(json["event_type"], "invocation_deferred");
+    assert_eq!(json["payload"]["reason"], "rate_limited");
+    assert_eq!(json["payload"]["model"], "moonshotai/kimi-k3");
+    assert_eq!(json["payload"]["retry_after_ms"], 300_000);
 }
 
 /// `invocation.stuck` must land inside `fq.agent.*.invocation.*` — the
