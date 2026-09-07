@@ -226,6 +226,13 @@ impl ProjectionStore {
     /// aggregate, so it shares [`Self::cost_summary`]'s wide
     /// allowlist: the summariser's model appears here with its own
     /// spend, which is the point of a per-model split.
+    ///
+    /// The token columns are [`Self::cost_summary`]'s, under the same
+    /// rule: the cache figures `COALESCE` to zero, the reasoning split
+    /// does not, so a model none of whose calls reported a
+    /// thought-versus-spoken split reads NULL rather than a zero nobody
+    /// measured. Per model that split is the most telling one — a
+    /// reasoning-first model's bill is mostly thinking.
     pub async fn cost_by_model(
         &self,
         agent: Option<&str>,
@@ -236,7 +243,10 @@ impl ProjectionStore {
              COUNT(*) AS event_count, \
              COALESCE(SUM(total_cost), 0.0) AS total_cost, \
              COALESCE(SUM(input_tokens), 0) AS total_input_tokens, \
-             COALESCE(SUM(output_tokens), 0) AS total_output_tokens \
+             COALESCE(SUM(output_tokens), 0) AS total_output_tokens, \
+             COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, \
+             COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, \
+             SUM(reasoning_tokens) AS total_reasoning_tokens \
              FROM events \
              WHERE event_type IN ('llm_response', 'llm_failure', 'invocation_summary') \
              AND total_cost IS NOT NULL",
@@ -253,6 +263,9 @@ impl ProjectionStore {
                 total_cost: row.get::<f64, _>(2),
                 total_input_tokens: row.get::<i64, _>(3),
                 total_output_tokens: row.get::<i64, _>(4),
+                total_cache_read_tokens: row.get::<i64, _>(5),
+                total_cache_write_tokens: row.get::<i64, _>(6),
+                total_reasoning_tokens: row.get::<Option<i64>, _>(7),
             })
             .collect())
     }
@@ -355,6 +368,11 @@ pub struct ModelCostSummary {
     pub total_cost: f64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
+    /// As on [`CostSummary`]: `None` when no call of this model reported
+    /// a split, which is not `Some(0)`.
+    pub total_reasoning_tokens: Option<i64>,
 }
 
 /// One row of a failure summary: a terminal `FailureKind` and the
