@@ -36,6 +36,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 /// The agent every remaining golden here names. The dead-letter
@@ -205,7 +207,7 @@ struct PairedDaemon {
     /// port 0).
     client_config: PathBuf,
     log_path: PathBuf,
-    child: Option<std::process::Child>,
+    child: Option<TestChild>,
     server: fq_test_support::NatsServer,
 }
 
@@ -223,7 +225,7 @@ impl PairedDaemon {
         let log_path = scratch.cache().join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone daemon log handle");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
+        let mut child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
             .env("FQ_DAEMON_CONFIG", &daemon_config)
             .env("FQ_NATS_URL", server.url())
             .env("FQ_CACHE_DIR", scratch.cache())
@@ -231,8 +233,7 @@ impl PairedDaemon {
             .env("FQ_AGENTS_DIR", scratch.agents())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("spawn fqd");
+            .spawn();
 
         // Wait for steady state; fail loudly if the daemon dies on
         // startup.
@@ -345,15 +346,6 @@ impl PairedDaemon {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-        }
-    }
-}
-
-impl Drop for PairedDaemon {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
         }
     }
 }

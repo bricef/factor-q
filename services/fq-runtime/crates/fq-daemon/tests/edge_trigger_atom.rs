@@ -26,7 +26,9 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_ops::{Domain, OpId, VerbId};
@@ -112,7 +114,7 @@ fn dead_letter(agent: &str, trigger_id: &str, payload: serde_json::Value) -> Eve
 
 struct World {
     scratch: std::path::PathBuf,
-    daemon: std::process::Child,
+    daemon: TestChild,
     client: fq_edge::EdgeClient,
     bus: fq_runtime::EventBus,
 }
@@ -123,7 +125,7 @@ impl World {
         let log_path = scratch.join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone log handle");
-        let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+        let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
             .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
             .env("FQ_NATS_URL", nats_url)
             .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -131,8 +133,7 @@ impl World {
             .env("FQ_AGENTS_DIR", scratch.join("agents"))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("spawn fqd");
+            .spawn();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let text = loop {
             if let Some(status) = daemon.try_wait().expect("poll fqd") {
@@ -234,8 +235,7 @@ impl World {
     }
 
     fn shutdown(mut self) {
-        let rc = unsafe { libc::kill(self.daemon.id() as i32, libc::SIGTERM) };
-        assert_eq!(rc, 0);
+        self.daemon.signal(libc::SIGTERM).expect("kill(SIGTERM)");
         let status = self.daemon.wait().expect("wait");
         assert!(status.success());
         let _ = std::fs::remove_dir_all(&self.scratch);
