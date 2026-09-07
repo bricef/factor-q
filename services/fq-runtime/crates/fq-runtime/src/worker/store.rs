@@ -16,17 +16,20 @@
 //! ## Schema versioning
 //!
 //! The `schema_meta` table tracks one row per *schema class*
-//! (`worker`, `projection`, ...). Each store reads its row on
-//! open and:
+//! (`worker`, `control_plane`). Each store reads its row on open
+//! and:
 //!
 //! - If the row is missing → fresh schema; create tables, insert
 //!   the row with the binary's expected version.
 //! - If the row matches the binary's version → up-to-date.
 //! - If the row's version is *higher* than the binary → refuse
 //!   to start, per the §5.6 refuse-and-flag contract.
-//! - If the row's version is *lower* → migrate forward (for now
-//!   only additive migrations land, so this is a no-op past
-//!   `CREATE TABLE IF NOT EXISTS`).
+//! - If the row's version is *lower* → migrate forward, one rung
+//!   of the ladder in `run_migrations` at a time.
+//!
+//! The machinery is [`crate::db::schema`], shared with the
+//! control-plane store; this module contributes its class, its
+//! version and its migration ladder.
 //!
 //! This module owns the worker's durable state: schema migrations,
 //! reducer-state persistence, three-state WAL writes, and recovery queries.
@@ -34,9 +37,14 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
+
+use crate::db::schema::{self, Migration, SchemaError};
+// The verdict type and its check are the kit's; re-exported so the
+// tests and `crate::worker` keep the path they had when the copy lived
+// here.
+pub use crate::db::schema::{Compatibility, SCHEMA_META_SQL, check_compatibility, split_sql};
 
 /// Schema class name used in the shared `schema_meta` table.
 pub const SCHEMA_CLASS: &str = "worker";
@@ -100,14 +108,6 @@ pub const WORKER_SCHEMA_VERSION: u32 = 9;
 /// `state_blob` column becoming a reference. See
 /// data-architecture.md §6 and the step-5 design discussion.
 pub const STATE_BLOB_WARN_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
-
-const SCHEMA_META_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_meta (
-    class       TEXT PRIMARY KEY,
-    version     INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-"#;
 
 const WORKER_TABLES_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS invocation_state (
@@ -445,93 +445,69 @@ impl WorkerStore {
         Ok(Self { pool })
     }
 
-    /// Initialise schema_meta and run worker migrations. Idempotent.
-    async fn bootstrap_schema(&self) -> Result<(), WorkerStoreError> {
-        // schema_meta is shared by both stores in v1; create it
-        // unconditionally with `IF NOT EXISTS` so racing with the
-        // projection store's bootstrap is safe.
-        for stmt in split_sql(SCHEMA_META_SQL) {
-            sqlx::query(stmt).execute(&self.pool).await?;
-        }
+    /// The migration ladder, one rung per version. Future migrations:
+    /// add a `(version, SQL)` rung and bump [`WORKER_SCHEMA_VERSION`].
+    const MIGRATIONS: &[Migration] = &[
+        (1, WORKER_TABLES_V1_SQL),
+        (2, WORKER_MIGRATION_V2_SQL),
+        (3, WORKER_MIGRATION_V3_SQL),
+        (4, WORKER_MIGRATION_V4_SQL),
+        (5, WORKER_MIGRATION_V5_SQL),
+        (6, WORKER_MIGRATION_V6_SQL),
+        (7, WORKER_MIGRATION_V7_SQL),
+        (8, WORKER_MIGRATION_V8_SQL),
+        (9, WORKER_MIGRATION_V9_SQL),
+    ];
 
-        let recorded = self.read_schema_version().await?;
-        match check_compatibility(recorded, WORKER_SCHEMA_VERSION) {
-            Compatibility::FreshInstall => {
-                self.run_migrations(0, WORKER_SCHEMA_VERSION).await?;
-                self.write_schema_version(WORKER_SCHEMA_VERSION).await?;
-            }
-            Compatibility::Current => {
-                // Recorded version matches the binary; nothing
-                // to do. Migrations are NOT re-run because not
-                // every migration is idempotent (e.g.
-                // `ALTER TABLE ADD COLUMN` errors on a second
-                // run with "duplicate column").
-            }
-            Compatibility::NeedsUpgrade { from } => {
-                self.run_migrations(from, WORKER_SCHEMA_VERSION).await?;
-                self.write_schema_version(WORKER_SCHEMA_VERSION).await?;
-            }
-            Compatibility::BinaryTooOld { db_version } => {
-                return Err(WorkerStoreError::IncompatibleSchema {
-                    db_version,
-                    binary_version: WORKER_SCHEMA_VERSION,
-                });
-            }
-        }
+    /// Initialise schema_meta and run worker migrations. Idempotent.
+    /// The protocol — create, leave alone, migrate, or refuse — is the
+    /// shared kit's; see [`crate::db::schema`].
+    async fn bootstrap_schema(&self) -> Result<(), WorkerStoreError> {
+        schema::bootstrap_versioned(
+            &self.pool,
+            SCHEMA_CLASS,
+            WORKER_SCHEMA_VERSION,
+            Self::MIGRATIONS,
+        )
+        .await
+        .map_err(|err| match err {
+            SchemaError::Backend(err) => WorkerStoreError::from(err),
+            SchemaError::BinaryTooOld {
+                db_version,
+                binary_version,
+            } => WorkerStoreError::IncompatibleSchema {
+                db_version,
+                binary_version,
+            },
+        })?;
         Ok(())
     }
+
+    // The three steps of the protocol, individually, for the migration
+    // tests: the populated-database ladder builds a file at an arbitrary
+    // rung and stamps it, which `bootstrap_schema` never does on its own.
+    // Test-only because production has exactly one caller of each, and
+    // that caller is the kit.
 
     /// Read the recorded version of the worker schema, or `None`
     /// if no row exists yet.
+    #[cfg(test)]
     async fn read_schema_version(&self) -> Result<Option<u32>, WorkerStoreError> {
-        let row = sqlx::query("SELECT version FROM schema_meta WHERE class = ?")
-            .bind(SCHEMA_CLASS)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get::<i64, _>(0) as u32))
+        Ok(schema::read_schema_version(&self.pool, SCHEMA_CLASS).await?)
     }
 
+    #[cfg(test)]
     async fn write_schema_version(&self, version: u32) -> Result<(), WorkerStoreError> {
-        let now = Utc::now().timestamp_millis();
-        sqlx::query(
-            r#"
-            INSERT INTO schema_meta (class, version, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(class) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(SCHEMA_CLASS)
-        .bind(version as i64)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        Ok(schema::write_schema_version(&self.pool, SCHEMA_CLASS, version).await?)
     }
 
     /// Apply the migrations needed to advance from `from` to
     /// `to`. Migrations are additive and gated on the recorded
     /// version; re-running on an up-to-date DB is a no-op past
     /// `IF NOT EXISTS`.
+    #[cfg(test)]
     async fn run_migrations(&self, from: u32, to: u32) -> Result<(), WorkerStoreError> {
-        const MIGRATIONS: &[(u32, &str)] = &[
-            (1, WORKER_TABLES_V1_SQL),
-            (2, WORKER_MIGRATION_V2_SQL),
-            (3, WORKER_MIGRATION_V3_SQL),
-            (4, WORKER_MIGRATION_V4_SQL),
-            (5, WORKER_MIGRATION_V5_SQL),
-            (6, WORKER_MIGRATION_V6_SQL),
-            (7, WORKER_MIGRATION_V7_SQL),
-            (8, WORKER_MIGRATION_V8_SQL),
-            (9, WORKER_MIGRATION_V9_SQL),
-        ];
-        for &(version, sql) in MIGRATIONS {
-            if from < version && to >= version {
-                for stmt in split_sql(sql) {
-                    sqlx::query(stmt).execute(&self.pool).await?;
-                }
-            }
-        }
-        // Future migrations: add a `(version, SQL)` row above.
-        Ok(())
+        Ok(schema::apply_migrations(&self.pool, Self::MIGRATIONS, from, to).await?)
     }
 
     // -----------------------------------------------------------
@@ -1246,34 +1222,6 @@ impl WorkerStore {
     }
 }
 
-/// Outcome of comparing the binary's expected schema version
-/// against what the database has recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compatibility {
-    /// No schema_meta row for this class — first time we've
-    /// touched this DB.
-    FreshInstall,
-    /// Recorded version equals the binary's expected version.
-    Current,
-    /// Recorded version is older than the binary's. Run
-    /// migrations forward.
-    NeedsUpgrade { from: u32 },
-    /// Recorded version is newer than the binary supports.
-    /// Refuse and surface the case to the operator.
-    BinaryTooOld { db_version: u32 },
-}
-
-/// Pure compatibility check, exposed for unit testing without
-/// needing a database.
-pub fn check_compatibility(recorded: Option<u32>, binary: u32) -> Compatibility {
-    match recorded {
-        None => Compatibility::FreshInstall,
-        Some(v) if v == binary => Compatibility::Current,
-        Some(v) if v < binary => Compatibility::NeedsUpgrade { from: v },
-        Some(v) => Compatibility::BinaryTooOld { db_version: v },
-    }
-}
-
 /// Render the synthetic result for one interrupted tool dispatch (#373).
 /// The timestamp is the row's persisted `dispatched_at` — never the live
 /// clock — so the payload is rendered once and every later replay
@@ -1288,13 +1236,6 @@ fn interrupted_result_payload(dispatched_at_ms: i64) -> String {
         "notice": format!("HOST NOTICE: this tool call was interrupted by a runtime crash after being dispatched at {rendered_at}. Whether it executed — fully, partially, or not at all — is unknown. Verify the relevant state (files, git, external services) before building on anything; re-run it only if you have confirmed it did not take effect.")
     })
     .to_string()
-}
-
-/// One statement at a time, so a failure names the statement. Slices of
-/// the `'static` script rather than copies: each is still compile-time
-/// SQL, which is what `sqlx::query` accepts without an audit marker.
-fn split_sql(sql: &'static str) -> impl Iterator<Item = &'static str> {
-    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn row_to_tool_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<ToolDispatchRow, WorkerStoreError> {
