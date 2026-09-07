@@ -379,11 +379,26 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     }
 
     let tools = Arc::new(tools);
+    // The per-model provider throttle (#278): one value, shared by the
+    // client stack below, the runner (deferral delays), the dispatcher
+    // (holding a paused model's triggers) and the health reports.
+    let throttle = Arc::new(fq_runtime::llm::ModelThrottle::new(
+        config.worker.throttle.clone(),
+        config.worker.throttle_bounds(),
+    ));
+    // Where a deferred invocation is put down and picked up again
+    // (#278): the handle goes everywhere an invocation can come back
+    // `Deferred`, the drain end goes to the dispatcher.
+    let (deferrals, due_resumes) = fq_runtime::worker::DeferralQueue::new();
     // Retry transient LLM errors (rate limits, transport failures) with
     // backoff instead of failing the whole invocation (issue #10). This is
-    // the daemon path — the one the fleet actually runs on.
+    // the daemon path — the one the fleet actually runs on. The throttle
+    // sits inside the retry layer so it sees every raw provider outcome.
     let llm: Arc<dyn LlmClient> = Arc::new(fq_runtime::llm::RetryingLlmClient::new(
-        GenAiClient::from_providers(&config.providers, config.worker.llm_timeouts())?,
+        fq_runtime::llm::ThrottledLlmClient::new(
+            GenAiClient::from_providers(&config.providers, config.worker.llm_timeouts())?,
+            throttle.clone(),
+        ),
         config.worker.llm_retry.clone(),
     ));
     // One ReducerRunner serves two roles: the dispatcher uses
@@ -416,6 +431,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
                     .tool_limits(config.tools.call_limits())
                     .mcp_progress(mcp.progress().await)
                     .mcp_states(mcp.states())
+                    .throttle(throttle.clone())
                     .build(),
             ),
             fq_runtime::Harness::new(),
@@ -457,6 +473,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         &llm,
         &bus,
         &worker_store,
+        &deferrals,
     );
 
     // Sweep workspaces whose invocation is no longer in flight (plan §1:
@@ -491,5 +508,8 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         agents_loaded,
         pricing_entries,
         resume_handles,
+        throttle,
+        deferrals,
+        due_resumes,
     })
 }

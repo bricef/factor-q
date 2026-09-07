@@ -21,6 +21,7 @@ fn stores(initialised: bool) -> StatusStores {
 fn report() -> StatusReport {
     StatusReport {
         mcp_servers: Vec::new(),
+        throttled_models: Vec::new(),
         version: "0.1.0+deadbee".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
@@ -510,4 +511,56 @@ fn render_recovery_guidance_for_both() {
     assert!(out.contains("fq invocation drop"));
     assert!(out.contains("fq workers list --stale-only"));
     assert!(!out.contains("prune"), "got: {out:?}");
+}
+
+// ------------------------------------------------------------------
+// The provider throttle (#278).
+// ------------------------------------------------------------------
+
+fn throttled(model: &str, paused_until_ms: Option<i64>) -> fq_ops::health::ThrottledModel {
+    fq_ops::health::ThrottledModel {
+        model: model.to_string(),
+        paused_until_ms,
+        cap: 2,
+        ceiling: 4,
+        in_flight: 1,
+        rate_limited_in_window: 3,
+        waves: 2,
+    }
+}
+
+/// A throttled model is a section of its own, with the pause's end on
+/// the daemon's clock and the permit arithmetic; an unthrottled fleet
+/// has no section at all, because a quiet provider is not a finding.
+#[test]
+fn throttled_models_render_their_pause_and_permits() {
+    let doc = StatusDocument {
+        daemon: Some(StatusReport {
+            throttled_models: vec![
+                throttled("moonshotai/kimi-k3", Some(1_700_000_030_000)),
+                throttled("claude-haiku", None),
+            ],
+            ..report()
+        }),
+        ..answered()
+    };
+    let out = render_status_human(&doc);
+    assert!(out.contains("\nThrottled models\n"), "got:\n{out}");
+    assert!(
+        out.contains(
+            "  moonshotai/kimi-k3: paused until 20:53:50Z; 2 of 4 permits, 1 in flight; \
+             3 rate-limited this window (wave 2)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("  claude-haiku: not paused; 2 of 4 permits"),
+        "got:\n{out}"
+    );
+
+    let quiet = render_status_human(&answered());
+    assert!(
+        !quiet.contains("Throttled models"),
+        "nothing throttled, nothing said: {quiet}"
+    );
 }

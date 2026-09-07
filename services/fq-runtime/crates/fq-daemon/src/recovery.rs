@@ -265,6 +265,10 @@ pub(crate) fn spawn_resume_tasks(
     llm: &Arc<dyn LlmClient>,
     bus: &EventBus,
     worker_store: &Arc<WorkerStore>,
+    // A resumed invocation can come back `Deferred` (#278) — its model
+    // is still rate-limited — and goes back on the queue the dispatcher
+    // drains, rather than being logged and forgotten.
+    deferrals: &fq_runtime::worker::DeferralQueue,
 ) -> Vec<JoinHandle<()>> {
     let resume_count = recoverable.len();
     // Track the resume tasks' handles so a graceful drain (ADR-0027) can
@@ -309,8 +313,13 @@ pub(crate) fn spawn_resume_tasks(
         let llm_arc = llm.clone();
         let bus = bus.clone();
         let wstore = worker_store.clone();
+        let deferrals = deferrals.clone();
         resume_handles.push(tokio::spawn(async move {
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
+                Ok(fq_runtime::InvocationOutcome::Deferred {
+                    invocation_id,
+                    resume_after,
+                }) => deferrals.defer(invocation_id, agent_id, resume_after),
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
                     ?outcome,

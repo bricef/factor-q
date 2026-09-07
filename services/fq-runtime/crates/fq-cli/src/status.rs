@@ -168,6 +168,7 @@ fn render_status_human(doc: &StatusDocument) -> String {
     }
     out.push_str(&render_stores_human(&report.stores));
     out.push_str(&render_mcp_servers_human(&report.mcp_servers));
+    out.push_str(&render_throttled_models_human(&report.throttled_models));
 
     // Recovery state: points the operator at the commands they'd need
     // if anything is off; renders "All clear." otherwise.
@@ -250,6 +251,48 @@ fn render_mcp_servers_human(servers: &[fq_ops::health::McpServerHealth]) -> Stri
         out.push_str(&format!("  {line}\n"));
     }
     out
+}
+
+/// Pure: the models the provider throttle is holding back (#278), one
+/// line each — the pause's end on the daemon's clock, the permits the
+/// model may hold against its ceiling, and the 429s behind it. Absent
+/// entirely when nothing is throttled: a quiet provider has nothing
+/// to say. Not a verdict, for the same reason the MCP lines are not:
+/// a throttled model is the runtime doing its job.
+fn render_throttled_models_human(models: &[fq_ops::health::ThrottledModel]) -> String {
+    if models.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nThrottled models\n");
+    for model in models {
+        out.push_str(&format!("  {}\n", throttled_model_line(model)));
+    }
+    out
+}
+
+/// One throttled model as a phrase, shared by the human report and its
+/// test. The pause end is an absolute time on the daemon's clock rather
+/// than a countdown, so the line is stable to render and the reader can
+/// compare it with the event trail's timestamps.
+fn throttled_model_line(model: &fq_ops::health::ThrottledModel) -> String {
+    let pause = match model.paused_until_ms {
+        Some(until) => format!(
+            "paused until {}",
+            chrono::DateTime::from_timestamp_millis(until)
+                .map(|t| t.format("%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| format!("{until}ms"))
+        ),
+        None => "not paused".to_string(),
+    };
+    format!(
+        "{}: {pause}; {} of {} permits, {} in flight; {} rate-limited this window (wave {})",
+        model.model,
+        model.cap,
+        model.ceiling,
+        model.in_flight,
+        model.rate_limited_in_window,
+        model.waves
+    )
 }
 
 /// Pure: the registry census as one line, plus a line per rejection.

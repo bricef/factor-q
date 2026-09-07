@@ -426,6 +426,13 @@ pub struct StatusReport {
     /// verdict, exactly as this report treats stale workers.
     #[serde(default)]
     pub mcp_servers: Vec<crate::health::McpServerHealth>,
+    /// Every model the worker's provider throttle is holding back
+    /// (<https://github.com/bricef/factor-q/issues/278>): paused, under
+    /// its permit ceiling, or rate-limited in the current window. Empty
+    /// on a daemon no provider has said no to, and always empty with
+    /// `[worker.throttle] enabled = false`.
+    #[serde(default)]
+    pub throttled_models: Vec<crate::health::ThrottledModel>,
 }
 
 /// The projection's last rebuild, as `control.status` reports it.

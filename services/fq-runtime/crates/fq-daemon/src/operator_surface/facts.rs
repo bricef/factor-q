@@ -43,4 +43,9 @@ pub struct DaemonFacts {
     /// and the only other place it surfaces is the terminal refusal of
     /// an agent that needed it.
     pub mcp_servers: fq_runtime::McpServerStates,
+    /// The worker's provider throttle (#278) — the same value the LLM
+    /// stack takes permits from and the dispatcher holds triggers on.
+    /// Both health reports list the models it is holding back; an
+    /// operator wondering why the fleet went quiet reads the pause here.
+    pub throttle: std::sync::Arc<fq_runtime::llm::ModelThrottle>,
 }

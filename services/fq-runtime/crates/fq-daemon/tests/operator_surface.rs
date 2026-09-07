@@ -87,6 +87,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
         runner.clone(),
         agents.clone(),
         Arc::new(UnusedLlm),
+        fq_runtime::worker::DeferralQueue::new().0,
     ));
     let registry = fq_daemon::operator_registry(
         views,
@@ -100,6 +101,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 stuck_after_ms: 4_210_000,
                 summary_enabled: false,
                 mcp_servers: Default::default(),
+                throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
             },
             bus,
             projection: projection_store,

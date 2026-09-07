@@ -492,3 +492,67 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
     let out = render_doctor_report_human(&report);
     assert!(out.contains("fq-projector: ok (lag 9000)"), "got:\n{out}");
 }
+
+/// The provider throttle (#278): a throttled model is listed with its
+/// pause and permits, points at the deferral events, and is **not** an
+/// issue — the runtime absorbing a provider's backpressure is the
+/// runtime working. A quiet fleet says "none" so the block is always
+/// on the page.
+#[test]
+fn throttled_models_are_listed_without_becoming_an_issue() {
+    let quiet = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&quiet);
+    assert!(out.contains("Throttled models: none\n"), "got:\n{out}");
+
+    let report = quiet.with_throttled_models(vec![
+        fq_ops::health::ThrottledModel {
+            model: "moonshotai/kimi-k3".to_string(),
+            paused_until_ms: Some(chrono::Utc::now().timestamp_millis() + 45_000),
+            cap: 2,
+            ceiling: 4,
+            in_flight: 1,
+            rate_limited_in_window: 3,
+            waves: 1,
+        },
+        fq_ops::health::ThrottledModel {
+            model: "claude-haiku".to_string(),
+            paused_until_ms: None,
+            cap: 1,
+            ceiling: 4,
+            in_flight: 0,
+            rate_limited_in_window: 0,
+            waves: 0,
+        },
+    ]);
+    assert!(!report.has_issues(), "a throttled model is not an issue");
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("Verdict: All clear."), "got:\n{out}");
+    assert!(
+        out.contains("Throttled models: 2 (1 paused)"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("  moonshotai/kimi-k3: paused, resumes in 4"),
+        "a countdown, like the MCP retry line: {out}"
+    );
+    assert!(
+        out.contains("2 of 4 permits, 1 in flight; 3 rate-limited this window (wave 1)"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("  claude-haiku: not paused; 1 of 4 permits"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("fq events query --event-type invocation_deferred"),
+        "the next step names the deferral events: {out}"
+    );
+}
