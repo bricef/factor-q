@@ -18,4 +18,5 @@ Consumers: 5 checked, 0 unhealthy
   fq-heartbeat: ok (lag #)
   fq-dispatcher: ok (lag #)
   fq-advisory-watch: ok (lag #)
+Throttled models: none
 Dead-letters: none
