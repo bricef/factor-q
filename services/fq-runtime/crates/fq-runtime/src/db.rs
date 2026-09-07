@@ -9,8 +9,9 @@
 //!   source of truth for coordination, schedules, and the archive;
 //!   non-rebuildable.
 //! - [`crate::control_plane::projection::ProjectionStore`] —
-//!   `projection.db`, derived from the NATS stream; disposable
-//!   (delete + replay rebuilds it).
+//!   `projection.db`, derived from the NATS stream; versioned, and
+//!   rebuilt from the stream on a version bump or on demand
+//!   (`fq projection rebuild`).
 //!
 //! v1 collapsed all three into a single `events.db`. This module owns
 //! the split layout ([`RuntimeDbPaths`]) and the one-time migration
@@ -104,8 +105,12 @@ const CONTROL_PLANE_TABLES: &[&str] = &[
     "invocation_archive",
     "schema_meta",
 ];
-// No `schema_meta`: the projection has no version row (#139), so the
-// copy drops the table entirely.
+// No `schema_meta`: the projection versions through SQLite's
+// `user_version`, which the legacy file never stamped — the copy reads
+// 0, and the projection's own open treats a 0 with tables present as a
+// pre-versioning file and rebuilds it from the stream. The copy is
+// still made: it is what a store that could not reach the stream
+// would have, and the rebuild carries its cost rows across.
 const PROJECTION_TABLES: &[&str] = &["events", "invocation_summary"];
 
 /// Absolute paths of the three per-store database files under one
@@ -658,7 +663,18 @@ mod tests {
             .unwrap();
         assert!(cp.get_worker("w-legacy").await.unwrap().is_some());
         assert!(cp.get_archive("inv-done").await.unwrap().is_some());
+        // The projection copy keeps the version the seeded file was
+        // stamped with — the current one, since this fixture's legacy
+        // file was written by this build — so it opens as current: the
+        // `triggers` table the split's keep-list never carried is
+        // recreated, and the copied row is still there. A legacy file
+        // from a pre-versioning build reads 0 and is rebuilt instead;
+        // the projection's own tests pin that path.
         let proj = ProjectionStore::open(&targets.projection).await.unwrap();
+        assert_eq!(
+            proj.schema_version().await.unwrap(),
+            crate::control_plane::projection::PROJECTION_SCHEMA_VERSION
+        );
         assert_eq!(proj.count().await.unwrap(), 1);
     }
 

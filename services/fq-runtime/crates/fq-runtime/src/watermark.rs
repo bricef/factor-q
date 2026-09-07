@@ -6,8 +6,11 @@
 //! its events landed at; a subsequent read waits — bounded — until
 //! the fold includes them. The mark is in-memory by design: on
 //! restart the durable consumer resumes from its ack floor and the
-//! mark rebuilds as events apply. Durable applied-state is #139's
-//! reproject concern, not this one.
+//! mark rebuilds as events apply. A projection rebuild (its tables
+//! dropped and the stream replayed) does not reset it — the mark is
+//! monotonic and the replay re-applies sequences below it — so until
+//! the replay catches up, a read released at the old mark can find
+//! its row not yet re-derived; `control.status` reports the replay.
 
 use std::time::Duration;
 
@@ -20,7 +23,10 @@ pub fn channel() -> (WatermarkSender, Watermark) {
     (WatermarkSender { tx }, Watermark { rx })
 }
 
-/// The producer half, held by the projection consumer.
+/// The producer half, held by the projection consumer. Clone-able so
+/// the supervisor that restarts the consumer around a rebuild can hand
+/// every incarnation the same mark.
+#[derive(Clone)]
 pub struct WatermarkSender {
     tx: watch::Sender<u64>,
 }

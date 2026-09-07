@@ -52,6 +52,10 @@ pub(crate) fn register_status_report(
     views: Arc<Views>,
     bus: fq_runtime::EventBus,
     agents: fq_runtime::SharedRegistry,
+    // The writer's handle on the projection, for the rebuild record
+    // the file keeps: when its tables were last dropped and re-derived,
+    // and whether the replay has caught up.
+    projection: Arc<fq_runtime::ProjectionStore>,
     // What this daemon knows about itself that a reader cannot derive:
     // where its stores are, how long it will take to stop, and whether
     // it runs a summariser (so health expects that durable only where
@@ -92,13 +96,17 @@ pub(crate) fn register_status_report(
          machinery rather than failed to learn anything: absence is the finding. \
          The MCP lines are every shared server a loaded agent declares and whether it is \
          up; as with stale workers, whether that amounts to a problem is \
-         `control.doctor`'s call.",
+         `control.doctor`'s call. \
+         `projection_rebuild` is the projection's last rebuild — a schema bump on start, \
+         or `control.projection_rebuild` — and whether its replay has caught up; absent \
+         on a projection that has never been rebuilt.",
     );
     registry
         .report::<StatusParams, StatusReport, _, _>(decl, move |_params: StatusParams| {
             let views = views.clone();
             let bus = bus.clone();
             let agents = agents.clone();
+            let projection = projection.clone();
             let db_paths = db_paths.clone();
             let legacy_events_db = legacy_events_db.clone();
             let mcp_servers = mcp_servers.clone();
@@ -113,6 +121,15 @@ pub(crate) fn register_status_report(
                 )
                 .await;
                 let projection_rows = views.event_count().await.map_err(internal)?;
+                let projection_rebuild =
+                    fq_runtime::control_plane::projection::rebuild::rebuild_status(
+                        &projection,
+                        &bus,
+                    )
+                    .await
+                    .map_err(|e| WireError::Internal {
+                        message: e.to_string(),
+                    })?;
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 let recovery = views
                     .recovery(now_ms, DEFAULT_STALE_THRESHOLD_MS)
@@ -141,6 +158,7 @@ pub(crate) fn register_status_report(
                     streams,
                     registry: StatusRegistry::from(snapshot.as_ref()),
                     projection_rows,
+                    projection_rebuild,
                     recovery,
                     mcp_servers: fq_runtime::health::mcp_server_health(&mcp_servers),
                 })

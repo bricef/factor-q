@@ -902,6 +902,9 @@ async fn opens_and_creates_schema() {
     assert_eq!(store.count().await.unwrap(), 0);
 }
 
+/// A pre-versioning file whose `events` table predates the cache
+/// columns: the open rebuilds it (it records no version, and it has
+/// tables), and the recreated table has every column.
 #[tokio::test]
 async fn migrates_existing_projection_with_cache_columns() {
     let dir = tempdir().unwrap();
@@ -2399,11 +2402,15 @@ async fn cost_by_model_sums_the_split_per_model_and_coalesces_the_cache_figures(
     assert_eq!(legacy.total_reasoning_tokens, None);
 }
 
-/// **A database from before the column reads NULL for its history**,
-/// which is the honest value: those rows carried a `0` the wire could
-/// not distinguish from a report, and the projection does not reproject
-/// to find out (#536). The column arrives by `ALTER`, and a call
-/// projected after it reports as itself beside the old rows.
+/// **A database from before the column reads NULL for its history**
+/// until the stream re-derives it: those rows carried a `0` the wire
+/// could not distinguish from a report (#536). The file here is a
+/// pre-versioning one (tables present, `user_version` 0), so the open
+/// rebuilds it — the cost-bearing row is carried across with the shape
+/// it had, NULL where the old table had no column, and a call
+/// projected after it reports as itself beside the old row. The
+/// replay that would fill the old row in is the consumer's, not this
+/// test's; `rebuild::tests` proves that half.
 #[tokio::test]
 async fn migrates_existing_projection_with_a_reasoning_column() {
     let dir = tempdir().unwrap();
@@ -2461,4 +2468,333 @@ async fn migrates_existing_projection_with_a_reasoning_column() {
     // And the read-only handle accepts the migrated file: the new column
     // is on the same list the check reads.
     ProjectionStore::open_read_only(&path).await.unwrap();
+}
+
+// ------------------------------------------------------------------
+// The schema version, and what a mismatch does (#139).
+// ------------------------------------------------------------------
+
+/// Stamp `user_version` behind the store's back — a file written by
+/// another build.
+async fn stamp_version(store: &ProjectionStore, version: u32) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {version}"
+    )))
+    .execute(&store.pool)
+    .await
+    .unwrap();
+}
+
+/// A populated current-version file: one plain event, one cost-bearing
+/// event, one summary line, one trigger record — one row of each kind
+/// a rebuild has to decide about. The fresh-file consumer reset is
+/// marked done, as a consumer that had run would have left it.
+async fn populated_store(path: &Path) -> (ProjectionStore, Uuid) {
+    let store = ProjectionStore::open(path).await.unwrap();
+    let inv = Uuid::now_v7();
+    store
+        .insert_event(&sample_triggered("alpha", inv), Some(1))
+        .await
+        .unwrap();
+    store
+        .insert_event(
+            &sample_llm_response_reporting("alpha", inv, 0.02, Some(9)),
+            Some(2),
+        )
+        .await
+        .unwrap();
+    store
+        .insert_event(
+            &summary_event(inv, crate::events::SummaryKind::Outcome, "done"),
+            Some(3),
+        )
+        .await
+        .unwrap();
+    store
+        .insert_event(
+            &named_triggered("alpha", Uuid::now_v7(), json!({"k": 1})),
+            Some(4),
+        )
+        .await
+        .unwrap();
+    store.consumer_reset_done(4, false).await.unwrap();
+    (store, inv)
+}
+
+/// Opening a file at the version this build writes leaves it alone:
+/// every row is still there, nothing is recorded as a rebuild, and no
+/// consumer reset is asked for.
+#[tokio::test]
+async fn open_at_the_current_version_does_not_rebuild() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, _inv) = populated_store(&path).await;
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        PROJECTION_SCHEMA_VERSION
+    );
+    drop(store);
+
+    let store = ProjectionStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.count().await.unwrap(),
+        4,
+        "every row survives a current-version open"
+    );
+    assert!(store.rebuild_record().await.unwrap().is_none());
+    assert!(store.consumer_reset_pending().await.unwrap().is_none());
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        PROJECTION_SCHEMA_VERSION
+    );
+}
+
+/// The core guarantee. A file recording an older version is rebuilt on
+/// open: the plain event is gone (the stream will bring it back), the
+/// cost-bearing row, the summary line and the trigger record are
+/// carried across, the file is stamped at this build's version, and
+/// the durable is marked for the reset that starts the replay.
+#[tokio::test]
+async fn open_at_an_older_version_rebuilds_and_requests_a_consumer_reset() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, inv) = populated_store(&path).await;
+    stamp_version(&store, PROJECTION_SCHEMA_VERSION - 1).await;
+    drop(store);
+
+    let store = ProjectionStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        PROJECTION_SCHEMA_VERSION,
+        "the rebuilt file is stamped at this build's version"
+    );
+    let record = store
+        .rebuild_record()
+        .await
+        .unwrap()
+        .expect("a rebuild is recorded");
+    assert_eq!(record.from_version, Some(PROJECTION_SCHEMA_VERSION - 1));
+    assert_eq!(record.schema_version, PROJECTION_SCHEMA_VERSION);
+    assert_eq!(
+        record.target_seq, None,
+        "the replay target is the consumer's to set"
+    );
+    assert!(
+        store.consumer_reset_pending().await.unwrap().is_some(),
+        "the durable must be reset before it reads again"
+    );
+
+    // Dropped and recreated: the plain `triggered` event is gone, and
+    // the two cost-bearing rows (the call, and the priced summary
+    // event) are the only `events` rows left...
+    let rows = store
+        .query_events(&EventFilter::default(), 100)
+        .await
+        .unwrap();
+    let mut kinds: Vec<&str> = rows.iter().map(|row| row.event_type.as_str()).collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        ["invocation_summary", "llm_response"],
+        "only the cost-bearing rows survive the drop: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| row.total_cost.is_some()),
+        "what survives is exactly what the sweep would have kept"
+    );
+    // ...the cost-bearing row is carried across whole...
+    let cost = store
+        .cost_of_invocation(&inv.to_string())
+        .await
+        .unwrap()
+        .expect("spend is never lost to a rebuild");
+    assert_eq!(cost.total_reasoning_tokens, Some(9));
+    // ...and so are the summary line and the trigger record.
+    let summaries = store.summaries_for(&[inv.to_string()]).await.unwrap();
+    assert_eq!(
+        summaries.get(&inv.to_string()).map(String::as_str),
+        Some("done")
+    );
+    let triggers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM triggers")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        triggers, 1,
+        "trigger records are kept indefinitely, rebuild or not"
+    );
+}
+
+/// A file written by a newer build is refused, by the writer and the
+/// reader alike — the same refuse-and-flag the other stores make.
+#[tokio::test]
+async fn open_at_a_newer_version_refuses() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, _inv) = populated_store(&path).await;
+    stamp_version(&store, PROJECTION_SCHEMA_VERSION + 1).await;
+    drop(store);
+
+    let err = ProjectionStore::open(&path).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            StoreError::IncompatibleSchema { db_version, binary_version, .. }
+                if *db_version == PROJECTION_SCHEMA_VERSION + 1
+                    && *binary_version == PROJECTION_SCHEMA_VERSION
+        ),
+        "expected IncompatibleSchema, got {err:?}"
+    );
+    let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+    assert!(
+        matches!(&err, StoreError::IncompatibleSchema { .. }),
+        "a read-only handle refuses a newer file too, got {err:?}"
+    );
+    // Refused means untouched: the file still records the newer
+    // version, and the rows a newer build wrote are still there.
+    let conn = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&conn)
+        .await
+        .unwrap();
+    assert_eq!(version as u32, PROJECTION_SCHEMA_VERSION + 1);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&conn)
+        .await
+        .unwrap();
+    assert_eq!(rows, 4);
+}
+
+/// A read-only handle on an older file cannot rebuild it, and says so
+/// by version rather than by whichever column the first query missed.
+#[tokio::test]
+async fn read_only_open_names_an_older_version() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, _inv) = populated_store(&path).await;
+    stamp_version(&store, PROJECTION_SCHEMA_VERSION - 1).await;
+    drop(store);
+
+    let err = ProjectionStore::open_read_only(&path).await.unwrap_err();
+    let StoreError::SchemaOutdated { missing, .. } = &err else {
+        panic!("expected SchemaOutdated, got: {err:?}");
+    };
+    assert!(
+        missing.contains(&format!("schema version {PROJECTION_SCHEMA_VERSION}")),
+        "the error names the version it expects, got: {missing}"
+    );
+}
+
+/// The consumer's half of the record: once the durable is reset the
+/// replay target is known, the reset is no longer pending, and "in
+/// progress" is judged against the projector's acked floor.
+#[tokio::test]
+async fn the_consumer_reset_completes_the_rebuild_record() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, _inv) = populated_store(&path).await;
+    stamp_version(&store, PROJECTION_SCHEMA_VERSION - 1).await;
+    drop(store);
+    let store = ProjectionStore::open(&path).await.unwrap();
+
+    let before = store.rebuild_record().await.unwrap().unwrap();
+    assert!(before.status(true, None).in_progress);
+    assert!(before.status(true, None).consumer_reset_pending);
+
+    store.consumer_reset_done(42, true).await.unwrap();
+    assert!(store.consumer_reset_pending().await.unwrap().is_none());
+    let after = store.rebuild_record().await.unwrap().unwrap();
+    assert_eq!(after.target_seq, Some(42));
+    assert!(after.consumer_reset_at.is_some());
+    assert_eq!(
+        after.reason, before.reason,
+        "the reset completes the record, it does not replace it"
+    );
+
+    assert!(
+        after.status(false, None).in_progress,
+        "an unreadable durable is not done"
+    );
+    assert!(
+        after.status(false, Some(41)).in_progress,
+        "one short of the target is not done"
+    );
+    assert!(
+        !after.status(false, Some(42)).in_progress,
+        "at the target the replay is complete"
+    );
+    assert!(!after.status(false, Some(43)).in_progress);
+}
+
+/// A fresh file marks the durable for a reset, and whether that reset
+/// is *recorded* depends on what it found: a durable from an earlier
+/// life of the store means the file was recreated under it — a rebuild
+/// in every way that matters, recorded as one — while a first start
+/// on a fresh broker found nothing and records nothing.
+#[tokio::test]
+async fn a_fresh_file_records_a_rebuild_only_when_it_found_a_durable() {
+    let dir = tempdir().unwrap();
+
+    let recreated = ProjectionStore::open(&dir.path().join("recreated.db"))
+        .await
+        .unwrap();
+    assert_eq!(
+        recreated.consumer_reset_pending().await.unwrap().as_deref(),
+        Some(FRESH_FILE_REASON)
+    );
+    recreated.consumer_reset_done(7, true).await.unwrap();
+    let record = recreated
+        .rebuild_record()
+        .await
+        .unwrap()
+        .expect("a file recreated under an existing durable is a rebuild");
+    assert_eq!(record.reason, FRESH_FILE_REASON);
+    assert_eq!(record.target_seq, Some(7));
+    assert_eq!(record.from_version, None);
+
+    let first_start = ProjectionStore::open(&dir.path().join("first.db"))
+        .await
+        .unwrap();
+    first_start.consumer_reset_done(0, false).await.unwrap();
+    assert!(first_start.rebuild_record().await.unwrap().is_none());
+    assert!(
+        first_start
+            .consumer_reset_pending()
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The upsert a replay relies on: a redelivery with a position fills
+/// in a row that had none, and a redelivery without one never takes a
+/// known position away.
+#[tokio::test]
+async fn a_replay_refreshes_a_row_and_never_unlocates_it() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    let event = sample_llm_response_reporting("alpha", inv, 0.01, Some(5));
+    let id = event.envelope.event_id.to_string();
+
+    store.insert_event(&event, None).await.unwrap();
+    assert_eq!(
+        store.event_location(&id).await.unwrap(),
+        EventLocation::Unlocated
+    );
+
+    store.insert_event(&event, Some(17)).await.unwrap();
+    assert_eq!(
+        store.event_location(&id).await.unwrap(),
+        EventLocation::At(17)
+    );
+
+    store.insert_event(&event, None).await.unwrap();
+    assert_eq!(
+        store.event_location(&id).await.unwrap(),
+        EventLocation::At(17),
+        "a delivery without metadata keeps the position already known"
+    );
+    assert_eq!(store.count().await.unwrap(), 1);
 }

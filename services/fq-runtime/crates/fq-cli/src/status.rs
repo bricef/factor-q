@@ -153,6 +153,9 @@ fn render_status_human(doc: &StatusDocument) -> String {
     out.push_str(&format!("  version:          {}\n", report.version));
     out.push_str(&render_registry_human(&report.registry));
     out.push_str(&format!("  projection rows:  {}\n", report.projection_rows));
+    out.push_str(&render_projection_rebuild_human(
+        report.projection_rebuild.as_ref(),
+    ));
     // Derived from this daemon's call deadlines, so it is the daemon's
     // to report and nothing here can compute it (#37).
     out.push_str(&format!(
@@ -174,6 +177,32 @@ fn render_status_human(doc: &StatusDocument) -> String {
         report.recovery.stale_workers,
     ));
     out
+}
+
+/// Pure: the projection's last rebuild, one line. Nothing at all when
+/// the projection has never been rebuilt — the common case, and not a
+/// finding. While the replay runs the line says so, with the stream
+/// position it has to reach; afterwards it records when and why, so
+/// an operator reading a spend figure that looks freshly backfilled
+/// can see the rebuild that did it.
+fn render_projection_rebuild_human(rebuild: Option<&fq_ops::surface::ProjectionRebuild>) -> String {
+    let Some(rebuild) = rebuild else {
+        return String::new();
+    };
+    let state = if rebuild.consumer_reset_pending {
+        "in progress (the consumer is resetting)".to_string()
+    } else if rebuild.in_progress {
+        match rebuild.target_seq {
+            Some(seq) => format!("in progress (replaying to stream sequence {seq})"),
+            None => "in progress".to_string(),
+        }
+    } else {
+        "complete".to_string()
+    };
+    format!(
+        "  projection rebuild: {state} — started {}, {}\n",
+        rebuild.started_at, rebuild.reason
+    )
 }
 
 /// Pure: the shared MCP servers, one line each. Absent entirely when

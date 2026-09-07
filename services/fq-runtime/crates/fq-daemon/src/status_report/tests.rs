@@ -96,6 +96,17 @@ fn the_report_roundtrips_through_its_declared_shape() {
             load_errors: vec!["failed to parse notes.md".to_string()],
         },
         projection_rows: 10,
+        // A replay under way, so the optional block roundtrips with
+        // every field set rather than as an absence.
+        projection_rebuild: Some(fq_ops::surface::ProjectionRebuild {
+            started_at: "2026-09-07T10:00:00+00:00".to_string(),
+            reason: "schema version 0 -> 1".to_string(),
+            from_version: Some(0),
+            schema_version: 1,
+            target_seq: Some(60_744),
+            consumer_reset_pending: false,
+            in_progress: true,
+        }),
         recovery: fq_runtime::views::RecoveryView {
             ambiguous: 1,
             stale_workers: 2,
