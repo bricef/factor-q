@@ -2047,15 +2047,16 @@ mod crash_dst {
     /// LLM provider error: the invocation fails canonically — the
     /// trace ends in a `failed` terminal + archived (full-oracle
     /// valid), the WAL row completes with `is_error`, and nothing is
-    /// left in flight.
+    /// left in flight. A transport failure, not a rate limit: since
+    /// #278 a `RateLimited` that reaches the runner is a deferral, which
+    /// `resume_equivalence` covers.
     #[tokio::test]
     async fn llm_provider_error_fails_canonically() {
         let world = SimWorld::new(31, 5.0).await;
         let llm = FixtureClient::new();
-        llm.push_error(LlmError::RateLimited {
-            model: "sim-model".to_string(),
-            retry_after: None,
-        });
+        llm.push_error(LlmError::RequestFailed(
+            "sim: provider gave up".to_string(),
+        ));
 
         let err = world.run(&llm).await.expect_err("provider error");
         assert!(matches!(err, ExecutorError::Llm(_)), "got {err:?}");
@@ -2571,10 +2572,11 @@ mod soak {
         let llm = FixtureClient::new();
         if let Some(k) = s.llm_error_at {
             load_fixture(&llm, &responses[..k]);
-            llm.push_error(LlmError::RateLimited {
-                model: "sim-model".to_string(),
-                retry_after: None,
-            });
+            // A failing provider, not a throttling one: a rate limit is
+            // a deferral since #278, and this soak is about failures.
+            llm.push_error(LlmError::RequestFailed(
+                "sim: provider gave up".to_string(),
+            ));
         } else {
             load_fixture(&llm, &responses);
         }
@@ -2664,10 +2666,9 @@ mod soak {
                             match s.llm_error_at {
                                 Some(k) if consumed < k + 1 => {
                                     load_fixture(&resume_llm, &responses[consumed..k]);
-                                    resume_llm.push_error(LlmError::RateLimited {
-                                        model: "sim-model".to_string(),
-                                        retry_after: None,
-                                    });
+                                    resume_llm.push_error(LlmError::RequestFailed(
+                                        "sim: provider gave up".to_string(),
+                                    ));
                                 }
                                 _ => load_fixture(&resume_llm, &responses[consumed..]),
                             }
