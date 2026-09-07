@@ -578,6 +578,48 @@ message counts and lag beside them. The thresholds are `[bus]` in
 `fqd.toml`: `stuck_after_redeliveries` decides when retrying becomes
 stuck, and the escalation and log rate are configured there too.
 
+### When a consumer halts on an event it cannot read
+
+Every event carries the envelope's `schema_version`, and every consumer
+reads it before anything else
+([#409](https://github.com/bricef/factor-q/issues/409)). An event in a
+version this build does not read — the stream holds history written by
+an older or newer daemon — **halts** the consumer: the message is left
+unacked, nothing after it is consumed, and the consumer holds there
+until the daemon stops. The daemon itself keeps running, so the report
+can say what happened:
+
+```text
+Consumers: 5 checked, 1 unhealthy
+  fq-projector: ✗ halted — event 01990000-0000-7000-8000-000000000002 on
+     fq.agent.researcher.triggered (seq 4242) declares schema_version 2;
+     this build reads [3]
+  -> the message is unacked and nothing after it is consumed: run a build
+     that reads schema_version 2 and restart; the daemon log has the line
+     under `consumer=fq-projector`
+  fq-coordination: ok (lag 0)
+```
+
+**Halted means kept, not lost.** The alternative — acking what the
+build cannot read, as it does for malformed bytes — would erase that
+history from every projection built from the stream, and a rebuild
+would complete "successfully" with a hole in it. So the consumer stops
+at the first such event and says which version it found, which versions
+this build reads, and where the event sits. What to do is run a build
+that reads that version: the unacked message is where the consumer
+resumes, and nothing needs resetting. The daemon log carries the same
+detail once, at error level, under `consumer=<name>`.
+
+**Malformed is a different fact, and reported separately.** Bytes that
+are not an event in any version — JSON that does not parse, or a
+supported version whose body does not match its shape — are logged,
+acked and skipped, as they always were, and now counted: the line reads
+`fq-projector: ok (lag 0, 3 malformed acked)`, and `fq status` shows
+`malformed acked: 3` under the consumer. A non-zero count is not an
+issue on its own; it says poison was skipped, not that history was
+lost. A halt and a malformed count never read as one thing, because
+they call for opposite responses.
+
 ### Deleting a durable under a running daemon restarts it
 
 Every consumer the daemon hosts is supervised: if one exits — for any
@@ -609,6 +651,7 @@ deleting the durable and starts it again after.
 | Re-derive the projection from the event stream | `fq projection rebuild --yes` (`fq status` reports the replay) |
 | Inspect daemon / worker health | `fq status`, `fq workers list`, `fq doctor` (all three ask the daemon; `fq status` reports its absence as a finding rather than failing) |
 | See which consumers are keeping up | `fq doctor` (names every durable and any that is stuck) |
+| See whether a consumer halted on an event this build cannot read, and how many malformed messages it skipped | `fq doctor` (the `halted` line names the version found and the versions read; `malformed acked` is the skip count), `fq status` |
 | See the stuck threshold this daemon derived | `fq status` (the `stuck after` line) |
 | Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --event-type invocation_stuck` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
