@@ -109,6 +109,12 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // being refused at dispatch with the same reason.
     out.push_str(&render_mcp_servers(&report.mcp_servers));
 
+    // Throttled models (#278): what the provider throttle is holding
+    // back. Not an issue — the runtime absorbing a provider's
+    // backpressure is the runtime working — but the reason a quiet
+    // fleet is quiet, so it is on the page an operator opens first.
+    out.push_str(&render_throttled_models(&report.throttled_models));
+
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
     if report.dead_letters.exhausted_triggers > 0 {
         out.push_str(&format!(
@@ -277,6 +283,46 @@ fn render_mcp_servers(servers: &[fq_ops::health::McpServerHealth]) -> String {
             }
         }
     }
+    out
+}
+
+/// Pure but for the clock: the throttle block of `fq doctor`. One line
+/// per model the worker is holding back, with the pause as a countdown
+/// (the reader is deciding whether to wait, like the MCP retry line)
+/// and the permit arithmetic behind the slowdown. "none" when the
+/// provider has not said no recently, so the block is always on the
+/// page and its absence never has to be read as "not checked".
+fn render_throttled_models(models: &[fq_ops::health::ThrottledModel]) -> String {
+    if models.is_empty() {
+        return "Throttled models: none\n".to_string();
+    }
+    let paused = models
+        .iter()
+        .filter(|m| m.paused_until_ms.is_some())
+        .count();
+    let mut out = format!(
+        "Throttled models: {} ({paused} paused) — the provider throttle is holding work back; \
+         nothing to fix\n",
+        models.len()
+    );
+    for model in models {
+        let pause = match model.paused_until_ms {
+            Some(until) => format!("paused, resumes {}", render_when(until)),
+            None => "not paused".to_string(),
+        };
+        out.push_str(&format!(
+            "  {}: {pause}; {} of {} permits, {} in flight; {} rate-limited this window (wave {})\n",
+            model.model,
+            model.cap,
+            model.ceiling,
+            model.in_flight,
+            model.rate_limited_in_window,
+            model.waves
+        ));
+    }
+    out.push_str(
+        "  -> `fq events query --event-type invocation_deferred` for the invocations put down\n",
+    );
     out
 }
 

@@ -53,6 +53,17 @@ fn an_empty_registry_is_a_zero_not_a_gap() {
 fn the_report_roundtrips_through_its_declared_shape() {
     let report = StatusReport {
         mcp_servers: Vec::new(),
+        // One throttled model, so the roundtrip exercises the optional
+        // pause end as well as the counts (#278).
+        throttled_models: vec![fq_ops::health::ThrottledModel {
+            model: "moonshotai/kimi-k3".to_string(),
+            paused_until_ms: Some(1_700_000_030_000),
+            cap: 2,
+            ceiling: 4,
+            in_flight: 1,
+            rate_limited_in_window: 3,
+            waves: 1,
+        }],
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
         version: "0.1.0+deadbee".to_string(),

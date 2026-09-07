@@ -2567,6 +2567,62 @@
               }
             ]
           },
+          "ThrottledModel": {
+            "description": "One model the worker's provider throttle is holding back\n(<https://github.com/bricef/factor-q/issues/278>), as every operator\nsurface reads it: paused, running under its permit ceiling, or\nrate-limited in the current success window. A model with no 429\nhistory is not listed at all.\n\nReported, not judged: a throttled model is the runtime doing its job\nunder a provider's backpressure, so `fq doctor` lists it without\nchanging its verdict.",
+            "properties": {
+              "cap": {
+                "description": "How many calls the model may have in flight right now — halved on\neach 429 wave, raised by one per clean success window, never\nbelow 1 and never above `ceiling`.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ceiling": {
+                "description": "The cap's upper bound: `[worker] max_concurrent_invocations`.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "in_flight": {
+                "description": "Calls holding a permit at the instant of the report.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "model": {
+                "description": "The model string requests target — the throttle's key, which\nnames the `(provider, model)` pair because routing maps a model\nto exactly one provider.",
+                "type": "string"
+              },
+              "paused_until_ms": {
+                "description": "When the current pause ends, epoch milliseconds on the daemon's\nclock. Absent when the model is not paused. A paused model starts\nno invocation and is granted no permit until this passes.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "rate_limited_in_window": {
+                "description": "429s seen since the success window last completed.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "waves": {
+                "description": "Consecutive 429 waves without a success in between — what the\ndefault pause escalates on. Zero once a call succeeds.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "cap",
+              "ceiling",
+              "in_flight",
+              "rate_limited_in_window",
+              "waves"
+            ],
+            "type": "object"
+          },
           "UnsupportedEvent": {
             "description": "An event a consumer could not read: its envelope declares a schema\nversion outside the set this build parses. Carries where the event\nsits on the stream and how its envelope identified itself, so an\noperator can find it, and the versions the reader would have\naccepted, so the line says which side is behind.",
             "properties": {
@@ -2651,6 +2707,14 @@
             },
             "type": "array"
           },
+          "throttled_models": {
+            "default": [],
+            "description": "Every model the worker's provider throttle is holding back\n(<https://github.com/bricef/factor-q/issues/278>). Listed, not\njudged: a throttled model is the runtime absorbing a provider's\nbackpressure, which is its job, so it does not make the report an\nissue — but an operator wondering why the fleet is quiet reads\nthe answer here.",
+            "items": {
+              "$ref": "#/$defs/ThrottledModel"
+            },
+            "type": "array"
+          },
           "workers": {
             "$ref": "#/$defs/DoctorWorkers"
           }
@@ -2678,7 +2742,7 @@
   },
   {
     "report": {
-      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call. `projection_rebuild` is the projection's last rebuild — a schema bump on start, or `control.projection_rebuild` — and whether its replay has caught up; absent on a projection that has never been rebuilt.",
+      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call. `projection_rebuild` is the projection's last rebuild — a schema bump on start, or `control.projection_rebuild` — and whether its replay has caught up; absent on a projection that has never been rebuilt. `throttled_models` is every model the worker's provider throttle is holding back — paused after a 429, running under its in-flight ceiling, or rate-limited in the current window — read off the live throttle at the instant of the call. An empty list means no provider has said no recently.",
       "domain": "control",
       "name": "status",
       "output_schema": {
@@ -3171,6 +3235,62 @@
               }
             ]
           },
+          "ThrottledModel": {
+            "description": "One model the worker's provider throttle is holding back\n(<https://github.com/bricef/factor-q/issues/278>), as every operator\nsurface reads it: paused, running under its permit ceiling, or\nrate-limited in the current success window. A model with no 429\nhistory is not listed at all.\n\nReported, not judged: a throttled model is the runtime doing its job\nunder a provider's backpressure, so `fq doctor` lists it without\nchanging its verdict.",
+            "properties": {
+              "cap": {
+                "description": "How many calls the model may have in flight right now — halved on\neach 429 wave, raised by one per clean success window, never\nbelow 1 and never above `ceiling`.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "ceiling": {
+                "description": "The cap's upper bound: `[worker] max_concurrent_invocations`.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "in_flight": {
+                "description": "Calls holding a permit at the instant of the report.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "model": {
+                "description": "The model string requests target — the throttle's key, which\nnames the `(provider, model)` pair because routing maps a model\nto exactly one provider.",
+                "type": "string"
+              },
+              "paused_until_ms": {
+                "description": "When the current pause ends, epoch milliseconds on the daemon's\nclock. Absent when the model is not paused. A paused model starts\nno invocation and is granted no permit until this passes.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "rate_limited_in_window": {
+                "description": "429s seen since the success window last completed.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "waves": {
+                "description": "Consecutive 429 waves without a success in between — what the\ndefault pause escalates on. Zero once a call succeeds.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model",
+              "cap",
+              "ceiling",
+              "in_flight",
+              "rate_limited_in_window",
+              "waves"
+            ],
+            "type": "object"
+          },
           "UnsupportedEvent": {
             "description": "An event a consumer could not read: its envelope declares a schema\nversion outside the set this build parses. Carries where the event\nsits on the stream and how its envelope identified itself, so an\noperator can find it, and the versions the reader would have\naccepted, so the line says which side is behind.",
             "properties": {
@@ -3275,6 +3395,14 @@
             "description": "How long an in-flight invocation may go without crossing a step\nboundary before this daemon reports it stuck, in milliseconds.\n\nMachinery state rather than a judgement — `control.doctor` is\nwhere the verdict lives. It is here because the number is\nderived from this daemon's own call deadlines and is therefore\nsomething only the daemon can answer: an operator reading an\n`invocation.stuck` event needs to know what threshold produced\nit, and a reader with no access to the daemon's config cannot\nwork it out.",
             "format": "int64",
             "type": "integer"
+          },
+          "throttled_models": {
+            "default": [],
+            "description": "Every model the worker's provider throttle is holding back\n(<https://github.com/bricef/factor-q/issues/278>): paused, under\nits permit ceiling, or rate-limited in the current window. Empty\non a daemon no provider has said no to, and always empty with\n`[worker.throttle] enabled = false`.",
+            "items": {
+              "$ref": "#/$defs/ThrottledModel"
+            },
+            "type": "array"
           },
           "version": {
             "description": "The build this daemon is running: semver plus the commit it was\nbuilt from, so a deploy check can confirm the live process is on\nthe expected revision.",

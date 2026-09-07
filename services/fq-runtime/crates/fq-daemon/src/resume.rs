@@ -45,6 +45,9 @@ pub struct ResumeControl {
     pub(crate) runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
     pub(crate) registry: SharedRegistry,
     pub(crate) llm: Arc<dyn LlmClient>,
+    /// Where a re-driven invocation goes if its model is still
+    /// rate-limited when it gets there (#278).
+    pub(crate) deferrals: fq_runtime::worker::DeferralQueue,
 }
 
 impl ResumeControl {
@@ -62,6 +65,7 @@ impl ResumeControl {
         runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
         registry: SharedRegistry,
         llm: Arc<dyn LlmClient>,
+        deferrals: fq_runtime::worker::DeferralQueue,
     ) -> Self {
         ResumeControl {
             bus,
@@ -70,6 +74,7 @@ impl ResumeControl {
             runner,
             registry,
             llm,
+            deferrals,
         }
     }
 }
@@ -237,9 +242,18 @@ pub(crate) async fn handle_resume_request(
     // re-driven invocation, which can run for minutes.
     let runner = control.runner.clone();
     let llm = control.llm.clone();
+    let deferrals = control.deferrals.clone();
     tokio::spawn(async move {
-        if let Err(err) = runner.resume(&agent, llm.as_ref(), invocation_id).await {
-            tracing::error!(error = %err, %invocation_id, "operator resume failed");
+        match runner.resume(&agent, llm.as_ref(), invocation_id).await {
+            // Still rate-limited (#278): back on the queue, not lost.
+            Ok(fq_runtime::InvocationOutcome::Deferred {
+                invocation_id,
+                resume_after,
+            }) => deferrals.defer(invocation_id, agent_id, resume_after),
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(error = %err, %invocation_id, "operator resume failed");
+            }
         }
     });
     InvocationResumeResponse {

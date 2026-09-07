@@ -70,6 +70,7 @@ pub(crate) fn register_status_report(
     let stuck_after_ms_value = facts.stuck_after_ms;
     let summary_enabled = facts.summary_enabled;
     let mcp_servers = facts.mcp_servers.clone();
+    let throttle = facts.throttle.clone();
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
         fq_ops::ControlReport::Status,
         "Machinery state: the daemon's build, its stream health, its live registry, \
@@ -99,7 +100,11 @@ pub(crate) fn register_status_report(
          `control.doctor`'s call. \
          `projection_rebuild` is the projection's last rebuild — a schema bump on start, \
          or `control.projection_rebuild` — and whether its replay has caught up; absent \
-         on a projection that has never been rebuilt.",
+         on a projection that has never been rebuilt. \
+         `throttled_models` is every model the worker's provider throttle is holding \
+         back — paused after a 429, running under its in-flight ceiling, or rate-limited \
+         in the current window — read off the live throttle at the instant of the call. \
+         An empty list means no provider has said no recently.",
     );
     registry
         .report::<StatusParams, StatusReport, _, _>(decl, move |_params: StatusParams| {
@@ -110,6 +115,7 @@ pub(crate) fn register_status_report(
             let db_paths = db_paths.clone();
             let legacy_events_db = legacy_events_db.clone();
             let mcp_servers = mcp_servers.clone();
+            let throttle = throttle.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -162,6 +168,7 @@ pub(crate) fn register_status_report(
                     projection_rebuild,
                     recovery,
                     mcp_servers: fq_runtime::health::mcp_server_health(&mcp_servers),
+                    throttled_models: throttle.snapshot(now_ms),
                 })
             }
         })

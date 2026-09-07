@@ -120,9 +120,25 @@ pub struct DoctorReport {
     /// why.
     #[serde(default)]
     pub mcp_servers: Vec<crate::health::McpServerHealth>,
+    /// Every model the worker's provider throttle is holding back
+    /// (<https://github.com/bricef/factor-q/issues/278>). Listed, not
+    /// judged: a throttled model is the runtime absorbing a provider's
+    /// backpressure, which is its job, so it does not make the report an
+    /// issue — but an operator wondering why the fleet is quiet reads
+    /// the answer here.
+    #[serde(default)]
+    pub throttled_models: Vec<crate::health::ThrottledModel>,
 }
 
 impl DoctorReport {
+    /// Attach the throttle's snapshot. Separate from
+    /// [`build_doctor_report`] because the list is the daemon's live
+    /// throttle rather than a fold of the stores the builder reads.
+    pub fn with_throttled_models(mut self, models: Vec<crate::health::ThrottledModel>) -> Self {
+        self.throttled_models = models;
+        self
+    }
+
     /// Total terminal failures across all kinds.
     pub fn failure_total(&self) -> i64 {
         self.failures.iter().map(|f| f.count).sum()
@@ -232,5 +248,6 @@ pub fn build_doctor_report(
         dead_letters,
         consumers,
         mcp_servers,
+        throttled_models: Vec::new(),
     }
 }

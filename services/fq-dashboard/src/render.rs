@@ -326,6 +326,23 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
         r#"<tr><th>recovery</th><td class="{}">{} ambiguous, {} stale workers</td></tr>"#,
         rec_class, status.recovery.ambiguous, status.recovery.stale_workers
     ));
+    // The provider throttle (#278): what the worker is holding back,
+    // and why the fleet is quiet when it is. Amber, not red — a
+    // throttled model is the runtime absorbing a provider's
+    // backpressure, not a fault.
+    if status.throttled_models.is_empty() {
+        b.push_str(r#"<tr><th>throttled models</th><td class="ok">none</td></tr>"#);
+    } else {
+        let lines: Vec<String> = status
+            .throttled_models
+            .iter()
+            .map(throttled_model_cell)
+            .collect();
+        b.push_str(&format!(
+            r#"<tr><th>throttled models</th><td class="warn">{}</td></tr>"#,
+            lines.join("<br>")
+        ));
+    }
     b.push_str("</table>");
 
     if !doctor.failures.is_empty() {
@@ -341,6 +358,28 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
     }
 
     b
+}
+
+/// One throttled model as an escaped phrase: the pause's end on the
+/// daemon's clock, the permits against the ceiling, the 429s behind it.
+fn throttled_model_cell(model: &fq_ops::health::ThrottledModel) -> String {
+    let pause = match model.paused_until_ms {
+        Some(until) => format!(
+            "paused until {}",
+            chrono::DateTime::from_timestamp_millis(until)
+                .map(|t| t.format("%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| format!("{until}ms"))
+        ),
+        None => "not paused".to_string(),
+    };
+    format!(
+        "{} — {pause}; {} of {} permits, {} in flight; {} × 429 this window",
+        esc(&model.model),
+        model.cap,
+        model.ceiling,
+        model.in_flight,
+        model.rate_limited_in_window
+    )
 }
 
 /// The transcript page body: the step-by-step conversation — prompt,

@@ -98,6 +98,15 @@ pub(crate) struct Assembled {
     pub agents_loaded: u32,
     pub pricing_entries: u32,
     pub resume_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// The worker's provider throttle (#278): the LLM stack already
+    /// takes permits from it; the dispatcher holds triggers on it and
+    /// the health reports read it.
+    pub throttle: Arc<fq_runtime::llm::ModelThrottle>,
+    /// Where a deferred invocation is put down (#278). The handle went
+    /// to startup recovery and `invocation.resume` already; the drain
+    /// end is the dispatcher's.
+    pub deferrals: fq_runtime::worker::DeferralQueue,
+    pub due_resumes: tokio::sync::mpsc::Receiver<fq_runtime::worker::DueResume>,
 }
 
 /// Start the hosted tasks, wait for a stop, and shut them down.
@@ -124,6 +133,9 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         agents_loaded,
         pricing_entries,
         resume_handles,
+        throttle,
+        deferrals,
+        due_resumes,
     } = a;
     // Publish a system.startup event before spawning any tasks.
     // If this fails the daemon cannot produce lifecycle events at
@@ -159,6 +171,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         runner: resume_runner.clone(),
         registry: shared_registry.clone(),
         llm: llm.clone(),
+        deferrals: deferrals.clone(),
     });
 
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
@@ -189,7 +202,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             bus: bus.clone(),
             projection: store.clone(),
             control_plane: cp_store.clone(),
-            facts: daemon_facts(&config, mcp.states()),
+            facts: daemon_facts(&config, mcp.states(), throttle.clone()),
             // The same runner the dispatcher and startup recovery
             // drive invocations with — `invocation.drop` asks it
             // whether the target is live, and arms its halt.
@@ -377,13 +390,18 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // Spawn the trigger dispatcher. Its concurrency bound (#70) is
     // config, default 1 (serial) until the Phase-2 concurrency gate.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
+    // The throttle it holds paused models' triggers on is the one the
+    // LLM stack takes permits from, and the deferral queue it drains is
+    // the one every resume path puts invocations down into (#278).
     let dispatcher = TriggerDispatcher::new(
         bus.clone(),
         shared_registry.clone(),
         worker,
         llm,
         config.worker.max_concurrent_invocations,
-    );
+    )
+    .with_throttle(throttle)
+    .with_deferrals(deferrals, due_resumes);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
     // Set by the select's own dispatcher arm, which consumes the handle.
     let mut dispatcher_joined = false;
@@ -671,6 +689,7 @@ fn edge_limits(config: &Config) -> fq_edge::EdgeLimits {
 fn daemon_facts(
     config: &Config,
     mcp_servers: fq_runtime::McpServerStates,
+    throttle: Arc<fq_runtime::llm::ModelThrottle>,
 ) -> crate::operator_surface::DaemonFacts {
     crate::operator_surface::DaemonFacts {
         db_paths: Arc::new(runtime_db_paths(config)),
@@ -679,5 +698,6 @@ fn daemon_facts(
         stuck_after_ms: config.stuck_after_ms(),
         summary_enabled: config.summary.model.is_some(),
         mcp_servers,
+        throttle,
     }
 }

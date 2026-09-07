@@ -22,6 +22,35 @@ fn health_links_working_and_stuck_ids() {
     );
 }
 
+/// The provider throttle (#278): a paused model is on the health page,
+/// amber, with its permit arithmetic and the pause's end; a daemon with
+/// nothing throttled says so rather than leaving the row out.
+#[test]
+fn health_shows_throttled_models() {
+    let mut status = crate::fixtures::status_report();
+    let doctor = crate::fixtures::doctor_report();
+    let html = health(&status, &doctor);
+    assert!(
+        html.contains(r#"<th>throttled models</th><td class="warn">"#),
+        "got: {html}"
+    );
+    assert!(
+        html.contains("moonshotai/kimi-k3 — paused until "),
+        "got: {html}"
+    );
+    assert!(
+        html.contains("2 of 4 permits, 0 in flight; 3 × 429 this window"),
+        "got: {html}"
+    );
+
+    status.throttled_models.clear();
+    let html = health(&status, &doctor);
+    assert!(
+        html.contains(r#"<th>throttled models</th><td class="ok">none</td>"#),
+        "got: {html}"
+    );
+}
+
 /// Retry pressure (#49) is visible on the streams table when a
 /// consumer has outstanding redeliveries.
 #[test]

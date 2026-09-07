@@ -72,6 +72,7 @@ pub(crate) fn register_doctor_report(
     let stuck_after_ms = facts.stuck_after_ms;
     let summary_enabled = facts.summary_enabled;
     let mcp_servers = facts.mcp_servers.clone();
+    let throttle = facts.throttle.clone();
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -102,6 +103,7 @@ pub(crate) fn register_doctor_report(
             let views = views.clone();
             let bus = bus.clone();
             let mcp_servers = mcp_servers.clone();
+            let throttle = throttle.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -150,7 +152,10 @@ pub(crate) fn register_doctor_report(
                     &failures,
                     consumers,
                     fq_runtime::health::mcp_server_health(&mcp_servers),
-                ))
+                )
+                // The throttle is live state, not a fold of the stores
+                // the builder reads (#278).
+                .with_throttled_models(throttle.snapshot(now_ms)))
             }
         })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
