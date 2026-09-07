@@ -1502,3 +1502,169 @@ fn reported_cost_rides_the_cost_record_and_is_absent_when_unreported() {
     let back: CostMetadata = serde_json::from_value(reported_json).unwrap();
     assert_eq!(back.reported_cost, Some(0.0000285));
 }
+
+// ------------------------------------------------------------------
+// The wire boundary (#409): the version is read before the shape, so
+// "a version this build does not read" and "not an event at all" are
+// two errors, not one.
+// ------------------------------------------------------------------
+
+/// A current-version event as the serialisers write it, as JSON so a
+/// test can bend one field at a time.
+fn wire_fixture() -> serde_json::Value {
+    let event = Event::new(
+        AgentId::new("researcher").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::Completed(CompletedPayload {
+            task_status: TaskStatus::Success,
+            result_summary: Some("done".to_string()),
+            total_llm_calls: 1,
+            total_tool_calls: 0,
+            total_cost: 0.001,
+            total_duration_ms: 10,
+        }),
+    );
+    serde_json::to_value(&event).unwrap()
+}
+
+/// The same bytes minus the version field are malformed; the same
+/// bytes with a version this build does not read are unsupported. The
+/// two must never collapse into one another: a consumer acks the first
+/// and halts on the second.
+#[test]
+fn the_boundary_tells_an_unsupported_version_from_malformed_bytes() {
+    let current = wire_fixture();
+    let event_id = current["envelope"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    Event::from_wire(current.to_string().as_bytes())
+        .expect("the current version parses through the boundary");
+
+    let mut older = current.clone();
+    older["envelope"]["schema_version"] = json!(2);
+    match Event::from_wire(older.to_string().as_bytes()) {
+        Err(EventParseError::UnsupportedSchemaVersion {
+            found,
+            supported,
+            event_id: found_id,
+        }) => {
+            assert_eq!(found, 2);
+            assert_eq!(supported, SUPPORTED_SCHEMA_VERSIONS);
+            assert_eq!(supported, &[SCHEMA_VERSION]);
+            assert_eq!(
+                found_id.as_deref(),
+                Some(event_id.as_str()),
+                "the id is read by name so the message can be found on the stream"
+            );
+        }
+        other => panic!("a version this build does not read is unsupported, got {other:?}"),
+    }
+
+    let mut versionless = current.clone();
+    versionless["envelope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    assert!(
+        matches!(
+            Event::from_wire(versionless.to_string().as_bytes()),
+            Err(EventParseError::Malformed(_))
+        ),
+        "no version anywhere is not an event in any version"
+    );
+}
+
+/// The version is read *first*: an older envelope whose body happens
+/// to parse against the current types is still refused, and an older
+/// envelope whose body is garbage is refused for its version, not for
+/// its body. Without this a v2 event with a serde-compatible payload
+/// would project silently, which is the loss this boundary exists to
+/// stop.
+#[test]
+fn the_version_is_read_before_the_shape() {
+    let mut older = wire_fixture();
+    older["envelope"]["schema_version"] = json!(2);
+    older["payload"] = json!({"event_type": "completed", "payload": "not an object"});
+    assert!(
+        matches!(
+            Event::from_wire(older.to_string().as_bytes()),
+            Err(EventParseError::UnsupportedSchemaVersion { found: 2, .. })
+        ),
+        "an unsupported version is refused before its body is looked at"
+    );
+
+    let mut current_bad_body = wire_fixture();
+    current_bad_body["payload"] = json!({"event_type": "completed", "payload": "not an object"});
+    assert!(
+        matches!(
+            Event::from_wire(current_bad_body.to_string().as_bytes()),
+            Err(EventParseError::Malformed(_))
+        ),
+        "a supported version with a body that does not match its shape is malformed"
+    );
+}
+
+/// v1 kept the version at the top level — the `envelope` object came
+/// with v2 — and it is still refused for its version rather than
+/// reported as malformed, because a v1 replay is the same class of
+/// loss as a v2 one.
+#[test]
+fn a_v1_flat_envelope_is_refused_by_version() {
+    let v1 = json!({
+        "schema_version": 1,
+        "event_id": "01890000-0000-7000-8000-000000000001",
+        "timestamp": "2026-01-02T03:04:05Z",
+        "agent_id": "researcher",
+        "invocation_id": "01890000-0000-7000-8000-000000000002",
+        "event_type": "completed",
+        "payload": {"total_llm_calls": 1}
+    });
+    match Event::from_wire(v1.to_string().as_bytes()) {
+        Err(EventParseError::UnsupportedSchemaVersion {
+            found, event_id, ..
+        }) => {
+            assert_eq!(found, 1);
+            assert_eq!(
+                event_id.as_deref(),
+                Some("01890000-0000-7000-8000-000000000001")
+            );
+        }
+        other => panic!("a v1 event is unsupported, got {other:?}"),
+    }
+}
+
+/// Bytes that are not JSON, and JSON that is not an object, are
+/// malformed — the existing parse error, wrapped.
+#[test]
+fn bytes_that_are_not_an_event_are_malformed() {
+    let cases: [&[u8]; 4] = [b"not json", b"[1, 2, 3]", b"\"a string\"", b"{}"];
+    for bytes in cases {
+        assert!(
+            matches!(Event::from_wire(bytes), Err(EventParseError::Malformed(_))),
+            "{:?} is malformed",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
+/// The runtime writes exactly the version it reads: a bump to one
+/// without the other would refuse the runtime's own events.
+#[test]
+fn the_written_version_is_a_supported_one() {
+    assert!(SUPPORTED_SCHEMA_VERSIONS.contains(&SCHEMA_VERSION));
+}
+
+/// Every payload has a kind, the kinds are distinct, and the kind of
+/// an event is its type: the corpus test in `fq-runtime` leans on this
+/// to ask whether every type is covered.
+#[test]
+fn every_payload_has_a_kind_and_the_kinds_are_distinct() {
+    use strum::IntoEnumIterator;
+    let kinds: Vec<EventKind> = EventKind::iter().collect();
+    let distinct: std::collections::BTreeSet<EventKind> = kinds.iter().copied().collect();
+    assert_eq!(kinds.len(), distinct.len());
+    assert!(kinds.contains(&EventKind::Unknown));
+    let event: Event = serde_json::from_value(wire_fixture()).unwrap();
+    assert_eq!(EventKind::from(&event.payload), EventKind::Completed);
+}
