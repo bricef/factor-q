@@ -212,7 +212,7 @@ The durable path follows the
 producer rules: JetStream publish, await the ack. On top of that, every
 durable publish sets the standard dedup header:
 
-```
+```text
 Nats-Msg-Id: fq-cron/<job-name>@<scheduled-time RFC3339>
 ```
 
@@ -353,7 +353,7 @@ timezone) and `{{job}}` (the job name). No further templating in v1.
 
 ## Architecture
 
-```
+```text
 fq-cron.toml ──▶ ConfigWatcher ──(validated JobSet)──▶ Scheduler core ──▶ Publisher ──▶ NATS
  (fsnotify+poll)                                          │      ▲
                                                           ▼      │
