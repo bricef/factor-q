@@ -122,7 +122,7 @@ impl ModelState {
     }
 }
 
-/// The throttle: one per daemon, one [`ModelState`] per model.
+/// The throttle: one per daemon, one `ModelState` per model.
 pub struct ModelThrottle {
     config: ThrottleConfig,
     bounds: ThrottleBounds,
