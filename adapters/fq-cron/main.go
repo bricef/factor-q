@@ -17,6 +17,8 @@ import (
 
 const reloadSettleEnv = "FQCRON_RELOAD_SETTLE"
 
+const removalConfirmEnv = "FQCRON_REMOVAL_CONFIRM"
+
 type cliConfig struct {
 	ConfigPath, NATSURL, KVBucket string
 	// HealthBind is the loopback address of GET /healthz (health.go);
@@ -25,7 +27,10 @@ type cliConfig struct {
 	// ReloadSettle is the quiet period a changed jobs file must hold
 	// before the watcher reads it as final (watch.go).
 	ReloadSettle time.Duration
-	Check        bool
+	// RemovalConfirm is how long a job dropped by a reload keeps its fire
+	// state before the deletion is carried out (removal.go).
+	RemovalConfirm time.Duration
+	Check          bool
 }
 
 func envOr(key, fallback string) string {
@@ -57,11 +62,16 @@ func configFromArgs(args []string) (cliConfig, error) {
 	if err != nil {
 		return c, err
 	}
+	removalConfirm, err := envOrDuration(removalConfirmEnv, DefaultRemovalConfirm)
+	if err != nil {
+		return c, err
+	}
 	fs.StringVar(&c.ConfigPath, "config", envOr("FQCRON_CONFIG", ""), "config file (env FQCRON_CONFIG)")
 	fs.StringVar(&c.NATSURL, "nats-url", envOr("FQCRON_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env FQCRON_NATS_URL)")
 	fs.StringVar(&c.KVBucket, "kv-bucket", envOr("FQCRON_KV_BUCKET", "fq-cron-state"), "KV bucket (env FQCRON_KV_BUCKET)")
 	fs.StringVar(&c.HealthBind, "health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 	fs.DurationVar(&c.ReloadSettle, "reload-settle", settle, "quiet period a changed config file must hold before it is reloaded (env "+reloadSettleEnv+")")
+	fs.DurationVar(&c.RemovalConfirm, "removal-confirm", removalConfirm, "how long a job dropped by a reload keeps its fire state before it is deleted (env "+removalConfirmEnv+")")
 	fs.BoolVar(&c.Check, "check", false, "validate config and exit")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -76,6 +86,12 @@ func configFromArgs(args []string) (cliConfig, error) {
 	// not.
 	if c.ReloadSettle <= 0 {
 		return c, fmt.Errorf("--reload-settle (or %s) must be greater than zero", reloadSettleEnv)
+	}
+	// Same reason, same shape: the loop reads a non-positive window as "use
+	// the default", so a zero here would run a 60-second confirmation window
+	// while its operator believed removals were immediate.
+	if c.RemovalConfirm <= 0 {
+		return c, fmt.Errorf("--removal-confirm (or %s) must be greater than zero", removalConfirmEnv)
 	}
 	return c, nil
 }
@@ -201,7 +217,11 @@ func run(args []string) error {
 		return nil // ctx cancelled: a clean stop
 	}
 	watcher := NewConfigWatcher(cli.ConfigPath, loaded, ConfigWatcherOptions{Settle: cli.ReloadSettle, Logger: log.Default()})
-	return runScheduler(ctx, loaded.Config, watcher.Run(ctx), publisher, store, log.Default())
+	// Recheck is the watcher's own Check: at a parked removal's deadline the
+	// loop takes one last look at the file, so a write that completed since
+	// the reload that dropped the job is seen before its state is deleted.
+	removal := removalPolicy{Confirm: cli.RemovalConfirm, Recheck: watcher.Check}
+	return runScheduler(ctx, loaded.Config, watcher.Run(ctx), publisher, store, removal, log.Default())
 }
 
 func main() {
