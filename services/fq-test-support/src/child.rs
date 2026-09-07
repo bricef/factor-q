@@ -506,7 +506,10 @@ mod tests {
         let mut child = TestChild::builder("/bin/true").spawn();
         let status = child.wait().expect("wait");
         assert!(status.success());
-        assert!(child.child.is_none(), "a reaped child must disarm the guard");
+        assert!(
+            child.child.is_none(),
+            "a reaped child must disarm the guard"
+        );
     }
 
     /// The stray report must not fire on a *live* run's children, or it

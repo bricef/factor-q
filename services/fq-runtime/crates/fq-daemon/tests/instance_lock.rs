@@ -196,7 +196,8 @@ fn a_held_address_stops_the_daemon_before_it_touches_anything() {
 
     let scratch = scratch_with_bind("held", &addr);
     let mut child = spawn_daemon(&scratch, &nats_url, "daemon.log");
-    let status = child.wait_timeout(Duration::from_secs(30))
+    let status = child
+        .wait_timeout(Duration::from_secs(30))
         .expect("a daemon that cannot bind must exit, not hang");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -254,7 +255,8 @@ fn a_second_daemon_on_one_state_dir_refuses_and_leaves_the_first_running() {
     )
     .unwrap();
     let mut second = spawn_daemon(&scratch, &nats_url, "second.log");
-    let second_status = second.wait_timeout(Duration::from_secs(30))
+    let second_status = second
+        .wait_timeout(Duration::from_secs(30))
         .expect("the second daemon must exit rather than share the store");
     let second_log = std::fs::read_to_string(scratch.join("second.log")).unwrap_or_default();
 
@@ -307,7 +309,8 @@ fn a_failure_after_registration_leaves_the_worker_shutdown() {
     .unwrap();
 
     let mut child = spawn_daemon(&scratch, &nats_url, "daemon.log");
-    let status = child.wait_timeout(Duration::from_secs(60))
+    let status = child
+        .wait_timeout(Duration::from_secs(60))
         .expect("a daemon that fails its pricing guarantee must exit");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -394,7 +397,8 @@ fn a_signal_during_a_hung_boot_stops_the_daemon_cleanly() {
 
     child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
-    let status = child.wait_timeout(Duration::from_secs(30))
+    let status = child
+        .wait_timeout(Duration::from_secs(30))
         .expect("a hung boot must answer SIGTERM, not need SIGKILL");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
