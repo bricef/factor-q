@@ -26,10 +26,14 @@
 //! 2. A `Drop` that still stops the child politely on the normal path
 //!    (`SIGTERM`, a grace period, then `SIGKILL`), in *one* implementation
 //!    rather than the five near-copies that let the omission spread.
-//! 3. A one-shot stray report at first spawn: any process already running
-//!    the binary we are about to start is named on stderr. Never killed —
-//!    a parallel run's daemon is not ours to end — but a leak that was
-//!    invisible for 27 hours now announces itself on the next run.
+//! 3. A one-shot stray report at first spawn: any **orphaned** process
+//!    running the binary we are about to start is named on stderr.
+//!    Orphaned, not merely present — cargo runs a crate's test binaries
+//!    concurrently, so several live runs legitimately have a daemon up,
+//!    and naming those is noise that trains the reader to skip the line.
+//!    Never killed — somebody else's daemon is not ours to end — but a
+//!    leak that was invisible for 27 hours now announces itself on the
+//!    next run.
 //!
 //! **The `PDEATHSIG` pitfall.** The signal fires when the spawning
 //! *thread* exits, not when the process does. A child spawned from a
@@ -58,9 +62,15 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long a dropped child gets to honour `SIGTERM` before `SIGKILL`.
-/// Long enough for `fqd`'s drain to finish on a loaded box, short enough
-/// that a wedged child cannot hang the suite the way an unbounded
-/// `wait()` would.
+///
+/// **Not** the daemon's drain deadline, which defaults to 180 s: this is
+/// teardown, reached after the test's assertions are made, on daemons
+/// that are idle by then — the drain they run has nothing to drain.
+/// Several fixtures previously waited on that `SIGTERM` unboundedly, so
+/// this is a deliberate change: a wedged child now costs five seconds
+/// instead of hanging the suite. A test that means to observe a real
+/// drain waits for it explicitly (`wait_timeout`) and does not leave the
+/// question to `Drop`.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// Builder for [`TestChild`]. Mirrors the slice of [`Command`] the test
@@ -134,7 +144,9 @@ impl TestChildBuilder {
             .spawn()
             .unwrap_or_else(|e| panic!("spawn {}: {e}", self.program.display()));
         TestChild {
+            pid: child.id(),
             child: Some(child),
+            status: None,
             program: self.program,
         }
     }
@@ -160,8 +172,24 @@ impl TestChildBuilder {
 /// reaped — by [`wait`](Self::wait) or by a [`try_wait`](Self::try_wait)
 /// that reported an exit — the guard disarms itself, so `Drop` can never
 /// signal a PID the kernel has since handed to somebody else.
+///
+/// **Reaping is not forgetting.** The exit status is kept, and every
+/// query answers from it afterwards: `try_wait` still reports `Some`,
+/// `wait` returns immediately, `wait_timeout` does not sit out its
+/// deadline. `std::process::Child` caches the status for exactly this
+/// reason, and the hand-rolled `wait_with_timeout` copies this fixture
+/// replaced inherited that behaviour for free. A caller that reaches the
+/// child through a path that happens to reap it — `wait_for_log_line`
+/// returns normally when the daemon writes its line and exits inside one
+/// poll interval — must not then be told "still running" by a `None` it
+/// cannot distinguish from a live child.
 pub struct TestChild {
     child: Option<Child>,
+    /// What the child exited with, once it has. Survives the `Child`.
+    status: Option<ExitStatus>,
+    /// The PID it was given, which outlives the handle for the sake of a
+    /// caller that captured it while the child was alive.
+    pid: u32,
     program: PathBuf,
 }
 
@@ -175,48 +203,72 @@ impl TestChild {
         // what they mean to set; inheriting the rest is deliberate (the
         // suites rely on RUST_BACKTRACE, PATH and the like) and matches
         // what these sites did before the fixture existed.
+        //
+        // stdin is the one exception, and it is a change: the daemon
+        // sites used to inherit the test binary's stdin, which is the
+        // developer's terminal under a bare `cargo test`. Nothing relied
+        // on that — every pre-fixture `stdin(..)` call in this tree is on
+        // an `fq`-client `Command` that stays a `Command` — and a daemon
+        // holding a share of the runner's terminal is a hazard on its
+        // own. A site that wants otherwise says so with `.stdin(..)`.
         command.stdin(Stdio::null());
         TestChildBuilder { program, command }
     }
 
-    /// The child's PID, for a test that signals it by hand.
+    /// The PID the child was given.
     ///
-    /// Panics once the child has been reaped: the PID is meaningless
-    /// then, and silently returning a stale one is how a teardown ends
-    /// up killing an unrelated process.
+    /// Still answered after the child has been reaped, because that is
+    /// what a caller who captured it while the child was alive already
+    /// holds. It is not a licence to signal: [`signal`](Self::signal)
+    /// refuses once the child is reaped rather than firing at a number
+    /// the kernel may have handed to somebody else.
     #[must_use]
     pub fn id(&self) -> u32 {
-        self.alive().id()
+        self.pid
     }
 
     /// Poll for exit without blocking.
+    ///
+    /// Keeps answering `Some(status)` once the child has exited — see the
+    /// type docs. Only a live child returns `None`.
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         let Some(child) = self.child.as_mut() else {
-            return Ok(None);
+            return Ok(self.status);
         };
         let status = child.try_wait()?;
-        if status.is_some() {
+        if let Some(status) = status {
+            self.status = Some(status);
             self.child = None; // reaped: the guard has nothing left to do
         }
         Ok(status)
     }
 
-    /// Block until the child exits.
+    /// Block until the child exits. Returns the remembered status
+    /// immediately if it already has.
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        let status = self.alive_mut().wait();
-        if status.is_ok() {
-            self.child = None;
-        }
-        status
+        let Some(child) = self.child.as_mut() else {
+            return self.status.ok_or_else(reaped_and_forgotten);
+        };
+        let status = child.wait()?;
+        self.status = Some(status);
+        self.child = None;
+        Ok(status)
     }
 
     /// Send `signal` to the child. `Ok(())` means the kernel accepted it,
     /// not that the child acted on it.
+    ///
+    /// A reaped child is `ESRCH` — the same answer the kernel gives for a
+    /// process that is gone, and emphatically not a signal aimed at a
+    /// recycled PID.
     pub fn signal(&self, signal: i32) -> std::io::Result<()> {
+        if self.child.is_none() {
+            return Err(reaped_and_forgotten());
+        }
         // SAFETY: `kill` on a live child PID this process owns. The child
-        // is unreaped (`alive` panics otherwise), so the PID is still
-        // ours and cannot have been recycled.
-        let rc = unsafe { libc::kill(self.id() as libc::pid_t, signal) };
+        // is unreaped, so the PID is still ours and cannot have been
+        // recycled.
+        let rc = unsafe { libc::kill(self.pid as libc::pid_t, signal) };
         if rc == 0 {
             Ok(())
         } else {
@@ -269,33 +321,26 @@ impl TestChild {
             libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
         }
         let deadline = Instant::now() + TERM_GRACE;
-        loop {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                break;
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break Some(status);
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
-                let _ = child.wait();
-                break;
+                break child.wait().ok();
             }
             std::thread::sleep(Duration::from_millis(20));
-        }
+        };
+        self.status = status.or(self.status);
         self.child = None;
     }
+}
 
-    fn alive(&self) -> &Child {
-        match self.child.as_ref() {
-            Some(child) => child,
-            None => panic!("{} has already been reaped", self.program.display()),
-        }
-    }
-
-    fn alive_mut(&mut self) -> &mut Child {
-        match self.child.as_mut() {
-            Some(child) => child,
-            None => panic!("{} has already been reaped", self.program.display()),
-        }
-    }
+/// The child is gone and its status was never observed — only reachable
+/// via [`TestChild::terminate`], which reaps without always being able to
+/// collect a status.
+fn reaped_and_forgotten() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::ESRCH)
 }
 
 impl Drop for TestChild {
@@ -304,42 +349,71 @@ impl Drop for TestChild {
     }
 }
 
-/// Arm the guard on `command`: the kernel kills the child when the thread
-/// that forked it dies.
-#[cfg(target_os = "linux")]
-fn arm_death_guard(command: &mut Command) {
-    use std::os::unix::process::CommandExt as _;
+/// This process's PID, to be captured *before* the fork and re-checked
+/// after it. Read it in the parent: `getpid` in the child answers about
+/// the child.
+pub(crate) fn spawning_process() -> libc::pid_t {
+    std::process::id() as libc::pid_t
+}
 
-    let parent = std::process::id() as libc::pid_t;
-    // SAFETY: the closure runs between fork and exec, where only
-    // async-signal-safe calls are legal. `prctl`, `getppid` and `_exit`
-    // all are, and nothing here allocates. `PR_SET_PDEATHSIG` survives
-    // the exec (it is cleared only by fork, and by exec of a set-user-ID
-    // binary — `fqd` is neither).
-    unsafe {
-        command.pre_exec(move || {
+/// The post-fork, pre-exec half of the guard, given the PID
+/// [`spawning_process`] returned in the parent.
+///
+/// Its own function rather than a closure body because three call sites
+/// need it and only one of them used to have the race check:
+/// [`arm_death_guard`] below, [`crate::spawn_grouped`], and
+/// [`crate::NatsServer`]. Two `pre_exec` bodies drifting from a third is
+/// how the test broker kept a hole this module had already closed.
+///
+/// # Safety
+///
+/// Callable only between `fork` and `exec`, where nothing but
+/// async-signal-safe syscalls is legal. `prctl`, `getppid` and `_exit`
+/// all are, and nothing here allocates.
+pub(crate) unsafe fn arm_in_child(parent: libc::pid_t) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the caller guarantees the post-fork, pre-exec context.
+        // `PR_SET_PDEATHSIG` survives the exec — it is cleared by `fork`,
+        // and by `exec` of a set-user-ID binary, and neither `fqd` nor
+        // `nats-server` is one.
+        unsafe {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            // The race the guard cannot cover on its own: if the parent
-            // died between fork and now, the death signal it would have
+            // The race the death signal cannot cover on its own: if the
+            // parent died between fork and now, the signal it would have
             // sent is already in the past and will never arrive. Losing
             // our parent is exactly the condition we were armed for, so
             // act on it directly.
             if libc::getppid() != parent {
                 libc::_exit(1);
             }
-            Ok(())
-        });
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Everywhere else there is no parent-death signal; `Drop` is the
+        // whole guarantee. The suites that spawn daemons are Linux-only
+        // in practice (the pinned broker binary), so this costs nothing
+        // today and keeps the crate compiling if that changes.
+        let _ = parent;
+    }
+    Ok(())
 }
 
-/// Everywhere else there is no parent-death signal; `Drop` is the whole
-/// guarantee. The suites that spawn daemons are Linux-only in practice
-/// (the pinned broker binary), so this costs nothing today and keeps the
-/// crate compiling if that changes.
-#[cfg(not(target_os = "linux"))]
-fn arm_death_guard(_command: &mut Command) {}
+/// Arm the guard on `command`: the kernel kills the child when the thread
+/// that forked it dies.
+pub(crate) fn arm_death_guard(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    let parent = spawning_process();
+    // SAFETY: `pre_exec` runs the closure between fork and exec, which is
+    // exactly `arm_in_child`'s contract.
+    unsafe {
+        command.pre_exec(move || arm_in_child(parent));
+    }
+}
 
 /// Report — once per program, per test binary — any **orphaned** process
 /// already running `program`.
@@ -380,24 +454,35 @@ fn report_strays(program: &Path) {
     let _ = writeln!(
         std::io::stderr(),
         "warning: {} orphaned process(es) are running {} — pid(s) {strays:?}, \
-         all reparented to PID 1. A previous run leaked them. Nothing was \
-         killed; see #630 and kill by exe path, never by name.",
+         reparented to a reaper above this run. A previous run leaked them. \
+         Nothing was killed; see #630 and kill by exe path, never by name.",
         strays.len(),
         program.display(),
     );
 }
 
-/// Every PID whose executable is exactly `program` and whose parent is
-/// PID 1.
+/// Every PID whose executable is exactly `program` and which has been
+/// **reparented to a reaper above this run**.
 ///
 /// The exe path is the only reliable identity here: the dogfood daemon
 /// and every other worktree's daemon are all called `fqd`, and acting on
 /// a name is how the wrong process gets hit.
+///
+/// "Orphaned" is not "parent is PID 1". PID 1 is only the reaper when
+/// nothing closer claimed the role: a systemd user scope, a
+/// `docker run --init`, or any `PR_SET_CHILD_SUBREAPER` process adopts
+/// its descendants' orphans instead, and a rule written as `ppid == 1`
+/// silently reports nothing there. Every such reaper is by construction
+/// an *ancestor of ours*, so that is the test — and it keeps the
+/// discrimination that matters: a daemon belonging to a live sibling test
+/// binary has that binary as its parent, which is not on our ancestor
+/// chain, so a concurrent `cargo test` is never mistaken for a leak.
 #[cfg(target_os = "linux")]
 fn orphans_running(program: &Path) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
+    let reapers = ancestors_of_this_process();
     let me = std::process::id();
     let mut strays = Vec::new();
     for entry in entries.flatten() {
@@ -412,11 +497,34 @@ fn orphans_running(program: &Path) -> Vec<u32> {
         if !std::fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == program) {
             continue;
         }
-        if parent_pid(pid) == Some(1) {
+        if parent_pid(pid).is_some_and(|ppid| reapers.contains(&ppid)) {
             strays.push(pid);
         }
     }
     strays
+}
+
+/// Our strict ancestors, nearest first, ending at PID 1.
+///
+/// Bounded by a hop limit rather than trusting the chain to terminate:
+/// this walks live kernel state that can change under us, and a test
+/// helper has no business looping forever over `/proc`.
+#[cfg(target_os = "linux")]
+fn ancestors_of_this_process() -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut pid = std::process::id();
+    for _ in 0..64 {
+        let Some(parent) = parent_pid(pid) else { break };
+        if parent == 0 || chain.contains(&parent) {
+            break;
+        }
+        chain.push(parent);
+        if parent == 1 {
+            break;
+        }
+        pid = parent;
+    }
+    chain
 }
 
 /// The parent PID from `/proc/<pid>/stat` — the fourth field, after a
@@ -512,10 +620,52 @@ mod tests {
         );
     }
 
+    /// Reaping must not lose the answer. Before this, `try_wait` reported
+    /// `None` after an exit — indistinguishable from "still running" — so
+    /// `wait_timeout` sat out its whole deadline and returned `None`
+    /// ("the daemon did not exit") about a daemon that had exited, and
+    /// `signal` panicked where the kernel would have said ESRCH. That is
+    /// reachable: `daemon_shutdown::wait_for_log_line` returns normally
+    /// with the child already reaped when the daemon writes its line and
+    /// exits inside one poll interval, and its callers then ask
+    /// `wait_timeout` what happened.
+    #[test]
+    fn a_reaped_child_still_answers_for_its_exit() {
+        let mut child = TestChild::builder("/bin/true").spawn();
+        let waited = child.wait().expect("wait");
+        assert!(waited.success());
+
+        assert_eq!(
+            child.try_wait().expect("try_wait after reaping"),
+            Some(waited),
+            "try_wait must keep reporting the exit, not None"
+        );
+
+        let started = Instant::now();
+        assert_eq!(
+            child.wait_timeout(Duration::from_secs(3)),
+            Some(waited),
+            "wait_timeout must answer from the remembered status"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "wait_timeout sat out its deadline on an already-reaped child"
+        );
+        assert_eq!(child.wait().expect("wait again"), waited);
+
+        let refused = child.signal(libc::SIGTERM).expect_err("a reaped child");
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(libc::ESRCH),
+            "signalling a reaped child is ESRCH, never a panic and never a \
+             signal at a recycled PID"
+        );
+    }
+
     /// The stray report must not fire on a *live* run's children, or it
     /// becomes noise: cargo runs a crate's test binaries concurrently, so
-    /// several daemons are legitimately up at any moment. Only an orphan
-    /// — reparented to PID 1 — is the tell.
+    /// several daemons are legitimately up at any moment. Only a process
+    /// reparented to a reaper above this run is the tell.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_live_childs_process_is_not_reported_as_a_stray() {
@@ -524,6 +674,32 @@ mod tests {
         assert!(
             !orphans_running(Path::new("/bin/sleep")).contains(&pid),
             "pid {pid} has a live parent and must not be reported as leaked"
+        );
+    }
+
+    /// The reaper set the stray rule keys on: our own strict ancestors,
+    /// ending at PID 1. `ppid == 1` was the first version and is only the
+    /// bottom of this chain — under a systemd user scope or a
+    /// `docker run --init` the reaper is nearer, and a rule written as
+    /// `== 1` reports nothing at all there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_reaper_set_is_our_ancestor_chain_not_just_pid_1() {
+        let chain = ancestors_of_this_process();
+        assert_eq!(
+            chain.last(),
+            Some(&1),
+            "the chain must reach init: {chain:?}"
+        );
+        assert_eq!(
+            chain.first().copied(),
+            parent_pid(std::process::id()),
+            "and start at our own parent"
+        );
+        assert!(
+            !chain.contains(&std::process::id()),
+            "strict ancestors only — our own children's parent is us, and \
+             they are not leaks"
         );
     }
 

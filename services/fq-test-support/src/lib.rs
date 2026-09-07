@@ -80,21 +80,21 @@ fn read_edge_file(state_dir: &Path, name: &str) -> String {
 /// Configure `cmd` to lead a fresh process group inherited by its descendants.
 ///
 /// On Linux, the direct child also receives `SIGKILL` if its spawning thread
-/// dies. Call this before spawning the command.
+/// dies — [`child::arm_in_child`](mod@child) supplies that half, including the
+/// `getppid` re-check for a parent that died between fork and exec. This used
+/// to be a second, thinner copy of the same `prctl` call (#630).
 #[cfg(unix)]
 pub fn spawn_grouped(cmd: &mut tokio::process::Command) {
-    // SAFETY: this closure runs after fork and before exec. `setpgid` and
-    // Linux's `prctl` are async-signal-safe syscalls, and no allocation occurs.
+    let parent = child::spawning_process();
+    // SAFETY: this closure runs after fork and before exec. `setpgid` is an
+    // async-signal-safe syscall and allocates nothing, and that context is
+    // exactly `arm_in_child`'s contract.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::setpgid(0, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            #[cfg(target_os = "linux")]
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
+            child::arm_in_child(parent)
         });
     }
 }
@@ -203,18 +203,12 @@ impl NatsServer {
         // worker that lives until the runtime drops (multi_thread). Do not
         // call this from spawn_blocking: those threads idle out mid-test
         // and would take the broker with them.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                // Post-fork, pre-exec; prctl is async-signal-safe and the
-                // setting survives the exec.
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        //
+        // One implementation, shared with every other guarded spawn (#630).
+        // It used to be a bare `prctl` here, missing the `getppid` re-check
+        // that closes the fork/exec window — a hole this crate had already
+        // closed elsewhere and left open in its own broker.
+        child::arm_death_guard(&mut cmd);
 
         let child = cmd.spawn().unwrap_or_else(|e| {
             panic!(
