@@ -48,12 +48,29 @@ func boolPtr(v bool) *bool { return &v }
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
-func LoadConfig(path string) (*Config, error) {
+// LoadedConfig is a parsed configuration together with the exact bytes it was
+// parsed from. The two travel as one value so that whatever is handed the
+// running configuration can also be handed the content that produced it,
+// instead of reading the file a second time and getting whatever is there by
+// then (https://github.com/bricef/factor-q/issues/634).
+type LoadedConfig struct {
+	Config *Config
+	// Raw is the file's content at the moment it was read. Nil means "no
+	// bytes known" — see NewConfigWatcher, which treats that as having seen
+	// nothing yet.
+	Raw []byte
+}
+
+func LoadConfig(path string) (*LoadedConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	return ParseConfig(data)
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	return &LoadedConfig{Config: cfg, Raw: data}, nil
 }
 
 func ParseConfig(data []byte) (*Config, error) {
