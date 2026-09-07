@@ -5,11 +5,14 @@
 # hand where a file cannot read the pin: the container image's base
 # images (services/fq-runtime/Dockerfile), every workflow's
 # `dtolnay/rust-toolchain@<v>` step, and every compose file's
-# `image: nats:<v>`. "Keep in lockstep" comments beside each copy asked
-# for the discipline; this is the gate (`just check-pins`, part of
-# `just quality`), so a bump that misses a copy fails CI instead of
-# shipping an image built with a different compiler from the tarball's
-# (#102: same commit, same binary).
+# `image: nats:<v>`. The audit tools are the same shape from the other
+# end: the justfile pins them (`cargo_audit_version`,
+# `cargo_deny_version`) and `just audit` refuses any other version, so
+# the image's `tools`-stage ARGs are copies too. "Keep in lockstep"
+# comments beside each copy asked for the discipline; this is the gate
+# (`just check-pins`, part of `just quality`), so a bump that misses a
+# copy fails CI instead of shipping an image built with a different
+# compiler from the tarball's (#102: same commit, same binary).
 #
 # Not covered: the `just`, `gh` and `sccache` versions in the Dockerfile's
 # `tools` stage — the repository has no other pin for them to agree with
@@ -77,6 +80,18 @@ while IFS= read -r hit; do
     copies+=("${hit%%:*}:$(printf '%s' "${hit#*:}" | sed 's/.*image: *nats://; s/-.*//; s/ *$//')")
 done < <(git grep -E '^\s*image:\s*nats:[0-9]' -- '*.yml' '*.yaml')
 check nats "$nats" .nats-version "${copies[@]}"
+
+# --- audit tools: the justfile's pins → the image's `tools` stage ---------------
+# `just audit` compares what is on PATH against these and fails on anything
+# else, and three fleet agents run `just ci` — audit phase and all — inside
+# the dogfood image. A drift here is not a subtle divergence: it is `just ci`
+# unable to get past its first phase in the container.
+for t in audit deny; do
+    T="$(printf '%s' "$t" | tr '[:lower:]' '[:upper:]')"
+    want="$(sed -n "s/^cargo_${t}_version := \"\(.*\)\"\$/\1/p" justfile)"
+    found="$(sed -n "s/^ARG CARGO_${T}_VERSION=\(.*\)\$/\1/p" "$dockerfile" | head -1)"
+    check "$t" "$want" justfile "$dockerfile:$found"
+done
 
 if [ "$fail" != 0 ]; then
     echo "error: a pinned version has a copy that disagrees with it — bump every copy together (scripts/check-pins.sh)" >&2

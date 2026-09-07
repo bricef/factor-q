@@ -148,6 +148,11 @@ token_env = "FQ_NATS_TOKEN"             # the URL is the image's; the token is i
 `fq init` writes a fresh-project starter, not this instance's config;
 start from the instance's existing `fqd.toml`.
 
+Nothing needs seeding for git auth: the image ships `gh`'s credential
+helper in `/etc/gitconfig`, so a definition that pushes with plain `git`
+over HTTPS works on `GH_TOKEN` alone — but a commit identity is the
+definition's job, because who a commit is by is per-agent, not per-image.
+
 **First deploy, then pair.** `~/fq-dogfood/deploy.sh` pulls, proves and
 starts everything. The daemon mints its edge identity on first start
 into `state/edge/` and logs the fingerprint. Its container reports

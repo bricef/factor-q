@@ -2,7 +2,8 @@
 # `-f services/fq-runtime/Dockerfile` from `just docker-build`. Keep the
 # context lean — nothing is compiled in-image (ADR-0035), so the only
 # thing the build reads from the context is the staged binaries in
-# dist/bin/ plus the nats-server pin and checksums.
+# dist/bin/, the nats-server pin and checksums, and the gitconfig the
+# dogfood image ships as /etc/gitconfig.
 
 # Build output, except the staged binaries `just docker-stage` writes.
 **/target/
