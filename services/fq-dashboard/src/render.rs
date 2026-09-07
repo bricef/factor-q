@@ -938,18 +938,24 @@ fn framework_split(total: f64, framework: f64) -> String {
 
 /// The per-model spend table — shared between the top-level costs page
 /// (all agents) and the per-agent drill-down, so the two by-model
-/// views cannot drift apart. `total` is the share denominator.
+/// views cannot drift apart. `total` is the share denominator. The
+/// token columns are the by-agent table's, reasoning included: a
+/// muted `n/a` for a model none of whose calls reported a split, the
+/// count otherwise — and per model that column is the telling one.
 fn by_model_table(models: &[ModelCostView], total: f64) -> String {
     let mut b = String::from(
-        "<table><tr><th>model</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">total cost</th><th>share</th></tr>",
+        "<table><tr><th>model</th><th class=\"n\">llm calls</th><th class=\"n\">input</th><th class=\"n\">output</th><th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">reasoning</th><th class=\"n\">total cost</th><th>share</th></tr>",
     );
     for m in models {
         b.push_str(&format!(
-            r#"<tr><td>{}</td><td class="n">{}</td>{}{}<td class="n">${:.4}</td>{}</tr>"#,
+            r#"<tr><td>{}</td><td class="n">{}</td>{}{}{}{}{}<td class="n">${:.4}</td>{}</tr>"#,
             esc(&m.model),
             fmt_grouped(m.event_count),
             token_cell(m.total_input_tokens),
             token_cell(m.total_output_tokens),
+            token_cell(m.total_cache_read_tokens),
+            token_cell(m.total_cache_write_tokens),
+            reasoning_cell(m.total_reasoning_tokens),
             m.total_cost,
             share_cell(m.total_cost, total),
         ));

@@ -386,6 +386,21 @@ fn cost_view(agent: &str, calls: i64, cost: f64) -> CostView {
     }
 }
 
+/// One model's row, with a little cache traffic so those columns carry
+/// something (40 read, 20 written) and the split as given.
+fn model_cost(model: &str, calls: i64, cost: f64, reasoning: Option<i64>) -> ModelCostView {
+    ModelCostView {
+        model: model.to_string(),
+        event_count: calls,
+        total_cost: cost,
+        total_input_tokens: 1_000,
+        total_output_tokens: 100,
+        total_cache_read_tokens: 40,
+        total_cache_write_tokens: 20,
+        total_reasoning_tokens: reasoning,
+    }
+}
+
 fn cost_report(agents: Vec<CostView>) -> CostReport {
     CostReport {
         total_cost: agents.iter().map(|a| a.total_cost).sum(),
@@ -412,20 +427,8 @@ fn costs_render_the_by_model_split() {
         cost_view("m0-loop", 10, 25.0),
     ]);
     report.models = vec![
-        ModelCostView {
-            model: "claude-opus-4-8".to_string(),
-            event_count: 80,
-            total_cost: 90.0,
-            total_input_tokens: 100_000_000,
-            total_output_tokens: 500_000,
-        },
-        ModelCostView {
-            model: "z-ai/glm-5.2".to_string(),
-            event_count: 30,
-            total_cost: 10.0,
-            total_input_tokens: 8_000_000,
-            total_output_tokens: 60_000,
-        },
+        model_cost("claude-opus-4-8", 80, 90.0, None),
+        model_cost("z-ai/glm-5.2", 30, 10.0, None),
     ];
     let html = costs(&report, &CostReport::default(), Window::All, TEST_NOW_MS);
     assert!(html.contains("<h2>By agent</h2>"), "got: {html}");
@@ -619,19 +622,13 @@ fn costs_link_named_agents_to_their_drilldown() {
 /// and per-invocation rows linking to the invocation detail page.
 #[test]
 fn agent_costs_render_models_and_linked_invocations() {
-    use fq_ops::views::{InvocationCostView, ModelCostView};
+    use fq_ops::views::InvocationCostView;
     let mut totals = cost_view("m0-issue-fix", 1187, 101.38);
     totals.invocation_count = 43;
     let d = AgentCostDetailView {
         agent_id: "m0-issue-fix".to_string(),
         totals,
-        models: vec![ModelCostView {
-            model: "claude-opus-4-8".to_string(),
-            event_count: 1187,
-            total_cost: 101.38,
-            total_input_tokens: 126_872_419,
-            total_output_tokens: 702_313,
-        }],
+        models: vec![model_cost("claude-opus-4-8", 1187, 101.38, None)],
         invocations: vec![InvocationCostView {
             invocation_id: "019f6176-78c3-7cb3-9f0a-73c98b760b70".to_string(),
             started_at_ms: 0,
@@ -1424,4 +1421,79 @@ fn invocation_detail_names_reasoning_only_when_reported() {
         !html.contains("reasoning</span>"),
         "an unreported split is not mentioned: {html}"
     );
+}
+
+/// One model's row in a by-model table: the `<tr>` whose first cell is
+/// the model name.
+fn model_row<'a>(html: &'a str, model: &str) -> &'a str {
+    let start = html
+        .find(&format!("<tr><td>{model}</td>"))
+        .unwrap_or_else(|| panic!("{model} has a row in: {html}"));
+    let end = html[start..].find("</tr>").expect("a row ends") + start;
+    &html[start..end]
+}
+
+/// The by-model tables — the fleet page's and the drill-down's, one
+/// function — carry the cache and reasoning columns of the by-agent
+/// table, with the same three cells: a muted `n/a` for a model none
+/// of whose calls reported a split, `0` for a reported zero, the count
+/// otherwise. There is no subtotal row to fold: the table's rows sum
+/// to the total the page already states.
+#[test]
+fn by_model_tables_render_the_cache_and_reasoning_columns() {
+    let models = vec![
+        model_cost("kimi-k3", 10, 60.0, Some(1_234)),
+        model_cost("openai/gpt", 10, 20.0, Some(0)),
+        model_cost("claude-opus", 10, 20.0, None),
+    ];
+
+    let mut report = cost_report(vec![cost_view("a", 30, 100.0)]);
+    report.models = models.clone();
+    let fleet = costs_all(&report);
+    let mut totals = cost_view("a", 30, 100.0);
+    totals.total_reasoning_tokens = Some(1_234);
+    let drilldown = agent_costs(
+        &AgentCostDetailView {
+            agent_id: "a".to_string(),
+            totals,
+            models,
+            invocations: vec![],
+        },
+        Window::All,
+        1_000,
+    );
+
+    for html in [&fleet, &drilldown] {
+        let table = &html[html.find("<h2>By model</h2>").expect("a by-model table")..];
+        assert!(
+            table.contains(
+                "<th class=\"n\">cache read</th><th class=\"n\">cache write</th><th class=\"n\">reasoning</th><th class=\"n\">total cost</th>"
+            ),
+            "the columns sit between output and total cost: {table}"
+        );
+        assert!(
+            model_row(table, "kimi-k3").contains(r#"<td class="n">1,234</td>"#),
+            "got: {table}"
+        );
+        assert!(
+            model_row(table, "claude-opus").contains(r#"<td class="n muted">n/a</td>"#),
+            "got: {table}"
+        );
+        assert!(
+            !model_row(table, "openai/gpt").contains("n/a"),
+            "a reported zero is not `n/a`: {table}"
+        );
+        // The cache cells are counts too — 40 read, 20 written — and
+        // the reported zero is one more zero cell than the `n/a` row.
+        assert!(
+            model_row(table, "kimi-k3").contains(r#"<td class="n">40</td><td class="n">20</td>"#),
+            "got: {table}"
+        );
+        let zeros = |row: &str| row.matches(r#"<td class="n">0</td>"#).count();
+        assert_eq!(
+            zeros(model_row(table, "openai/gpt")),
+            zeros(model_row(table, "claude-opus")) + 1,
+            "a reported zero renders as a count: {table}"
+        );
+    }
 }
