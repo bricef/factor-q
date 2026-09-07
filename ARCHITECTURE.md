@@ -247,8 +247,10 @@ materialises every event into its own SQLite database
 worker WAL and control-plane state live in `worker.db` and
 `control-plane.db`). Only envelope fields and denormalised columns
 (model, tokens, cost, error_kind, duration) are stored — no full
-payloads. NATS is the source of truth; the projection is
-rebuildable by deleting the file and replaying from the stream.
+payloads. NATS is the source of truth; the projection carries a
+schema version and is rebuilt from the stream when it changes, or on
+demand with `fq projection rebuild` — cost-bearing rows, summaries and
+trigger records are carried across, everything else is re-derived.
 
 ### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 

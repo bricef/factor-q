@@ -108,6 +108,7 @@ fq status                                   # build, streams, consumers, registr
                                             #   recovery
 fq doctor [--json] [--fail-on-issues]       # durable-execution health, composed from the above
 fq reload                                   # hot-swap the agent registry, no restart
+fq projection rebuild --yes                 # re-derive the projection from the event stream
 fq down [--now]                             # drain and stop the daemon, confirmed
 fq ops list                                 # the surface describing itself
 fq token attenuate --grant <verb:domain>    # local: narrow a token, no round trip
