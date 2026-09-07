@@ -55,10 +55,16 @@ type ConfigWatcherOptions struct {
 // ConfigWatcher watches one configuration file. Polling is the correctness
 // mechanism; fsnotify only reduces latency.
 type ConfigWatcher struct {
-	path     string
-	opts     ConfigWatcherOptions
-	mu       sync.Mutex
-	current  *Config
+	path    string
+	opts    ConfigWatcherOptions
+	mu      sync.Mutex
+	current *Config
+	// seeded reports whether lastSeen holds a reading at all. "Nothing has
+	// been seen yet" is a state of its own rather than a particular
+	// fileSignature value: making it one would rest on which signatures
+	// happen to be unreachable, and a later change to fileSignature's fields
+	// could quietly turn "unseeded" into "already saw an empty file".
+	seeded   bool
 	lastSeen fileSignature
 	// unsettledLogged keeps a file that is being written continuously to
 	// one log line per streak rather than one per check.
@@ -96,6 +102,11 @@ type fileSignature struct {
 // rewritten inside that window would otherwise be invisible until something
 // wrote it again (https://github.com/bricef/factor-q/issues/634).
 //
+// running must be non-nil; a watcher with no running configuration has
+// nothing to compare against, and the alternative to the panic is a first
+// check that reports every job in the file as added — a wrong answer given
+// quietly, where this one is loud and immediate at startup.
+//
 // running.Raw may be nil, for a caller that has no bytes to offer — a config
 // built in memory by a test. Nothing has been seen then, and the first Check
 // treats whatever the file holds as a change.
@@ -111,11 +122,8 @@ func NewConfigWatcher(path string, running *LoadedConfig, opts ConfigWatcherOpti
 	}
 	w := &ConfigWatcher{path: path, current: running.Config, opts: opts}
 	if running.Raw != nil {
-		w.lastSeen = signature(running.Raw, nil)
+		w.lastSeen, w.seeded = signature(running.Raw, nil), true
 	}
-	// Otherwise lastSeen keeps its zero value, which signature never returns
-	// — a successful read sets exists, a failed one sets readErr — so it
-	// stands for "nothing seen yet" and the first check finds a difference.
 	return w
 }
 
@@ -246,7 +254,7 @@ func (w *ConfigWatcher) check(ctx context.Context) (ReloadEvent, checkOutcome) {
 
 	data, err := os.ReadFile(w.path)
 	sig := signature(data, err)
-	if sig == w.lastSeen {
+	if w.seeded && sig == w.lastSeen {
 		return ReloadEvent{}, checkUnchanged
 	}
 	// The file differs from the last one seen — but a writer may be part
@@ -265,7 +273,7 @@ func (w *ConfigWatcher) check(ctx context.Context) (ReloadEvent, checkOutcome) {
 		return ReloadEvent{}, checkUnsettled
 	}
 	w.unsettledLogged = false
-	w.lastSeen = sig
+	w.lastSeen, w.seeded = sig, true
 	if err != nil {
 		w.opts.Logger.Printf("config reload rejected: %v", err)
 		return ReloadEvent{}, checkRejected

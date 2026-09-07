@@ -128,6 +128,67 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 			t.Fatalf("the refusal must say why; log was:\n%s", logs.String())
 		}
 	})
+
+	// #634's "silently and indefinitely", in full: LoadConfig itself lands in
+	// the truncate gap, so fq-cron starts with zero jobs. Startup does not
+	// apply the reload rule, so nothing refuses that (#632) — the first check
+	// is the only thing that can put the jobs back, and it can only do so by
+	// comparing against what was actually loaded.
+	t.Run("a startup that read a torn file recovers on the first check", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "fq-cron.toml")
+		writeConfig(t, path, "") // the writer's truncate, caught by LoadConfig
+		running := mustLoad(t, path)
+		if len(running.Config.Jobs) != 0 {
+			t.Fatalf("a torn read must load as no jobs, got %q", jobNames(running.Config))
+		}
+		// A zero-byte file still seeds: os.ReadFile returns empty but non-nil,
+		// so this is a watcher that has seen zero bytes, not one that has seen
+		// nothing. The distinction is the whole point of the seeded flag.
+		if running.Raw == nil {
+			t.Fatal("a zero-byte config must still seed the watcher")
+		}
+		writeConfig(t, path, configText("first", "0 * * * *")) // the writer finishes
+		w := NewConfigWatcher(path, running, ConfigWatcherOptions{
+			Settle: time.Millisecond,
+			Logger: log.New(&syncBuffer{}, "", 0),
+		})
+
+		event, ok := w.Check()
+		if !ok || len(event.Diff.Added) != 1 || event.Diff.Added[0] != "first" {
+			t.Fatalf("the completed write = %+v (accepted=%v), want first added; "+
+				"a watcher that seeded itself would have swallowed it and scheduled nothing indefinitely", event.Diff, ok)
+		}
+	})
+
+	// A caller with no bytes to offer — a config built in memory — has seen
+	// nothing, and the first check treats whatever is on disk as a change.
+	// Asserted rather than reasoned about: this is the documented meaning of a
+	// nil Raw, and it must not rest on which fileSignature values happen to be
+	// unreachable.
+	t.Run("a watcher given no bytes treats its first read as a change", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "fq-cron.toml")
+		writeConfig(t, path, configText("first", "0 * * * *"))
+		// Deliberately the same content the config was parsed from: a seeded
+		// watcher would call this unchanged and return nothing. An unseeded
+		// one has no reading to call it against, so it must reload.
+		unseeded := &LoadedConfig{Config: mustParse(t, configText("first", "0 * * * *"))}
+		w := NewConfigWatcher(path, unseeded, ConfigWatcherOptions{
+			Settle: time.Millisecond,
+			Logger: log.New(&syncBuffer{}, "", 0),
+		})
+
+		event, ok := w.Check()
+		if !ok {
+			t.Fatal("an unseeded watcher must treat its first read as a change")
+		}
+		if len(event.Diff.Added) != 0 || len(event.Diff.Removed) != 0 || len(event.Diff.Changed) != 0 {
+			t.Fatalf("first-check diff = %+v, want an empty one: the file matches the config, it had simply never been seen", event.Diff)
+		}
+		// And it is seeded now, so the same file is not a reload twice.
+		if event, ok := w.Check(); ok {
+			t.Fatalf("the second check reloaded an untouched file: %+v", event.Diff)
+		}
+	})
 }
 
 // A read landing between a writer's truncate and its write sees zero bytes,

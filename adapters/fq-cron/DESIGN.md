@@ -148,6 +148,19 @@ Two configuration planes, deliberately separate:
   edited job is live. With the poll as the floor, every one of those
   degrades to "reload lands within one interval", never "reload never
   happens". `SIGHUP` forces an immediate check.
+- **The comparison starts from the running config's bytes.** "Against
+  the config in force" above is literal: the watcher is handed the
+  content that produced the configuration it was given, and never reads
+  the file to seed itself. Startup loads the config, then waits for the
+  broker — a wait as long as the outage — so a watcher seeding from its
+  own read would begin by comparing against whatever was on disk by
+  then. A file rewritten inside that window would be invisible: the
+  scheduler running the bytes it loaded, the watcher believing it had
+  already seen the new ones, and nothing to reconcile the two until the
+  file was written again
+  ([#634](https://github.com/bricef/factor-q/issues/634)). A watcher
+  given no bytes has seen nothing at all, and treats its first read as a
+  change.
 - **Validation is all-or-nothing.** A reload parses and validates the
   whole file; any error (bad TOML, duplicate name, invalid cron
   expression, invalid subject, unknown timezone) is logged with the
@@ -374,6 +387,7 @@ the returned fires.
 | Invalid config on reload | Logged with job + line; old config keeps running in full (D4). |
 | Config file deleted | Treated as an invalid reload: running jobs continue; recreating the file resumes normal reloads. |
 | Config read mid-save (truncate gap, streamed copy) | The second read disagrees with the first, so nothing is concluded and nothing recorded; the watcher looks again after another settle and reads the finished file. A zero-byte or job-less read that reaches the parse anyway is refused rather than applied as "every job deleted" (D4, #623). |
+| Config written during the startup broker wait | Seen on the first check after the scheduler starts. The watcher compares against the bytes that produced the running config, not against a read of its own, so an edit made while fq-cron was still connecting is a normal reload rather than a change that waits for the next write. The same path recovers a startup whose own read landed mid-save (D4, #634). |
 | KV bucket lost | All jobs start with no history: no catch-up, next scheduled fires only (D2, D6). |
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
