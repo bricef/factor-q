@@ -42,6 +42,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use super::fault::MockFault;
+use super::gauge::{Arrival, ConcurrencyGauge};
 
 /// One canned assistant turn the mock will return.
 #[derive(Debug, Clone, Default)]
@@ -188,6 +189,11 @@ enum Scripted {
 struct MockState {
     responses: Mutex<Vec<Scripted>>,
     requests: Mutex<Vec<Value>>,
+    /// How long every answer — scripted turn or fault alike — is held
+    /// before it goes out. Zero unless a test asks; the burst test asks,
+    /// so concurrent arrivals overlap at the provider (#278).
+    hold: Mutex<std::time::Duration>,
+    gauge: ConcurrencyGauge,
 }
 
 /// An in-process OpenAI-compatible endpoint on an ephemeral port.
@@ -253,6 +259,19 @@ impl MockOpenAiServer {
         self.state.requests.lock().unwrap().clone()
     }
 
+    /// Hold every answer for `held_for` before sending it, so requests
+    /// that arrive together are open together and the concurrency the
+    /// provider saw is measurable ([`Self::arrivals`]).
+    pub fn hold_each_response(&self, held_for: std::time::Duration) {
+        *self.state.hold.lock().unwrap() = held_for;
+    }
+
+    /// Every arrival as the provider saw it: how many requests were
+    /// open at that instant and how many 429s had gone out by then.
+    pub fn arrivals(&self) -> Vec<Arrival> {
+        self.state.gauge.arrivals()
+    }
+
     pub fn base_url(&self) -> String {
         format!("http://{}/", self.addr)
     }
@@ -303,6 +322,8 @@ async fn completions(
         .and_then(|m| m.as_str())
         .unwrap_or("mock-model")
         .to_string();
+    // The slot is open from arrival until the answer is built.
+    let _open = state.gauge.enter();
     state.requests.lock().unwrap().push(body);
     let scripted = {
         let mut queued = state.responses.lock().unwrap();
@@ -312,6 +333,13 @@ async fn completions(
             queued.remove(0)
         }
     };
+    let hold = *state.hold.lock().unwrap();
+    if !hold.is_zero() {
+        tokio::time::sleep(hold).await;
+    }
+    if let Scripted::Fault(MockFault::Status { status: 429, .. }) = &scripted {
+        state.gauge.rate_limit_served();
+    }
     match scripted {
         Scripted::Choice(choice) => Json(choice.to_body(&model)).into_response(),
         Scripted::Fault(fault) => fault.serve(openai_error_body).await,

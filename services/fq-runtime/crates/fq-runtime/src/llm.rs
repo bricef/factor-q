@@ -13,8 +13,10 @@
 
 pub mod fixture;
 pub mod genai;
+pub mod throttle;
 
 pub use genai::GenAiClient;
+pub use throttle::{ModelThrottle, ThrottleBounds, ThrottleConfig, ThrottledLlmClient};
 
 use std::time::Duration;
 

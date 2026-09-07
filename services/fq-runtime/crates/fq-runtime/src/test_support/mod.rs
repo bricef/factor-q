@@ -38,6 +38,7 @@ pub mod corpus;
 #[cfg(test)]
 pub mod events;
 pub mod fault;
+pub mod gauge;
 pub mod mock_anthropic;
 pub mod mock_gemini;
 pub mod mock_openai;

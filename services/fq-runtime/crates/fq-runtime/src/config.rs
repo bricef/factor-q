@@ -188,6 +188,13 @@ pub struct WorkerConfig {
     /// (design principle 8), overridable in `fqd.toml`.
     #[serde(default)]
     pub llm_retry: crate::llm::RetryConfig,
+    /// The per-model provider throttle (#278): the pause a 429 sets, the
+    /// AIMD cap on calls in flight, and the dispatcher's hold on triggers
+    /// for a paused model. Its ceiling is `max_concurrent_invocations`
+    /// and its longest default pause is `llm_retry.max_retry_after_ms`
+    /// — see [`Self::throttle_bounds`].
+    #[serde(default)]
+    pub throttle: crate::llm::ThrottleConfig,
     /// The deadline on every model call, in seconds (#546, review
     /// finding B1): the whole call, connect to last byte, applied on the
     /// HTTP client and again around the call. A call past it fails as a
@@ -251,6 +258,7 @@ impl Default for WorkerConfig {
             archive_retry_interval_ms: default_archive_retry_interval_ms(),
             archive_warn_after_ms: default_archive_warn_after_ms(),
             llm_retry: crate::llm::RetryConfig::default(),
+            throttle: crate::llm::ThrottleConfig::default(),
             llm_timeout_secs: default_llm_timeout_secs(),
             llm_connect_timeout_secs: default_llm_connect_timeout_secs(),
             max_concurrent_invocations: default_max_concurrent_invocations(),
@@ -265,6 +273,17 @@ impl WorkerConfig {
         crate::llm::LlmTimeouts {
             connect: Duration::from_secs(self.llm_connect_timeout_secs),
             request: Duration::from_secs(self.llm_timeout_secs),
+        }
+    }
+
+    /// The bounds the throttle must agree with, read off the keys that
+    /// already own them rather than declared a second time: the permit
+    /// ceiling is `max_concurrent_invocations`, the longest default pause
+    /// is `llm_retry.max_retry_after_ms`.
+    pub fn throttle_bounds(&self) -> crate::llm::ThrottleBounds {
+        crate::llm::ThrottleBounds {
+            ceiling: self.max_concurrent_invocations.max(1),
+            max_pause: Duration::from_millis(self.llm_retry.max_retry_after_ms),
         }
     }
 }
@@ -874,6 +893,51 @@ mod tests {
         assert_eq!(
             config.worker.llm_retry.max_attempts, 4,
             "the other retry knobs keep their defaults"
+        );
+    }
+
+    /// #278: the throttle keys are `[worker.throttle]` with the
+    /// documented defaults, and its bounds are read off the keys that
+    /// already own them rather than declared twice.
+    #[test]
+    fn worker_throttle_defaults_and_parses() {
+        use crate::llm::{ThrottleBounds, ThrottleConfig};
+
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.worker.throttle, ThrottleConfig::default());
+        assert!(config.worker.throttle.enabled, "on by default");
+        assert_eq!(config.worker.throttle.default_pause_ms, 30_000);
+        assert_eq!(config.worker.throttle.success_window, 10);
+        assert_eq!(
+            config.worker.throttle_bounds(),
+            ThrottleBounds {
+                ceiling: 1,
+                max_pause: Duration::from_secs(120),
+            },
+            "the defaults: one permit, a two-minute longest pause"
+        );
+
+        let config = Config::from_toml_str(
+            "[worker]\nmax_concurrent_invocations = 4\n\n\
+             [worker.llm_retry]\nmax_retry_after_ms = 9000\n\n\
+             [worker.throttle]\nenabled = false\ndefault_pause_ms = 500\nsuccess_window = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.worker.throttle,
+            ThrottleConfig {
+                enabled: false,
+                default_pause_ms: 500,
+                success_window: 3,
+            }
+        );
+        assert_eq!(
+            config.worker.throttle_bounds(),
+            ThrottleBounds {
+                ceiling: 4,
+                max_pause: Duration::from_millis(9000),
+            },
+            "the ceiling is max_concurrent_invocations and the cap is max_retry_after_ms"
         );
     }
 

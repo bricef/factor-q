@@ -17,7 +17,9 @@
 //! has stopped making progress is reported as such — by name, so an
 //! operator reads which one rather than that something is wrong.
 
-pub use fq_ops::health::{ConsumerHealth, McpServerHealth, StreamHealth, UnsupportedEvent};
+pub use fq_ops::health::{
+    ConsumerHealth, McpServerHealth, StreamHealth, ThrottledModel, UnsupportedEvent,
+};
 
 use crate::bus::{
     ADVISORY_STREAM_NAME, ConsumerLedger, ConsumerRecord, ConsumerRedeliveryPolicy, STREAM_NAME,
