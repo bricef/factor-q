@@ -22,6 +22,7 @@ NATS.
 | `--check` | — | `false` |
 | `--health-bind` | `FQCRON_HEALTH_BIND` | `127.0.0.1:9474` — loopback address of `GET /healthz`; empty disables |
 | `--reload-settle` | `FQCRON_RELOAD_SETTLE` | `250ms` — quiet period a changed config file must hold before it is reloaded |
+| `--removal-confirm` | `FQCRON_REMOVAL_CONFIRM` | `1m` — how long a job dropped by a reload keeps its fire state before it is deleted |
 | `--probe` | — | asks the running scheduler's `/healthz` and exits 0 on healthy — the container's `HEALTHCHECK`; needs no config |
 | `--version` | — | prints `fq-cron <commit>` and exits; needs no config |
 
@@ -53,9 +54,10 @@ A saved file replaces the running configuration only when all of this holds
   job = []
   ```
 
-Only `job = []` stops every job and deletes their state. Everything else that
-looks empty is a file being written, and is waited out. The two refusals an
-operator sees in the log are:
+Only `job = []` stops every job and deletes their state, and even then only
+after the confirmation window below. Everything else that looks empty is a file
+being written, and is waited out. The two refusals an operator sees in the log
+are:
 
 ```text
 config reload rejected: 0 bytes declaring no jobs, and no explicit `job = []`
@@ -82,6 +84,55 @@ that read a file mid-save recovers: `fq-cron` begins with nothing scheduled,
 and the writer's completed file is picked up on that first check rather than
 waiting for another edit
 ([#634](https://github.com/bricef/factor-q/issues/634)).
+
+## When a removed job's state is deleted
+
+Additions and changes apply the instant a reload is accepted. So does a
+removal — a job that has left the file stops firing at once — but **deleting
+its fire state waits `--removal-confirm`** (default `1m`, two config poll
+intervals). At the deadline `fq-cron` reads the file once more and deletes only
+what is still absent; a job that came back inside the window keeps the ledger
+it left with, valve history and all.
+
+The settle above defends against a read that lands *inside* a writer's truncate
+gap: a second read catches the file still moving. What it cannot see is a
+writer that emits the first of two `[[job]]` blocks and then stalls for longer
+than the settle — both reads return the same complete, valid, one-job file, and
+nothing about it says the second job is still coming. Accepting that reload is
+harmless; deleting the missing job's ledger is not, because the next complete
+write re-adds it empty and the loss is silent
+([#635](https://github.com/bricef/factor-q/issues/635)). A stall is as long as
+the writer chooses, so removals are made slower than additions rather than the
+settle made longer.
+
+**Write the file atomically.** Every case above is a reader seeing a partial
+file, and a writer that renders to a temp file in the same directory and
+`rename`s it over the target never produces one: the rename is atomic, so a
+reader sees the old file or the new one and never a prefix of either. `install
+-m`, Ansible's `copy`/`template`, `sops -i` and most editors already do this;
+`scp`, `rsync` without `--inplace` guards, shell redirection into the live path,
+and a template rendered straight to it do not. The settle and the confirmation
+window exist for the writers that truncate in place; they are a backstop, not a
+substitute.
+
+What an operator sees in the log, in each case:
+
+```text
+job=beta removed from the configuration: it stops firing now, and its fire state is deleted in 1m0s unless it returns
+job=beta removal cancelled: back in the configuration before its deadline, fire state kept
+job=beta removal confirmed after 1m0s: fire state deleted
+```
+
+A `SIGTERM` while a removal is parked deletes nothing — the scheduler cannot
+tell an orderly stop from one that lands mid-save:
+
+```text
+stopping with 1 unconfirmed removal(s) [beta]: fire state kept, and reclaimed if a job of the same name returns
+```
+
+The residual is that a job removed deliberately and never re-added, in a
+process that stops before the deadline, leaves one row in the KV bucket that
+nothing reads. A job of the same name reclaims it; otherwise it is inert.
 
 ## Broker outages
 
