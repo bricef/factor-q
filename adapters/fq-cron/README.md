@@ -53,13 +53,6 @@ A saved file replaces the running configuration only when all of this holds
   job = []
   ```
 
-The comparison starts from the configuration that is actually running: the
-watcher is seeded with the bytes `fq-cron` loaded at startup, not with a fresh
-read of its own. So an edit made while `fq-cron` was still connecting to the
-broker — a wait that lasts as long as the outage does — is applied on the first
-check after it starts, rather than sitting unnoticed until the file is written
-again ([#634](https://github.com/bricef/factor-q/issues/634)).
-
 Only `job = []` stops every job and deletes their state. Everything else that
 looks empty is a file being written, and is waited out. The two refusals an
 operator sees in the log are:
@@ -77,6 +70,18 @@ and stop there: a job-less file is *valid*, so `--check` passes on it and
 `fq-cron` will start with nothing scheduled. What it will never do is
 replace a **running** configuration, because that is the reload that deletes
 job state.
+
+**The comparison starts from the configuration that is running.** The watcher
+is seeded with the bytes `fq-cron` loaded at startup, and never reads the file
+to seed itself. So an edit made while `fq-cron` was still connecting to the
+broker — a wait that lasts as long as the outage does — is seen by the first
+check after the scheduler starts, on the same schedule as any other edit: the
+next poll tick (30 s) or an `fsnotify` event, whichever comes first. It does
+not sit unnoticed until the file is written again. This is also how a startup
+that read a file mid-save recovers: `fq-cron` begins with nothing scheduled,
+and the writer's completed file is picked up on that first check rather than
+waiting for another edit
+([#634](https://github.com/bricef/factor-q/issues/634)).
 
 ## Broker outages
 
