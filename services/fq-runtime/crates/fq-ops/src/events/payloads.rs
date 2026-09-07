@@ -535,6 +535,34 @@ pub struct InvocationStuckPayload {
     pub step_index: u32,
 }
 
+/// Why an invocation was put down. One reason today; an enum because a
+/// deferral is a decision with a cause, and the cause is data a reader
+/// switches on rather than a string it pattern-matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferralReason {
+    /// The model is rate-limited past what the retry layer waits in
+    /// place (<https://github.com/bricef/factor-q/issues/278>).
+    RateLimited,
+}
+
+/// Payload for [`EventPayload::InvocationDeferred`](super::EventPayload::InvocationDeferred):
+/// the worker put an in-flight invocation down rather than fail it,
+/// and will pick it up again. The invocation and its agent ride the
+/// envelope; this carries what the reader needs to know about the
+/// decision — why, on which model, and for how long.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationDeferredPayload {
+    pub reason: DeferralReason,
+    /// The model that was throttled — the throttle's key.
+    pub model: String,
+    /// How long the invocation is deferred for, in milliseconds: the
+    /// largest of what the provider's `Retry-After` asked for, the
+    /// model's escalating default pause, and the pause still in force.
+    /// The provider's own number is on the `llm.failure` just before.
+    pub retry_after_ms: u64,
+}
+
 /// A log record a connected MCP server emitted (`notifications/message`),
 /// forwarded to the event bus by the daemon's notification drain
 /// (ADR-0020). Daemon-scoped: shared MCP servers are not tied to a

@@ -427,6 +427,7 @@ impl EventPayload {
             Self::LlmDispatched(_) => subjects::agent_llm_dispatched(agent),
             Self::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
             Self::InvocationStuck(_) => subjects::agent_invocation_stuck(agent),
+            Self::InvocationDeferred(_) => subjects::agent_invocation_deferred(agent),
             Self::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
             Self::InvocationOperatorRecovered(_) => {
                 subjects::agent_invocation_operator_recovered(agent)
@@ -468,6 +469,7 @@ impl EventPayload {
             Self::HostNotice(_) => "factor-q/host_notice@1",
             Self::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
             Self::InvocationStuck(_) => "factor-q/invocation_stuck@1",
+            Self::InvocationDeferred(_) => "factor-q/invocation_deferred@1",
             Self::InvocationArchived(_) => "factor-q/invocation_archived@1",
             Self::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
             Self::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",
@@ -610,6 +612,18 @@ pub enum EventPayload {
     /// *restart-time* verdict about a WAL that cannot be replayed
     /// safely. This one is about a runtime that is still running.
     InvocationStuck(InvocationStuckPayload),
+
+    /// The worker put an in-flight invocation down rather than fail it
+    /// (<https://github.com/bricef/factor-q/issues/278>): its model is
+    /// rate-limited past what the retry layer waits in place, so the
+    /// invocation suspends at its step boundary — WAL row in flight,
+    /// `phase = "deferred"` — and is resumed after the delay the
+    /// payload names. **Not terminal:** no `failed` follows it, the
+    /// watcher's retries are untouched, and the trigger was acked at the
+    /// first WAL write so no redelivery is consumed either. The
+    /// `llm.failure` immediately before it (`error_kind: rate_limited`)
+    /// is the cause; this is the decision.
+    InvocationDeferred(InvocationDeferredPayload),
 
     /// Worker → control-plane archive hand-off (step 8 of
     /// data-architecture.md). Emitted after an invocation

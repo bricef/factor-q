@@ -438,6 +438,17 @@ fn exemplars() -> Vec<Event> {
                 data: json!({"message": "indexed 3 files"}),
             }),
         ),
+        // Added after the system events (#278): the index pins an
+        // exemplar's id and timestamp, so a new kind takes the next one
+        // rather than renumbering every file after its place in a trace.
+        chained(
+            26,
+            EventPayload::InvocationDeferred(InvocationDeferredPayload {
+                reason: DeferralReason::RateLimited,
+                model: MODEL.to_string(),
+                retry_after_ms: 300_000,
+            }),
+        ),
     ]
 }
 

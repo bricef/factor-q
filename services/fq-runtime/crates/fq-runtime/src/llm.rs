@@ -16,7 +16,9 @@ pub mod genai;
 pub mod throttle;
 
 pub use genai::GenAiClient;
-pub use throttle::{ModelThrottle, ThrottleBounds, ThrottleConfig, ThrottledLlmClient};
+pub use throttle::{
+    CallVerdict, ModelThrottle, ThrottleBounds, ThrottleConfig, ThrottledLlmClient,
+};
 
 use std::time::Duration;
 

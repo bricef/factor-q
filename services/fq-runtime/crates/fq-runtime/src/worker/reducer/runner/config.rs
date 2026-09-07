@@ -208,6 +208,12 @@ pub struct RunnerConfig {
     /// server is unknown and so nothing is refused — right for a runner
     /// with no daemon around it (tests, the sim).
     pub(super) mcp_states: crate::mcp::McpServerStates,
+    /// The daemon's provider throttle (#278), asked how long to defer an
+    /// invocation whose model is rate-limited past what the retry layer
+    /// waits in place. Defaults to an inert one, which still answers
+    /// with the default pause — right for a runner with no daemon
+    /// around it.
+    pub(super) throttle: Arc<crate::llm::ModelThrottle>,
 }
 
 impl RunnerConfig {
@@ -245,6 +251,7 @@ pub struct RunnerConfigBuilder {
     tool_limits: Option<crate::tools::ToolCallLimits>,
     mcp_progress: Option<crate::mcp::ProgressRegistry>,
     mcp_states: Option<crate::mcp::McpServerStates>,
+    throttle: Option<Arc<crate::llm::ModelThrottle>>,
 }
 
 impl RunnerConfigBuilder {
@@ -375,6 +382,16 @@ impl RunnerConfigBuilder {
             tool_limits: self.tool_limits.unwrap_or_default(),
             mcp_progress: self.mcp_progress.unwrap_or_default(),
             mcp_states: self.mcp_states.unwrap_or_default(),
+            throttle: self
+                .throttle
+                .unwrap_or_else(|| Arc::new(crate::llm::ModelThrottle::inert())),
         }
+    }
+
+    /// Share the daemon's provider throttle (#278), so a deferral's
+    /// delay follows the same escalation the model's pause does.
+    pub fn throttle(mut self, throttle: Arc<crate::llm::ModelThrottle>) -> Self {
+        self.throttle = Some(throttle);
+        self
     }
 }

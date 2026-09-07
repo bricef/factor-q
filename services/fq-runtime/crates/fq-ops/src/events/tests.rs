@@ -150,7 +150,37 @@ fn subjects_for_all_event_types() {
         subjects::agent_invocation_stuck(agent),
         "fq.agent.test-agent.invocation.stuck"
     );
+    assert_eq!(
+        subjects::agent_invocation_deferred(agent),
+        "fq.agent.test-agent.invocation.deferred"
+    );
     assert_eq!(subjects::worker_orphaned("w1"), "fq.worker.w1.orphaned");
+}
+
+/// `invocation.deferred` (#278) lands inside `fq.agent.*.invocation.*`
+/// like `invocation.stuck`, names the invocation on the envelope, and
+/// serialises its reason as the string the schema doc promises.
+#[test]
+fn invocation_deferred_is_agent_scoped_and_names_its_reason() {
+    let invocation_id = Uuid::now_v7();
+    let event = Event::new(
+        AgentId::new("researcher").unwrap(),
+        invocation_id,
+        EventPayload::InvocationDeferred(crate::events::InvocationDeferredPayload {
+            reason: crate::events::DeferralReason::RateLimited,
+            model: "moonshotai/kimi-k3".to_string(),
+            retry_after_ms: 300_000,
+        }),
+    );
+    assert_eq!(event.subject(), "fq.agent.researcher.invocation.deferred");
+    assert_eq!(event.envelope.schema_id, "factor-q/invocation_deferred@1");
+    assert_eq!(event.envelope.invocation_id, invocation_id);
+    assert_eq!(event.payload.event_type(), "invocation_deferred");
+    assert!(!event.payload.is_transient(), "a deferral is history");
+    let json = serde_json::to_value(&event.payload).unwrap();
+    assert_eq!(json["reason"], "rate_limited");
+    assert_eq!(json["model"], "moonshotai/kimi-k3");
+    assert_eq!(json["retry_after_ms"], 300_000);
 }
 
 /// `invocation.stuck` must land inside `fq.agent.*.invocation.*` — the
@@ -1342,6 +1372,11 @@ fn schema_id_for_every_payload_variant() {
             stuck_after_ms: 0,
             phase: String::new(),
             step_index: 0,
+        }),
+        EventPayload::InvocationDeferred(crate::events::InvocationDeferredPayload {
+            reason: crate::events::DeferralReason::RateLimited,
+            model: String::new(),
+            retry_after_ms: 0,
         }),
         EventPayload::SystemStartup(SystemStartupPayload {
             runtime_id: inv,

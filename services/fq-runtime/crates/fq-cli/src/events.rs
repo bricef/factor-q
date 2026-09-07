@@ -187,6 +187,12 @@ fn event_summary(event: &Event) -> String {
             p.last_step_at_ms,
             p.stuck_after_ms / 1000
         ),
+        EventPayload::InvocationDeferred(p) => format!(
+            "invocation.deferred reason={:?} model={} resume_in={}s",
+            p.reason,
+            p.model,
+            p.retry_after_ms / 1000
+        ),
         EventPayload::InvocationArchived(p) => format!(
             "invocation.archived worker_id={} phase={}",
             p.worker_id, p.final_phase
