@@ -14,8 +14,9 @@
 
 #![cfg(unix)]
 
-use std::io::ErrorKind;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 fn unique_scratch() -> std::path::PathBuf {
@@ -31,28 +32,6 @@ fn unique_scratch() -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("cache")).unwrap();
     std::fs::create_dir_all(dir.join("agents")).unwrap();
     dir
-}
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
 }
 
 /// The variable the scratch config names. Deliberately not
@@ -84,7 +63,7 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fqd.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env(TOKEN_ENV, &token)
@@ -104,8 +83,7 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
         .env("FQ_LOG_FORMAT", "json")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
@@ -131,7 +109,7 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
 
     let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     assert_eq!(rc, 0, "kill(SIGTERM) failed");
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+    let status = child.wait_timeout(Duration::from_secs(15))
         .expect("fqd did not exit within 15s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     assert!(
@@ -200,7 +178,7 @@ fn an_fq_nats_url_override_with_userinfo_is_refused_without_echoing_it() {
     let scratch = unique_scratch();
     std::fs::write(scratch.join("fqd.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let output = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fqd.toml"))
         // Port 1: were the refusal ever to fail, the connect would too,
         // and the test would still finish rather than start a daemon.
@@ -208,9 +186,7 @@ fn an_fq_nats_url_override_with_userinfo_is_refused_without_echoing_it() {
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
-        .stdin(Stdio::null())
-        .output()
-        .expect("run fqd");
+        .output();
     let _ = std::fs::remove_dir_all(&scratch);
 
     let all = format!(

@@ -29,8 +29,9 @@
 
 #![cfg(unix)]
 
-use std::io::ErrorKind;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 fn fqd_binary() -> &'static str {
@@ -51,10 +52,10 @@ fn scratch_with_bind(tag: &str, bind: &str) -> std::path::PathBuf {
     dir
 }
 
-fn spawn_daemon(scratch: &std::path::Path, nats_url: &str, log_name: &str) -> std::process::Child {
+fn spawn_daemon(scratch: &std::path::Path, nats_url: &str, log_name: &str) -> TestChild {
     let log = std::fs::File::create(scratch.join(log_name)).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
-    Command::new(fqd_binary())
+    TestChild::builder(fqd_binary())
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -63,36 +64,13 @@ fn spawn_daemon(scratch: &std::path::Path, nats_url: &str, log_name: &str) -> st
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()
-        .expect("spawn fqd")
-}
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
 }
 
 /// Wait for a line to appear in the daemon's log, failing loudly if the
 /// daemon dies first. Waiting on the observable rather than on a fixed
 /// sleep (#433's caveat).
 fn wait_for_log(
-    child: &mut std::process::Child,
+    child: &mut TestChild,
     log: &std::path::Path,
     needle: &str,
     timeout: Duration,
@@ -218,7 +196,7 @@ fn a_held_address_stops_the_daemon_before_it_touches_anything() {
 
     let scratch = scratch_with_bind("held", &addr);
     let mut child = spawn_daemon(&scratch, &nats_url, "daemon.log");
-    let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+    let status = child.wait_timeout(Duration::from_secs(30))
         .expect("a daemon that cannot bind must exit, not hang");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -276,7 +254,7 @@ fn a_second_daemon_on_one_state_dir_refuses_and_leaves_the_first_running() {
     )
     .unwrap();
     let mut second = spawn_daemon(&scratch, &nats_url, "second.log");
-    let second_status = wait_with_timeout(&mut second, Duration::from_secs(30))
+    let second_status = second.wait_timeout(Duration::from_secs(30))
         .expect("the second daemon must exit rather than share the store");
     let second_log = std::fs::read_to_string(scratch.join("second.log")).unwrap_or_default();
 
@@ -285,8 +263,7 @@ fn a_second_daemon_on_one_state_dir_refuses_and_leaves_the_first_running() {
     let first_alive = first.try_wait().expect("poll first daemon").is_none();
     let workers = worker_statuses(&scratch.join("cache")).unwrap_or_default();
 
-    let _ = first.kill();
-    let _ = first.wait();
+    drop(first); // the fixture's Drop stops it — SIGTERM, then SIGKILL (#630)
     let _ = std::fs::remove_dir_all(&scratch);
 
     assert!(
@@ -330,7 +307,7 @@ fn a_failure_after_registration_leaves_the_worker_shutdown() {
     .unwrap();
 
     let mut child = spawn_daemon(&scratch, &nats_url, "daemon.log");
-    let status = wait_with_timeout(&mut child, Duration::from_secs(60))
+    let status = child.wait_timeout(Duration::from_secs(60))
         .expect("a daemon that fails its pricing guarantee must exit");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -415,10 +392,9 @@ fn a_signal_during_a_hung_boot_stops_the_daemon_cleanly() {
         "the boot was not held open — `sleep` answered the MCP handshake?\n--- log ---\n{log}"
     );
 
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+    child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
-    let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+    let status = child.wait_timeout(Duration::from_secs(30))
         .expect("a hung boot must answer SIGTERM, not need SIGKILL");
     let log = std::fs::read_to_string(scratch.join("daemon.log")).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));

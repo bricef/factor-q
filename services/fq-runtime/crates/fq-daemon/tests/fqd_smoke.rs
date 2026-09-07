@@ -5,8 +5,9 @@
 
 #![cfg(unix)]
 
-use std::io::ErrorKind;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 fn unique_scratch() -> std::path::PathBuf {
@@ -23,28 +24,6 @@ fn unique_scratch() -> std::path::PathBuf {
     dir
 }
 
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
-}
-
 #[test]
 fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     let server = fq_test_support::NatsServer::start();
@@ -53,7 +32,7 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -61,8 +40,7 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
@@ -82,10 +60,9 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     }
     assert!(ready, "fqd never reached 'Runtime ready' within 30s");
 
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+    child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+    let status = child.wait_timeout(Duration::from_secs(15))
         .expect("fqd did not exit within 15s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
@@ -143,7 +120,7 @@ fn fqd_boots_with_a_hung_mcp_server_and_reports_it_unavailable() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
     let started = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fqd"))
+    let mut child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", server.url())
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -151,8 +128,7 @@ fn fqd_boots_with_a_hung_mcp_server_and_reports_it_unavailable() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut ready = false;
@@ -172,8 +148,8 @@ fn fqd_boots_with_a_hung_mcp_server_and_reports_it_unavailable() {
     }
     let to_ready = started.elapsed();
 
-    let _ = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    let _ = wait_with_timeout(&mut child, Duration::from_secs(15));
+    let _ = child.signal(libc::SIGTERM);
+    let _ = child.wait_timeout(Duration::from_secs(15));
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
 
