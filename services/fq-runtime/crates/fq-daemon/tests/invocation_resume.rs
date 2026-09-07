@@ -24,6 +24,8 @@
 #![cfg(unix)]
 
 use std::process::{Command, Output, Stdio};
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
@@ -165,7 +167,7 @@ fn run_fq(scratch: &Scratch, nats_url: &str, args: &[&str]) -> Output {
 }
 
 struct Daemon {
-    child: std::process::Child,
+    child: TestChild,
     log_path: std::path::PathBuf,
 }
 
@@ -174,7 +176,7 @@ impl Daemon {
         let log_path = scratch.path(log_name);
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone log handle");
-        let child = Command::new(fqd_binary())
+        let child = TestChild::builder(fqd_binary())
             .env("FQ_DAEMON_CONFIG", scratch.path("fq.toml"))
             .env("FQ_NATS_URL", nats_url)
             .env("FQ_CACHE_DIR", scratch.path("cache"))
@@ -186,8 +188,7 @@ impl Daemon {
             .env("FQ_LOG_FORMAT", "json")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("spawn fqd");
+            .spawn();
         Self { child, log_path }
     }
 
@@ -279,21 +280,17 @@ impl Daemon {
 
     /// The crash under test: SIGKILL, no grace of any kind.
     fn sigkill(&mut self) {
-        let rc = unsafe { libc::kill(self.child.id() as i32, libc::SIGKILL) };
-        assert_eq!(rc, 0, "kill(SIGKILL) failed");
+        self.child
+            .signal(libc::SIGKILL)
+            .expect("kill(SIGKILL) failed");
         let _ = self.child.wait();
     }
 
     fn stop(&mut self) {
-        let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            if self.child.try_wait().expect("poll daemon").is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let _ = self.child.kill();
+        let _ = self.child.signal(libc::SIGTERM);
+        // `wait_timeout` escalates to SIGKILL itself if the grace runs
+        // out, which is what the hand-rolled loop below used to do.
+        let _ = self.child.wait_timeout(Duration::from_secs(15));
     }
 }
 

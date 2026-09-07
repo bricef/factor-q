@@ -22,7 +22,9 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
+
+use fq_test_support::TestChild;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -223,7 +225,7 @@ fn suffix_of<'a>(log: &'a str, prefix: &str) -> &'a str {
 /// machine. A streaming verb's test has to be able to tell "it died"
 /// from "it is still thinking".
 struct Tail {
-    child: Child,
+    child: TestChild,
     lines: mpsc::Receiver<String>,
     stderr_path: std::path::PathBuf,
 }
@@ -325,15 +327,6 @@ impl Tail {
     }
 }
 
-impl Drop for Tail {
-    fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGTERM);
-        }
-        let _ = self.child.wait();
-    }
-}
-
 /// The world the tail runs in: a broker, the daemon that serves the
 /// edge, and the pairing the client dials it with. **Only this half
 /// moved when the verb was flipped** — before it, a broker and an
@@ -341,7 +334,10 @@ impl Drop for Tail {
 /// subscription. The assertions above are unchanged by that move,
 /// which is what makes them an oracle rather than a description.
 struct World {
-    daemon: Option<Child>,
+    /// Held, never read: dropping it is what stops the daemon (#630),
+    /// so the field is load-bearing exactly where the lint cannot see.
+    #[allow(dead_code)]
+    daemon: TestChild,
     broker: fq_test_support::NatsServer,
     dir: std::path::PathBuf,
     xdg: tempfile::TempDir,
@@ -366,7 +362,7 @@ impl World {
         let log_path = dir.join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let log_err = log.try_clone().expect("log handle");
-        let mut daemon = Command::new(env!("CARGO_BIN_EXE_fqd"))
+        let mut daemon = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
             .env("FQ_DAEMON_CONFIG", dir.join("fqd.toml"))
             .env("FQ_NATS_URL", broker.url())
             .env("FQ_CACHE_DIR", dir.join("cache"))
@@ -376,8 +372,7 @@ impl World {
             .env("NO_COLOR", "1")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("spawn fqd");
+            .spawn();
 
         let deadline = Instant::now() + Duration::from_secs(30);
         let text = loop {
@@ -431,7 +426,7 @@ impl World {
         );
 
         World {
-            daemon: Some(daemon),
+            daemon,
             broker,
             dir,
             xdg,
@@ -537,7 +532,7 @@ impl World {
                 .unwrap()
                 .as_nanos()
         ));
-        let mut child = Command::new(fq_client_binary())
+        let mut child = TestChild::builder(fq_client_binary())
             .arg("events")
             .arg("tail")
             .args(args)
@@ -553,9 +548,8 @@ impl World {
             .stderr(Stdio::from(
                 std::fs::File::create(&stderr_path).expect("tail stderr log"),
             ))
-            .spawn()
-            .expect("spawn fq events tail");
-        let stdout = child.stdout.take().expect("piped stdout");
+            .spawn();
+        let stdout = child.take_stdout().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -705,17 +699,6 @@ impl World {
                 .expect("delete message from the event log")
         });
         assert!(dropped, "the log must have held sequence {seq}");
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        if let Some(mut daemon) = self.daemon.take() {
-            unsafe {
-                libc::kill(daemon.id() as i32, libc::SIGTERM);
-            }
-            let _ = daemon.wait();
-        }
     }
 }
 

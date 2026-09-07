@@ -26,9 +26,10 @@
 
 #![cfg(unix)]
 
-use std::io::ErrorKind;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+
+use fq_test_support::TestChild;
 use std::time::{Duration, Instant};
 
 /// The daemon is its own binary now: `fq` cannot start one, so a test
@@ -116,7 +117,7 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fqd_binary())
+    let mut child = TestChild::builder(fqd_binary())
         // The scratch fq.toml plus env overrides — the test never
         // reads a real config.
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
@@ -126,8 +127,7 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     // Wait for the daemon to reach its steady state (the point past which
     // the shutdown select is armed). Fail loudly if it dies during startup.
@@ -150,16 +150,12 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
     assert!(ready, "daemon never reached 'Runtime ready' within 30s");
 
     // SIGTERM — the signal under test.
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(
-        rc,
-        0,
-        "kill(SIGTERM) failed: {}",
-        std::io::Error::last_os_error()
-    );
+    child
+        .signal(libc::SIGTERM)
+        .expect("kill(SIGTERM) on the daemon");
 
     // It must exit cleanly and promptly, not be killed by the signal.
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+    let status = child.wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of SIGTERM (graceful shutdown hung?)");
 
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -221,30 +217,6 @@ fn worker_statuses(cache: &std::path::Path) -> Vec<String> {
         })
 }
 
-/// Poll `try_wait` until the child exits or the timeout elapses. Returns
-/// `None` on timeout (caller treats that as a hung shutdown).
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
-}
-
 /// `fq down` makes a running daemon drain in-flight work to a step
 /// boundary, deregister its worker, and exit — and the command
 /// *confirms* the exit by waiting for the daemon's `fq.system.shutdown`
@@ -260,7 +232,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fqd_binary())
+    let mut child = TestChild::builder(fqd_binary())
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -268,8 +240,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     // Wait for the daemon to reach steady state.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -307,7 +278,7 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
 
     // The daemon must have exited on its own — no signal sent.
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+    let status = child.wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of `fq down` (down hung?)");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
 
@@ -356,7 +327,7 @@ fn daemon_stops_now_on_fq_down_now() {
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
 
-    let mut child = Command::new(fqd_binary())
+    let mut child = TestChild::builder(fqd_binary())
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", &nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -364,8 +335,7 @@ fn daemon_stops_now_on_fq_down_now() {
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
@@ -399,7 +369,7 @@ fn daemon_stops_now_on_fq_down_now() {
     let down_out = String::from_utf8_lossy(&down.stdout).into_owned();
     let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
 
-    let status = wait_with_timeout(&mut child, Duration::from_secs(15))
+    let status = child.wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of `fq down --now`");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
@@ -564,7 +534,7 @@ impl ShutdownWatch {
 /// the observable; the process still being alive afterwards is not
 /// something the caller may assume.
 fn wait_for_log_line(
-    child: &mut std::process::Child,
+    child: &mut TestChild,
     log: &std::path::Path,
     needle: &str,
     timeout: Duration,
@@ -597,11 +567,11 @@ fn wait_for_log_line(
 fn spawn_ready_daemon(
     scratch: &std::path::Path,
     nats_url: &str,
-) -> (std::process::Child, std::path::PathBuf) {
+) -> (TestChild, std::path::PathBuf) {
     let log_path = scratch.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let log_err = log.try_clone().expect("clone daemon log handle");
-    let mut child = Command::new(fqd_binary())
+    let mut child = TestChild::builder(fqd_binary())
         .env("FQ_DAEMON_CONFIG", scratch.join("fq.toml"))
         .env("FQ_NATS_URL", nats_url)
         .env("FQ_CACHE_DIR", scratch.join("cache"))
@@ -609,8 +579,7 @@ fn spawn_ready_daemon(
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn fqd");
+        .spawn();
     wait_for_log_line(
         &mut child,
         &log_path,
@@ -636,8 +605,7 @@ fn the_drain_is_joined_before_the_infrastructure_teardown() {
     let scratch = unique_scratch();
     let (mut child, log_path) = spawn_ready_daemon(&scratch, &nats_url);
 
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
+    child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
     // The wait must start promptly: nothing is allowed to run ahead of
     // it and eat the deadline.
@@ -647,7 +615,7 @@ fn the_drain_is_joined_before_the_infrastructure_teardown() {
         "Draining — waiting up to",
         Duration::from_secs(10),
     );
-    let status = wait_with_timeout(&mut child, Duration::from_secs(20))
+    let status = child.wait_timeout(Duration::from_secs(20))
         .expect("daemon did not exit within 20s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
@@ -721,7 +689,7 @@ fn a_second_sigterm_never_costs_the_clean_teardown() {
     // ESRCH, not a failure of this test.
     unsafe { libc::kill(pid, libc::SIGTERM) };
 
-    let status = wait_with_timeout(&mut child, Duration::from_secs(20))
+    let status = child.wait_timeout(Duration::from_secs(20))
         .expect("daemon did not exit within 20s of the second SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -788,7 +756,7 @@ fn the_teardown_completes_when_the_dispatcher_arm_wins() {
                 .expect("delete the trigger stream");
         });
 
-    let status = wait_with_timeout(&mut child, Duration::from_secs(30)).unwrap_or_else(|| {
+    let status = child.wait_timeout(Duration::from_secs(30)).unwrap_or_else(|| {
         let log = std::fs::read_to_string(&log_path).unwrap_or_default();
         panic!("daemon did not exit after its dispatcher died\n--- log ---\n{log}")
     });
