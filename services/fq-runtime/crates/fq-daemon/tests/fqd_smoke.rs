@@ -62,7 +62,8 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
 
     child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
-    let status = child.wait_timeout(Duration::from_secs(15))
+    let status = child
+        .wait_timeout(Duration::from_secs(15))
         .expect("fqd did not exit within 15s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);

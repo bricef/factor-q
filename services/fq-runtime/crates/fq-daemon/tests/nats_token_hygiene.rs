@@ -107,9 +107,9 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
         std::fs::read_to_string(&log_path).unwrap_or_default()
     );
 
-    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    assert_eq!(rc, 0, "kill(SIGTERM) failed");
-    let status = child.wait_timeout(Duration::from_secs(15))
+    child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
+    let status = child
+        .wait_timeout(Duration::from_secs(15))
         .expect("fqd did not exit within 15s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     assert!(

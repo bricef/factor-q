@@ -216,7 +216,10 @@ fn helper_stands_a_daemon_up_and_parks() {
         {
             break;
         }
-        assert!(Instant::now() < deadline, "fqd never reached 'Runtime ready'");
+        assert!(
+            Instant::now() < deadline,
+            "fqd never reached 'Runtime ready'"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 

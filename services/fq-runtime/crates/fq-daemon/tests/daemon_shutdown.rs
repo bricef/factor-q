@@ -155,7 +155,8 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .expect("kill(SIGTERM) on the daemon");
 
     // It must exit cleanly and promptly, not be killed by the signal.
-    let status = child.wait_timeout(Duration::from_secs(15))
+    let status = child
+        .wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of SIGTERM (graceful shutdown hung?)");
 
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -278,7 +279,8 @@ fn daemon_stops_and_confirms_on_fq_down() {
     let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
 
     // The daemon must have exited on its own — no signal sent.
-    let status = child.wait_timeout(Duration::from_secs(15))
+    let status = child
+        .wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of `fq down` (down hung?)");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
 
@@ -369,7 +371,8 @@ fn daemon_stops_now_on_fq_down_now() {
     let down_out = String::from_utf8_lossy(&down.stdout).into_owned();
     let down_err = String::from_utf8_lossy(&down.stderr).into_owned();
 
-    let status = child.wait_timeout(Duration::from_secs(15))
+    let status = child
+        .wait_timeout(Duration::from_secs(15))
         .expect("daemon did not exit within 15s of `fq down --now`");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
@@ -615,7 +618,8 @@ fn the_drain_is_joined_before_the_infrastructure_teardown() {
         "Draining — waiting up to",
         Duration::from_secs(10),
     );
-    let status = child.wait_timeout(Duration::from_secs(20))
+    let status = child
+        .wait_timeout(Duration::from_secs(20))
         .expect("daemon did not exit within 20s of SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
@@ -689,7 +693,8 @@ fn a_second_sigterm_never_costs_the_clean_teardown() {
     // ESRCH, not a failure of this test.
     unsafe { libc::kill(pid, libc::SIGTERM) };
 
-    let status = child.wait_timeout(Duration::from_secs(20))
+    let status = child
+        .wait_timeout(Duration::from_secs(20))
         .expect("daemon did not exit within 20s of the second SIGTERM");
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let workers = worker_statuses(&scratch.join("cache"));
@@ -756,10 +761,12 @@ fn the_teardown_completes_when_the_dispatcher_arm_wins() {
                 .expect("delete the trigger stream");
         });
 
-    let status = child.wait_timeout(Duration::from_secs(30)).unwrap_or_else(|| {
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        panic!("daemon did not exit after its dispatcher died\n--- log ---\n{log}")
-    });
+    let status = child
+        .wait_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|| {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("daemon did not exit after its dispatcher died\n--- log ---\n{log}")
+        });
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let reasons = watch.finish();
     let _ = std::fs::remove_dir_all(&scratch);
