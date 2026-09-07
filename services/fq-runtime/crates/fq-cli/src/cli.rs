@@ -218,6 +218,12 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: WorkerCommands,
     },
+    /// The daemon's projection — the SQLite read model it derives
+    /// from the event stream
+    Projection {
+        #[command(subcommand)]
+        command: ProjectionCommands,
+    },
     /// Pair this client with a daemon's edge: pin its certificate
     /// fingerprint and store the capability token. With --fingerprint
     /// the pin is explicit; without it, and only from a terminal, the
@@ -253,6 +259,35 @@ pub(crate) enum Commands {
     /// Print version and build information
     Version {
         /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProjectionCommands {
+    /// Rebuild the daemon's projection from the event stream: drop
+    /// its tables, recreate them at the daemon's schema version, and
+    /// replay the stream from the start of its retention.
+    ///
+    /// Asks the running daemon (`control.projection_rebuild`), which
+    /// stops its projection consumer, rebuilds, resets the durable
+    /// consumer and starts it again — the same rebuild it performs by
+    /// itself when its schema version changes. Rows the retention
+    /// sweep exempts (cost-bearing events, invocation summaries,
+    /// trigger records) are carried across, so spend older than the
+    /// stream's window is kept; everything the stream still holds is
+    /// re-derived whole. Until the replay catches up, reads answer over
+    /// a partial fold — `fq status` reports its progress.
+    Rebuild {
+        /// Confirm: the projection's tables are dropped and re-derived
+        /// from the stream. Refused without it.
+        #[arg(long)]
+        yes: bool,
+        /// Why, for the record `fq status` reports.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit the rebuild record as JSON instead of the confirmation.
         #[arg(long)]
         json: bool,
     },

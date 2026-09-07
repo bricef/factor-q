@@ -135,6 +135,10 @@ pub struct MachineryDeps {
     /// its next step boundary before the daemon exits.
     pub worker: Arc<dyn fq_runtime::Worker>,
     pub down: DownSignal,
+    /// The projection supervisor's handle — what
+    /// `control.projection_rebuild` asks to drop, recreate and replay
+    /// the projection under the running daemon.
+    pub projection_rebuild: fq_runtime::control_plane::projection::rebuild::ProjectionRebuildHandle,
 }
 
 /// The typed input of `control.down` on the wire.
@@ -202,7 +206,8 @@ async fn reload_agents(
     }
 }
 
-/// Register `control.reload` and `control.down` on the daemon's edge.
+/// Register `control.reload`, `control.down` and
+/// `control.projection_rebuild` on the daemon's edge.
 pub(crate) fn register_control_commands(
     registry: &mut fq_edge::EdgeRegistry,
     deps: MachineryDeps,
@@ -213,7 +218,9 @@ pub(crate) fn register_control_commands(
         default_model,
         worker,
         down,
+        projection_rebuild,
     } = deps;
+    crate::projection_command::register_projection_rebuild(registry, projection_rebuild)?;
 
     let decl = fq_ops::Command::new::<ReloadCommandInput>(
         fq_ops::Control::Reload,

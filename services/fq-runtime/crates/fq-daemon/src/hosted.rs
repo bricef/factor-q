@@ -41,12 +41,13 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use fq_runtime::control_plane::projection::rebuild::ProjectionSupervisor;
 use fq_runtime::events::{Event, EventPayload, SystemShutdownPayload, SystemStartupPayload};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
-    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionConsumer, ProjectionStore,
-    SharedRegistry, TriggerDispatcher,
+    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionStore, SharedRegistry,
+    TriggerDispatcher,
 };
 use uuid::Uuid;
 
@@ -150,6 +151,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
     let down_signal = DownSignal::new();
     let mut down_rx = down_signal.subscribe();
+    let projection_supervisor = ProjectionSupervisor::new(bus.clone(), store.clone());
     let resume_control = Arc::new(ResumeControl {
         bus: bus.clone(),
         worker_store: worker_store.clone(),
@@ -201,10 +203,10 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
                 agents: shared_registry.clone(),
                 agents_dir: config.agents.directory.clone(),
                 default_model: config.agents.default_model.clone(),
-                // The same runner `fq down`'s drain suspends and the
-                // teardown below waits on.
+                // The same runner `fq down`'s drain suspends and the teardown below waits on.
                 worker: resume_runner.clone(),
                 down: down_signal,
+                projection_rebuild: projection_supervisor.rebuild_handle(),
             },
         },
     )?);
@@ -216,10 +218,9 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // New fallible work goes above this line — see the module doc for
     // what a `?` down here costs. ----
     let (proj_shutdown_tx, proj_shutdown_rx) = tokio::sync::oneshot::channel();
-    let projection_consumer =
-        ProjectionConsumer::new(bus.clone(), store.clone()).with_watermark(watermark_tx);
+    let projection_supervisor = projection_supervisor.with_watermark(watermark_tx);
     let mut projection_handle =
-        tokio::spawn(async move { projection_consumer.run(proj_shutdown_rx).await });
+        tokio::spawn(async move { projection_supervisor.run(proj_shutdown_rx).await });
 
     // Spawn the coordination consumer. Subscribes to
     // invocation lifecycle events and maintains the

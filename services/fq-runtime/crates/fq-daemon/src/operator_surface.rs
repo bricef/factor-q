@@ -145,10 +145,11 @@ fn arm_drop_halt(
 /// registry, reads gated at the read horizon (every consumer feeding a
 /// view's fold), the Turn, Event and DeadLetter atoms served from the
 /// log, the Trigger atom served from its permanent projection record,
-/// the six commands — `invocation.drop`, `invocation.resume`,
-/// `trigger.publish`, `dead_letter.requeue`, and the two machinery
-/// verbs (`control.reload`, `control.down`) — each returning a
-/// receipt, and the five reports: the two Cost aggregates
+/// the seven commands — `invocation.drop`, `invocation.resume`,
+/// `trigger.publish`, `dead_letter.requeue`, and the three machinery
+/// verbs (`control.reload`, `control.down`,
+/// `control.projection_rebuild`) — each returning a receipt, and the
+/// five reports: the two Cost aggregates
 /// (`cost.summary`, `cost.by_agent`), `invocation.active`, and the two
 /// Control machinery reports (`control.doctor`, `control.status`).
 /// Public for the operator-surface snapshot test.

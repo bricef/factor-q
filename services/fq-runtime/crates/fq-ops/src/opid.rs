@@ -58,6 +58,12 @@ pub enum Invocation {
 pub enum Control {
     Down,
     Reload,
+    /// `control.projection_rebuild` — drop the projection's tables,
+    /// recreate them at the daemon's schema version and replay the
+    /// event stream into them. A machinery verb because the projection
+    /// is derived: nothing is written to any resource, the daemon's
+    /// read model is re-derived.
+    ProjectionRebuild,
 }
 
 #[derive(
