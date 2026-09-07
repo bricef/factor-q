@@ -232,3 +232,37 @@ impl McpServerHealth {
         matches!(self, McpServerHealth::Unavailable { .. })
     }
 }
+
+/// One model the worker's provider throttle is holding back
+/// (<https://github.com/bricef/factor-q/issues/278>), as every operator
+/// surface reads it: paused, running under its permit ceiling, or
+/// rate-limited in the current success window. A model with no 429
+/// history is not listed at all.
+///
+/// Reported, not judged: a throttled model is the runtime doing its job
+/// under a provider's backpressure, so `fq doctor` lists it without
+/// changing its verdict.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ThrottledModel {
+    /// The model string requests target — the throttle's key, which
+    /// names the `(provider, model)` pair because routing maps a model
+    /// to exactly one provider.
+    pub model: String,
+    /// When the current pause ends, epoch milliseconds on the daemon's
+    /// clock. Absent when the model is not paused. A paused model starts
+    /// no invocation and is granted no permit until this passes.
+    pub paused_until_ms: Option<i64>,
+    /// How many calls the model may have in flight right now — halved on
+    /// each 429 wave, raised by one per clean success window, never
+    /// below 1 and never above `ceiling`.
+    pub cap: u32,
+    /// The cap's upper bound: `[worker] max_concurrent_invocations`.
+    pub ceiling: u32,
+    /// Calls holding a permit at the instant of the report.
+    pub in_flight: u32,
+    /// 429s seen since the success window last completed.
+    pub rate_limited_in_window: u32,
+    /// Consecutive 429 waves without a success in between — what the
+    /// default pause escalates on. Zero once a call succeeds.
+    pub waves: u32,
+}
