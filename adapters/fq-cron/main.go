@@ -10,16 +10,22 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+const reloadSettleEnv = "FQCRON_RELOAD_SETTLE"
 
 type cliConfig struct {
 	ConfigPath, NATSURL, KVBucket string
 	// HealthBind is the loopback address of GET /healthz (health.go);
 	// "" = no endpoint.
 	HealthBind string
-	Check      bool
+	// ReloadSettle is the quiet period a changed jobs file must hold
+	// before the watcher reads it as final (watch.go).
+	ReloadSettle time.Duration
+	Check        bool
 }
 
 func envOr(key, fallback string) string {
@@ -29,20 +35,42 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// envOrDuration is envOr for a duration, with a malformed value an error
+// rather than a silent fallback — a mistyped settle must not look applied.
+func envOrDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, nil
+}
+
 func configFromArgs(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("fq-cron", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var c cliConfig
+	settle, err := envOrDuration(reloadSettleEnv, DefaultReloadSettle)
+	if err != nil {
+		return c, err
+	}
 	fs.StringVar(&c.ConfigPath, "config", envOr("FQCRON_CONFIG", ""), "config file (env FQCRON_CONFIG)")
 	fs.StringVar(&c.NATSURL, "nats-url", envOr("FQCRON_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env FQCRON_NATS_URL)")
 	fs.StringVar(&c.KVBucket, "kv-bucket", envOr("FQCRON_KV_BUCKET", "fq-cron-state"), "KV bucket (env FQCRON_KV_BUCKET)")
 	fs.StringVar(&c.HealthBind, "health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
+	fs.DurationVar(&c.ReloadSettle, "reload-settle", settle, "quiet period a changed config file must hold before it is reloaded (env "+reloadSettleEnv+")")
 	fs.BoolVar(&c.Check, "check", false, "validate config and exit")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
 	if c.ConfigPath == "" {
 		return c, fmt.Errorf("--config (or FQCRON_CONFIG) is required")
+	}
+	if c.ReloadSettle < 0 {
+		return c, fmt.Errorf("--reload-settle (or %s) must not be negative", reloadSettleEnv)
 	}
 	return c, nil
 }
@@ -164,7 +192,7 @@ func run(args []string) error {
 	}); err != nil {
 		return nil // ctx cancelled: a clean stop
 	}
-	watcher := NewConfigWatcher(cli.ConfigPath, config, ConfigWatcherOptions{Logger: log.Default()})
+	watcher := NewConfigWatcher(cli.ConfigPath, config, ConfigWatcherOptions{Settle: cli.ReloadSettle, Logger: log.Default()})
 	return runScheduler(ctx, config, watcher.Run(ctx), publisher, store, log.Default())
 }
 

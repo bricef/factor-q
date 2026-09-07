@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigFromArgsDefaultsAndEnvironment(t *testing.T) {
@@ -17,6 +18,32 @@ func TestConfigFromArgsDefaultsAndEnvironment(t *testing.T) {
 	}
 	if cfg.ConfigPath != "jobs.toml" || cfg.NATSURL != "nats://example:4222" || cfg.KVBucket != "jobs-state" || !cfg.Check {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+// The settle is configuration like every other number: a default, a flag,
+// and an environment variable, with a mistyped value an error rather than a
+// silent fallback to the default.
+func TestReloadSettleIsConfigurable(t *testing.T) {
+	t.Setenv("FQCRON_CONFIG", "jobs.toml")
+	cfg, err := configFromArgs(nil)
+	if err != nil || cfg.ReloadSettle != DefaultReloadSettle {
+		t.Fatalf("default settle = %s (%v), want %s", cfg.ReloadSettle, err, DefaultReloadSettle)
+	}
+	t.Setenv(reloadSettleEnv, "750ms")
+	if cfg, err = configFromArgs(nil); err != nil || cfg.ReloadSettle != 750*time.Millisecond {
+		t.Fatalf("settle from the environment = %s (%v)", cfg.ReloadSettle, err)
+	}
+	if cfg, err = configFromArgs([]string{"--reload-settle", "2s"}); err != nil || cfg.ReloadSettle != 2*time.Second {
+		t.Fatalf("settle from the flag = %s (%v), and the flag must win over the environment", cfg.ReloadSettle, err)
+	}
+	t.Setenv(reloadSettleEnv, "soon")
+	if _, err = configFromArgs(nil); err == nil || !strings.Contains(err.Error(), reloadSettleEnv) {
+		t.Fatalf("a malformed %s = %v, want an error naming it", reloadSettleEnv, err)
+	}
+	t.Setenv(reloadSettleEnv, "250ms")
+	if _, err = configFromArgs([]string{"--reload-settle", "-1s"}); err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("a negative settle = %v, want a rejection", err)
 	}
 }
 
