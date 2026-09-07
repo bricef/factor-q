@@ -57,10 +57,23 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func ParseConfig(data []byte) (*Config, error) {
+	cfg, _, err := parseConfig(data)
+	return cfg, err
+}
+
+// parseConfig additionally reports whether the file *declares* the top-level
+// `job` key. That is the only thing separating an operator's deliberate "no
+// jobs any more" (`job = []`) from a file that merely happens to contain
+// none — including the zero bytes a reader sees between a writer's truncate
+// and its write, which TOML parses as a perfectly valid config with every job
+// gone (https://github.com/bricef/factor-q/issues/623).
+func parseConfig(data []byte) (*Config, bool, error) {
 	var cfg Config
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
-		return nil, fmt.Errorf("parse TOML: %w", err)
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse TOML: %w", err)
 	}
+	declaresJobs := meta.IsDefined("job")
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		// TOML metadata does not retain a table's declaration position, so add
@@ -68,13 +81,13 @@ func ParseConfig(data []byte) (*Config, error) {
 		for line, text := range strings.Split(string(data), "\n") {
 			for _, job := range cfg.Jobs {
 				if strings.Contains(err.Error(), fmt.Sprintf("job %q", job.Name)) && strings.TrimSpace(text) == fmt.Sprintf("name = %q", job.Name) {
-					return nil, fmt.Errorf("line %d: %w", line+1, err)
+					return nil, declaresJobs, fmt.Errorf("line %d: %w", line+1, err)
 				}
 			}
 		}
-		return nil, err
+		return nil, declaresJobs, err
 	}
-	return &cfg, nil
+	return &cfg, declaresJobs, nil
 }
 
 func (c *Config) applyDefaults() {

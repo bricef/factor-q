@@ -19,6 +19,13 @@ import (
 
 const DefaultConfigPollInterval = 30 * time.Second
 
+// DefaultReloadSettle is how long a changed config file must hold still
+// before the watcher reads it as final. Low hundreds of milliseconds: long
+// enough to span a save's truncate-then-write, an editor's temp-file rename,
+// or the last chunks of an `scp`; short enough that an edit still applies
+// while the operator is looking at the log.
+const DefaultReloadSettle = 250 * time.Millisecond
+
 // ConfigDiff describes a wholesale, validated configuration change.
 type ConfigDiff struct {
 	Added   []string
@@ -34,8 +41,13 @@ type ReloadEvent struct {
 }
 
 type ConfigWatcherOptions struct {
-	PollInterval    time.Duration
-	Debounce        time.Duration
+	PollInterval time.Duration
+	// Settle is the quiet period a changed file must hold before what was
+	// read counts as the whole file. One number does two jobs: fsnotify
+	// write bursts are coalesced for this long, and every changed read —
+	// from any trigger, the poll included — is confirmed by a second read
+	// taken Settle later, with only byte-identical reads accepted.
+	Settle          time.Duration
 	DisableFSNotify bool
 	Logger          *log.Logger
 }
@@ -48,7 +60,26 @@ type ConfigWatcher struct {
 	mu       sync.Mutex
 	current  *Config
 	lastSeen fileSignature
+	// unsettledLogged keeps a file that is being written continuously to
+	// one log line per streak rather than one per check.
+	unsettledLogged bool
 }
+
+// checkOutcome is what one examination of the file concluded.
+type checkOutcome int
+
+const (
+	// checkUnchanged: the file reads the same as the last one seen.
+	checkUnchanged checkOutcome = iota
+	// checkUnsettled: the file moved between the two reads, so nothing was
+	// concluded and nothing recorded — it must be looked at again.
+	checkUnsettled
+	// checkRejected: the file was read whole and refused; the running
+	// config stands.
+	checkRejected
+	// checkAccepted: a new config is in force and an event was produced.
+	checkAccepted
+)
 
 type fileSignature struct {
 	hash    [sha256.Size]byte
@@ -60,8 +91,8 @@ func NewConfigWatcher(path string, current *Config, opts ConfigWatcherOptions) *
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = DefaultConfigPollInterval
 	}
-	if opts.Debounce <= 0 {
-		opts.Debounce = 100 * time.Millisecond
+	if opts.Settle <= 0 {
+		opts.Settle = DefaultReloadSettle
 	}
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
@@ -92,26 +123,32 @@ func (w *ConfigWatcher) run(ctx context.Context, out chan<- ReloadEvent) {
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 
-	var events <-chan fsnotify.Event
-	var errors <-chan error
-	var watcher *fsnotify.Watcher
-	if !w.opts.DisableFSNotify {
-		var err error
-		watcher, err = fsnotify.NewWatcher()
-		if err != nil {
-			w.opts.Logger.Printf("config watch accelerator unavailable: %v", err)
-		} else if err = watcher.Add(filepath.Dir(w.path)); err != nil {
-			w.opts.Logger.Printf("config watch accelerator unavailable: %v", err)
-			_ = watcher.Close()
-			watcher = nil
+	events, errors, closeAccelerator := w.accelerator()
+	defer closeAccelerator()
+
+	var settle <-chan time.Time
+	var timer *time.Timer
+	arm := func() {
+		if timer == nil {
+			timer = time.NewTimer(w.opts.Settle)
 		} else {
-			events, errors = watcher.Events, watcher.Errors
-			defer watcher.Close()
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(w.opts.Settle)
+		}
+		settle = timer.C
+	}
+	// A file caught mid-write concluded nothing, so come back for it after
+	// another settle rather than waiting out a whole poll interval.
+	examine := func() {
+		if w.emitIfChanged(ctx, out) == checkUnsettled {
+			arm()
 		}
 	}
-
-	var debounce <-chan time.Time
-	var timer *time.Timer
 	for {
 		select {
 		case <-ctx.Done():
@@ -120,9 +157,9 @@ func (w *ConfigWatcher) run(ctx context.Context, out chan<- ReloadEvent) {
 			}
 			return
 		case <-poll.C:
-			w.emitIfChanged(out)
+			examine()
 		case <-hup:
-			w.emitIfChanged(out)
+			examine()
 		case event, ok := <-events:
 			if !ok {
 				events = nil
@@ -131,21 +168,10 @@ func (w *ConfigWatcher) run(ctx context.Context, out chan<- ReloadEvent) {
 			if filepath.Clean(event.Name) != filepath.Clean(w.path) {
 				continue
 			}
-			if timer == nil {
-				timer = time.NewTimer(w.opts.Debounce)
-			} else {
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(w.opts.Debounce)
-			}
-			debounce = timer.C
-		case <-debounce:
-			debounce = nil
-			w.emitIfChanged(out)
+			arm()
+		case <-settle:
+			settle = nil
+			examine()
 		case err, ok := <-errors:
 			if ok {
 				w.opts.Logger.Printf("config watch accelerator error: %v", err)
@@ -156,38 +182,111 @@ func (w *ConfigWatcher) run(ctx context.Context, out chan<- ReloadEvent) {
 	}
 }
 
-func (w *ConfigWatcher) emitIfChanged(out chan<- ReloadEvent) {
-	if event, ok := w.Check(); ok {
-		out <- event
+// accelerator subscribes to the config file's *directory* — editors save by
+// renaming over the file, which orphans a watch on its inode. A failure is a
+// latency regression, not an outage: the poll is the guarantee.
+func (w *ConfigWatcher) accelerator() (<-chan fsnotify.Event, <-chan error, func()) {
+	if w.opts.DisableFSNotify {
+		return nil, nil, func() {}
 	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		w.opts.Logger.Printf("config watch accelerator unavailable: %v", err)
+		return nil, nil, func() {}
+	}
+	if err := watcher.Add(filepath.Dir(w.path)); err != nil {
+		w.opts.Logger.Printf("config watch accelerator unavailable: %v", err)
+		_ = watcher.Close()
+		return nil, nil, func() {}
+	}
+	return watcher.Events, watcher.Errors, func() { _ = watcher.Close() }
 }
 
-// Check immediately examines the file. It returns an event only when a new,
-// valid configuration differs in content from the last observed file.
+func (w *ConfigWatcher) emitIfChanged(ctx context.Context, out chan<- ReloadEvent) checkOutcome {
+	event, outcome := w.check(ctx)
+	if outcome != checkAccepted {
+		return outcome
+	}
+	select {
+	case out <- event:
+	case <-ctx.Done():
+	}
+	return outcome
+}
+
+// Check immediately examines the file. It returns an event only for a reload
+// the watcher accepts: see check.
 func (w *ConfigWatcher) Check() (ReloadEvent, bool) {
+	event, outcome := w.check(context.Background())
+	return event, outcome == checkAccepted
+}
+
+// check reads the file and decides. A reload is accepted only when the file
+// reads, holds still across the settle, parses, validates, and declares at
+// least one job — or declares `job = []`, the one way a config says "no jobs"
+// out loud. Anything else leaves the running config in force.
+func (w *ConfigWatcher) check(ctx context.Context) (ReloadEvent, checkOutcome) {
+	// The settle wait is held under the lock deliberately: two concurrent
+	// checks must not interleave their reads of the same file.
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	data, err := os.ReadFile(w.path)
 	sig := signature(data, err)
 	if sig == w.lastSeen {
-		return ReloadEvent{}, false
+		return ReloadEvent{}, checkUnchanged
 	}
+	// The file differs from the last one seen — but a writer may be part
+	// way through it: os.WriteFile truncates before it writes, an editor
+	// renames over a temp file, scp streams. Read it again after the settle
+	// and trust only bytes that did not move.
+	if !waitFor(ctx, w.opts.Settle) {
+		return ReloadEvent{}, checkUnchanged // shutting down
+	}
+	confirm, confirmErr := os.ReadFile(w.path)
+	if signature(confirm, confirmErr) != sig {
+		if !w.unsettledLogged {
+			w.opts.Logger.Printf("config changed while being read; reload deferred until it settles")
+			w.unsettledLogged = true
+		}
+		return ReloadEvent{}, checkUnsettled
+	}
+	w.unsettledLogged = false
 	w.lastSeen = sig
 	if err != nil {
 		w.opts.Logger.Printf("config reload rejected: %v", err)
-		return ReloadEvent{}, false
+		return ReloadEvent{}, checkRejected
 	}
 
-	next, err := ParseConfig(data)
+	next, declaresJobs, err := parseConfig(data)
 	if err != nil {
 		w.opts.Logger.Printf("config reload rejected: %v", err)
-		return ReloadEvent{}, false
+		return ReloadEvent{}, checkRejected
+	}
+	// Zero bytes are valid TOML declaring no jobs, so a read that lands in
+	// a writer's truncate gap parses as "every job deleted" — and the
+	// scheduler would delete every job's fire ledger to match. A config only
+	// means that when it says so (#623).
+	if len(next.Jobs) == 0 && !declaresJobs {
+		w.opts.Logger.Printf("config reload rejected: %d bytes declaring no jobs, and no explicit `job = []`", len(data))
+		return ReloadEvent{}, checkRejected
 	}
 	diff := diffConfigs(w.current, next)
 	w.current = next
 	w.opts.Logger.Printf("config reload accepted: added=%v removed=%v changed=%v", diff.Added, diff.Removed, diff.Changed)
-	return ReloadEvent{Config: next, Diff: diff}, true
+	return ReloadEvent{Config: next, Diff: diff}, checkAccepted
+}
+
+// waitFor waits out d, reporting false if ctx ended first.
+func waitFor(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func signature(data []byte, err error) fileSignature {

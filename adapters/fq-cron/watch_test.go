@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -17,17 +17,14 @@ func TestConfigWatcherReloadPaths(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "fq-cron.toml")
 			writeConfig(t, path, configText("first", "0 * * * *"))
-			initial, err := LoadConfig(path)
-			if err != nil {
-				t.Fatal(err)
-			}
+			initial := mustLoad(t, path)
 
-			var logs bytes.Buffer
+			logs := &syncBuffer{}
 			w := NewConfigWatcher(path, initial, ConfigWatcherOptions{
 				PollInterval:    20 * time.Millisecond,
-				Debounce:        5 * time.Millisecond,
+				Settle:          20 * time.Millisecond,
 				DisableFSNotify: pollOnly,
-				Logger:          log.New(&logs, "", 0),
+				Logger:          log.New(logs, "", 0),
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -49,16 +46,128 @@ func TestConfigWatcherReloadPaths(t *testing.T) {
 				t.Fatalf("atomic-rename diff = %+v", e.Diff)
 			}
 
+			// Each rejection is asserted by the reason it carries, not by a
+			// count of the shared "rejected" prefix: a count cannot tell one
+			// cause from another, and the reasons are what the operator reads.
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
-			waitLog(t, &logs, "config reload rejected")
+			waitForLog(t, logs, "config reload rejected: open", 2*time.Second)
 			writeConfig(t, path, "not = [valid")
-			waitLogCount(t, &logs, "config reload rejected", 2)
+			waitForLog(t, logs, "config reload rejected: parse TOML", 2*time.Second)
 			writeConfig(t, path, configText("third", "0 * * * *"))
 			e = waitReload(t, events)
 			if e.Diff.Removed[0] != "second" || e.Diff.Added[0] != "third" {
 				t.Fatalf("old config was not retained: %+v", e.Diff)
+			}
+		})
+	}
+}
+
+// A read landing between a writer's truncate and its write sees zero bytes,
+// which TOML parses as a perfectly valid config with no jobs at all. The
+// watcher used to accept that as "every job deleted"; it must refuse every
+// shape of it and leave the running config alone
+// (https://github.com/bricef/factor-q/issues/623).
+func TestReloadRefusesAConfigThatDeclaresNoJobs(t *testing.T) {
+	for name, text := range map[string]string{
+		"truncated to zero bytes": "",
+		"whitespace only":         "  \n\t\n",
+		"comments only":           "# every job commented out\n",
+		"header but no jobs":      "[limits]\nmax_fires_per_hour = 30\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fq-cron.toml")
+			writeConfig(t, path, configText("first", "0 * * * *"))
+			logs := &syncBuffer{}
+			w := NewConfigWatcher(path, mustLoad(t, path), ConfigWatcherOptions{
+				Settle: time.Millisecond,
+				Logger: log.New(logs, "", 0),
+			})
+
+			writeConfig(t, path, text)
+			if event, ok := w.Check(); ok {
+				t.Fatalf("a config declaring no jobs was accepted: %+v", event.Diff)
+			}
+			if names := jobNames(w.current); names != "first" {
+				t.Fatalf("running config = %q, want the previous one (%q)", names, "first")
+			}
+			if !strings.Contains(logs.String(), "declaring no jobs") {
+				t.Fatalf("the refusal must say why; log was:\n%s", logs.String())
+			}
+
+			// And the watcher keeps watching: the completed write lands.
+			writeConfig(t, path, configText("first", "0 * * * *")+configText("second", "0 * * * *"))
+			event, ok := w.Check()
+			if !ok || len(event.Diff.Added) != 1 || event.Diff.Added[0] != "second" || len(event.Diff.Removed) != 0 {
+				t.Fatalf("the write after the refusal = %+v (accepted=%v)", event.Diff, ok)
+			}
+		})
+	}
+}
+
+// `job = []` is the one way a file says "no jobs" out loud, and it is
+// honoured in full: the jobs stop and their fire ledgers go with them.
+func TestReloadAcceptsAnExplicitlyEmptyJobList(t *testing.T) {
+	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	defer s.stop(t)
+
+	writeConfig(t, s.path, "job = []\n")
+	waitForLog(t, s.logs, "config reload accepted: added=[] removed=[alpha beta]", 2*time.Second)
+	waitForStateKeys(t, s.store, "", 2*time.Second)
+}
+
+// The same two jobs, the same store, and the intermediate state of a save
+// written on purpose: nothing may be removed, and nothing accepted.
+func TestATruncatedReadKeepsEveryJobsState(t *testing.T) {
+	s := startScheduler(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	defer s.stop(t)
+
+	writeConfig(t, s.path, "")
+	waitForLog(t, s.logs, "config reload rejected: 0 bytes declaring no jobs", 2*time.Second)
+	if keys := stateKeys(s.store); keys != "alpha,beta" {
+		t.Fatalf("state after a truncated read = %q, want both ledgers intact", keys)
+	}
+	if strings.Contains(s.logs.String(), "config reload accepted") {
+		t.Fatalf("nothing may be accepted; log was:\n%s", s.logs.String())
+	}
+
+	// The completed save that follows is accepted, and still removes nothing.
+	writeConfig(t, s.path, configText("alpha", "30 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	waitForLog(t, s.logs, "config reload accepted: added=[] removed=[] changed=[alpha]", 2*time.Second)
+	if keys := stateKeys(s.store); keys != "alpha,beta" {
+		t.Fatalf("state after the completed save = %q, want both ledgers intact", keys)
+	}
+}
+
+// A multi-step save is one reload of the finished file, not one per step —
+// on the poll path as much as on the fsnotify one.
+func TestWritesInsideTheSettleWindowProduceOneReload(t *testing.T) {
+	for _, pollOnly := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fsnotify", true: "poll-only"}[pollOnly], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fq-cron.toml")
+			writeConfig(t, path, configText("first", "0 * * * *"))
+			w := NewConfigWatcher(path, mustLoad(t, path), ConfigWatcherOptions{
+				PollInterval:    20 * time.Millisecond,
+				Settle:          200 * time.Millisecond,
+				DisableFSNotify: pollOnly,
+				Logger:          log.New(&syncBuffer{}, "", 0),
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			events := w.Run(ctx)
+
+			writeConfig(t, path, configText("second", "0 * * * *"))
+			time.Sleep(20 * time.Millisecond)
+			writeConfig(t, path, configText("third", "0 * * * *"))
+
+			if got := jobNames(waitReload(t, events).Config); got != "third" {
+				t.Fatalf("the settled reload carried %q, want the last write (%q)", got, "third")
+			}
+			select {
+			case extra := <-events:
+				t.Fatalf("a second reload followed the same save: %+v", extra.Diff)
+			case <-time.After(500 * time.Millisecond):
 			}
 		})
 	}
@@ -73,6 +182,91 @@ func TestDiffConfigsSortedByName(t *testing.T) {
 	}
 }
 
+// runningScheduler is the production path a reload takes to the fire ledgers
+// it can delete: a real ConfigWatcher over a real file, feeding runScheduler
+// over an in-memory store seeded with one ledger per job.
+type runningScheduler struct {
+	path   string
+	store  *MemoryStateStore
+	logs   *syncBuffer
+	cancel context.CancelFunc
+	done   chan error
+}
+
+func startScheduler(t *testing.T, text string) *runningScheduler {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fq-cron.toml")
+	writeConfig(t, path, text)
+	config := mustLoad(t, path)
+	store := NewMemoryStateStore()
+	for _, job := range config.Jobs {
+		// A ledger with a recent slot: nothing to catch up, nothing to fire
+		// for a year, so only a reload can move this scheduler.
+		store.States[job.Name] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
+	}
+	logs := &syncBuffer{}
+	logger := log.New(logs, "", 0)
+	watcher := NewConfigWatcher(path, config, ConfigWatcherOptions{
+		PollInterval: 20 * time.Millisecond,
+		Settle:       20 * time.Millisecond,
+		Logger:       logger,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runScheduler(ctx, config, watcher.Run(ctx), &MemoryPublisher{}, store, logger)
+	}()
+	return &runningScheduler{path: path, store: store, logs: logs, cancel: cancel, done: done}
+}
+
+func (s *runningScheduler) stop(t *testing.T) {
+	t.Helper()
+	s.cancel()
+	select {
+	case err := <-s.done:
+		if err != nil {
+			t.Fatalf("runScheduler = %v, want a clean stop", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("runScheduler did not stop on cancellation; log was:\n%s", s.logs.String())
+	}
+}
+
+func stateKeys(store *MemoryStateStore) string {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	names := make([]string, 0, len(store.States))
+	for name := range store.States {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+func waitForStateKeys(t *testing.T, store *MemoryStateStore, want string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		got := stateKeys(store)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state keys = %q after %s, want %q", got, within, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func jobNames(config *Config) string {
+	names := make([]string, 0, len(config.Jobs))
+	for _, job := range config.Jobs {
+		names = append(names, job.Name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
 func configText(name, schedule string) string {
 	return "[[job]]\nname = \"" + name + "\"\nschedule = \"" + schedule + "\"\nsubject = \"fq.trigger.test\"\n"
 }
@@ -80,6 +274,15 @@ func configText(name, schedule string) string {
 func mustParse(t *testing.T, text string) *Config {
 	t.Helper()
 	c, err := ParseConfig([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func mustLoad(t *testing.T, path string) *Config {
+	t.Helper()
+	c, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,21 +305,4 @@ func waitReload(t *testing.T, events <-chan ReloadEvent) ReloadEvent {
 		t.Fatal("timed out waiting for reload")
 		return ReloadEvent{}
 	}
-}
-
-func waitLog(t *testing.T, logs *bytes.Buffer, want string) {
-	t.Helper()
-	waitLogCount(t, logs, want, 1)
-}
-
-func waitLogCount(t *testing.T, logs *bytes.Buffer, want string, count int) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Count(logs.String(), want) >= count {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("logs did not contain %q %d times: %s", want, count, logs.String())
 }
