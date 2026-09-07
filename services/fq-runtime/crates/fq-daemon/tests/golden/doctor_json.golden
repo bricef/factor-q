@@ -94,5 +94,6 @@
       }
     }
   ],
-  "mcp_servers": []
+  "mcp_servers": [],
+  "throttled_models": []
 }
