@@ -52,9 +52,6 @@
         {
           "parts": [
             {
-              "thoughtSignature": "sig-b"
-            },
-            {
               "text": "Reading it now."
             },
             {
@@ -64,7 +61,7 @@
                 },
                 "name": "read_file"
               },
-              "thoughtSignature": "skip_thought_signature_validator"
+              "thoughtSignature": "sig-b"
             }
           ],
           "role": "model"
@@ -117,6 +114,10 @@
     {
       "parts": [
         {
+          "kind": "text",
+          "text": "Reading it now."
+        },
+        {
           "content": {
             "kind": "opaque",
             "token": {
@@ -126,10 +127,6 @@
           },
           "kind": "reasoning",
           "model": "gemini-3-pro"
-        },
-        {
-          "kind": "text",
-          "text": "Reading it now."
         },
         {
           "kind": "tool_call",
