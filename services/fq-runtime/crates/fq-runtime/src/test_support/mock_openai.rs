@@ -53,6 +53,11 @@ pub struct MockChoice {
     /// OpenRouter serves the same models under a `reasoning` key.
     reasoning_key: Option<&'static str>,
     tool_calls: Vec<(String, String, Value)>,
+    /// OpenRouter's `reasoning_details` entries, verbatim — a provider's
+    /// own reasoning blocks (a signed `reasoning.text`, a
+    /// `reasoning.encrypted`, a `reasoning.summary`) beside the plaintext
+    /// `reasoning`. What #603 is about.
+    reasoning_details: Vec<Value>,
     /// `(prompt, completion, reasoning)` token counts; `reasoning` goes
     /// out as `completion_tokens_details.reasoning_tokens` when set.
     usage: Option<(u64, u64, Option<u64>)>,
@@ -88,6 +93,13 @@ impl MockChoice {
         self
     }
 
+    /// Attach OpenRouter `reasoning_details` entries, as the gateway
+    /// returns them for a model whose reasoning is signed or encrypted.
+    pub fn with_reasoning_details(mut self, details: Vec<Value>) -> Self {
+        self.reasoning_details = details;
+        self
+    }
+
     /// Report token usage, optionally with the reasoning split the
     /// OpenAI-compatible wire carries in `completion_tokens_details`.
     pub fn with_usage(mut self, prompt: u64, completion: u64, reasoning: Option<u64>) -> Self {
@@ -112,6 +124,9 @@ impl MockChoice {
         if let Some(reasoning) = &self.reasoning {
             let key = self.reasoning_key.unwrap_or("reasoning_content");
             message[key] = json!(reasoning);
+        }
+        if !self.reasoning_details.is_empty() {
+            message["reasoning_details"] = Value::Array(self.reasoning_details.clone());
         }
         if !self.tool_calls.is_empty() {
             message["tool_calls"] = Value::Array(

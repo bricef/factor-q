@@ -158,6 +158,7 @@ fn anthropic_turn(
         output_tokens,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        thinking_tokens: None,
     }
 }
 
@@ -555,6 +556,71 @@ async fn anthropic_parallel_tool_calls_signed() {
     pin("anthropic_parallel_tool_calls_signed", turns, requests);
 }
 
+/// Anthropic reports the thinking share of `output_tokens` as
+/// `usage.output_tokens_details.thinking_tokens` when adaptive thinking
+/// engaged. genai carries it since 0.7.0-beta.23 (upstream #303), so the
+/// split reaches `reasoning_tokens` as a reported figure. A turn where
+/// thinking did not engage reports nothing: upstream #305 maps a zero to
+/// `None` like every other usage counter, so here it is unreported —
+/// `n/a` in `fq costs`, never `0` — and the two cannot be told apart at
+/// this boundary for Anthropic alone.
+#[tokio::test]
+async fn anthropic_thinking_share_reaches_reasoning_tokens() {
+    const MODEL: &str = "claude-opus-5";
+
+    let mock = anthropic_mock().await;
+    mock.push_response(
+        anthropic_turn(
+            vec![
+                thinking("Work out the prime before touching a tool.", "sig-1"),
+                tool_use("toolu_01", "/runbook"),
+            ],
+            "tool_use",
+            485,
+            189,
+        )
+        .with_thinking_tokens(182),
+    );
+    mock.push_response(MockResponse::text("41, digit sum 5.", 700, 20));
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+
+    let mut messages = vec![Message::user(
+        "Work out the smallest prime above 40, then read /runbook.",
+    )];
+    let first = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    assert_eq!(
+        first.usage.reasoning_tokens,
+        Some(182),
+        "the thinking share is a reported split"
+    );
+    assert_eq!(
+        first.usage.output_tokens, 189,
+        "and output_tokens still includes it — a decomposition, not an addition"
+    );
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    assert_eq!(
+        second.usage.reasoning_tokens, None,
+        "no thinking engaged: unreported, never a zero"
+    );
+    mock.shutdown().await;
+}
+
 // endregion: anthropic
 
 // region: openai-compatible
@@ -652,6 +718,185 @@ async fn openai_openrouter_reasoning_key() {
     let requests = mock.requests();
     mock.shutdown().await;
     pin("openai_openrouter_reasoning_key", turns, requests);
+}
+
+/// Claude through OpenRouter — the route #603 is about. OpenRouter
+/// returns Anthropic's signed thinking as a `reasoning_details` entry
+/// beside the plaintext `reasoning`; since genai 0.7.0-beta.23 (upstream
+/// #301) the entry reaches this adapter as a `Custom` part and goes back
+/// verbatim as `reasoning_details`. Recorded `signed` with the whole
+/// entry as the token — the gateway wants the array back as it came,
+/// `format`, `id` and `index` included — and the plaintext, which
+/// repeats the entry's text, is not recorded twice.
+#[tokio::test]
+async fn openai_openrouter_signed_reasoning_details() {
+    const MODEL: &str = "anthropic/claude-sonnet-4-6";
+    let signed = json!({
+        "type": "reasoning.text",
+        "text": "The runbook is the cheapest place to start.",
+        "signature": "sig-openrouter-1",
+        "format": "anthropic-claude-v1",
+        "index": 0
+    });
+    let closing = json!({
+        "type": "reasoning.text",
+        "text": "Restart is the documented fix.",
+        "signature": "sig-openrouter-2",
+        "format": "anthropic-claude-v1",
+        "index": 0
+    });
+
+    let mock = MockOpenAiServer::start().await;
+    mock.push(
+        MockChoice::silent()
+            .with_openrouter_reasoning("The runbook is the cheapest place to start.")
+            .with_reasoning_details(vec![signed.clone()])
+            .with_tool_call("call_1", "read_file", json!({"path": "/runbook"}))
+            .with_usage(1047, 74, Some(40)),
+    );
+    mock.push(
+        MockChoice::text("Restart the deploy service.")
+            .with_openrouter_reasoning("Restart is the documented fix.")
+            .with_reasoning_details(vec![closing])
+            .with_usage(1262, 26, Some(12)),
+    );
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![
+        Message::system("You are a careful assistant."),
+        Message::user("Investigate the failing deploy."),
+    ];
+    let mut turns = Vec::new();
+
+    let first = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    turns.push(decoded(&first));
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    // The point of #603, said before the pin so a failure names it.
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .expect("request 2 carries the conversation")
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the assistant turn is replayed")
+        .clone();
+    assert_eq!(
+        replayed["reasoning_details"],
+        json!([signed]),
+        "the signed entry goes back verbatim, in sequence — the continuity token survives"
+    );
+    pin(
+        "openai_openrouter_signed_reasoning_details",
+        turns,
+        requests,
+    );
+}
+
+/// An OpenAI reasoning model through OpenRouter: a `reasoning.summary`
+/// beside a `reasoning.encrypted` entry, with the plaintext `reasoning`
+/// repeating the summary. The summary is recorded `signed` — readable,
+/// and it must ride back in sequence — the encrypted entry `opaque`,
+/// and the plaintext is not recorded a third time. Both go back
+/// verbatim, in order, and nothing goes back as `reasoning_content`.
+#[tokio::test]
+async fn openai_openrouter_encrypted_reasoning_details() {
+    const MODEL: &str = "openai/gpt-5.2";
+    let summary = json!({
+        "type": "reasoning.summary",
+        "summary": "Check the runbook before acting.",
+        "format": "openai-responses-v1",
+        "index": 0
+    });
+    let encrypted = json!({
+        "type": "reasoning.encrypted",
+        "data": "gAAAAABo-opaque-encrypted-reasoning",
+        "format": "openai-responses-v1",
+        "id": "rs_0123",
+        "index": 1
+    });
+
+    let mock = MockOpenAiServer::start().await;
+    mock.push(
+        MockChoice::silent()
+            .with_openrouter_reasoning("Check the runbook before acting.")
+            .with_reasoning_details(vec![summary.clone(), encrypted.clone()])
+            .with_tool_call("call_1", "read_file", json!({"path": "/runbook"}))
+            .with_usage(1047, 220, Some(180)),
+    );
+    mock.push(MockChoice::text("Restart the deploy service.").with_usage(1330, 26, Some(0)));
+    let client = mock.client(MODEL);
+
+    let mut messages = vec![
+        Message::system("You are a careful assistant."),
+        Message::user("Investigate the failing deploy."),
+    ];
+    let mut turns = Vec::new();
+
+    let first = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    turns.push(decoded(&first));
+    continue_with_tool_result(&mut messages, &first, "runbook says: restart");
+
+    let second = send(
+        &client,
+        MODEL,
+        &messages,
+        read_file_tool(),
+        Some(Effort::High),
+    )
+    .await;
+    turns.push(decoded(&second));
+
+    let requests = mock.requests();
+    mock.shutdown().await;
+
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .expect("request 2 carries the conversation")
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the assistant turn is replayed")
+        .clone();
+    assert_eq!(
+        replayed["reasoning_details"],
+        json!([summary, encrypted]),
+        "both entries go back verbatim, in order"
+    );
+    assert!(
+        replayed.get("reasoning_content").is_none(),
+        "the summary rides in the entry, not as a second plaintext copy: {replayed}"
+    );
+    pin(
+        "openai_openrouter_encrypted_reasoning_details",
+        turns,
+        requests,
+    );
 }
 
 /// Two calls in one turn, answered by one tool-results turn. This wire

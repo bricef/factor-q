@@ -58,6 +58,10 @@ pub struct MockResponse {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_write_tokens: u32,
+    /// `usage.output_tokens_details.thinking_tokens`, the share of
+    /// `output_tokens` spent thinking — reported when adaptive thinking
+    /// engaged; absent otherwise.
+    pub thinking_tokens: Option<u32>,
 }
 
 /// Either a text block or a tool_use block in the response.
@@ -94,6 +98,7 @@ impl MockResponse {
             output_tokens,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            thinking_tokens: None,
         }
     }
 
@@ -127,6 +132,13 @@ impl MockResponse {
         self
     }
 
+    /// Report the thinking share of `output_tokens`, as Anthropic does
+    /// when adaptive thinking engaged.
+    pub fn with_thinking_tokens(mut self, thinking_tokens: u32) -> Self {
+        self.thinking_tokens = Some(thinking_tokens);
+        self
+    }
+
     /// Build a tool-use response carrying one `tool_use` block. Stop
     /// reason is `"tool_use"` per Anthropic's contract. Chain
     /// [`with_tool_use`](Self::with_tool_use) for a turn that requests
@@ -149,6 +161,7 @@ impl MockResponse {
             output_tokens,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            thinking_tokens: None,
         }
     }
 
@@ -203,7 +216,7 @@ impl MockResponse {
                 }),
             })
             .collect();
-        json!({
+        let mut body = json!({
             "id": "msg_mock",
             "type": "message",
             "role": "assistant",
@@ -217,7 +230,11 @@ impl MockResponse {
                 "cache_read_input_tokens": self.cache_read_tokens,
                 "cache_creation_input_tokens": self.cache_write_tokens,
             },
-        })
+        });
+        if let Some(thinking_tokens) = self.thinking_tokens {
+            body["usage"]["output_tokens_details"] = json!({ "thinking_tokens": thinking_tokens });
+        }
+        body
     }
 }
 
