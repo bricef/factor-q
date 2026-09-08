@@ -62,7 +62,7 @@ async-trait = { workspace = true }
 # block whole (see `llm/genai.rs`); the wire goldens under
 # `tests/snapshots/reasoning_wire/` pin that nothing the provider or the
 # reducer sees changed across the switch.
-genai = "=0.7.0-beta.21"
+genai = "=0.7.0-beta.23"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 strum = { workspace = true }
