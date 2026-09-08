@@ -42,7 +42,11 @@ came back with an empty text, which is what the 2026-09-04 run recorded and
 this ADR called the provider's data; it was a missing request field. With it
 the live matrix of 2026-09-06 recorded a readable summary beside the
 signature, carried and accepted; the matrix now judges its own event log and
-runs nightly.
+runs nightly. genai 0.7.0-beta.23 (2026-09-08) carries the three changes
+factor-q sent upstream (jeremychone/rust-genai #301, #302, #303): OpenRouter's
+signed and encrypted `reasoning_details` now round-trip, closing #603; a
+Gemini signature rides back on the part it arrived on; and Anthropic's
+thinking share reaches `reasoning_tokens`.
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends

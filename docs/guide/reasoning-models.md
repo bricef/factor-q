@@ -28,7 +28,7 @@ is a continuity token with no readable text (see
 | Kimi, DeepSeek and other `reasoning_content` models | native OpenAI-compatible endpoint | `reasoning_content` text | `plain` | yes — as `reasoning_content`, which is those APIs' own field | wire goldens |
 | The same models through OpenRouter | `[providers.openrouter]`, `api_shape = "openai-compatible"` | `reasoning` text, plus an unsigned `reasoning_details` entry | `plain` | yes — as `reasoning_content`, which OpenRouter documents as the mechanism for raw-string reasoning | live 2026-09-04 and 2026-09-05 (kimi-k3) |
 | Gemini, thinking | native, `api_shape = "gemini"` | a `thoughtSignature` on the function-call part; a thought summary, which the request asks for (`includeThoughts`) | `opaque` (a `thought_signature` token); `plain` for the summary | yes — the token goes back as a signature part that genai attaches to the call it came with, and Gemini accepts it | live 2026-09-07 (`gemini-3.8-flash` via AI Studio, two runs: every signature and summary carried, three tool turns in a row accepted); Gemini mock and wire goldens (#600) |
-| Claude, Gemini or OpenAI encrypted reasoning through OpenRouter | `[providers.openrouter]` | `reasoning` text plus a signed or encrypted `reasoning_details` entry | `plain` — the signed or encrypted entry is **dropped** | **no**. The text goes back as `reasoning_content`, which OpenRouter cannot turn back into a signed block. The provider accepts the turn and continues without its prior reasoning; nothing errors | live probe 2026-09-05; open as [#603](https://github.com/bricef/factor-q/issues/603) |
+| Claude, Gemini or OpenAI encrypted reasoning through OpenRouter | `[providers.openrouter]` | `reasoning` text plus signed, encrypted or summary `reasoning_details` entries | `signed`, with the whole entry as the token (`format`, `id` and `index` included); `opaque` for an encrypted entry; an unsigned entry stays `plain` | yes — the entries go back verbatim and in sequence as `reasoning_details` (genai ≥ 0.7.0-beta.23, upstream #301); an unsigned entry goes back as `reasoning_content`, the gateway's own mechanism for raw-string reasoning | wire goldens (#603); live 2026-09-08 (`anthropic/claude-sonnet-4-6` through OpenRouter, a harness arm) |
 | OpenAI o-series and gpt-5 on chat completions | native | no reasoning text; only `reasoning_tokens` in usage | nothing but the token count | nothing to carry | not verified live |
 
 Two things are true of every row:
@@ -68,9 +68,12 @@ collapsed disclosure, with "opaque — click to see raw" for a token.
 - The WAL and the invocation archive carry the same parts, so reasoning
   survives a crash and resume.
 - Cost metadata on each response carries `reasoning_tokens` when the
-  provider reports a split, and omits it when the provider does not
-  (Anthropic never does): an unreported split is not a `0`, and the two
-  stay apart all the way down. `fq costs` has a `reasoning` column on
+  provider reports a split, and omits it when the provider does not:
+  an unreported split is not a `0`, and the two stay apart all the way
+  down. Anthropic reports one since genai 0.7.0-beta.23 (upstream #303)
+  whenever thinking engaged; a turn with no thinking reads as unreported,
+  since the library maps a zero to none for every usage counter
+  (upstream #305). `fq costs` has a `reasoning` column on
   both its tables, by agent and by model — `n/a` where no call reported
   a split, `0` where a provider reported zero — `fq costs --json` and
   `fq invocation show --json` carry `total_reasoning_tokens` as `null`
@@ -91,19 +94,14 @@ The Claude 5 family thinks adaptively by default when no effort is set.
 
 ## Known gaps
 
-- **#603** — signed and encrypted reasoning through OpenRouter, above. The
-  fix needs genai's OpenAI adapter to carry `reasoning_details`; the data
-  model here is ready for it.
-- **Gemini turns with visible text before a signed call.** genai's Gemini
-  adapter hoists every signature ahead of the text on the way in and
-  attaches it to the next part it meets on the way out, so such a turn's
-  signature can land on the text. The live runs never produced that shape
-  (Gemini 3 returned a thought summary, not visible text, before each
-  call), so it stays unverified. The adapter here already records and
-  replays parts in arrival order, so the signature-adjacency fix proposed
-  upstream needs nothing on this side; the wire golden
-  `gemini_text_and_signed_call` pins today's approximation and moves when
-  that fix lands.
+- **Gemini turns with visible text before a signed call, live.** Fixed
+  upstream (#302, in genai 0.7.0-beta.23): the signature now rides back
+  on the part it arrived on, and the wire golden
+  `gemini_text_and_signed_call` pins that. No live run has produced the
+  shape yet — Gemini 3 returned a thought summary, not visible text,
+  before each call — so it stays hermetically verified.
+- **Streaming.** factor-q does not stream, and none of the upstream
+  changes touch the streaming paths.
 
 ## Verifying a provider yourself
 
