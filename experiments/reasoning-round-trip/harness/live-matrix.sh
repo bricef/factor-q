@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Live reasoning round-trip matrix (#437 verification).
 #
-# Three agents, three models, one task each — four with a Google AI Studio
-# key, which switches the Gemini arm on (2026-09-07). By default the sequential
+# Four agents, four models, one task each — five with a Google AI Studio
+# key, which switches the Gemini arm on (2026-09-07). The fourth arm is Claude
+# through OpenRouter (2026-09-08), the route whose signed reasoning #603 was
+# about. By default the sequential
 # two-tool task of the 2026-09-04 run with a mental step in front of it
 # (2026-09-07; without it neither reasoning model reasons on the turns
 # that get replayed — see the README), or whatever `TASK=...` names (a
@@ -113,7 +115,12 @@ EOF
 write_agent kimi-k3-reasoner   "moonshotai/kimi-k3"  1.00 "effort: medium"
 write_agent opus-5-thinker     "claude-opus-5"       2.00 "effort: high"
 write_agent gpt4o-mini-control "openai/gpt-4o-mini"  0.20 ""
-ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control)
+# Claude through OpenRouter: the route #603 is about. OpenRouter returns
+# Anthropic's signed thinking as `reasoning_details` entries, which genai
+# carries since 0.7.0-beta.23 (upstream #301); this arm proves the signed
+# block survives a tool turn on that route, which no native arm can.
+write_agent claude-openrouter-thinker "anthropic/claude-sonnet-4-6" 0.50 "effort: high"
+ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control claude-openrouter-thinker)
 # Gemini 3 thinks by default and signs every function call, so the arm
 # sets no effort; the readable summary rides on the adapter's capture flag.
 if [[ -n "$GEMINI_ARM" ]]; then
@@ -123,7 +130,7 @@ fi
 # What each arm must show for the run to pass (verify-carry.py): a
 # reasoning arm carries at least one reasoning part into its next turn,
 # the control records none.
-declare -A EXPECT=([kimi-k3-reasoner]=reasoning [opus-5-thinker]=reasoning [gpt4o-mini-control]=none [gemini-3-thinker]=reasoning)
+declare -A EXPECT=([kimi-k3-reasoner]=reasoning [opus-5-thinker]=reasoning [gpt4o-mini-control]=none [gemini-3-thinker]=reasoning [claude-openrouter-thinker]=reasoning)
 
 write_config() { # edge bind address
   cat > "$FQ_DAEMON_CONFIG" <<EOF
@@ -141,7 +148,7 @@ bind = "$1"
 api_shape = "openai-compatible"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
-models = ["moonshotai/kimi-k3", "openai/gpt-4o-mini"]
+models = ["moonshotai/kimi-k3", "openai/gpt-4o-mini", "anthropic/claude-sonnet-4-6"]
 
 [providers.openrouter.pricing."moonshotai/kimi-k3"]
 input_per_mtok = 3.0
@@ -152,6 +159,11 @@ cache_read_per_mtok = 0.3
 input_per_mtok = 0.15
 output_per_mtok = 0.60
 cache_read_per_mtok = 0.075
+
+[providers.openrouter.pricing."anthropic/claude-sonnet-4-6"]
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+cache_read_per_mtok = 0.3
 
 [providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
