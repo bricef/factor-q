@@ -92,7 +92,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 
 	t.Run("a write inside the window lands on the first check", func(t *testing.T) {
 		w, _ := startupWindow(t, configText("first", "0 * * * *")+configText("second", "0 * * * *"))
-		event, ok := w.Check()
+		_, event, ok := w.Check(context.Background())
 		if !ok {
 			t.Fatal("the first check missed a config written while fq-cron was starting")
 		}
@@ -106,7 +106,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 
 	t.Run("an untouched file is not a reload", func(t *testing.T) {
 		w, logs := startupWindow(t, configText("first", "0 * * * *"))
-		if event, ok := w.Check(); ok {
+		if _, event, ok := w.Check(context.Background()); ok {
 			t.Fatalf("a file nobody touched was reloaded: %+v", event.Diff)
 		}
 		if strings.Contains(logs.String(), "config reload") {
@@ -119,7 +119,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 	// (#623), and the configuration loaded at startup keeps running.
 	t.Run("a torn write inside the window is refused, not applied", func(t *testing.T) {
 		w, logs := startupWindow(t, "")
-		if event, ok := w.Check(); ok {
+		if _, event, ok := w.Check(context.Background()); ok {
 			t.Fatalf("a torn write was accepted: %+v", event.Diff)
 		}
 		if names := jobNames(w.current); names != "first" {
@@ -154,7 +154,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 			Logger: log.New(&syncBuffer{}, "", 0),
 		})
 
-		event, ok := w.Check()
+		_, event, ok := w.Check(context.Background())
 		if !ok || len(event.Diff.Added) != 1 || event.Diff.Added[0] != "first" {
 			t.Fatalf("the completed write = %+v (accepted=%v), want first added; "+
 				"a watcher that seeded itself would have swallowed it and scheduled nothing indefinitely", event.Diff, ok)
@@ -178,7 +178,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 			Logger: log.New(&syncBuffer{}, "", 0),
 		})
 
-		event, ok := w.Check()
+		_, event, ok := w.Check(context.Background())
 		if !ok {
 			t.Fatal("an unseeded watcher must treat its first read as a change")
 		}
@@ -186,7 +186,7 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 			t.Fatalf("first-check diff = %+v, want an empty one: the file matches the config, it had simply never been seen", event.Diff)
 		}
 		// And it is seeded now, so the same file is not a reload twice.
-		if event, ok := w.Check(); ok {
+		if _, event, ok := w.Check(context.Background()); ok {
 			t.Fatalf("the second check reloaded an untouched file: %+v", event.Diff)
 		}
 	})
@@ -214,7 +214,7 @@ func TestReloadRefusesAConfigThatDeclaresNoJobs(t *testing.T) {
 			})
 
 			writeConfig(t, path, text)
-			if event, ok := w.Check(); ok {
+			if _, event, ok := w.Check(context.Background()); ok {
 				t.Fatalf("a config declaring no jobs was accepted: %+v", event.Diff)
 			}
 			if names := jobNames(w.current); names != "first" {
@@ -226,7 +226,7 @@ func TestReloadRefusesAConfigThatDeclaresNoJobs(t *testing.T) {
 
 			// And the watcher keeps watching: the completed write lands.
 			writeConfig(t, path, configText("first", "0 * * * *")+configText("second", "0 * * * *"))
-			event, ok := w.Check()
+			_, event, ok := w.Check(context.Background())
 			if !ok || len(event.Diff.Added) != 1 || event.Diff.Added[0] != "second" || len(event.Diff.Removed) != 0 {
 				t.Fatalf("the write after the refusal = %+v (accepted=%v)", event.Diff, ok)
 			}
@@ -350,6 +350,77 @@ func TestAStalledWriteKeepsTheDroppedJobsLedger(t *testing.T) {
 	}
 }
 
+// The deadline can fire while the watcher is mid-settle on the very write that
+// brings the job back. The watcher then accepts it, moves its own notion of
+// the config on, and blocks handing the event to the loop — which is busy in
+// its deadline recheck. That recheck sees a file identical to what the watcher
+// last saw and reports "unchanged", and a loop that judged absence by its own
+// copy of the config, one reload behind, would delete the ledger a moment
+// before taking the very event that re-adds the job. Absence is judged against
+// the watcher's config instead, so the ledger survives (#635, found in the
+// review of #641).
+//
+// The timings put the deadline inside the watcher's settle: poll 20 ms, settle
+// 400 ms, window 1 s, and the complete write 850 ms after the job was parked.
+func TestADeadlineInsideTheWatchersSettleDoesNotDeleteAReturningJob(t *testing.T) {
+	alpha := configText("alpha", "0 4 1 1 *")
+	beta := configText("beta", "0 4 1 1 *")
+	marker := time.Now().Add(-42 * time.Minute)
+	s := startSchedulerTimed(t, alpha+beta, time.Second, 400*time.Millisecond, func(store *countingStore, _ *Config) {
+		store.States["alpha"] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
+		store.States["beta"] = FireState{LastScheduled: time.Now(), PublishedAt: marker}
+	})
+	defer s.stop(t)
+
+	// The stalled write parks beta.
+	writeConfig(t, s.path, alpha)
+	waitForLog(t, s.logs, "job=beta removed from the configuration", 3*time.Second)
+	parked := time.Now()
+
+	// The writer finishes 150 ms before the deadline: the watcher picks it up
+	// within a poll and is still in its 400 ms settle when the deadline fires.
+	time.Sleep(850*time.Millisecond - time.Since(parked))
+	writeConfig(t, s.path, alpha+beta)
+
+	switch outcome := waitForEitherLog(t, s.logs, 5*time.Second, "job=beta removal cancelled", "job=beta removal confirmed"); outcome {
+	case "job=beta removal cancelled":
+	default:
+		t.Fatalf("the deadline deleted a job the watcher had already taken back (%q); log was:\n%s", outcome, s.logs.String())
+	}
+	waitForLog(t, s.logs, "config reload accepted: added=[beta]", 5*time.Second)
+	if got := s.store.deletions(); len(got) != 0 {
+		t.Fatalf("Delete was called for %v; log was:\n%s", got, s.logs.String())
+	}
+	after, ok, err := s.store.Get(context.Background(), "beta")
+	if err != nil || !ok {
+		t.Fatalf("beta's state after it came back: ok=%v err=%v", ok, err)
+	}
+	if !after.PublishedAt.Equal(marker) {
+		t.Fatalf("beta's ledger = %+v, want the one it left with (PublishedAt %s)", after, marker)
+	}
+}
+
+// waitForEitherLog returns the first of the needles to appear in the log, or
+// fails the test when none does within the deadline. For a test whose failure
+// mode is a *different* log line — a deletion where a cancellation was due —
+// it fails fast and says which one it saw.
+func waitForEitherLog(t *testing.T, logs *syncBuffer, within time.Duration, needles ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		text := logs.String()
+		for _, needle := range needles {
+			if strings.Contains(text, needle) {
+				return needle
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("none of %q appeared within %s; log was:\n%s", needles, within, text)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // A multi-step save is one reload of the finished file, not one per step —
 // on the poll path as much as on the fsnotify one.
 func TestWritesInsideTheSettleWindowProduceOneReload(t *testing.T) {
@@ -422,6 +493,14 @@ func startScheduler(t *testing.T, text string, removalConfirm time.Duration) *ru
 // write that ledger before the loop's first read.
 func startSchedulerSeeded(t *testing.T, text string, removalConfirm time.Duration, seed func(*countingStore, *Config)) *runningScheduler {
 	t.Helper()
+	return startSchedulerTimed(t, text, removalConfirm, 20*time.Millisecond, seed)
+}
+
+// startSchedulerTimed is startSchedulerSeeded with the settle chosen too — for
+// a test whose point is where the removal deadline lands relative to the
+// watcher's own settle.
+func startSchedulerTimed(t *testing.T, text string, removalConfirm, settle time.Duration, seed func(*countingStore, *Config)) *runningScheduler {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "fq-cron.toml")
 	writeConfig(t, path, text)
 	running := mustLoad(t, path)
@@ -432,7 +511,7 @@ func startSchedulerSeeded(t *testing.T, text string, removalConfirm time.Duratio
 	logger := log.New(logs, "", 0)
 	watcher := NewConfigWatcher(path, running, ConfigWatcherOptions{
 		PollInterval: 20 * time.Millisecond,
-		Settle:       20 * time.Millisecond,
+		Settle:       settle,
 		Logger:       logger,
 	})
 	ctx, cancel := context.WithCancel(context.Background())

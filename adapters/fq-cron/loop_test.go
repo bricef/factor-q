@@ -326,16 +326,17 @@ func TestTheDeadlineRechecksTheFileBeforeDeleting(t *testing.T) {
 	reloads := make(chan ReloadEvent)
 	// The recheck answers once, with the complete file the watcher has not
 	// delivered yet — exactly what ConfigWatcher.Check returns for a config it
-	// has just accepted.
+	// has just accepted; afterwards, as the watcher would, it reports that
+	// config as current and nothing new.
 	var once sync.Once
-	recheck := func() (ReloadEvent, bool) {
+	recheck := func(context.Context) (*Config, ReloadEvent, bool) {
 		event := ReloadEvent{}
 		answered := false
 		once.Do(func() {
 			event = ReloadEvent{Config: both, Diff: diffConfigs(alphaOnly, both)}
 			answered = true
 		})
-		return event, answered
+		return both, event, answered
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -356,6 +357,68 @@ func TestTheDeadlineRechecksTheFileBeforeDeleting(t *testing.T) {
 	waitForLog(t, logs, "job=beta removal cancelled", 5*time.Second)
 	if got := store.deletions(); len(got) != 0 {
 		t.Fatalf("Delete was called for %v; the recheck found beta in the file", got)
+	}
+}
+
+// The seam of TestADeadlineInsideTheWatchersSettleDoesNotDeleteAReturningJob
+// (watch_test.go), modelled directly. At the deadline the recheck reports
+// nothing new — the watcher has already accepted the config that brings beta
+// back and is blocked delivering it on the unbuffered reload channel — but it
+// hands over the watcher's current config, which has beta in it. Judged
+// against the loop's own copy, beta is absent and would be deleted a moment
+// before the event that re-adds it is taken (#635).
+func TestTheDeadlineJudgesAbsenceAgainstTheWatchersConfigNotTheLoopsCopy(t *testing.T) {
+	both := mustParse(t, configText("alpha", "0 4 1 1 *")+configText("beta", "0 4 1 1 *"))
+	alphaOnly := mustParse(t, configText("alpha", "0 4 1 1 *"))
+	store := &countingStore{MemoryStateStore: NewMemoryStateStore()}
+	for _, name := range []string{"alpha", "beta"} {
+		store.States[name] = FireState{LastScheduled: time.Now(), PublishedAt: time.Now()}
+	}
+	logs := &syncBuffer{}
+	reloads := make(chan ReloadEvent)
+	delivered := make(chan struct{})
+	var once sync.Once
+	recheck := func(context.Context) (*Config, ReloadEvent, bool) {
+		once.Do(func() {
+			// The watcher's poll has accepted the complete file and is now
+			// parked in its send; give it long enough to be genuinely blocked.
+			go func() {
+				reloads <- ReloadEvent{Config: both, Diff: diffConfigs(alphaOnly, both)}
+				close(delivered)
+			}()
+			time.Sleep(100 * time.Millisecond)
+		})
+		return both, ReloadEvent{}, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runScheduler(ctx, alphaOnly, reloads, &MemoryPublisher{}, store,
+			removalPolicy{Confirm: 300 * time.Millisecond, Recheck: recheck}, log.New(logs, "", 0))
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case reloads <- ReloadEvent{Config: alphaOnly, Diff: diffConfigs(both, alphaOnly)}:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the scheduler never took the reload; log was:\n%s", logs.String())
+	}
+	if outcome := waitForEitherLog(t, logs, 5*time.Second, "job=beta removal cancelled", "job=beta removal confirmed"); outcome != "job=beta removal cancelled" {
+		t.Fatalf("the deadline decided on the loop's stale copy (%q); log was:\n%s", outcome, logs.String())
+	}
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the loop never took the event that re-added beta; log was:\n%s", logs.String())
+	}
+	if got := store.deletions(); len(got) != 0 {
+		t.Fatalf("Delete was called for %v with beta back in the watcher's config", got)
+	}
+	if keys := stateKeys(store); keys != "alpha,beta" {
+		t.Fatalf("state keys = %q, want both ledgers kept", keys)
 	}
 }
 

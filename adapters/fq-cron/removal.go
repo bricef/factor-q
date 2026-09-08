@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"sort"
 	"time"
@@ -39,13 +40,18 @@ type removalPolicy struct {
 	// with; a job still absent at the deadline loses it.
 	Confirm time.Duration
 	// Recheck, when set, is one fresh look at the configuration file taken at
-	// the deadline, so a completed write that has not yet produced a reload
-	// event is seen before anything is deleted. An accepted event it returns
-	// is applied exactly as one arriving on the reload channel is — which it
-	// must be, because the watcher offers each accepted config once, to
-	// whichever caller sees it first. ConfigWatcher.Check is the production
-	// implementation; nil means "trust the configuration already in force".
-	Recheck func() (ReloadEvent, bool)
+	// the deadline. It returns the configuration the watcher holds as current
+	// — on every call — and an accepted reload event when that look produced
+	// one. The event is applied exactly as one arriving on the reload channel
+	// is, which it must be, because the watcher offers each accepted config
+	// once, to whichever caller sees it first. The configuration is what
+	// absence is judged against: the loop's own copy can be one reload behind,
+	// with the event that brings a parked job back still waiting on the
+	// channel while the deadline fires, and the watcher's never is. A
+	// completed write that has produced no event yet is seen the same way.
+	// ConfigWatcher.Check is the production implementation; nil means "trust
+	// the configuration already in force".
+	Recheck func(ctx context.Context) (*Config, ReloadEvent, bool)
 }
 
 // pendingRemovals is the loop's set of parked deletions: for each job that has
