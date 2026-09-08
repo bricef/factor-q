@@ -43,20 +43,42 @@ func runScheduler(ctx context.Context, config *Config, reloads <-chan ReloadEven
 
 	// confirmRemovals runs when the earliest parked removal falls due. A
 	// deletion happens only if the job is still absent from the configuration
-	// in force — and only after one last look at the file, so a completed
-	// write that has not yet produced a reload event gets the last word rather
-	// than the read that dropped the job (#635).
+	// in force — judged against the *watcher's* configuration, not the loop's
+	// copy of it. The two differ at exactly the wrong moment: the watcher may
+	// have accepted a config that brings the job back and be blocked handing
+	// it over on the reload channel while the deadline fires, and its recheck
+	// then reports "unchanged" because, to the watcher, it is. So the recheck
+	// returns the watcher's current config whether or not it produced an
+	// event, and that is what decides; a completed write that has produced no
+	// event yet gets the last word the same way (#635).
 	confirmRemovals := func() error {
+		authoritative := config
 		if removal.Recheck != nil {
-			if event, ok := removal.Recheck(); ok {
+			current, event, ok := removal.Recheck(ctx)
+			switch {
+			case ok:
 				applyReload(event)
+				authoritative = config
+			case current != nil:
+				authoritative = current
+			}
+			// A recheck cut short by shutdown has looked at nothing; deciding
+			// on what it returned would carry out a deletion the shutdown
+			// path promises not to.
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 		}
-		jobs := jobsByName(config)
+		jobs := jobsByName(authoritative)
 		var confirmed []string
 		for _, name := range pending.due(time.Now()) {
 			if _, back := jobs[name]; back {
-				pending.forget(name) // restored in the meantime; retain logged it
+				// Back in the watcher's configuration. The reload that brought
+				// it back may still be on its way to the loop, so this is where
+				// the cancellation is said; retain finds nothing left to cancel
+				// when that event arrives.
+				pending.forget(name)
+				logger.Printf("job=%s removal cancelled: back in the configuration before its deadline, fire state kept", name)
 				continue
 			}
 			confirmed = append(confirmed, name)

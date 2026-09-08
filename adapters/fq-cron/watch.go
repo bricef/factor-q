@@ -235,11 +235,25 @@ func (w *ConfigWatcher) emitIfChanged(ctx context.Context, out chan<- ReloadEven
 	return outcome
 }
 
-// Check immediately examines the file. It returns an event only for a reload
-// the watcher accepts: see check.
-func (w *ConfigWatcher) Check() (ReloadEvent, bool) {
-	event, outcome := w.check(context.Background())
-	return event, outcome == checkAccepted
+// Check immediately examines the file. It returns the configuration the
+// watcher holds as current — the one in force from its point of view, whether
+// or not the reload that put it there has been taken off the channel yet — and
+// an event for a reload this look accepted, if it did: see check. ctx bounds
+// the settle, so a caller shutting down is not held for it.
+//
+// The configuration is returned on every path deliberately. A caller that only
+// acted on the event would, at exactly the wrong moment, decide on a copy one
+// reload behind: the watcher's own poll may have accepted a config and be
+// blocked handing it over while the caller asks, and to the watcher that file
+// is then "unchanged" (#635).
+func (w *ConfigWatcher) Check(ctx context.Context) (*Config, ReloadEvent, bool) {
+	event, outcome := w.check(ctx)
+	if outcome == checkAccepted {
+		return event.Config, event, true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.current, ReloadEvent{}, false
 }
 
 // check reads the file and decides. A reload is accepted only when the file

@@ -91,8 +91,15 @@ Additions and changes apply the instant a reload is accepted. So does a
 removal — a job that has left the file stops firing at once — but **deleting
 its fire state waits `--removal-confirm`** (default `1m`, two config poll
 intervals). At the deadline `fq-cron` reads the file once more and deletes only
-what is still absent; a job that came back inside the window keeps the ledger
-it left with, valve history and all.
+what is still absent from the configuration the watcher holds — the watcher's
+own view, not a copy that may trail it by one undelivered reload; a job that
+came back inside the window keeps the ledger it left with, valve history and
+all.
+
+The window is only useful when it comfortably exceeds `--reload-settle`: the
+deadline's own read holds still for a settle before it counts, so a window
+shorter than the settle buys nothing over the settle alone. Two poll intervals
+against a quarter-second settle is the intended proportion; raise both together.
 
 The settle above defends against a read that lands *inside* a writer's truncate
 gap: a second read catches the file still moving. What it cannot see is a

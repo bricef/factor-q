@@ -219,7 +219,9 @@ func run(args []string) error {
 	watcher := NewConfigWatcher(cli.ConfigPath, loaded, ConfigWatcherOptions{Settle: cli.ReloadSettle, Logger: log.Default()})
 	// Recheck is the watcher's own Check: at a parked removal's deadline the
 	// loop takes one last look at the file, so a write that completed since
-	// the reload that dropped the job is seen before its state is deleted.
+	// the reload that dropped the job is seen before its state is deleted —
+	// and judges the job's absence against the watcher's configuration, which
+	// the loop's own copy may trail by one undelivered reload.
 	removal := removalPolicy{Confirm: cli.RemovalConfirm, Recheck: watcher.Check}
 	return runScheduler(ctx, loaded.Config, watcher.Run(ctx), publisher, store, removal, log.Default())
 }
