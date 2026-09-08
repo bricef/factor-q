@@ -206,7 +206,7 @@ jobs:
         run: >-
           echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
           >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+      - uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: ${{ steps.versions.outputs.tools }}
       - run: just audit
