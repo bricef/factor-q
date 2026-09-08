@@ -333,6 +333,52 @@ carried two plain parts (272 readable characters), Opus 5 one signed block (213)
 control none. Nothing in the pipeline changed; the 2026-09-06 verdict on the old task
 stands as recorded.
 
+## genai 0.7.0-beta.23: signed reasoning through OpenRouter round-trips (2026-09-08)
+
+The three changes factor-q sent upstream to jeremychone/rust-genai landed within a day
+(#301 OpenRouter `reasoning_details`, #302 Gemini signature adjacency, #303 Anthropic
+thinking tokens) and shipped in 0.7.0-beta.23. The bump is one pull request with one pin
+move, and each change shows up in the goldens the way it should:
+
+- **#302** moved exactly one golden on the bump alone, `gemini_text_and_signed_call`: the
+  replayed model turn now carries the signature on the `functionCall` part, where it
+  arrived, instead of a bare part ahead of the text with a validator stand-in on the
+  call. The recorded turn keeps arrival order (text, signature, call), which #625 made
+  possible; nothing else moved.
+- **#303** needed no factor-q code: a mocked Anthropic response with
+  `output_tokens_details.thinking_tokens: 182` reaches `reasoning_tokens` as `Some(182)`,
+  with `output_tokens` unchanged. A turn with no thinking reads as unreported, because
+  the maintainer's follow-up (#305) maps a zero to none like every other usage counter.
+- **#301** is the one that closes #603. OpenRouter's entries reach the adapter as `Custom`
+  parts typed `reasoning.*`; the decoder records a signed `reasoning.text` as `signed`
+  with the whole entry as the token, a `reasoning.summary` as `signed`, an encrypted entry
+  as `opaque`, and an unsigned `reasoning.text` (Kimi, DeepSeek) as `plain`, exactly as
+  before. Two new goldens pin the round trip against the OpenAI mock: a Claude-shaped
+  signed entry and an OpenAI-shaped summary-plus-encrypted pair both go back verbatim,
+  in sequence, as `reasoning_details`. Before the decoder change those goldens failed
+  with `reasoning_details: Null` in the replay — #603's loss in one line.
+
+**The fifth arm.** `claude-openrouter-thinker` runs `anthropic/claude-sonnet-4-6` through
+`[providers.openrouter]`, the route #603 was about, with `effort: high` so the mental
+step makes it think. Its verdict expects reasoning: the signed entries must be carried.
+
+**Live run on the bump** (`~/factor-q-live-runs/2026-09-08-genai-beta23/`, five arms):
+
+| arm | turns | reasoning produced / carried | kinds | readable chars | outcome |
+|---|---|---|---|---|---|
+| kimi-k3-reasoner | 3 | 2 / 1 | plain | 106 | completed |
+| opus-5-thinker | 3 | 1 / 1 | signed | 281 | completed |
+| gpt4o-mini-control | 4 | 0 / 0 | — | 0 | completed |
+| claude-openrouter-thinker | 4 | 2 / 2 | signed | 1132 | completed, $0.0409 |
+| gemini-3-thinker | 0 | 0 / 0 | — | 0 | failed twice on the free tier's per-minute quota ("provider asked for a 59s wait"); unrelated to the bump |
+
+The Claude-through-OpenRouter arm is #603 closed live: two `reasoning.text` entries in
+`anthropic-claude-v1` format, signatures of 1192 and 1288 characters beside 436 and 696
+readable ones, each replayed verbatim as `reasoning_details` in the next request and
+accepted by the gateway — the shape that the 2026-09-05 probe showed being dropped. The
+Gemini arm's failure is the free tier's rate limit after a day of runs, not the round
+trip; the arm passed twice on 2026-09-07 and the goldens pin its wire.
+
 ## Traps this harness already hit
 
 Each of these produced a plausible-looking but meaningless result before being fixed.
