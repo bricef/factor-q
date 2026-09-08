@@ -40,7 +40,7 @@ mod wire_goldens;
 /// Reasoning parts on the wire: how a recorded part is encoded for the
 /// provider, and the bare-token wrapper for a continuity token.
 mod reasoning;
-use reasoning::{bare_signature, encode_reasoning};
+use reasoning::{bare_signature, encode_reasoning, reasoning_detail};
 
 /// The provider client could not be built.
 ///
@@ -572,6 +572,13 @@ fn from_provider_response(
                 Some("redacted_thinking") => crate::events::ReasoningContent::Opaque {
                     token: custom.data().clone(),
                 },
+                // OpenRouter's `reasoning_details` entries (genai ≥
+                // 0.7.0-beta.23, upstream #301): a provider's own
+                // reasoning, wrapped, that the gateway wants back
+                // verbatim and in sequence. The whole entry is the token
+                // — see `reasoning_detail` for why even the readable
+                // kinds are signed rather than plain (#603).
+                Some(typ) if typ.starts_with("reasoning.") => reasoning_detail(typ, custom.data()),
                 // Some other block type we do not model. Skipped rather
                 // than guessed at: inventing a meaning for it would be
                 // worse than not carrying it, and it is not reasoning as
@@ -1262,6 +1269,141 @@ mod tests {
         );
     }
 
+    fn openrouter_response(
+        details: Vec<serde_json::Value>,
+        reasoning: Option<&str>,
+    ) -> provider::chat::ChatResponse {
+        let model = provider::ModelIden::new(
+            provider::adapter::AdapterKind::OpenAI,
+            "anthropic/claude-sonnet-4-6",
+        );
+        let mut parts: Vec<provider::chat::ContentPart> = details
+            .into_iter()
+            .map(|entry| provider::chat::ContentPart::from_custom(entry, Some(model.clone())))
+            .collect();
+        parts.push(provider::chat::ContentPart::Text(
+            "Reading the runbook.".to_string(),
+        ));
+        provider::chat::ChatResponse {
+            content: provider::chat::MessageContent::from_parts(parts),
+            reasoning_content: reasoning.map(str::to_string),
+            model_iden: model.clone(),
+            provider_model_iden: model,
+            stop_reason: None,
+            usage: provider::chat::Usage::default(),
+            captured_raw_body: None,
+            response_id: None,
+        }
+    }
+
+    fn reasoning_tokens_of(parsed: &ChatResponse) -> Vec<Option<serde_json::Value>> {
+        reasoning_parts(parsed)
+            .iter()
+            .map(|r| match &r.content {
+                crate::events::ReasoningContent::Signed { token, .. }
+                | crate::events::ReasoningContent::Opaque { token } => Some(token.clone()),
+                crate::events::ReasoningContent::Plain { .. } => None,
+            })
+            .collect()
+    }
+
+    // region: OpenRouter reasoning_details (#603)
+
+    /// OpenRouter's signed entry (Claude through the gateway) is signed
+    /// reasoning whose token is the whole entry: the gateway wants the
+    /// array back verbatim, `format`, `id` and `index` included, so
+    /// nothing smaller than the entry can be replayed. The plaintext
+    /// `reasoning`, which repeats the entry's text, is not recorded
+    /// twice.
+    #[test]
+    fn an_openrouter_signed_entry_is_recorded_signed_with_the_whole_entry_as_its_token() {
+        let entry = serde_json::json!({
+            "type": "reasoning.text", "text": "Start with the runbook.",
+            "signature": "sig-1", "format": "anthropic-claude-v1", "index": 0
+        });
+        let parsed = from_provider_response(openrouter_response(
+            vec![entry.clone()],
+            Some("Start with the runbook."),
+        ))
+        .expect("parses");
+
+        assert_eq!(
+            part_kinds(&parsed),
+            ["signed", "text"],
+            "one part, not a plaintext twin"
+        );
+        assert_eq!(reasoning_tokens_of(&parsed), [Some(entry)]);
+        let crate::events::ReasoningContent::Signed { text, .. } =
+            &reasoning_parts(&parsed)[0].content
+        else {
+            unreachable!()
+        };
+        assert_eq!(text, "Start with the runbook.");
+    }
+
+    /// An unsigned `reasoning.text` (Kimi, DeepSeek through the gateway)
+    /// is plain reasoning, exactly as the same models' native
+    /// `reasoning_content` is: `reasoning_content` is the documented
+    /// mechanism for raw-string reasoning, and it is what goes back.
+    #[test]
+    fn an_openrouter_unsigned_text_entry_is_plain() {
+        let entry = serde_json::json!({
+            "type": "reasoning.text", "text": "Read file.", "format": "unknown", "index": 0
+        });
+        let parsed = from_provider_response(openrouter_response(vec![entry], Some("Read file.")))
+            .expect("parses");
+
+        assert_eq!(part_kinds(&parsed), ["plain", "text"]);
+    }
+
+    /// An OpenAI reasoning model through the gateway: the summary is
+    /// signed (readable, and it must ride back in sequence), the
+    /// encrypted entry opaque, both tokens the entries themselves, in
+    /// the order they arrived; the plaintext summary is not a third
+    /// part.
+    #[test]
+    fn an_openrouter_summary_is_signed_and_an_encrypted_entry_opaque() {
+        let summary = serde_json::json!({
+            "type": "reasoning.summary", "summary": "Check the runbook.",
+            "format": "openai-responses-v1", "index": 0
+        });
+        let encrypted = serde_json::json!({
+            "type": "reasoning.encrypted", "data": "gAAAA", "format": "openai-responses-v1",
+            "id": "rs_1", "index": 1
+        });
+        let parsed = from_provider_response(openrouter_response(
+            vec![summary.clone(), encrypted.clone()],
+            Some("Check the runbook."),
+        ))
+        .expect("parses");
+
+        assert_eq!(part_kinds(&parsed), ["signed", "opaque", "text"]);
+        assert_eq!(
+            reasoning_tokens_of(&parsed),
+            [Some(summary), Some(encrypted)]
+        );
+    }
+
+    /// An encrypted entry with only the plaintext beside it: the
+    /// plaintext is readable reasoning the entry does not carry, so it
+    /// is kept — after the opaque part, ahead of the spoken text.
+    #[test]
+    fn an_encrypted_entry_alone_keeps_the_plaintext_beside_it() {
+        let encrypted = serde_json::json!({
+            "type": "reasoning.encrypted", "data": "gAAAA", "format": "openai-responses-v1",
+            "id": "rs_1", "index": 0
+        });
+        let parsed = from_provider_response(openrouter_response(
+            vec![encrypted],
+            Some("A summary the gateway wrote."),
+        ))
+        .expect("parses");
+
+        assert_eq!(part_kinds(&parsed), ["opaque", "plain", "text"]);
+    }
+
+    // endregion: OpenRouter reasoning_details (#603)
+
     /// The write side: the opaque token this adapter minted goes back as
     /// genai's `ThoughtSignature` part, which its Gemini adapter attaches
     /// to the next function call — a `Custom` part would be ignored on
@@ -1660,6 +1802,7 @@ mod tests {
             output_tokens: 20,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            thinking_tokens: None,
         });
         mock.push_response(MockResponse::text("Done.", 120, 5));
 

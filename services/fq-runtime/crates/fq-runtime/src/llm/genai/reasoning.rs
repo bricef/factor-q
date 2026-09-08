@@ -123,3 +123,55 @@ fn bare_signature_of(token: &Value) -> Option<&str> {
     }
     token.get("signature").and_then(Value::as_str)
 }
+
+/// An OpenRouter `reasoning_details` entry as reasoning (#603).
+///
+/// The gateway returns a provider's own reasoning blocks — Anthropic's
+/// signed text, OpenAI's encrypted content, summaries — as entries
+/// beside the plaintext `reasoning`, and wants the array back verbatim
+/// and in sequence for the model to keep its continuity: `format`, `id`
+/// and `index` included. So the token is the whole entry, never a
+/// field of it, and a readable entry that must ride back is `signed`,
+/// not `plain` — plain would go back as `reasoning_content`, which the
+/// gateway cannot turn back into a block.
+///
+/// The one exception is an unsigned `reasoning.text`, which is what a
+/// raw-string model (Kimi, DeepSeek) produces through the gateway. That
+/// is plain reasoning exactly as the same models' native
+/// `reasoning_content` is, and `reasoning_content` is the documented
+/// way to return it; recording it signed would carry a token that adds
+/// nothing and show the operator an "opaque" marker on text that is
+/// not.
+pub(super) fn reasoning_detail(
+    typ: &str,
+    entry: &serde_json::Value,
+) -> crate::events::ReasoningContent {
+    use crate::events::ReasoningContent;
+    let text_of = |key: &str| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    match typ {
+        "reasoning.text" => match (text_of("text"), entry.get("signature")) {
+            (Some(text), Some(_)) => ReasoningContent::Signed {
+                text,
+                token: entry.clone(),
+            },
+            (Some(text), None) => ReasoningContent::Plain { text },
+            (None, _) => ReasoningContent::Opaque {
+                token: entry.clone(),
+            },
+        },
+        "reasoning.summary" => ReasoningContent::Signed {
+            text: text_of("summary").unwrap_or_default(),
+            token: entry.clone(),
+        },
+        // `reasoning.encrypted`, and any kind the gateway adds later: a
+        // token with nothing to read, carried whole.
+        _ => ReasoningContent::Opaque {
+            token: entry.clone(),
+        },
+    }
+}
