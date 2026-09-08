@@ -241,21 +241,26 @@ makes `Message` an enum over turn kinds with reasoning as a first-class
 part, and the cross-model strip a multi-node graph needs (ADR-0003
 guarantees per-agent model selection, so cross-model edges exist by
 construction) is enforced at the adapter (PR #510). Reasoning now
-round-trips for OpenAI-compatible, Anthropic and Gemini providers. The
-first two are confirmed live on 2026-09-04 and again on 2026-09-05
-(kimi-k3 via OpenRouter, `claude-opus-5`, `gpt-4o-mini` as control):
-every reasoning part was carried byte-for-byte into the next request
-(`experiments/reasoning-round-trip/`, live run section). The Gemini row
-landed on 2026-09-05 (#600) and is **hermetic only** — a Gemini mock and
-wire goldens, since no Gemini key is held here. One route does not
-carry: signed or encrypted reasoning routed through OpenRouter is
-dropped on the way back, open as
-[#603](https://github.com/bricef/factor-q/issues/603). Per-provider
-detail, and how each row was verified, is in the
-[reasoning-models guide](docs/guide/reasoning-models.md). The
-Anthropic path no longer rides a fork of `genai`: upstream `0.7.0-beta.21`
-carries the signed-thinking fix, and the switch is pinned by wire goldens
-that did not move.
+round-trips for OpenAI-compatible, Anthropic and Gemini providers, and
+for all three routed through OpenRouter. Every carrying row is
+confirmed live: the OpenAI-compatible and Anthropic rows on 2026-09-04
+and again on 2026-09-05 (kimi-k3 via OpenRouter, `claude-opus-5`,
+`gpt-4o-mini` as control), Gemini on 2026-09-07 (`gemini-3.8-flash` via
+AI Studio, on top of the mock and wire goldens the row landed with,
+#600), and signed reasoning through OpenRouter on 2026-09-08
+(`anthropic/claude-sonnet-4-6`) — in each case every reasoning part was
+carried byte-for-byte into the next request
+(`experiments/reasoning-round-trip/`, live run section). The one route
+that used to drop signed and encrypted `reasoning_details` on the way
+back — through OpenRouter — now carries them, so
+[#603](https://github.com/bricef/factor-q/issues/603) is closed; the
+gap left hermetic-only is a Gemini turn with visible text before a
+signed call. Per-provider detail, and how each row was verified, is in
+the [reasoning-models guide](docs/guide/reasoning-models.md). The
+Anthropic path no longer rides a fork of `genai`: upstream carries the
+signed-thinking fix since `0.7.0-beta.21`, the pin is now
+`=0.7.0-beta.23` (which also carries the three changes factor-q sent
+upstream), and each switch is held by wire goldens that did not move.
 
 Issue #424's block on #437 stands, but its stated premise — *"`events`
 has fan-in 10, the parts change ripples through the same ten modules"* —
