@@ -71,7 +71,7 @@ jobs:
       # The images, from the binaries built above. The tag is the same
       # twelve-hex commit `fq --version` stamps, so `docker-publish` can
       # check the image content against the tag before anything is pushed.
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
