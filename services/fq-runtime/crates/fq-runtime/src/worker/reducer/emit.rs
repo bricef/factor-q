@@ -125,6 +125,7 @@ pub(crate) fn llm_response_event(
         cumulative_invocation_cost: cumulative_cost,
         cumulative_agent_cost: cumulative_cost,
         origin,
+        reported_cost: response.reported_cost_usd,
     })
 }
 
@@ -143,6 +144,9 @@ pub(crate) struct FailedCall<'a> {
     /// What the provider billed, when we know. `None` is not zero —
     /// see [`crate::events::LlmFailurePayload::usage`].
     pub(crate) usage: Option<TokenUsage>,
+    /// What the provider said it billed, when the response carried a
+    /// figure — an empty completion through OpenRouter does.
+    pub(crate) reported_cost_usd: Option<f64>,
     pub(crate) origin: &'a events::LlmCallOrigin,
 }
 
@@ -193,5 +197,6 @@ pub(crate) fn llm_failure_event(
         cumulative_invocation_cost: cumulative_cost,
         cumulative_agent_cost: cumulative_cost,
         origin: call.origin.clone(),
+        reported_cost: call.reported_cost_usd,
     })
 }

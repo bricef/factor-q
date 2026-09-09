@@ -177,6 +177,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         error_message: err.to_string(),
                         duration_ms: call_started.elapsed().as_millis() as u64,
                         usage: None,
+                        reported_cost_usd: None,
                         origin: &origin,
                     },
                     ctx.totals,
@@ -209,6 +210,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     error_message: err.to_string(),
                     duration_ms: call_started.elapsed().as_millis() as u64,
                     usage: Some(response.usage),
+                    reported_cost_usd: response.reported_cost_usd,
                     origin: &origin,
                 },
                 ctx.totals,
@@ -258,6 +260,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .map(|p| p.calculate(&response.usage))
             .unwrap_or((0.0, 0.0, 0.0));
         ctx.totals.total_cost += total_cost;
+        note_reported_cost(&request.model, total_cost, response.reported_cost_usd);
 
         let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
         self.config
@@ -394,5 +397,20 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         // Retries exhausted without a valid result.
         Ok(None)
+    }
+}
+
+/// The provider's own figure, when it gave one (OpenRouter's
+/// `usage.cost`), rides the cost record beside the table's; the table's
+/// is what the budget is charged. Logged together so a drift between
+/// them is visible where it happens.
+fn note_reported_cost(model: &str, computed_cost: f64, reported_cost: Option<f64>) {
+    if let Some(reported) = reported_cost {
+        debug!(
+            model,
+            computed_cost,
+            reported_cost = reported,
+            "provider reported its own cost for the call"
+        );
     }
 }

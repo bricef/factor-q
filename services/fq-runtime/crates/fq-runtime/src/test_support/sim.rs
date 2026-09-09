@@ -462,6 +462,7 @@ impl SimWorld {
                     cache_write_tokens: 0,
                     reasoning_tokens: None,
                 },
+                reported_cost_usd: None,
             }
         }
         let last_triggered = |sink: &RecordingSink| {
@@ -805,6 +806,7 @@ mod tests {
                 cache_write_tokens: 0,
                 reasoning_tokens: None,
             },
+            reported_cost_usd: None,
         }
     }
 
@@ -826,6 +828,7 @@ mod tests {
                 cache_write_tokens: 0,
                 reasoning_tokens: None,
             },
+            reported_cost_usd: None,
         }
     }
 
@@ -852,6 +855,7 @@ mod tests {
                 cache_write_tokens: 0,
                 reasoning_tokens: None,
             },
+            reported_cost_usd: None,
         }
     }
 

@@ -1007,6 +1007,7 @@ fn event_with_cost_sets_envelope_cost() {
         cumulative_agent_cost: 0.0006,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     };
     let event = event.with_cost(cost.clone());
     assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
@@ -1029,6 +1030,7 @@ fn cost_metadata_round_trips_on_envelope() {
         cumulative_agent_cost: 0.3,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     };
     let event = Event::new(
         AgentId::new("agent").unwrap(),
@@ -1437,6 +1439,7 @@ fn reasoning_tokens_keep_unreported_apart_from_zero_on_the_wire() {
         cumulative_agent_cost: 0.3,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     };
     let unreported_json = serde_json::to_value(&cost).unwrap();
     assert!(
@@ -1453,4 +1456,49 @@ fn reasoning_tokens_keep_unreported_apart_from_zero_on_the_wire() {
     assert_eq!(back.reasoning_tokens, None);
     let back: CostMetadata = serde_json::from_value(zero_json).unwrap();
     assert_eq!(back.reasoning_tokens, Some(0));
+}
+
+/// **A provider's reported cost is a separate figure from the computed
+/// one, and its absence is not zero.** OpenRouter reports what it billed
+/// as `usage.cost`; the native wires report nothing. On the cost record
+/// the first is a literal number, the second an absent key, and each
+/// reads back as itself — while `total_cost` is the table's figure in
+/// both cases, because that is the number budgets are enforced on.
+#[test]
+fn reported_cost_rides_the_cost_record_and_is_absent_when_unreported() {
+    let unreported = CostMetadata {
+        call_id: Uuid::now_v7(),
+        model: "openai/gpt-4o-mini".to_string(),
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: None,
+        input_cost: 0.000015,
+        output_cost: 0.000012,
+        total_cost: 0.000027,
+        cumulative_invocation_cost: 0.000027,
+        cumulative_agent_cost: 0.000027,
+        origin: LlmCallOrigin::default(),
+        reported_cost: None,
+    };
+    let reported = CostMetadata {
+        reported_cost: Some(0.0000285),
+        ..unreported.clone()
+    };
+
+    let unreported_json = serde_json::to_value(&unreported).unwrap();
+    let reported_json = serde_json::to_value(&reported).unwrap();
+    assert!(
+        unreported_json.get("reported_cost").is_none(),
+        "an unreported cost is absent, not zero: {unreported_json}"
+    );
+    assert_eq!(reported_json["reported_cost"], json!(0.0000285));
+    // The computed figure is untouched by the reported one.
+    assert_eq!(reported_json["total_cost"], unreported_json["total_cost"]);
+
+    let back: CostMetadata = serde_json::from_value(unreported_json).unwrap();
+    assert_eq!(back.reported_cost, None);
+    let back: CostMetadata = serde_json::from_value(reported_json).unwrap();
+    assert_eq!(back.reported_cost, Some(0.0000285));
 }

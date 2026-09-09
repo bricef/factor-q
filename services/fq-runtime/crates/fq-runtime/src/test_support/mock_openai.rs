@@ -61,6 +61,9 @@ pub struct MockChoice {
     /// `(prompt, completion, reasoning)` token counts; `reasoning` goes
     /// out as `completion_tokens_details.reasoning_tokens` when set.
     usage: Option<(u64, u64, Option<u64>)>,
+    /// OpenRouter's `usage.cost`: what it billed, in USD. Absent on a
+    /// native OpenAI-shaped wire.
+    cost: Option<f64>,
 }
 
 impl MockChoice {
@@ -107,6 +110,12 @@ impl MockChoice {
         self
     }
 
+    /// Report the billed cost the way OpenRouter does, as `usage.cost`.
+    pub fn with_cost(mut self, usd: f64) -> Self {
+        self.cost = Some(usd);
+        self
+    }
+
     /// Attach a tool call, which is what makes the turn a continuation
     /// rather than the end of the conversation.
     pub fn with_tool_call(mut self, id: &str, name: &str, arguments: Value) -> Self {
@@ -147,7 +156,7 @@ impl MockChoice {
         } else {
             "tool_calls"
         };
-        let usage = match self.usage {
+        let mut usage = match self.usage {
             None => json!({ "prompt_tokens": 100, "completion_tokens": 20 }),
             Some((prompt, completion, None)) => {
                 json!({ "prompt_tokens": prompt, "completion_tokens": completion })
@@ -158,6 +167,9 @@ impl MockChoice {
                 "completion_tokens_details": { "reasoning_tokens": reasoning }
             }),
         };
+        if let Some(cost) = self.cost {
+            usage["cost"] = json!(cost);
+        }
         json!({
             "model": model,
             "choices": [{ "index": 0, "message": message, "finish_reason": finish }],

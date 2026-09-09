@@ -86,4 +86,15 @@ pub struct CostMetadata {
     /// counting toward the invocation total. Defaults to `AgentTurn`.
     #[serde(default)]
     pub origin: LlmCallOrigin,
+    /// What the provider itself said the call cost, in USD — the billed
+    /// figure OpenRouter returns on every response as `usage.cost`,
+    /// which includes its own fee and any cache discount. **It changes
+    /// no figure**: `total_cost` is what the runtime's pricing table
+    /// computed, because budgets are enforced on a rate known before
+    /// the call, and that is the number every sum and ceiling reads.
+    /// This is the number to reconcile that against. Absent on the wire
+    /// where the provider reported nothing (the native Anthropic, OpenAI
+    /// and Gemini wires carry no cost), which is not `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost: Option<f64>,
 }

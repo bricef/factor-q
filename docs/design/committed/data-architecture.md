@@ -646,7 +646,7 @@ the role and store.
 | **Per-invocation workspaces** | worker | Worker filesystem | Critical state. Local to the worker that runs the invocation. Lifecycle bound to invocation. |
 | Static configuration | operator | Filesystem (`fqd.toml`) | Operator-managed. Unchanged. |
 | Agent definitions | operator | Filesystem (`agents/`) | Operator-managed. Unchanged. |
-| Pricing cache | both roles | Filesystem (`<cache_dir>/pricing.json`) | Rebuildable from network. Both roles may cache. |
+| Pricing cache | both roles | Filesystem (`<cache_dir>/pricing.json`; `<cache_dir>/openrouter-pricing.json` when a provider is routed through OpenRouter) | Rebuildable from network. Both roles may cache. |
 | Cost/budget windows | derived | (control-plane projection) | Rebuildable from audit log via the projection. |
 
 **Three source-of-truth physical stores per worker (local

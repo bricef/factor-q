@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use fq_runtime::llm::{GenAiClient, LlmClient};
-use fq_runtime::{ControlPlaneStore, EventBus, PricingTable, ProjectionStore};
+use fq_runtime::{ControlPlaneStore, EventBus, ProjectionStore};
 use uuid::Uuid;
 
 use crate::boot::{ensure_split_dbs, local_host_label, workspace_provider};
@@ -351,13 +351,15 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         crate::recovery::classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
             .await?;
 
-    // Load pricing, merge config overrides, and enforce the coverage
-    // guarantee (ADR-0004) — fail-fast before serving any trigger.
-    let pricing_cache = config.cache.directory.join("pricing.json");
+    // Load the pricing sources (LiteLLM, and OpenRouter's catalogue for
+    // the models routed there), merge config overrides, and enforce the
+    // coverage guarantee (ADR-0004) — fail-fast before serving any
+    // trigger.
+    let pricing_cache = crate::pricing::litellm_cache_path(&config.cache.directory);
     let pricing = Arc::new(build_validated_pricing(
         &config,
         &registry,
-        PricingTable::load(&pricing_cache).await,
+        crate::pricing::load_pricing_sources(&config).await,
     )?);
     let pricing_entries = pricing.len() as u32;
     println!(

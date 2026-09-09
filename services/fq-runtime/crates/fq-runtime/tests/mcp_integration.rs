@@ -863,6 +863,7 @@ async fn static_resource_pin_appears_in_first_model_request() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
 
     // Host machinery: NATS bus + a throwaway worker store.
@@ -1317,6 +1318,7 @@ async fn run_sampling_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
@@ -1336,6 +1338,7 @@ async fn run_sampling_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
     // Input-evaluator judge verdicts (if any) are answered before the
     // sampling completion; an over-pushed response is simply unused.
@@ -1360,6 +1363,7 @@ async fn run_sampling_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
 
     // Host machinery (mirrors the static-resource e2e test).
@@ -1906,6 +1910,7 @@ async fn run_elicitation_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
 
     let llm = FixtureClient::new();
@@ -1927,6 +1932,7 @@ async fn run_elicitation_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
     // (2) the elicitation completion attempts.
     for answer in &elicitation_answers {
@@ -1950,6 +1956,7 @@ async fn run_elicitation_scenario(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
 
     let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");
@@ -2458,6 +2465,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let llm = FixtureClient::new();
     llm.push_response(ChatResponse {
@@ -2477,6 +2485,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
     llm.push_response(canned("SAMPLED-ANSWER"));
     llm.push_response(ChatResponse {
@@ -2496,6 +2505,7 @@ async fn run_auto_starts_a_grant_bearing_server_and_samples() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
 
     let bus = EventBus::connect(&nats_url).await.expect("connect to NATS");

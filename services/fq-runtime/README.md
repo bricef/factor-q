@@ -362,8 +362,9 @@ a container, with none of these set, factor-q falls back to:
 
 Two directories, two lifetimes (#362):
 
-- **cache** (`FQ_CACHE_DIR`, `[cache] directory`) — the LiteLLM pricing
-  snapshot, plus (for now) the daemon's SQLite stores. Its fallback is
+- **cache** (`FQ_CACHE_DIR`, `[cache] directory`) — the pricing
+  snapshots (LiteLLM's table, and OpenRouter's catalogue when a provider
+  is routed there), plus (for now) the daemon's SQLite stores. Its fallback is
   temp-dir shaped because FHS §5.5 and the XDG spec both license a
   cleaner to empty it — which is why the image pins it under the volume
   rather than trusting the fallback.

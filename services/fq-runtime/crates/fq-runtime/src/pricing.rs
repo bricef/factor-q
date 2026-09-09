@@ -5,8 +5,12 @@
 //! pricing. LiteLLM maintains the file as providers change prices, which
 //! is more sustainable than hand-coding ~15 entries ourselves.
 //!
-//! Loading strategy (see [`PricingTable::load`]):
-//! 1. Fetch the JSON from GitHub.
+//! A second source, OpenRouter's own model catalogue, prices the models
+//! an operator routes through OpenRouter under the ids they are routed
+//! by — see [`openrouter`]. The daemon layers it over this table.
+//!
+//! Loading strategy (see [`PricingTable::load`] and [`load_source`]):
+//! 1. Fetch the JSON from its remote.
 //! 2. On success, write it to the cache path and parse the fresh copy.
 //! 3. On fetch failure, log a warning and load the last cached copy.
 //! 4. On cache miss too, log another warning and return an empty table
@@ -19,6 +23,8 @@
 //! running service (per VISION.md), pricing will need periodic refresh
 //! through the future internal job scheduler — see the phase 1 plan's
 //! deferred work section.
+
+pub mod openrouter;
 
 use std::collections::HashMap;
 use std::fs;
@@ -135,6 +141,49 @@ impl PricingTable {
         self.entries.insert(model.into(), pricing);
     }
 
+    /// Record a model's context-window size (max input tokens), for a
+    /// source that carries the window separately from the price.
+    pub fn insert_context_window(&mut self, model: impl Into<String>, window: u32) {
+        self.context_windows.insert(model.into(), window);
+    }
+
+    /// Copy `model`'s price and context window from `source` into this
+    /// table under the same id, replacing whatever this table held.
+    /// Returns `false`, and changes nothing, when `source` has no price
+    /// for it. This is how a provider-specific catalogue lays its
+    /// figures over the LiteLLM base for the models routed through it.
+    pub fn adopt(&mut self, source: &PricingTable, model: &str) -> bool {
+        let Some(pricing) = source.lookup(model) else {
+            return false;
+        };
+        self.entries.insert(model.to_string(), *pricing);
+        if let Some(window) = source.context_window(model) {
+            self.context_windows.insert(model.to_string(), window);
+        }
+        true
+    }
+
+    /// Price `model` from this table's own entry for `{prefix}/{model}`,
+    /// when it has one and no direct entry. LiteLLM keys a gateway's
+    /// models by the gateway's slug — `openrouter/openai/gpt-4o-mini` —
+    /// while factor-q routes by the id the gateway itself takes, so
+    /// without this a model LiteLLM knows perfectly well is reported
+    /// unpriced. Returns whether a price was adopted.
+    pub fn adopt_prefixed(&mut self, prefix: &str, model: &str) -> bool {
+        if self.entries.contains_key(model) {
+            return false;
+        }
+        let key = format!("{prefix}/{model}");
+        let Some(pricing) = self.entries.get(&key).copied() else {
+            return false;
+        };
+        self.entries.insert(model.to_string(), pricing);
+        if let Some(window) = self.context_windows.get(&key).copied() {
+            self.context_windows.insert(model.to_string(), window);
+        }
+        true
+    }
+
     /// Parse a LiteLLM-format pricing JSON string into a table.
     ///
     /// Unknown or malformed entries are skipped rather than failing the
@@ -212,90 +261,121 @@ impl PricingTable {
     /// back to the cached copy on failure, and return an empty table if
     /// neither source is available.
     pub async fn load(cache_path: &Path) -> Self {
-        match Self::fetch(LITELLM_PRICING_URL).await {
-            Ok(json) => {
-                debug!(bytes = json.len(), "fetched LiteLLM pricing JSON");
-                if let Err(err) = write_cache(cache_path, &json) {
-                    warn!(error = %err, "failed to write pricing cache");
-                }
-                match Self::from_litellm_json(&json) {
-                    Ok(table) => {
-                        info!(entries = table.len(), "loaded pricing from LiteLLM");
-                        table
-                    }
-                    Err(err) => {
-                        warn!(error = %err, "failed to parse fetched pricing JSON");
-                        Self::load_from_cache_or_empty(cache_path)
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(error = %err, "failed to fetch LiteLLM pricing; using cached copy");
-                Self::load_from_cache_or_empty(cache_path)
-            }
-        }
+        load_source(
+            PricingSource {
+                name: "LiteLLM",
+                url: LITELLM_PRICING_URL,
+                parse: Self::from_litellm_json,
+            },
+            cache_path,
+        )
+        .await
     }
+}
 
-    fn load_from_cache_or_empty(cache_path: &Path) -> Self {
-        match fs::read_to_string(cache_path) {
-            Ok(json) => match Self::from_litellm_json(&json) {
+/// One remote pricing document: where it lives, what to call it in the
+/// log, and how to read it into a table.
+pub struct PricingSource<'a> {
+    /// The source's name as it appears in log lines.
+    pub name: &'static str,
+    /// URL of the document.
+    pub url: &'a str,
+    /// Parser for the document's format.
+    pub parse: fn(&str) -> Result<PricingTable, PricingError>,
+}
+
+/// Fetch a pricing document, cache it to disk, and parse the fresh
+/// copy; fall back to the cached copy when the fetch or the parse
+/// fails, and to an empty table when there is no usable cache either.
+/// Never fails — the runtime does not block on pricing; the startup
+/// guarantee (ADR-0004) decides afterwards whether the result suffices.
+pub async fn load_source(source: PricingSource<'_>, cache_path: &Path) -> PricingTable {
+    let name = source.name;
+    match fetch(source.url).await {
+        Ok(json) => {
+            debug!(bytes = json.len(), source = name, "fetched pricing JSON");
+            if let Err(err) = write_cache(cache_path, &json) {
+                warn!(error = %err, source = name, "failed to write pricing cache");
+            }
+            match (source.parse)(&json) {
                 Ok(table) => {
-                    // Serving from disk means the fresh fetch didn't
-                    // land — surface it loudly with the cache age so
-                    // reliance on possibly-stale prices is visible. The
-                    // startup pricing guarantee still ensures declared
-                    // models are *priced*; this flags that they may be
-                    // *out of date* (runtime refresh is future work —
-                    // issue #344, "Periodic LiteLLM pricing
-                    // refresh").
-                    warn!(
-                        entries = table.len(),
-                        path = %cache_path.display(),
-                        cache_age = %cache_age(cache_path),
-                        "using cached LiteLLM pricing (fresh fetch unavailable); prices may be stale"
-                    );
+                    info!(entries = table.len(), "loaded pricing from {name}");
                     table
                 }
                 Err(err) => {
-                    warn!(error = %err, path = %cache_path.display(), "cached pricing is corrupt; using empty table");
-                    Self::empty()
+                    warn!(error = %err, source = name, "failed to parse fetched pricing JSON");
+                    load_from_cache_or_empty(&source, cache_path)
                 }
-            },
-            Err(_) => {
-                warn!(
-                    path = %cache_path.display(),
-                    "no cached pricing available; costs will be reported as $0"
-                );
-                Self::empty()
             }
         }
-    }
-
-    async fn fetch(url: &str) -> Result<String, PricingError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent(concat!("factor-q/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|err| PricingError::Http(err.to_string()))?;
-
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|err| PricingError::Http(err.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(PricingError::Http(format!(
-                "unexpected status: {}",
-                response.status()
-            )));
+        Err(err) => {
+            warn!(error = %err, "failed to fetch {name} pricing; using cached copy");
+            load_from_cache_or_empty(&source, cache_path)
         }
-
-        response
-            .text()
-            .await
-            .map_err(|err| PricingError::Http(err.to_string()))
     }
+}
+
+fn load_from_cache_or_empty(source: &PricingSource<'_>, cache_path: &Path) -> PricingTable {
+    let name = source.name;
+    match fs::read_to_string(cache_path) {
+        Ok(json) => match (source.parse)(&json) {
+            Ok(table) => {
+                // Serving from disk means the fresh fetch didn't
+                // land — surface it loudly with the cache age so
+                // reliance on possibly-stale prices is visible. The
+                // startup pricing guarantee still ensures declared
+                // models are *priced*; this flags that they may be
+                // *out of date* (runtime refresh is future work —
+                // issue #344, "Periodic LiteLLM pricing
+                // refresh").
+                warn!(
+                    entries = table.len(),
+                    path = %cache_path.display(),
+                    cache_age = %cache_age(cache_path),
+                    "using cached {name} pricing (fresh fetch unavailable); prices may be stale"
+                );
+                table
+            }
+            Err(err) => {
+                warn!(error = %err, path = %cache_path.display(), source = name, "cached pricing is corrupt; using empty table");
+                PricingTable::empty()
+            }
+        },
+        Err(_) => {
+            warn!(
+                path = %cache_path.display(),
+                source = name,
+                "no cached pricing available; models it would have priced are unpriced"
+            );
+            PricingTable::empty()
+        }
+    }
+}
+
+async fn fetch(url: &str) -> Result<String, PricingError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(concat!("factor-q/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|err| PricingError::Http(err.to_string()))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| PricingError::Http(err.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(PricingError::Http(format!(
+            "unexpected status: {}",
+            response.status()
+        )));
+    }
+
+    response
+        .text()
+        .await
+        .map_err(|err| PricingError::Http(err.to_string()))
 }
 
 fn write_cache(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -563,7 +643,7 @@ mod tests {
     fn load_from_cache_falls_back_to_empty_on_missing_file() {
         // File doesn't exist — should return empty table without panicking.
         let path = PathBuf::from("/tmp/fq-nonexistent-pricing-cache-xyz-12345.json");
-        let table = PricingTable::load_from_cache_or_empty(&path);
+        let table = load_from_cache_or_empty(&litellm_source(), &path);
         assert!(table.is_empty());
     }
 
@@ -573,9 +653,73 @@ mod tests {
         let path = dir.path().join("pricing.json");
         std::fs::write(&path, LITELLM_SAMPLE).unwrap();
 
-        let table = PricingTable::load_from_cache_or_empty(&path);
+        let table = load_from_cache_or_empty(&litellm_source(), &path);
         assert_eq!(table.len(), 4);
         assert!(table.lookup("claude-haiku-test").is_some());
+    }
+
+    fn litellm_source() -> PricingSource<'static> {
+        PricingSource {
+            name: "LiteLLM",
+            url: LITELLM_PRICING_URL,
+            parse: PricingTable::from_litellm_json,
+        }
+    }
+
+    fn priced(input: f64, output: f64) -> ModelPricing {
+        ModelPricing {
+            input_per_million: input,
+            output_per_million: output,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        }
+    }
+
+    #[test]
+    fn adopt_copies_price_and_window_from_another_table() {
+        let mut source = PricingTable::empty();
+        source.insert("openai/gpt-4o-mini", priced(0.15, 0.60));
+        source.insert_context_window("openai/gpt-4o-mini", 128_000);
+
+        let mut table = PricingTable::empty();
+        table.insert("openai/gpt-4o-mini", priced(9.0, 9.0));
+        assert!(table.adopt(&source, "openai/gpt-4o-mini"));
+        let adopted = table.lookup("openai/gpt-4o-mini").unwrap();
+        assert!((adopted.input_per_million - 0.15).abs() < 1e-9);
+        assert_eq!(table.context_window("openai/gpt-4o-mini"), Some(128_000));
+
+        // Nothing to adopt: the table is untouched, and says so.
+        assert!(!table.adopt(&source, "not/listed"));
+        assert!(table.lookup("not/listed").is_none());
+    }
+
+    #[test]
+    fn adopt_prefixed_prices_a_gateway_id_from_its_litellm_key() {
+        let mut table = PricingTable::empty();
+        table.insert("openrouter/openai/gpt-4o-mini", priced(0.15, 0.60));
+        table.insert_context_window("openrouter/openai/gpt-4o-mini", 128_000);
+        table.insert("openai/gpt-4o", priced(2.5, 10.0));
+
+        assert!(table.adopt_prefixed("openrouter", "openai/gpt-4o-mini"));
+        assert!(
+            (table
+                .lookup("openai/gpt-4o-mini")
+                .unwrap()
+                .output_per_million
+                - 0.60)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(table.context_window("openai/gpt-4o-mini"), Some(128_000));
+
+        // A direct entry is never displaced by a prefixed one.
+        table.insert("openrouter/openai/gpt-4o", priced(7.0, 7.0));
+        assert!(!table.adopt_prefixed("openrouter", "openai/gpt-4o"));
+        assert!((table.lookup("openai/gpt-4o").unwrap().input_per_million - 2.5).abs() < 1e-9);
+
+        // No prefixed entry either: nothing happens.
+        assert!(!table.adopt_prefixed("openrouter", "nobody/knows"));
+        assert!(table.lookup("nobody/knows").is_none());
     }
 
     #[test]

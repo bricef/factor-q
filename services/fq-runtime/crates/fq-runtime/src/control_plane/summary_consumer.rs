@@ -378,6 +378,7 @@ impl SummaryConsumer {
             cumulative_agent_cost: total_cost,
             origin: Default::default(),
             reasoning_tokens: response.usage.reasoning_tokens,
+            reported_cost: response.reported_cost_usd,
         });
 
         match self.bus.publish(&summary_event).await {
@@ -470,6 +471,7 @@ mod tests {
                 output_tokens: 20,
                 ..Default::default()
             },
+            reported_cost_usd: None,
         }
     }
 

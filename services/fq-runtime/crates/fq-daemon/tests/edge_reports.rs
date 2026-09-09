@@ -101,6 +101,7 @@ fn cost(seq: u32, total_cost: f64, model: &str) -> CostMetadata {
         cumulative_agent_cost: total_cost,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     }
 }
 

@@ -2,7 +2,7 @@
   "chat_options": {
     "cache_control": null,
     "capture_content": null,
-    "capture_raw_body": null,
+    "capture_raw_body": true,
     "capture_reasoning_content": true,
     "capture_tool_calls": null,
     "capture_usage": null,

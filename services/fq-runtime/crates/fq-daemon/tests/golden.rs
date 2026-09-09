@@ -150,6 +150,7 @@ fn cost(call: u32, total: f64, cumulative: f64, reasoning_tokens: Option<u32>) -
         cumulative_agent_cost: cumulative,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens,
+        reported_cost: None,
     }
 }
 
@@ -254,6 +255,7 @@ fn invocation_summary(invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -
         cumulative_agent_cost: total_cost,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     })
 }
 
@@ -409,6 +411,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     })
     .unwrap();
     let second_response = serde_json::to_string(&ChatResponse {
@@ -424,6 +427,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     })
     .unwrap();
 
