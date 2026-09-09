@@ -335,6 +335,16 @@ impl ProvidersConfig {
             .chain(self.extra.values().flat_map(|p| p.pricing.iter()))
             .map(|(k, v)| (k.as_str(), v))
     }
+
+    /// The providers routed to OpenRouter (by `base_url` host), as
+    /// `(name, config)`. Their models are priced from OpenRouter's own
+    /// catalogue at startup — see `fq_runtime::pricing::openrouter`.
+    pub fn openrouter_providers(&self) -> impl Iterator<Item = (&str, &ProviderConfig)> {
+        self.extra
+            .iter()
+            .filter(|(_, p)| p.is_openrouter())
+            .map(|(name, p)| (name.as_str(), p))
+    }
 }
 
 /// Error listing every model-registry / pricing-coverage violation found
@@ -395,7 +405,7 @@ pub fn validate_model_registry(
     for &model in &declared {
         if pricing.lookup(model).is_none() {
             problems.push(format!(
-                "model \"{model}\" is declared but has no pricing — add [providers.<name>.pricing.\"{model}\"] or ensure the LiteLLM table lists it"
+                "model \"{model}\" is declared but has no pricing — add [providers.<name>.pricing.\"{model}\"] or ensure the LiteLLM table (or, for a model routed through OpenRouter, OpenRouter's catalogue) lists it"
             ));
         }
     }
@@ -451,6 +461,17 @@ pub struct ProviderConfig {
     /// which the startup pricing guarantee requires (ADR-0004).
     #[serde(default)]
     pub pricing: std::collections::BTreeMap<String, ModelPriceOverride>,
+}
+
+impl ProviderConfig {
+    /// True when this provider's `base_url` is an OpenRouter endpoint,
+    /// which makes OpenRouter's catalogue the price of record for the
+    /// models it declares.
+    pub fn is_openrouter(&self) -> bool {
+        self.base_url
+            .as_deref()
+            .is_some_and(crate::pricing::openrouter::is_openrouter_base_url)
+    }
 }
 
 /// A per-model price override in USD per **million** tokens. Merged into

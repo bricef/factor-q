@@ -40,6 +40,15 @@ pub struct ChatResponse {
     pub parts: Vec<AssistantPart>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
+    /// What the provider itself said the call cost, in USD, when it
+    /// said anything: OpenRouter puts the billed figure on every
+    /// response as `usage.cost`; the native providers put nothing. The
+    /// runtime prices from its own table regardless — a budget needs a
+    /// rate before the call, not a bill after it — and carries this
+    /// beside the computed figure as the number to reconcile against.
+    /// `None` is "the provider did not say", never "it was free".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost_usd: Option<f64>,
 }
 
 impl ChatResponse {
@@ -54,6 +63,7 @@ impl ChatResponse {
                 .unwrap_or_default(),
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
+            reported_cost_usd: None,
         }
     }
 
@@ -437,6 +447,7 @@ mod retry_tests {
                 cache_write_tokens: 0,
                 reasoning_tokens: None,
             },
+            reported_cost_usd: None,
         }
     }
 

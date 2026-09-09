@@ -313,6 +313,7 @@ mod tests {
             cumulative_agent_cost: 0.01,
             origin: Default::default(),
             reasoning_tokens: None,
+            reported_cost: None,
         })
     }
 

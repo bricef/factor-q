@@ -755,6 +755,7 @@ fn costed_response_on(
         cumulative_agent_cost: cost,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens,
+        reported_cost: None,
     })
 }
 

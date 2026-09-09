@@ -152,10 +152,17 @@ models = ["claude-haiku-4-5"]
 # api_key_env = "OPENROUTER_API_KEY"
 # models      = ["openai/gpt-4o-mini"]
 #
+# Models declared under a provider whose base_url is openrouter.ai are
+# priced from OpenRouter's own catalogue (GET {base_url}/models, fetched
+# at startup and cached beside the LiteLLM snapshot), under exactly the
+# ids listed above — no override needed. Every other provider's models
+# are priced from the LiteLLM table.
+#
 # Per-model price override, USD per MILLION tokens. Required for any model
-# the LiteLLM pricing table doesn't list (e.g. OpenRouter-namespaced ids)
-# — without it the daemon refuses to start, since an unpriced model would
+# neither source lists (a custom endpoint, a model too new for either) —
+# without it the daemon refuses to start, since an unpriced model would
 # track its cost as $0 and silently escape budget enforcement (ADR-0004).
+# An override always wins over both sources.
 # [providers.openrouter.pricing."openai/gpt-4o-mini"]
 # input_per_mtok  = 0.15
 # output_per_mtok = 0.60

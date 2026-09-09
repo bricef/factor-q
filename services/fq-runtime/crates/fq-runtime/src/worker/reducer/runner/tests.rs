@@ -447,6 +447,7 @@ fn canned(text: &str, input: u32, output: u32) -> ChatResponse {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     }
 }
 
@@ -468,6 +469,7 @@ fn tool_use(name: &str, call_id: &str, params: Value, tokens: (u32, u32)) -> Cha
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     }
 }
 
@@ -1321,6 +1323,7 @@ fn tool_call_response(tool: &str, call_id: &str, params: serde_json::Value) -> C
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     }
 }
 
@@ -1713,6 +1716,7 @@ async fn budget_exceeded_emits_failed_event_on_reducer_path() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
 
     // triggered, llm_request, llm_dispatched, llm_response,
@@ -1957,6 +1961,7 @@ async fn empty_model_response_fails_the_invocation_as_llm_error() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
 
     let (store, events, outcome) =
@@ -2029,6 +2034,7 @@ async fn empty_response_bills_its_prefill_on_the_failure_event() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let (_store, events, _outcome) =
         run_with_wal_capturing_outcome(&url, agent, vec![empty], 6, None).await;
@@ -2205,6 +2211,7 @@ async fn bare_text_only_model_fails_at_the_iteration_ceiling() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let responses: Vec<ChatResponse> = (0..5).map(|_| text_turn()).collect();
 
@@ -2534,6 +2541,7 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     store
         .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
@@ -2745,6 +2753,7 @@ async fn resume_with_same_ms_interleave(
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let end_turn = canned("done.", 60, 4);
     store
@@ -2953,6 +2962,7 @@ async fn resume_enforces_lifetime_budget() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     };
     let response_json = serde_json::to_string(&response).unwrap();
     store
@@ -3007,6 +3017,7 @@ async fn resume_enforces_lifetime_budget() {
             cache_write_tokens: 0,
             reasoning_tokens: None,
         },
+        reported_cost_usd: None,
     });
 
     let outcome = runner

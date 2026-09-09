@@ -700,7 +700,19 @@ recognises. Examples:
 Cost is calculated from the
 [LiteLLM pricing table](https://github.com/BerriAI/litellm),
 fetched at daemon start and merged with any
-`[providers.<name>.pricing]` overrides.
+`[providers.<name>.pricing]` overrides. Models declared under a provider
+whose `base_url` is `openrouter.ai` are priced from
+[OpenRouter's own model catalogue](https://openrouter.ai/api/v1/models)
+instead — fetched and cached the same way, keyed by the ids OpenRouter
+routes (`openai/gpt-4o-mini`), which is the price OpenRouter actually
+charges — so an OpenRouter-routed model needs no override. Where the
+catalogue is unavailable and never cached, LiteLLM's `openrouter/…`
+entry stands in. An override wins over both.
+
+OpenRouter also reports what it billed on every response; the runtime
+records that beside the figure it computed (`reported_cost` on the cost
+record) without charging it to any budget — see the
+[event schema](../design/committed/event-schema.md#cost-metadata).
 
 An identifier that resolves to no price is not tolerated at any stage —
 that is the whole of ADR-0004's guarantee, since a model tracking as $0
@@ -708,7 +720,8 @@ would silently defeat every budget:
 
 - **At startup**, the daemon refuses to run and names each offending
   model: `model "…" is declared but has no pricing — add
-  [providers.<name>.pricing."…"] or ensure the LiteLLM table lists it`.
+  [providers.<name>.pricing."…"] or ensure the LiteLLM table (or, for a
+  model routed through OpenRouter, OpenRouter's catalogue) lists it`.
   The same check rejects an agent naming a model no provider declares.
 - **At use**, a second backstop refuses the dispatch before any WAL write
   rather than proceeding at $0.

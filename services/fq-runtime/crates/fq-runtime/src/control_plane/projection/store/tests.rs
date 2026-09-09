@@ -52,6 +52,7 @@ fn summary_event_costing(
         cumulative_agent_cost: total_cost,
         origin: Default::default(),
         reasoning_tokens: None,
+        reported_cost: None,
     })
 }
 
@@ -431,6 +432,7 @@ fn sample_llm_response_of_model(
         cumulative_agent_cost: cost,
         origin: crate::events::LlmCallOrigin::AgentTurn,
         reasoning_tokens,
+        reported_cost: None,
     })
 }
 
@@ -554,6 +556,7 @@ fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
         cumulative_agent_cost: total_cost,
         origin: crate::events::LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     })
 }
 

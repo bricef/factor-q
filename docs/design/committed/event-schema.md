@@ -69,7 +69,8 @@ When present (on `llm.response` events, and on the `llm.failure` events that bil
   "total_cost": 0.001018,
   "cumulative_invocation_cost": 0.004523,
   "cumulative_agent_cost": 0.127890,
-  "origin": { "kind": "agent_turn" }
+  "origin": { "kind": "agent_turn" },
+  "reported_cost": 0.001075
 }
 ```
 
@@ -80,6 +81,8 @@ still counts toward the invocation total, which needs both facts on the
 one record.
 
 `reasoning_tokens` is the share of `output_tokens` the model spent thinking rather than speaking. It is carried here because the cost record is where anyone looks to ask what a call cost, and for a reasoning-first model that split is most of the answer — it was previously invisible in the cost data entirely. **It changes no figure**: reasoning is already inside `output_tokens`, so `output_cost` and `total_cost` are what they always were, and the pricing table is deliberately not told about it. **Absent where the provider does not report the split** — Anthropic never does — and present, as `0`, where a provider reported that none were spent. The two are different facts and stay distinguishable downstream: the projection stores NULL against `0`, `fq costs` prints `n/a` against `0`, and `--json` says `null` against `0` ([#536](https://github.com/bricef/factor-q/issues/536)). Read an absent key as "not reported", never as "no thinking happened".
+
+`reported_cost` is what the provider itself said the call cost — the billed figure OpenRouter returns on every response as `usage.cost`, its own fee and any cache discount included. **It changes no figure either**: `total_cost` is what the runtime's pricing table computed, because budgets are enforced on a rate known before the call, and that is the number every sum and ceiling reads. `reported_cost` is the number to reconcile that against. **Absent where the provider reported nothing** — the native Anthropic, OpenAI and Gemini wires carry no cost — which is not `0`; a free model through OpenRouter reports `0`.
 
 ## Annotations
 
@@ -836,6 +839,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-06, [#37](https://github.com/bricef/factor-q/issues/37))* A new event type, `invocation.stuck`, on `fq.agent.{agent_id}.invocation.stuck` | Additive. `schema_version` stays at 3: the `Unknown` landing pad means an older reader takes the envelope and no typed payload rather than failing, which is what adding a type was made safe for. |
 | *(2026-09-06, [#37](https://github.com/bricef/factor-q/issues/37))* `worker.heartbeat` gains `last_step_at_ms` (nullable, optional on read) | The newest `invocation_state.updated_at` across the worker's in-flight work. A beat reported process liveness only, so a worker wedged inside one invocation kept beating and never looked stale (review finding F). Nullable because a worker with no in-flight work has no boundary to report, and so does one whose WAL could not be read. |
 | *(2026-09-06, [#536](https://github.com/bricef/factor-q/issues/536))* `usage.reasoning_tokens` and `cost.reasoning_tokens` become optional: absent where the provider reported no thought-versus-spoken split, present — `0` included — where it did. Supersedes the "defaults to 0" row above | An unreported split and a reported zero are different facts, and a count defaulting to 0 conflated them: every Anthropic call recorded `0`, indistinguishable from a model that did no thinking. `schema_version` stays at 3 — the key was already optional on read. No shim: a v3 event written before this that carried the defaulted `0` now reads back as a reported zero, and the projection records that history as NULL rather than guess. |
+| *(2026-09-09)* `cost.reported_cost` (additive, optional): what the provider itself said the call cost, in USD — OpenRouter's `usage.cost` | The computed `total_cost` is a table rate applied to token counts and cannot see a gateway's fee, a cache discount, or which upstream the gateway chose; the provider's own figure can, and is the one to reconcile against. Absent where the provider reported nothing, which is not `0`. `total_cost` is unchanged — budgets are enforced on it, and it needs a rate before the call. `schema_version` stays at 3. |
 
 ## Changelog: v1 → v2
 

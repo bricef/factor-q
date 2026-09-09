@@ -42,6 +42,10 @@ mod wire_goldens;
 mod reasoning;
 use reasoning::{bare_signature, encode_reasoning, reasoning_detail};
 
+/// The cost a provider reports on its own response (OpenRouter's
+/// `usage.cost`), read from the raw body the dependency drops it from.
+mod reported_cost;
+
 /// The provider client could not be built.
 ///
 /// genai builds an HTTP client underneath (TLS roots, proxy settings from
@@ -476,6 +480,12 @@ fn convert_params(params: RequestParams) -> provider::chat::ChatOptions {
         // tokens were carried either way; this is the half an operator
         // gets to read.
         capture_reasoning_content: Some(true),
+        // Keep the raw response body: OpenRouter reports what it billed
+        // as `usage.cost`, which the dependency's normalised `Usage`
+        // has no field for and drops. Non-streaming only, which is the
+        // only path this adapter uses; the body is dropped with the
+        // response once the figure is read.
+        capture_raw_body: Some(true),
         ..Default::default()
     }
 }
@@ -662,6 +672,7 @@ fn from_provider_response(
         parts,
         stop_reason,
         usage,
+        reported_cost_usd: reported_cost::from_raw_body(response.captured_raw_body.as_ref()),
     })
 }
 
@@ -1403,6 +1414,48 @@ mod tests {
     }
 
     // endregion: OpenRouter reasoning_details (#603)
+
+    // region: OpenRouter reported cost
+
+    /// OpenRouter puts what it billed on the response as `usage.cost`.
+    /// The dependency's `Usage` drops the key, so the adapter reads it
+    /// from the raw body — and a wire that carries no such figure, as
+    /// the native OpenAI shape does not, reads as unreported rather
+    /// than free.
+    #[tokio::test]
+    async fn openrouter_reported_cost_is_carried_and_a_native_wire_reads_unreported() {
+        use crate::test_support::mock_openai::{MockChoice, MockOpenAiServer};
+
+        const MODEL: &str = "openai/gpt-4o-mini";
+        let mock = MockOpenAiServer::start().await;
+        mock.push(
+            MockChoice::text("Done.")
+                .with_usage(100, 20, None)
+                .with_cost(0.000027),
+        );
+        mock.push(MockChoice::text("Done again."));
+        let client = mock.client(MODEL);
+        let request = || ChatRequest {
+            model: MODEL.to_string(),
+            messages: vec![Message::user("Investigate the deploy.")],
+            tools: vec![],
+            params: RequestParams {
+                effort: None,
+                temperature: None,
+                max_tokens: Some(64),
+            },
+        };
+
+        let billed = client.chat(request()).await.expect("turn 1 succeeds");
+        assert_eq!(billed.reported_cost_usd, Some(0.000027));
+        assert_eq!(billed.usage.input_tokens, 100);
+        assert_eq!(billed.usage.output_tokens, 20);
+
+        let unreported = client.chat(request()).await.expect("turn 2 succeeds");
+        assert_eq!(unreported.reported_cost_usd, None);
+    }
+
+    // endregion: OpenRouter reported cost
 
     /// The write side: the opaque token this adapter minted goes back as
     /// genai's `ThoughtSignature` part, which its Gemini adapter attaches

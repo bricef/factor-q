@@ -828,6 +828,7 @@ mod tests {
                 cache_write_tokens: 0,
                 reasoning_tokens: None,
             },
+            reported_cost_usd: None,
         }
     }
 
