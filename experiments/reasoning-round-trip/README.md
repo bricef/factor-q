@@ -238,6 +238,11 @@ requests a minute and 20 a day per model (measured 2026-09-07; the daily count r
 provider had no capacity — a 5xx or a 429 — through the runtime's whole retry budget,
 and the verdict judges an arm's latest invocation. Probing by hand on the arm's model
 spends the nightly's day; probe on a sibling model instead.
+The nightly of 2026-09-10 showed that re-trigger waiting on the wrong row: the second
+attempt matched the first attempt's terminal invocation and reported "failed in 0s" under
+the same id, so the arm was judged on the attempt that had been retried away. The wait now
+skips every invocation the arm has already been judged on; a second attempt is judged on
+its own invocation or not at all.
 
 **Two runs, same task as the other arms** (`~/factor-q-live-runs/2026-09-07-gemini-arm/`
 and `-2/`):
