@@ -118,9 +118,7 @@ impl Event {
     /// the log; see the module doc for why it is not a plain
     /// `serde_json::from_slice`.
     pub fn from_wire(bytes: &[u8]) -> Result<Self, EventParseError> {
-        let probe: VersionProbe =
-            serde_json::from_slice(bytes).map_err(EventParseError::Malformed)?;
-        let Some((found, event_id)) = probe.declared() else {
+        let Some((found, event_id)) = probe_version(bytes)? else {
             return Err(EventParseError::Malformed(serde::de::Error::missing_field(
                 "schema_version",
             )));
@@ -134,4 +132,31 @@ impl Event {
         }
         serde_json::from_slice(bytes).map_err(EventParseError::Malformed)
     }
+}
+
+/// The version and id `bytes` declare, looked for wherever a version
+/// has ever lived; `Ok(None)` for JSON that declares no version, `Err`
+/// for bytes that are not JSON at all. The one probe behind
+/// [`Event::from_wire`] and [`declared_schema_version`].
+fn probe_version(bytes: &[u8]) -> Result<Option<(u32, Option<String>)>, EventParseError> {
+    let probe: VersionProbe = serde_json::from_slice(bytes).map_err(EventParseError::Malformed)?;
+    Ok(probe.declared())
+}
+
+/// The envelope version `bytes` declare, and nothing else about them:
+/// `None` for bytes that are not an event in any version. The body is
+/// not examined and no shape is assumed, exactly as [`Event::from_wire`]
+/// reads the version before it reads anything else.
+///
+/// For a reader that needs the version of a message it is not going
+/// to consume — the projection's replay floor, which finds the first
+/// stream sequence whose version this build reads by probing messages
+/// by sequence (<https://github.com/bricef/factor-q/issues/648>).
+/// Whether a version is one this build reads is
+/// [`SUPPORTED_SCHEMA_VERSIONS`]'s to say.
+pub fn declared_schema_version(bytes: &[u8]) -> Option<u32> {
+    probe_version(bytes)
+        .ok()
+        .flatten()
+        .map(|(version, _)| version)
 }

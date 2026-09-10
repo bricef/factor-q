@@ -101,7 +101,7 @@ pub use llm::{
     assistant_tool_calls, reduce_reasoning,
 };
 pub use payloads::*;
-pub use wire::{EventParseError, SUPPORTED_SCHEMA_VERSIONS};
+pub use wire::{EventParseError, SUPPORTED_SCHEMA_VERSIONS, declared_schema_version};
 
 /// A complete event: envelope + payload + annotations.
 ///

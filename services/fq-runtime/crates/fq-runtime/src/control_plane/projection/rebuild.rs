@@ -36,6 +36,8 @@ use super::store::{ProjectionStore, StoreError};
 use crate::bus::{EventBus, STREAM_NAME};
 use crate::watermark::WatermarkSender;
 
+pub mod floor;
+
 /// What resetting the durable found and recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConsumerReset {
