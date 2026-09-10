@@ -105,6 +105,8 @@ fn the_report_roundtrips_through_its_declared_shape() {
             from_version: Some(0),
             schema_version: 1,
             target_seq: Some(60_744),
+            floor_seq: Some(58_000),
+            carried_below_floor: 12,
             consumer_reset_pending: false,
             in_progress: true,
         }),

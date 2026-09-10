@@ -165,6 +165,8 @@ impl RebuildRecord {
             from_version: self.from_version,
             schema_version: self.schema_version,
             target_seq: self.target_seq,
+            floor_seq: self.floor_seq,
+            carried_below_floor: self.carried_below_floor,
             consumer_reset_pending,
             in_progress,
         }

@@ -268,17 +268,19 @@ pub(crate) enum Commands {
 pub(crate) enum ProjectionCommands {
     /// Rebuild the daemon's projection from the event stream: drop
     /// its tables, recreate them at the daemon's schema version, and
-    /// replay the stream from the start of its retention.
+    /// replay the stream from its replay floor — the first sequence
+    /// whose envelope version the daemon reads.
     ///
     /// Asks the running daemon (`control.projection_rebuild`), which
     /// stops its projection consumer, rebuilds, resets the durable
     /// consumer and starts it again — the same rebuild it performs by
-    /// itself when its schema version changes. Rows the retention
-    /// sweep exempts (cost-bearing events, invocation summaries,
-    /// trigger records) are carried across, so spend older than the
-    /// stream's window is kept; everything the stream still holds is
-    /// re-derived whole. Until the replay catches up, reads answer over
-    /// a partial fold — `fq status` reports its progress.
+    /// itself when its schema version changes. Every row is carried
+    /// across; rows at or above the floor are then re-derived whole
+    /// from the stream, and rows below it — history the daemon cannot
+    /// read — stay as they were, as do cost-bearing events, invocation
+    /// summaries and trigger records wherever they sit, so no spend is
+    /// lost. Until the replay catches up, reads answer over a partial
+    /// fold — `fq status` reports its progress, the floor included.
     Rebuild {
         /// Confirm: the projection's tables are dropped and re-derived
         /// from the stream. Refused without it.

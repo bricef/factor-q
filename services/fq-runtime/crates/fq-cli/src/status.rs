@@ -181,23 +181,44 @@ fn render_status_human(doc: &StatusDocument) -> String {
 
 /// Pure: the projection's last rebuild, one line. Nothing at all when
 /// the projection has never been rebuilt — the common case, and not a
-/// finding. While the replay runs the line says so, with the stream
-/// position it has to reach; afterwards it records when and why, so
+/// finding. While the replay runs the line says so, with where it
+/// started (the replay floor: the first sequence this build reads),
+/// the position it has to reach, and how many older rows were carried
+/// as they were; afterwards it records the same, and when and why, so
 /// an operator reading a spend figure that looks freshly backfilled
-/// can see the rebuild that did it.
+/// can see the rebuild that did it — and one that looks untouched can
+/// see it lay below the floor.
 fn render_projection_rebuild_human(rebuild: Option<&fq_ops::surface::ProjectionRebuild>) -> String {
     let Some(rebuild) = rebuild else {
         return String::new();
     };
+    let carried = rebuild.carried_below_floor;
     let state = if rebuild.consumer_reset_pending {
         "in progress (the consumer is resetting)".to_string()
     } else if rebuild.in_progress {
-        match rebuild.target_seq {
-            Some(seq) => format!("in progress (replaying to stream sequence {seq})"),
-            None => "in progress".to_string(),
+        match (rebuild.floor_seq, rebuild.target_seq) {
+            (Some(floor), Some(target)) => format!(
+                "in progress (replaying from sequence {floor} to {target}; {carried} older \
+                 rows carried as-is)"
+            ),
+            (None, Some(target)) => {
+                format!("in progress (replaying to stream sequence {target})")
+            }
+            _ => "in progress".to_string(),
         }
     } else {
-        "complete".to_string()
+        match (rebuild.floor_seq, rebuild.target_seq) {
+            (Some(floor), Some(target)) if floor > target => format!(
+                "complete (nothing to replay: the stream holds no event this build reads; \
+                 {carried} rows carried as-is)"
+            ),
+            (Some(floor), _) => {
+                format!(
+                    "complete (replayed from sequence {floor}; {carried} older rows carried as-is)"
+                )
+            }
+            (None, _) => "complete".to_string(),
+        }
     };
     format!(
         "  projection rebuild: {state} — started {}, {}\n",

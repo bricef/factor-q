@@ -1640,7 +1640,7 @@
         "scope": "control",
         "verb": "write"
       },
-      "description": "Requires `confirm`; refused otherwise. The projection is derived, so this is a recovery of the machinery rather than a write to any resource: the daemon stops its projection consumer, drops the projection tables and recreates them at this build's schema version, resets the durable consumer so the stream replays from the start of its retention, and starts the consumer again. Rows the retention sweep exempts — cost-bearing events, invocation summaries and trigger records — are carried across before the replay begins, so spend older than the stream's window is kept; everything the stream still holds is re-derived whole, which is what backfills a column that was NULL for history. Answers when the consumer is running again, not when the replay has finished: until it catches up, reads answer over a partial fold, and `control.status` reports the replay's progress under `projection_rebuild`. Appends no atom.",
+      "description": "Requires `confirm`; refused otherwise. The projection is derived, so this is a recovery of the machinery rather than a write to any resource: the daemon stops its projection consumer, drops the projection tables and recreates them at this build's schema version with every row carried across, resets the durable consumer so the stream replays from its replay floor — the first sequence whose envelope version this build reads — and starts the consumer again. Rows at or above the floor are dropped and re-derived whole from the stream, which is what backfills a column that was NULL for history; rows below it — history this build cannot read, which the replay never reaches — stay as they were, as do cost-bearing events, invocation summaries and trigger records wherever they sit, so no spend figure is lost. Answers when the consumer is running again, not when the replay has finished: until it catches up, reads answer over a partial fold, and `control.status` reports the replay's progress under `projection_rebuild`, with the floor and the count of rows carried below it. Appends no atom.",
       "domain": "control",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2935,11 +2935,28 @@
             ]
           },
           "ProjectionRebuild": {
-            "description": "The projection's last rebuild, as `control.status` reports it.\n\nA rebuild drops the projection's tables, recreates them at the\ndaemon's schema version, carries the sweep-exempt rows across\n(cost-bearing events, invocation summaries, trigger records), and\nreplays the event stream from the start of its retention into them.\nIt happens on start when the file's schema version is older than\nthe daemon's, and on demand through `control.projection_rebuild`.",
+            "description": "The projection's last rebuild, as `control.status` reports it.\n\nA rebuild drops the projection's tables, recreates them at the\ndaemon's schema version with every row carried across, and replays\nthe event stream into them from the **replay floor** — the first\nstream sequence whose envelope version the daemon reads. Rows at or\nabove the floor are dropped and re-derived by the replay; rows\nbelow it — history from before an envelope bump, which the daemon\ncannot read and the replay never reaches — are kept as they were,\nas are cost-bearing events, invocation summaries and trigger\nrecords wherever they sit. It happens on start when the file's\nschema version is older than the daemon's, and on demand through\n`control.projection_rebuild`.",
             "properties": {
+              "carried_below_floor": {
+                "default": 0,
+                "description": "How many projected event rows lie below the floor and were\ncarried as they were, the replay being unable to re-derive them.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "consumer_reset_pending": {
                 "description": "True while the durable consumer has yet to be reset: the tables\nare recreated, the replay has not started.",
                 "type": "boolean"
+              },
+              "floor_seq": {
+                "default": null,
+                "description": "The replay floor: the first stream sequence the replay started\nat — the first whose envelope version the daemon reads. Absent\nuntil the reset. Past `target_seq` when the stream held nothing\nthe daemon reads: then nothing was replayed and every row was\ncarried.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "from_version": {
                 "default": null,

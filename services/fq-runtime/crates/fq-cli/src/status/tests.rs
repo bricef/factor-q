@@ -275,6 +275,8 @@ fn rebuild(consumer_reset_pending: bool, in_progress: bool) -> fq_ops::surface::
         from_version: Some(0),
         schema_version: 1,
         target_seq: Some(4_242),
+        floor_seq: Some(4_000),
+        carried_below_floor: 3,
         consumer_reset_pending,
         in_progress,
     }
@@ -282,7 +284,11 @@ fn rebuild(consumer_reset_pending: bool, in_progress: bool) -> fq_ops::surface::
 
 /// A projection that was never rebuilt prints no rebuild line at all —
 /// the common case is not a finding — and one that was says where the
-/// replay stands: resetting, replaying to a named position, or done.
+/// replay stands: resetting, replaying from the floor to a named
+/// position with the older rows carried as-is, or done and saying the
+/// same in the past tense. A record with no floor (the reset not yet
+/// performed) says what it can; a floor past the target says nothing
+/// was replayed.
 #[test]
 fn the_rebuild_line_follows_the_replay() {
     assert!(
@@ -306,7 +312,9 @@ fn the_rebuild_line_follows_the_replay() {
     );
     let replaying = with(rebuild(false, true));
     assert!(
-        replaying.contains("in progress (replaying to stream sequence 4242)"),
+        replaying.contains(
+            "in progress (replaying from sequence 4000 to 4242; 3 older rows carried as-is)"
+        ),
         "{replaying}"
     );
     assert!(
@@ -315,8 +323,33 @@ fn the_rebuild_line_follows_the_replay() {
     );
     let done = with(rebuild(false, false));
     assert!(
-        done.contains("projection rebuild: complete — started 2026-09-07T10:00:00+00:00"),
+        done.contains(
+            "projection rebuild: complete (replayed from sequence 4000; 3 older rows carried \
+             as-is) — started 2026-09-07T10:00:00+00:00"
+        ),
         "{done}"
+    );
+
+    let without_floor = with(fq_ops::surface::ProjectionRebuild {
+        floor_seq: None,
+        carried_below_floor: 0,
+        ..rebuild(false, true)
+    });
+    assert!(
+        without_floor.contains("in progress (replaying to stream sequence 4242)"),
+        "{without_floor}"
+    );
+    let nothing_replayed = with(fq_ops::surface::ProjectionRebuild {
+        floor_seq: Some(4_243),
+        carried_below_floor: 9,
+        ..rebuild(false, false)
+    });
+    assert!(
+        nothing_replayed.contains(
+            "complete (nothing to replay: the stream holds no event this build reads; 9 rows \
+             carried as-is)"
+        ),
+        "{nothing_replayed}"
     );
 }
 
