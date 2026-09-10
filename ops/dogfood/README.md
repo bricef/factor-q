@@ -121,10 +121,11 @@ else. The crontab is active from the moment it is installed, but
 it is idle — i.e. until the pairing in step 3 exists.
 
 **Seed the instance volume.** The daemon needs `fqd.toml`, `agents/`
-and, if the scheduler runs, `fq-cron.toml` inside the volume before its
-first start. `fq-cron.toml` must hold at least one `[[job]]` block, or
-the line `job = []` for an instance that starts with nothing scheduled:
-an empty file is refused at startup and by `--check`, because zero bytes
+and `fq-cron.toml` inside the volume before its first start — compose
+starts `fq-cron` unconditionally, and it exits 1 on a file that is
+missing. `fq-cron.toml` must hold at least one `[[job]]` block, or the
+line `job = []` for an instance that starts with nothing scheduled: an
+empty file is refused at startup and by `--check`, because zero bytes
 are what a reader sees of a half-written save and are not worth guessing
 about (#664). Stage them in a directory and copy them in through the
 image (the volume is created on first use and owned by the runtime

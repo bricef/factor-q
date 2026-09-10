@@ -63,7 +63,7 @@ const valveWindow = time.Hour
 func plan(now time.Time, jobs JobSet, state map[string]FireState) ([]Fire, time.Time) {
 	candidates := make([]Fire, 0, len(jobs.Jobs))
 	for _, job := range jobs.Jobs {
-		if job.Enabled != nil && !*job.Enabled {
+		if !job.scheduled() {
 			continue
 		}
 		location, err := time.LoadLocation(job.TZ)
