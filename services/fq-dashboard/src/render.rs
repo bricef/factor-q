@@ -9,7 +9,9 @@
 mod agents;
 mod consumers;
 mod transcript;
-pub use transcript::{transcript_entry_html, transcript_outcome, transcript_status_html};
+pub use transcript::{
+    transcript_entry_html, transcript_error, transcript_outcome, transcript_status_html,
+};
 
 use fq_ops::health::StreamHealth;
 use fq_ops::surface::{DoctorReport, StatusReport};
