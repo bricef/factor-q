@@ -216,6 +216,10 @@ pub(crate) async fn transcript_stream(
 /// not answer, and this is the page an operator is looking at when it
 /// matters.
 fn transcript_error_page(state: &AppState, invocation_id: &str, error: &str) -> Page {
+    // The daemon answered, so it was seen — the unreachable page's
+    // "last seen …" line reads this, and a later outage should date
+    // from here rather than from the last page that fully rendered.
+    state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
     let title = format!(
         "transcript {}",
         invocation_id.chars().take(8).collect::<String>()
@@ -264,12 +268,17 @@ pub(crate) async fn transcript_page(
         match call(&client, OpId::List(Domain::Turn), filter).await {
             Ok(turns) => turns,
             Err(CallError::NotFound) => Vec::new(),
-            // The edge answered, and the answer was an error. That is
-            // not "runtime unreachable", and rendering it as one sent
-            // the operator to the tunnel and the daemon while every
-            // transcript on the instance was unreadable for a reason
-            // neither of those would explain (#673). The connection
-            // stands — record it as seen — and the error goes on the
+            // No answer came back: the connection broke under the call
+            // or the deadline passed, and nothing can be said about
+            // what the daemon thinks. That IS the unreachable page.
+            Err(CallError::Unreachable(err)) => {
+                return unreachable_page(&state, "transcript", &err);
+            }
+            // An answer came back, and it was an error. Not "runtime
+            // unreachable": rendering it as one sent the operator to
+            // the tunnel and the daemon process while every transcript
+            // on the instance was unreadable for a reason neither of
+            // those would explain (#673). The error goes on the
             // transcript page, in the page's own frame.
             Err(CallError::Failed(err)) => return transcript_error_page(&state, &id, &err),
         };
