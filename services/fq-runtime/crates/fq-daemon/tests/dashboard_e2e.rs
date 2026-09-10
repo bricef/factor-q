@@ -212,8 +212,8 @@ async fn start_daemon(server: &fq_test_support::NatsServer, scratch: &std::path:
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    let fingerprint_hex = suffix_of(&text, "edge: certificate fingerprint (clients pin this): ")
-        .to_string();
+    let fingerprint_hex =
+        suffix_of(&text, "edge: certificate fingerprint (clients pin this): ").to_string();
     Daemon {
         addr: suffix_of(&text, "- edge is listening on ").to_string(),
         fingerprint: parse_fingerprint(&fingerprint_hex),
@@ -480,9 +480,10 @@ async fn the_dashboard_serves_every_page_against_a_real_daemon() {
     let mut daemon = start_daemon(&server, &scratch).await;
     let invocation = run_one_invocation(&server, &mut daemon).await;
 
-    let client = fq_edge::EdgeClient::connect(&daemon.addr, daemon.fingerprint, &daemon.admin_token)
-        .await
-        .expect("connect edge");
+    let client =
+        fq_edge::EdgeClient::connect(&daemon.addr, daemon.fingerprint, &daemon.admin_token)
+            .await
+            .expect("connect edge");
     // Read-your-writes before anything touches the dashboard: gate a
     // read on the last sequence this agent's subject holds, so the
     // daemon's fold is known to have taken in everything the run just
