@@ -112,10 +112,18 @@ fn unique_scratch(mock_base_url: &str) -> std::path::PathBuf {
     // so the invocation below is a real dispatch that never leaves the
     // machine. The explicit price is the pricing guarantee (ADR-0004),
     // which declaring an agent arms.
+    //
+    // `min_seq_wait_ms` is the ceiling on the gated read below, and its
+    // default is 2 s — the daemon answers `Lagging` past that, not the
+    // tarpc deadline. Two seconds is a sane production default and far
+    // too tight for the only load-sensitive barrier in this suite: a
+    // fold that falls behind on a busy box would fail the test for a
+    // reason that has nothing to do with the dashboard.
     std::fs::write(
         dir.join("fq.toml"),
         format!(
-            "[edge]\nbind = \"127.0.0.1:0\"\n\n\
+            "[edge]\nbind = \"127.0.0.1:0\"\n\
+             min_seq_wait_ms = 30000\n\n\
              [providers.anthropic]\nmodels = [\"{MODEL}\"]\n\
              base_url = \"{mock_base_url}\"\n\n\
              [providers.anthropic.pricing.\"{MODEL}\"]\n\
@@ -425,15 +433,22 @@ fn assert_contains(path: &str, resp: &HttpResponse, needle: &str) {
 /// The committed pre-#510 event, published raw onto the stream — the
 /// history a long-lived instance carries across a wire break.
 ///
-/// **Published after the daemon's projection has caught up**, which is
-/// what the live instance actually looks like: those events were
-/// written by a build that could read them, so the durable projector
-/// consumed them when they were current and only the *ad-hoc rescan*
-/// (`events_from` from sequence one, which is what `turn.list` does)
-/// meets them with a build that cannot. Seeding them ahead of a fresh
-/// daemon instead halts its projector on the first message it ever
-/// sees, which is a different bug in a different consumer — strict is
-/// the right policy for a durable fold, and #673 is not about that.
+/// **Published after the daemon's projection has caught up.** Not
+/// because that avoids halting the projector — it does not. The
+/// projection durable subscribes to every subject and halts its loop on
+/// any version it cannot read, so this message stops it either way.
+/// What the ordering buys is *when*: the halt lands after the rows this
+/// test needs are already folded, so everything asserted below reads a
+/// projection frozen at the pre-seed horizon, which the gated read has
+/// just proved is far enough. Seeding ahead of a fresh daemon instead
+/// halts it at sequence one, with nothing folded at all.
+///
+/// The live instance was never in either state: its durable was long
+/// past the v2 range, having consumed those events when the build could
+/// still read them. Only the *ad-hoc rescan* — `events_from` from
+/// sequence one, which is what `turn.list` does — meets them with a
+/// build that cannot, and that rescan is what #673 is about and what
+/// this reproduces faithfully.
 async fn seed_legacy_history(server: &fq_test_support::NatsServer) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../fq-runtime/tests/corpus/events/v2/llm_request.json");
@@ -565,9 +580,19 @@ async fn run_one_invocation(server: &fq_test_support::NatsServer, daemon: &mut D
     let log = daemon
         .await_log("reducer invocation completed", Duration::from_secs(60))
         .await;
-    let marker = "\"invocation_id\":\"";
-    let start = log.find(marker).expect("no invocation_id in daemon log") + marker.len();
-    log[start..start + 36].to_string()
+    // JSON logs, so the id is a field: parse the first line that
+    // carries one rather than slicing a fixed width off a `find`, which
+    // would hand back 36 bytes of whatever followed if the shape moved.
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|v| {
+            v.pointer("/fields/invocation_id")
+                .or_else(|| v.pointer("/span/invocation_id"))
+                .or_else(|| v.get("invocation_id"))
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| panic!("no invocation_id in daemon log\n--- log ---\n{log}"))
 }
 
 /// A gated read: returns once the daemon's fold has taken in `min_seq`.
@@ -637,7 +662,7 @@ async fn check_pages(at: &str, invocation: &str, version: &str) {
     let path = format!("/invocations/{id}");
     let resp = get(at, &path, budget).await;
     assert_reached_the_daemon(&path, &resp);
-    assert_contains(&path, &resp, short);
+    assert_contains(&path, &resp, id);
     assert_contains(&path, &resp, AGENT);
 
     let resp = get(at, "/events", budget).await;
@@ -647,6 +672,9 @@ async fn check_pages(at: &str, invocation: &str, version: &str) {
     let resp = get(at, "/costs", budget).await;
     assert_reached_the_daemon("/costs", &resp);
     assert_eq!(resp.status, 200, "GET /costs");
+    // The run priced a real model call past the gated read, so this
+    // page has a row and not the "no cost events recorded" body.
+    assert_contains("/costs", &resp, AGENT);
 
     let resp = get(at, "/agents", budget).await;
     assert_reached_the_daemon("/agents", &resp);
@@ -671,11 +699,24 @@ async fn check_transcript(at: &str, invocation: &str) {
     assert_reached_the_daemon(&path, &resp);
     assert_eq!(resp.status, 200, "GET {path}\n--- body ---\n{}", resp.body);
     assert_contains(&path, &resp, r#"id="turns""#);
-    assert_contains(&path, &resp, r#"class="turn"#);
+    // `<div class="turn` and not `class="turn`. #683 renders a refused
+    // `turn.list` as `<pre class="turn err">…</pre>` inside the
+    // transcript's own frame, so the looser needle is present on
+    // exactly the failure this suite exists to catch. Real turns are
+    // the `<div>`s `render::transcript_entry_html` writes.
+    let turns = resp.body.matches(r#"<div class="turn"#).count();
     assert!(
-        !resp.body.contains("no transcript for that id"),
-        "GET {path} found no turns — the seeded LlmResponse should be one.\n\
-         --- body ---\n{}",
+        turns >= 1,
+        "GET {path} rendered no turn elements — the run's dispatch should \
+         have produced at least one.\n--- body ---\n{}",
+        resp.body
+    );
+    // The zero-turns-at-200 body. (`no transcript for that id` is the
+    // 404's, which the status assertion above already excludes.)
+    assert!(
+        !resp.body.contains("no transcript entries."),
+        "GET {path} rendered an empty transcript — `turn.list` answered \
+         with no turns for a run that completed.\n--- body ---\n{}",
         resp.body
     );
 
