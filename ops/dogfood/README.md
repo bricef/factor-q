@@ -122,7 +122,11 @@ it is idle — i.e. until the pairing in step 3 exists.
 
 **Seed the instance volume.** The daemon needs `fqd.toml`, `agents/`
 and, if the scheduler runs, `fq-cron.toml` inside the volume before its
-first start. Stage them in a directory and copy them in through the
+first start. `fq-cron.toml` must hold at least one `[[job]]` block, or
+the line `job = []` for an instance that starts with nothing scheduled:
+an empty file is refused at startup and by `--check`, because zero bytes
+are what a reader sees of a half-written save and are not worth guessing
+about (#664). Stage them in a directory and copy them in through the
 image (the volume is created on first use and owned by the runtime
 user; the copy runs as that user):
 
