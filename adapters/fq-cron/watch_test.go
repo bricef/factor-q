@@ -130,34 +130,28 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 		}
 	})
 
-	// #634's "silently and indefinitely", in full: LoadConfig itself lands in
-	// the truncate gap, so fq-cron starts with zero jobs. Startup does not
-	// apply the reload rule, so nothing refuses that (#632) — the first check
-	// is the only thing that can put the jobs back, and it can only do so by
-	// comparing against what was actually loaded.
-	t.Run("a startup that read a torn file recovers on the first check", func(t *testing.T) {
+	// #634's "silently and indefinitely" is now refused one step earlier.
+	// LoadConfig itself landing in the truncate gap used to start fq-cron with
+	// zero jobs, because startup did not apply the reload rule (#632), and the
+	// first check was the only thing that could put the jobs back. Startup
+	// applies that rule now (#664), so there is no job-less startup left to
+	// recover from: the process does not come up, and the supervisor's restart
+	// reads the file the writer has since finished. The seed's own guarantee —
+	// that an edit made during the broker wait is seen — is the subtest above.
+	t.Run("a startup that reads a torn file does not start", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "fq-cron.toml")
 		writeConfig(t, path, "") // the writer's truncate, caught by LoadConfig
-		running := mustLoad(t, path)
-		if len(running.Config.Jobs) != 0 {
-			t.Fatalf("a torn read must load as no jobs, got %q", jobNames(running.Config))
+		_, err := LoadConfig(path)
+		if err == nil {
+			t.Fatal("a torn read started a scheduler with nothing scheduled")
 		}
-		// A zero-byte file still seeds: os.ReadFile returns empty but non-nil,
-		// so this is a watcher that has seen zero bytes, not one that has seen
-		// nothing. The distinction is the whole point of the seeded flag.
-		if running.Raw == nil {
-			t.Fatal("a zero-byte config must still seed the watcher")
+		if !strings.Contains(err.Error(), "declaring no jobs") {
+			t.Fatalf("startup refusal = %v, want the reason a reload gives", err)
 		}
-		writeConfig(t, path, configText("first", "0 * * * *")) // the writer finishes
-		w := NewConfigWatcher(path, running, ConfigWatcherOptions{
-			Settle: time.Millisecond,
-			Logger: log.New(&syncBuffer{}, "", 0),
-		})
-
-		_, event, ok := w.Check(context.Background())
-		if !ok || len(event.Diff.Added) != 1 || event.Diff.Added[0] != "first" {
-			t.Fatalf("the completed write = %+v (accepted=%v), want first added; "+
-				"a watcher that seeded itself would have swallowed it and scheduled nothing indefinitely", event.Diff, ok)
+		// The restart that follows reads the completed write and starts.
+		writeConfig(t, path, configText("first", "0 * * * *"))
+		if names := jobNames(mustLoad(t, path).Config); names != "first" {
+			t.Fatalf("the restart loaded %q, want the finished file (%q)", names, "first")
 		}
 	})
 

@@ -293,17 +293,16 @@ func (w *ConfigWatcher) check(ctx context.Context) (ReloadEvent, checkOutcome) {
 		return ReloadEvent{}, checkRejected
 	}
 
-	next, declaresJobs, err := parseConfig(data)
+	// A config that declares no jobs without an explicit `job = []` is one of
+	// the refusals ParseConfig itself makes: a read that lands in a writer's
+	// truncate gap parses as "every job deleted", and the scheduler would
+	// delete every job's fire ledger to match (#623). It is refused at every
+	// door rather than at this one, so startup and `--check` cannot accept
+	// what a reload would throw out (#664, jobsUndeclaredError) — and the
+	// operator reads the same sentence either way.
+	next, err := ParseConfig(data)
 	if err != nil {
 		w.opts.Logger.Printf("config reload rejected: %v", err)
-		return ReloadEvent{}, checkRejected
-	}
-	// Zero bytes are valid TOML declaring no jobs, so a read that lands in
-	// a writer's truncate gap parses as "every job deleted" — and the
-	// scheduler would delete every job's fire ledger to match. A config only
-	// means that when it says so (#623).
-	if len(next.Jobs) == 0 && !declaresJobs {
-		w.opts.Logger.Printf("config reload rejected: %d bytes declaring no jobs, and no explicit `job = []`", len(data))
 		return ReloadEvent{}, checkRejected
 	}
 	diff := diffConfigs(w.current, next)

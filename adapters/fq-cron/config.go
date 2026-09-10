@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -61,6 +62,26 @@ type LoadedConfig struct {
 	Raw []byte
 }
 
+// jobsUndeclaredError refuses a file that came out with no jobs in it and
+// never said it meant to. `job = []` is the one way a config says "no jobs"
+// out loud; everything else that parses empty — zero bytes, whitespace,
+// comments alone, a `[limits]` header alone — is far more likely a read that
+// landed between a writer's truncate and its write, which TOML parses as a
+// perfectly valid config with every job gone
+// (https://github.com/bricef/factor-q/issues/623).
+//
+// One rule, one sentence, one place: ParseConfig applies it, so the two paths
+// that read a config cannot drift apart the way they had
+// (https://github.com/bricef/factor-q/issues/664). A reload logs the sentence
+// as it stands ("config reload rejected: …", watch.go); startup and `--check`
+// name the file and say what to write instead (LoadConfig). Neither can skip
+// it, because neither can obtain a *Config without going through here.
+type jobsUndeclaredError struct{ Bytes int }
+
+func (e jobsUndeclaredError) Error() string {
+	return fmt.Sprintf("%d bytes declaring no jobs, and no explicit `job = []`", e.Bytes)
+}
+
 func LoadConfig(path string) (*LoadedConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -68,29 +89,28 @@ func LoadConfig(path string) (*LoadedConfig, error) {
 	}
 	cfg, err := ParseConfig(data)
 	if err != nil {
+		// The reason a reload logs is, here, the reason the process will not
+		// come up — so it carries the file it is about and the line that
+		// makes it go away. An operator running `--check` has the file in
+		// front of them; a scheduler that starts on it fires nothing (#664).
+		var undeclared jobsUndeclaredError
+		if errors.As(err, &undeclared) {
+			return nil, fmt.Errorf("%s: %w — write `job = []` to run with nothing scheduled", path, err)
+		}
 		return nil, err
 	}
 	return &LoadedConfig{Config: cfg, Raw: data}, nil
 }
 
+// ParseConfig parses and validates one configuration file's bytes. A config
+// that declares no jobs without saying so is refused here rather than by each
+// caller: see jobsUndeclaredError.
 func ParseConfig(data []byte) (*Config, error) {
-	cfg, _, err := parseConfig(data)
-	return cfg, err
-}
-
-// parseConfig additionally reports whether the file *declares* the top-level
-// `job` key. That is the only thing separating an operator's deliberate "no
-// jobs any more" (`job = []`) from a file that merely happens to contain
-// none — including the zero bytes a reader sees between a writer's truncate
-// and its write, which TOML parses as a perfectly valid config with every job
-// gone (https://github.com/bricef/factor-q/issues/623).
-func parseConfig(data []byte) (*Config, bool, error) {
 	var cfg Config
 	meta, err := toml.Decode(string(data), &cfg)
 	if err != nil {
-		return nil, false, fmt.Errorf("parse TOML: %w", err)
+		return nil, fmt.Errorf("parse TOML: %w", err)
 	}
-	declaresJobs := meta.IsDefined("job")
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		// TOML metadata does not retain a table's declaration position, so add
@@ -98,13 +118,20 @@ func parseConfig(data []byte) (*Config, bool, error) {
 		for line, text := range strings.Split(string(data), "\n") {
 			for _, job := range cfg.Jobs {
 				if strings.Contains(err.Error(), fmt.Sprintf("job %q", job.Name)) && strings.TrimSpace(text) == fmt.Sprintf("name = %q", job.Name) {
-					return nil, declaresJobs, fmt.Errorf("line %d: %w", line+1, err)
+					return nil, fmt.Errorf("line %d: %w", line+1, err)
 				}
 			}
 		}
-		return nil, declaresJobs, err
+		return nil, err
 	}
-	return &cfg, declaresJobs, nil
+	// Last, so a file with a real mistake in it is told about the mistake:
+	// whether the top-level `job` key is *declared* is all that separates a
+	// deliberate "no jobs any more" from a file that merely happens to hold
+	// none.
+	if len(cfg.Jobs) == 0 && !meta.IsDefined("job") {
+		return nil, jobsUndeclaredError{Bytes: len(data)}
+	}
+	return &cfg, nil
 }
 
 func (c *Config) applyDefaults() {
