@@ -46,7 +46,7 @@ cargo run -q --manifest-path "$root/services/fq-dashboard/Cargo.toml" \
 # guards the renderer, and nothing more: no daemon runs here, so it
 # cannot see a page that 503s against a real one.
 for f in "$html"/*.html; do
-    [ "$(basename "$f")" = "unreachable.html" ] && continue
+    if [ "$(basename "$f")" = "unreachable.html" ]; then continue; fi
     if grep -q "runtime unreachable at" "$f"; then
         echo "$f rendered the unreachable banner from fixture data" >&2
         exit 1

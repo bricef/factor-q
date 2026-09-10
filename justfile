@@ -686,7 +686,10 @@ lint-fmt:
 # Per crate rather than one `--workspace` pass, because the feature sets are
 # load-bearing: fq-store lints under --all-features (cli/service/bus/
 # failpoints), and a workspace pass resolves default features, which would
-# silently drop that coverage.
+# silently drop that coverage. Same reason `--features dashboard-e2e` is on
+# the runtime pass: that feature gates a test TARGET, and `--all-targets`
+# under default features skips it — the file would be the one place in the
+# tree clippy never reads. It needs no dashboard binary to lint.
 # Run clippy over every crate with its own feature set.
 lint-clippy:
     #!/usr/bin/env bash
@@ -694,7 +697,7 @@ lint-clippy:
     export FQ_CI_TIMINGS="${FQ_CI_TIMINGS:-{{justfile_directory()}}/.ci-timings}"
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
-    run_phase "runtime"      cargo clippy --all-targets {{runtime_pkgs}} -- -D warnings
+    run_phase "runtime"      cargo clippy --all-targets --features dashboard-e2e {{runtime_pkgs}} -- -D warnings
     run_phase "store"        cargo clippy -p fq-store --all-targets --all-features
     run_phase "dashboard"    cargo clippy -p fq-dashboard --all-targets
     run_phase "test-support" cargo clippy -p fq-test-support --all-targets -- -D warnings
