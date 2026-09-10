@@ -41,6 +41,18 @@ mkdir -p "$html"
 cargo run -q --manifest-path "$root/services/fq-dashboard/Cargo.toml" \
     -- render-fixtures --out "$html" >/dev/null
 
+# `unreachable.html` is a deliberate fixture; the banner anywhere else
+# means `render-fixtures` itself is handing a page the wrong body. This
+# guards the renderer, and nothing more: no daemon runs here, so it
+# cannot see a page that 503s against a real one.
+for f in "$html"/*.html; do
+    [ "$(basename "$f")" = "unreachable.html" ] && continue
+    if grep -q "runtime unreachable at" "$f"; then
+        echo "$f rendered the unreachable banner from fixture data" >&2
+        exit 1
+    fi
+done
+
 shot() {
     # --no-sandbox: the devbox chromium cannot create its own sandbox
     # inside the agent sandbox; the input is our own generated HTML.
