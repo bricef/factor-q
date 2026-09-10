@@ -27,7 +27,13 @@
 //!
 //! What the floor does not change: a version this build does not read
 //! *after* the floor still halts the replay. That is a genuinely mixed
-//! stream, and #409's rule stands.
+//! stream, and #409's rule stands. A stream whose versions are not
+//! monotone — a rollback after a bump — has no single floor, and the
+//! search lands on *a* position: every message it probed below it was
+//! unreadable, and the first classifiable message at or above it is
+//! readable. Whichever position that is, nothing is lost: the rows
+//! below it are kept as they were, and an unreadable message above it
+//! halts the replay where the consumer would have halted live.
 
 use async_nats::jetstream::stream::{RawMessageErrorKind, Stream};
 

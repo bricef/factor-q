@@ -3,13 +3,27 @@
 //! the consumer so it can be stopped and started around a rebuild, and
 //! the handle `control.projection_rebuild` asks.
 //!
-//! The store's own `rebuild` module does the SQL half — drop, recreate,
-//! carry the sweep-exempt rows across, stamp the version, note that the
-//! durable must be reset. What that half cannot do is touch the bus.
-//! This module does: [`reset_projection_consumer`] deletes the
-//! `fq-projector` durable so the next consumer start creates it afresh
-//! from the beginning of the stream, and records the stream's last
-//! sequence as the replay's target.
+//! The store's own `rebuild` module does the SQL half at open — drop,
+//! recreate, carry every row across, stamp the version, note that the
+//! durable must be reset. What that half cannot do is touch the bus,
+//! and so it cannot know which rows the replay will re-derive. This
+//! module can: [`reset_projection_consumer`] finds the **replay
+//! floor** — the first stream sequence whose envelope version this
+//! build reads ([`floor`]) — has the store drop the rows at or above
+//! it and keep the rest, deletes the `fq-projector` durable so the
+//! next consumer start creates it afresh *at the floor*, and records
+//! the stream's last sequence as the replay's target. A stream still
+//! holding history from before an envelope bump is therefore replayed
+//! from the point this build can read, and the rows below that point
+//! stay as they were, instead of the replay halting on the first
+//! message it cannot read
+//! (<https://github.com/bricef/factor-q/issues/648>).
+//!
+//! The reset is two halves, and the order is the crash-safety: the
+//! floor step ([`apply_replay_floor`]) commits the delete and the
+//! floor with the reset note left in place, then the durable is
+//! deleted and the note cleared. A start that dies between the halves
+//! finds the note on its next start and redoes both.
 //!
 //! **A reset is never performed under a running consumer loop.** The
 //! loop's message stream would end, the daemon supervises that as a
@@ -20,10 +34,10 @@
 //! durable, and starts the loop again, and only *its* exit is what the
 //! daemon supervises.
 //!
-//! The consumer's own parse-and-ack policy is untouched here. What an
-//! unsupported envelope version does to a replay is that policy's
-//! concern, and its fix; a rebuild replays whatever the consumer would
-//! have projected live.
+//! The consumer's own parse-and-ack policy is untouched here. The
+//! floor is where the replay starts; a version this build does not
+//! read *after* the floor still halts the replay, because that is a
+//! genuinely mixed stream and the policy's concern.
 
 use std::sync::Arc;
 
@@ -31,9 +45,11 @@ use async_nats::jetstream::stream::ConsumerErrorKind;
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
+use self::floor::{ReplayFloor, replay_floor};
 use super::consumer::{CONSUMER_NAME, ConsumerError, ProjectionConsumer};
 use super::store::{ProjectionStore, StoreError};
 use crate::bus::{EventBus, STREAM_NAME};
+use crate::control_plane::durable_consumer::DeliverFrom;
 use crate::watermark::WatermarkSender;
 
 pub mod floor;
@@ -47,15 +63,57 @@ pub struct ConsumerReset {
     /// The stream's last sequence at the reset — what the replay has
     /// to reach before every event the stream holds is back.
     pub target_seq: u64,
+    /// The replay floor the reset was performed at.
+    pub floor: ReplayFloor,
+    /// How many `events` rows were kept below the floor.
+    pub carried_below_floor: u64,
+}
+
+impl ConsumerReset {
+    /// Where the durable is recreated: at the floor.
+    pub fn deliver_from(&self) -> DeliverFrom {
+        self.floor.deliver_from()
+    }
 }
 
 fn stream_error(err: impl std::fmt::Display) -> ConsumerError {
     ConsumerError::Stream(err.to_string())
 }
 
-/// Delete the projection's durable consumer so the next start creates
-/// it afresh — `DeliverAll` from the beginning of the stream — and
-/// record the reset on the store.
+async fn event_stream(
+    bus: &EventBus,
+) -> Result<async_nats::jetstream::stream::Stream, ConsumerError> {
+    bus.jetstream()
+        .get_stream(STREAM_NAME)
+        .await
+        .map_err(stream_error)
+}
+
+/// The floor step — the first half of a reset, on its own so a start
+/// that died between the halves can be rehearsed: find the replay
+/// floor, and have the store drop what the replay re-derives and
+/// record the floor and what it kept. The reset note is untouched.
+pub async fn apply_replay_floor(
+    bus: &EventBus,
+    store: &ProjectionStore,
+) -> Result<(ReplayFloor, u64), ConsumerError> {
+    let mut stream = event_stream(bus).await?;
+    let floor = replay_floor(&mut stream).await?;
+    let carried_below_floor = store.apply_replay_floor(floor.floor).await?;
+    info!(
+        floor = floor.floor,
+        first_sequence = floor.first_sequence,
+        last_sequence = floor.last_sequence,
+        carried_below_floor,
+        "projection replay floor found; rows at or above it will be re-derived"
+    );
+    Ok((floor, carried_below_floor))
+}
+
+/// Reset the projection's durable consumer so the next start creates
+/// it afresh at the replay floor, and record the reset on the store:
+/// the floor step first, then the durable is deleted and the record
+/// completed.
 ///
 /// Tolerates an absent durable. Must not be called while a consumer
 /// loop is reading the durable; see the module docs.
@@ -63,11 +121,8 @@ pub async fn reset_projection_consumer(
     bus: &EventBus,
     store: &ProjectionStore,
 ) -> Result<ConsumerReset, ConsumerError> {
-    let mut stream = bus
-        .jetstream()
-        .get_stream(STREAM_NAME)
-        .await
-        .map_err(stream_error)?;
+    let (floor, carried_below_floor) = apply_replay_floor(bus, store).await?;
+    let mut stream = event_stream(bus).await?;
     let deleted = match stream.delete_consumer(CONSUMER_NAME).await {
         Ok(status) => status.success,
         Err(err) if matches!(err.kind(), ConsumerErrorKind::JetStream(js) if js.code() == 404) => {
@@ -86,11 +141,15 @@ pub async fn reset_projection_consumer(
         consumer = CONSUMER_NAME,
         deleted,
         target_seq,
-        "projection durable reset; the next consumer start replays the stream from the beginning"
+        floor = floor.floor,
+        carried_below_floor,
+        "projection durable reset; the next consumer start replays the stream from the floor"
     );
     Ok(ConsumerReset {
         deleted,
         target_seq,
+        floor,
+        carried_below_floor,
     })
 }
 

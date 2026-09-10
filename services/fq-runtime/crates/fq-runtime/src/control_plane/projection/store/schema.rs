@@ -8,13 +8,13 @@
 //! pragma, and there is no migration ladder. When the version a file
 //! records is older than this binary's, [`ProjectionStore::open`]
 //! **rebuilds**: the projection tables are dropped and recreated at the
-//! current version, the rows the retention sweep exempts are carried
-//! across (below), and the durable consumer is marked for a reset so the
-//! stream replays from the start of retention (`DeliverAll`) and
-//! re-derives every row it still can. The verdict — fresh, current,
-//! older, newer — is the shared kit's ([`crate::db::schema`]); a file
-//! written by a *newer* binary is refused, as the other two stores
-//! refuse theirs.
+//! current version, every row is carried across (below), and the
+//! durable consumer is marked for a reset so the stream replays from
+//! its replay floor — the first sequence whose envelope version this
+//! build reads — and re-derives every row it still can. The verdict —
+//! fresh, current, older, newer — is the shared kit's
+//! ([`crate::db::schema`]); a file written by a *newer* binary is
+//! refused, as the other two stores refuse theirs.
 //!
 //! A rebuild backfills where a migration cannot. `ALTER TABLE ADD
 //! COLUMN` leaves every existing row NULL even when the event that row
@@ -34,16 +34,25 @@
 //!
 //! ## What a rebuild keeps
 //!
-//! Three kinds of row outlive the log they were folded from, by design:
-//! cost-bearing `events` rows (`total_cost IS NOT NULL` — spend is kept
-//! indefinitely, and past stream retention the projection is its only
-//! copy), every `invocation_summary` line, and every `triggers` record.
-//! A rebuild carries all three across into the recreated tables before
-//! the replay starts. The replay then **refreshes** whichever of them
-//! the stream still holds — `insert_event` is an upsert on `event_id` —
-//! so history inside retention is re-derived whole, and history past it
-//! keeps the shape it had. Nothing the sweep would have kept is lost to
-//! a rebuild.
+//! At open, **every row**: the rebuild transaction carries the whole of
+//! `events`, `invocation_summary` and `triggers` into the recreated
+//! tables, so the file stays readable and no history is lost while the
+//! rebuild waits on the consumer. Which rows the replay can re-derive
+//! is a fact about the stream, decided where the bus is held: the
+//! consumer's reset finds the replay floor and drops the `events` rows
+//! at or above it (they come back from the replay), keeping the rows
+//! below it — history from before an envelope bump, which this build
+//! cannot read and the replay never reaches — as they are. Three kinds
+//! of row are never dropped at all, because they outlive the log they
+//! were folded from by design: cost-bearing `events` rows (`total_cost
+//! IS NOT NULL` — spend is kept indefinitely, and past stream retention
+//! the projection is its only copy), every `invocation_summary` line,
+//! and every `triggers` record. The replay **refreshes** whichever of
+//! them the stream still holds — `insert_event` is an upsert on
+//! `event_id` — so history inside the replay is re-derived whole, and
+//! history outside it keeps the shape it had. Nothing the sweep would
+//! have kept is lost to a rebuild, and neither is anything below the
+//! floor.
 //!
 //! ## Bumping the version
 //!
@@ -231,6 +240,21 @@ const ADDED_TRIGGER_COLUMNS: [(&str, &str); 1] = [
     ("requeued_from", "TEXT"),
 ];
 
+/// Sweep the transients (cheap once empty via the type index): they
+/// stopped being projected — see `insert_event` — and this evicts what
+/// older builds accumulated. Derived from `events::transient`, so
+/// adding a type there needs no edit here. Run on a same-version open,
+/// and inside a rebuild once every row has been carried across.
+pub(super) async fn evict_transients(conn: &mut sqlx::SqliteConnection) -> Result<(), StoreError> {
+    for event_type in crate::events::transient::types() {
+        sqlx::query("DELETE FROM events WHERE event_type = ?")
+            .bind(event_type)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
 impl ProjectionStore {
     /// The version this file records, or `None` for a file that has no
     /// projection tables yet. `user_version` reads 0 on a file that was
@@ -326,17 +350,8 @@ impl ProjectionStore {
                 sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
                     .execute(&self.pool)
                     .await?;
-                // Sweep the transients (cheap once empty via the type
-                // index): they stopped being projected — see
-                // `insert_event` — and this evicts what older builds
-                // accumulated. Derived from `events::transient`, so
-                // adding a type there needs no edit here.
-                for event_type in crate::events::transient::types() {
-                    sqlx::query("DELETE FROM events WHERE event_type = ?")
-                        .bind(event_type)
-                        .execute(&self.pool)
-                        .await?;
-                }
+                let mut conn = self.pool.acquire().await?;
+                evict_transients(&mut conn).await?;
             }
             Compatibility::NeedsUpgrade { from } => {
                 self.rebuild_tables(super::rebuild::RebuildReason::SchemaUpgrade { from })

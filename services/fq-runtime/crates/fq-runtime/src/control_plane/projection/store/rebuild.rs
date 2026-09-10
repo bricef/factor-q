@@ -1,31 +1,58 @@
 //! The rebuild itself, and the record the file keeps of it.
 //!
-//! A rebuild is one transaction: carry the sweep-exempt rows aside,
-//! drop the projection tables, recreate them at
-//! [`PROJECTION_SCHEMA_VERSION`], put the carried rows back, stamp the
-//! version, and note in `projection_meta` that the durable consumer
-//! must be reset before it next reads. SQLite runs DDL inside a
-//! transaction, so a crash anywhere in the middle leaves the old file
-//! whole and the next open does it again from the start.
+//! A rebuild is one transaction: carry every row aside, drop the
+//! projection tables, recreate them at [`PROJECTION_SCHEMA_VERSION`],
+//! put the carried rows back by the columns the two shapes share,
+//! stamp the version, and note in `projection_meta` that the durable
+//! consumer must be reset before it next reads. SQLite runs DDL inside
+//! a transaction, so a crash anywhere in the middle leaves the old file
+//! whole and the next open does it again from the start. Nothing is
+//! dropped here: which rows the replay can re-derive and which it
+//! cannot is a fact about the stream, and this transaction runs at
+//! open, without the bus. The file stays readable, whole, until the
+//! consumer holds the bus.
 //!
 //! The consumer-reset note is durable on purpose. The reset is the
-//! consumer's to perform — it holds the bus — and it happens after this
-//! transaction commits, in another task. An in-memory flag would lose
-//! the reset to a crash between the two, and the file would then look
-//! rebuilt while its durable resumed from its old acked floor: every
-//! event before that floor gone from the projection for good, silently.
-//! `projection_meta` outlives the rebuild (it is not among the tables
-//! dropped), so the note survives whatever happens next.
+//! consumer's to perform — it holds the bus — and it happens after
+//! this transaction commits, in another task, in two halves. First the
+//! **floor step**: the consumer finds the replay floor — the first
+//! stream sequence whose envelope version this build reads, see the
+//! `floor` module beside the consumer's `rebuild` — and calls
+//! [`ProjectionStore::apply_replay_floor`], which drops every row the
+//! replay will re-derive (`seq` at or above the floor), keeps the rest
+//! as it is, and records the floor and the count kept under a key of
+//! its own, all in one transaction, with the reset note left in place.
+//! Then the **reset**: the durable is deleted and
+//! [`ProjectionStore::consumer_reset_done`] folds the floor into the
+//! rebuild record, sets the replay target, and clears both notes. A
+//! crash between the two leaves the reset note, so the next consumer
+//! start redoes the floor step from it — the floor is recomputed and
+//! the delete finds nothing left — and then the reset. An in-memory
+//! flag would lose the reset to a crash between the two, and the file
+//! would then look rebuilt while its durable resumed from its old
+//! acked floor: every event before that floor gone from the projection
+//! for good, silently. `projection_meta` outlives the rebuild (it is
+//! not among the tables dropped), so the notes survive whatever
+//! happens next.
+//!
+//! Cost-bearing rows at or above the floor are kept through the floor
+//! step rather than dropped: the replay refreshes them by upsert, and
+//! a message that ages out of retention between the delete and its
+//! replay cannot then take a spend figure with it. Spend is kept
+//! indefinitely, and past stream retention the projection is its only
+//! copy.
 //!
 //! `projection_meta` also keeps the last rebuild's record — when, why,
-//! from which version, and the stream position the replay has to reach
-//! — which is what `fq status` reports.
+//! from which version, the floor and how many rows were kept below it,
+//! and the stream position the replay has to reach — which is what
+//! `fq status` reports.
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use super::schema::{
     PROJECTION_SCHEMA_VERSION, PROJECTION_TABLES, SCHEMA_SQL, TRIGGER_REQUEUE_INDEX_SQL,
+    evict_transients,
 };
 use super::{ProjectionStore, StoreError};
 use crate::db::schema::{split_sql, write_user_version};
@@ -38,6 +65,9 @@ const PROJECTION_META_SQL: &str = "CREATE TABLE IF NOT EXISTS projection_meta (\
 /// Present while the durable consumer has yet to be reset; its value is
 /// the reason.
 const META_CONSUMER_RESET_PENDING: &str = "consumer_reset_pending";
+/// Present between the floor step and the reset; its value is
+/// [`PendingFloor`] JSON.
+const META_REPLAY_FLOOR: &str = "replay_floor";
 /// The last rebuild, as [`RebuildRecord`] JSON.
 const META_REBUILD: &str = "rebuild";
 
@@ -91,6 +121,17 @@ pub struct RebuildRecord {
     pub target_seq: Option<u64>,
     /// When the durable was reset (RFC3339). Absent until then.
     pub consumer_reset_at: Option<String>,
+    /// The replay floor: the first stream sequence the replay started
+    /// at — the first whose envelope version this build reads. Rows
+    /// at or above it were re-derived; rows below it were kept as they
+    /// were. Absent until the reset; past `target_seq` when the stream
+    /// held nothing this build reads, and then nothing was replayed.
+    #[serde(default)]
+    pub floor_seq: Option<u64>,
+    /// How many `events` rows the floor step kept as they were: those
+    /// below the floor, and those with no position at all.
+    #[serde(default)]
+    pub carried_below_floor: u64,
 }
 
 impl RebuildRecord {
@@ -98,19 +139,26 @@ impl RebuildRecord {
     /// the durable's acked floor is now.
     ///
     /// The rebuild is in progress while the reset is still pending and
-    /// then while the replay has not reached `target_seq`. A floor that
-    /// cannot be read (the durable is between its deletion and its
-    /// recreation) is "not there yet" rather than "done".
+    /// then while the replay has not reached `target_seq`. A floor
+    /// that cannot be read (the durable is between its deletion and
+    /// its recreation) is "not there yet" rather than "done". A replay
+    /// floor past the target means nothing was replayed, and the
+    /// rebuild is complete the moment the reset is.
     pub fn status(
         &self,
         consumer_reset_pending: bool,
         projector_ack_floor: Option<u64>,
     ) -> fq_ops::surface::ProjectionRebuild {
+        let nothing_to_replay = matches!(
+            (self.floor_seq, self.target_seq),
+            (Some(floor), Some(target)) if floor > target
+        );
         let in_progress = consumer_reset_pending
-            || match (self.target_seq, projector_ack_floor) {
-                (Some(target), Some(floor)) => floor < target,
-                _ => true,
-            };
+            || (!nothing_to_replay
+                && match (self.target_seq, projector_ack_floor) {
+                    (Some(target), Some(acked)) => acked < target,
+                    _ => true,
+                });
         fq_ops::surface::ProjectionRebuild {
             started_at: self.started_at.clone(),
             reason: self.reason.clone(),
@@ -121,6 +169,14 @@ impl RebuildRecord {
             in_progress,
         }
     }
+}
+
+/// What the floor step recorded, held under its own key until the
+/// reset folds it into the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingFloor {
+    pub floor_seq: u64,
+    pub carried_below_floor: u64,
 }
 
 /// A plain `[A-Za-z_][A-Za-z0-9_]*` identifier, or a refusal. Column
@@ -156,6 +212,10 @@ async fn table_columns(
         .await?)
 }
 
+fn encode<T: Serialize>(what: &str, value: &T) -> Result<String, StoreError> {
+    serde_json::to_string(value).map_err(|err| StoreError::Backend(format!("encode {what}: {err}")))
+}
+
 impl ProjectionStore {
     pub(super) async fn ensure_meta_table(&self) -> Result<(), StoreError> {
         sqlx::query(PROJECTION_META_SQL).execute(&self.pool).await?;
@@ -186,6 +246,19 @@ impl ProjectionStore {
         self.meta_get(META_CONSUMER_RESET_PENDING).await
     }
 
+    /// What the floor step recorded, while the reset that folds it
+    /// into the record is still to come.
+    pub async fn pending_replay_floor(&self) -> Result<Option<PendingFloor>, StoreError> {
+        let Some(json) = self.meta_get(META_REPLAY_FLOOR).await? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&json).map(Some).map_err(|err| {
+            StoreError::Backend(format!(
+                "projection_meta holds an unreadable replay floor: {err}"
+            ))
+        })
+    }
+
     /// The last rebuild this file remembers, if any.
     pub async fn rebuild_record(&self) -> Result<Option<RebuildRecord>, StoreError> {
         let Some(json) = self.meta_get(META_REBUILD).await? else {
@@ -199,8 +272,7 @@ impl ProjectionStore {
     }
 
     async fn write_rebuild_record(&self, record: &RebuildRecord) -> Result<(), StoreError> {
-        let json = serde_json::to_string(record)
-            .map_err(|err| StoreError::Backend(format!("encode rebuild record: {err}")))?;
+        let json = encode("rebuild record", record)?;
         sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
             .bind(META_REBUILD)
             .bind(json)
@@ -209,8 +281,46 @@ impl ProjectionStore {
         Ok(())
     }
 
-    /// The durable has been reset: clear the note and complete the
-    /// rebuild's record with the replay target.
+    /// The floor step: drop what the replay re-derives, keep what it
+    /// cannot, and record both. One transaction; the reset note stays.
+    ///
+    /// Rows at or above `floor` are re-derived by the replay and are
+    /// deleted — except cost-bearing ones, which the replay refreshes
+    /// in place (see the module docs). Rows below the floor, and rows
+    /// with no `seq` at all — projected before the column existed, and
+    /// below any floor by definition — are kept as they are; how many
+    /// is what `fq status` reports as carried.
+    ///
+    /// Run again after a crash between the halves it finds nothing
+    /// left to delete and records the floor it is given, which is the
+    /// same floor unless retention moved in between.
+    pub async fn apply_replay_floor(&self, floor: u64) -> Result<u64, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM events WHERE seq >= ? AND total_cost IS NULL")
+            .bind(floor as i64)
+            .execute(&mut *tx)
+            .await?;
+        let carried: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE seq IS NULL OR seq < ?")
+                .bind(floor as i64)
+                .fetch_one(&mut *tx)
+                .await?;
+        let pending = PendingFloor {
+            floor_seq: floor,
+            carried_below_floor: carried as u64,
+        };
+        sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
+            .bind(META_REPLAY_FLOOR)
+            .bind(encode("replay floor", &pending)?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(pending.carried_below_floor)
+    }
+
+    /// The durable has been reset: fold the floor step's figures into
+    /// the rebuild's record, complete it with the replay target, and
+    /// clear both notes.
     ///
     /// `deleted_durable` says whether there was a durable to delete. A
     /// fresh file that found one is a rebuild in every way that matters
@@ -225,10 +335,16 @@ impl ProjectionStore {
     ) -> Result<(), StoreError> {
         let now = chrono::Utc::now().to_rfc3339();
         let pending_reason = self.consumer_reset_pending().await?;
+        let (floor_seq, carried_below_floor) = match self.pending_replay_floor().await? {
+            Some(floor) => (Some(floor.floor_seq), floor.carried_below_floor),
+            None => (None, 0),
+        };
         let record = match self.rebuild_record().await? {
             Some(record) if record.target_seq.is_none() => Some(RebuildRecord {
                 target_seq: Some(target_seq),
                 consumer_reset_at: Some(now.clone()),
+                floor_seq,
+                carried_below_floor,
                 ..record
             }),
             Some(_) => None,
@@ -241,14 +357,17 @@ impl ProjectionStore {
                 schema_version: PROJECTION_SCHEMA_VERSION,
                 target_seq: Some(target_seq),
                 consumer_reset_at: Some(now.clone()),
+                floor_seq,
+                carried_below_floor,
             }),
             None => None,
         };
         if let Some(record) = record {
             self.write_rebuild_record(&record).await?;
         }
-        sqlx::query("DELETE FROM projection_meta WHERE key = ?")
+        sqlx::query("DELETE FROM projection_meta WHERE key IN (?, ?)")
             .bind(META_CONSUMER_RESET_PENDING)
+            .bind(META_REPLAY_FLOOR)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -262,9 +381,9 @@ impl ProjectionStore {
     }
 
     /// Drop and recreate the projection tables at
-    /// [`PROJECTION_SCHEMA_VERSION`], carrying the sweep-exempt rows
-    /// across, and note that the durable must be reset. One
-    /// transaction; see the module docs.
+    /// [`PROJECTION_SCHEMA_VERSION`], carrying every row across, and
+    /// note that the durable must be reset. One transaction; see the
+    /// module docs.
     pub(super) async fn rebuild_tables(
         &self,
         reason: RebuildReason,
@@ -272,24 +391,20 @@ impl ProjectionStore {
         let from_version = self.recorded_version().await?;
         let mut tx = self.pool.begin().await?;
 
-        // The rows that outlive the log, set aside on this connection
-        // (a TEMP table is private to it) before their tables go.
-        // A table an older file never had is simply not carried.
+        // Every row, set aside on this connection (a TEMP table is
+        // private to it) before its table goes. Which of them the
+        // replay re-derives is decided at the reset, with the bus in
+        // hand; here nothing is known about the stream and nothing is
+        // dropped. A table an older file never had is simply not
+        // carried.
         let mut carried: Vec<(&'static str, Vec<String>)> = Vec::new();
         for table in PROJECTION_TABLES {
             let columns = table_columns(&mut tx, table).await?;
             if columns.is_empty() {
                 continue;
             }
-            let keep = match table {
-                "events" if columns.iter().any(|c| c == "total_cost") => {
-                    " WHERE total_cost IS NOT NULL"
-                }
-                "events" => continue,
-                _ => "",
-            };
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "CREATE TEMP TABLE carry_{table} AS SELECT * FROM {table}{keep}"
+                "CREATE TEMP TABLE carry_{table} AS SELECT * FROM {table}"
             )))
             .execute(&mut *tx)
             .await?;
@@ -329,6 +444,11 @@ impl ProjectionStore {
                 .execute(&mut *tx)
                 .await?;
         }
+        // The one class of row a rebuild does not keep: transients an
+        // older build projected before they stopped being. A same-
+        // version open evicts them; a rebuild, having carried every
+        // row, evicts them here for the same reason.
+        evict_transients(&mut tx).await?;
 
         write_user_version(&mut *tx, PROJECTION_SCHEMA_VERSION).await?;
 
@@ -339,17 +459,23 @@ impl ProjectionStore {
             schema_version: PROJECTION_SCHEMA_VERSION,
             target_seq: None,
             consumer_reset_at: None,
+            floor_seq: None,
+            carried_below_floor: 0,
         };
-        let json = serde_json::to_string(&record)
-            .map_err(|err| StoreError::Backend(format!("encode rebuild record: {err}")))?;
         sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
             .bind(META_REBUILD)
-            .bind(json)
+            .bind(encode("rebuild record", &record)?)
             .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
             .bind(META_CONSUMER_RESET_PENDING)
             .bind(&record.reason)
+            .execute(&mut *tx)
+            .await?;
+        // A floor from an earlier rebuild whose reset never ran must
+        // not be folded into this one.
+        sqlx::query("DELETE FROM projection_meta WHERE key = ?")
+            .bind(META_REPLAY_FLOOR)
             .execute(&mut *tx)
             .await?;
 
@@ -358,7 +484,8 @@ impl ProjectionStore {
             from_version = ?from_version,
             to_version = PROJECTION_SCHEMA_VERSION,
             reason = %record.reason,
-            "projection tables rebuilt; the durable consumer will be reset before it next reads"
+            "projection tables rebuilt with every row carried; the durable consumer will \
+             find the replay floor and be reset before it next reads"
         );
         Ok(record)
     }
