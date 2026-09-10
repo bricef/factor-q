@@ -101,6 +101,7 @@ async fn seed_cost_row(cache: &std::path::Path) {
         cumulative_agent_cost: INVOCATION_COST,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
+        reported_cost: None,
     });
     event.envelope.event_id = fixed_uuid(2);
     event.envelope.timestamp = chrono::DateTime::from_timestamp_millis(BASE_MS).unwrap();
