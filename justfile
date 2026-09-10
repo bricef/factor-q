@@ -253,6 +253,22 @@ dashboard-ci:
     run_phase "build"     cargo build --tests -p fq-dashboard
     run_phase "test"      cargo test --tests -p fq-dashboard
 
+# What `dashboard-ci` and the screenshots cannot prove. Both are hermetic by
+# design: the router tests answer `turn.list` from an in-process fixture whose
+# turn atom returns an empty list, and `dashboard-screenshots` renders canned
+# structs straight through `render::*` with no daemon, no HTTP and no status
+# code. So the transcript page spent six days serving 503 on the live instance
+# and every gate stayed green (#673). This one runs the real `fqd` and the real
+# `fq-dashboard` as processes, seeds a legacy event into the agent's history,
+# and speaks HTTP to every page — including the one that broke. No browser: the
+# pages are server-side HTML, so a socket sees what a browser would.
+#
+# Not part of `just ci`: it is slower than the hermetic gates and starts two
+# processes. Run it when the dashboard or the read surface changes.
+# Run the dashboard end-to-end suite against a real daemon.
+dashboard-e2e: install-nats build-dashboard
+    cargo test -p fq-daemon --features dashboard-e2e --test dashboard_e2e
+
 # The shared test-only crate (#233) — the per-service gates only compile it as
 # a dependency; this runs its own fmt/clippy/tests. Its self-tests spawn a
 # broker from the pinned nats-server the `install-nats` dependency provisions.
