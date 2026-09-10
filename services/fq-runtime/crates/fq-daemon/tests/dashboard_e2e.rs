@@ -52,6 +52,7 @@ use std::time::Duration;
 
 use fq_ops::surface::StatusReport;
 use fq_ops::{ControlReport, Domain, OpId, ReportId};
+use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
 use fq_test_support::TestChild;
 use serde_json::json;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -86,7 +87,7 @@ const DASHBOARD_GRANTS: &[&str] = &[
 /// every page assertion below.
 const UNREACHABLE: &str = "runtime unreachable at";
 
-fn unique_scratch() -> std::path::PathBuf {
+fn unique_scratch(mock_base_url: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -107,11 +108,16 @@ fn unique_scratch() -> std::path::PathBuf {
         ),
     )
     .unwrap();
+    // `base_url` points the daemon's LLM client at this test's mock,
+    // so the invocation below is a real dispatch that never leaves the
+    // machine. The explicit price is the pricing guarantee (ADR-0004),
+    // which declaring an agent arms.
     std::fs::write(
         dir.join("fq.toml"),
         format!(
             "[edge]\nbind = \"127.0.0.1:0\"\n\n\
-             [providers.anthropic]\nmodels = [\"{MODEL}\"]\n\n\
+             [providers.anthropic]\nmodels = [\"{MODEL}\"]\n\
+             base_url = \"{mock_base_url}\"\n\n\
              [providers.anthropic.pricing.\"{MODEL}\"]\n\
              input_per_mtok = 1.0\noutput_per_mtok = 5.0\n"
         ),
@@ -143,6 +149,32 @@ struct Daemon {
     fingerprint_hex: String,
     fingerprint: [u8; 32],
     admin_token: String,
+    log_path: std::path::PathBuf,
+}
+
+impl Daemon {
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    /// Wait for `needle` in the daemon's log, or panic with the log.
+    async fn await_log(&mut self, needle: &str, budget: Duration) -> String {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let text = self.log();
+            if text.contains(needle) {
+                return text;
+            }
+            if let Some(status) = self.process.try_wait().expect("poll fqd") {
+                panic!("fqd exited ({status:?}) waiting for {needle:?}\n--- log ---\n{text}");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon log never carried {needle:?}\n--- log ---\n{text}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 }
 
 async fn start_daemon(server: &fq_test_support::NatsServer, scratch: &std::path::Path) -> Daemon {
@@ -158,6 +190,10 @@ async fn start_daemon(server: &fq_test_support::NatsServer, scratch: &std::path:
         .env("FQ_CACHE_DIR", scratch.join("cache"))
         .env("FQ_STATE_DIR", scratch.join("state"))
         .env("FQ_AGENTS_DIR", scratch.join("agents"))
+        .env("ANTHROPIC_API_KEY", "test-key-unused-by-mock")
+        // JSON logs: the invocation id is read back out of them, and a
+        // human-formatted line would not carry it as a field.
+        .env("FQ_LOG_FORMAT", "json")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn();
@@ -184,6 +220,7 @@ async fn start_daemon(server: &fq_test_support::NatsServer, scratch: &std::path:
         fingerprint_hex,
         admin_token: fq_test_support::admin_token(&scratch.join("state")),
         process,
+        log_path,
     }
 }
 
@@ -385,14 +422,18 @@ fn assert_contains(path: &str, resp: &HttpResponse, needle: &str) {
 
 // === seeding ===
 
-/// The committed pre-#510 event, published raw onto the stream before
-/// the daemon exists — the history a long-lived instance carries across
-/// a wire break. Returns nothing: no reader here is gated on it, and
-/// the whole point is that it sits in the agent's past.
+/// The committed pre-#510 event, published raw onto the stream — the
+/// history a long-lived instance carries across a wire break.
 ///
-/// Seeded first, as `edge_projection_rebuild.rs` does, so the daemon's
-/// projector meets it during its replay-from-the-floor rather than
-/// live on its durable consumer.
+/// **Published after the daemon's projection has caught up**, which is
+/// what the live instance actually looks like: those events were
+/// written by a build that could read them, so the durable projector
+/// consumed them when they were current and only the *ad-hoc rescan*
+/// (`events_from` from sequence one, which is what `turn.list` does)
+/// meets them with a build that cannot. Seeding them ahead of a fresh
+/// daemon instead halts its projector on the first message it ever
+/// sees, which is a different bug in a different consumer — strict is
+/// the right policy for a durable fold, and #673 is not about that.
 async fn seed_legacy_history(server: &fq_test_support::NatsServer) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../fq-runtime/tests/corpus/events/v2/llm_request.json");
@@ -417,19 +458,48 @@ async fn seed_legacy_history(server: &fq_test_support::NatsServer) {
 
 // === the suite ===
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_dashboard_serves_every_page_against_a_real_daemon() {
     let server = fq_test_support::NatsServer::start();
-    seed_legacy_history(&server).await;
+    // The model this run talks to. One scripted turn, terminal: the
+    // agent declares its outcome and the invocation completes, which
+    // is the state a transcript is usually read in.
+    let mock = MockAnthropicServer::start().await;
+    mock.push_response(MockResponse::tool_use(
+        "toolu_dashboard_e2e",
+        "report_outcome",
+        json!({
+            "status": "success",
+            "summary": "The dashboard end-to-end run reached its terminal turn.",
+        }),
+        10,
+        5,
+    ));
 
-    let scratch = unique_scratch();
+    let scratch = unique_scratch(mock.base_url());
     let mut daemon = start_daemon(&server, &scratch).await;
+    let invocation = run_one_invocation(&server, &mut daemon).await;
+
     let client = fq_edge::EdgeClient::connect(&daemon.addr, daemon.fingerprint, &daemon.admin_token)
         .await
         .expect("connect edge");
-
-    let invocation = seed_invocation(&server, &client).await;
+    // Read-your-writes before anything touches the dashboard: gate a
+    // read on the last sequence this agent's subject holds, so the
+    // daemon's fold is known to have taken in everything the run just
+    // wrote. No sleeps anywhere below.
+    let tip = fq_runtime::EventBus::connect(server.url())
+        .await
+        .expect("connect bus")
+        .last_event_seq_matching(&format!("fq.agent.{AGENT}.>"))
+        .await
+        .expect("stream tip");
+    gated_get(&client, &invocation, tip).await;
     let version = daemon_version(&client).await;
+
+    // Only now: the invocation under test is folded and readable, and
+    // the unreadable history goes in behind it — under the same agent,
+    // under a different invocation, which is the live shape exactly.
+    seed_legacy_history(&server).await;
 
     let grants: Vec<(String, String)> = DASHBOARD_GRANTS
         .iter()
@@ -469,83 +539,38 @@ async fn the_dashboard_serves_every_page_against_a_real_daemon() {
     assert_contains(&path, &resp, UNREACHABLE);
 }
 
-/// Publish the invocation under test: one `Triggered` so it resolves to
-/// its agent, then one `LlmResponse` so it has a turn to render.
+/// Drive one real invocation through the daemon and return its id.
 ///
-/// Returns the invocation id, once the daemon's fold is known to have
-/// seen the last of them — a gated read (`min_seq`) is the barrier, so
-/// nothing here sleeps.
-async fn seed_invocation(
-    server: &fq_test_support::NatsServer,
-    client: &fq_edge::EdgeClient,
-) -> uuid::Uuid {
-    let bus = fq_runtime::EventBus::connect(server.url())
+/// Handed over on `fq.trigger.<agent>` — the same subject the watcher
+/// and fq-cron publish on, so the daemon dispatches it itself rather
+/// than the test forging the rows a dispatch writes. That matters:
+/// `/invocations` is the control plane's ownership index, which only a
+/// real claim populates, and the transcript is the dispatch's own
+/// turns. Synthetic events on the stream produce neither.
+async fn run_one_invocation(server: &fq_test_support::NatsServer, daemon: &mut Daemon) -> String {
+    let nats = async_nats::connect(server.url())
         .await
-        .expect("connect bus");
-    let agent = fq_runtime::agent::AgentId::new(AGENT).unwrap();
-    let invocation = uuid::Uuid::now_v7();
-
-    bus.publish(&fq_runtime::events::Event::new(
-        agent.clone(),
-        invocation,
-        fq_runtime::events::EventPayload::Triggered(fq_runtime::events::TriggeredPayload {
-            trigger_id: None,
-            trigger_source: fq_runtime::events::TriggerSource::Manual,
-            trigger_subject: None,
-            trigger_payload: json!({}),
-            config_snapshot: fq_runtime::events::ConfigSnapshot {
-                name: AGENT.into(),
-                model: MODEL.into(),
-                system_prompt: "You are the corpus agent.".into(),
-                tools: vec![],
-                sandbox: fq_runtime::events::SandboxSnapshot::default(),
-                budget: None,
-                ..Default::default()
-            },
-        }),
-    ))
-    .await
-    .expect("publish triggered");
-
-    let call_id = uuid::Uuid::now_v7();
-    let response = fq_runtime::events::Event::new(
-        agent,
-        invocation,
-        fq_runtime::events::EventPayload::LlmResponse(fq_runtime::events::LlmResponsePayload {
-            parts: fq_runtime::events::assistant_parts(
-                Some("The dashboard renders this line.".into()),
-                Vec::new(),
-            ),
-            round: 1,
-            call_id,
-            stop_reason: fq_runtime::events::StopReason::EndTurn,
-            usage: fq_runtime::events::TokenUsage::default(),
-            origin: Default::default(),
-        }),
+        .expect("connect to test broker");
+    nats.publish(
+        format!("fq.trigger.{AGENT}"),
+        serde_json::to_vec(&json!("render something for the dashboard"))
+            .unwrap()
+            .into(),
     )
-    // Priced, so `/costs` has a row and the transcript names a model
-    // rather than the `?` an uncosted turn renders.
-    .with_cost(fq_runtime::events::CostMetadata {
-        call_id,
-        model: MODEL.into(),
-        input_tokens: 120,
-        output_tokens: 30,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: None,
-        input_cost: 0.000_12,
-        output_cost: 0.000_15,
-        total_cost: 0.000_27,
-        cumulative_invocation_cost: 0.000_27,
-        cumulative_agent_cost: 0.000_27,
-        origin: fq_runtime::events::LlmCallOrigin::AgentTurn,
-        reported_cost: None,
-    });
-    let seq = bus.publish(&response).await.expect("publish llm response");
+    .await
+    .expect("publish trigger");
+    nats.flush().await.expect("flush trigger publish");
 
-    // Read-your-writes: the gated read returns once the daemon's fold
-    // has taken in `seq`, so every page below is asking about state the
-    // daemon already has.
+    let log = daemon
+        .await_log("reducer invocation completed", Duration::from_secs(60))
+        .await;
+    let marker = "\"invocation_id\":\"";
+    let start = log.find(marker).expect("no invocation_id in daemon log") + marker.len();
+    log[start..start + 36].to_string()
+}
+
+/// A gated read: returns once the daemon's fold has taken in `min_seq`.
+async fn gated_get(client: &fq_edge::EdgeClient, invocation: &str, min_seq: u64) {
     client
         .rpc
         .invoke(
@@ -553,14 +578,13 @@ async fn seed_invocation(
             fq_edge::InvokeRequest {
                 op: OpId::Get(Domain::Invocation),
                 version: 1,
-                input: json!({"invocation_id": invocation.to_string()}),
-                min_seq: Some(seq),
+                input: json!({"invocation_id": invocation}),
+                min_seq: Some(min_seq),
             },
         )
         .await
         .expect("rpc")
-        .expect("gated get after seeding");
-    invocation
+        .expect("gated get after the run");
 }
 
 /// What `control.status` says this daemon's build is — the string the
@@ -586,10 +610,10 @@ async fn daemon_version(client: &fq_edge::EdgeClient) -> String {
 }
 
 /// The pages that are one read each.
-async fn check_pages(at: &str, invocation: &uuid::Uuid, version: &str) {
+async fn check_pages(at: &str, invocation: &str, version: &str) {
     let budget = Duration::from_secs(20);
-    let short = invocation.to_string()[..8].to_string();
-    let id = invocation.to_string();
+    let short = &invocation[..8];
+    let id = invocation;
 
     let resp = get(at, "/healthz", budget).await;
     assert_eq!(resp.status, 200, "GET /healthz");
@@ -607,12 +631,12 @@ async fn check_pages(at: &str, invocation: &uuid::Uuid, version: &str) {
 
     let resp = get(at, "/invocations", budget).await;
     assert_reached_the_daemon("/invocations", &resp);
-    assert_contains("/invocations", &resp, &short);
+    assert_contains("/invocations", &resp, short);
 
     let path = format!("/invocations/{id}");
     let resp = get(at, &path, budget).await;
     assert_reached_the_daemon(&path, &resp);
-    assert_contains(&path, &resp, &short);
+    assert_contains(&path, &resp, short);
     assert_contains(&path, &resp, AGENT);
 
     let resp = get(at, "/events", budget).await;
@@ -640,7 +664,7 @@ async fn check_pages(at: &str, invocation: &uuid::Uuid, version: &str) {
 /// On a build that cannot read the seeded v2 event this is where the
 /// suite fails: `turn.list` errors on the whole agent's history and
 /// `pages/transcript.rs` renders that as `unreachable_page`, a 503.
-async fn check_transcript(at: &str, invocation: &uuid::Uuid) {
+async fn check_transcript(at: &str, invocation: &str) {
     let path = format!("/invocations/{invocation}/transcript");
     let resp = get(at, &path, Duration::from_secs(20)).await;
     assert_reached_the_daemon(&path, &resp);
@@ -654,9 +678,9 @@ async fn check_transcript(at: &str, invocation: &uuid::Uuid) {
         resp.body
     );
 
-    // The seam the page pinned for its own tail, read back off the page
-    // rather than recomputed: asserting on the URL the browser would
-    // actually open is the only version of this worth making.
+    // The seam the page pinned for its own tail, read back off the
+    // page rather than recomputed — asserting on the URL a browser
+    // would actually open is the only version of this worth making.
     let marker = "/transcript/stream?after=";
     let seam: u64 = resp
         .body
@@ -665,19 +689,44 @@ async fn check_transcript(at: &str, invocation: &uuid::Uuid) {
         .and_then(|rest| rest.split(['&', '\'']).next())
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
-            panic!("GET {path} carried no live-tail seam.\n--- body ---\n{}", resp.body)
+            panic!(
+                "GET {path} carried no live-tail seam.\n--- body ---\n{}",
+                resp.body
+            )
         });
 
-    let path = format!("/invocations/{invocation}/transcript/stream?after={seam}&full=0");
-    // Timeboxed: the tail long-polls and would never close on its own.
-    let resp = get(at, &path, Duration::from_secs(5)).await;
-    assert_eq!(resp.status, 200, "GET {path}");
+    // That URL, exactly as the page pins it: one past the highest
+    // sequence it rendered, so it long-polls for turns that have not
+    // happened yet. What it proves is that the route is served and the
+    // response is SSE — content would mean waiting out a poll for a
+    // turn this finished run will never produce.
+    let live = format!("/invocations/{invocation}/transcript/stream?after={seam}&full=0");
+    let resp = get(at, &live, Duration::from_secs(5)).await;
+    assert_eq!(resp.status, 200, "GET {live}");
     assert!(
         resp.header_contains("content-type", "text/event-stream"),
-        "GET {path} should be SSE.\n--- headers ---\n{}",
+        "GET {live} should be SSE.\n--- headers ---\n{}",
         resp.headers
     );
-    assert_contains(&path, &resp, "datastar-patch-elements");
+
+    // And the same handler opened from the bottom of the log, where
+    // the turns already are: this is the one that proves the tail
+    // renders turns rather than merely holding a socket open.
+    // Timeboxed either way — the stream never closes on its own.
+    let replay = format!("/invocations/{invocation}/transcript/stream?after=1&full=0");
+    let resp = get(at, &replay, Duration::from_secs(5)).await;
+    assert_eq!(resp.status, 200, "GET {replay}");
+    assert!(
+        resp.header_contains("content-type", "text/event-stream"),
+        "GET {replay} should be SSE.\n--- headers ---\n{}",
+        resp.headers
+    );
+    assert_contains(&replay, &resp, "datastar-patch-elements");
+    // `#turns` is the prepend target for a real turn. The stream's
+    // error path also emits a patch, at `#status`, so asserting the
+    // event name alone would pass on a stream that only reported a
+    // failure.
+    assert_contains(&replay, &resp, "selector #turns");
 }
 
 /// The datastar content negotiation: the same URL, two representations.
