@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,64 @@ func TestCheckMode(t *testing.T) {
 	}
 	if err := run([]string{"--check", "--config", path}); err == nil {
 		t.Fatal("expected invalid config to fail")
+	}
+}
+
+// `--check` answers for the file the way startup will. It used to print
+// "valid" and exit 0 for a zero-byte file that a reload would have thrown
+// out, so an operator could be told the config was fine by the one command
+// whose whole job is to say otherwise (#664). A non-nil error here is exit 1:
+// main prints it and exits.
+func TestCheckRefusesAConfigDeclaringNoJobs(t *testing.T) {
+	for name, text := range joblessConfigs {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fq-cron.toml")
+			if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := run([]string{"--check", "--config", path})
+			if err == nil {
+				t.Fatalf("--check called a %d-byte config declaring no jobs valid", len(text))
+			}
+			if !strings.Contains(err.Error(), jobsUndeclaredError{Bytes: len(text)}.Error()) {
+				t.Fatalf("--check error = %q, want the reload's sentence in it", err)
+			}
+			if !strings.Contains(err.Error(), "write `job = []`") {
+				t.Fatalf("--check error = %q, want it to say what to write", err)
+			}
+		})
+	}
+}
+
+// The other half of the same rule: a file that says `job = []` passes
+// `--check` and starts. A fresh instance can come up with nothing scheduled —
+// it just has to say so.
+func TestCheckAcceptsAnExplicitlyEmptyJobList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fq-cron.toml")
+	if err := os.WriteFile(path, []byte("job = []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"--check", "--config", path}); err != nil {
+		t.Fatalf("--check on `job = []` = %v, want valid", err)
+	}
+}
+
+// A scheduler with nothing scheduled looks, from outside, exactly like one
+// that is failing to fire. Starting on `job = []` therefore says so — once,
+// and only for a configuration that has no jobs in it.
+func TestAnEmptyScheduleIsAnnouncedOnce(t *testing.T) {
+	logs := &syncBuffer{}
+	announceEmptySchedule(mustParse(t, "job = []\n"), log.New(logs, "", 0))
+	if got := logs.String(); got != emptyScheduleNotice+"\n" {
+		t.Fatalf("startup log = %q, want exactly one line: %q", got, emptyScheduleNotice)
+	}
+	if got := emptyScheduleNotice; got != "config declares no jobs (`job = []`): nothing scheduled until one is added" {
+		t.Fatalf("the notice reads %q; it is what an operator greps for", got)
+	}
+	quiet := &syncBuffer{}
+	announceEmptySchedule(mustParse(t, validConfig), log.New(quiet, "", 0))
+	if got := quiet.String(); got != "" {
+		t.Fatalf("a config with jobs in it logged %q, want nothing", got)
 	}
 }
 

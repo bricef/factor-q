@@ -129,6 +129,22 @@ func buildVersion() string {
 	return rev
 }
 
+// emptyScheduleNotice is what a deliberate empty schedule says at startup.
+// `job = []` is now the only way to reach it — anything else that parses to no
+// jobs is refused (config.go, jobsUndeclaredError) — and from outside, a
+// scheduler running it is indistinguishable from one that is failing to fire.
+// So it says so, once, rather than starting in silence (#664).
+const emptyScheduleNotice = "config declares no jobs (`job = []`): nothing scheduled until one is added"
+
+// announceEmptySchedule logs that notice for a configuration with no jobs in
+// it, and nothing at all for any other: a scheduler with jobs reports them as
+// it fires them.
+func announceEmptySchedule(cfg *Config, logger *log.Logger) {
+	if len(cfg.Jobs) == 0 {
+		logger.Print(emptyScheduleNotice)
+	}
+}
+
 func run(args []string) error {
 	// Answered before flag parsing, like the watcher: --version must
 	// work without a --config, and the flag set would otherwise reject
@@ -160,6 +176,7 @@ func run(args []string) error {
 		fmt.Printf("configuration %s is valid\n", cli.ConfigPath)
 		return nil
 	}
+	announceEmptySchedule(loaded.Config, log.Default())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
