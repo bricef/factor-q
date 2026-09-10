@@ -75,18 +75,39 @@ impl ProjectionConsumer {
         // events before it would never reach the new tables. The store
         // says so durably; the reset happens here, before the loop
         // attaches, because this is the one place that holds the bus
-        // and is guaranteed not to be reading yet.
-        if let Some(reason) = self.store.consumer_reset_pending().await? {
-            info!(
-                reason,
-                "projection consumer: resetting the durable before reading"
-            );
-            super::rebuild::reset_projection_consumer(&self.bus, &self.store).await?;
-        }
+        // and is guaranteed not to be reading yet. The reset finds the
+        // replay floor — the first sequence whose envelope version this
+        // build reads — and that is where the durable it deletes is
+        // recreated below, so a stream still holding older history is
+        // replayed from the point this build can read rather than
+        // halted at its first unreadable message (#648).
+        let deliver_from = match self.store.consumer_reset_pending().await? {
+            Some(reason) => {
+                info!(
+                    reason,
+                    "projection consumer: resetting the durable before reading"
+                );
+                super::rebuild::reset_projection_consumer(&self.bus, &self.store)
+                    .await?
+                    .deliver_from()
+            }
+            // No reset due. The durable normally exists and keeps its
+            // position whatever this says; when it does not — a crash
+            // between the reset that cleared the note and the creation
+            // below — the record's floor is where that replay was to
+            // start, and the beginning is right for a file that was
+            // never rebuilt.
+            None => self
+                .store
+                .rebuild_record()
+                .await?
+                .and_then(|record| record.floor_seq)
+                .map_or(DeliverFrom::Beginning, DeliverFrom::from_floor),
+        };
         let config = DurableConsumerConfig {
             durable_name: CONSUMER_NAME.to_string(),
             filter_subjects: Vec::new(),
-            deliver_from: DeliverFrom::Beginning,
+            deliver_from,
             // The watermark's contract ("a reader released at S finds
             // S's row") requires resolved-contiguous delivery: without
             // it a NAK'd sequence can be leapfrogged by a later one
@@ -322,8 +343,11 @@ mod tests {
 
     /// The halt (#409): a v2 event on the stream stops the projector
     /// where it is. Driven through `ProjectionConsumer::run` itself —
-    /// the durable the daemon creates, strict order, from the
-    /// beginning — on the private test broker. Four things must hold
+    /// the durable the daemon creates, strict order — on the private
+    /// test broker, as a live consumer meets it: the durable exists
+    /// and has read past the first event when the v2 one lands, so no
+    /// reset and no replay floor is involved (a rebuild replays from
+    /// the floor, which is `rebuild`'s to prove). Four things must hold
     /// together: the loop stops consuming (an event published after
     /// the v2 one is never projected), the v2 message is left unacked
     /// (the broker still counts it pending, and the acked floor stops
@@ -343,13 +367,37 @@ mod tests {
                 .expect("open store"),
         );
 
-        // One current event before the boundary, one after it.
+        // One current event before the boundary, read by the durable
+        // the daemon creates before anything unreadable exists.
         let agent_id = format!("proj-halt-{}", Uuid::now_v7().simple());
         let before = triggered(&agent_id);
         let inv = before.envelope.invocation_id;
         let before_seq = bus.publish(&before).await.expect("publish before");
+        let filter = super::super::store::EventFilter {
+            agent: Some(&agent_id),
+            ..Default::default()
+        };
+        {
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let consumer = ProjectionConsumer::new(bus.clone(), store.clone());
+            let handle = tokio::spawn(async move { consumer.run(shutdown_rx).await });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while store.query_events(&filter, 100).await.unwrap().is_empty() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the first event was never projected"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            shutdown_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("stops on shutdown")
+                .expect("join")
+                .expect("clean stop");
+        }
 
-        // The v2 event: a current event with its envelope's version
+        // Then one after it. The v2 event: a current event with its envelope's version
         // rewritten — a shape a v3 reader would parse happily, which is
         // exactly what must not happen.
         let mut older = serde_json::to_value(completed(&agent_id, inv)).unwrap();
@@ -398,10 +446,6 @@ mod tests {
         // It stopped where it was: the event before the boundary is
         // projected, the one after it is not, and stays not.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let filter = super::super::store::EventFilter {
-            agent: Some(&agent_id),
-            ..Default::default()
-        };
         let rows = store.query_events(&filter, 100).await.unwrap();
         let types: Vec<&str> = rows.iter().map(|r| r.event_type.as_str()).collect();
         assert_eq!(

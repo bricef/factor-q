@@ -11,9 +11,11 @@
 //!   is predictable.
 //! - The projection can always be rebuilt from NATS: the file carries
 //!   a schema version, a bump rebuilds it on open, and `fq projection
-//!   rebuild` does the same on demand — tables dropped and recreated,
-//!   the durable consumer reset, the stream replayed from
-//!   `deliver_all` ([`rebuild`]).
+//!   rebuild` does the same on demand — tables dropped and recreated
+//!   with every row carried, the durable consumer reset, the stream
+//!   replayed from its replay floor (the first sequence whose envelope
+//!   version this build reads) with the rows below it kept as they
+//!   were ([`rebuild`]).
 //!
 //! [`ProjectionStore`] owns the SQLite connection pool and exposes
 //! `insert_event`, `query_events`, and `cost_summary`. The store is

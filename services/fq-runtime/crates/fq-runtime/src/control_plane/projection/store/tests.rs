@@ -2550,15 +2550,30 @@ async fn open_at_the_current_version_does_not_rebuild() {
 }
 
 /// The core guarantee. A file recording an older version is rebuilt on
-/// open: the plain event is gone (the stream will bring it back), the
-/// cost-bearing row, the summary line and the trigger record are
-/// carried across, the file is stamped at this build's version, and
-/// the durable is marked for the reset that starts the replay.
+/// open: every row — the plain events, the cost-bearing row, the
+/// summary line and the trigger record — is carried across whole, the
+/// file is stamped at this build's version, and the durable is marked
+/// for the reset that finds the replay floor and starts the replay.
+/// Nothing is dropped at open: which rows the replay re-derives is
+/// decided at the reset, with the bus in hand. The one exception is a
+/// transient row an older build projected, which is evicted as a
+/// same-version open evicts it.
 #[tokio::test]
 async fn open_at_an_older_version_rebuilds_and_requests_a_consumer_reset() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("projection.db");
     let (store, inv) = populated_store(&path).await;
+    let transient = crate::events::transient::types()
+        .next()
+        .expect("at least one transient type");
+    sqlx::query(
+        "INSERT INTO events (event_id, seq, timestamp, agent_id, invocation_id, event_type) \
+         VALUES ('stale-transient', 5, '2026-01-01T00:00:00Z', 'alpha', 'inv', ?)",
+    )
+    .bind(transient)
+    .execute(&store.pool)
+    .await
+    .unwrap();
     stamp_version(&store, PROJECTION_SCHEMA_VERSION - 1).await;
     drop(store);
 
@@ -2579,14 +2594,24 @@ async fn open_at_an_older_version_rebuilds_and_requests_a_consumer_reset() {
         record.target_seq, None,
         "the replay target is the consumer's to set"
     );
+    assert_eq!(
+        (record.floor_seq, record.carried_below_floor),
+        (None, 0),
+        "the floor is the consumer's to find"
+    );
     assert!(
         store.consumer_reset_pending().await.unwrap().is_some(),
         "the durable must be reset before it reads again"
     );
+    assert!(
+        store.pending_replay_floor().await.unwrap().is_none(),
+        "no floor step has run yet"
+    );
 
-    // Dropped and recreated: the plain `triggered` event is gone, and
-    // the two cost-bearing rows (the call, and the priced summary
-    // event) are the only `events` rows left...
+    // Dropped and recreated with every row carried: the plain
+    // `triggered` events are still here beside the two cost-bearing
+    // rows (the call, and the priced summary event); only the stale
+    // transient is gone...
     let rows = store
         .query_events(&EventFilter::default(), 100)
         .await
@@ -2595,12 +2620,18 @@ async fn open_at_an_older_version_rebuilds_and_requests_a_consumer_reset() {
     kinds.sort_unstable();
     assert_eq!(
         kinds,
-        ["invocation_summary", "llm_response"],
-        "only the cost-bearing rows survive the drop: {rows:?}"
+        [
+            "invocation_summary",
+            "llm_response",
+            "triggered",
+            "triggered"
+        ],
+        "every row survives the drop, the transient excepted: {rows:?}"
     );
-    assert!(
-        rows.iter().all(|row| row.total_cost.is_some()),
-        "what survives is exactly what the sweep would have kept"
+    assert_eq!(
+        store.event_location("stale-transient").await.unwrap(),
+        EventLocation::Unindexed,
+        "a transient an older build projected is evicted by the rebuild"
     );
     // ...the cost-bearing row is carried across whole...
     let cost = store
@@ -2687,9 +2718,13 @@ async fn read_only_open_names_an_older_version() {
     );
 }
 
-/// The consumer's half of the record: once the durable is reset the
-/// replay target is known, the reset is no longer pending, and "in
-/// progress" is judged against the projector's acked floor.
+/// The consumer's half of the record, in its two halves: the floor
+/// step records the floor and what it kept under its own key with the
+/// reset note left in place; the reset folds them into the record,
+/// sets the replay target, clears both notes, and from then on "in
+/// progress" is judged against the projector's acked floor — unless
+/// the floor is past the target, when nothing was replayed and the
+/// rebuild is complete at once.
 #[tokio::test]
 async fn the_consumer_reset_completes_the_rebuild_record() {
     let dir = tempdir().unwrap();
@@ -2703,10 +2738,34 @@ async fn the_consumer_reset_completes_the_rebuild_record() {
     assert!(before.status(true, None).in_progress);
     assert!(before.status(true, None).consumer_reset_pending);
 
+    // The floor step: rows 1 and 2 lie below a floor of 3 and are kept;
+    // the priced summary at 3 is kept for its spend; the plain trigger
+    // event at 4 is the replay's to re-derive.
+    assert_eq!(store.apply_replay_floor(3).await.unwrap(), 2);
+    assert_eq!(
+        store.pending_replay_floor().await.unwrap(),
+        Some(PendingFloor {
+            floor_seq: 3,
+            carried_below_floor: 2
+        })
+    );
+    assert!(
+        store.consumer_reset_pending().await.unwrap().is_some(),
+        "the reset note outlives the floor step"
+    );
+    assert_eq!(
+        store.rebuild_record().await.unwrap().unwrap().floor_seq,
+        None,
+        "the record is completed by the reset, not by the floor step"
+    );
+
     store.consumer_reset_done(42, true).await.unwrap();
     assert!(store.consumer_reset_pending().await.unwrap().is_none());
+    assert!(store.pending_replay_floor().await.unwrap().is_none());
     let after = store.rebuild_record().await.unwrap().unwrap();
     assert_eq!(after.target_seq, Some(42));
+    assert_eq!(after.floor_seq, Some(3));
+    assert_eq!(after.carried_below_floor, 2);
     assert!(after.consumer_reset_at.is_some());
     assert_eq!(
         after.reason, before.reason,
@@ -2726,6 +2785,88 @@ async fn the_consumer_reset_completes_the_rebuild_record() {
         "at the target the replay is complete"
     );
     assert!(!after.status(false, Some(43)).in_progress);
+
+    // A floor past the target: the stream held nothing this build
+    // reads, nothing was replayed, and the rebuild is complete however
+    // the durable reads.
+    let nothing_replayed = RebuildRecord {
+        floor_seq: Some(43),
+        ..after.clone()
+    };
+    assert!(!nothing_replayed.status(false, None).in_progress);
+    assert!(!nothing_replayed.status(false, Some(0)).in_progress);
+    assert!(
+        nothing_replayed.status(true, None).in_progress,
+        "but not while the reset itself is still pending"
+    );
+}
+
+/// The floor step on its own: rows at or above the floor with no spend
+/// are dropped for the replay to re-derive, cost-bearing rows at or
+/// above it stay for the replay to refresh, rows below it and rows with
+/// no position at all are kept and counted — and running it again
+/// finds nothing more to drop and records the same figures.
+#[tokio::test]
+async fn the_floor_step_drops_what_the_replay_re_derives_and_keeps_the_rest() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let (store, inv) = populated_store(&path).await;
+    // A priced row that was never located — projected before the `seq`
+    // column existed. Below any floor by definition.
+    let unlocated = sample_llm_response_reporting("alpha", Uuid::now_v7(), 0.5, None);
+    store.insert_event(&unlocated, None).await.unwrap();
+    // A plain row and a priced row above the floor.
+    let above_inv = Uuid::now_v7();
+    let above_plain = sample_triggered("alpha", above_inv);
+    let above_priced = sample_llm_response_reporting("alpha", above_inv, 0.25, Some(3));
+    store.insert_event(&above_plain, Some(10)).await.unwrap();
+    store.insert_event(&above_priced, Some(11)).await.unwrap();
+    assert_eq!(store.count().await.unwrap(), 7);
+
+    for pass in ["first", "again"] {
+        assert_eq!(
+            store.apply_replay_floor(4).await.unwrap(),
+            4,
+            "{pass}: rows 1, 2, 3 and the unlocated one are kept below the floor"
+        );
+        let rows = store
+            .query_events(&EventFilter::default(), 100)
+            .await
+            .unwrap();
+        let ids: std::collections::BTreeSet<&str> =
+            rows.iter().map(|row| row.event_id.as_str()).collect();
+        assert!(
+            !ids.contains(above_plain.envelope.event_id.to_string().as_str()),
+            "{pass}: the plain row above the floor is the replay's to re-derive"
+        );
+        assert!(
+            ids.contains(above_priced.envelope.event_id.to_string().as_str()),
+            "{pass}: spend above the floor is kept for the replay to refresh"
+        );
+        assert!(ids.contains(unlocated.envelope.event_id.to_string().as_str()));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.event_type == "triggered")
+                .count(),
+            1,
+            "{pass}: the plain trigger row at 4 is gone, the one at 1 stays: {rows:?}"
+        );
+        assert_eq!(store.count().await.unwrap(), 5);
+        assert_eq!(
+            store.pending_replay_floor().await.unwrap(),
+            Some(PendingFloor {
+                floor_seq: 4,
+                carried_below_floor: 4
+            })
+        );
+    }
+    // The spend below the floor is untouched.
+    let cost = store
+        .cost_of_invocation(&inv.to_string())
+        .await
+        .unwrap()
+        .expect("spend below the floor is kept");
+    assert_eq!(cost.total_reasoning_tokens, Some(9));
 }
 
 /// A fresh file marks the durable for a reset, and whether that reset

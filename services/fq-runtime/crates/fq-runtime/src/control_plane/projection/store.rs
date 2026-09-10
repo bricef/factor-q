@@ -32,7 +32,7 @@ mod triggers;
 pub use self::costs::{
     CostBucketSummary, CostSummary, FailureSummary, InvocationCostSummary, ModelCostSummary,
 };
-pub use self::rebuild::{FRESH_FILE_REASON, RebuildRecord};
+pub use self::rebuild::{FRESH_FILE_REASON, PendingFloor, RebuildRecord};
 pub use self::schema::PROJECTION_SCHEMA_VERSION;
 
 /// SQLite projection store. Cheap to clone (the underlying
@@ -400,7 +400,7 @@ pub enum EventLocation {
 }
 
 /// One row from a [`ProjectionStore::query_events`] call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EventRow {
     pub event_id: String,
     pub timestamp: String,
