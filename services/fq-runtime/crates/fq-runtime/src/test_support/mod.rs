@@ -29,7 +29,11 @@ pub use fq_test_support as nats;
 // (fq-test-support, tempfile, …), so only the mocks and the faults they
 // serve are exposed through the `test-support` feature; the rest stays
 // crate-test-only.
-#[cfg(test)]
+// The corpus is history in a version this build does not read, and an
+// integration test needs it for the same reason a unit test does — a
+// stream that holds a wire break is not something a current serialiser
+// can construct (#673).
+#[cfg(any(test, feature = "test-support"))]
 pub mod corpus;
 #[cfg(test)]
 pub mod events;

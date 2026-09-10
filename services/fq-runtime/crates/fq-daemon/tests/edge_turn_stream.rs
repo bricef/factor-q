@@ -4,6 +4,13 @@
 //! `from_seq = u64::MAX`, items carrying their sequences, the cursor
 //! advancing past non-matching events, and the tool-result join
 //! (name, parameters, `initiating_turn`) intact across the wire.
+//!
+//! The stream this runs against holds a wire break, which is what a
+//! long-lived instance's stream holds: committed v2 history under the
+//! probe agent's own subject, below everything the test then writes
+//! (<https://github.com/bricef/factor-q/issues/673>). `turn.list`
+//! scans an agent's whole subject from sequence 1, so every assertion
+//! below is made *across* that break.
 
 #![cfg(unix)]
 
@@ -86,6 +93,38 @@ fn tool_result(
             duration_ms: 3,
         }),
     )
+}
+
+/// The committed v2 `llm_request` — the pre-#510 flat `{role, content,
+/// tool_calls}` messages that today's tagged `Message` reads as
+/// `missing field kind`. Published raw under the probe agent's own
+/// subject, so the ephemeral reads that scan that subject meet it
+/// exactly as they meet the live instance's own history.
+///
+/// **It halts this daemon's `fq-coordination` consumer**, deliberately
+/// (#409: a durable consumer stops on a version it cannot read rather
+/// than acking history away) — the replay floor #648 added is the
+/// projection consumer's alone. So this is published *after* the one
+/// gated read below, and nothing after it waits on a watermark. The
+/// ephemeral reads this test is about do not go through a durable
+/// consumer at all, which is the whole point: they are a live
+/// operator's window onto a stream, and a stream that holds a wire
+/// break is still a stream they must be able to read.
+async fn publish_legacy_history(url: &str) -> u64 {
+    let bus = fq_runtime::EventBus::connect(url)
+        .await
+        .expect("connect the bus");
+    let (_, bytes) = fq_runtime::test_support::corpus::corpus_bytes("v2")
+        .into_iter()
+        .find(|(name, _)| name == "llm_request.json")
+        .expect("the v2 llm_request corpus file");
+    bus.jetstream()
+        .publish("fq.agent.turn-probe.llm.request", bytes.into())
+        .await
+        .expect("publish v2 history")
+        .await
+        .expect("v2 history stored")
+        .sequence
 }
 
 #[tokio::test]
@@ -196,6 +235,16 @@ async fn the_turn_atom_lives_end_to_end() {
     assert!(seek.items.is_empty());
     assert!(seek.next_from_seq < u64::MAX, "a concrete resume cursor");
 
+    // #673: the wire break goes in HERE — after the seam the stream
+    // resumes from, before the turns. So List (which scans the agent's
+    // subject from sequence 1) and Stream (which resumes at the seam)
+    // both read across it, which is what failed on the live instance.
+    let legacy_seq = publish_legacy_history(server.url()).await;
+    assert!(
+        legacy_seq >= seek.next_from_seq,
+        "the break is inside the range the tail will read"
+    );
+
     // Publish the turns AFTER the seek: the stream must deliver them.
     let a_seq = bus
         .publish(&assistant_with_call(&agent, invocation, "tc-1"))
@@ -269,7 +318,11 @@ async fn the_turn_atom_lives_end_to_end() {
         .expect("rpc")
         .expect("turn.list");
     let listed = listed.output.as_array().unwrap().clone();
-    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed.len(),
+        2,
+        "the listing scanned across the wire break and answered (#673)"
+    );
     assert_eq!(listed[0]["invocation_id"], invocation.to_string());
     assert!(listed[0]["action"]["content"].is_string(), "full payloads");
 
