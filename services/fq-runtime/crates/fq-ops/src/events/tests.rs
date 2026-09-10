@@ -1655,6 +1655,55 @@ fn the_written_version_is_a_supported_one() {
     assert!(SUPPORTED_SCHEMA_VERSIONS.contains(&SCHEMA_VERSION));
 }
 
+/// The version probe on its own (#648): it answers the version and
+/// nothing else — the same version `from_wire` decides on, from either
+/// place it has lived, with the body unexamined — and `None` for bytes
+/// that declare none, so a reader probing history by sequence can tell
+/// "a version" from "not an event" without parsing a shape.
+#[test]
+fn declared_schema_version_reads_the_version_wherever_it_lives_and_nothing_else() {
+    let current = wire_fixture();
+    assert_eq!(
+        declared_schema_version(current.to_string().as_bytes()),
+        Some(SCHEMA_VERSION)
+    );
+
+    let mut older = current.clone();
+    older["envelope"]["schema_version"] = json!(2);
+    older["payload"] = json!("not a body in any version");
+    assert_eq!(
+        declared_schema_version(older.to_string().as_bytes()),
+        Some(2),
+        "the body is not examined: an unreadable body still has a version"
+    );
+
+    let v1 = json!({"schema_version": 1, "event_id": "x", "event_type": "cost"});
+    assert_eq!(
+        declared_schema_version(v1.to_string().as_bytes()),
+        Some(1),
+        "v1 kept the version at the top level"
+    );
+
+    let mut versionless = current.clone();
+    versionless["envelope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    for bytes in [
+        versionless.to_string().as_bytes(),
+        b"not json",
+        b"[1, 2, 3]",
+        b"{}",
+    ] {
+        assert_eq!(
+            declared_schema_version(bytes),
+            None,
+            "{:?} declares no version",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
 /// Every payload has a kind, the kinds are distinct, and the kind of
 /// an event is its type: the corpus test in `fq-runtime` leans on this
 /// to ask whether every type is covered.

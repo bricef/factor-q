@@ -30,6 +30,8 @@ pub use fq_test_support as nats;
 // serve are exposed through the `test-support` feature; the rest stays
 // crate-test-only.
 #[cfg(test)]
+pub mod corpus;
+#[cfg(test)]
 pub mod events;
 pub mod fault;
 pub mod mock_anthropic;
