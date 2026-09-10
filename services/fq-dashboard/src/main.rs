@@ -983,6 +983,63 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// #673: an edge that **answers with an error** is not an edge that
+    /// is unreachable. The transcript page used to render the
+    /// unreachable banner and a 503 for either, which pointed the
+    /// operator at the tunnel and the daemon process while the daemon
+    /// was up and answering — and it did that for every transcript on
+    /// the live instance at once.
+    ///
+    /// The connection is real here (a serving edge), and only the
+    /// operation fails: the token holds every grant but `read:turn`, so
+    /// `turn.list` is refused the way any edge failure is. The page
+    /// must keep its own frame, carry the edge's words, and answer 502
+    /// — the gateway's "I asked, and this came back".
+    #[tokio::test]
+    async fn transcript_shows_an_edge_error_without_calling_it_unreachable() {
+        let grants: Vec<&str> = REQUIRED_GRANTS
+            .iter()
+            .copied()
+            .filter(|g| *g != "read:turn")
+            .collect();
+        let edge = spawn_edge_with(&format!("0.1.0+{OWN_SHA}"), &grants).await;
+
+        let resp = app(state_for(&edge))
+            .oneshot(
+                Request::get("/invocations/01a08a99-5622-7b61-9816-6b6fd8e0f310/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let html = body_string(resp).await;
+        assert!(
+            !html.contains("runtime unreachable"),
+            "the runtime answered; the page must not say otherwise: {html}"
+        );
+        assert!(
+            html.contains("the runtime answered"),
+            "the page names what happened: {html}"
+        );
+        assert!(
+            html.contains("denied"),
+            "the edge's own words are shown: {html}"
+        );
+        assert!(
+            html.contains("/invocations/01a08a99-5622-7b61-9816-6b6fd8e0f310"),
+            "the page stays this invocation's: {html}"
+        );
+
+        // The grants it does hold still work, so the page's 502 is
+        // about one operation and not a broken connection.
+        let resp = app(state_for(&edge))
+            .oneshot(Request::get("/agents").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     /// The crash-domain contract: with no daemon listening, every page
     /// renders the unreachable banner as a 503 — never a panic, never
     /// a broken page.

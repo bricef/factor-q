@@ -201,6 +201,36 @@ pub(crate) async fn transcript_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// The transcript page when the edge refused to serve it.
+///
+/// **502, not 503.** The dashboard is a gateway in front of the
+/// daemon's edge, and the upstream answered — with an error. 503 is
+/// what [`unreachable_page`] means ("nothing is answering, come back
+/// later"), which is the reading that cost an afternoon on the live
+/// instance; and 200 would claim a transcript that is not there. 502
+/// says the exact thing that happened: this dashboard asked, and what
+/// came back could not be served.
+///
+/// The skew banner still rides along (warn-and-continue, #168): a
+/// cross-build mismatch is a live candidate for *why* the edge could
+/// not answer, and this is the page an operator is looking at when it
+/// matters.
+fn transcript_error_page(state: &AppState, invocation_id: &str, error: &str) -> Page {
+    let title = format!(
+        "transcript {}",
+        invocation_id.chars().take(8).collect::<String>()
+    );
+    let body = format!(
+        "{}{}",
+        with_skew_banner(state, &render::transcript_error(invocation_id, error)),
+        super::updated_line(now_ms()),
+    );
+    (
+        StatusCode::BAD_GATEWAY,
+        Html(render::page(&title, state.refresh_secs, &body)),
+    )
+}
+
 /// The whole conversation, not a page of it — `turn.list` pages at 200
 /// by default, which would silently clip a long run's tail. So: the
 /// largest page the atom will serve, read off its declaration rather
@@ -234,7 +264,14 @@ pub(crate) async fn transcript_page(
         match call(&client, OpId::List(Domain::Turn), filter).await {
             Ok(turns) => turns,
             Err(CallError::NotFound) => Vec::new(),
-            Err(CallError::Failed(err)) => return unreachable_page(&state, "transcript", &err),
+            // The edge answered, and the answer was an error. That is
+            // not "runtime unreachable", and rendering it as one sent
+            // the operator to the tunnel and the daemon while every
+            // transcript on the instance was unreadable for a reason
+            // neither of those would explain (#673). The connection
+            // stands — record it as seen — and the error goes on the
+            // transcript page, in the page's own frame.
+            Err(CallError::Failed(err)) => return transcript_error_page(&state, &id, &err),
         };
     if turns.is_empty() {
         return (

@@ -10,6 +10,30 @@ use fq_ops::transcript::{AssistantToolCall, TranscriptEntry};
 
 use super::{age, esc};
 
+/// What the transcript page shows when the runtime **answered** and the
+/// answer was an error.
+///
+/// Not the unreachable page. The daemon replied, so "runtime
+/// unreachable at …" is the one diagnosis that is certainly wrong, and
+/// it sends the operator to the tunnel and the process while the fault
+/// is in serving this invocation's turns
+/// (<https://github.com/bricef/factor-q/issues/673>). The page keeps
+/// its frame and its identity; the edge's own words go where the turns
+/// would have been, escaped like every other payload the dashboard
+/// renders.
+pub fn transcript_error(invocation_id: &str, error: &str) -> String {
+    format!(
+        concat!(
+            r#"<p class="bad">the runtime answered, and could not serve this transcript.</p>"#,
+            r#"<pre class="turn err">{}</pre>"#,
+            r#"<p class="muted">the daemon is reachable — this is not a connectivity fault. "#,
+            r#"<a href="/invocations/{}">invocation detail</a></p>"#,
+        ),
+        esc(error),
+        esc(invocation_id),
+    )
+}
+
 /// The terminal phase, when the transcript is closed by an Outcome.
 pub fn transcript_outcome(entries: &[TranscriptEntry]) -> Option<&str> {
     entries.iter().rev().find_map(|e| match e {
