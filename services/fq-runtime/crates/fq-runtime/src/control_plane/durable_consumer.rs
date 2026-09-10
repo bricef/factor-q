@@ -102,6 +102,40 @@ pub enum DeliverFrom {
     /// instead of churning through it. Pair with a unique
     /// durable name, or an existing durable's position wins.
     New,
+    /// A stream position: the durable's first delivery is the message
+    /// at this sequence, or the first one after it that the stream
+    /// still holds. The projection replay after a rebuild starts here
+    /// — at the replay floor, the first sequence whose envelope
+    /// version this build reads — rather than at the beginning, so a
+    /// stream still holding older history is replayed from the point
+    /// this build can read and the rows below it are kept as they
+    /// were (<https://github.com/bricef/factor-q/issues/648>).
+    /// Whole-stream consumers only.
+    Sequence(u64),
+}
+
+impl DeliverFrom {
+    /// Start at `floor`, reading sequence 0 as the beginning. JetStream
+    /// numbers messages from 1; 0 is what an empty stream reports as
+    /// its first sequence, and `ByStartSequence` refuses it, so a floor
+    /// of 0 means "nothing to skip" and is spelled as such.
+    pub fn from_floor(floor: u64) -> Self {
+        if floor == 0 {
+            Self::Beginning
+        } else {
+            Self::Sequence(floor)
+        }
+    }
+
+    /// The JetStream policy this start maps to.
+    fn policy(self) -> async_nats::jetstream::consumer::DeliverPolicy {
+        use async_nats::jetstream::consumer::DeliverPolicy;
+        match self {
+            Self::Beginning => DeliverPolicy::All,
+            Self::New => DeliverPolicy::New,
+            Self::Sequence(start_sequence) => DeliverPolicy::ByStartSequence { start_sequence },
+        }
+    }
 }
 
 /// Configuration for one durable consumer on the factor-q event
@@ -153,18 +187,45 @@ impl DurableConsumerConfig {
             // the gaps between its matches, so its mark cannot speak
             // for them (a reader gated at an unmatched sequence would
             // wait forever); a from-new start skips history outright.
-            if !self.filter_subjects.is_empty() || self.deliver_from != DeliverFrom::Beginning {
+            // A start at a sequence is allowed: the sequences below a
+            // replay floor are not skipped from the projection, they
+            // are the part of it the replay cannot re-derive and the
+            // file already holds.
+            if !self.filter_subjects.is_empty() || self.deliver_from == DeliverFrom::New {
                 return Err(BusError::Stream(format!(
-                    "strict_order requires a whole-stream from-beginning consumer \
-                     (consumer `{}` has filters or a non-beginning start)",
+                    "strict_order requires a whole-stream consumer that starts at the \
+                     beginning or at a sequence (consumer `{}` has filters or a from-new \
+                     start)",
                     self.durable_name
                 )));
             }
             return bus
-                .durable_consumer_strict(&self.durable_name, self.ack_wait)
+                .durable_consumer_strict_from(
+                    &self.durable_name,
+                    self.deliver_from.policy(),
+                    self.ack_wait,
+                )
                 .await;
         }
         match self.deliver_from {
+            DeliverFrom::Sequence(_) => match self.filter_subjects.as_slice() {
+                [] => {
+                    bus.durable_consumer_from(
+                        &self.durable_name,
+                        self.deliver_from.policy(),
+                        self.ack_wait,
+                    )
+                    .await
+                }
+                // No consumer starts filtered at a sequence, and the
+                // bus has no factory for one; a config that asks is a
+                // mistake to name rather than a shape to guess at.
+                _ => Err(BusError::Stream(format!(
+                    "a start at a sequence needs a whole-stream consumer (consumer `{}` \
+                     has subject filters)",
+                    self.durable_name
+                ))),
+            },
             DeliverFrom::Beginning => match self.filter_subjects.as_slice() {
                 [] => {
                     bus.durable_consumer(&self.durable_name, self.ack_wait)
@@ -746,5 +807,148 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         let _ = handle.await;
+    }
+
+    /// Sequence 0 names no message, so a floor of 0 is the beginning;
+    /// any other floor is the position itself.
+    #[test]
+    fn a_floor_of_zero_is_the_beginning() {
+        assert_eq!(DeliverFrom::from_floor(0), DeliverFrom::Beginning);
+        assert_eq!(DeliverFrom::from_floor(7), DeliverFrom::Sequence(7));
+    }
+
+    /// The start-at-a-sequence variant (#648), on the projector's
+    /// shape — strict order, whole stream: a durable created at
+    /// sequence S is delivered S and what follows, and nothing below
+    /// it. Proved at the server as well as at the handler: the
+    /// durable's policy names S, and its acked floor after the loop is
+    /// the last sequence.
+    #[tokio::test]
+    async fn a_sequence_start_delivers_from_that_position_and_not_below() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+        // Three heartbeats on the private broker's own stream.
+        let mut published = Vec::new();
+        for i in 0..3 {
+            let worker_id =
+                WorkerId::new(format!("loop-seq-{i}-{}", Uuid::now_v7().simple())).unwrap();
+            let event = Event::system(
+                Uuid::now_v7(),
+                EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                    worker_id: worker_id.clone(),
+                    last_step_at_ms: None,
+                }),
+            );
+            let seq = bus.publish(&event).await.expect("publish");
+            published.push((seq, worker_id.as_str().to_string()));
+        }
+        let start = published[1].0;
+
+        let seen = Arc::new(Mutex::new(Vec::<(Option<u64>, String)>::new()));
+        let name = format!("fq-loop-seq-test-{}", Uuid::now_v7().simple());
+        let config = DurableConsumerConfig {
+            durable_name: name.clone(),
+            filter_subjects: Vec::new(),
+            deliver_from: DeliverFrom::Sequence(start),
+            strict_order: true,
+            ack_wait: None,
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let bus_for_loop = bus.clone();
+        let seen_for_loop = seen.clone();
+        let handle = tokio::spawn(async move {
+            run_durable_consumer(
+                &bus_for_loop,
+                config,
+                shutdown_rx,
+                move |Delivery { event, stream_seq }| {
+                    let seen = seen_for_loop.clone();
+                    async move {
+                        if let EventPayload::WorkerHeartbeat(p) = &event.payload {
+                            seen.lock()
+                                .unwrap()
+                                .push((stream_seq, p.worker_id.as_str().to_string()));
+                        }
+                        Ok(())
+                    }
+                },
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the two heartbeats at and after the start were not delivered: {:?}",
+                seen.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Quiet window: a delivery from below the start would land here.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let expected: Vec<(Option<u64>, String)> = published[1..]
+            .iter()
+            .map(|(seq, worker)| (Some(*seq), worker.clone()))
+            .collect();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            expected,
+            "exactly the messages at and after sequence {start}, in order"
+        );
+
+        let _ = shutdown_tx.send(());
+        handle
+            .await
+            .expect("loop task")
+            .expect("the loop stops clean");
+
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::STREAM_NAME)
+            .await
+            .unwrap();
+        let mut durable = stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(&name)
+            .await
+            .unwrap();
+        let info = durable.info().await.unwrap();
+        assert_eq!(
+            info.config.deliver_policy,
+            async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                start_sequence: start
+            },
+            "the server holds the start the config asked for"
+        );
+        assert_eq!(
+            info.ack_floor.stream_sequence, published[2].0,
+            "everything from the start on is acked"
+        );
+    }
+
+    /// A start at a sequence is a whole-stream shape: a config that
+    /// pairs it with subject filters is refused by name rather than
+    /// created as something else.
+    #[tokio::test]
+    async fn a_sequence_start_with_filters_is_refused() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let config = DurableConsumerConfig {
+            durable_name: "fq-loop-seq-filtered".to_string(),
+            filter_subjects: vec!["fq.worker.*.heartbeat".to_string()],
+            deliver_from: DeliverFrom::Sequence(1),
+            strict_order: false,
+            ack_wait: None,
+        };
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let err = run_durable_consumer(&bus, config, shutdown_rx, |_delivery| async { Ok(()) })
+            .await
+            .expect_err("a filtered sequence start has no factory");
+        assert!(
+            matches!(&err, DurableConsumerError::Bus(BusError::Stream(msg))
+                if msg.contains("whole-stream") && msg.contains("fq-loop-seq-filtered")),
+            "the refusal names the shape and the consumer: {err:?}"
+        );
     }
 }

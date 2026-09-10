@@ -120,12 +120,37 @@ impl EventBus {
         name: &str,
         ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
+        self.durable_consumer_from(name, consumer::DeliverPolicy::All, ack_wait)
+            .await
+    }
+
+    /// [`EventBus::durable_consumer`], starting where `deliver_policy`
+    /// says when the durable is first created. The policy is a
+    /// creation-time fact: an existing durable keeps its position, and
+    /// the get-or-create seam never rewrites a delivery policy, so a
+    /// caller that needs a durable moved deletes it first (the
+    /// projection reset does).
+    pub async fn durable_consumer_from(
+        &self,
+        name: &str,
+        deliver_policy: consumer::DeliverPolicy,
+        ack_wait: Option<Duration>,
+    ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
+            ?deliver_policy,
             "getting/creating durable JetStream consumer"
         );
-        self.durable(STREAM_NAME, name, ack_wait, event_stream_config())
-            .await
+        self.durable(
+            STREAM_NAME,
+            name,
+            ack_wait,
+            consumer::pull::Config {
+                deliver_policy,
+                ..event_stream_config()
+            },
+        )
+        .await
     }
 
     /// [`EventBus::durable_consumer`], with **resolved-contiguous
@@ -150,8 +175,25 @@ impl EventBus {
         name: &str,
         ack_wait: Option<Duration>,
     ) -> Result<consumer::PullConsumer, BusError> {
+        self.durable_consumer_strict_from(name, consumer::DeliverPolicy::All, ack_wait)
+            .await
+    }
+
+    /// [`EventBus::durable_consumer_strict`], starting where
+    /// `deliver_policy` says when the durable is first created — the
+    /// projector's shape after a rebuild, which replays from the floor
+    /// the file records rather than from the beginning. As with
+    /// [`EventBus::durable_consumer_from`], the policy only ever
+    /// applies to a durable that does not exist yet.
+    pub async fn durable_consumer_strict_from(
+        &self,
+        name: &str,
+        deliver_policy: consumer::DeliverPolicy,
+        ack_wait: Option<Duration>,
+    ) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,
+            ?deliver_policy,
             "getting/creating strict-order durable JetStream consumer"
         );
         self.durable(
@@ -160,6 +202,7 @@ impl EventBus {
             ack_wait,
             consumer::pull::Config {
                 max_ack_pending: 1,
+                deliver_policy,
                 ..event_stream_config()
             },
         )
