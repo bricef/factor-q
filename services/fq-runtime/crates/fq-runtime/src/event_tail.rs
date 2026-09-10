@@ -162,3 +162,6 @@ impl EventBus {
         Ok(info.state.last_sequence)
     }
 }
+
+#[cfg(test)]
+mod tests;
