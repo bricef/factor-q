@@ -57,7 +57,11 @@ it is the licence to keep changing shape quickly.
   `fqd` is the daemon, and reads `fqd.toml` while the client reads
   `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / status / workers /
-  dead-letters / doctor` (read commands take `--json`), plus the
+  dead-letters / doctor / projection rebuild` (read commands take
+  `--json`; `projection rebuild` re-derives the SQLite read model from
+  the event stream, which the daemon also does by itself when the
+  projection's schema version bumps — see
+  [operating the daemon](docs/guide/operating-the-daemon.md)), plus the
   authenticated-edge client verbs `fq connect` (TOFU cert pinning +
   token), `fq ops list`, and `fq token attenuate` (offline token
   narrowing), plus a read-only
