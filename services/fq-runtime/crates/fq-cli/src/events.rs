@@ -457,9 +457,12 @@ fn unavailable_event(err: &WireError) -> anyhow::Result<(String, &'static str)> 
         ),
         WireError::Gone { message, .. } => (
             format!("gone: {message}"),
-            "The index outlives the log: cost-bearing rows are kept indefinitely while the \
-             log keeps thirty days, so an old event that lists without a readable payload \
-             is the ordinary answer here rather than a fault.",
+            "The index outlives the log twice over. Cost-bearing rows are kept indefinitely \
+             while the log keeps thirty days, so an old event that lists without a readable \
+             payload is the ordinary answer here rather than a fault; and a payload the log \
+             still holds may be in an envelope version this build does not read — history \
+             from before a wire break, which a later build removes and no retry will. The \
+             message says which of the two you have.",
         ),
         other => anyhow::bail!("{other}"),
     })
