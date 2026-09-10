@@ -63,12 +63,27 @@ pub(crate) fn updated_line(now_ms: i64) -> String {
 
 pub(crate) type Page = (StatusCode, Html<String>);
 
-/// Why an edge call did not produce an answer. `NotFound` is split out
-/// because several pages turn it into a 404 — the request was fine,
-/// the entity is not there — while everything else is a failure to
-/// report on the unreachable page.
-enum CallError {
+/// Why an edge call did not produce an answer.
+///
+/// Three outcomes, because three different things are true of the
+/// daemon in each. `NotFound` is the request being fine and the entity
+/// not being there, which several pages turn into a 404.
+/// [`Unreachable`](Self::Unreachable) is the call never reaching an
+/// answer — the connection broke, or the deadline passed — and nothing
+/// can be said about what the daemon thinks. [`Failed`](Self::Failed)
+/// is an answer: the daemon replied, and the reply was an error (or was
+/// not the shape this build reads).
+///
+/// The last two used to be one variant, which is how the transcript
+/// page came to print "runtime unreachable" over a daemon that was up
+/// and answering (<https://github.com/bricef/factor-q/issues/673>).
+/// Pages that report both the same way say so with an or-pattern,
+/// rather than by the distinction not existing.
+pub(crate) enum CallError {
     NotFound,
+    /// No answer arrived: transport, or the RPC deadline.
+    Unreachable(String),
+    /// An answer arrived and it was not one this page can render.
     Failed(String),
 }
 
@@ -95,13 +110,17 @@ async fn edge_or_unreachable(state: &AppState, title: &str) -> Result<EdgeClient
 /// the shapes being shared (D-3): the daemon serialises the same
 /// struct this deserialises, so a field rename is a compile error on
 /// one side or the other rather than an empty page.
-async fn call<T: DeserializeOwned>(
+pub(crate) async fn call<T: DeserializeOwned>(
     client: &EdgeClient,
     op: OpId,
     input: serde_json::Value,
 ) -> Result<T, CallError> {
     match client.invoke(op, input).await {
-        Err(err) => Err(CallError::Failed(format!("rpc: {err}"))),
+        // No answer: the connection broke under the call, or
+        // `tarpc::context::current()`'s deadline passed. Either way
+        // nothing came back, which is the one case that is genuinely
+        // "unreachable".
+        Err(err) => Err(CallError::Unreachable(format!("rpc: {err}"))),
         Ok(Err(WireError::NotFound { .. })) => Err(CallError::NotFound),
         Ok(Err(err)) => Err(CallError::Failed(err.to_string())),
         Ok(Ok(value)) => {
@@ -191,7 +210,9 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.status is not registered");
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "health", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "health", &err);
+        }
     };
     // Recorded before the second call, so a doctor failure still
     // leaves the banner able to name both builds.
@@ -208,7 +229,9 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.doctor is not registered");
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "health", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "health", &err);
+        }
     };
     ok_page(&state, "health", &render::health(&status, &doctor))
 }
@@ -246,7 +269,9 @@ pub(crate) async fn invocations_page(
     {
         Ok(active) => active,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "invocations", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "invocations", &err);
+        }
     };
     let items: Vec<InvocationSummaryView> = match call(
         &client,
@@ -266,7 +291,9 @@ pub(crate) async fn invocations_page(
     {
         Ok(items) => items,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "invocations", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "invocations", &err);
+        }
     };
     ok_page(
         &state,
@@ -311,7 +338,9 @@ pub(crate) async fn invocation_page(
                 )),
             );
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "invocation", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "invocation", &err);
+        }
     };
     ok_page(
         &state,
@@ -363,7 +392,9 @@ pub(crate) async fn events_page(
     let rows: Vec<EventView> = match call(&client, OpId::List(Domain::Event), filter).await {
         Ok(rows) => rows,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "events", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "events", &err);
+        }
     };
     ok_page(&state, "events", &render::events(&rows))
 }
@@ -412,7 +443,9 @@ pub(crate) async fn costs_page(
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "costs", "cost.summary is not registered");
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "costs", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "costs", &err);
+        }
     };
     // The last-24h column always reads from a day-bounded report; when
     // the page window IS the day, that's the same data — skip the call.
@@ -439,7 +472,9 @@ pub(crate) async fn costs_page(
             Err(CallError::NotFound) => {
                 return unreachable_page(&state, "costs", "cost.summary is not registered");
             }
-            Err(CallError::Failed(err)) => return unreachable_page(&state, "costs", &err),
+            Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+                return unreachable_page(&state, "costs", &err);
+            }
         }
     };
     ok_page(
@@ -492,7 +527,9 @@ pub(crate) async fn agent_costs_page(
                 )),
             );
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "costs", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "costs", &err);
+        }
     };
     ok_page(
         &state,
@@ -530,7 +567,9 @@ pub(crate) async fn agents_page(State(state): State<Arc<AppState>>) -> Page {
     {
         Ok(entries) => entries,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "agents", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "agents", &err);
+        }
     };
     ok_page(&state, "agents", &render::agents(&agents_view(entries)))
 }
@@ -563,7 +602,9 @@ pub(crate) async fn agent_page(State(state): State<Arc<AppState>>, Path(id): Pat
                 )),
             );
         }
-        Err(CallError::Failed(err)) => return unreachable_page(&state, "agent", &err),
+        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            return unreachable_page(&state, "agent", &err);
+        }
     };
     ok_page(
         &state,

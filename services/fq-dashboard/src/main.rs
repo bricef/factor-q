@@ -983,6 +983,92 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// #673, the other half: an edge that **stops answering** is still
+    /// unreachable, and must still say so.
+    ///
+    /// The distinction lives in [`pages::CallError`], so it is tested
+    /// there. The page cannot be made to show it: it dials a fresh
+    /// client per request, so a dead daemon fails at `connect` and the
+    /// post-connect arm is never the one a page-level test reaches.
+    /// Here the client connects to a live edge through a byte relay,
+    /// the relay is then cut, and the call is made over the connection
+    /// that is left — the shape of a tunnel dropped, or a daemon
+    /// restarted, mid-page. The relay is what makes it deterministic:
+    /// aborting the edge's accept loop does not close a connection it
+    /// already handed to a task of its own, and the call would still
+    /// be answered.
+    #[tokio::test]
+    async fn a_call_that_never_gets_an_answer_is_unreachable_not_failed() {
+        use fq_ops::{Domain, OpId};
+
+        let edge = spawn_edge(&format!("0.1.0+{OWN_SHA}")).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let via = listener.local_addr().unwrap().to_string();
+        let upstream = edge.addr.clone();
+        // One connection, copied in this task, so cutting the task
+        // closes the sockets — which is the point.
+        let relay = tokio::spawn(async move {
+            let (mut inbound, _) = listener
+                .accept()
+                .await
+                .expect("the dashboard connects once");
+            let mut outbound = tokio::net::TcpStream::connect(upstream)
+                .await
+                .expect("dial the edge");
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+
+        let client = fq_edge::EdgeClient::connect(&via, edge.fingerprint, &edge.token)
+            .await
+            .expect("connect to a live edge");
+        let filter = serde_json::json!({"invocation_id": "inv-1"});
+        // The connection works — so what follows is about losing it,
+        // not about never having had it.
+        let answered = pages::call::<Vec<fq_ops::turn::TurnState>>(
+            &client,
+            OpId::List(Domain::Turn),
+            filter.clone(),
+        )
+        .await;
+        assert!(answered.is_ok(), "the edge answers while the link is up");
+
+        relay.abort();
+        let _ = relay.await;
+
+        let err =
+            pages::call::<Vec<fq_ops::turn::TurnState>>(&client, OpId::List(Domain::Turn), filter)
+                .await
+                .expect_err("the link is gone");
+        assert!(
+            matches!(err, pages::CallError::Unreachable(_)),
+            "no answer came back, so nothing may claim the daemon said anything"
+        );
+    }
+
+    /// And the transcript page still shows the banner when the runtime
+    /// really is unreachable — the crash-domain contract holds for the
+    /// one route that stopped routing every edge failure to it.
+    #[tokio::test]
+    async fn transcript_of_a_dead_runtime_still_renders_the_banner() {
+        let dead = dead_addr();
+        let edge = TestEdge {
+            addr: dead,
+            fingerprint: [0u8; 32],
+            token: "not-a-token".to_string(),
+        };
+        let resp = app(state_for(&edge))
+            .oneshot(
+                Request::get("/invocations/inv-1/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let html = body_string(resp).await;
+        assert!(html.contains("runtime unreachable"), "got: {html}");
+    }
+
     /// #673: an edge that **answers with an error** is not an edge that
     /// is unreachable. The transcript page used to render the
     /// unreachable banner and a 503 for either, which pointed the
