@@ -13,6 +13,10 @@ exact commit in their header). They come in a few flavours:
   read/write endpoint), captured as input to a specific decision.
 - **Retrospective learnings** — what a completed piece of work taught
   us, extracted as candidate principles.
+- **Backlog reviews** — a sweep of every open issue against the tree
+  at a pinned commit: themes, what to tackle first, the maintainer
+  decisions the tracker is waiting on, and the label and state
+  corrections applied that day.
 
 A review is never updated — it is a snapshot, only ever superseded by a
 later one. If its findings led to changes, those show up in code, plans,
