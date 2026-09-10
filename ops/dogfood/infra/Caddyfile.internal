@@ -1,0 +1,41 @@
+# The dashboard's door on an INTERNAL host — one with no public address,
+# where dev.lambda.works and ACME do not apply (the dogfood guest on nest is
+# one). The tracked infra/Caddyfile stays the public shape; on an internal
+# host compose.override.yml mounts this file in its place (README, "An
+# internal host"). bootstrap.sh refreshes both.
+#
+# Same door, different street: TLS from Caddy's own CA (`tls internal` —
+# trust /data/caddy/pki/authorities/local/root.crt on the operator's machine,
+# or accept the warning once), bound to the host's internal address only
+# (DASH_INTERNAL_ADDR in ../.secrets/caddy.env — the address the tunnel
+# reaches, never 0.0.0.0), so the only ways to it are the WireGuard tunnel
+# and the host's neighbours. Auth is the tracked Caddyfile's: basic-auth
+# plus the 90-day fq_dash session cookie, credentials from caddy.env. The
+# dashboard stays loopback-only behind it, exactly as on the public shape.
+{
+	auto_https disable_redirects
+	# No admin API (#543): see the tracked Caddyfile. Every change here or in
+	# caddy.env is a container recreate (docker compose up -d --force-recreate caddy).
+	admin off
+}
+
+https://{$DASH_INTERNAL_ADDR} {
+	bind {$DASH_INTERNAL_ADDR}
+	tls internal
+
+	@session expression `"{$DASH_COOKIE}" != "" && {http.request.header.Cookie}.contains("fq_dash={$DASH_COOKIE}")`
+
+	handle @session {
+		reverse_proxy 127.0.0.1:9472
+	}
+
+	handle {
+		route {
+			basic_auth {
+				{$DASH_USER} {$DASH_HASH}
+			}
+			header Set-Cookie "fq_dash={$DASH_COOKIE}; Path=/; Max-Age=7776000; Secure; HttpOnly; SameSite=Lax"
+			reverse_proxy 127.0.0.1:9472
+		}
+	}
+}
