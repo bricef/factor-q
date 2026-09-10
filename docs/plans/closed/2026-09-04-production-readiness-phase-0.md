@@ -1,11 +1,120 @@
 # Production readiness, Phase 0 — execution plan
 
+**Status:** closed 2026-09-10. Phase 0 ("stop the bleeding") completed on
+2026-09-04 with all four exit criteria verified on the dogfood host;
+Phase 1 ("nothing can wedge the daemon"), whose queue this plan filed,
+reached code-complete on `main` on 2026-09-06 and its follow-ups landed
+by 2026-09-09 — see [Outcome](#outcome) below. What this plan did not do
+is put Phase 1 on the live instance: that is the move onto the compose
+stack, tracked by the
+[dogfood host migration plan](../active/2026-09-05-dogfood-host-migration.md)
+(#587). Phase 2 (the record is trustworthy) is next, by hand, one PR at a
+time, per the review. Originally: active (2026-09-04). Tracking issue:
+[#554](https://github.com/bricef/factor-q/issues/554).
+
 > **Opened 2026-09-04.** Executes Phase 0 of the
 > [production-readiness review](../../reviews/2026-09-03-production-readiness-review.md)
 > (PR #530) and queues Phase 1. Written as a hand-off: a session with no
 > prior context should be able to read this file, then the review's
 > "The plan" section, and start work. Line numbers below are as of
 > `main@223c357`; treat them as pointers, not facts.
+
+## Outcome
+
+Recorded at close from the evidence on #554; the sections that follow
+are the plan as written on 2026-09-04 and are left as they were.
+
+### Phase 0 — complete 2026-09-04 13:32Z
+
+- **Step 1** filed #539–#553 and re-grounded #406, #405, #278, #509 and
+  #37 by comment; #554 tracked the phase.
+- **Step 2** landed as #555 (WP-C), #556 (WP-B) and #557 (WP-A), with
+  review follow-ups #559 and #560; `main` at `77c3389` on 2026-09-04.
+  The `async-nats` 0.38 → 0.50 bump traced the CONNECT frame, token
+  included, at `trace` level; `fqd` now caps `async_nats` below `trace`
+  regardless of `RUST_LOG`, and #556's `nats_token_hygiene` test is the
+  guard.
+- **Step 3** was one 26-second window (13:31:52Z → 13:32:18Z): `fq down`
+  drained clean, the adapters stopped, `nats` recreated 2.14.0 → 2.14.3
+  with token auth, `caddy` recreated with `admin off`, `deploy.sh`
+  installed `5afeacaf42b8`. The adapters read the broker URL from the
+  environment rather than argv from then on (ops PR #575). Host config
+  is committed to the ops repo; the runbook sections survived into the
+  compose-era `ops/dogfood/README.md`.
+
+| Exit criterion (review, verbatim) | Evidence |
+|---|---|
+| `just ci` includes a red-on-advisory audit gate and is green | `main@5afeaca`, CI run 33876523067: Dependency audit inside the required Rust CI job (#557); seen red on the pre-update lockfile and again with an ignore commented out |
+| `fq events get` of a `system_startup` event contains no credential | event `01a06c9e-a06e-79a2-a49f-a8fdab705078`: payload `nats_url: "nats://localhost:4223"`, token absent from the payload and from all four logs |
+| the dogfood broker rejects an unauthenticated `PUB` | raw-socket `PUB` to 127.0.0.1:4223 → `-ERR 'Authorization Violation'`; `connz` shows three clients, all authenticated |
+| `curl localhost:2019/config/` on the dogfood host is refused | connection refused (HTTP 200 before the window); the dashboard still serves behind basic-auth |
+
+### Phase 1 — code complete 2026-09-06, `main@3b9f319`
+
+Decisions made 2026-09-04 and recorded on each issue:
+
+- docker compose, not systemd
+  ([ADR-0035](../../adrs/accepted/0035-container-image-and-compose-supervision.md);
+  issue #553 closed against it);
+- a re-signalable stop mode (#509);
+- a 10 s connect and 600 s response deadline on LLM calls, a timeout
+  being transient with its own two-attempt budget, `Retry-After`
+  honoured up to about two minutes and deferral beyond that left to
+  #278 (#546, #607);
+- the `mcp.rs` split (#191) as the first PR, so the rest had room.
+
+| Item | PR(s) | Closes |
+|---|---|---|
+| LLM call deadlines, 429 + `Retry-After` cap | #606, #608 | #546, #607 |
+| tool/MCP call deadlines, cancellable MCP calls, regular-file `check_read`, progress correlation | #610, #614 | #547, #605 |
+| MCP boot never blocks: concurrent start, deadlines, caps, unavailable state + retry, refusal at dispatch, post-boot death detection | #621 | #548 |
+| escalating NAK + explicit `ack_wait` on every durable, health over every consumer, summariser supervised | #611 | #549 |
+| edge listener as instance lock, error-path deregistration, accept-loop limits, re-signalable stop, drain ordering | #597 | #550, #509 |
+| adapters reconnect forever, cron valve re-arms, watcher add-then-remove claim | #609, #613 | #551 |
+| process-group kill on exec timeout/drop; teardown graces configurable | #615 | #552, #618 |
+| stuck-invocation detection, threshold derived from the timeouts, last step boundary on the heartbeat | #619 | #37 |
+| supervision | ADR-0035 / #586 and the compose stack | #553 |
+
+The review's exit criterion asked for a fault-injection test per wedge
+class, `fq doctor` over every consumer, and five supervised units:
+
+| Wedge class | Test on `main` |
+|---|---|
+| hung provider | `a_hung_provider_ends_the_invocation_within_the_timeout` (real TCP mock that stalls; default attempt policy) |
+| hung MCP server at boot | `fqd_boots_with_a_hung_mcp_server_and_reports_it_unavailable` (`fqd_smoke.rs`; real binary, `command: sleep`) |
+| hung tool | `a_hung_tool_times_out_and_the_invocation_continues`, `consecutive_timeouts_end_the_invocation_naming_the_count` |
+| FIFO read | `fifo_is_refused_immediately_and_never_blocks` (FIFO, symlink-to-FIFO, directory, device) |
+| consumer `SQLITE_FULL` | `a_permanently_failing_handler_backs_off_and_reports_stuck` + `consumer_log_rate.rs` |
+| `fq doctor` reports every consumer | `edge_reports::control_doctor_*` (live daemon, five durables named) |
+| five units | superseded by ADR-0035: the compose services are the supervised set |
+
+Also from this phase: an MCP server that dies after boot is detected
+and redialled, and `invocation.stuck` fires once per stall at a
+threshold derived from the configured deadlines (4,210 s on the dogfood
+config). #327's root cause is recorded: the trigger durable's real
+first-delivery window is `backoff[0]` = 1 s.
+
+**Follow-ups after the close-out, all merged by 2026-09-09:**
+
+- #622 (#612): the cron valve counted jobs rather than fires.
+- #624 (#617): a long server-request servicing consumed the tool's
+  backstop grace.
+- #628 (#115): the reference server's startup is retried once in the
+  test harness.
+- #632 (#623): a truncated config read deleted every cron job's state.
+- #638 (#630): integration tests stranded `fqd` children when the test
+  binary was killed.
+- #639 (#634): the config watcher seeded itself from a second read.
+- #641 (#635): a partial write that parsed still deleted the missing
+  jobs' ledgers.
+
+**Open by decision, on their own issues:** #278 (429 deferral and a
+per-provider limiter), #593 (`nats_url` stays in `system_startup`
+through alpha; Beta gate milestone), #594 (dependency audit reported as
+a PR comment before thresholds), #640 (`just lint-docs` covers only the
+ADR tree), #643 (`gate-adapters` returns only the last adapter's
+status), #664 (startup and `--check` accept a job-less cron config that
+a reload refuses).
 
 ## How to use this plan
 
@@ -28,7 +137,7 @@
 - **#510 (#437, reasoning as message parts) also merged on 2026-09-04**,
   fifteen commits including `Message` becoming an enum over turn kinds —
   a breaking change to the event wire with `SCHEMA_VERSION` 2 → 3
-  (ADR-0034, the [reasoning plan](../closed/2026-08-25-reasoning-as-message-parts.md)).
+  (ADR-0034, the [reasoning plan](2026-08-25-reasoning-as-message-parts.md)).
   It is not on the review's "what not to start" list; STATUS.md records
   why it went first. Phase 0 builds on top of it.
 - **`main` is green on every Rust job**; the nightly live suites have
@@ -310,6 +419,49 @@ one place so a hand-off prompt can point at them.
 - **Dogfood host.** Read `~/fq-dogfood/agents/` for compatibility
   checks; never modify it from a work package. Deploys follow
   `ops/dogfood/deploy.sh` and the SOP in the ops README.
+
+**Added during Phase 1 (2026-09-05 → 2026-09-10),** from what the work
+actually needed; the next plan should start from this list.
+
+- **Draft PRs until reviewed.** An agent opens its PR as a draft. A
+  second, read-only agent reviews it: findings by severity, each claim
+  tested rather than read, temporary edits reverted, tree verified clean.
+  The dispatcher marks the PR ready only after the review fixes land and
+  CI is green on the *full* check set. Three PRs were merged between
+  first push and review fixes before this rule (#556, #609, #610 →
+  follow-ups #559, #613, #614).
+- **Prove a guard by breaking it.** A fix that adds a guard says in its
+  PR that the guard was disabled and the new test failed, with the
+  failure text; the reviewer repeats it. Twice this round the reviewer's
+  own probe found a defect the author's tests could not (#638's
+  forgotten exit status, #641's stale-config deadline).
+- **Parallel agents in one package get disjoint regions**, named by file
+  and function in each brief, with the shared file's owner named; the
+  dispatcher rebases whichever lands second (#634 and #635 in
+  `adapters/fq-cron`).
+- **Kill test processes by executable path, never by name.** The devbox
+  runs the dogfood `fqd`; `readlink /proc/<pid>/exe` under the
+  worktree's `target/` is the only safe selector. A test binary killed by
+  a signal used to strand its daemons for ever — 42 of them, 1.3 GB,
+  found a day later (#630, closed by the `TestChild` fixture in #638).
+  `git worktree remove` does not kill processes rooted in the worktree.
+- **Which recipe is the gate.** `just runtime-ci` does not run
+  `test-support-ci`; use `just rust-ci` when `fq-test-support` changes.
+  `just go-ci` returns only the last adapter's status (#643): run
+  `go vet ./... && go test ./...` in the changed adapter as well until
+  that is fixed. Neither Go gate runs `-race`; run it by hand on
+  concurrency changes — two real races were found that way this round.
+- **A CI poll must see the full check set** before "no pending" means
+  green: a conflicting PR registers a handful of checks and suppresses
+  the rest, and one PR was flipped to ready on six of eighteen.
+- **Watchdog details.** `stat -L` on the transcript path — it is a
+  symlink, and the link's own mtime never changes. A session forked or
+  compacted from the dispatcher does not own the dispatcher's agents:
+  it must not salvage, commit, gate or push in their worktrees; it
+  messages the parent.
+- **When a decision changes an issue's fix shape, edit the issue body**,
+  not just a comment: #606 followed #546's stale body and #607/#608 had
+  to correct it.
 
 ## Exit criteria (from the review, verbatim)
 

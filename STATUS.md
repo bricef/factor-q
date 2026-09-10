@@ -137,11 +137,16 @@ docs) — maintainer-confirmed per the done signal of the now-closed
 
 The active track is **production readiness**: the
 [2026-09-03 review](docs/reviews/2026-09-03-production-readiness-review.md)
-and its
-[Phase 0 execution plan](docs/plans/active/2026-09-04-production-readiness-phase-0.md)
-(opened 2026-09-04) sequence Phases 0–2, and their standing answer to
-"can we also…" **parks the storage M3–M5 track, Memory and Skills, and
-the multi-node vertical until Phase 2 is done**. So M3, then M4, then M5
+sequences Phases 0–5. Its
+[Phase 0 execution plan](docs/plans/closed/2026-09-04-production-readiness-phase-0.md)
+closed on 2026-09-10 with **Phases 0 and 1 on `main`** (Phase 0's exit
+criteria verified on the dogfood host 2026-09-04; Phase 1 code complete
+2026-09-06, follow-ups merged by 2026-09-09); the
+[dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
+carries them to the live instance, and Phase 2 (the record is
+trustworthy) is next, by hand, one PR at a time. The review's standing
+answer to "can we also…" **parks the storage M3–M5 track, Memory and
+Skills, and the multi-node vertical until Phase 2 is done**. So M3, then M4, then M5
 per the
 [storage + vector foundation plan](docs/plans/active/2026-06-27-storage-vector-foundation.md)
 — with Memory and Skills MVPs on the result — is the shape of that work
