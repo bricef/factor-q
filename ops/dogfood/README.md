@@ -344,6 +344,49 @@ survive it. Caddy and the dashboard run on the host network,
 loopback-bound, exactly as the processes did — the dashboard refuses
 any other bind, and Caddy is the only door.
 
+### An internal host
+
+A host with no public address — the dogfood guest on nest is one — has
+nothing for `dev.lambda.works` or ACME to point at, and the migration
+plan's answer was an SSH tunnel to `127.0.0.1:9472`. The door can stay
+instead: [infra/Caddyfile.internal](infra/Caddyfile.internal) is the
+tracked Caddyfile with the site address and the certificate source
+changed — `https://{$DASH_INTERNAL_ADDR}`, `bind {$DASH_INTERNAL_ADDR}`,
+`tls internal` — so Caddy answers on the host's tunnel-side address only,
+with a certificate from its own CA and the same basic-auth and session
+cookie. The dashboard stays loopback-only behind it.
+
+Two host-authored lines wire it in. In `.secrets/caddy.env`:
+
+```sh
+DASH_INTERNAL_ADDR=10.20.0.10     # the address the tunnel reaches — never 0.0.0.0
+```
+
+and a `compose.override.yml` beside `compose.yml`, which `bootstrap.sh`
+never touches (it refreshes both Caddyfiles, and leaves the override and
+`caddy.env` alone):
+
+```yaml
+services:
+  caddy:
+    volumes:
+      - ./infra/Caddyfile.internal:/etc/caddy/Caddyfile:ro
+```
+
+Then `docker compose up -d --force-recreate caddy`. The operator's
+browser trusts the CA once — `docker compose exec caddy cat
+/data/caddy/pki/authorities/local/root.crt` — or accepts the warning.
+Nothing else on the host changes: `:80` stays closed, the admin API stays
+off, the edge and the dashboard stay on loopback, and a port scan of the
+address from outside the tunnel finds nothing, because nothing outside
+the tunnel can reach the address at all.
+
+The same override is where a rehearsal keeps the adapters off (`profiles:
+["cutover"]` on `github-watcher` and `fq-cron`) while the old host's pair
+is still live — the [migration
+plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md) has
+the details.
+
 ## Continuous delivery: `deploy.sh --auto`
 
 The [crontab](crontab) runs `deploy.sh --auto` hourly. It is the same

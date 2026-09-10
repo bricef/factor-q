@@ -60,7 +60,7 @@ else
     SRC="$FQ_REPO_DIR/ops/dogfood"
     ok "$SRC at $(git -C "$FQ_REPO_DIR" rev-parse --short=12 HEAD)"
 fi
-for f in compose.yml deploy.sh hygiene.sh backup.sh restore.sh notify.sh crontab .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile; do
+for f in compose.yml deploy.sh hygiene.sh backup.sh restore.sh notify.sh crontab .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
     [ -f "$SRC/$f" ] || die "missing $SRC/$f — an incomplete checkout?"
 done
 
@@ -107,13 +107,13 @@ install -d -o "$FQ_USER" -g "$FQ_USER" -m 755 "$DOGFOOD" "$DOGFOOD/infra" "$DOGF
 install -d -o "$FQ_USER" -g "$FQ_USER" -m 700 "$DOGFOOD/.secrets"
 # Tracked files: always refreshed — this is how a change to the stack or
 # a script reaches the host.
-for f in compose.yml infra/nats.conf infra/Caddyfile; do
+for f in compose.yml infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 644 "$SRC/$f" "$DOGFOOD/$f"
 done
 for f in deploy.sh hygiene.sh backup.sh restore.sh notify.sh; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 755 "$SRC/$f" "$DOGFOOD/$f"
 done
-ok "compose.yml, infra/, deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh (refreshed)"
+ok "compose.yml, infra/ (both Caddyfiles), deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh (refreshed)"
 
 # Host-authored files: created from their templates once, never touched again.
 seed() {  # $1 = template, $2 = destination, $3 = mode
@@ -134,7 +134,7 @@ fi
 seed "$SRC/dashboard.env.example" "$DOGFOOD/.secrets/dashboard.env" 600 || true
 if [ ! -f "$DOGFOOD/.secrets/caddy.env" ]; then
     cookie="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    printf '# DASH_USER and DASH_HASH (docker run --rm caddy:2 caddy hash-password) gate the dashboard.\nDASH_USER=\nDASH_HASH=\nDASH_COOKIE=%s\n' "$cookie" > "$DOGFOOD/.secrets/caddy.env"
+    printf '# DASH_USER and DASH_HASH (docker run --rm caddy:2 caddy hash-password) gate the dashboard.\nDASH_USER=\nDASH_HASH=\nDASH_COOKIE=%s\n# On a host with no public address: the tunnel-side address Caddy binds (infra/Caddyfile.internal, README "An internal host").\n# DASH_INTERNAL_ADDR=\n' "$cookie" > "$DOGFOOD/.secrets/caddy.env"
     chown "$FQ_USER:$FQ_USER" "$DOGFOOD/.secrets/caddy.env"; chmod 600 "$DOGFOOD/.secrets/caddy.env"
     ok "caddy.env created — DASH_COOKIE generated; DASH_USER and DASH_HASH are yours to fill"
 else
