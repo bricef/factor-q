@@ -158,6 +158,18 @@ pub enum BusError {
     #[error("failed to serialise event: {0}")]
     Serialise(#[from] serde_json::Error),
 
+    /// Bytes read back off the stream are not an event this build can
+    /// read: JSON that does not parse, or a supported schema version
+    /// whose body does not match its shape.
+    ///
+    /// The read-side sibling of [`Self::Serialise`], which is the
+    /// publish path's. One variant used to serve both, so every read
+    /// failure printed "failed to serialise event" and sent the reader
+    /// looking at the publisher — the wrong end of the pipe
+    /// (<https://github.com/bricef/factor-q/issues/673>).
+    #[error("failed to read event: {0}")]
+    Deserialise(#[source] serde_json::Error),
+
     /// The serialised event exceeds the NATS server's advertised
     /// `max_payload`. Returned by the pre-flight guard in
     /// [`EventBus::publish`] *before* any bytes reach the wire, so an
@@ -468,7 +480,7 @@ impl EventBus {
         let stream = subscriber.map(|msg| {
             serde_json::from_slice::<Event>(&msg.payload).map_err(|err| {
                 warn!(error = %err, "failed to deserialise event");
-                BusError::Serialise(err)
+                BusError::Deserialise(err)
             })
         });
         Ok(Box::pin(stream))

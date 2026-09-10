@@ -577,10 +577,22 @@ async fn turn_at(
         .map_err(|e| fq_edge::wire::WireError::Internal {
             message: e.to_string(),
         })?;
-    let (got_seq, event) = first;
+    let fq_runtime::event_tail::TailedMessage {
+        seq: got_seq,
+        event,
+    } = first;
     if got_seq != seq {
         return Err(not_found());
     }
+    // The message is there; this build cannot read it. Saying "no turn
+    // at sequence N" would be the misdirection #673 is about, so say
+    // which of the two it is.
+    let event = event.ok_or_else(|| fq_edge::wire::WireError::NotFound {
+        op: "turn.get".into(),
+        message: format!(
+            "the message at sequence {seq} declares a schema version this build does not read"
+        ),
+    })?;
     fq_runtime::turn::TurnFold::new()
         .apply(got_seq, &event)
         .ok_or_else(not_found)
@@ -617,17 +629,27 @@ async fn list_turns(
     let mut fold = fq_runtime::turn::TurnFold::new();
     let mut turns = Vec::new();
     while let Some(next) = events.next().await {
-        let (seq, event) = next.map_err(internal)?;
-        if event.envelope.invocation_id.to_string() == filter.invocation_id
-            && let Some(turn) = fold.apply(seq, &event)
-        {
-            turns.push(turn);
-            if turns.len() >= limit {
-                break;
+        let fq_runtime::event_tail::TailedMessage { seq, event } = next.map_err(internal)?;
+        // The scan walks the agent's *whole* subject and filters by
+        // invocation afterwards, so this listing meets every event that
+        // agent has ever written — history from before a wire break
+        // included. Refusing on one failed `turn.list` for every
+        // invocation of that agent, however recent, which is what took
+        // the dashboard's transcript page down on the live instance
+        // (#673). Unreadable history is not this invocation's turn: it
+        // is skipped, and the fold does not see it.
+        if let Some(event) = event.as_ref() {
+            if event.envelope.invocation_id.to_string() == filter.invocation_id
+                && let Some(turn) = fold.apply(seq, event)
+            {
+                turns.push(turn);
+                if turns.len() >= limit {
+                    break;
+                }
+            } else {
+                // Non-matching events still feed the fold's join window.
+                let _ = fold.apply(seq, event);
             }
-        } else {
-            // Non-matching events still feed the fold's join window.
-            let _ = fold.apply(seq, &event);
         }
         if seq >= tip {
             break;
@@ -679,8 +701,17 @@ async fn stream_turns(
             Ok(Some(next)) => next.map_err(internal)?,
             Ok(None) | Err(_) => break,
         };
-        let (seq, event) = next;
+        let fq_runtime::event_tail::TailedMessage { seq, event } = next;
         next_from_seq = seq + 1;
+        // The cursor has moved past it either way: unreadable history
+        // is skipped, exactly as List skips it, so a tail that opens
+        // below a wire break makes progress instead of dying (#673).
+        let Some(event) = event else {
+            if items.is_empty() && remaining.is_zero() {
+                break;
+            }
+            continue;
+        };
         let turn = fold.apply(seq, &event);
         if event.envelope.invocation_id.to_string() == invocation_id
             && let Some(turn) = turn
