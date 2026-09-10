@@ -380,7 +380,10 @@ impl Surface {
             .expect("the event log stream stayed open")
             .expect("event deserialises");
             let Some(event) = next.event else { continue };
-            if matches!(event.payload, fq_runtime::events::EventPayload::Triggered(_)) {
+            if matches!(
+                event.payload,
+                fq_runtime::events::EventPayload::Triggered(_)
+            ) {
                 return event.envelope.invocation_id;
             }
         }

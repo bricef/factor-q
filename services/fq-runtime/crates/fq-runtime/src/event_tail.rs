@@ -105,7 +105,8 @@ impl EventBus {
                 Err(EventParseError::UnsupportedSchemaVersion { found, .. }) => {
                     debug!(
                         seq,
-                        found, "tail skipped a message in a schema version this build does not read"
+                        found,
+                        "tail skipped a message in a schema version this build does not read"
                     );
                     Ok(TailedMessage { seq, event: None })
                 }
