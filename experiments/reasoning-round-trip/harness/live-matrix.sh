@@ -252,8 +252,16 @@ sleep 1
 # ---------------------------------------------------------------- arms
 declare -A RESULT
 declare -A RETRIED
+# Invocation ids an arm has already been judged on, space-separated. A
+# second attempt must wait for a *new* invocation: the first attempt's
+# terminal row is still there, and a wait that took the first terminal
+# row for the agent would return it at once, "failed in 0s", and judge
+# the arm on the attempt that was retried away (seen on the nightly of
+# 2026-09-10).
+declare -A SEEN_IDS
 run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
   local arm="$1"
+  local seen="${SEEN_IDS[$arm]:-}"
   mkdir -p "$OUT/$arm/events"
   log "=== $arm: trigger"
   t0=$SECONDS
@@ -262,7 +270,7 @@ run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
   deadline=$((SECONDS + INVOCATION_TIMEOUT_S))
   while (( SECONDS < deadline )); do
     row="$(fqc invocation list --json --include-archived 2>/dev/null \
-      | jq -r --arg a "$arm" 'map(select(.agent_id == $a)) | map(select(.status == "completed" or .status == "failed")) | first // empty | "\(.invocation_id) \(.status)"')" || true
+      | jq -r --arg a "$arm" --arg seen " $seen " 'map(select(.agent_id == $a)) | map(select(.status == "completed" or .status == "failed")) | map(select(.invocation_id as $id | ($seen | contains(" " + $id + " ")) | not)) | first // empty | "\(.invocation_id) \(.status)"')" || true
     if [[ -n "$row" ]]; then id="${row%% *}"; status="${row##* }"; break; fi
     sleep 2
   done
@@ -273,6 +281,7 @@ run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
   fi
   log "$arm: invocation $id $status in $((SECONDS - t0))s"
   RESULT[$arm]="$status"
+  SEEN_IDS[$arm]="$seen $id"
   printf '%s\n' "$id" > "$OUT/$arm/invocation-id"
   fqc invocation transcript "$id" --full --reasoning > "$OUT/$arm/transcript-reasoning.txt" 2>&1 || true
   fqc invocation transcript "$id" --full             > "$OUT/$arm/transcript-plain.txt"     2>&1 || true
