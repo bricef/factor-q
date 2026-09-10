@@ -89,6 +89,7 @@ fn llm_response(agent: &str, inv: Uuid, reasoning_tokens: Option<u32>) -> Event 
         cumulative_agent_cost: 0.02,
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens,
+        reported_cost: None,
     })
 }
 
