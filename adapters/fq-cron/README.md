@@ -47,8 +47,9 @@ A saved file replaces the running configuration only when all of this holds
   words, with a top-level `job = []`. A file with no `[[job]]` blocks and no
   `job = []` is refused: zero bytes are valid TOML with no jobs, so accepting
   it would let a read caught mid-save delete every job *and* its fire ledger
-  ([#623](https://github.com/bricef/factor-q/issues/623)). To run with no
-  jobs, say so:
+  ([#623](https://github.com/bricef/factor-q/issues/623)). This one is a
+  rule of the *config*, not of reloads: the parser applies it, so startup
+  and `--check` refuse the same files (below). To run with no jobs, say so:
 
   ```toml
   job = []
@@ -67,11 +68,37 @@ config changed while being read; reload deferred until it settles
 The second is not a failure — the file is mid-save and the watcher looks
 again after another settle.
 
-**This rule governs reloads only.** `--check` and startup validate the file
-and stop there: a job-less file is *valid*, so `--check` passes on it and
-`fq-cron` will start with nothing scheduled. What it will never do is
-replace a **running** configuration, because that is the reload that deletes
-job state.
+**The same rule at startup and under `--check`.** A config that declares no
+jobs without `job = []` is refused wherever it is read
+([#664](https://github.com/bricef/factor-q/issues/664)): a reload keeps the
+running configuration, and startup and `--check` refuse to proceed, exit 1,
+with the same sentence, the file's name and the remedy:
+
+```text
+fq-cron: /var/lib/factor-q/fq-cron.toml: 0 bytes declaring no jobs, and no explicit `job = []` — write `job = []` to run with nothing scheduled
+```
+
+So a file that would leave the scheduler idle never passes the pre-flight the
+runbook asks for. `job = []` is valid everywhere, and so is a file whose jobs
+are all `enabled = false`; both schedule nothing, and both say so rather than
+looking like a scheduler that is failing to fire. `--check` qualifies its
+verdict — `configuration … is valid (no jobs declared)`, or `(2 job(s)
+declared, none enabled)` — and startup logs one line:
+
+```text
+config declares no jobs (`job = []`): nothing scheduled until one is added
+config declares 2 job(s), none enabled: nothing scheduled until one is enabled
+```
+
+Under a supervisor a refused file is a restart loop rather than an idle
+process: the refusal happens before any broker contact, docker backs off to
+one attempt a minute, the last log line names the file, and the fix is the
+file — `docker compose up -d fq-cron` afterwards, no redeploy. Run `fq-cron`
+under something that restarts it; a bare binary that reads a torn file at
+startup stays down. `deploy.sh`'s health wait cannot yet tell a refused
+config from a sick service, so a deploy that lands on such a file fails and
+its rollback, reading the same file, fails too
+([#667](https://github.com/bricef/factor-q/issues/667)).
 
 **The comparison starts from the configuration that is running.** The watcher
 is seeded with the bytes `fq-cron` loaded at startup, and never reads the file
@@ -79,11 +106,10 @@ to seed itself. So an edit made while `fq-cron` was still connecting to the
 broker — a wait that lasts as long as the outage does — is seen by the first
 check after the scheduler starts, on the same schedule as any other edit: the
 next poll tick (30 s) or an `fsnotify` event, whichever comes first. It does
-not sit unnoticed until the file is written again. This is also how a startup
-that read a file mid-save recovers: `fq-cron` begins with nothing scheduled,
-and the writer's completed file is picked up on that first check rather than
-waiting for another edit
-([#634](https://github.com/bricef/factor-q/issues/634)).
+not sit unnoticed until the file is written again
+([#634](https://github.com/bricef/factor-q/issues/634)). A startup whose own
+read landed mid-save does not start: the parse refuses it as above, and it is
+the supervisor's restart, a moment later, that reads the finished file.
 
 ## When a removed job's state is deleted
 
