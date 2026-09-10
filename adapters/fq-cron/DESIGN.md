@@ -185,12 +185,16 @@ Two configuration planes, deliberately separate:
   valid TOML declaring no jobs, so the truncate gap above parses as a
   complete, valid config in which every job has been deleted — and the
   diff below would delete every job's KV state to match, ledgers and all
-  ([#623](https://github.com/bricef/factor-q/issues/623)). A reload that
+  ([#623](https://github.com/bricef/factor-q/issues/623)). A config that
   declares no jobs is therefore accepted only when the file declares the
   top-level `job` key with zero entries (`job = []`); a file with no
   `[[job]]` blocks and no `job = []` — empty, whitespace, comments, or
-  `[limits]` alone — is refused and logged, and the running config keeps
-  going. `job = []` is a *deliberate* state that any writer of the file
+  `[limits]` alone — is refused. The rule lives in the parser, so it is
+  the same wherever the file is read
+  ([#664](https://github.com/bricef/factor-q/issues/664)): on reload it is
+  logged and the running config keeps going; at startup the process exits
+  with the same sentence, the file's name and the remedy; `--check` fails
+  on it. `job = []` is a *deliberate* state that any writer of the file
   can express, and no prefix of a file containing `[[job]]` blocks can
   produce it by accident; "the file happens to have no jobs in it right
   now" is not, which is exactly why the two are not the same reload.
@@ -350,6 +354,12 @@ durable = false                           # core NATS, fire-and-forget
 payload_json = '{"source": "fq-cron", "slot": "{{scheduled_time}}"}'
 ```
 
+A file must declare at least one `[[job]]` or say `job = []` outright;
+anything else that parses to no jobs — empty, comments only, `[limits]`
+alone — is refused at startup, by `--check` and on reload alike
+(D4, #664). A file whose jobs are all `enabled = false` is accepted, and
+announced as scheduling nothing.
+
 Per-job fields: `name`, `schedule`, `subject` (a concrete subject — no
 wildcards), `tz`, `catch_up`, `durable`, `enabled` (default `true`;
 `false` pauses a job without deleting its state), and exactly one of:
@@ -403,7 +413,8 @@ the returned fires.
 | Invalid config on reload | Logged with job + line; old config keeps running in full (D4). |
 | Config file deleted | Treated as an invalid reload: running jobs continue; recreating the file resumes normal reloads. |
 | Config read mid-save (truncate gap, streamed copy) | The second read disagrees with the first, so nothing is concluded and nothing recorded; the watcher looks again after another settle and reads the finished file. A zero-byte or job-less read that reaches the parse anyway is refused rather than applied as "every job deleted" (D4, #623). |
-| Config written during the startup broker wait | Seen on the first check after the scheduler starts. The watcher compares against the bytes that produced the running config, not against a read of its own, so an edit made while fq-cron was still connecting is a normal reload rather than a change that waits for the next write. The same path recovers a startup whose own read landed mid-save (D4, #634). |
+| Config written during the startup broker wait | Seen on the first check after the scheduler starts. The watcher compares against the bytes that produced the running config, not against a read of its own, so an edit made while fq-cron was still connecting is a normal reload rather than a change that waits for the next write (D4, #634). A startup whose own read landed mid-save does not start — the row below — and the supervisor's restart reads the finished file. |
+| Config declares no jobs at startup or under `--check` (empty, comments, `[limits]` alone) | Refused before any broker contact or port bind: exit 1, one stderr line with the file, the byte count and the remedy — write `job = []` to run with nothing scheduled. Under compose that is a restart loop backing off to one attempt a minute until the file has a job or says `job = []`; a bare binary stays down, so run it supervised. `job = []`, or every job `enabled = false`, starts and logs once that nothing is scheduled; `--check` says the same beside "is valid" (D4, #664). `deploy.sh` cannot yet tell this from an unhealthy service and rolls back onto the same file (#667). |
 | KV bucket lost | All jobs start with no history: no catch-up, next scheduled fires only (D2, D6). |
 | Durable job whose subject no stream matches | Configuration error: logged, job unhealthy until reload; not retried (D5). |
 | Trigger for an unknown agent id | Not detectable by fq-cron (the contract stores it durably, undelivered); operator checks the agent id against the fleet. |
@@ -414,7 +425,11 @@ the returned fires.
 
 Matches the fleet's config-first deploy discipline: a schedule, payload,
 or policy change is an edit to `fq-cron.toml` and an automatic reload —
-no restart, no binary. A binary upgrade is a plain restart at any time:
+no restart, no binary. Pausing is `enabled = false` per job (state kept)
+or `job = []` (state deleted after the confirmation window); a file with
+every job commented out is neither — the running scheduler refuses the
+reload and keeps its jobs, and the next restart will not come up until
+the file says one or the other (D4, #664). A binary upgrade is a plain restart at any time:
 fq-cron holds no in-flight work beyond a single pending publish, and D5/D6
 define exactly what a restart can and cannot re-fire. Observability in v1
 is structured logs — one line per fire attempt with job, scheduled slot,
