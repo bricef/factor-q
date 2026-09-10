@@ -249,8 +249,10 @@ worker WAL and control-plane state live in `worker.db` and
 (model, tokens, cost, error_kind, duration) are stored — no full
 payloads. NATS is the source of truth; the projection carries a
 schema version and is rebuilt from the stream when it changes, or on
-demand with `fq projection rebuild` — cost-bearing rows, summaries and
-trigger records are carried across, everything else is re-derived.
+demand with `fq projection rebuild` — every row is carried across, then
+everything from the replay floor (the first event the build reads) on
+is re-derived; the rows below it, and cost-bearing rows, summaries and
+trigger records wherever they sit, are kept.
 
 ### Trigger dispatcher (`fq-runtime/src/control_plane/dispatcher.rs`)
 

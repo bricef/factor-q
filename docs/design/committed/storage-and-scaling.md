@@ -11,8 +11,9 @@ bus. NATS with JetStream is the system's event store: full payloads,
 30-day window. A separate SQLite projection consumer materialises
 events into queryable tables for CLI inspection (`fq events query`,
 `fq costs`), and **the projection is not authoritative** — it can be
-dropped and rebuilt from NATS by replaying the stream from
-`deliver_all`.
+dropped and rebuilt from NATS by replaying the stream, from the first
+event the build reads (see
+[schema versioning](#schema-versioning-a-bump-is-a-rebuild)).
 
 That is a sizing statement, not a durability one, and the difference
 matters. ADR-0011 made NATS the source of truth;
@@ -213,40 +214,69 @@ migration**:
   whose value the events do not carry; a column they do carry gets a
   version bump.
 - **Older version** — the projection tables are dropped and recreated
-  at the current version, the rows the retention sweep exempts are
-  carried across (below), the file is stamped, and the durable
-  consumer is marked for a reset. The daemon's consumer performs the
-  reset before it next reads: it deletes the `fq-projector` durable,
-  records the stream's last sequence as the replay's target, and
-  recreates the durable from the beginning of the stream
-  (`deliver_all`). Every event the stream still holds is re-derived,
+  at the current version, **every row is carried across** (below), the
+  file is stamped, and the durable consumer is marked for a reset.
+  Nothing is dropped at open: which rows the replay can re-derive is a
+  fact about the stream, and open holds no bus. The daemon's consumer
+  performs the reset before it next reads, in two halves. First the
+  **floor step**: it finds the **replay floor** — the first stream
+  sequence whose message declares an envelope version this build reads
+  (see [how a reader treats the version](event-schema.md#how-a-reader-treats-the-version))
+  — by binary search over `[first_sequence, last_sequence]` with
+  JetStream's get-message-by-sequence and the wire boundary's own
+  version probe, assuming versions are monotone along the stream (a
+  bump is one deploy moment); a deleted sequence or versionless bytes
+  at a probed position is probed forward, so the floor is always a
+  readable message. Then, in one transaction, it deletes every
+  `events` row with `seq` at or above the floor — those the replay
+  re-derives — and records the floor and the count of rows kept below
+  it; rows with no `seq` at all (written before the column existed)
+  are below any floor and stay. Then the **reset**: it deletes the
+  `fq-projector` durable, records the stream's last sequence as the
+  replay's target, and recreates the durable **at the floor**
+  (`ByStartSequence`). Every event from the floor on is re-derived,
   which is what backfills a column that was NULL for history —
   `reasoning_tokens` for every row written before the split was
-  recorded is the live example.
+  recorded is the live example. A stream this build reads whole floors
+  at its first sequence, so nothing changes for it; one it reads none
+  of, or an empty one, floors past its last — nothing to replay, the
+  record says so, and the durable waits for what comes next.
 - **Newer version** — refused, as the other stores refuse a file a
   newer binary wrote. The error names the remedy: run that build, or
   delete the file and let this one rebuild it.
 
-**What a rebuild keeps.** Three kinds of row outlive the log they were
-folded from by design, and a rebuild carries all three across before
-the replay starts: cost-bearing `events` rows (`total_cost IS NOT
-NULL`), every `invocation_summary` line, and every `triggers` record.
-The replay then refreshes whichever of them the stream still holds —
-`insert_event` is an upsert on `event_id` — so history inside retention
-is re-derived whole and history past it keeps the shape it had. No
-spend figure is lost to a rebuild.
+**What a rebuild keeps.** Everything below the floor: history from
+before an envelope bump, which this build cannot read and the replay
+never reaches, stays in the file exactly as the older build projected
+it. And three kinds of row outlive the log they were folded from by
+design, wherever they sit: cost-bearing `events` rows (`total_cost IS
+NOT NULL`), every `invocation_summary` line, and every `triggers`
+record. The floor step never deletes them — a cost row at or above the
+floor is kept and refreshed by the replay (`insert_event` is an upsert
+on `event_id`), so a message that ages out of retention between the
+delete and its replay cannot take a spend figure with it. History
+inside the replay is re-derived whole; history outside it keeps the
+shape it had. No spend figure is lost to a rebuild, and neither is
+anything below the floor: carrying the whole file across at open makes
+the retention principle stronger than the sweep-exempt carry it
+replaces, not weaker.
 
 **While it runs**, reads answer over a partial fold: `projection_rows`
 climbs back and a spend figure inside the window can be short until the
 replay reaches its target. The projection watermark is not reset (it is
 monotonic, and the replay re-applies sequences below it), so a read
 gated at the old mark can find its row not yet re-derived. `fq status`
-reports the rebuild — when, why, the target sequence, and whether the
-replay has caught up — under `projection rebuild`.
+reports the rebuild — when, why, the floor and the target sequence, how
+many older rows were carried as-is, and whether the replay has caught
+up — under `projection rebuild`.
 
-The replay assumes the events it reads are ones this build can parse.
-A rebuild across an event-envelope version boundary is the consumer's
-parse policy's concern, not the rebuild's.
+The floor is where the replay starts, not a promise about what follows:
+an event in a version this build does not read *after* the floor still
+halts the consumer, unacked, exactly as it would live — that is a
+genuinely mixed stream, and the halt is the right report. The reset is
+crash-safe in the way it was: the reset note is cleared only after the
+durable is deleted, so a start that dies between the floor step and the
+reset finds the note on its next start and redoes both.
 
 ## NATS backing store sizing
 
@@ -387,11 +417,14 @@ where the old file's durable left off. This is a first-class recovery
 path, not a fallback — it is what lets the projection's schema roll
 forward with history backfilled rather than NULL.
 
-Cost-bearing rows, summary lines and trigger records survive the first
-two because the rebuild carries them across. A **deleted** file loses
-the cost rows older than stream retention with it — the projection is
-their only copy — which is why `fq projection rebuild` exists: it is
-the way to rebuild without paying that.
+Every row survives the first two: the rebuild carries the whole file
+across at open, and the reset that follows drops only the rows at or
+above the replay floor — those the stream will re-derive — keeping
+history below it and every cost-bearing row, summary line and trigger
+record. A **deleted** file loses the cost rows older than stream
+retention with it — the projection is their only copy — which is why
+`fq projection rebuild` exists: it is the way to rebuild without paying
+that.
 
 ## Migration path
 
