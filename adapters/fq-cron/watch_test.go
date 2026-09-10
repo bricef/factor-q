@@ -130,30 +130,11 @@ func TestWatcherIsSeededFromTheConfigThatIsRunning(t *testing.T) {
 		}
 	})
 
-	// #634's "silently and indefinitely" is now refused one step earlier.
-	// LoadConfig itself landing in the truncate gap used to start fq-cron with
-	// zero jobs, because startup did not apply the reload rule (#632), and the
-	// first check was the only thing that could put the jobs back. Startup
-	// applies that rule now (#664), so there is no job-less startup left to
-	// recover from: the process does not come up, and the supervisor's restart
-	// reads the file the writer has since finished. The seed's own guarantee —
-	// that an edit made during the broker wait is seen — is the subtest above.
-	t.Run("a startup that reads a torn file does not start", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "fq-cron.toml")
-		writeConfig(t, path, "") // the writer's truncate, caught by LoadConfig
-		_, err := LoadConfig(path)
-		if err == nil {
-			t.Fatal("a torn read started a scheduler with nothing scheduled")
-		}
-		if !strings.Contains(err.Error(), "declaring no jobs") {
-			t.Fatalf("startup refusal = %v, want the reason a reload gives", err)
-		}
-		// The restart that follows reads the completed write and starts.
-		writeConfig(t, path, configText("first", "0 * * * *"))
-		if names := jobNames(mustLoad(t, path).Config); names != "first" {
-			t.Fatalf("the restart loaded %q, want the finished file (%q)", names, "first")
-		}
-	})
+	// The startup half of #634 — a LoadConfig that lands in the truncate gap —
+	// is refused outright now rather than recovered from, and belongs with the
+	// rule that refuses it: config_test.go,
+	// TestAStartupThatReadsATornFileDoesNotStart. What is asserted here is the
+	// seed's own guarantee, which is the subtest above.
 
 	// A caller with no bytes to offer — a config built in memory — has seen
 	// nothing, and the first check treats whatever is on disk as a change.

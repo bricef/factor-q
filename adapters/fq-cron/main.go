@@ -136,13 +136,38 @@ func buildVersion() string {
 // So it says so, once, rather than starting in silence (#664).
 const emptyScheduleNotice = "config declares no jobs (`job = []`): nothing scheduled until one is added"
 
-// announceEmptySchedule logs that notice for a configuration with no jobs in
-// it, and nothing at all for any other: a scheduler with jobs reports them as
-// it fires them.
+// noneEnabledNotice is the same silence reached by the other road: a file full
+// of jobs, every one of them `enabled = false`. The planner skips those
+// (plan.go), so such a config fires exactly as much as `job = []` — and unlike
+// `job = []`, it does not look empty to the operator reading it.
+func noneEnabledNotice(declared int) string {
+	return fmt.Sprintf("config declares %d job(s), none enabled: nothing scheduled until one is enabled", declared)
+}
+
+// announceEmptySchedule says, once at startup, that this configuration will
+// fire nothing. A configuration with something to schedule says nothing here:
+// the scheduler reports its jobs as it fires them.
 func announceEmptySchedule(cfg *Config, logger *log.Logger) {
-	if len(cfg.Jobs) == 0 {
+	switch {
+	case len(cfg.Jobs) == 0:
 		logger.Print(emptyScheduleNotice)
+	case cfg.scheduledJobs() == 0:
+		logger.Print(noneEnabledNotice(len(cfg.Jobs)))
 	}
+}
+
+// checkQualifier is what `--check` adds to "is valid" for a file that will
+// schedule nothing. Valid and useful are different questions, and the operator
+// running `--check` is the one who can still do something about the answer
+// (#664).
+func checkQualifier(cfg *Config) string {
+	switch {
+	case len(cfg.Jobs) == 0:
+		return " (no jobs declared)"
+	case cfg.scheduledJobs() == 0:
+		return fmt.Sprintf(" (%d job(s) declared, none enabled)", len(cfg.Jobs))
+	}
+	return ""
 }
 
 func run(args []string) error {
@@ -173,7 +198,7 @@ func run(args []string) error {
 		return err
 	}
 	if cli.Check {
-		fmt.Printf("configuration %s is valid\n", cli.ConfigPath)
+		fmt.Printf("configuration %s is valid%s\n", cli.ConfigPath, checkQualifier(loaded.Config))
 		return nil
 	}
 	announceEmptySchedule(loaded.Config, log.Default())

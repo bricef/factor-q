@@ -44,6 +44,28 @@ type Job struct {
 	PayloadJSON *string        `toml:"payload_json"`
 }
 
+// scheduled reports whether this job is one the planner will fire at all:
+// `enabled = false` is the operator's off switch and plan skips it (plan.go).
+// The predicate is written once, here, so that everything which reports what
+// a configuration *will do* agrees with what it does. applyDefaults fills a
+// missing `enabled` with true, but the nil case is honoured here too: a Job
+// built in memory must not read as disabled.
+func (j Job) scheduled() bool { return j.Enabled == nil || *j.Enabled }
+
+// scheduledJobs counts the jobs that will actually be fired — which is not
+// len(Jobs): a file whose every job is `enabled = false` schedules exactly as
+// much as one with no jobs in it, and looks just as much like a broken
+// install from outside (#664).
+func (c *Config) scheduledJobs() int {
+	n := 0
+	for _, job := range c.Jobs {
+		if job.scheduled() {
+			n++
+		}
+	}
+	return n
+}
+
 func boolPtr(v bool) *bool { return &v }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -85,19 +107,26 @@ func (e jobsUndeclaredError) Error() string {
 func LoadConfig(path string) (*LoadedConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// Not prefixed with the path: os.ReadFile's error already names the
+		// file it could not read, and saying it twice only stutters.
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	cfg, err := ParseConfig(data)
 	if err != nil {
-		// The reason a reload logs is, here, the reason the process will not
-		// come up — so it carries the file it is about and the line that
-		// makes it go away. An operator running `--check` has the file in
-		// front of them; a scheduler that starts on it fires nothing (#664).
+		// Every refusal names the file. A parse or validation error carries
+		// no path of its own, and `docker compose logs fq-cron` shows the
+		// message without the FQCRON_CONFIG it came from — so a bare
+		// "limits.max_fires_per_hour must be greater than zero" leaves the
+		// operator to work out which file is meant.
+		//
+		// A config that declares no jobs gets the remedy as well: this is the
+		// reason the process will not come up, and an operator running
+		// `--check` has the file in front of them (#664).
 		var undeclared jobsUndeclaredError
 		if errors.As(err, &undeclared) {
 			return nil, fmt.Errorf("%s: %w — write `job = []` to run with nothing scheduled", path, err)
 		}
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &LoadedConfig{Config: cfg, Raw: data}, nil
 }

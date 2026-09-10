@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validConfig = `
@@ -178,6 +179,110 @@ func TestLoadConfigRefusalNamesTheFileAndWhatToWrite(t *testing.T) {
 			var undeclared jobsUndeclaredError
 			if !errors.As(err, &undeclared) {
 				t.Fatalf("error = %#v, want the reload's own refusal wrapped, not a second copy of it", err)
+			}
+		})
+	}
+}
+
+// Every refusal LoadConfig makes names the file it is about. A validation
+// error and a TOML error carry no path of their own, and the operator reading
+// `docker compose logs fq-cron` does not see the FQCRON_CONFIG the message
+// came from — so the message has to carry it (#664 review).
+func TestLoadConfigRefusalsNameTheFile(t *testing.T) {
+	for name, text := range map[string]string{
+		"invalid TOML":     "not = [valid",
+		"validation error": "[limits]\nmax_fires_per_hour = -1\n",
+		"bad job":          "[[job]]\nname = \"Bad_Name\"\nschedule = \"@daily\"\nsubject = \"fq.x\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fq-cron.toml")
+			if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatal("expected a refusal")
+			}
+			if !strings.HasPrefix(err.Error(), path+": ") {
+				t.Fatalf("error = %q, want it to begin with the file it is about (%q)", err, path)
+			}
+			// The reason survives the wrapping.
+			if bare, _ := ParseConfig([]byte(text)); bare != nil {
+				t.Fatal("this case must be one ParseConfig refuses")
+			}
+		})
+	}
+	// The read error is the exception, and deliberately: os.ReadFile already
+	// names the file, so prefixing it again would only stutter.
+	missing := filepath.Join(t.TempDir(), "absent.toml")
+	_, err := LoadConfig(missing)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want the missing file named once", err)
+	}
+	if strings.HasPrefix(err.Error(), missing+": ") {
+		t.Fatalf("error = %q, want no second copy of the path", err)
+	}
+}
+
+// #634's "silently and indefinitely", one step earlier. A LoadConfig landing
+// in a writer's truncate gap used to start fq-cron with nothing scheduled,
+// because startup did not apply the reload rule (#632) — the watcher's first
+// check was the only thing that could put the jobs back. Startup applies that
+// rule now, so there is no job-less startup left to recover from: the process
+// does not come up, and the supervisor's restart reads the file the writer has
+// since finished (#664). The watcher's own guarantee, that an edit made during
+// the broker wait is seen, is watch_test.go's "a write inside the window lands
+// on the first check".
+func TestAStartupThatReadsATornFileDoesNotStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fq-cron.toml")
+	if err := os.WriteFile(path, nil, 0o600); err != nil { // the writer's truncate
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("a torn read started a scheduler with nothing scheduled")
+	}
+	// The restart that follows reads the completed write and starts.
+	if err := os.WriteFile(path, []byte(validConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("the restart refused the finished file: %v", err)
+	}
+	if len(loaded.Config.Jobs) != 1 {
+		t.Fatalf("the restart loaded %d jobs, want the finished file's one", len(loaded.Config.Jobs))
+	}
+}
+
+// What a configuration will fire is not how many jobs it declares: the planner
+// skips `enabled = false` (plan.go), and this is the count everything that
+// reports on a configuration uses, so the two cannot disagree.
+func TestScheduledJobsCountsWhatThePlannerWillFire(t *testing.T) {
+	job := func(name, enabled string) string {
+		return "[[job]]\nname = \"" + name + "\"\nschedule = \"@daily\"\nsubject = \"fq.x\"\n" + enabled
+	}
+	for name, tc := range map[string]struct {
+		text string
+		want int
+	}{
+		"enabled by default": {job("a", ""), 1},
+		"explicitly on":      {job("a", "enabled = true\n"), 1},
+		"explicitly off":     {job("a", "enabled = false\n"), 0},
+		"one of two off":     {job("a", "enabled = false\n") + job("b", ""), 1},
+		"every one off":      {job("a", "enabled = false\n") + job("b", "enabled = false\n"), 0},
+		"none declared":      {"job = []\n", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := mustParse(t, tc.text)
+			if got := cfg.scheduledJobs(); got != tc.want {
+				t.Fatalf("scheduledJobs() = %d, want %d", got, tc.want)
+			}
+			// The count must be the planner's own answer, not a second
+			// opinion about it: an empty plan is what "schedules nothing"
+			// means to the process.
+			fires, _ := plan(time.Now(), JobSet{Jobs: cfg.Jobs, MaxFiresPerHour: cfg.Limits.MaxFiresPerHour}, map[string]FireState{})
+			if (len(fires) == 0) != (tc.want == 0) {
+				t.Fatalf("scheduledJobs() = %d but the planner produced %d fires", tc.want, len(fires))
 			}
 		})
 	}

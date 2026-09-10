@@ -170,22 +170,66 @@ func TestCheckAcceptsAnExplicitlyEmptyJobList(t *testing.T) {
 	}
 }
 
+// "Valid" on its own is a half-answer for a file that will fire nothing: it is
+// true, and it is not what the operator running `--check` wanted to know. The
+// qualifier says which kind of nothing it is.
+func TestCheckSaysWhenAValidConfigSchedulesNothing(t *testing.T) {
+	disabled := "[[job]]\nname = \"a\"\nschedule = \"@daily\"\nsubject = \"fq.x\"\nenabled = false\n"
+	for name, tc := range map[string]struct{ text, want string }{
+		"no jobs declared": {"job = []\n", " (no jobs declared)"},
+		"none enabled":     {disabled, " (1 job(s) declared, none enabled)"},
+		"one of two on":    {disabled + configText("b", "@daily"), ""},
+		"jobs to fire":     {validConfig, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := checkQualifier(mustParse(t, tc.text)); got != tc.want {
+				t.Fatalf("checkQualifier = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A scheduler with nothing scheduled looks, from outside, exactly like one
-// that is failing to fire. Starting on `job = []` therefore says so — once,
-// and only for a configuration that has no jobs in it.
-func TestAnEmptyScheduleIsAnnouncedOnce(t *testing.T) {
-	logs := &syncBuffer{}
-	announceEmptySchedule(mustParse(t, "job = []\n"), log.New(logs, "", 0))
-	if got := logs.String(); got != emptyScheduleNotice+"\n" {
-		t.Fatalf("startup log = %q, want exactly one line: %q", got, emptyScheduleNotice)
+// that is failing to fire — so it says which it is, once, at startup. There
+// are two ways to reach that silence and both are announced: no jobs at all,
+// and jobs that are every one of them switched off.
+func TestAScheduleThatFiresNothingIsAnnouncedOnce(t *testing.T) {
+	disabled := "[[job]]\nname = \"a\"\nschedule = \"@daily\"\nsubject = \"fq.x\"\nenabled = false\n"
+	for name, tc := range map[string]struct{ text, want string }{
+		"no jobs declared": {"job = []\n", emptyScheduleNotice},
+		"none enabled":     {disabled, noneEnabledNotice(1)},
+		"two, none enabled": {disabled + "[[job]]\nname = \"b\"\nschedule = \"@daily\"\nsubject = \"fq.x\"\nenabled = false\n",
+			noneEnabledNotice(2)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := &syncBuffer{}
+			announceEmptySchedule(mustParse(t, tc.text), log.New(logs, "", 0))
+			if got := logs.String(); got != tc.want+"\n" {
+				t.Fatalf("startup log = %q, want exactly one line: %q", got, tc.want)
+			}
+		})
 	}
-	if got := emptyScheduleNotice; got != "config declares no jobs (`job = []`): nothing scheduled until one is added" {
-		t.Fatalf("the notice reads %q; it is what an operator greps for", got)
+	// The wording is what an operator greps for, so it is pinned here rather
+	// than only computed.
+	if emptyScheduleNotice != "config declares no jobs (`job = []`): nothing scheduled until one is added" {
+		t.Fatalf("the empty-schedule notice reads %q", emptyScheduleNotice)
 	}
-	quiet := &syncBuffer{}
-	announceEmptySchedule(mustParse(t, validConfig), log.New(quiet, "", 0))
-	if got := quiet.String(); got != "" {
-		t.Fatalf("a config with jobs in it logged %q, want nothing", got)
+	if got := noneEnabledNotice(3); got != "config declares 3 job(s), none enabled: nothing scheduled until one is enabled" {
+		t.Fatalf("the none-enabled notice reads %q", got)
+	}
+	// A configuration with something to fire says nothing: the scheduler
+	// reports its jobs as it fires them.
+	for name, text := range map[string]string{
+		"jobs to fire":  validConfig,
+		"one of two on": disabled + configText("b", "@daily"),
+	} {
+		t.Run(name+" says nothing", func(t *testing.T) {
+			quiet := &syncBuffer{}
+			announceEmptySchedule(mustParse(t, text), log.New(quiet, "", 0))
+			if got := quiet.String(); got != "" {
+				t.Fatalf("logged %q, want nothing", got)
+			}
+		})
 	}
 }
 
