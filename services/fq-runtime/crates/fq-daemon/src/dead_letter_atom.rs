@@ -219,10 +219,16 @@ async fn dead_letter_at(
     if got_seq != seq {
         return Err(not_found());
     }
-    // History this build does not read is not a dead letter it can
-    // serve — the same answer `from_event` gives for an event that is
-    // not one (#673).
-    let event = event.ok_or_else(not_found)?;
+    // Held, and not readable here. "No dead letter at sequence N"
+    // would be the same collapse the rest of this change undoes: the
+    // message is there, and which of the two it is is the operator's
+    // to know (#673).
+    let event = event.ok_or_else(|| WireError::NotFound {
+        op: "dead_letter.get".into(),
+        message: format!(
+            "the message at sequence {seq} declares a schema version this build does not read"
+        ),
+    })?;
     from_event(&event)
         .map(|dead_letter| DeadLetterState {
             seq: got_seq,

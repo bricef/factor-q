@@ -239,8 +239,9 @@ pub(crate) fn register_event_atom(
          collapsed into `not found`: `Unlocatable` (the row is indexed but \
          its log position was never recorded, so we know the event and not \
          where its payload is) and `Gone` (the position is known and the \
-         log has aged past it, or was replaced). Read payloads in bulk by \
-         streaming, not by listing. ",
+         log has aged past it, was replaced, or still holds it in a \
+         schema version this build does not read). Read payloads in bulk \
+         by streaming, not by listing. ",
         "LIST AND STREAM SELECT THE SAME EVENTS FOR THE SAME FILTER. \
          `agent` means the envelope's `agent_id` on both — the domain's \
          answer to whose event this is, never the bus subject the message \
@@ -412,7 +413,8 @@ async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<Option<EventSt
     let event = event.ok_or_else(|| WireError::Gone {
         op: "event.get".into(),
         message: format!(
-            "the log holds position {seq}, but its envelope declares a schema version this              build does not read — history from before a wire break"
+            "the log holds position {seq}, but its envelope declares a schema version \
+             this build does not read — history from before a wire break"
         ),
     })?;
     Ok(Some(EventState {

@@ -11,7 +11,7 @@
 use crate::bus::{BusError, EventBus, STREAM_NAME};
 use crate::events::{Event, EventParseError};
 use async_nats::jetstream::consumer;
-use tracing::debug;
+use tracing::trace;
 
 pub use fq_ops::events::EventState;
 
@@ -103,7 +103,12 @@ impl EventBus {
                     event: Some(event),
                 }),
                 Err(EventParseError::UnsupportedSchemaVersion { found, .. }) => {
-                    debug!(
+                    // `trace`, not `debug`: this fires once per
+                    // unreadable message per tail, and a page load
+                    // walks an agent's whole subject — on an instance
+                    // with a wire break in its history that is
+                    // thousands of lines for one transcript.
+                    trace!(
                         seq,
                         found,
                         "tail skipped a message in a schema version this build does not read"
