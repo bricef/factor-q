@@ -127,9 +127,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // A sampling model failure declines the request; the agent
             // invocation continues (ADR-0018: the failure is the
             // server's, not the agent's).
-            Err(err) => {
+            Err(failed) => {
                 return Ok(Err(sampling_decline(&format!(
-                    "sampling model call failed: {err}"
+                    "sampling model call failed: {}",
+                    failed.error
                 ))));
             }
         };

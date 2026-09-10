@@ -27,15 +27,20 @@ use crate::worker::ExecutorError;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::store::LlmDispatchRow;
 
-/// The `invocation_state.phase` a deferred row carries. Recovery reads
-/// it: an errored LLM row under this phase is the recorded 429 the
-/// deferral was decided on, not a failure whose terminal was lost.
+/// The `invocation_state.phase` a deferred row carries, for the stuck
+/// sweep and the operator surface. Not a classifier: the phase is one
+/// column the next step boundary overwrites, so a resume reads the
+/// call's own row (`llm_dispatch.deferred_at`) to tell a deferral's 429
+/// from a failure whose terminal was lost.
 pub(super) const DEFERRED_PHASE: &str = "deferred";
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
-    /// Put the invocation down: mark the WAL row deferred, then say so.
-    /// WAL before bus, as everywhere in the runner — the row is what a
-    /// restart reads, the event is what an operator reads.
+    /// Put the invocation down: stamp the call's WAL row, mark the state
+    /// row deferred, then say so. WAL before bus, as everywhere in the
+    /// runner — the rows are what a restart reads, the event is what an
+    /// operator reads. The call's row carries the stamp because it is
+    /// the fact a resume classifies by: the state row's phase moves on
+    /// at the next step boundary, the row's `deferred_at` does not.
     ///
     /// `resume_after` is the throttle's answer for `model`: at least
     /// what the provider asked for, at least the model's escalating
@@ -43,6 +48,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     pub(super) async fn defer_invocation(
         &self,
         ctx: &mut InvocationCtx<'_>,
+        call_id: Uuid,
         model: &str,
         provider_asked: Option<Duration>,
         resume_after: Duration,
@@ -50,11 +56,21 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         warn!(
             agent_id = %ctx.agent_id,
             invocation_id = %ctx.invocation_id,
+            call_id = %call_id,
             model,
             provider_asked_ms = provider_asked.map(|d| d.as_millis() as u64),
             resume_after_ms = resume_after.as_millis() as u64,
             "model rate-limited past the retry policy; deferring the invocation"
         );
+        self.config
+            .store
+            .mark_llm_deferred(
+                &ctx.invocation_id.to_string(),
+                &call_id.to_string(),
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+            .map_err(map_store_err)?;
         self.mark_deferred(ctx.invocation_id).await?;
         self.publish_chained(
             ctx.cursor,

@@ -1385,6 +1385,111 @@ async fn open_read_only_refuses_missing_file() {
         .expect_err("missing file");
     assert!(matches!(err, WorkerStoreError::NotInitialised(_)));
 }
+/// v10 (#278): a v9 file opens at v10 with its rows intact and no
+/// deferral stamp on any of them; a deferral stamps exactly the
+/// completed error row it was decided on, and nothing else qualifies.
+#[tokio::test]
+async fn v9_to_v10_migration_adds_the_deferral_stamp() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker-v9.db");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let opts = SqliteConnectOptions::from_str(&url).unwrap();
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+    for stmt in split_sql(SCHEMA_META_SQL) {
+        sqlx::query(stmt).execute(&pool).await.unwrap();
+    }
+    for stmt in split_sql(WORKER_TABLES_V1_SQL) {
+        sqlx::query(stmt).execute(&pool).await.unwrap();
+    }
+    for migration in [
+        WORKER_MIGRATION_V2_SQL,
+        WORKER_MIGRATION_V3_SQL,
+        WORKER_MIGRATION_V4_SQL,
+        WORKER_MIGRATION_V5_SQL,
+        WORKER_MIGRATION_V6_SQL,
+        WORKER_MIGRATION_V7_SQL,
+        WORKER_MIGRATION_V8_SQL,
+        WORKER_MIGRATION_V9_SQL,
+    ] {
+        for stmt in split_sql(migration) {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+    }
+    sqlx::query("INSERT INTO schema_meta (class, version, updated_at) VALUES (?, 9, 0)")
+        .bind(SCHEMA_CLASS)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A v9 errored row: a lost failure from before the stamp existed.
+    sqlx::query(
+        "INSERT INTO llm_dispatch (invocation_id, request_id, model, status, request_payload, \
+         response, is_error, intent_at, dispatched_at, completed_at) \
+         VALUES ('inv', 'old', 'm', 'completed', '{}', 'boom', 1, 1, 2, 3)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let store = WorkerStore::open(&path).await.expect("migrate v9 -> v10");
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+    let old = store.get_llm_dispatch("inv", "old").await.unwrap().unwrap();
+    assert_eq!(old.is_error, Some(true));
+    assert_eq!(
+        old.deferred_at, None,
+        "a pre-v10 errored row is not a deferral"
+    );
+
+    // A new call, closed as an error, then deferred on.
+    store
+        .write_llm_intent("inv", "rl", "m", "{}", 4)
+        .await
+        .unwrap();
+    let not_yet = store.mark_llm_deferred("inv", "rl", 5).await;
+    assert!(
+        matches!(not_yet, Err(WorkerStoreError::WalTransitionFailed { .. })),
+        "only a completed error row can be stamped: {not_yet:?}"
+    );
+    store.write_llm_dispatched("inv", "rl", 5).await.unwrap();
+    store
+        .write_llm_completed("inv", "rl", "rate limited", true, 0.0, 6)
+        .await
+        .unwrap();
+    store.mark_llm_deferred("inv", "rl", 7).await.unwrap();
+    let rows = store
+        .list_llm_dispatches_for_invocation("inv")
+        .await
+        .unwrap();
+    let stamps: Vec<(String, Option<i64>)> = rows
+        .iter()
+        .map(|r| (r.request_id.clone(), r.deferred_at))
+        .collect();
+    assert_eq!(
+        stamps,
+        vec![("old".to_string(), None), ("rl".to_string(), Some(7))],
+        "exactly the deferred row carries the stamp"
+    );
+
+    // A successful call is never a deferral.
+    store
+        .write_llm_intent("inv", "ok", "m", "{}", 8)
+        .await
+        .unwrap();
+    store.write_llm_dispatched("inv", "ok", 9).await.unwrap();
+    store
+        .write_llm_completed("inv", "ok", "{}", false, 0.0, 10)
+        .await
+        .unwrap();
+    let refused = store.mark_llm_deferred("inv", "ok", 11).await;
+    assert!(
+        matches!(refused, Err(WorkerStoreError::WalTransitionFailed { .. })),
+        "a successful row cannot be stamped: {refused:?}"
+    );
+}
+
 #[tokio::test]
 async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
     let dir = tempdir().unwrap();

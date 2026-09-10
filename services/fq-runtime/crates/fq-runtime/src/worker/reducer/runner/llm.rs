@@ -14,6 +14,23 @@
 
 use super::*;
 
+/// A call the provider did not answer with a turn: which call, and
+/// why. Returned as the inner error of [`ReducerRunner::dispatch_llm`]
+/// once the call's WAL row is closed `is_error`, so a caller that
+/// decides something about the call — a deferral stamps its row (#278)
+/// — can name it, and one that does not (a sampling decline) ignores
+/// the id.
+pub(super) struct FailedLlmCall {
+    pub(super) call_id: Uuid,
+    pub(super) error: crate::llm::LlmError,
+}
+
+impl FailedLlmCall {
+    fn of(call_id: Uuid, error: crate::llm::LlmError) -> Self {
+        Self { call_id, error }
+    }
+}
+
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -36,27 +53,31 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             Ok((response, _cost)) => response,
             // A rate limit the retry layer gave up on is a deferral, not
             // a failure (#278, decided 2026-09-04): the turn is put down
-            // and re-issued after the delay the throttle names.
-            Err(crate::llm::LlmError::RateLimited { model, retry_after }) => {
+            // and re-issued after the delay the throttle names. The call
+            // is named so the deferral can stamp its own WAL row.
+            Err(FailedLlmCall {
+                call_id,
+                error: crate::llm::LlmError::RateLimited { model, retry_after },
+            }) => {
                 ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
                 let resume_after = self.config.throttle.deferral_delay(&model, retry_after);
-                self.defer_invocation(ctx, &model, retry_after, resume_after)
+                self.defer_invocation(ctx, call_id, &model, retry_after, resume_after)
                     .await?;
                 return Ok(ModelOutcome::Deferred(resume_after));
             }
-            Err(err) => {
+            Err(FailedLlmCall { error, .. }) => {
                 ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
                 self.emit_failed(
                     ctx.agent_id,
                     ctx.invocation_id,
                     FailureKind::LlmError,
-                    err.to_string(),
+                    error.to_string(),
                     FailurePhase::LlmRequest,
                     *ctx.totals,
                     ctx.cursor,
                 )
                 .await?;
-                return Err(ExecutorError::Llm(err));
+                return Err(ExecutorError::Llm(error));
             }
         };
 
@@ -120,7 +141,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // are server-initiated and do not drive the agent's own context
         // signal.
         context: Option<&mut ContextTracker>,
-    ) -> Result<Result<(ModelResponse, f64), crate::llm::LlmError>, ExecutorError> {
+    ) -> Result<Result<(ModelResponse, f64), FailedLlmCall>, ExecutorError> {
         let call_id = Uuid::now_v7();
         let inv_str = ctx.invocation_id.to_string();
         let req_str = call_id.to_string();
@@ -132,7 +153,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         };
 
         if let Some(refusal) = self.unpriced_model_refusal(&chat_request.model) {
-            return Ok(Err(refusal));
+            return Ok(Err(FailedLlmCall::of(call_id, refusal)));
         }
 
         // §5.5 write order applied to LLM calls: SQL first, then
@@ -196,7 +217,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .await?;
                 // Hand the LLM error back to the caller; the WAL is
                 // already closed `is_error`, so this is a final state.
-                return Ok(Err(err));
+                return Ok(Err(FailedLlmCall::of(call_id, err)));
             }
         };
 
@@ -227,7 +248,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ctx.cursor,
             )
             .await?;
-            return Ok(Err(err));
+            return Ok(Err(FailedLlmCall::of(call_id, err)));
         }
 
         ctx.totals.total_llm_calls += 1;

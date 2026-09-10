@@ -62,8 +62,9 @@ existing `LlmClient` and `Worker`.
 - **Deferral** — an invocation that was already running when the retry
   layer gave up on a 429 (the wait exceeded the cap, or the attempts ran
   out). It suspends at its step boundary with the WAL row left in flight
-  and `phase = "deferred"`, emits `invocation.deferred`, and is resumed
-  by the dispatcher after the delay. No `failed` event, no terminal, no
+  and `phase = "deferred"`, stamps the call's own `llm_dispatch` row
+  `deferred_at`, emits `invocation.deferred`, and is resumed by the
+  dispatcher after the delay. No `failed` event, no terminal, no
   archive, no retry consumed anywhere.
 
 ## Invariants
@@ -138,12 +139,17 @@ its first call anyway.
 retry layer gave up — the agent turn is not failed. The call's WAL row is
 closed as an error like any other (`llm.dispatched`, `llm.failure` with
 `error_kind: rate_limited`, so the trail invariant holds), the state row
-is marked `phase = "deferred"`, `invocation.deferred` is published, and
+is marked `phase = "deferred"`, the call's `llm_dispatch` row is stamped
+`deferred_at`, `invocation.deferred` is published, and
 `InvocationOutcome::Deferred { resume_after }` returns to the dispatcher,
 which schedules `Worker::resume_invocation` after the delay under its own
-concurrency permit. On resume, an errored LLM row in a `deferred` row is
-the recorded 429 and is skipped rather than reproduced as a failure; the
-step re-issues the model call with a fresh `call_id`. The delay is the
+concurrency permit. On resume, an errored LLM row stamped `deferred_at`
+is the recorded 429 and is skipped rather than reproduced as a failure;
+the step re-issues the model call with a fresh `call_id`. The stamp is
+per row because the state row's `phase` is one column the next step
+boundary overwrites: a deferral, a resume, a real failure whose terminal
+was lost, and a second resume must reproduce the real failure, not the
+deferral. The delay is the
 larger of what the provider asked for and the model's escalating default,
 so an invocation that keeps meeting a two-second `Retry-After` backs off
 anyway. A resume that meets another 429 is deferred again; a daemon that

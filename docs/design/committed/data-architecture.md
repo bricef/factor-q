@@ -750,7 +750,7 @@ factor-q runtime starting
   control-plane db: /home/op/.cache/factor-q/control-plane.db
   projection db:    /home/op/.cache/factor-q/projection.db
   control plane:    v1
-  worker schema:    v9
+  worker schema:    v10
   worker:           01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f (host: prod-1)
   in-flight:        3 (1 safe-resume, 1 safe-replay, 1 ambiguous)
   pricing entries:  62 (cache: /home/op/.cache/factor-q/pricing.json)

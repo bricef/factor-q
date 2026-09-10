@@ -279,6 +279,7 @@ mod tests {
                 None
             },
             seq: None,
+            deferred_at: None,
         }
     }
 

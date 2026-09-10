@@ -280,6 +280,7 @@ mod tests {
             dispatched_at: Some(intent_at + 1),
             completed_at: Some(completed_at),
             seq: None,
+            deferred_at: None,
         }
     }
 
