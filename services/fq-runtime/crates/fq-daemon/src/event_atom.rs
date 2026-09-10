@@ -395,13 +395,26 @@ async fn event_at(bus: &fq_runtime::EventBus, seq: u64) -> Result<Option<EventSt
     else {
         return Ok(None);
     };
-    let (got_seq, event) = next.map_err(internal)?;
+    let fq_runtime::event_tail::TailedMessage {
+        seq: got_seq,
+        event,
+    } = next.map_err(internal)?;
     // A position the stream skipped (retention, a subject this stream
     // never captured) hands back the next one along — so the position
     // asked for holds nothing, whatever the read returned.
     if got_seq != seq {
         return Ok(None);
     }
+    // Held, but not readable here. `Gone` rather than `None`: "the log
+    // no longer holds that position" is not what happened, and the
+    // operator who reaches for an old event deserves to be told which
+    // of the two it is (#673).
+    let event = event.ok_or_else(|| WireError::Gone {
+        op: "event.get".into(),
+        message: format!(
+            "the log holds position {seq}, but its envelope declares a schema version this              build does not read — history from before a wire break"
+        ),
+    })?;
     Ok(Some(EventState {
         seq: got_seq,
         event,
@@ -487,8 +500,17 @@ async fn stream_events(
             Ok(Some(next)) => next.map_err(internal)?,
             Ok(None) | Err(_) => break,
         };
-        let (seq, event) = next;
+        let fq_runtime::event_tail::TailedMessage { seq, event } = next;
         next_from_seq = seq + 1;
+        // Unreadable history advances the cursor and nothing else: a
+        // tail opened below a wire break makes progress rather than
+        // dying on the first message it cannot read (#673).
+        let Some(event) = event else {
+            if items.is_empty() && remaining.is_zero() {
+                break;
+            }
+            continue;
+        };
         if selection.matches(&event) {
             let item = serde_json::to_value(EventState { seq, event }).map_err(|e| {
                 WireError::Internal {

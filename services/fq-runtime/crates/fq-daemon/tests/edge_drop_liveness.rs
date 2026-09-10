@@ -379,11 +379,9 @@ impl Surface {
             .expect("a `triggered` event within the deadline")
             .expect("the event log stream stayed open")
             .expect("event deserialises");
-            if matches!(
-                next.1.payload,
-                fq_runtime::events::EventPayload::Triggered(_)
-            ) {
-                return next.1.envelope.invocation_id;
+            let Some(event) = next.event else { continue };
+            if matches!(event.payload, fq_runtime::events::EventPayload::Triggered(_)) {
+                return event.envelope.invocation_id;
             }
         }
     }
@@ -398,8 +396,10 @@ impl Surface {
             .events_from("fq.agent.>", 1)
             .await
             .expect("read the event log");
-        while let Ok(Some(Ok((seq, event)))) = tokio::time::timeout(PATIENCE, events.next()).await {
-            if event.envelope.invocation_id == invocation_id
+        while let Ok(Some(Ok(message))) = tokio::time::timeout(PATIENCE, events.next()).await {
+            let seq = message.seq;
+            if let Some(event) = message.event
+                && event.envelope.invocation_id == invocation_id
                 && matches!(
                     event.payload,
                     fq_runtime::events::EventPayload::InvocationOperatorRecovered(_)

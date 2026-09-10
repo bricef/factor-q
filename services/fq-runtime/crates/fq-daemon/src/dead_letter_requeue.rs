@@ -237,7 +237,15 @@ async fn select_dead_letter(
     if tip > 0 {
         let mut events = bus.events_from(&subject, 1).await.map_err(internal)?;
         while let Some(next) = events.next().await {
-            let (seq, event) = next.map_err(internal)?;
+            let fq_runtime::event_tail::TailedMessage { seq, event } = next.map_err(internal)?;
+            // History this build does not read is skipped, as it is on
+            // the listing this selection has to agree with (#673).
+            let Some(event) = event else {
+                if seq >= tip {
+                    break;
+                }
+                continue;
+            };
             // The atom's own predicate decides what is a dead letter, so
             // this scan and the listing cannot come to disagree about
             // which events the operator is choosing between.

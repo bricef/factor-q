@@ -206,7 +206,10 @@ async fn dead_letter_at(
         return Err(not_found());
     }
     let mut events = bus.events_from(subject, seq).await.map_err(internal)?;
-    let (got_seq, event) = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+    let fq_runtime::event_tail::TailedMessage {
+        seq: got_seq,
+        event,
+    } = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
         .await
         .map_err(|_| not_found())?
         .ok_or_else(not_found)?
@@ -216,6 +219,10 @@ async fn dead_letter_at(
     if got_seq != seq {
         return Err(not_found());
     }
+    // History this build does not read is not a dead letter it can
+    // serve — the same answer `from_event` gives for an event that is
+    // not one (#673).
+    let event = event.ok_or_else(not_found)?;
     from_event(&event)
         .map(|dead_letter| DeadLetterState {
             seq: got_seq,
@@ -262,8 +269,11 @@ async fn list_dead_letters(
     let mut events = bus.events_from(subject, 1).await.map_err(internal)?;
     let mut window: std::collections::VecDeque<DeadLetterState> = std::collections::VecDeque::new();
     while let Some(next) = events.next().await {
-        let (seq, event) = next.map_err(internal)?;
-        if let Some(dead_letter) = from_event(&event) {
+        let fq_runtime::event_tail::TailedMessage { seq, event } = next.map_err(internal)?;
+        // The scan walks the subject from sequence 1, so it meets
+        // whatever history the stream still holds; one message from
+        // before a wire break must not refuse the whole page (#673).
+        if let Some(dead_letter) = event.as_ref().and_then(from_event) {
             if window.len() == limit {
                 window.pop_front();
             }
@@ -311,9 +321,9 @@ async fn stream_dead_letters(
             Ok(Some(next)) => next.map_err(internal)?,
             Ok(None) | Err(_) => break,
         };
-        let (seq, event) = next;
+        let fq_runtime::event_tail::TailedMessage { seq, event } = next;
         next_from_seq = seq + 1;
-        if let Some(dead_letter) = from_event(&event) {
+        if let Some(dead_letter) = event.as_ref().and_then(from_event) {
             let item = serde_json::to_value(DeadLetterState { seq, dead_letter }).map_err(|e| {
                 WireError::Internal {
                     message: e.to_string(),
