@@ -311,13 +311,9 @@ fn render_throttled_models(models: &[fq_ops::health::ThrottledModel]) -> String 
             None => "not paused".to_string(),
         };
         out.push_str(&format!(
-            "  {}: {pause}; {} of {} permits, {} in flight; {} rate-limited this window (wave {})\n",
+            "  {}: {pause}; {}\n",
             model.model,
-            model.cap,
-            model.ceiling,
-            model.in_flight,
-            model.rate_limited_in_window,
-            model.waves
+            model.permit_summary()
         ));
     }
     out.push_str(

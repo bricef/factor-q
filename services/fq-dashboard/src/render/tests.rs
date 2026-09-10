@@ -39,7 +39,7 @@ fn health_shows_throttled_models() {
         "got: {html}"
     );
     assert!(
-        html.contains("2 of 4 permits, 0 in flight; 3 × 429 this window"),
+        html.contains("2 of 4 permits, 0 in flight; 3 rate-limited this window (wave 1)"),
         "got: {html}"
     );
 

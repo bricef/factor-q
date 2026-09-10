@@ -145,11 +145,8 @@ fn throttled_model_cell(model: &fq_ops::health::ThrottledModel) -> String {
         None => "not paused".to_string(),
     };
     format!(
-        "{} — {pause}; {} of {} permits, {} in flight; {} × 429 this window",
+        "{} — {pause}; {}",
         esc(&model.model),
-        model.cap,
-        model.ceiling,
-        model.in_flight,
-        model.rate_limited_in_window
+        esc(&model.permit_summary())
     )
 }
