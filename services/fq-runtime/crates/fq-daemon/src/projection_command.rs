@@ -61,15 +61,17 @@ pub(crate) fn register_projection_rebuild(
         "Requires `confirm`; refused otherwise. The projection is derived, so this is a \
          recovery of the machinery rather than a write to any resource: the daemon stops \
          its projection consumer, drops the projection tables and recreates them at this \
-         build's schema version, resets the durable consumer so the stream replays from the \
-         start of its retention, and starts the consumer again. Rows the retention sweep \
-         exempts — cost-bearing events, invocation summaries and trigger records — are \
-         carried across before the replay begins, so spend older than the stream's window \
-         is kept; everything the stream still holds is re-derived whole, which is what \
-         backfills a column that was NULL for history. Answers when the consumer is running \
-         again, not when the replay has finished: until it catches up, reads answer over a \
-         partial fold, and `control.status` reports the replay's progress under \
-         `projection_rebuild`. Appends no atom.",
+         build's schema version with every row carried across, resets the durable consumer \
+         so the stream replays from its replay floor — the first sequence whose envelope \
+         version this build reads — and starts the consumer again. Rows at or above the \
+         floor are dropped and re-derived whole from the stream, which is what backfills a \
+         column that was NULL for history; rows below it — history this build cannot read, \
+         which the replay never reaches — stay as they were, as do cost-bearing events, \
+         invocation summaries and trigger records wherever they sit, so no spend figure is \
+         lost. Answers when the consumer is running again, not when the replay has \
+         finished: until it catches up, reads answer over a partial fold, and \
+         `control.status` reports the replay's progress under `projection_rebuild`, with \
+         the floor and the count of rows carried below it. Appends no atom.",
     );
     registry
         .command::<ProjectionRebuildInput, _, _>(decl, move |input: ProjectionRebuildInput| {

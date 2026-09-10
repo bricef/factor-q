@@ -431,11 +431,16 @@ pub struct StatusReport {
 /// The projection's last rebuild, as `control.status` reports it.
 ///
 /// A rebuild drops the projection's tables, recreates them at the
-/// daemon's schema version, carries the sweep-exempt rows across
-/// (cost-bearing events, invocation summaries, trigger records), and
-/// replays the event stream from the start of its retention into them.
-/// It happens on start when the file's schema version is older than
-/// the daemon's, and on demand through `control.projection_rebuild`.
+/// daemon's schema version with every row carried across, and replays
+/// the event stream into them from the **replay floor** — the first
+/// stream sequence whose envelope version the daemon reads. Rows at or
+/// above the floor are dropped and re-derived by the replay; rows
+/// below it — history from before an envelope bump, which the daemon
+/// cannot read and the replay never reaches — are kept as they were,
+/// as are cost-bearing events, invocation summaries and trigger
+/// records wherever they sit. It happens on start when the file's
+/// schema version is older than the daemon's, and on demand through
+/// `control.projection_rebuild`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionRebuild {
     /// When the tables were dropped and recreated (RFC3339).
@@ -454,6 +459,17 @@ pub struct ProjectionRebuild {
     /// stream still holds is back in the file. Absent until the reset.
     #[serde(default)]
     pub target_seq: Option<u64>,
+    /// The replay floor: the first stream sequence the replay started
+    /// at — the first whose envelope version the daemon reads. Absent
+    /// until the reset. Past `target_seq` when the stream held nothing
+    /// the daemon reads: then nothing was replayed and every row was
+    /// carried.
+    #[serde(default)]
+    pub floor_seq: Option<u64>,
+    /// How many projected event rows lie below the floor and were
+    /// carried as they were, the replay being unable to re-derive them.
+    #[serde(default)]
+    pub carried_below_floor: u64,
     /// True while the durable consumer has yet to be reset: the tables
     /// are recreated, the replay has not started.
     pub consumer_reset_pending: bool,

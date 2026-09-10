@@ -686,6 +686,11 @@ async fn the_supervisor_rebuilds_on_request_and_keeps_projecting() {
         Some(1),
         "the operator path finds the floor too"
     );
+    assert_eq!(
+        (rebuild.floor_seq, rebuild.carried_below_floor),
+        (Some(1), 0),
+        "and the answer carries it: {rebuild:?}"
+    );
 
     // The consumer is running again: the replay re-derives the first
     // row and a new event lands after it. The mark never regressed.

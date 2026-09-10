@@ -2,12 +2,17 @@
 //! edge: refused without `confirm`, and with it the daemon drops and
 //! re-derives its projection under a running consumer — the
 //! cost-bearing rows it was seeded with survive, and `control.status`
-//! reports the rebuild.
+//! reports the rebuild. The stream holds an event in a version this
+//! build does not read before anything the daemon writes, so the
+//! rebuild's replay has to start at the floor above it: the report
+//! names that floor and the rows carried below it, and the projector
+//! does not halt.
 //!
-//! The store-level guarantees (what a rebuild keeps, what a bump does)
-//! are proved in `fq-runtime`; this suite covers what only the wire can
-//! prove — that the verb is served, that its refusal is a verdict on
-//! the request, and that the report carries the record afterwards.
+//! The store-level guarantees (what a rebuild keeps, what a bump does,
+//! where the floor lies) are proved in `fq-runtime`; this suite covers
+//! what only the wire can prove — that the verb is served, that its
+//! refusal is a verdict on the request, and that the report carries
+//! the record afterwards.
 
 #![cfg(unix)]
 
@@ -106,6 +111,57 @@ async fn seed_cost_row(cache: &std::path::Path) {
     event.envelope.event_id = fixed_uuid(2);
     event.envelope.timestamp = chrono::DateTime::from_timestamp_millis(BASE_MS).unwrap();
     proj.insert_event(&event, None).await.expect("insert event");
+}
+
+/// An event in a version this build does not read, from the committed
+/// corpus, published raw onto the broker's stream before the daemon
+/// writes anything — the history a stream holds in the weeks after an
+/// envelope bump. Returns its sequence.
+async fn seed_older_history(server: &fq_test_support::NatsServer) -> u64 {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fq-runtime/tests/corpus/events/v2/completed.json");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let bus = fq_runtime::bus::EventBus::connect(server.url())
+        .await
+        .expect("connect NATS");
+    bus.jetstream()
+        .publish("fq.agent.corpus-agent.corpus", bytes.into())
+        .await
+        .expect("publish v2")
+        .await
+        .expect("v2 stored")
+        .sequence
+}
+
+/// Whether `control.status` reports the projector as halted on an
+/// event this build does not read — it must not be, if the replay
+/// started at the floor.
+///
+/// The projector alone, deliberately. This daemon starts on a fresh
+/// broker, so every one of its durables is created from the beginning
+/// of a stream whose first message is the seeded older event, and the
+/// coordination consumer — whole-stream, strict, no rebuild and no
+/// floor — halts on it exactly as the parse policy says every consumer
+/// on the shared loop does. That is the policy's behaviour for a
+/// daemon with no durables yet, not this verb's; a deployed daemon's
+/// durables are past such history. The projector is the one consumer
+/// that replays from a floor, and the one this suite is about.
+fn projector_halted(report: &StatusReport) -> Option<String> {
+    report
+        .streams
+        .iter()
+        .filter_map(|stream| match stream {
+            fq_ops::health::StreamHealth::Available { consumers, .. } => Some(consumers),
+            _ => None,
+        })
+        .flatten()
+        .find(|consumer| {
+            matches!(
+                consumer,
+                fq_ops::health::ConsumerHealth::Halted { name, .. } if name == "fq-projector"
+            )
+        })
+        .map(|consumer| format!("{consumer:?}"))
 }
 
 struct Daemon {
@@ -209,6 +265,7 @@ async fn fleet_total(client: &fq_edge::EdgeClient) -> f64 {
 #[tokio::test]
 async fn projection_rebuild_over_the_edge() {
     let server = fq_test_support::NatsServer::start();
+    let older_seq = seed_older_history(&server).await;
     let daemon = start_daemon(&server).await;
     let client =
         fq_edge::EdgeClient::connect(&daemon.addr, daemon.fingerprint, &daemon.admin_token)
@@ -283,13 +340,23 @@ async fn projection_rebuild_over_the_edge() {
     );
     assert!(rebuild.target_seq.is_some(), "{rebuild:?}");
     assert_eq!(rebuild.from_version, None);
+    // The replay started above the event this build cannot read, and
+    // the seeded row — never on the stream, so below any floor — was
+    // carried as it was.
+    assert_eq!(
+        rebuild.floor_seq,
+        Some(older_seq + 1),
+        "the floor is the first sequence this build reads: {rebuild:?}"
+    );
+    assert_eq!(rebuild.carried_below_floor, 1, "{rebuild:?}");
     assert!(
         about(fleet_total(&client).await, INVOCATION_COST),
         "spend survives a rebuild"
     );
 
     // The replay catches up: the daemon's own startup events are back
-    // in the projection and the record reports complete.
+    // in the projection, the record reports complete, and no consumer
+    // halted on the older event.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let status: StatusReport = serde_json::from_value(
@@ -298,6 +365,11 @@ async fn projection_rebuild_over_the_edge() {
                 .expect("control.status"),
         )
         .unwrap();
+        assert_eq!(
+            projector_halted(&status),
+            None,
+            "a replay from the floor never meets the older event"
+        );
         let rebuild = status.projection_rebuild.expect("still on record");
         if !rebuild.in_progress && status.projection_rows >= 2 {
             break;
