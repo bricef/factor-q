@@ -753,9 +753,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // was decided on (#278) — nothing determined, the step
             // re-issues the call — or a provider failure whose terminal
             // was lost to the crash, to be reproduced rather than
-            // replayed (finding 6). The row's phase says which.
+            // replayed (finding 6). The row's own stamp says which.
             if r.is_error == Some(true) {
-                if state_row.phase == deferral::DEFERRED_PHASE {
+                if r.deferred_at.is_some() {
                     continue;
                 }
                 return self

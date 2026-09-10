@@ -1518,6 +1518,203 @@ mod resume_equivalence {
         }
     }
 
+    /// Resume with a publish fault armed for the resumed run itself.
+    /// [`SimWorld::resume`] clears any fault first — the crash it models
+    /// is over — so a crash *during* a resume drives the runner directly.
+    async fn resume_crashing_at(
+        world: &SimWorld,
+        llm: &FixtureClient,
+        publish_index: usize,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        world.sink.fail_publish_at(publish_index);
+        world
+            .runner
+            .resume(&world.agent, llm, world.invocation_id())
+            .await
+    }
+
+    /// Everything a `failed` event said, for the classifier assertions.
+    fn failed_messages(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                crate::events::EventPayload::Failed(p) => Some(p.error_message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The deferral's own row is not a lost failure, whatever the state
+    /// row's phase says now (#649 review). The sequence: a 429 defers
+    /// the run (row A errored, phase `deferred`); the resume crosses a
+    /// step boundary (phase `awaiting_model`) and the model then fails
+    /// for another reason (row B errored); the daemon crashes before
+    /// the `failed` terminal lands. The next resume must reproduce row
+    /// B's failure — not read row A through the overwritten phase and
+    /// reproduce the deferral as the failure.
+    #[tokio::test]
+    async fn a_lost_failure_after_a_deferral_is_reproduced_from_its_own_row() {
+        let world = SimWorld::new(4322, 5.0).await;
+        queue_tool_outputs(&world, 1);
+
+        // Row A: the 429 the deferral was decided on.
+        let llm = FixtureClient::new();
+        llm.push_error(crate::llm::LlmError::RateLimited {
+            model: "sim-model".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(300)),
+        });
+        let outcome = world.run(&llm).await.expect("a deferral is not an error");
+        assert!(
+            matches!(outcome, InvocationOutcome::Deferred { .. }),
+            "{outcome:?}"
+        );
+
+        // Row B: a transport failure on the resumed turn, with the
+        // `failed` publish faulted so the terminal is never written —
+        // the resumed chain publishes request, dispatched, failure, and
+        // then the terminal, which is the fourth.
+        let published = world.sink.events().len();
+        let resume_llm = FixtureClient::new();
+        resume_llm.push_error(crate::llm::LlmError::RequestFailed(
+            "sim: provider gave up".to_string(),
+        ));
+        let err = resume_crashing_at(&world, &resume_llm, published + 3)
+            .await
+            .expect_err("the faulted terminal publish surfaces as the crash");
+        assert!(matches!(err, ExecutorError::Bus(_)), "{err:?}");
+        assert!(
+            failed_messages(&world.sink.events()).is_empty(),
+            "the terminal was lost to the crash"
+        );
+
+        // The second resume reproduces the failure that was lost — B's.
+        let err = world
+            .resume(&FixtureClient::new())
+            .await
+            .expect_err("a lost failure is reproduced, not resumed past");
+        // The WAL holds the failure as the retry layer displayed it
+        // (`request failed: …`), and a reproduction replays that string.
+        let ExecutorError::Llm(crate::llm::LlmError::RequestFailed(message)) = &err else {
+            panic!("expected the reproduced failure, got {err:?}");
+        };
+        assert_eq!(
+            message, "request failed: sim: provider gave up",
+            "the returned error is row B's"
+        );
+        let messages = failed_messages(&world.sink.events());
+        assert_eq!(messages.len(), 1, "exactly one terminal: {messages:?}");
+        assert_eq!(
+            messages[0], "request failed: sim: provider gave up (reproduced on resume)",
+            "the reproduced failure carries row B's message, not the deferral's"
+        );
+    }
+
+    /// A deferral followed by real progress and then a crash: the next
+    /// resume continues to completion. The deferral's row is still the
+    /// first errored row on the WAL, and the state row's phase has long
+    /// since moved on from `deferred`; a classifier reading the phase
+    /// would turn the healthy run into a phantom "rate limited" failure.
+    #[tokio::test]
+    async fn a_deferral_followed_by_progress_and_a_crash_resumes_to_completion() {
+        let turns = 1;
+        let world = SimWorld::new(4323, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let responses = script(turns);
+
+        let llm = FixtureClient::new();
+        llm.push_error(crate::llm::LlmError::RateLimited {
+            model: "sim-model".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(300)),
+        });
+        let outcome = world.run(&llm).await.expect("a deferral is not an error");
+        assert!(
+            matches!(outcome, InvocationOutcome::Deferred { .. }),
+            "{outcome:?}"
+        );
+
+        // Resume, make progress (a model turn and its tool), then crash
+        // at the next turn's `llm.request` — the seventh publish of the
+        // resumed chain: request, dispatched, response, tool call,
+        // dispatched, result, request.
+        let published = world.sink.events().len();
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses);
+        let err = resume_crashing_at(&world, &resume_llm, published + 6)
+            .await
+            .expect_err("the injected crash");
+        assert!(matches!(err, ExecutorError::Bus(_)), "{err:?}");
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            1,
+            "the tool ran once before the crash"
+        );
+
+        // The next resume re-issues the interrupted turn and finishes.
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &responses[turns..]);
+        let outcome = world
+            .resume(&resume_llm)
+            .await
+            .expect("no failure is reproduced for a deferral's row");
+        assert_eq!(summary_of(&outcome).as_deref(), Some("all-done"));
+        assert!(
+            failed_messages(&world.sink.events()).is_empty(),
+            "no phantom failure: {:?}",
+            failed_messages(&world.sink.events())
+        );
+        assert_eq!(
+            world.tool.dispatches().lock().unwrap().len(),
+            1,
+            "the tool is not re-run on resume"
+        );
+    }
+
+    /// Two deferrals in a row, then a resume that succeeds: both 429
+    /// rows carry the stamp and are skipped, and nothing is reproduced.
+    #[tokio::test]
+    async fn two_deferrals_then_a_successful_resume_skip_both_rows() {
+        let turns = 1;
+        let world = SimWorld::new(4324, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        let rate_limited = || crate::llm::LlmError::RateLimited {
+            model: "sim-model".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(300)),
+        };
+
+        let llm = FixtureClient::new();
+        llm.push_error(rate_limited());
+        let outcome = world.run(&llm).await.expect("deferred once");
+        assert!(matches!(outcome, InvocationOutcome::Deferred { .. }));
+        let again = FixtureClient::new();
+        again.push_error(rate_limited());
+        let outcome = world.resume(&again).await.expect("deferred twice");
+        assert!(matches!(outcome, InvocationOutcome::Deferred { .. }));
+
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &script(turns));
+        let outcome = world.resume(&resume_llm).await.expect("completes");
+        assert_eq!(summary_of(&outcome).as_deref(), Some("all-done"));
+        assert!(failed_messages(&world.sink.events()).is_empty());
+
+        let rows = world
+            .store
+            .list_llm_dispatches_for_invocation(&world.invocation_id().to_string())
+            .await
+            .unwrap();
+        let stamped: Vec<bool> = rows
+            .iter()
+            .filter(|r| r.is_error == Some(true))
+            .map(|r| r.deferred_at.is_some())
+            .collect();
+        assert_eq!(stamped, vec![true, true], "both 429 rows are deferrals");
+        assert!(
+            rows.iter()
+                .filter(|r| r.is_error != Some(true))
+                .all(|r| r.deferred_at.is_none()),
+            "no other row is"
+        );
+    }
+
     // ---- Parallel-turn extension (guards the #103 batched-tool path) ----
 
     /// A script shaped by per-turn tool-call counts: turn `i` fires

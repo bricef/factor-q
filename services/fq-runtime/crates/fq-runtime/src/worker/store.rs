@@ -98,7 +98,13 @@ pub const SCHEMA_CLASS: &str = "worker";
 /// - **v9** — adds a nullable per-invocation completion `seq` to both
 ///   dispatch tables, providing one total replay order across tool and
 ///   LLM results. Pre-v9 rows remain `NULL` and use timestamp fallback.
-pub const WORKER_SCHEMA_VERSION: u32 = 9;
+/// - **v10** — adds `deferred_at INTEGER NULL` to `llm_dispatch`
+///   (#278): stamped on the errored row a deferral was decided on, so
+///   a resume can tell the 429 an invocation was put down for from a
+///   provider failure whose terminal was lost. Per row on purpose —
+///   `invocation_state.phase` is one column the next step boundary
+///   overwrites, so it cannot classify rows written before it.
+pub const WORKER_SCHEMA_VERSION: u32 = 10;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -235,6 +241,12 @@ ALTER TABLE tool_dispatch ADD COLUMN seq INTEGER;
 ALTER TABLE llm_dispatch ADD COLUMN seq INTEGER;
 "#;
 
+/// v10 migration: the per-row deferral stamp (#278). `NULL` on every
+/// row but the one a deferral was decided on.
+const WORKER_MIGRATION_V10_SQL: &str = r#"
+ALTER TABLE llm_dispatch ADD COLUMN deferred_at INTEGER;
+"#;
+
 /// One durable host notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostNoticeRow {
@@ -307,6 +319,11 @@ pub struct LlmDispatchRow {
     pub dispatched_at: Option<i64>,
     pub completed_at: Option<i64>,
     pub seq: Option<i64>,
+    /// When the invocation was deferred on this call (#278), unix ms —
+    /// set on the errored row a deferral was decided on, `None` on every
+    /// other row. What a resume reads to skip the deferral's 429 rather
+    /// than reproduce it as a lost failure.
+    pub deferred_at: Option<i64>,
 }
 
 /// Minimal fields for an open tool dispatch used by read-model views.
@@ -457,6 +474,7 @@ impl WorkerStore {
         (7, WORKER_MIGRATION_V7_SQL),
         (8, WORKER_MIGRATION_V8_SQL),
         (9, WORKER_MIGRATION_V9_SQL),
+        (10, WORKER_MIGRATION_V10_SQL),
     ];
 
     /// Initialise schema_meta and run worker migrations. Idempotent.
@@ -826,7 +844,8 @@ impl WorkerStore {
         let row = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
+                   deferred_at
             FROM llm_dispatch
             WHERE invocation_id = ? AND request_id = ?
             "#,
@@ -841,13 +860,49 @@ impl WorkerStore {
         }
     }
 
+    /// Stamp the errored row a deferral was decided on (#278). Only a
+    /// `completed` row closed `is_error` qualifies — the 429 the retry
+    /// layer gave up on is recorded there before the deferral is
+    /// decided — so a stamp that finds no such row is a WAL transition
+    /// error, not a silent no-op.
+    pub async fn mark_llm_deferred(
+        &self,
+        invocation_id: &str,
+        request_id: &str,
+        deferred_at: i64,
+    ) -> Result<(), WorkerStoreError> {
+        let res = sqlx::query(
+            r#"
+            UPDATE llm_dispatch
+            SET deferred_at = ?
+            WHERE invocation_id = ? AND request_id = ? AND status = ? AND is_error = 1
+            "#,
+        )
+        .bind(deferred_at)
+        .bind(invocation_id)
+        .bind(request_id)
+        .bind(DispatchStatus::Completed.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(WorkerStoreError::WalTransitionFailed {
+                entity: "llm_dispatch",
+                invocation_id: invocation_id.to_string(),
+                call_id: request_id.to_string(),
+                reason: "no completed error row to mark deferred".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn find_ambiguous_llm_dispatches(
         &self,
     ) -> Result<Vec<LlmDispatchRow>, WorkerStoreError> {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
+                   deferred_at
             FROM llm_dispatch
             WHERE status = ?
             ORDER BY dispatched_at
@@ -1209,7 +1264,8 @@ impl WorkerStore {
         let rows = sqlx::query(
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
-                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq
+                   response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
+                   deferred_at
             FROM llm_dispatch
             WHERE invocation_id = ?
             ORDER BY intent_at
@@ -1276,6 +1332,7 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
         dispatched_at: row.get("dispatched_at"),
         completed_at: row.get("completed_at"),
         seq: row.get("seq"),
+        deferred_at: row.get("deferred_at"),
     })
 }
 
