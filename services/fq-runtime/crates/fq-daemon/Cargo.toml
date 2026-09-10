@@ -15,6 +15,21 @@ license.workspace = true
 name = "fqd"
 path = "src/bin/fqd.rs"
 
+# The dashboard end-to-end suite runs the real `fq-dashboard` binary,
+# which `cargo test -p fq-daemon` does not build — so `just runtime-ci`
+# would compile a target whose sibling binary is missing. Declared here
+# behind a feature so that gate skips it entirely and only
+# `just dashboard-e2e` (which builds the dashboard first) selects it.
+# Not `#[ignore]`: an ignored test is one nobody notices staying
+# ignored, and this one exists because nobody noticed (#673).
+[[test]]
+name = "dashboard_e2e"
+required-features = ["dashboard-e2e"]
+
+[features]
+# Selects the `dashboard_e2e` test target above. No code is behind it.
+dashboard-e2e = []
+
 [dependencies]
 fq-edge = { path = "../fq-edge" }
 fq-ops = { workspace = true }

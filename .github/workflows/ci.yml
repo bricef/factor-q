@@ -367,6 +367,56 @@ jobs:
       - if: always() && (needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true')
         run: sccache --show-stats
 
+  # The composition Dashboard CI and the screenshots cannot reach: the real
+  # daemon, the real dashboard binary, and real HTTP between them. Both of
+  # those are hermetic on purpose — the router tests answer `turn.list` from
+  # an in-process fixture that returns no turns, and the screenshots render
+  # canned structs with no daemon and no status code — which is why the
+  # transcript page served 503 on the live instance for six days with every
+  # check green (#673).
+  #
+  # ADVISORY for now: deliberately NOT an input to the "Rust CI" aggregate
+  # below, so a flake in a two-process suite cannot block a merge while it
+  # earns its trust. Promote it into that job's `needs` after a week green.
+  #
+  # Gated like dashboard-ci (fq-dashboard path-depends on fq-runtime), and it
+  # needs the pinned broker because the suite spawns its own nats-server.
+  dashboard-e2e:
+    name: Dashboard E2E
+    needs: changes
+    runs-on: ubuntu-latest
+    # sccache over the GHA backend — see the caveat on runtime-ci.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - if: needs.changes.outputs.runtime != 'true' && needs.changes.outputs.dashboard != 'true'
+        run: echo "No dashboard-relevant changes — skipping the dashboard e2e suite."
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: actions/checkout@v7
+      # Keep in lockstep with rust-toolchain.toml (#102).
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      # Unified workspace at the repo root (#194) — rust-cache's default.
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.11
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        uses: extractions/setup-just@v4
+      # Install the pinned test broker (#233): the suite spawns its own
+      # nats-server. Idempotent; version from .nats-version.
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        run: just install-nats
+      - if: needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true'
+        run: just dashboard-e2e
+      # Cache hit-rate for the keep/drop decision on sccache.
+      - if: always() && (needs.changes.outputs.runtime == 'true' || needs.changes.outputs.dashboard == 'true')
+        run: sccache --show-stats
+
   # Visual artifact, not a required check: when dashboard code changes,
   # render every page from deterministic fixtures and screenshot them
   # (headless chrome over file:// — no daemon, no broker), so the PR run
