@@ -266,3 +266,17 @@ pub struct ThrottledModel {
     /// default pause escalates on. Zero once a call succeeds.
     pub waves: u32,
 }
+
+impl ThrottledModel {
+    /// The permit arithmetic behind a slowdown, phrased once: the
+    /// permits the model may hold against its ceiling, the calls
+    /// holding one now, and the 429s and waves behind the cap. `fq
+    /// status`, `fq doctor` and the dashboard each wrap their own pause
+    /// phrase around this line, so the three never drift.
+    pub fn permit_summary(&self) -> String {
+        format!(
+            "{} of {} permits, {} in flight; {} rate-limited this window (wave {})",
+            self.cap, self.ceiling, self.in_flight, self.rate_limited_in_window, self.waves
+        )
+    }
+}

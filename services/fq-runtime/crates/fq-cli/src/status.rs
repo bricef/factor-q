@@ -284,15 +284,7 @@ fn throttled_model_line(model: &fq_ops::health::ThrottledModel) -> String {
         ),
         None => "not paused".to_string(),
     };
-    format!(
-        "{}: {pause}; {} of {} permits, {} in flight; {} rate-limited this window (wave {})",
-        model.model,
-        model.cap,
-        model.ceiling,
-        model.in_flight,
-        model.rate_limited_in_window,
-        model.waves
-    )
+    format!("{}: {pause}; {}", model.model, model.permit_summary())
 }
 
 /// Pure: the registry census as one line, plus a line per rejection.
