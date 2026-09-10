@@ -232,14 +232,15 @@ fq projection rebuild --yes --reason "backfill"  # with a note for `fq status`
 ```
 
 The daemon stops its projection consumer, drops the projection tables,
-recreates them at its schema version, resets the `fq-projector`
-durable so the stream replays from the start of its retention, and
-starts the consumer again. Cost-bearing event rows, invocation
-summaries and trigger records are carried across before the replay
-begins — no spend figure is lost — and everything the stream still
-holds is re-derived whole, which is what fills in a column that was
-NULL for history. `--yes` is required: without it the command explains
-and stops.
+recreates them at its schema version with every row carried across,
+resets the `fq-projector` durable so the stream replays from its
+**replay floor** — the first event whose envelope version this build
+reads — and starts the consumer again. Rows at or above the floor are
+dropped and re-derived whole from the stream, which is what fills in a
+column that was NULL for history; rows below it stay as they were, and
+so do cost-bearing event rows, invocation summaries and trigger records
+wherever they sit — no spend figure is lost. `--yes` is required:
+without it the command explains and stops.
 
 The command answers when the consumer is running again, not when the
 replay has finished. Until it catches up, reads answer over a partial
@@ -248,11 +249,23 @@ inside the stream's window can be short. `fq status` reports the
 rebuild for as long as the file lasts:
 
 ```text
-  projection rebuild: in progress (replaying to stream sequence 60744) — started 2026-09-07T10:00:00+00:00, operator request: backfill
+  projection rebuild: in progress (replaying from sequence 58000 to 60744; 12 older rows carried as-is) — started 2026-09-07T10:00:00+00:00, operator request: backfill
 ```
 
-and `complete` once the durable's acked position has reached that
-sequence.
+and `complete (replayed from sequence 58000; 12 older rows carried
+as-is)` once the durable's acked position has reached the target.
+
+**In the weeks after an envelope bump** the stream still holds events
+in the version the previous build wrote, until they age out of
+retention. A rebuild in that window replays only the part this build
+reads — everything from the floor on — and carries the rest as-is: the
+rows an older build projected from that history keep the shape they
+had, and the line's "older rows carried as-is" count is how many. The
+older events do not halt the projector; a halt during a replay (see
+[below](#when-a-consumer-halts-on-an-event-it-cannot-read)) means an
+unreadable event *above* the floor, which is a genuinely mixed stream.
+A stream that holds nothing this build reads floors past its end, and
+the line reads `complete (nothing to replay: …)` at once.
 
 The same rebuild happens by itself when a new build's projection
 schema version is higher than the file's: the daemon rebuilds on start
@@ -619,6 +632,18 @@ acked and skipped, as they always were, and now counted: the line reads
 issue on its own; it says poison was skipped, not that history was
 lost. A halt and a malformed count never read as one thing, because
 they call for opposite responses.
+
+**A projection rebuild does not halt on the history below its replay
+floor.** It starts at the first event this build reads and carries the
+rows below that point as they were (see
+[rebuilding the projection](#rebuilding-the-projection-fq-projection-rebuild)),
+so the weeks after an envelope bump — when the stream still holds the
+previous version's events — are not a window in which a rebuild is
+unsafe. A halt reported *during* a replay means an unreadable event
+above the floor. The other consumers have no floor: a daemon started
+with no durables at all against a stream that still holds older
+history — a fresh broker seeded from another, or durables deleted by
+hand — halts them on it, as this section describes.
 
 ### Deleting a durable under a running daemon restarts it
 
