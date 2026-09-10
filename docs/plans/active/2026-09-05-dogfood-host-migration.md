@@ -47,7 +47,7 @@
   (three stores), `agents/`, `fqd.toml`, `fq-cron.toml`, and the edge
   identity under `~/.local/state/factor-q/edge/` or `[state] directory`
   if `fqd.toml` sets it. It was at `9477254` (2026-08-25) when the
-  [phase-0 plan](2026-09-04-production-readiness-phase-0.md) was written;
+  [phase-0 plan](../closed/2026-09-04-production-readiness-phase-0.md) was written;
   `./current/fq --version` says what it is now. Whatever it is, it is
   before #510, so the move also crosses the event `SCHEMA_VERSION` 2 → 3
   bump (see risks).
