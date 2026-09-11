@@ -1,9 +1,10 @@
 # Status
 
 One screen: what runs today, where we are, what's next. Updated at
-milestone boundaries — **last: 2026-08-26** (ADR-0006 + ADR-0031 done:
-the edge migration gate reached zero on 2026-08-14 and the `fq`/`fqd`
-binary split shipped on 2026-08-23).
+milestone boundaries — **last: 2026-09-10** (the production-readiness
+Phase 0 plan closed with Phases 0 and 1 on `main`; before it,
+2026-08-26, ADR-0006 + ADR-0031: the edge migration gate reached zero
+on 2026-08-14 and the `fq`/`fqd` binary split shipped on 2026-08-23).
 If this contradicts `git log`, trust the log and fix this file.
 
 ## Maturity: pre-alpha
@@ -70,6 +71,15 @@ it is the licence to keep changing shape quickly.
   offline to six read grants, so a compromised dashboard can read
   exactly what it renders and command nothing — the
   [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
+  A **per-model provider throttle** absorbs rate limits fleet-wide and is
+  on by default (`[worker.throttle]` in `fqd.toml`): a 429 pauses the
+  model for the wait the provider named, halves its in-flight cap, and
+  makes the dispatcher hold a paused model's triggers instead of
+  redelivering them; an invocation the retry layer gave up on is
+  *deferred* at its step boundary (`invocation.deferred`) and resumed
+  after the wait rather than failed. `fq status` and `fq doctor` list the
+  throttled models and the dashboard's health page shows the same line —
+  see [operating the daemon](docs/guide/operating-the-daemon.md).
 - **Store (`fq-cas`)** — [content-addressed storage](services/fq-store/README.md)
   (BLAKE3, FastCDC dedup) + named objects with version history + verified
   online GC + [access control](docs/guide/access-control.md) (event-sourced
