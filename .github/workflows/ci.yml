@@ -507,6 +507,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  pr-size:
+    name: PR size
+    runs-on: ubuntu-latest
+    # Every PR, no path filter: the question "is this one change?" applies to
+    # a docs sweep as much as to a runtime change. PR context only, same-repo
+    # only — the label and the comment need a writable token, which a fork
+    # PR does not get; the script exits 0 either way.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Elevated for this job only: the label and the comment. The workflow
+    # default stays read-only.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the script counts from the merge base.
+          fetch-depth: 0
+      - run: >-
+          bash scripts/pr-size-comment.sh
+          "${{ github.event.pull_request.number }}"
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   go-ci:
     name: Go adapters
     needs: changes
