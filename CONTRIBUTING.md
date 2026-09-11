@@ -209,6 +209,15 @@ daemon; after changing the Dockerfile, build them and run
 - **Commits** follow conventional style: imperative mood, short
   first line, body explains the "why" and links to ADRs where
   relevant.
+- **Pull requests carry one semantic change each**, with its tests
+  and docs. An issue that names several changes becomes a stack of
+  PRs, and mechanical work (a ratchet-driven extraction, a formatting
+  sweep, a snapshot regeneration) goes in its own PR ahead of the
+  feature that needs it. The description names the one change and
+  lists the consequential files — operator surfaces, snapshots,
+  goldens — separately, so a reviewer reads the change closely and
+  skims the fan-out; the template asks for both. `AGENTS.md` has the
+  reasoning and the origin.
 
 ## Design sessions
 
