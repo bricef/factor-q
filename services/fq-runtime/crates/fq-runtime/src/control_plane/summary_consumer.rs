@@ -60,14 +60,16 @@ use super::durable_consumer::{
 /// Name of the durable JetStream consumer.
 pub const CONSUMER_NAME: &str = "fq-summary";
 
-/// The lifecycle moments the summariser reacts to. Multi-subject so
-/// the consumer never churns through the tool-event firehose.
-pub const FILTER_SUBJECTS: [&str; 4] = [
-    "fq.agent.*.triggered",
-    "fq.agent.*.llm_response",
-    "fq.agent.*.completed",
-    "fq.agent.*.failed",
-];
+/// The lifecycle moments the summariser reacts to. Derived from the producer
+/// helpers so subject changes cannot leave the consumer filters behind.
+fn filter_subjects(agent: &str) -> Vec<String> {
+    vec![
+        subjects::agent_triggered(agent),
+        subjects::agent_llm_response(agent),
+        subjects::agent_completed(agent),
+        subjects::agent_failed(agent),
+    ]
+}
 
 /// Cap on how much of a trigger payload reaches the summariser —
 /// payloads are operator/task-sized in practice; this only guards
@@ -162,15 +164,8 @@ impl SummaryConsumer {
     /// Run the consumer loop until `shutdown` fires.
     pub async fn run(self, shutdown: oneshot::Receiver<()>) -> Result<(), SummaryConsumerError> {
         info!(model = %self.model, "invocation summary consumer starting");
-        let filter_subjects: Vec<String> = match &self.test_agent_scope {
-            Some(agent) => vec![
-                subjects::agent_triggered(agent),
-                subjects::agent_llm_response(agent),
-                subjects::agent_completed(agent),
-                subjects::agent_failed(agent),
-            ],
-            None => FILTER_SUBJECTS.iter().map(|s| s.to_string()).collect(),
-        };
+        let filter_agent = self.test_agent_scope.as_deref().unwrap_or("*");
+        let filter_subjects = filter_subjects(filter_agent);
         // A test-name override pairs with deliver-from-new so each
         // test gets a fresh cursor on the shared stream (see
         // [`Self::with_test_scope`]).
@@ -459,6 +454,38 @@ mod tests {
     use futures::StreamExt;
     use std::collections::HashMap as StdHashMap;
     use std::time::Duration;
+
+    fn nats_subject_matches(filter: &str, subject: &str) -> bool {
+        let mut filter_tokens = filter.split('.');
+        let mut subject_tokens = subject.split('.');
+
+        loop {
+            match (filter_tokens.next(), subject_tokens.next()) {
+                (Some("*"), Some(_)) => {}
+                (Some(filter), Some(subject)) if filter == subject => {}
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    #[test]
+    fn production_filters_match_representative_event_subjects() {
+        let production_filters = filter_subjects("*");
+        let representative_subjects = [
+            subjects::agent_triggered("representative-agent"),
+            subjects::agent_llm_response("representative-agent"),
+            subjects::agent_completed("representative-agent"),
+            subjects::agent_failed("representative-agent"),
+        ];
+
+        for (filter, subject) in production_filters.iter().zip(representative_subjects) {
+            assert!(
+                nats_subject_matches(filter, &subject),
+                "production filter {filter} does not match event subject {subject}"
+            );
+        }
+    }
 
     fn canned(line: &str) -> ChatResponse {
         ChatResponse {
