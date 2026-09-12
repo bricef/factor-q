@@ -4,7 +4,9 @@
 # The restore drill (README) is this script on a freshly bootstrapped host.
 #
 #   restore.sh <backup-dir>        refuse if either volume already has content
-#   restore.sh <backup-dir> --yes  overwrite existing volume content
+#   restore.sh <backup-dir> --yes  overwrite existing volume content — and the
+#                                  first restore on a freshly bootstrapped host,
+#                                  whose image-seeded layout reads as content (#671)
 #
 # The stack is taken down first (containers removed, volumes kept), the
 # tarballs are checked against SHA256SUMS, the volumes are created if

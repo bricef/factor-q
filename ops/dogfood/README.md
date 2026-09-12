@@ -40,12 +40,13 @@ the previous, launcher-based shape was
 ```text
 fq-dogfood/
 ├── compose.yml              # the stack — copied from ops/dogfood/
+├── compose.override.yml     # host-authored, bootstrap never touches it — the internal Caddyfile, a rehearsal's profiles
 ├── .env                     # FQ_TAG (deploy.sh owns it), image repo, limits — from .env.example
-├── infra/nats.conf          # broker config; infra/Caddyfile the proxy's — copied from ops/dogfood/infra/
+├── infra/nats.conf          # broker config; infra/Caddyfile and infra/Caddyfile.internal the proxy's — copied from ops/dogfood/infra/
 ├── .secrets/env             # provider keys, GH_TOKEN, the broker token, the adapters' URLs (env.example)
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
-├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE
+├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE / DASH_INTERNAL_ADDR on an internal host
 ├── deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh   # copied by bootstrap.sh, run by the crontab
 ├── logs/                    # deploy.log, hygiene.log, backup.log — the cron jobs' output; notify.log, every message sent
 ├── backups/                 # backup.sh's sets, FQ_BACKUP_KEEP of them
@@ -78,9 +79,12 @@ the config. So:
    the daemon (`deploy.sh --force`) so the new registry takes;
 2. then copy the definition into `agents/` and `fq reload`.
 
-`ops/dogfood/agents/` holds `backlog-groomer.md` (the weekly groom,
-until #257 lands), which declares `model: claude-fable-5` — check it is
-in the live registry before installing it.
+The live instance's own definitions are not here: they live in the
+`bricef/fq-dogfood` ops repo and deploy with `migrate/sync-config.sh`
+(see "Declared state is version-controlled, not hand-edited").
+`ops/dogfood/agents/` holds only `backlog-groomer.md` — the weekly groom,
+until #257 lands — which declares `model: claude-fable-5`; add that to
+the registry before installing it.
 
 ## Bootstrap (one-time per host, and again when the tracked files change)
 
@@ -105,20 +109,27 @@ broker token generated and written to all four places, a dashboard
 session secret generated), and installs the [crontab](crontab). It ends
 by printing what only a human can do:
 
-1. `.secrets/env`: `ANTHROPIC_API_KEY`, `GH_TOKEN` (literal — nothing
-   runs `gh auth token` for you now; #402 wants a per-role PAT).
+1. `.secrets/env`: `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` — one
+   key per provider `fqd.toml` declares, because a missing one fails the
+   daemon at startup and not at invocation time — plus `GH_TOKEN`
+   (literal — nothing runs `gh auth token` for you now; #402 wants a
+   per-role PAT). `.env`: `FQ_NOTIFY_HOOK`, then `./notify.sh --test`.
    `.secrets/caddy.env`: `DASH_USER`, `DASH_HASH` (`docker run --rm
-   caddy:2 caddy hash-password`). `docker login ghcr.io` as `fq` if the
-   packages are private.
-2. Seed the instance volume (below), or `restore.sh <set>` to bring an
-   existing instance across.
+   caddy:2 caddy hash-password`), and on a host with no public address
+   `DASH_INTERNAL_ADDR` and the override from "An internal host".
+   `docker login ghcr.io` as `fq` if the packages are private.
+2. Seed the instance volume (below), or `restore.sh <set> --yes` to
+   bring an existing instance across (a freshly bootstrapped host reads
+   as occupied — see "Backups and the restore drill").
 3. The first `deploy.sh`, then pair and mint the dashboard token (below).
 
 Knobs: `FQ_USER`, `FQ_REPO_URL`, `FQ_REF`, `FQ_REPO_DIR`. Inbound 443 and
-22 are the provider firewall's business; the stack publishes nothing
-else. The crontab is active from the moment it is installed, but
-`deploy.sh --auto` deploys nothing until the daemon can be asked whether
-it is idle — i.e. until the pairing in step 3 exists.
+22 are the host's own business — a provider firewall on a public VM, or,
+on an internal guest, the fact that nothing outside the tunnel can route
+to the address at all. The stack publishes nothing else. The crontab is
+active from the moment it is installed, but `deploy.sh --auto` deploys
+nothing until the daemon can be asked whether it is idle — i.e. until
+the pairing in step 3 exists.
 
 **Seed the instance volume.** The daemon needs `fqd.toml`, `agents/`
 and `fq-cron.toml` inside the volume before its first start — compose
@@ -192,11 +203,20 @@ docker compose up -d fq-dashboard
 Six grants, one per domain the pages render, all `read`; attenuation
 only narrows, so the dashboard can read exactly what it shows and
 command nothing. Reach it via SSH tunnel to `127.0.0.1:9472`, or through
-Caddy at `https://dev.lambda.works` (TLS-only, basic-auth plus a 90-day
-`fq_dash` session cookie; rotate `DASH_COOKIE` to log every browser
-out).
+Caddy — on a public host at that host's own name, on an internal one at
+`https://{$DASH_INTERNAL_ADDR}` (the live instance: `https://10.20.0.10/`
+over the tunnel, see "An internal host"). TLS-only, basic-auth plus a
+90-day `fq_dash` session cookie; rotate `DASH_COOKIE` to log every
+browser out.
 
 ## Routine operations
+
+The live instance runs on an internal guest: its dashboard is
+`https://10.20.0.10/` over the WireGuard tunnel, its declared state is
+version-controlled in the `bricef/fq-dogfood` ops repo rather than edited
+in the volume, and its backup sets stay on the guest until
+`FQ_BACKUP_HOOK` names somewhere else. Everything else below is generic
+to the stack.
 
 ```sh
 ~/fq-dogfood/deploy.sh              # upgrade to the newest main build (the images' main-latest)
@@ -219,6 +239,15 @@ need one — `fqd.toml` is read once, at startup — so a `[providers]`,
 same story: an `env_file` is read when a container is *created*, which
 `deploy.sh --force` does and a restart does not. `fq-cron.toml` is the
 exception: the scheduler watches it and reloads on edit.
+
+**Declared state is version-controlled, not hand-edited.** `agents/`,
+`fqd.toml` and `fq-cron.toml` live in the `bricef/fq-dogfood` ops repo;
+deploying a change is an edit and a commit there, then
+`migrate/sync-config.sh fq@<host>`, which copies as the runtime user,
+removes retired definitions and runs `fq reload` — `--restart` for
+`fqd.toml`, whose model registry is read only at startup. `fq-cron.toml`
+hot-reloads by itself. The commands below are for reading the volume and
+for one-off repair: anything left in it by hand is gone at the next sync.
 
 **Editing files in the volume.** The config and the agents live inside
 `fq-dogfood_fq-data`, not on the host's filesystem. Edit them through
@@ -262,9 +291,13 @@ the daemon. Two checks first, every time:
 After a deploy: `fq status` answers with the new version and the agents
 loaded, the projector consumer is caught up, `docker compose ps` shows
 every service running (fqd `healthy` once paired), and the previous
-worker's terminal state is `shutdown`, not `stale`. The `fq` client
-prints tarpc INFO spans to stderr on every call (#535); `2>/dev/null` is
-safe when reading its output.
+worker's terminal state is `shutdown`, not `stale`. `fq status` also
+reports `fq-summary ✗ lagging` on a filtered consumer even when
+JetStream has nothing pending
+([#672](https://github.com/bricef/factor-q/issues/672)) — read the
+projector and coordination consumers as the health signal and ignore
+that line. The `fq` client prints tarpc INFO spans to stderr on every
+call (#535); `2>/dev/null` is safe when reading its output.
 
 A deploy that crosses an event `SCHEMA_VERSION` bump (2 → 3 with #510)
 does not rebuild the projection — the projector continues from its
@@ -478,72 +511,134 @@ unreachable". Copying SQLite and JetStream files under a live writer
 would not be guaranteed to restore, which is the only property a backup
 has. `FQ_BACKUP_KEEP` (7) sets are kept on the host; `FQ_BACKUP_HOOK` is
 a command run with the finished set's directory, for the off-host copy
-— the on-host copy alone does not survive the host. Unattended, a
-failed backup goes through `notify.sh`; a backup that stops happening
-is `hygiene.sh`'s stale-set warning.
+— the on-host copy alone does not survive the host. The live instance
+has no `FQ_BACKUP_HOOK` yet, so every one of its sets exists only on the
+guest; until a hook names somewhere else, pull the newest set by hand
+(`rsync -a fq@<host>:fq-dogfood/backups/<set> ./`) after anything
+interesting. Unattended, a failed backup goes through `notify.sh`; a
+backup that stops happening is `hygiene.sh`'s stale-set warning.
 
 `restore.sh <set> [--yes]` is the other half: it verifies the checksums,
 takes the stack down (volumes kept), refuses to overwrite a volume that
 already has content unless `--yes`, fills both volumes from the tarballs
 as root and hands them to the runtime user, and brings the stack up on
 the set's tag (or `.env`'s, if set). The pairing comes back with
-`state/client/`, so `fq status` answers immediately.
+`state/client/`, so `fq status` answers immediately. Restore `nats-data`
+**with** its consumer state, never a stream on its own: a daemon
+attaching with no existing durable halts `fq-coordination` and
+`fq-projector` at sequence 1 and still logs `Runtime ready`
+([#684](https://github.com/bricef/factor-q/issues/684)). After any
+restore, `fq status` must show coordination caught up, not merely a
+daemon that started.
 
 **The drill**, once, and again after anything touches the layout: on a
-scratch VM, `bootstrap.sh`, copy a backup set over, `restore.sh <set>`,
-then `docker compose exec fqd fq status` and `fq invocation list` show
-the instance as it was. Clone-and-restore is cheap on a dedicated VM;
-the ADR's acceptance asks for it and so does the production-readiness
-review's Phase 3.
+scratch VM, `bootstrap.sh`, copy a backup set over, `restore.sh <set>
+--yes`, then `docker compose exec fqd fq status` and `fq invocation
+list` show the instance as it was. The `--yes` is not impatience: the
+image seeds the volume's layout on first mount, so a freshly
+bootstrapped host reads as occupied and the refusal is spurious
+([#671](https://github.com/bricef/factor-q/issues/671)).
+Clone-and-restore is cheap on a dedicated VM; the ADR's acceptance asks
+for it and so does the production-readiness review's Phase 3. The drill
+has been run for real twice — the dogfood instance's rehearsal and its
+cutover.
 
-## Migrating an instance onto the stack
+## Moving an instance to another host
 
-From a host running the launcher shape (or from one host to another):
-the state to carry is the `~/fq-dogfood` tree minus `releases/`,
-`current`, `logs/` and `.secrets/`, plus the old broker's JetStream
-volume. Rotating the edge identity is simpler than moving it and costs
-one re-pair and one dashboard token; the steps below move it.
+An instance is two volumes and four secrets files, so moving it is a
+backup set, a bootstrap and a restore — the same three steps whether the
+destination is a bigger VM, another provider or an internal guest. Moving
+*off* the old launcher shape is history: it happened once, on 2026-09-12,
+and the worked example with the day's real timings is the
+[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md)
+([#587](https://github.com/bricef/factor-q/issues/587)); the ops repo's
+`migrate/take-set.sh` is what packaged a set out of a launcher host, if
+one ever needs packaging again.
 
-1. **Stop the old shape, in this order.** SIGTERM the watcher and cron
-   first, so nothing is claimed or fired mid-drain; then `./current/fq
-   down` (the drain); then `docker compose -f infra/docker-compose.yml
-   down` for the old broker and proxy; the dashboard last or never.
-   Confirm with `fq workers list` that the worker ended `shutdown`, not
-   `stale`. Never run two watchers or two schedulers against one
-   repository — the old pair is down before the new pair is up, and
-   the reverse on a rollback.
-2. **Bootstrap the new shape** (above) on the target host, with the same
-   secrets and the same broker token. Do not run `deploy.sh` yet.
-3. **Seed the volume from the tree**: `fqd.toml` (with the three
-   settings for this shape — the edge bind changes from `127.0.0.1:9470`
-   to `0.0.0.0:9470`), `fq-cron.toml`, `agents/`, `cache/` (the three
-   stores), `workspace/` if anything is suspended, and the edge identity
-   — `~/.local/state/factor-q/edge/` by default, or `[state] directory`
-   if set — as `state/edge/`. Copy in through the image as in Bootstrap;
-   the copy runs as the runtime user, so ownership comes out right.
-   Across hosts, package the same files and the broker volume as a
-   `restore.sh` set instead and let it do steps 3–5 — the
-   [migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md)
-   has the packaging, the rehearsal and the day's order.
-4. **Move the event log.** The old compose project's volume is
-   `infra_nats-data`; the new one is `fq-dogfood_nats-data`:
+1. **Package the set on the source: `backup.sh`.** It is consistent by
+   construction — the scheduler, the daemon, the watcher and the broker
+   are all stopped for the copy — and it carries what the new host needs:
+   `state/edge/` (the edge identity), `state/client/` (the container's
+   pairing), `home/` (the fleet's git identity) and `cache/` (the
+   stores), skipping `build/` and `workspace/`. It writes `SHA256SUMS`
+   and a `MANIFEST` naming the tag the set was taken at.
 
    ```sh
-   docker volume create fq-dogfood_nats-data
-   docker run --rm -v infra_nats-data:/from:ro -v fq-dogfood_nats-data:/to alpine sh -c 'cp -a /from/. /to/'
+   cd ~/fq-dogfood && ./backup.sh
+   rsync -a backups/<utc-stamp> fq@<new-host>:fq-dogfood/backups/
    ```
 
-   Likewise `infra_caddy-data` → `fq-dogfood_caddy-data` to keep the
-   certificates (or let Caddy re-issue them).
-5. **`deploy.sh`**, then pair as in Bootstrap. With the identity copied,
-   the operator's existing pairing and the dashboard's token stay valid
-   — `FQ_EDGE` in `dashboard.env` is the same `127.0.0.1:9470`. Re-run
-   the "after a deploy" checks.
-6. **Retire** the tree's `releases/`, `current` and `logs/`, and the
-   old `infra/docker-compose.yml`; the host's `gh` login is no longer
-   read by anything (GH_TOKEN is literal in `.secrets/env`).
+2. **The source's publishers stop before the destination's start.**
+   `docker compose stop github-watcher fq-cron fqd` — the two publishers
+   first, so nothing is claimed or fired mid-drain, then the daemon; the
+   dashboard last or never. Confirm with `fq workers list` that the
+   worker ended `shutdown`, not `stale`. Never run two watchers or two
+   schedulers against one repository, or both claim the same issues: the
+   old pair is down before the new pair is up, and the reverse on a
+   rollback. A rehearsal that wants the destination running while the
+   source still publishes holds its pair back on a `profiles:
+   ["cutover"]` entry in `compose.override.yml` ("An internal host").
 
-The move itself — pre-flight, the set from the launcher shape, the
+3. **Bootstrap the destination** (above) with the same secrets and the
+   same broker token, and `FQ_TAG` in `.env` naming the source's build.
+   Do not run `deploy.sh` yet — the restore brings the stack up itself,
+   on the set's tag. A host with no public address gets the
+   `DASH_INTERNAL_ADDR` and `compose.override.yml` two-liner from "An
+   internal host" now, before anything starts.
+
+4. **`restore.sh <set> --yes`.** The flag is right here, not a
+   workaround: the image seeds the volume's layout on first mount, so a
+   freshly bootstrapped host reads as occupied and the refusal is
+   spurious ([#671](https://github.com/bricef/factor-q/issues/671)). The
+   broker volume has to arrive **with** its durable consumer state — a
+   daemon attaching to a stream with no existing durable halts
+   `fq-coordination` and `fq-projector` at sequence 1 and still logs
+   `Runtime ready` ([#684](https://github.com/bricef/factor-q/issues/684)).
+   A `backup.sh` set carries the durables; a stream copied by hand may
+   not.
+
+5. **The identity is copied, so nothing re-pairs.** The set carries
+   `state/edge/`, so the destination's daemon loads the source's identity
+   instead of minting one: clients that were paired with the old daemon
+   stay paired, and the dashboard's attenuated token and its
+   `FQ_EDGE=127.0.0.1:9470` are unchanged. The step people get wrong is
+   looking for the admin token afterwards. A loaded identity mints no new
+   token and writes no `state/edge/admin.token` — the daemon says so at
+   startup, "no admin.token beside the loaded identity; the pairing
+   already stored client-side (connections.toml) is the only copy of the
+   admin token" — so carry `state/client/` in the set and the container's
+   own `fq` is already paired: `docker compose exec fqd fq status`
+   answers and the container goes healthy with no `fq connect` at all. If
+   the pairing was not carried, mint a fresh token in the container
+   (`docker compose exec fqd fq token …`) rather than hunting for a file
+   that is not there. Rotating the identity instead is the fallback, and
+   costs one re-pair per client and one new dashboard token.
+
+6. **Set the declared state from the ops repo.** `agents/`, `fqd.toml`
+   and `fq-cron.toml` arrive inside the set, but the source of truth is
+   the `bricef/fq-dogfood` ops repo: after the restore,
+   `migrate/sync-config.sh fq@<host> --restart` is what makes the two
+   agree, and `migrate/compose-shape.sh` holds the `fqd.toml` edits this
+   shape needs — edge bind, workspace path, broker URL and token
+   variable, the agents and cache directories — in one place, so a
+   packaged set and a live sync cannot disagree.
+
+7. **Accept the move before trusting it.** Six services running and
+   healthy in `docker compose ps`; `fq status` reporting the tag, the
+   expected agent count and the projector and coordination consumers
+   caught up (ignoring the `fq-summary ✗ lagging` line, #672);
+   `fq invocation list` and `fq costs` showing the history that came
+   across; one trigger end to end; the dashboard rendering a recent
+   transcript with no build-skew banner; `hygiene.sh --report` clean; and
+   `notify.sh --test` delivered.
+
+8. **Then the crontab.** `bootstrap.sh` installs it and it is live from
+   that moment, so on a move take it out (`crontab -r -u fq`) before the
+   restore and put it back once the acceptance above passes — otherwise
+   the hourly `deploy.sh --auto` can move the tag, or the nightly
+   `backup.sh` stop the stack, in the middle of the move.
+
+The one move this has actually had — pre-flight, the rehearsal, the
 day's sequence, acceptance, rollback and retirement — is the
-[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md);
-[#587](https://github.com/bricef/factor-q/issues/587) tracks it.
+[migration plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md),
+and it is the worked example to read beside these eight steps.
