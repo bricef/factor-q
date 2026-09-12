@@ -19,4 +19,5 @@ Consumers: 5 checked, 0 unhealthy
   fq-dispatcher: ok (pending #)
   fq-advisory-watch: ok (pending #)
 Throttled models: none
+Agents at cap: none
 Dead-letters: none

@@ -90,5 +90,6 @@
     }
   ],
   "mcp_servers": [],
-  "throttled_models": []
+  "throttled_models": [],
+  "agents_at_cap": []
 }
