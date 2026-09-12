@@ -304,13 +304,13 @@ the daemon. Two checks first, every time:
 After a deploy: `fq status` answers with the new version and the agents
 loaded, the projector consumer is caught up, `docker compose ps` shows
 every service running (fqd `healthy` once paired), and the previous
-worker's terminal state is `shutdown`, not `stale`. `fq status` also
-reports `fq-summary ✗ lagging` on a filtered consumer even when
-JetStream has nothing pending
-([#672](https://github.com/bricef/factor-q/issues/672)) — read the
-projector and coordination consumers as the health signal and ignore
-that line. The `fq` client prints tarpc INFO spans to stderr on every
-call (#535); `2>/dev/null` is safe when reading its output.
+worker's terminal state is `shutdown`, not `stale`. Every consumer's
+verdict is its own backlog — what JetStream still owes it behind its
+subject filter — so a filtered consumer such as `fq-summary` reads
+`✓ caught up` while the stream head runs ahead of it, and a red glyph
+there is a real finding. The `fq` client prints tarpc INFO spans to
+stderr on every call (#535); `2>/dev/null` is safe when reading its
+output.
 
 A deploy that crosses an event `SCHEMA_VERSION` bump (2 → 3 with #510)
 does not rebuild the projection — the projector continues from its
@@ -697,8 +697,7 @@ one ever needs packaging again.
 
 7. **Accept the move before trusting it.** Six services running and
    healthy in `docker compose ps`; `fq status` reporting the tag, the
-   expected agent count and the projector and coordination consumers
-   caught up (ignoring the `fq-summary ✗ lagging` line, #672);
+   expected agent count and every consumer caught up;
    `fq invocation list` and `fq costs` showing the history that came
    across; one trigger end to end; the dashboard rendering a recent
    transcript with no build-skew banner;

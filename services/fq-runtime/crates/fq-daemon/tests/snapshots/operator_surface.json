@@ -2263,18 +2263,13 @@
                   "active": {
                     "properties": {
                       "ack_pending": {
+                        "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
                       },
                       "delivered": {
-                        "description": "Stream sequence the consumer has been delivered up to.",
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "lag": {
-                        "description": "`last_seq - delivered` — how far behind the stream head.",
+                        "description": "Stream sequence the consumer has been delivered up to —\nwhere it sits on the stream, not how far behind it is. The\ndistance from here to the stream head is not a backlog: a\nconsumer filtered to a few subjects is never offered the\nmessages in between, so that distance grows with every\nmessage anybody publishes and never comes back down.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -2289,6 +2284,7 @@
                         "type": "string"
                       },
                       "num_pending": {
+                        "description": "Matching messages JetStream still has to offer this\nconsumer — the backlog, as the broker itself counts it,\nafter the consumer's subject filter has been applied.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -2313,7 +2309,6 @@
                     "required": [
                       "name",
                       "delivered",
-                      "lag",
                       "ack_pending",
                       "num_pending",
                       "num_redelivered",
@@ -2802,18 +2797,13 @@
                   "active": {
                     "properties": {
                       "ack_pending": {
+                        "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
                       },
                       "delivered": {
-                        "description": "Stream sequence the consumer has been delivered up to.",
-                        "format": "uint64",
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "lag": {
-                        "description": "`last_seq - delivered` — how far behind the stream head.",
+                        "description": "Stream sequence the consumer has been delivered up to —\nwhere it sits on the stream, not how far behind it is. The\ndistance from here to the stream head is not a backlog: a\nconsumer filtered to a few subjects is never offered the\nmessages in between, so that distance grows with every\nmessage anybody publishes and never comes back down.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -2828,6 +2818,7 @@
                         "type": "string"
                       },
                       "num_pending": {
+                        "description": "Matching messages JetStream still has to offer this\nconsumer — the backlog, as the broker itself counts it,\nafter the consumer's subject filter has been applied.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -2852,7 +2843,6 @@
                     "required": [
                       "name",
                       "delivered",
-                      "lag",
                       "ack_pending",
                       "num_pending",
                       "num_redelivered",

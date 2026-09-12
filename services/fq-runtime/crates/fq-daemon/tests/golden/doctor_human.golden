@@ -13,10 +13,10 @@ Permanent failures: 1
   tool_error: 1
   -> `fq invocation list --status=failed` to inspect
 Consumers: 5 checked, 0 unhealthy
-  fq-projector: ok (lag #)
-  fq-coordination: ok (lag #)
-  fq-heartbeat: ok (lag #)
-  fq-dispatcher: ok (lag #)
-  fq-advisory-watch: ok (lag #)
+  fq-projector: ok (pending #)
+  fq-coordination: ok (pending #)
+  fq-heartbeat: ok (pending #)
+  fq-dispatcher: ok (pending #)
+  fq-advisory-watch: ok (pending #)
 Throttled models: none
 Dead-letters: none

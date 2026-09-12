@@ -1010,15 +1010,14 @@ fn golden_costs_json() {
 // sweep emits for the same row.
 
 /// The consumer block's per-consumer counters are machinery readings —
-/// how far each durable has been delivered, and how far behind the
-/// stream head that leaves it — and they move with the fixture's own
-/// timers (the daemon heartbeats on a schedule while the golden runs).
-/// The names, the verdicts and the checked/unhealthy summary are what
-/// the golden is pinning; the digits behind them are collapsed (#549).
+/// how far each durable has been delivered, and what the broker still
+/// owes it — and they move with the fixture's own timers (the daemon
+/// heartbeats on a schedule while the golden runs). The names, the
+/// verdicts and the checked/unhealthy summary are what the golden is
+/// pinning; the digits behind them are collapsed (#549).
 const VOLATILE_CONSUMER_FIGURES: &[&str] = &[
-    ": ok (lag ",
+    ": ok (pending ",
     "\"delivered\":",
-    "\"lag\":",
     "\"ack_pending\":",
     "\"num_pending\":",
     "\"num_redelivered\":",

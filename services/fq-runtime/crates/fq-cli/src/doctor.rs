@@ -152,7 +152,7 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
         match consumer {
             ConsumerHealth::Active {
                 name,
-                lag,
+                num_pending,
                 redeliveries,
                 stuck: true,
                 malformed_acked,
@@ -160,7 +160,7 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — {redeliveries} redeliveries past its acked floor, \
-                     lag {lag}{}\n",
+                     pending {num_pending}{}\n",
                     malformed_suffix(*malformed_acked)
                 ));
                 out.push_str(&format!(
@@ -170,12 +170,12 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
             }
             ConsumerHealth::Active {
                 name,
-                lag,
+                num_pending,
                 malformed_acked,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (lag {lag}{})\n",
+                    "  {name}: ok (pending {num_pending}{})\n",
                     malformed_suffix(*malformed_acked)
                 ));
             }

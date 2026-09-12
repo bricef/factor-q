@@ -378,8 +378,11 @@ retention state. Watch for:
 
 - **Byte count approaching `max_file_store`** → increase the cap or
   tighten retention
-- **Consumer lag** growing → the SQLite projection consumer is
-  falling behind
+- **A consumer's `num_pending`** growing → that consumer is falling
+  behind; on `fq-projector` it is the SQLite projection that cannot
+  keep up. Read `num_pending` rather than the gap between the stream's
+  `last_seq` and the consumer's delivered position: the gap counts
+  messages a filtered consumer is never offered
 - **Message count without bounded growth** → retention policy not
   taking effect
 

@@ -61,7 +61,6 @@ pub(crate) fn status_report() -> StatusReport {
                     ConsumerHealth::Active {
                         name: "fq-projector".to_string(),
                         delivered: 60_744,
-                        lag: 0,
                         ack_pending: 0,
                         num_pending: 0,
                         num_redelivered: 0,
@@ -72,7 +71,6 @@ pub(crate) fn status_report() -> StatusReport {
                     ConsumerHealth::Active {
                         name: "fq-coordination".to_string(),
                         delivered: 60_744,
-                        lag: 0,
                         ack_pending: 0,
                         num_pending: 0,
                         num_redelivered: 0,
@@ -86,7 +84,6 @@ pub(crate) fn status_report() -> StatusReport {
                     ConsumerHealth::Active {
                         name: "fq-heartbeat".to_string(),
                         delivered: 60_020,
-                        lag: 724,
                         ack_pending: 1,
                         num_pending: 724,
                         num_redelivered: 1,
@@ -105,7 +102,6 @@ pub(crate) fn status_report() -> StatusReport {
                 consumers: vec![ConsumerHealth::Active {
                     name: "fq-dispatcher".to_string(),
                     delivered: 29,
-                    lag: 3,
                     ack_pending: 1,
                     num_pending: 2,
                     num_redelivered: 4,
@@ -174,7 +170,6 @@ pub(crate) fn doctor_report() -> DoctorReport {
             ConsumerHealth::Active {
                 name: "fq-projector".to_string(),
                 delivered: 60_744,
-                lag: 0,
                 ack_pending: 0,
                 num_pending: 0,
                 num_redelivered: 0,
@@ -185,7 +180,6 @@ pub(crate) fn doctor_report() -> DoctorReport {
             ConsumerHealth::Active {
                 name: "fq-heartbeat".to_string(),
                 delivered: 60_020,
-                lag: 724,
                 ack_pending: 1,
                 num_pending: 724,
                 num_redelivered: 1,

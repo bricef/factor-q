@@ -18,7 +18,8 @@
 //! operator reads which one rather than that something is wrong.
 
 pub use fq_ops::health::{
-    ConsumerHealth, McpServerHealth, StreamHealth, ThrottledModel, UnsupportedEvent,
+    ConsumerHealth, ConsumerProgress, McpServerHealth, StreamHealth, ThrottledModel,
+    UnsupportedEvent,
 };
 
 use crate::bus::{
@@ -95,16 +96,7 @@ pub async fn probe_stream(
 
     let mut consumers = Vec::with_capacity(expected_consumers.len());
     for name in expected_consumers {
-        consumers.push(
-            probe_consumer(
-                &mut stream,
-                name,
-                info.state.last_sequence,
-                policy,
-                ledger.record(name),
-            )
-            .await,
-        );
+        consumers.push(probe_consumer(&mut stream, name, policy, ledger.record(name)).await);
     }
 
     StreamHealth::Available {
@@ -117,14 +109,18 @@ pub async fn probe_stream(
     }
 }
 
-/// Probe one durable. `last_seq` is its stream's head, for the lag;
-/// `record` is what the loop behind the durable has said about its own
-/// parse boundary, and a recorded halt is reported over whatever the
-/// broker's figures would have made of the consumer.
+/// Probe one durable. `record` is what the loop behind the durable has
+/// said about its own parse boundary, and a recorded halt is reported
+/// over whatever the broker's figures would have made of the consumer.
+///
+/// The stream's head is not passed in and not consulted. What a
+/// consumer still owes is `num_pending` and `ack_pending`, which the
+/// broker reports with the consumer's own subject filter applied;
+/// subtracting `delivered` from the head instead counts every message
+/// the consumer is not subscribed to.
 async fn probe_consumer(
     stream: &mut async_nats::jetstream::stream::Stream,
     name: &str,
-    last_seq: u64,
     policy: ConsumerRedeliveryPolicy,
     record: ConsumerRecord,
 ) -> ConsumerHealth {
@@ -154,9 +150,9 @@ async fn probe_consumer(
         halted_on,
     } = record;
     // The loop's own account wins over the broker's figures: a halted
-    // consumer has one message delivered and unacked and a lag that
-    // only grows, which the arithmetic below would call "behind" and
-    // never "stuck". The loop knows it stopped, and why.
+    // consumer has one message delivered and unacked and a backlog
+    // that only grows, which the arithmetic below would call "behind"
+    // and never "stuck". The loop knows it stopped, and why.
     if let Some(halted_on) = halted_on {
         return ConsumerHealth::Halted {
             name: name.to_string(),
@@ -172,7 +168,6 @@ async fn probe_consumer(
     ConsumerHealth::Active {
         name: name.to_string(),
         delivered,
-        lag: last_seq.saturating_sub(delivered),
         ack_pending,
         num_pending: info.num_pending,
         num_redelivered,

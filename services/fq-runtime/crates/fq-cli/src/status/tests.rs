@@ -35,7 +35,6 @@ fn report() -> StatusReport {
             consumers: vec![ConsumerHealth::Active {
                 name: "fq-projector".to_string(),
                 delivered: 12,
-                lag: 0,
                 ack_pending: 0,
                 num_pending: 0,
                 num_redelivered: 0,
@@ -248,7 +247,7 @@ fn a_clean_registry_says_only_what_it_loaded() {
 // cover the rest without a broker.
 // ------------------------------------------------------------------
 
-fn active(lag: u64) -> StreamHealth {
+fn active(num_pending: u64) -> StreamHealth {
     StreamHealth::Available {
         stream: "fq-events".to_string(),
         messages: 40,
@@ -257,10 +256,9 @@ fn active(lag: u64) -> StreamHealth {
         last_seq: 40,
         consumers: vec![ConsumerHealth::Active {
             name: "fq-projector".to_string(),
-            delivered: 40u64.saturating_sub(lag),
-            lag,
+            delivered: 40u64.saturating_sub(num_pending),
             ack_pending: 0,
-            num_pending: 0,
+            num_pending,
             num_redelivered: 0,
             redeliveries: 0,
             stuck: false,
@@ -354,11 +352,52 @@ fn the_rebuild_line_follows_the_replay() {
     );
 }
 
+/// The verdict follows what JetStream still owes the consumer, which
+/// is the only backlog a filtered durable has.
 #[test]
-fn a_consumers_verdict_follows_its_lag() {
+fn a_consumers_verdict_follows_what_is_still_pending_for_it() {
     assert!(render_stream_health_human(&active(0)).contains("✓ caught up"));
     assert!(render_stream_health_human(&active(3)).contains("◐ slightly behind"));
     assert!(render_stream_health_human(&active(99)).contains("✗ lagging"));
+}
+
+/// The defect this line was built for: the summariser on the dogfood
+/// broker, filtered to four subjects, sitting 781 sequences below a
+/// head it will never be offered — every message above it is heartbeat
+/// and coordination traffic — with nothing pending and nothing in
+/// flight.
+///
+/// The old verdict was `last_seq - delivered`, so this read
+/// `✗ lagging` and grew by one with every publish by anybody. A red
+/// glyph that is permanently wrong is a red glyph an operator stops
+/// reading, which is the real cost.
+#[test]
+fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-events".to_string(),
+        messages: 163_079,
+        bytes: 393_248_768,
+        first_seq: 278_036,
+        last_seq: 461_277,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-summary".to_string(),
+            delivered: 460_496,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+        }],
+    });
+    assert!(
+        out.contains("consumer fq-summary: ✓ caught up (delivered 460496, pending 0)"),
+        "got:\n{out}"
+    );
+    assert!(
+        !out.contains("lagging"),
+        "the distance to a head it is not subscribed to is not a backlog: {out}"
+    );
 }
 
 #[test]
@@ -399,7 +438,6 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
         consumers: vec![ConsumerHealth::Active {
             name: "fq-dispatcher".to_string(),
             delivered: 5,
-            lag: 0,
             ack_pending: 2,
             num_pending: 1,
             num_redelivered: 3,
@@ -408,8 +446,8 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             malformed_acked: 0,
         }],
     });
+    assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");
     assert!(out.contains("ack pending:    2"), "got:\n{out}");
-    assert!(out.contains("num pending:    1"), "got:\n{out}");
     assert!(out.contains("redelivered:    3"), "got:\n{out}");
     assert!(
         out.contains(&format!(

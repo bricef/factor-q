@@ -413,6 +413,91 @@ async fn a_healthy_consumer_is_never_reported_stuck() {
     let _ = handle.await;
 }
 
+/// The defect, at the probe: a durable filtered to a subject nothing
+/// publishes to, on a stream that has taken several messages it does
+/// not match, is caught up — and the broker says so itself, with
+/// `num_pending` 0 behind the consumer's own filter.
+///
+/// This is the summariser's shape on the dogfood broker. The stream
+/// head runs away from a filtered consumer as fast as anyone publishes
+/// anything, so a verdict read off the distance to it calls this
+/// consumer lagging and the number only ever grows.
+#[tokio::test]
+async fn a_filtered_durable_matching_nothing_on_the_stream_is_caught_up() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+    // A filter that no publisher on this stream will ever match.
+    let quiet = WorkerId::new(format!("quiet-{}", Uuid::now_v7().simple())).unwrap();
+    let durable = format!("fq-quiet-{}", Uuid::now_v7().simple());
+    bus.durable_consumer_with_filter(
+        &durable,
+        &format!("fq.worker.{}.heartbeat", quiet.as_str()),
+        None,
+    )
+    .await
+    .expect("consumer");
+
+    // Traffic it is not subscribed to, published after it exists, so
+    // the stream head moves without offering it anything.
+    let noisy = WorkerId::new(format!("noisy-{}", Uuid::now_v7().simple())).unwrap();
+    for _ in 0..5 {
+        bus.publish(&Event::system(
+            Uuid::now_v7(),
+            EventPayload::WorkerHeartbeat(WorkerHeartbeatPayload {
+                worker_id: noisy.clone(),
+                last_step_at_ms: None,
+            }),
+        ))
+        .await
+        .expect("publish");
+    }
+
+    let health = probe_stream(
+        &bus.jetstream(),
+        crate::bus::STREAM_NAME,
+        &[durable.as_str()],
+        bus.redelivery_policy(),
+        bus.consumer_ledger(),
+    )
+    .await;
+    let StreamHealth::Available {
+        consumers,
+        last_seq,
+        ..
+    } = &health
+    else {
+        panic!("the event stream must be available: {health:?}");
+    };
+    let ConsumerHealth::Active {
+        delivered,
+        num_pending,
+        ack_pending,
+        ..
+    } = &consumers[0]
+    else {
+        panic!("the durable exists, so it is Active: {:?}", consumers[0]);
+    };
+    assert!(
+        *last_seq > *delivered,
+        "the head must have moved past the consumer for this to be the case under test: \
+         head {last_seq}, delivered {delivered}"
+    );
+    assert_eq!(
+        (*num_pending, *ack_pending),
+        (0, 0),
+        "nothing matching is waiting and nothing is in flight: {:?}",
+        consumers[0]
+    );
+    assert_eq!(
+        consumers[0].progress(),
+        Some(ConsumerProgress::CaughtUp),
+        "a consumer the broker owes nothing is caught up wherever it sits: {:?}",
+        consumers[0]
+    );
+    assert!(!consumers[0].is_fault(), "{:?}", consumers[0]);
+}
+
 /// A durable nobody has created reads as `Missing` by name, which is
 /// what makes "`fq doctor` reports every consumer" true of a daemon
 /// whose task failed to start.

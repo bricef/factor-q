@@ -372,14 +372,17 @@ fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
 /// this is per-consumer rather than folded into the stream block — and
 /// a stuck consumer is called stuck by name, because "something is
 /// wrong somewhere" is not a thing an operator can act on.
+///
+/// The verdict is [`fq_ops::health::ConsumerHealth::progress`], which
+/// the dashboard renders too: the words differ between the two surfaces
+/// only in markup, and the judgement behind them is made once.
 fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> String {
-    use fq_ops::health::ConsumerHealth;
+    use fq_ops::health::{ConsumerHealth, ConsumerProgress};
 
     match consumer {
         ConsumerHealth::Active {
             name,
             delivered,
-            lag,
             ack_pending,
             num_pending,
             num_redelivered,
@@ -387,17 +390,17 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             stuck,
             malformed_acked,
         } => {
-            let status = if *stuck {
-                "✗ stuck redelivering"
-            } else if *lag == 0 {
-                "✓ caught up"
-            } else if *lag < 10 {
-                "◐ slightly behind"
-            } else {
-                "✗ lagging"
+            let status = match consumer.progress() {
+                Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
+                Some(ConsumerProgress::CaughtUp) => "✓ caught up",
+                Some(ConsumerProgress::SlightlyBehind) => "◐ slightly behind",
+                // An active consumer always has a verdict; `None` is
+                // the states this arm is not.
+                Some(ConsumerProgress::Lagging) | None => "✗ lagging",
             };
-            let mut out =
-                format!("  consumer {name}: {status} (delivered {delivered}, lag {lag})\n");
+            let mut out = format!(
+                "  consumer {name}: {status} (delivered {delivered}, pending {num_pending})\n"
+            );
             if *stuck {
                 out.push_str(&format!(
                     "    -> {redeliveries} redeliveries past its acked floor; its handler \
@@ -406,9 +409,6 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             }
             if *ack_pending > 0 {
                 out.push_str(&format!("    ack pending:    {ack_pending}\n"));
-            }
-            if *num_pending > 0 {
-                out.push_str(&format!("    num pending:    {num_pending}\n"));
             }
             if *num_redelivered > 0 {
                 out.push_str(&format!(
@@ -426,8 +426,8 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
         }
         // Halted on an event it cannot read: the message is unacked
         // and the consumer holds there, so the line locates the event
-        // and names the version gap rather than reporting a lag that
-        // will only grow.
+        // and names the version gap rather than reporting a backlog
+        // that will only grow.
         ConsumerHealth::Halted {
             name,
             halted_on,
