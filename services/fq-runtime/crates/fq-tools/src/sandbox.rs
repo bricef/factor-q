@@ -168,7 +168,10 @@ impl ToolSandbox {
         if self.fs_read.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
-                reason: "no read prefixes configured".to_string(),
+                reason: format!(
+                    "path {} denied; allowed fs_read prefixes: (none)",
+                    target.display()
+                ),
             });
         }
 
@@ -183,7 +186,7 @@ impl ToolSandbox {
         // as permission-denied whatever it happens to be, so the
         // diagnosis never confirms the existence of a FIFO the agent
         // was not allowed to look at in the first place.
-        let canonical = self.check_within(&canonical, &self.fs_read, target)?;
+        let canonical = self.check_within(&canonical, &self.fs_read, "fs_read", target)?;
         shape.check(&canonical, target)?;
         Ok(canonical)
     }
@@ -203,7 +206,10 @@ impl ToolSandbox {
         if self.exec_cwd.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
-                reason: "no exec_cwd prefixes configured".to_string(),
+                reason: format!(
+                    "path {} denied; allowed exec_cwd prefixes: (none)",
+                    target.display()
+                ),
             });
         }
 
@@ -222,7 +228,7 @@ impl ToolSandbox {
             });
         }
 
-        self.check_within(&canonical, &self.exec_cwd, target)
+        self.check_within(&canonical, &self.exec_cwd, "exec_cwd", target)
     }
 
     /// Check that a target path is allowed for writing.
@@ -240,18 +246,22 @@ impl ToolSandbox {
         if self.fs_write.is_empty() {
             return Err(SandboxError::PermissionDenied {
                 target: target.to_path_buf(),
-                reason: "no write prefixes configured".to_string(),
+                reason: format!(
+                    "path {} denied; allowed fs_write prefixes: (none)",
+                    target.display()
+                ),
             });
         }
 
         let canonical = canonicalise_for_write(target)?;
-        self.check_within(&canonical, &self.fs_write, target)
+        self.check_within(&canonical, &self.fs_write, "fs_write", target)
     }
 
     fn check_within(
         &self,
         canonical: &Path,
         prefixes: &[PathBuf],
+        dimension: &str,
         original: &Path,
     ) -> Result<PathBuf, SandboxError> {
         for prefix in prefixes {
@@ -266,8 +276,13 @@ impl ToolSandbox {
         Err(SandboxError::PermissionDenied {
             target: original.to_path_buf(),
             reason: format!(
-                "resolved path {} is outside every allowed prefix",
-                canonical.display()
+                "resolved path {} is outside every allowed {dimension} prefix; allowed: {}",
+                canonical.display(),
+                prefixes
+                    .iter()
+                    .map(|prefix| prefix.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         })
     }
@@ -466,6 +481,7 @@ pub enum SandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::ToolError;
     use std::fs;
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
@@ -498,6 +514,19 @@ mod tests {
         sb
     }
 
+    fn assert_message_names_once(message: &str, path: &Path) {
+        let rendered = path.display().to_string();
+        assert_eq!(
+            message.matches(&rendered).count(),
+            1,
+            "expected {rendered:?} exactly once in {message:?}"
+        );
+    }
+
+    fn tool_denial_message(err: SandboxError) -> String {
+        ToolError::from(err).to_string()
+    }
+
     // --- read checks --------------------------------------------------
 
     #[test]
@@ -511,12 +540,16 @@ mod tests {
 
     #[test]
     fn read_outside_allowed_prefix_is_denied() {
-        let allowed = tempdir().unwrap();
+        let allowed_a = tempdir().unwrap();
+        let allowed_b = tempdir().unwrap();
         let other = tempdir().unwrap();
         let file = write_file(other.path(), "secret.txt", "no");
-        let sb = make_sandbox(&[allowed.path()], &[]);
-        let err = sb.check_read(&file).unwrap_err();
-        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+        let sb = make_sandbox(&[allowed_a.path(), allowed_b.path()], &[]);
+        let message = tool_denial_message(sb.check_read(&file).unwrap_err());
+        assert_message_names_once(&message, &fs::canonicalize(&file).unwrap());
+        assert_message_names_once(&message, allowed_a.path());
+        assert_message_names_once(&message, allowed_b.path());
+        assert!(message.contains("allowed fs_read prefix"));
     }
 
     #[test]
@@ -699,8 +732,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = write_file(dir.path(), "hi.txt", "hi");
         let sb = ToolSandbox::new();
-        let err = sb.check_read(&file).unwrap_err();
-        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+        let message = tool_denial_message(sb.check_read(&file).unwrap_err());
+        assert_message_names_once(&message, &file);
+        assert!(message.contains("allowed fs_read prefixes: (none)"));
     }
 
     #[test]
@@ -796,8 +830,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("new.txt");
         let sb = ToolSandbox::new();
-        let err = sb.check_write(&target).unwrap_err();
-        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+        let message = tool_denial_message(sb.check_write(&target).unwrap_err());
+        assert_message_names_once(&message, &target);
+        assert!(message.contains("allowed fs_write prefixes: (none)"));
     }
 
     // --- cross-contamination ----------------------------------------
@@ -888,8 +923,9 @@ mod tests {
     fn empty_exec_prefix_list_denies_everything() {
         let dir = tempdir().unwrap();
         let sb = ToolSandbox::new();
-        let err = sb.check_exec_cwd(dir.path()).unwrap_err();
-        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+        let message = tool_denial_message(sb.check_exec_cwd(dir.path()).unwrap_err());
+        assert_message_names_once(&message, dir.path());
+        assert!(message.contains("allowed exec_cwd prefixes: (none)"));
     }
 
     #[test]

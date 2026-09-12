@@ -386,7 +386,7 @@ clear error message that the LLM sees and can adapt to.
   declared directory does not exist when the check runs — a typo, a
   relative path that missed, a volume not yet mounted — that prefix
   simply grants nothing. There is no error at load and no warning at use;
-  the agent gets `resolved path … is outside every allowed prefix` on
+  the agent gets `resolved path … is outside every allowed <dimension> prefix; allowed: …` on
   every call, as though it had been denied. When a grant appears to have
   no effect, check that the directory exists as the daemon sees it before
   suspecting the sandbox.

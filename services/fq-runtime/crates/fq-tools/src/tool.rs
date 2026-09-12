@@ -174,9 +174,7 @@ pub enum ToolError {
 impl From<SandboxError> for ToolError {
     fn from(err: SandboxError) -> Self {
         match err {
-            SandboxError::PermissionDenied { target, reason } => {
-                ToolError::PermissionDenied(format!("{reason} ({})", target.display()))
-            }
+            SandboxError::PermissionDenied { reason, .. } => ToolError::PermissionDenied(reason),
             SandboxError::NotFound(path) => ToolError::NotFound(path),
             SandboxError::InvalidPath { target, reason } => {
                 ToolError::InvalidParameters(format!("{reason} ({})", target.display()))
