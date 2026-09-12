@@ -480,6 +480,7 @@ test_shell_tool_sandbox_denial() {
     # Forbidden dir the LLM will be tempted to run commands in.
     local forbidden="${TMP_ROOT}/forbidden"
     mkdir -p "${forbidden}"
+    local forbidden_file="${forbidden}/sandbox-write"
 
     write_agent "${project}" "runner.md" "---
 name: ${agent_id}
@@ -496,14 +497,31 @@ You are a concise assistant. When asked to run a command, use the
 shell tool. If the tool returns an error, explain what the error was
 in one sentence."
 
+    start_fq_run "${project}/agents" "${project}/cache" || return 1
+
     local output
     output="$(fq_trigger "${project}/agents" "${project}/cache" \
-        "${agent_id}" "Run 'pwd' in the directory ${forbidden} and tell me the result." || true)"
+        "${agent_id}" "Run 'touch sandbox-write' in the directory ${forbidden} and tell me the result." || true)"
+
+    local events
+    events="$(fq_client events query --agent "${agent_id}" \
+        --event-type tool_result --limit 20 --json 2>&1)" || {
+        stop_daemon
+        fail "sandbox denial events query failed"
+        return 1
+    }
+    stop_daemon
 
     # The LLM's shell call should fail with a permission denied /
     # sandbox error. We don't assert on the LLM's exact wording
-    # (model output varies), only that the run itself completed and
-    # the forbidden path does not appear as a successful result.
+    # (model output varies), only the structured tool-result marker.
+    assert_contains "${events}" '"error_kind": "permission_denied"' \
+        "shell tool result records permission denial" || return 1
+    if [[ -e "${forbidden_file}" ]]; then
+        fail "denied shell command wrote ${forbidden_file}"
+        return 1
+    fi
+    pass "denied shell command did not write outside the sandbox"
     assert_contains "${output}" "invocation status: completed" "denied shell trigger still completes"
 }
 
