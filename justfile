@@ -506,6 +506,13 @@ fq *args:
 dashboard-screenshots out="dist/dashboard-screenshots":
     bash scripts/dashboard-screenshots.sh {{out}}
 
+# The icon set is committed; this is how it was made, for when the mark
+# changes. SVG paths from DejaVu Sans Mono Bold, PNGs from the SVG via
+# the same headless chromium the screenshots use. Needs `uv`.
+# Regenerate the fq-dashboard icon set in services/fq-dashboard/assets/.
+dashboard-icon:
+    bash scripts/dashboard-icon.sh
+
 # === Docs ===
 
 # Uses markdownlint-cli2 (pinned) via npx; rules in .markdownlint.jsonc.

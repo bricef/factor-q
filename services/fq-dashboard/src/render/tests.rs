@@ -192,6 +192,23 @@ fn page_shell_declares_viewport_and_phone_breakpoint() {
     }
 }
 
+/// The icon set that lets a phone put the dashboard on its home
+/// screen: browser tabs take the SVG, iOS the 180px PNG, Android the
+/// manifest. Every shell links all three; the router test proves the
+/// three URLs answer.
+#[test]
+fn page_shell_links_the_icon_set_and_manifest() {
+    for html in [page("t", 7, "<p>x</p>"), live_page("t", 7, "<p>x</p>")] {
+        for tag in [
+            r#"<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">"#,
+            r#"<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">"#,
+            r#"<link rel="manifest" href="/assets/manifest.webmanifest">"#,
+        ] {
+            assert!(html.contains(tag), "missing {tag}: {html}");
+        }
+    }
+}
+
 #[test]
 fn unreachable_shows_last_seen_or_never() {
     let never = unreachable("127.0.0.1:9471", "refused", None, 1_000);

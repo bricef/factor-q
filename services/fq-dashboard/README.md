@@ -46,6 +46,10 @@ browsers keep a full-page `<meta refresh>` via `<noscript>`.
 | `/agents` | `agent.list` | `read:agent` |
 | `/agents/{id}` | `agent.get` | `read:agent` |
 
+`/assets/{name}` serves the vendored datastar client and the icon set
+from the binary — a fixed table, no grant, no disk read; an unknown
+name is a 404.
+
 ## Configuration
 
 Every flag has an environment-variable fallback; the deployed form sets
@@ -152,6 +156,14 @@ pinned nav bar, sideways-scrolling tables, larger tap targets — under
 one `@media (max-width: 40rem)` block at the end of the stylesheet
 (`src/render/style.rs`). A desktop window never matches it, so the
 desktop layout is untouched by phone changes.
+
+"Add to Home Screen" works on either platform: every page links an icon
+set — an SVG for browser tabs, a 180px PNG for iOS, and a web app
+manifest with 192/512px PNGs for Android. The manifest keeps
+`display: browser` on purpose, so the shortcut opens in the normal
+browser and the Caddy session cookie from the first login carries over;
+a standalone web app on iOS would get its own cookie jar and land on the
+login prompt every launch. `just dashboard-icon` regenerates the set.
 
 ## Build skew
 

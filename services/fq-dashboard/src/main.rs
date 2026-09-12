@@ -42,7 +42,7 @@ mod pages;
 mod render;
 
 use pages::{
-    agent_costs_page, agent_page, agents_page, costs_page, datastar_js, events_page, health_page,
+    agent_costs_page, agent_page, agents_page, costs_page, events_page, health_page,
     invocation_page, invocations_page, transcript_page, transcript_stream,
 };
 
@@ -294,7 +294,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/invocations/{id}/transcript/stream",
             get(transcript_stream),
         )
-        .route("/assets/datastar.js", get(datastar_js))
+        .route("/assets/{name}", get(pages::assets::asset))
         .route("/events", get(events_page))
         .route("/costs", get(costs_page))
         .route("/costs/{agent}", get(agent_costs_page))
@@ -1195,6 +1195,75 @@ mod tests {
             "got: {}",
             page.1.0
         );
+    }
+
+    /// The icon set behind the shell's `<link>` tags: every URL the
+    /// shell and the manifest name answers with the promised content
+    /// type — the manifest's own icon entries included, since a phone
+    /// reads the manifest and then fetches what it lists — the PNGs
+    /// are PNGs, the manifest opens in the browser (a standalone app
+    /// would lose the auth front's cookie), and the table is closed:
+    /// an unknown name is a 404, never a disk read.
+    #[tokio::test]
+    async fn icon_set_and_manifest_are_served() {
+        let edge = spawn_edge(&format!("0.1.0+{OWN_SHA}")).await;
+        let app = app(state_for(&edge));
+
+        async fn fetch(app: &Router, path: &str) -> (StatusCode, String, Vec<u8>) {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = resp.status();
+            let ct = resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            let bytes = resp
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec();
+            (status, ct, bytes)
+        }
+
+        for (path, ct) in [
+            ("/assets/icon.svg", "image/svg+xml"),
+            ("/assets/apple-touch-icon.png", "image/png"),
+            ("/assets/manifest.webmanifest", "application/manifest+json"),
+            ("/assets/datastar.js", "text/javascript"),
+        ] {
+            let (status, got, bytes) = fetch(&app, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(got, ct, "{path}");
+            assert!(!bytes.is_empty(), "{path} is empty");
+            if ct == "image/png" {
+                assert!(
+                    bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                    "{path} is not a PNG"
+                );
+            }
+        }
+
+        let (_, _, manifest) = fetch(&app, "/assets/manifest.webmanifest").await;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        assert_eq!(manifest["display"], "browser", "got: {manifest}");
+        assert_eq!(manifest["start_url"], "/", "got: {manifest}");
+        let icons = manifest["icons"].as_array().unwrap();
+        assert!(icons.len() >= 2, "got: {manifest}");
+        for icon in icons {
+            let src = icon["src"].as_str().unwrap();
+            let (status, got, _) = fetch(&app, src).await;
+            assert_eq!(status, StatusCode::OK, "{src}");
+            assert_eq!(got, icon["type"].as_str().unwrap(), "{src}");
+        }
+
+        let (status, _, _) = fetch(&app, "/assets/nope.png").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[test]

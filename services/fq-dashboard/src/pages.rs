@@ -36,6 +36,7 @@ use serde::de::DeserializeOwned;
 
 use crate::{AppState, render, skew};
 
+pub(crate) mod assets;
 mod transcript;
 pub(crate) use transcript::{transcript_page, transcript_stream};
 
@@ -346,19 +347,6 @@ pub(crate) async fn invocation_page(
         &state,
         &format!("invocation {}", &id.chars().take(8).collect::<String>()),
         &render::invocation_detail(&detail, now_ms()),
-    )
-}
-
-/// The vendored datastar client (pinned v1.0.0, MIT; sha256 recorded in
-/// the PR that introduced it). Served from the binary so the dashboard
-/// stays fully self-contained behind its auth front — no CDN.
-pub(crate) async fn datastar_js() -> impl axum::response::IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/javascript"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        include_str!("../assets/datastar.js"),
     )
 }
 
