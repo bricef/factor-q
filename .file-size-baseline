@@ -34,5 +34,9 @@ services/fq-dashboard/src/render.rs 1122
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2539
 services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1415
-services/fq-store/src/cli.rs 842
+# Raised by hand, 2026-09-12 (#676): the gc report gained the staging-file
+# reap — two JSON fields and one line of the human report. The report is
+# rendered in this file and nowhere else, so the six lines belong beside the
+# other report fields rather than in a module of their own.
+services/fq-store/src/cli.rs 848
 services/fq-store/src/index.rs 848
