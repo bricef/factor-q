@@ -100,13 +100,11 @@ it is the licence to keep changing shape quickly.
   issues labelled `status:ready`, triggers an agent per issue over the
   documented wire contracts, then observes the run's lifecycle events
   and moves the issue's label onward so nothing strands mid-flight. The
-  observation half is **broken on `main`**: the event decoder accepts
-  envelope `schema_version` 2 and every event has been version 3 since
-  #510 (2026-09-04), so completions and failures are skipped and a
-  claimed issue sits at `status:in-progress` until a human relabels it
-  ([#694](https://github.com/bricef/factor-q/issues/694)). Claiming,
-  triggering and the merged-PR sweep read GitHub, not the event stream,
-  and are unaffected. The intake side of the M0 change loop; ships as
+  decoder reads every envelope `schema_version` the runtime writes, and
+  `just check-schema-versions` fails the gate if a bump ever outruns it
+  ([#694](https://github.com/bricef/factor-q/issues/694): a hard-coded
+  version 2 silently skipped every completion for the eight days after
+  #510). The intake side of the M0 change loop; ships as
   the `github-watcher` image and in the binary bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
   with the public static development token `fq-dev-token`. Do not expose its

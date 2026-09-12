@@ -656,6 +656,15 @@ audit:
 check-pins:
     scripts/check-pins.sh
 
+# The github-watcher is a Go binary that consumes the runtime's events over
+# the wire contract, so it cannot read the runtime's Rust
+# SUPPORTED_SCHEMA_VERSIONS and keeps its own copy. This asserts the copy is
+# a superset — a version the runtime writes but the watcher refuses is every
+# completion silently skipped, which is exactly what #694 was.
+# Check the github-watcher reads every schema version the runtime writes.
+check-schema-versions:
+    scripts/check-schema-versions.sh
+
 # Reject include!-family macros that splice Rust source (tracked *.rs).
 lint-sources:
     #!/usr/bin/env bash
@@ -824,6 +833,7 @@ quality:
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
     run_phase "check-pins"   just check-pins
+    run_phase "check-schema-versions" just check-schema-versions
     run_phase "lint-sources" just lint-sources
     run_phase "test-fq-lint" just test-fq-lint
     run_phase "lint-sizes"   just lint-sizes
