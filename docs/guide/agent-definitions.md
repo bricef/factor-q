@@ -699,8 +699,11 @@ recognises. Examples:
 
 Cost is calculated from the
 [LiteLLM pricing table](https://github.com/BerriAI/litellm),
-fetched at daemon start and merged with any
-`[providers.<name>.pricing]` overrides. Models declared under a provider
+fetched from a pinned commit at daemon start and merged with any
+`[providers.<name>.pricing]` overrides. To update pricing, change the
+pinned commit in `pricing.rs` and its SHA256 in `.pricing-checksum`
+together, clear any cache created under the old pin, then run
+`just runtime-ci`. Models declared under a provider
 whose `base_url` is `openrouter.ai` are priced from
 [OpenRouter's own model catalogue](https://openrouter.ai/api/v1/models)
 instead — fetched and cached the same way, keyed by the ids OpenRouter
