@@ -597,8 +597,8 @@ name, and says which of them is stuck. The line to look for is
 
 ```text
 Consumers: 5 checked, 1 unhealthy
-  fq-projector: ok (lag 0)
-  fq-coordination: ✗ stuck — 37 redeliveries past its acked floor, lag 724
+  fq-projector: ok (pending 0)
+  fq-coordination: ✗ stuck — 37 redeliveries past its acked floor, pending 724
   -> its handler keeps failing; check the daemon log for
      `consumer=fq-coordination` and free whatever it is blocked on
      (disk, store, broker)
@@ -623,7 +623,12 @@ does not exist, which means the task that creates it never started, and
 the daemon log at startup says why.
 
 `fq status` reports the same consumers under their streams, with the
-message counts and lag beside them. The thresholds are `[bus]` in
+message counts and each consumer's backlog beside them. That backlog is
+the broker's `num_pending` — the matching messages JetStream still has
+to offer, counted behind the consumer's own subject filter — and not
+the distance to the stream head, which for a filtered consumer counts
+traffic it will never be offered and grows with every publish by
+anybody. The thresholds are `[bus]` in
 `fqd.toml`: `stuck_after_redeliveries` decides when retrying becomes
 stuck, and the escalation and log rate are configured there too.
 
@@ -646,7 +651,7 @@ Consumers: 5 checked, 1 unhealthy
   -> the message is unacked and nothing after it is consumed: run a build
      that reads schema_version 2 and restart; the daemon log has the line
      under `consumer=fq-projector`
-  fq-coordination: ok (lag 0)
+  fq-coordination: ok (pending 0)
 ```
 
 **Halted means kept, not lost.** The alternative — acking what the
@@ -663,7 +668,7 @@ detail once, at error level, under `consumer=<name>`.
 are not an event in any version — JSON that does not parse, or a
 supported version whose body does not match its shape — are logged,
 acked and skipped, as they always were, and now counted: the line reads
-`fq-projector: ok (lag 0, 3 malformed acked)`, and `fq status` shows
+`fq-projector: ok (pending 0, 3 malformed acked)`, and `fq status` shows
 `malformed acked: 3` under the consumer. A non-zero count is not an
 issue on its own; it says poison was skipped, not that history was
 lost. A halt and a malformed count never read as one thing, because

@@ -74,11 +74,19 @@ pub enum ConsumerHealth {
     Error { name: String, error: String },
     Active {
         name: String,
-        /// Stream sequence the consumer has been delivered up to.
+        /// Stream sequence the consumer has been delivered up to —
+        /// where it sits on the stream, not how far behind it is. The
+        /// distance from here to the stream head is not a backlog: a
+        /// consumer filtered to a few subjects is never offered the
+        /// messages in between, so that distance grows with every
+        /// message anybody publishes and never comes back down.
         delivered: u64,
-        /// `last_seq - delivered` — how far behind the stream head.
-        lag: u64,
+        /// Matching messages delivered and not yet acked: work this
+        /// consumer has in hand right now.
         ack_pending: u64,
+        /// Matching messages JetStream still has to offer this
+        /// consumer — the backlog, as the broker itself counts it,
+        /// after the consumer's subject filter has been applied.
         num_pending: u64,
         /// Outstanding redeliveries — messages delivered more than
         /// once and not yet acked. The retry-pressure signal: a
@@ -162,8 +170,8 @@ impl ConsumerHealth {
 
     /// True when this consumer is something to act on: absent from a
     /// daemon that expects it, unreadable, stuck redelivering, or
-    /// halted on an event it cannot read. Lag alone is not a fault — a
-    /// consumer catching up is working.
+    /// halted on an event it cannot read. A backlog alone is not a
+    /// fault — a consumer catching up is working.
     pub fn is_fault(&self) -> bool {
         match self {
             ConsumerHealth::Missing { .. }
@@ -172,6 +180,79 @@ impl ConsumerHealth {
             ConsumerHealth::Active { stuck, .. } => *stuck,
         }
     }
+
+    /// How this consumer is getting on with its work, for the surfaces
+    /// that render a verdict. `None` for a consumer that is not
+    /// working at all — missing, unreadable, or halted on an event it
+    /// cannot parse — because "how far behind" is not the finding
+    /// there and every surface says something else about those.
+    ///
+    /// The verdict reads the two figures JetStream keeps per consumer,
+    /// both already filtered to the subjects the consumer subscribes
+    /// to. `num_pending` is the backlog: matching messages the broker
+    /// still has to offer. `ack_pending` is work in hand: matching
+    /// messages already delivered and not yet acked. Nothing pending
+    /// and nothing in flight is caught up, whatever else is on the
+    /// stream.
+    ///
+    /// **The distance to the stream head is not a backlog and is
+    /// deliberately not consulted.** A consumer filtered to a few
+    /// subjects will never be offered the messages in between, so
+    /// `last_seq - delivered` counts heartbeats and coordination
+    /// traffic it is not subscribed to; it climbs with every publish
+    /// by anyone and never returns to zero. A healthy summariser read
+    /// as permanently red that way, and a red glyph an operator learns
+    /// to ignore is worse than no glyph at all.
+    pub fn progress(&self) -> Option<ConsumerProgress> {
+        match self {
+            ConsumerHealth::Missing { .. }
+            | ConsumerHealth::Error { .. }
+            | ConsumerHealth::Halted { .. } => None,
+            ConsumerHealth::Active {
+                stuck,
+                ack_pending,
+                num_pending,
+                ..
+            } => Some(if *stuck {
+                ConsumerProgress::Stuck
+            } else if *num_pending == 0 && *ack_pending == 0 {
+                ConsumerProgress::CaughtUp
+            } else if *num_pending < SLIGHTLY_BEHIND_BELOW {
+                ConsumerProgress::SlightlyBehind
+            } else {
+                ConsumerProgress::Lagging
+            }),
+        }
+    }
+}
+
+/// The backlog at which a consumer stops reading as a moment behind
+/// and starts reading as one an operator should look at.
+///
+/// Ten, because a durable that is fetching in batches is routinely a
+/// handful of messages from empty and calling that "lagging" would put
+/// a fault glyph on a healthy runtime. It bounds a *rendering*, not a
+/// fault: [`ConsumerHealth::is_fault`] does not consult it, so nothing
+/// exits non-zero on the strength of this number.
+pub const SLIGHTLY_BEHIND_BELOW: u64 = 10;
+
+/// How an active consumer is getting on, as every health surface
+/// phrases it. Derived from a consumer's own figures rather than
+/// carried on the wire: it is a reading of the numbers beside it, and a
+/// surface that rendered a stored verdict could disagree with the
+/// counts printed on the same line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerProgress {
+    /// Retrying one message rather than making progress — the fault
+    /// verdict, and the only one of the four that is one.
+    Stuck,
+    /// Nothing pending and nothing in flight: the broker has offered
+    /// this consumer everything it matches.
+    CaughtUp,
+    /// A backlog under [`SLIGHTLY_BEHIND_BELOW`].
+    SlightlyBehind,
+    /// A backlog at or above [`SLIGHTLY_BEHIND_BELOW`].
+    Lagging,
 }
 
 /// Health of one shared MCP server, as every operator surface reads
@@ -280,3 +361,6 @@ impl ThrottledModel {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

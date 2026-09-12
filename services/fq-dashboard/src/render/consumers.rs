@@ -5,35 +5,47 @@
 //! that reports every consumer instead of one per stream is new code
 //! (#549), not a line added to old code.
 
-use fq_ops::health::ConsumerHealth;
+use fq_ops::health::{ConsumerHealth, ConsumerProgress};
 
 use super::esc;
 
-/// One durable's cells in the health table: name, state, lag, pending.
-/// A stuck consumer reads as stuck rather than as merely lagging — the
-/// two look alike in a lag column and are entirely different problems
-/// (#549).
+/// One durable's cells in the health table: name, state, pending, in
+/// flight. A stuck consumer reads as stuck rather than as merely
+/// lagging — the two look alike in a backlog column and are entirely
+/// different problems (#549).
+///
+/// `pending` is the broker's `num_pending`, the matching messages
+/// JetStream still owes this consumer, and `in flight` its
+/// `ack_pending`, the ones already in its hands. Both are counted with
+/// the consumer's subject filter applied, which the distance to the
+/// stream head is not. The verdict itself is
+/// [`ConsumerHealth::progress`], shared with `fq status`.
 pub(super) fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String, String) {
     match consumer {
         ConsumerHealth::Active {
-            name,
-            lag,
             ack_pending,
+            name,
             num_pending,
             num_redelivered,
             redeliveries,
-            stuck,
             malformed_acked,
             ..
         } => {
-            let state = if *stuck {
-                format!(r#"<span class="bad">✗ stuck ({redeliveries} redeliveries)</span>"#)
-            } else if *lag == 0 {
-                r#"<span class="ok">✓ caught up</span>"#.to_string()
-            } else if *lag < 10 {
-                r#"<span class="warn">◐ slightly behind</span>"#.to_string()
-            } else {
-                r#"<span class="bad">✗ lagging</span>"#.to_string()
+            let state = match consumer.progress() {
+                Some(ConsumerProgress::Stuck) => {
+                    format!(r#"<span class="bad">✗ stuck ({redeliveries} redeliveries)</span>"#)
+                }
+                Some(ConsumerProgress::CaughtUp) => {
+                    r#"<span class="ok">✓ caught up</span>"#.to_string()
+                }
+                Some(ConsumerProgress::SlightlyBehind) => {
+                    r#"<span class="warn">◐ slightly behind</span>"#.to_string()
+                }
+                // An active consumer always has a verdict; `None` is
+                // the states this arm is not.
+                Some(ConsumerProgress::Lagging) | None => {
+                    r#"<span class="bad">✗ lagging</span>"#.to_string()
+                }
             };
             let redelivery_suffix = if *num_redelivered > 0 {
                 format!(r#" / <span class="warn">redelivered {num_redelivered}</span>"#)
@@ -51,15 +63,14 @@ pub(super) fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String
             (
                 esc(name),
                 state,
-                lag.to_string(),
-                format!(
-                    "ack {ack_pending} / num {num_pending}{redelivery_suffix}{malformed_suffix}"
-                ),
+                num_pending.to_string(),
+                format!("{ack_pending}{redelivery_suffix}{malformed_suffix}"),
             )
         }
         // Halted on an event in a version this build does not read: the
-        // message is unacked and the consumer holds there. A lag figure
-        // would only ever grow, so the cells say where it stopped.
+        // message is unacked and the consumer holds there. A backlog
+        // figure would only ever grow, so the cells say where it
+        // stopped.
         ConsumerHealth::Halted {
             name, halted_on, ..
         } => (

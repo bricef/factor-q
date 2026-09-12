@@ -261,7 +261,6 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
     fq_ops::health::ConsumerHealth::Active {
         name: name.to_string(),
         delivered: 100,
-        lag: if stuck { 42 } else { 0 },
         ack_pending: u64::from(stuck),
         num_pending: if stuck { 42 } else { 0 },
         num_redelivered: u64::from(stuck),
@@ -369,7 +368,7 @@ fn malformed_acks_are_counted_beside_the_halt_and_are_not_an_issue_alone() {
     );
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("fq-coordination: ok (lag 0, 3 malformed acked)"),
+        out.contains("fq-coordination: ok (pending 0, 3 malformed acked)"),
         "got:\n{out}"
     );
 
@@ -463,15 +462,14 @@ fn a_stuck_consumer_is_named_counted_and_makes_the_report_an_issue() {
     );
 }
 
-/// Lag alone is not a fault. A consumer catching up after a restart is
-/// working, and a health report that called it broken would train an
-/// operator to ignore the line.
+/// A backlog alone is not a fault. A consumer catching up after a
+/// restart is working, and a health report that called it broken would
+/// train an operator to ignore the line.
 #[test]
 fn a_lagging_but_progressing_consumer_is_not_an_issue() {
     let behind = fq_ops::health::ConsumerHealth::Active {
         name: "fq-projector".to_string(),
         delivered: 10,
-        lag: 9_000,
         ack_pending: 1,
         num_pending: 9_000,
         num_redelivered: 0,
@@ -490,7 +488,10 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
     );
     assert!(!report.has_issues(), "catching up is not a fault");
     let out = render_doctor_report_human(&report);
-    assert!(out.contains("fq-projector: ok (lag 9000)"), "got:\n{out}");
+    assert!(
+        out.contains("fq-projector: ok (pending 9000)"),
+        "got:\n{out}"
+    );
 }
 
 /// The provider throttle (#278): a throttled model is listed with its

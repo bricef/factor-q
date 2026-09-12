@@ -34,7 +34,7 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
         esc(&status.version)
     ));
 
-    b.push_str("<h2>Streams</h2><table><tr><th>stream</th><th>messages</th><th>consumer</th><th>state</th><th>lag</th><th>pending</th></tr>");
+    b.push_str("<h2>Streams</h2><table><tr><th>stream</th><th>messages</th><th>consumer</th><th>state</th><th>pending</th><th>in flight</th></tr>");
     for s in &status.streams {
         match s {
             StreamHealth::Unavailable { stream, error } => {
@@ -54,15 +54,15 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
                 // and the row that matters during an incident is the
                 // one for the consumer that wedged (#549).
                 for consumer in consumers {
-                    let (cname, cstate, lag, pending) = consumer_row(consumer);
+                    let (cname, cstate, pending, in_flight) = consumer_row(consumer);
                     b.push_str(&format!(
                         "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                         esc(stream),
                         messages,
                         cname,
                         cstate,
-                        lag,
-                        pending
+                        pending,
+                        in_flight
                     ));
                 }
             }

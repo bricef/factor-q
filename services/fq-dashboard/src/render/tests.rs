@@ -62,10 +62,71 @@ fn health_shows_redelivery_pressure() {
     assert!(html.contains("redelivered 4"), "got: {html}");
 }
 
+/// The two backlog columns say which figure is which: `pending` is
+/// what JetStream still owes the consumer and `in flight` what it is
+/// already holding, both counted behind its subject filter.
+#[test]
+fn the_health_table_separates_the_backlog_from_the_work_in_hand() {
+    let html = health(
+        &crate::fixtures::status_report(),
+        &crate::fixtures::doctor_report(),
+    );
+    assert!(
+        html.contains("<th>state</th><th>pending</th><th>in flight</th>"),
+        "got: {html}"
+    );
+    // The fixture's dispatcher: two matching messages still to come,
+    // one in its hands, four of them redelivered.
+    assert!(
+        html.contains(r#"<td>fq-dispatcher</td><td><span class="warn">◐ slightly behind</span></td><td>2</td><td>1 / <span class="warn">redelivered 4</span></td>"#),
+        "got: {html}"
+    );
+}
+
+/// The defect the verdict was rebuilt for, on the page an operator
+/// leaves open: the dogfood summariser, filtered to four subjects,
+/// 781 sequences below a head it will never be offered, with nothing
+/// pending and nothing in flight. Read off the distance to that head it
+/// was permanently, wrongly red.
+#[test]
+fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
+    use fq_ops::health::{ConsumerHealth, StreamHealth};
+
+    let mut status = crate::fixtures::status_report();
+    status.streams = vec![StreamHealth::Available {
+        stream: "fq-events".to_string(),
+        messages: 163_079,
+        bytes: 393_248_768,
+        first_seq: 278_036,
+        last_seq: 461_277,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-summary".to_string(),
+            delivered: 460_496,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+        }],
+    }];
+    let html = health(&status, &crate::fixtures::doctor_report());
+    assert!(
+        html.contains(
+            r#"<td>fq-summary</td><td><span class="ok">✓ caught up</span></td><td>0</td>"#
+        ),
+        "got: {html}"
+    );
+    assert!(
+        !html.contains("lagging"),
+        "the distance to a head it is not subscribed to is not a backlog: {html}"
+    );
+}
+
 /// A consumer halted on an event it cannot read is a red cell that
-/// names the version gap and where the consumer stopped — not a lag
-/// figure, which would only ever grow — and a consumer that acked
-/// malformed messages says how many beside its pending counts.
+/// names the version gap and where the consumer stopped — not a
+/// backlog figure, which would only ever grow — and a consumer that
+/// acked malformed messages says how many beside its pending counts.
 #[test]
 fn health_shows_a_halted_consumer_and_the_malformed_count() {
     use fq_ops::health::{ConsumerHealth, StreamHealth, UnsupportedEvent};

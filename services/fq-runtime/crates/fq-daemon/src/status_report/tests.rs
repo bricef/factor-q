@@ -93,7 +93,6 @@ fn the_report_roundtrips_through_its_declared_shape() {
                 consumers: vec![fq_runtime::health::ConsumerHealth::Active {
                     name: "fq-dispatcher".to_string(),
                     delivered: 3,
-                    lag: 0,
                     ack_pending: 0,
                     num_pending: 0,
                     num_redelivered: 0,
