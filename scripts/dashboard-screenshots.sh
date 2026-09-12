@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Screenshot every fq-dashboard page from canned fixtures.
+# Screenshot every fq-dashboard page from canned fixtures, at a desktop
+# and a phone width.
 #
 #   scripts/dashboard-screenshots.sh [out-dir]     (default: dist/dashboard-screenshots)
 #
@@ -8,6 +9,13 @@
 # page over file:// — no server ever runs, so this works in sandboxes
 # that kill background processes and is stable in CI (fixed fixture
 # timestamps mean a visual diff is a rendering change, never the clock).
+#
+# Every page is shot twice: `<page>.png` at a 1100px desktop window and
+# `<page>.mobile.png` at a 390px phone window (an iPhone 14's CSS width),
+# which is what puts the stylesheet's phone breakpoint on the record.
+# Chromium's window size is the layout width here, so the phone shot
+# exercises the media query but not the `<meta name="viewport">` that
+# makes a real phone report that width — a unit test covers the tag.
 #
 # Browser resolution: $CHROMIUM, else chromium/chrome on PATH, else a
 # playwright-cache install (~/.cache/ms-playwright).
@@ -54,18 +62,21 @@ for f in "$html"/*.html; do
 done
 
 shot() {
+    # shot <png> <html> <WIDTH,HEIGHT>
     # --no-sandbox: the devbox chromium cannot create its own sandbox
     # inside the agent sandbox; the input is our own generated HTML.
     "$browser" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
-        --force-device-scale-factor=1 --window-size=1100,900 \
+        --force-device-scale-factor=1 --window-size="$3" \
         --screenshot="$1" "file://$2" 2>/dev/null
 }
 
 count=0
 for f in "$html"/*.html; do
     name="$(basename "$f" .html)"
-    shot "$out/$name.png" "$f"
+    shot "$out/$name.png" "$f" 1100,900
     echo "$out/$name.png"
+    shot "$out/$name.mobile.png" "$f" 390,844
+    echo "$out/$name.mobile.png"
     count=$((count + 1))
 done
 [ "$count" -gt 0 ] || { echo "no fixture pages were rendered" >&2; exit 1; }

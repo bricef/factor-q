@@ -147,6 +147,12 @@ authenticate. The dogfood instance does the latter — see
 setup, the dashboard's own env file (#545), and how `deploy.sh` moves
 the dashboard with the daemon so the two always run one build.
 
+On a phone the same pages lay themselves out for the narrow screen — a
+pinned nav bar, sideways-scrolling tables, larger tap targets — under
+one `@media (max-width: 40rem)` block at the end of the stylesheet
+(`src/render/style.rs`). A desktop window never matches it, so the
+desktop layout is untouched by phone changes.
+
 ## Build skew
 
 `fq-dashboard --version` prints this build's git SHA. If the daemon that
@@ -168,7 +174,7 @@ does not banner.
 ```sh
 just build-dashboard        # cargo build -p fq-dashboard
 just test-dashboard         # hermetic — spins a real edge in-process, no broker
-just dashboard-screenshots  # PNG of every page, from fixtures
+just dashboard-screenshots  # PNG of every page, desktop and phone, from fixtures
 just dashboard-e2e          # two processes: a real daemon, real HTTP
 ```
 
@@ -182,8 +188,11 @@ load-bearing, not decorative.
 `fq-dashboard render-fixtures --out <dir>` writes every page as static
 HTML from canned, fixed-timestamp data: no daemon, no broker, so a
 visual diff is a rendering change and never the clock. That is what
-`scripts/dashboard-screenshots.sh` screenshots over `file://`, and what
-CI uploads as an artifact when dashboard code changes.
+`scripts/dashboard-screenshots.sh` screenshots over `file://`, twice per
+page — `<page>.png` at a 1100px desktop window and `<page>.mobile.png`
+at a 390px phone window — and what CI uploads as an artifact when
+dashboard code changes, posting the pairs as a gallery comment on the
+PR (desktop beside mobile, one row per page).
 
 `just dashboard-e2e` (#687) is the composition neither of those can
 reach: it runs a real `fqd` and the real `fq-dashboard` binary as
