@@ -329,3 +329,53 @@ USER nonroot:nonroot
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/usr/local/bin/fq-dashboard", "probe"]
 ENTRYPOINT ["/usr/local/bin/fq-dashboard"]
+
+# --- ops (ADR-0036) --------------------------------------------------------------
+#
+# The stack's own operations — deploy, hygiene, backup, restore, notify —
+# and their schedule, in an image, so they are versioned, verified and
+# rolled back with the build like everything else and a host keeps no
+# copy of them. Not distroless, on purpose: this is the one image whose
+# job is to run shell against the host's container runtime, so it holds
+# bash, the docker CLI and the compose plugin (from Docker's apt
+# repository, pinned — the same source bootstrap.sh installs the host's
+# from) and supercronic, a container-native cron runner (foreground, logs
+# to stdout, unprivileged, one static binary; pinned and checksummed like
+# the tools stage's downloads). The scripts are ops/dogfood/'s, copied
+# unchanged; the crontab is ops/dogfood/ops.crontab; fq-ops is the
+# entrypoint that dispatches the verbs, runs the schedule, and answers
+# --version with the commit `docker-build` stamps (FQ_OPS_SHA) — the
+# coherence check deploy.sh makes on every image. Reads nothing from
+# dist/bin/. The only image that will ever mount the runtime's socket
+# (ADR-0036 clause 5); it never runs an agent. Nothing consumes it until
+# the `ops` service exists (the ADR's slice 2); it is published ahead of
+# that so a deploy can verify it.
+FROM debian:bookworm-slim AS ops
+ARG DOCKER_CLI_VERSION=5:29.8.0-1~debian.12~bookworm
+ARG DOCKER_COMPOSE_VERSION=5.5.1-1~debian.12~bookworm
+ARG SUPERCRONIC_VERSION=0.2.49
+ARG SUPERCRONIC_SHA256=a53ae236602c7338aba3fbaff40bda6300eae3b9fedb8261eb06cfe3724430c1
+ARG FQ_OPS_SHA=unstamped
+RUN apt-get update && apt-get install -y --no-install-recommends \
+       ca-certificates curl bash jq \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       "docker-ce-cli=${DOCKER_CLI_VERSION}" "docker-compose-plugin=${DOCKER_COMPOSE_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    curl -sfL -o /usr/local/bin/supercronic \
+        "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-amd64"; \
+    echo "${SUPERCRONIC_SHA256}  /usr/local/bin/supercronic" | sha256sum -c -; \
+    chmod 755 /usr/local/bin/supercronic
+COPY --chmod=755 ops/dogfood/deploy.sh ops/dogfood/hygiene.sh ops/dogfood/backup.sh \
+                 ops/dogfood/restore.sh ops/dogfood/notify.sh /usr/local/lib/fq-ops/
+COPY --chmod=644 ops/dogfood/ops.crontab /etc/fq-ops/crontab
+COPY --chmod=755 ops/dogfood/fq-ops /usr/local/bin/fq-ops
+RUN printf '%s\n' "$FQ_OPS_SHA" > /etc/fq-ops/version
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/fq-ops", "probe"]
+ENTRYPOINT ["/usr/local/bin/fq-ops"]
+CMD ["schedule"]

@@ -16,7 +16,10 @@
 #
 # Not covered: the `just`, `gh` and `sccache` versions in the Dockerfile's
 # `tools` stage — the repository has no other pin for them to agree with
-# (CI installs the latest through their setup actions).
+# (CI installs the latest through their setup actions) — nor, for the
+# same reason, the `ops` stage's docker CLI, compose plugin and
+# supercronic (ADR-0036); the host installs whatever Docker's repository
+# serves, and nothing else names those versions.
 set -euo pipefail
 
 root="${FQ_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

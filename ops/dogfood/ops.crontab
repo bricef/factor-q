@@ -1,0 +1,15 @@
+# The ops image's schedule (ADR-0036). supercronic runs this file as the
+# `ops` service's process, and every line is a one-shot sibling container
+# from the same image — `docker compose run` — never a job in the
+# scheduler's own process: the deploy's `compose up` may recreate the
+# scheduler while a job runs, and a sibling survives that. Times are UTC.
+# The working directory is the instance directory (the service's
+# `working_dir`), so `docker compose` here reads the same compose.yml,
+# .env and override the host does; -T because there is no terminal, and
+# --no-deps because the stack is already up.
+#
+# The ADR's slice 2 brings the `ops` service up on this file with the two
+# lines below; the deploy joins at slice 3, when the host's crontab
+# (ops/dogfood/crontab) retires. Until then this file is inert.
+*/30 *  * * *   docker compose run --rm -T --no-deps ops hygiene
+30   3  * * *   docker compose run --rm -T --no-deps ops backup --auto

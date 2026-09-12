@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# ops/dogfood/fq-ops — the ops image's entrypoint (ADR-0036).
+#
+#   fq-ops --version              "fq-ops <twelve-hex commit>": the image's
+#                                 coherence check, like every binary's
+#   fq-ops schedule               run the image's crontab under supercronic
+#                                 — the default command, the `ops` service
+#   fq-ops probe                  exit 0 while the scheduler is alive
+#                                 (the image's HEALTHCHECK)
+#   fq-ops check                  prove the image: the crontab parses, the
+#                                 toolset answers, the scripts are present
+#                                 (`just docker-check`)
+#   fq-ops <verb> [args...]       deploy | hygiene | backup | restore |
+#                                 notify — that script, from the image
+#
+# The scripts are ops/dogfood/'s, copied into the image unchanged; they
+# find the instance directory through FQ_DOGFOOD as they always did.
+# FQ_OPS_LIB and FQ_OPS_ETC relocate the image's paths for the tests.
+set -euo pipefail
+
+LIB="${FQ_OPS_LIB:-/usr/local/lib/fq-ops}"
+ETC="${FQ_OPS_ETC:-/etc/fq-ops}"
+SCRIPTS=(deploy hygiene backup restore notify)
+
+usage() { awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; }
+version() { tr -d '[:space:]' < "$ETC/version"; }
+
+verb="${1:-schedule}"
+[ $# -eq 0 ] || shift
+case "$verb" in
+    --version|version)
+        printf 'fq-ops %s\n' "$(version)" ;;
+    schedule)
+        exec supercronic -passthrough-logs "$ETC/crontab" ;;
+    probe)
+        # The scheduler is PID 1 of the `ops` service (exec'd above). In a
+        # one-shot sibling PID 1 is the script, and the probe is not asked.
+        [ "$(cat /proc/1/comm 2>/dev/null || true)" = supercronic ] ;;
+    check)
+        supercronic -test "$ETC/crontab"
+        docker --version
+        docker compose version
+        jq --version
+        curl --version | head -1
+        bash --version | head -1
+        for s in "${SCRIPTS[@]}"; do
+            [ -x "$LIB/$s.sh" ] || { echo "fq-ops: missing $LIB/$s.sh" >&2; exit 1; }
+            bash -n "$LIB/$s.sh"
+        done
+        printf 'fq-ops %s: crontab parses, toolset answers, %s scripts present\n' "$(version)" "${#SCRIPTS[@]}" ;;
+    deploy|hygiene|backup|restore|notify)
+        exec "$LIB/$verb.sh" "$@" ;;
+    -h|--help|help)
+        usage ;;
+    *)
+        echo "fq-ops: unknown verb '$verb'" >&2
+        usage >&2
+        exit 2 ;;
+esac

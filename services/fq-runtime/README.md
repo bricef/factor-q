@@ -208,6 +208,7 @@ image build takes seconds.
 | `minimal` | `factor-q/fq-runtime` | `fqd` + `fq` on `distroless/cc`. The bare envelope the daemon is held to: no shell, no init, configuration from one file and the environment, every piece of state under one volume. |
 | `dogfood` | `factor-q/fq-dogfood` | `minimal`'s binaries (copied, never rebuilt) on Debian with the toolchain the fleet's agents run: cargo 1.95 with rustfmt and clippy, Go, Node 20, `just`, `gh`, `git`, `jq`, `nats-server`, `sccache`, and the pinned `cargo-audit` / `cargo-deny` the audit gate needs. It also ships `/etc/gitconfig` with `gh`'s credential helper, so an agent pushing over HTTPS needs only `GH_TOKEN`; whose commit it is stays the definition's job. |
 | `watcher`, `cron`, `dashboard` | `factor-q/github-watcher`, `factor-q/fq-cron`, `factor-q/fq-dashboard` | one static binary each on `distroless/static`. |
+| `ops` | `factor-q/fq-ops` | the stack's own operations ([ADR-0036](../../docs/adrs/draft/0036-ops-image-and-scheduler-service.md)): the five `ops/dogfood` scripts, their schedule (`ops.crontab`) under supercronic, and the docker CLI and compose plugin they drive the stack with, on Debian — the one image with a shell and, once the `ops` service exists, the runtime's socket. No binary: `docker-build` stamps the commit in and `fq-ops --version` reports it. Nothing runs it yet. |
 
 ```sh
 # From the repository root. Build the binaries for a target first —
@@ -237,7 +238,7 @@ above by hand.
 
 ### Published images
 
-Every merge to `main` publishes the five images to the repository's
+Every merge to `main` publishes the six images to the repository's
 container registry, from the same binaries as the tarball
 ([`main-artifacts.yml`](../../.github/workflows/main-artifacts.yml)):
 
@@ -247,13 +248,15 @@ ghcr.io/bricef/fq-dogfood:<sha>       ghcr.io/bricef/fq-dogfood:main-latest
 ghcr.io/bricef/github-watcher:<sha>   …
 ghcr.io/bricef/fq-cron:<sha>
 ghcr.io/bricef/fq-dashboard:<sha>
+ghcr.io/bricef/fq-ops:<sha>
 ```
 
 `<sha>` is the twelve-hex commit the binaries inside the image report
-from `--version`, and `just docker-publish` refuses to push an image
-whose `fq` reports anything else — a dirty build, or staging left over
-from another commit — so the tag is a fact about the content, not a
-label. It is what a host deploys and rolls back to. `main-latest` moves
+from `--version` (the ops image has no binary and reports the commit
+stamped in at build), and `just docker-publish` refuses to push an image
+whose `fq` or `fq-ops` reports anything else — a dirty build, or staging
+left over from another commit — so the tag is a fact about the content,
+not a label. It is what a host deploys and rolls back to. `main-latest` moves
 with every merge and only ever names the newest build, like the tarball
 channel of the same name; nothing should pin to it.
 
