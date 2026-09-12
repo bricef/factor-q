@@ -1385,6 +1385,53 @@ async fn open_read_only_refuses_missing_file() {
         .expect_err("missing file");
     assert!(matches!(err, WorkerStoreError::NotInitialised(_)));
 }
+
+#[tokio::test]
+async fn open_read_only_refuses_outdated_and_newer_schemas() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    std::fs::File::create(&path).unwrap();
+    let err = WorkerStore::open_read_only(&path)
+        .await
+        .expect_err("unstamped file must be reported as uninitialised");
+    assert!(matches!(err, WorkerStoreError::NotInitialised(_)));
+
+    let store = WorkerStore::open(&path).await.unwrap();
+    store
+        .write_schema_version(WORKER_SCHEMA_VERSION - 1)
+        .await
+        .unwrap();
+
+    let err = WorkerStore::open_read_only(&path)
+        .await
+        .expect_err("read-only open must refuse an outdated schema");
+    assert!(matches!(
+        err,
+        WorkerStoreError::SchemaOutdated {
+            db_version,
+            binary_version,
+            ..
+        } if db_version == WORKER_SCHEMA_VERSION - 1
+            && binary_version == WORKER_SCHEMA_VERSION
+    ));
+
+    store
+        .write_schema_version(WORKER_SCHEMA_VERSION + 1)
+        .await
+        .unwrap();
+    drop(store);
+    let err = WorkerStore::open_read_only(&path)
+        .await
+        .expect_err("read-only open must refuse a newer schema");
+    assert!(matches!(
+        err,
+        WorkerStoreError::IncompatibleSchema {
+            db_version,
+            binary_version,
+        } if db_version == WORKER_SCHEMA_VERSION + 1
+            && binary_version == WORKER_SCHEMA_VERSION
+    ));
+}
 /// v10 (#278): a v9 file opens at v10 with its rows intact and no
 /// deferral stamp on any of them; a deferral stamps exactly the
 /// completed error row it was decided on, and nothing else qualifies.

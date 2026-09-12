@@ -182,6 +182,53 @@ async fn open_refuses_when_db_version_higher_than_binary() {
 }
 
 #[tokio::test]
+async fn open_read_only_refuses_outdated_and_newer_schemas() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    std::fs::File::create(&path).unwrap();
+    let err = ControlPlaneStore::open_read_only(&path)
+        .await
+        .expect_err("unstamped file must be reported as uninitialised");
+    assert!(matches!(err, ControlPlaneStoreError::NotInitialised(_)));
+
+    let store = ControlPlaneStore::open(&path).await.unwrap();
+    store
+        .write_schema_version(CONTROL_PLANE_SCHEMA_VERSION - 1)
+        .await
+        .unwrap();
+
+    let err = ControlPlaneStore::open_read_only(&path)
+        .await
+        .expect_err("read-only open must refuse an outdated schema");
+    assert!(matches!(
+        err,
+        ControlPlaneStoreError::SchemaOutdated {
+            db_version,
+            binary_version,
+            ..
+        } if db_version == CONTROL_PLANE_SCHEMA_VERSION - 1
+            && binary_version == CONTROL_PLANE_SCHEMA_VERSION
+    ));
+
+    store
+        .write_schema_version(CONTROL_PLANE_SCHEMA_VERSION + 1)
+        .await
+        .unwrap();
+    drop(store);
+    let err = ControlPlaneStore::open_read_only(&path)
+        .await
+        .expect_err("read-only open must refuse a newer schema");
+    assert!(matches!(
+        err,
+        ControlPlaneStoreError::IncompatibleSchema {
+            db_version,
+            binary_version,
+        } if db_version == CONTROL_PLANE_SCHEMA_VERSION + 1
+            && binary_version == CONTROL_PLANE_SCHEMA_VERSION
+    ));
+}
+
+#[tokio::test]
 async fn worker_registration_round_trip() {
     let (store, _dir) = open_fresh().await;
     store
