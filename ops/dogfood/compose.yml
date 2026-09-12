@@ -20,8 +20,10 @@
 #   .secrets/nats-auth.conf, .secrets/caddy.env   as before
 #
 # Everything the daemon persists lives in ONE named volume, fq-data,
-# mounted at /var/lib/factor-q: fqd.toml, fq.toml, fq-cron.toml, agents/,
-# state/ (the edge identity), cache/ (the stores), workspace/ and build/.
+# mounted at /var/lib/factor-q: fqd.toml, fq-cron.toml, agents/, state/
+# (the edge identity, and state/client/ — the container's pairing),
+# cache/ (the stores), workspace/, build/ and home/ (the fleet's HOME:
+# git identity and the gh credential store).
 # Backing up or migrating the instance is that volume plus the broker's
 # nats-data (services/fq-runtime/README.md, "One volume").
 #

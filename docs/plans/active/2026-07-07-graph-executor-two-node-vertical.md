@@ -84,7 +84,7 @@ output {
 }
 ```
 
-**Implementation (Q20, static binding):** the existing `m0-loop` agent —
+**Implementation (Q20, static binding):** the existing `m0-issue-fix` agent —
 grants: `file_read`, `file_write`, `shell`; env `PATH`, `GH_TOKEN`.
 
 ### Signature: `review`
@@ -149,8 +149,8 @@ replays like an invocation
   invocation;
 - replay: re-running a recorded traversal reproduces the same outcome.
 
-Plus a live two-node integration on the dogfood repo (`m0-loop` proposes,
-`m0-reviewer` reviews) as the real exercise.
+Plus a live two-node integration on the dogfood repo (`m0-issue-fix`
+proposes, a review agent reviews) as the real exercise.
 
 ## Scope — Q20 only; explicitly deferred
 
