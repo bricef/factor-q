@@ -285,7 +285,25 @@ impl ControlPlaneStore {
             .max_connections(2)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        match schema::inspect_readable_versioned(&pool, SCHEMA_CLASS, CONTROL_PLANE_SCHEMA_VERSION)
+            .await?
+        {
+            Compatibility::Current => Ok(Self { pool }),
+            Compatibility::FreshInstall => {
+                Err(ControlPlaneStoreError::NotInitialised(path.to_path_buf()))
+            }
+            Compatibility::NeedsUpgrade { from } => Err(ControlPlaneStoreError::SchemaOutdated {
+                path: path.to_path_buf(),
+                db_version: from,
+                binary_version: CONTROL_PLANE_SCHEMA_VERSION,
+            }),
+            Compatibility::BinaryTooOld { db_version } => {
+                Err(ControlPlaneStoreError::IncompatibleSchema {
+                    db_version,
+                    binary_version: CONTROL_PLANE_SCHEMA_VERSION,
+                })
+            }
+        }
     }
 
     /// Initialise schema_meta and run the control-plane migrations.
@@ -971,6 +989,15 @@ pub enum ControlPlaneStoreError {
 
     #[error("control-plane store not initialised at {0}")]
     NotInitialised(PathBuf),
+
+    #[error(
+        "control-plane store schema at {path} is version {db_version}, but this build requires version {binary_version}; run the daemon once against this state directory to migrate it"
+    )]
+    SchemaOutdated {
+        path: PathBuf,
+        db_version: u32,
+        binary_version: u32,
+    },
 
     #[error(
         "incompatible schema: db is at version {db_version}, this binary supports {binary_version}. \

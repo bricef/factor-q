@@ -459,7 +459,24 @@ impl WorkerStore {
             .max_connections(2)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        match schema::inspect_readable_versioned(&pool, SCHEMA_CLASS, WORKER_SCHEMA_VERSION).await?
+        {
+            Compatibility::Current => Ok(Self { pool }),
+            Compatibility::FreshInstall => {
+                Err(WorkerStoreError::NotInitialised(path.to_path_buf()))
+            }
+            Compatibility::NeedsUpgrade { from } => Err(WorkerStoreError::SchemaOutdated {
+                path: path.to_path_buf(),
+                db_version: from,
+                binary_version: WORKER_SCHEMA_VERSION,
+            }),
+            Compatibility::BinaryTooOld { db_version } => {
+                Err(WorkerStoreError::IncompatibleSchema {
+                    db_version,
+                    binary_version: WORKER_SCHEMA_VERSION,
+                })
+            }
+        }
     }
 
     /// The migration ladder, one rung per version. Future migrations:
@@ -1376,6 +1393,15 @@ pub enum WorkerStoreError {
 
     #[error("worker store not initialised at {0}")]
     NotInitialised(PathBuf),
+
+    #[error(
+        "worker store schema at {path} is version {db_version}, but this build requires version {binary_version}; run the daemon once against this state directory to migrate it"
+    )]
+    SchemaOutdated {
+        path: PathBuf,
+        db_version: u32,
+        binary_version: u32,
+    },
 
     #[error(
         "incompatible schema: db is at version {db_version}, this binary supports {binary_version}. \
