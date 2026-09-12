@@ -89,7 +89,7 @@ collapsed disclosure, with "opaque — click to see raw" for a token.
 
 `effort:` in the agent definition sets the per-request reasoning effort
 and maps to each provider's own control — see
-[agent definitions](agent-definitions.md#iteration-cap-and-reasoning-effort).
+[agent definitions](agent-definitions.md#iteration-cap-concurrency-cap-and-reasoning-effort).
 The Claude 5 family thinks adaptively by default when no effort is set.
 
 ## Known gaps

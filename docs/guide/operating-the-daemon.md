@@ -409,6 +409,18 @@ invocation_deferred` lists the invocations put down.
 permit granted at once, no pause, no hold); the deferral is not part of
 the throttle and stays on.
 
+An agent's own `max_concurrent`
+([#718](https://github.com/bricef/factor-q/issues/718),
+[agent definitions](agent-definitions.md#iteration-cap-concurrency-cap-and-reasoning-effort))
+holds a trigger the same way, for the same reason and by the same
+mechanism: an agent already running as many invocations as its
+definition allows has its next trigger pulled, un-acked, kept alive and
+started when a slot frees, still as its first delivery. The two bounds
+are independent — the throttle protects the provider, the per-agent cap
+protects the host — and a trigger can wait on either. `fq doctor` lists
+the agents at their cap beside the throttled models, and neither is a
+doctor issue.
+
 ## When a tool hangs
 
 Every tool call has a deadline too, applied at the one place all of
