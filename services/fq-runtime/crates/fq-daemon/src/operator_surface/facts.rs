@@ -48,4 +48,10 @@ pub struct DaemonFacts {
     /// Both health reports list the models it is holding back; an
     /// operator wondering why the fleet went quiet reads the pause here.
     pub throttle: std::sync::Arc<fq_runtime::llm::ModelThrottle>,
+    /// The per-agent in-flight count (#718) — the same value the
+    /// dispatcher admits triggers against and every resume path counts
+    /// into. `control.doctor` names the agents it is holding work back
+    /// for, so a queue that is not moving has a reason an operator can
+    /// read.
+    pub agent_caps: std::sync::Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
 }

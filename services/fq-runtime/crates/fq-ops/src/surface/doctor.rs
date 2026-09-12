@@ -128,6 +128,16 @@ pub struct DoctorReport {
     /// the answer here.
     #[serde(default)]
     pub throttled_models: Vec<crate::health::ThrottledModel>,
+    /// Every agent the per-agent concurrency cap is bounding right now
+    /// (<https://github.com/bricef/factor-q/issues/718>) — full, or with
+    /// triggers held waiting for a slot. Listed, not judged, for the
+    /// same reason `throttled_models` is: an agent at its cap is the
+    /// runtime honouring the definition. It is on the page because a
+    /// held trigger is otherwise invisible — nothing has failed, nothing
+    /// is queued anywhere an operator can see, and the issue that was
+    /// labelled simply has not been picked up yet.
+    #[serde(default)]
+    pub agents_at_cap: Vec<crate::health::AgentAtCap>,
 }
 
 impl DoctorReport {
@@ -136,6 +146,15 @@ impl DoctorReport {
     /// throttle rather than a fold of the stores the builder reads.
     pub fn with_throttled_models(mut self, models: Vec<crate::health::ThrottledModel>) -> Self {
         self.throttled_models = models;
+        self
+    }
+
+    /// Attach the per-agent cap snapshot. Separate from
+    /// [`build_doctor_report`] for the same reason the throttle is: the
+    /// list is the daemon's live count rather than a fold of the stores
+    /// the builder reads.
+    pub fn with_agents_at_cap(mut self, agents: Vec<crate::health::AgentAtCap>) -> Self {
+        self.agents_at_cap = agents;
         self
     }
 
@@ -249,5 +268,6 @@ pub fn build_doctor_report(
         consumers,
         mcp_servers,
         throttled_models: Vec::new(),
+        agents_at_cap: Vec::new(),
     }
 }

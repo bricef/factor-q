@@ -239,6 +239,7 @@ impl Surface {
             agents.clone(),
             ParkedLlm::new(),
             fq_runtime::worker::DeferralQueue::new().0,
+            fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
         ));
         let registry = fq_daemon::operator_registry(
             views,
@@ -253,6 +254,7 @@ impl Surface {
                     summary_enabled: false,
                     mcp_servers: Default::default(),
                     throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
+                    agent_caps: fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
                 },
                 bus: bus.clone(),
                 projection: projection.clone(),
