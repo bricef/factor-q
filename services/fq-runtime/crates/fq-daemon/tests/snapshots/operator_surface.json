@@ -2208,6 +2208,40 @@
       "name": "doctor",
       "output_schema": {
         "$defs": {
+          "AgentAtCap": {
+            "description": "One agent the dispatcher's per-agent concurrency cap is bounding\nright now (<https://github.com/bricef/factor-q/issues/718>), as every\noperator surface reads it: how many of its invocations are running,\nthe cap its definition declares, and how many triggers are being held\nun-started because the cap is full. An agent with no `max_concurrent`\nin its definition is not listed at all, and neither is one running\nunder its cap with nothing waiting.\n\nReported, not judged — the same tone as [`ThrottledModel`]. An agent\nat its cap is the runtime honouring the definition, not a fault; but\nan operator wondering why a labelled issue has not been picked up\nreads the answer here.",
+            "properties": {
+              "agent": {
+                "description": "The agent id, as the definition's `name:` spells it.",
+                "type": "string"
+              },
+              "cap": {
+                "description": "`max_concurrent` from the definition that was current when the\nlast invocation was admitted. A reload changes it for the next\ntrigger, and this line with it.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "held": {
+                "description": "Triggers pulled, un-acked and waiting for a slot. Each is still\nits first delivery; none has consumed a redelivery.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "in_flight": {
+                "description": "Invocations of this agent the daemon is running at this instant\n— trigger-started, deferral-resumed and recovery-resumed alike.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "agent",
+              "in_flight",
+              "cap",
+              "held"
+            ],
+            "type": "object"
+          },
           "ConsumerHealth": {
             "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
             "oneOf": [
@@ -2668,6 +2702,14 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "The full doctor report — `control.doctor`'s declared output, and\nwhat `fq doctor --json` prints verbatim.",
         "properties": {
+          "agents_at_cap": {
+            "default": [],
+            "description": "Every agent the per-agent concurrency cap is bounding right now\n(<https://github.com/bricef/factor-q/issues/718>) — full, or with\ntriggers held waiting for a slot. Listed, not judged, for the\nsame reason `throttled_models` is: an agent at its cap is the\nruntime honouring the definition. It is on the page because a\nheld trigger is otherwise invisible — nothing has failed, nothing\nis queued anywhere an operator can see, and the issue that was\nlabelled simply has not been picked up yet.",
+            "items": {
+              "$ref": "#/$defs/AgentAtCap"
+            },
+            "type": "array"
+          },
           "ambiguous": {
             "description": "Ambiguous invocations needing operator triage (CP owner\ntable, `status='ambiguous'`).",
             "format": "int64",
