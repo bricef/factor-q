@@ -448,8 +448,15 @@ running unattended:
   back` line — the log shows it, `notify.sh` tells you, and the instance
   is on the build it was on before. A rollback that also fails says
   "needs a human" and stops.
-- **It tells you what it did.** A deploy, a rollback and a failure each
-  go through [`notify.sh`](notify.sh) (below). So does a deferral that
+- **It tells you what it did — and what landed.** A deploy, a rollback
+  and a failure each go through [`notify.sh`](notify.sh) (below). The
+  deploy message lists the commits between the build that was live and
+  the new one: user-facing ones (`feat`, `fix`, `perf`) by subject, up
+  to six, the rest counted by type, then the GitHub compare link. The
+  list is asked of GitHub through the daemon container's own `gh` (it
+  holds `GH_TOKEN`; the host keeps no current checkout), for the
+  repository `GHW_REPO` names — best effort, so a failure is one line
+  in the message, never a failed deploy. So does a deferral that
   has gone on for `FQ_DEFER_WARN_HOURS` (6): an invocation stuck in
   flight, or a container nobody paired, would otherwise keep every merge
   off the host with nothing but a quiet line an hour in the log. Reported
@@ -476,8 +483,10 @@ line on stderr in the calling script's log, next to the thing it could
 not deliver; a failing hook is reported the same way and never fails
 its caller.
 
-What goes through it, all unattended: `deploy.sh --auto`'s deploys,
-rollbacks, failures and long deferrals; `hygiene.sh`'s warnings, one
+What goes through it, all unattended: `deploy.sh --auto`'s deploys
+(with the commits that landed — the formatting is the one part of
+`deploy.sh` with a test, `ops/dogfood/tests/render-changes.sh`, run by
+`just ops-ci`), rollbacks, failures and long deferrals; `hygiene.sh`'s warnings, one
 message per run; a failed `backup.sh --auto`. A deploy by hand tells
 its terminal and nothing else.
 
