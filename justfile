@@ -283,8 +283,15 @@ rust-ci: runtime-ci store-ci dashboard-ci test-support-ci
 # through the trigger wire contract, never fq-runtime code.
 # Run the Go adapter gate (gofmt, vet, test, build).
 gate-adapters: install-nats
-    # Keep every standalone Go adapter on the same gate.
-    for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && FQ_TEST_NATS_SERVER="{{nats_bin}}" go test ./... && go build -o /dev/null .); done
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fail=0
+    for module in adapters/*/go.mod; do
+        dir="${module%/go.mod}"
+        echo "== $dir"
+        (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && FQ_TEST_NATS_SERVER="{{nats_bin}}" go test ./... && go build -o /dev/null .) || { echo "FAIL: $dir"; fail=1; }
+    done
+    exit $fail
 
 # Compatibility name used by CI.
 go-ci: gate-adapters
