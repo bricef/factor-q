@@ -41,6 +41,7 @@ fn fqd_binary() -> &'static str {
 /// parallel tests never collide.
 struct Scratch {
     root: std::path::PathBuf,
+    dir: Option<tempfile::TempDir>,
     /// Held so `fq.toml` can be rewritten in full once the daemon
     /// reports the edge address it actually bound — see
     /// [`Scratch::pin_edge_bind`].
@@ -53,8 +54,11 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("fq-resume-{tag}-{}-{}", std::process::id(), nanos));
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("fq-resume-{tag}-{}-{nanos}-", std::process::id()))
+            .tempdir_in(std::env::temp_dir())
+            .expect("create scratch directory");
+        let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("cache")).unwrap();
         std::fs::create_dir_all(root.join("agents")).unwrap();
         std::fs::create_dir_all(root.join("workspace")).unwrap();
@@ -76,6 +80,7 @@ impl Scratch {
 
         let scratch = Self {
             root,
+            dir: Some(dir),
             mock_base_url: mock_base_url.to_string(),
         };
 
@@ -146,6 +151,15 @@ impl Scratch {
     /// it, so rewriting it under a live daemon is safe.
     fn pin_edge_bind(&self, addr: &str) {
         self.write_config(addr);
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let path = self.dir.take().expect("scratch guard present").keep();
+            eprintln!("test failed; scratch preserved at {}", path.display());
+        }
     }
 }
 

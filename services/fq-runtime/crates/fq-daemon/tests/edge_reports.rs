@@ -49,16 +49,44 @@ const AGENT: &str = "researcher";
 const INVOCATION_COST: f64 = 0.0125;
 const FRAMEWORK_COST: f64 = 0.0009;
 
-fn unique_scratch() -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("edge-reports-{}-{}", std::process::id(), nanos));
-    std::fs::create_dir_all(dir.join("cache")).unwrap();
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(dir.join("fq.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
-    dir
+struct ScratchDir(Option<tempfile::TempDir>);
+
+impl ScratchDir {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("edge-reports-")
+            .tempdir_in(std::env::temp_dir())
+            .expect("create scratch directory");
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+        std::fs::write(
+            dir.path().join("fq.toml"),
+            "[edge]\nbind = \"127.0.0.1:0\"\n",
+        )
+        .unwrap();
+        Self(Some(dir))
+    }
+
+    fn join(&self, path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        self.0
+            .as_ref()
+            .expect("scratch guard present")
+            .path()
+            .join(path)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let path = self.0.take().expect("scratch guard present").keep();
+            eprintln!("test failed; scratch preserved at {}", path.display());
+        }
+    }
+}
+
+fn unique_scratch() -> ScratchDir {
+    ScratchDir::new()
 }
 
 fn suffix_of<'a>(log: &'a str, prefix: &str) -> &'a str {
@@ -167,6 +195,7 @@ struct Daemon {
     /// so the field is load-bearing exactly where the lint cannot see.
     #[allow(dead_code)]
     process: TestChild,
+    _scratch: ScratchDir,
     addr: String,
     fingerprint: [u8; 32],
     admin_token: String,
@@ -212,6 +241,7 @@ async fn start_daemon(server: &fq_test_support::NatsServer) -> Daemon {
         )),
         admin_token: fq_test_support::admin_token(&scratch.join("state")),
         process,
+        _scratch: scratch,
     }
 }
 

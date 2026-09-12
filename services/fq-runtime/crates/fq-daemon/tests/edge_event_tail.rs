@@ -188,16 +188,40 @@ const EXPECTED_LINES: &[&str] = &[
 // Harness
 // ------------------------------------------------------------------
 
-fn scratch() -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("fq-events-tail-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(dir.join("cache")).unwrap();
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(dir.join("fqd.toml"), "[edge]\nbind = \"127.0.0.1:0\"\n").unwrap();
-    dir
+struct ScratchDir(Option<tempfile::TempDir>);
+
+impl ScratchDir {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("fq-events-tail-")
+            .tempdir_in(std::env::temp_dir())
+            .expect("create scratch directory");
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+        std::fs::write(
+            dir.path().join("fqd.toml"),
+            "[edge]\nbind = \"127.0.0.1:0\"\n",
+        )
+        .unwrap();
+        Self(Some(dir))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.as_ref().expect("scratch guard present").path()
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let path = self.0.take().expect("scratch guard present").keep();
+            eprintln!("test failed; scratch preserved at {}", path.display());
+        }
+    }
+}
+
+fn scratch() -> ScratchDir {
+    ScratchDir::new()
 }
 
 fn parse_fingerprint(hex: &str) -> [u8; 32] {
@@ -341,6 +365,7 @@ struct World {
     daemon: TestChild,
     broker: fq_test_support::NatsServer,
     dir: std::path::PathBuf,
+    _scratch: ScratchDir,
     xdg: tempfile::TempDir,
     rt: tokio::runtime::Runtime,
     bus: EventBus,
@@ -352,7 +377,8 @@ struct World {
 impl World {
     fn start() -> Self {
         let broker = fq_test_support::NatsServer::start();
-        let dir = scratch();
+        let scratch = scratch();
+        let dir = scratch.path().to_path_buf();
         let rt = tokio::runtime::Runtime::new().expect("test runtime");
         // Connecting provisions the event stream, so a publish has
         // somewhere to land before anything else starts.
@@ -430,6 +456,7 @@ impl World {
             daemon,
             broker,
             dir,
+            _scratch: scratch,
             xdg,
             rt,
             bus,
