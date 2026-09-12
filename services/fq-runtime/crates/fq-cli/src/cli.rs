@@ -581,8 +581,9 @@ pub(crate) enum EventCommands {
 }
 
 /// Initialise the global tracing subscriber. Both branches share the
-/// same `EnvFilter` wiring — `RUST_LOG` (or `info` by default) governs
-/// levels identically — and differ only in how each event is rendered:
+/// same `EnvFilter` wiring — `RUST_LOG` governs levels when set; otherwise
+/// INFO is shown except for tarpc's per-RPC transport spans — and differ only
+/// in how each event is rendered:
 ///
 /// - [`LogFormat::Text`] keeps the human-readable ANSI output (the
 ///   default, so existing behaviour is unchanged).
@@ -594,7 +595,8 @@ pub(crate) enum EventCommands {
 /// output (issue #190), and query-style commands log incidental INFO
 /// (e.g. the NATS connect) before their result is known.
 pub(crate) fn init_tracing(format: LogFormat) {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,tarpc::client=warn"));
     match format {
         LogFormat::Text => fmt()
             .with_env_filter(env_filter)

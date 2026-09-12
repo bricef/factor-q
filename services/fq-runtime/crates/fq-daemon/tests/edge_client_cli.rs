@@ -31,13 +31,21 @@ fn unique_scratch() -> std::path::PathBuf {
 /// Run the `fq` binary with stdin piped (non-interactive) and the
 /// scratch dir's isolated XDG config home.
 fn fq(scratch: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(fq_client_binary())
+    fq_with_rust_log(scratch, args, None)
+}
+
+fn fq_with_rust_log(scratch: &std::path::Path, args: &[&str], rust_log: Option<&str>) -> Output {
+    let mut command = Command::new(fq_client_binary());
+    command
         .args(args)
         .env("FQ_CLI_CONFIG", scratch.join("fq.toml"))
         .env("XDG_CONFIG_HOME", scratch.join("xdg"))
-        .stdin(Stdio::piped())
-        .output()
-        .expect("run fq")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::piped());
+    if let Some(rust_log) = rust_log {
+        command.env("RUST_LOG", rust_log);
+    }
+    command.output().expect("run fq")
 }
 
 fn stdout_of(output: &Output) -> String {
@@ -173,6 +181,22 @@ async fn the_cli_pairs_lists_repins_and_attenuates() {
         "the surface lists the Invocation view:\n{}",
         stdout_of(&out)
     );
+    let default_logs = fq(&scratch, &["costs"]);
+    assert!(default_logs.status.success(), "fq costs failed");
+    assert!(
+        !stderr_of(&default_logs).contains("tarpc"),
+        "the default filter must hide tarpc's per-RPC spans:\n{}",
+        stderr_of(&default_logs)
+    );
+
+    let verbose = fq_with_rust_log(&scratch, &["costs"], Some("tarpc::client=debug"));
+    assert!(verbose.status.success(), "verbose fq costs failed");
+    assert!(
+        stderr_of(&verbose).contains("tarpc"),
+        "RUST_LOG=tarpc::client=debug must restore tarpc's spans:\n{}",
+        stderr_of(&verbose)
+    );
+
     let out = fq(&scratch, &["ops", "list", "--addr", &addr, "--json"]);
     let described: serde_json::Value =
         serde_json::from_str(stdout_of(&out).trim()).expect("describe JSON");
