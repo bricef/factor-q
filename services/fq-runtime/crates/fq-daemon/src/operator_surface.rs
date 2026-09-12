@@ -747,7 +747,8 @@ pub(crate) fn parse_invocation_status_filter(
         "in_flight" => OwnerStatus::InFlight,
         "ambiguous" => OwnerStatus::Ambiguous,
         "completed" => OwnerStatus::Completed,
-        _ => OwnerStatus::Failed,
+        "failed" => OwnerStatus::Failed,
+        other => anyhow::bail!("validated invocation status filter `{other}` has no store mapping"),
     })
 }
 
@@ -885,22 +886,16 @@ mod status_filter_tests {
     #[test]
     fn parse_invocation_status_filter_accepts_known_values() {
         use fq_runtime::control_plane::store::OwnerStatus;
-        assert!(matches!(
-            parse_invocation_status_filter("in_flight").unwrap(),
-            OwnerStatus::InFlight
-        ));
-        assert!(matches!(
-            parse_invocation_status_filter("ambiguous").unwrap(),
-            OwnerStatus::Ambiguous
-        ));
-        assert!(matches!(
-            parse_invocation_status_filter("completed").unwrap(),
-            OwnerStatus::Completed
-        ));
-        assert!(matches!(
-            parse_invocation_status_filter("failed").unwrap(),
-            OwnerStatus::Failed
-        ));
+        for status in fq_ops::surface::INVOCATION_STATUS_FILTERS {
+            let expected = match status {
+                "in_flight" => OwnerStatus::InFlight,
+                "ambiguous" => OwnerStatus::Ambiguous,
+                "completed" => OwnerStatus::Completed,
+                "failed" => OwnerStatus::Failed,
+                other => panic!("accepted status filter `{other}` has no expected store mapping"),
+            };
+            assert_eq!(parse_invocation_status_filter(status).unwrap(), expected);
+        }
     }
 
     #[test]
