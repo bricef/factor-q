@@ -115,14 +115,16 @@ it is the licence to keep changing shape quickly.
   (accepted 2026-09-04): every merge to `main` publishes one container
   image per binary to `ghcr.io/bricef`, tagged with the commit its binary
   reports; `ops/dogfood/compose.yml` is the stack and its supervisor,
-  `ops/dogfood/deploy.sh` is a tag bump against it (hourly as `--auto`,
-  with an idle check and automatic rollback), `bootstrap.sh` provisions
+  `ops/dogfood/deploy.sh` is a tag bump against it (hourly as `--auto`
+  from the stack's own `ops` service, ADR-0036, with an idle check and
+  automatic rollback), `bootstrap.sh` provisions
   a dedicated host, and `backup.sh` / `restore.sh` make the instance's
   one volume restorable — the build-out is
   [#587](https://github.com/bricef/factor-q/issues/587). The live
   dogfood instance moved onto the stack on 2026-09-12 and runs on a
-  dedicated internal host; deploys run hourly via `deploy.sh --auto`, and
-  `backup.sh` runs nightly. The runbook is in
+  dedicated internal host; deploys run hourly via `deploy --auto` from
+  the `ops` service, which also runs hygiene and the nightly backup — no
+  host crontab. The runbook is in
   [ops/dogfood](ops/dogfood/README.md), and the move itself — pre-flight,
   the restore set, the day's sequence, acceptance, rollback and
   retirement — is recorded in the

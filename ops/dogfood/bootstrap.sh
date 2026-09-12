@@ -9,15 +9,18 @@
 #                                                 # from nothing: clones the repo to /opt/factor-q first
 #
 # What it does, in order: installs Docker Engine and the compose plugin
-# from Docker's apt repository (plus git, cron); asks the distribution's
-# init to run the container runtime — the only thing we ever ask of it;
+# from Docker's apt repository (plus git); asks the distribution's init
+# to run the container runtime — the only thing we ever ask of it;
 # creates the deploy user (default `fq`) in the docker group; lays out
-# ~fq/fq-dogfood with compose.yml, infra/, the five scripts, an .env and
-# the four secrets files from their templates (a broker token and a
-# dashboard session secret generated on first run); installs the crontab
-# (deploy.sh --auto hourly, hygiene.sh, a nightly backup.sh); and prints
-# the steps only a human can do — write the provider key and GH_TOKEN,
-# seed the volume, run the first deploy, pair, mint the dashboard token.
+# ~fq/fq-dogfood with compose.yml, infra/, an .env and the four secrets
+# files from their templates (a broker token and a dashboard session
+# secret generated on first run), writing the four host facts the ops
+# service needs into .env; removes a host crontab and script copies left
+# from before ADR-0036 (the stack schedules its own operations now — the
+# hourly deploy, hygiene, the nightly backup — from the `ops` service);
+# and prints the steps only a human can do — write the provider key and
+# GH_TOKEN, seed the volume, run the first deploy, pair, mint the
+# dashboard token.
 #
 # Assumes a dedicated host: nothing else listens on 443, 9470 or 9472,
 # and the box is ours to configure. Inbound 443 and 22 are the
@@ -60,7 +63,7 @@ else
     SRC="$FQ_REPO_DIR/ops/dogfood"
     ok "$SRC at $(git -C "$FQ_REPO_DIR" rev-parse --short=12 HEAD)"
 fi
-for f in compose.yml deploy.sh hygiene.sh backup.sh restore.sh notify.sh crontab .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
+for f in compose.yml .env.example env.example dashboard.env.example infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
     [ -f "$SRC/$f" ] || die "missing $SRC/$f — an incomplete checkout?"
 done
 
@@ -88,7 +91,7 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl enable --now docker >/dev/null 2>&1 || true
 fi
 docker info >/dev/null 2>&1 || die "the docker daemon is not running"
-apt-get install -y -qq cron git >/dev/null 2>&1 || true
+apt-get install -y -qq git >/dev/null 2>&1 || true
 
 # --- 3. the deploy user -----------------------------------------------------------------------
 if id "$FQ_USER" >/dev/null 2>&1; then
@@ -110,10 +113,15 @@ install -d -o "$FQ_USER" -g "$FQ_USER" -m 700 "$DOGFOOD/.secrets"
 for f in compose.yml infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 644 "$SRC/$f" "$DOGFOOD/$f"
 done
+ok "compose.yml, infra/ (both Caddyfiles) refreshed"
+# The scripts live in the fq-ops image now (ADR-0036) and run as
+# `docker compose run --rm ops <verb>`; a copy left here from before is
+# a stale one somebody might run.
+stale=""
 for f in deploy.sh hygiene.sh backup.sh restore.sh notify.sh; do
-    install -o "$FQ_USER" -g "$FQ_USER" -m 755 "$SRC/$f" "$DOGFOOD/$f"
+    [ -f "$DOGFOOD/$f" ] && { rm -f "$DOGFOOD/$f"; stale="$stale $f"; }
 done
-ok "compose.yml, infra/ (both Caddyfiles), deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh (refreshed)"
+[ -z "$stale" ] || ok "removed the pre-ADR-0036 script copies:$stale — the ops service runs them from its image"
 
 # Host-authored files: created from their templates once, never touched again.
 seed() {  # $1 = template, $2 = destination, $3 = mode
@@ -159,11 +167,13 @@ else
 fi
 
 # --- 5. the schedule ----------------------------------------------------------------------------
-if command -v crontab >/dev/null 2>&1; then
-    sed "s#^FQ_DOGFOOD=.*#FQ_DOGFOOD=$DOGFOOD#" "$SRC/crontab" | crontab -u "$FQ_USER" -
-    ok "crontab installed for $FQ_USER (deploy.sh --auto hourly; hygiene and backup run from the ops service)"
-else
-    printf '\033[1;33m    ⚠ no crontab on this host — install cron, then: sed "s#^FQ_DOGFOOD=.*#FQ_DOGFOOD=%s#" %s/crontab | crontab -u %s -\033[0m\n' "$DOGFOOD" "$SRC" "$FQ_USER"
+# Lives in the stack (ADR-0036): the `ops` service runs the image's
+# crontab — the hourly deploy, hygiene, the nightly backup — from the
+# moment `docker compose up -d` brings it up. A host crontab from before
+# would run the deploy twice an hour from two places; take ours out.
+if command -v crontab >/dev/null 2>&1 && crontab -l -u "$FQ_USER" 2>/dev/null | grep -q 'deploy.sh --auto'; then
+    crontab -r -u "$FQ_USER"
+    ok "host crontab removed — the ops service schedules the deploy, hygiene and backup now"
 fi
 
 # --- done --------------------------------------------------------------------------------------------
@@ -179,12 +189,14 @@ Left for you (ops/dogfood/README.md, "Bootstrap"):
      no public address?            — DASH_INTERNAL_ADDR in caddy.env + compose.override.yml (README, "An internal host")
      docker login ghcr.io          — as $FQ_USER, if the packages are private
      $DOGFOOD/.env                 — FQ_NOTIFY_HOOK, where a rollback or a warning should reach you
-                                     (then: sudo -iu $FQ_USER $DOGFOOD/notify.sh --test)
+                                     (then, as $FQ_USER in $DOGFOOD: docker compose run --rm ops notify --test)
+     $DOGFOOD/.env                 — FQ_TAG: a build, so the ops image itself can be pulled
+                                     (docker run --rm ghcr.io/bricef/fq-dogfood:main-latest --version)
   2. Seed the instance volume: fqd.toml (edge bind 0.0.0.0:9470, workspace path, token_env),
-     fq-cron.toml, agents/ — or restore.sh <backup-set> to bring an instance across.
-  3. sudo -iu $FQ_USER $DOGFOOD/deploy.sh      # first deploy: pulls main-latest, brings the stack up
+     fq-cron.toml, agents/ — or docker compose run --rm ops restore <backup-set> --yes to bring an instance across.
+  3. As $FQ_USER in $DOGFOOD: docker compose run --rm ops deploy      # first deploy: pulls main-latest, brings the stack up
   4. Pair the container's fq, then mint the dashboard token into .secrets/dashboard.env
      and 'docker compose up -d fq-dashboard'.
-The crontab is already active: deploy.sh --auto will not deploy until the daemon can be asked
-whether it is idle, i.e. until step 4 is done.
+The ops service's schedule is live once the stack is up: deploy --auto will not deploy until
+the daemon can be asked whether it is idle, i.e. until step 4 is done.
 NEXT

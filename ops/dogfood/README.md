@@ -41,17 +41,16 @@ the previous, launcher-based shape was
 fq-dogfood/
 ├── compose.yml              # the stack — copied from ops/dogfood/
 ├── compose.override.yml     # host-authored, bootstrap never touches it — the internal Caddyfile, a rehearsal's profiles
-├── .env                     # FQ_TAG (deploy.sh owns it), image repo, limits — from .env.example
+├── .env                     # FQ_TAG (the deploy owns it), image repo, limits, the four host facts the ops service needs — from .env.example
 ├── infra/nats.conf          # broker config; infra/Caddyfile and infra/Caddyfile.internal the proxy's — copied from ops/dogfood/infra/
 ├── .secrets/env             # provider keys, GH_TOKEN, the broker token, the adapters' URLs (env.example)
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE / DASH_INTERNAL_ADDR on an internal host
-├── deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh   # copied by bootstrap.sh; deploy.sh runs from the crontab, the rest from the ops service's own copy (ADR-0036)
-├── logs/                    # deploy.log — the hourly deploy's output; notify.log, every message sent. hygiene and backup log to the ops service (`docker compose logs ops`)
-├── backups/                 # backup.sh's sets, FQ_BACKUP_KEEP of them
-├── .deploy.lock             # the flock deploy.sh, backup.sh and restore.sh share
-└── .deploy.deferred         # since when deploy.sh --auto has been deferring the same build
+├── logs/                    # notify.log — every message sent; the scheduled jobs (deploy, hygiene, backup) log to the ops service (`docker compose logs ops`)
+├── backups/                 # backup's sets, FQ_BACKUP_KEEP of them
+├── .deploy.lock             # the flock deploy, backup and restore share
+└── .deploy.deferred         # since when deploy --auto has been deferring the same build
 
 docker volume fq-dogfood_fq-data → /var/lib/factor-q in the daemon's container:
     fqd.toml, fq.toml, fq-cron.toml, agents/, state/ (edge identity + the
@@ -106,35 +105,41 @@ the "refresh" is whatever the checkout last saw. The `curl` form fetches
 to re-run after a merge.
 
 It installs Docker Engine and the compose plugin from Docker's
-repository (plus `git` and `cron`), asks the distribution's init to run
-the container runtime — the only thing we ask of it — creates the
-deploy user `fq` in the `docker` group, lays out `~fq/fq-dogfood` with
-the tracked files and the four secrets files from their templates (one
+repository (plus `git`), asks the distribution's init to run the
+container runtime — the only thing we ask of it — creates the deploy
+user `fq` in the `docker` group, lays out `~fq/fq-dogfood` with the
+tracked files and the four secrets files from their templates (one
 broker token generated and written to all four places, a dashboard
-session secret generated), and installs the [crontab](crontab). It ends
-by printing what only a human can do:
+session secret generated), writes the four host facts the ops service
+needs into `.env`, and removes a host crontab and script copies from
+before ADR-0036. It ends by printing what only a human can do:
 
 1. `.secrets/env`: `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` — one
    key per provider `fqd.toml` declares, because a missing one fails the
    daemon at startup and not at invocation time — plus `GH_TOKEN`
    (literal — nothing runs `gh auth token` for you now; #402 wants a
-   per-role PAT). `.env`: `FQ_NOTIFY_HOOK`, then `./notify.sh --test`.
+   per-role PAT). `.env`: `FQ_TAG` naming a build (`docker run --rm
+   ghcr.io/bricef/fq-dogfood:main-latest --version`), so the ops image
+   itself can be pulled, and `FQ_NOTIFY_HOOK`, then
+   `docker compose run --rm ops notify --test`.
    `.secrets/caddy.env`: `DASH_USER`, `DASH_HASH` (`docker run --rm
    caddy:2 caddy hash-password`), and on a host with no public address
    `DASH_INTERNAL_ADDR` and the override from "An internal host".
    `docker login ghcr.io` as `fq` if the packages are private.
-2. Seed the instance volume (below), or `restore.sh <set> --yes` to
-   bring an existing instance across (a freshly bootstrapped host reads
-   as occupied — see "Backups and the restore drill").
-3. The first `deploy.sh`, then pair and mint the dashboard token (below).
+2. Seed the instance volume (below), or
+   `docker compose run --rm ops restore <set> --yes` to bring an
+   existing instance across (a freshly bootstrapped host reads as
+   occupied — see "Backups and the restore drill").
+3. The first deploy — `docker compose run --rm ops deploy` — then pair
+   and mint the dashboard token (below).
 
 Knobs: `FQ_USER`, `FQ_REPO_URL`, `FQ_REF`, `FQ_REPO_DIR`. Inbound 443 and
 22 are the host's own business — a provider firewall on a public VM, or,
 on an internal guest, the fact that nothing outside the tunnel can route
-to the address at all. The stack publishes nothing else. The crontab is
-active from the moment it is installed, but `deploy.sh --auto` deploys
-nothing until the daemon can be asked whether it is idle — i.e. until
-the pairing in step 3 exists.
+to the address at all. The stack publishes nothing else. The ops
+service's schedule is live from the first `docker compose up`, but
+`deploy --auto` deploys nothing until the daemon can be asked whether it
+is idle — i.e. until the pairing in step 3 exists.
 
 **Seed the instance volume.** The daemon needs `fqd.toml`, `agents/`
 and `fq-cron.toml` inside the volume before its first start — compose
@@ -174,8 +179,9 @@ helper in `/etc/gitconfig`, so a definition that pushes with plain `git`
 over HTTPS works on `GH_TOKEN` alone — but a commit identity is the
 definition's job, because who a commit is by is per-agent, not per-image.
 
-**First deploy, then pair.** `~/fq-dogfood/deploy.sh` pulls, proves and
-starts everything. The daemon mints its edge identity on first start
+**First deploy, then pair.** `docker compose run --rm ops deploy` pulls,
+proves and starts everything (compose pulls the ops image itself at
+`.env`'s `FQ_TAG` first, which is why bootstrap asks for one). The daemon mints its edge identity on first start
 into `state/edge/` and logs the fingerprint. Its container reports
 unhealthy until its `fq` is paired (the health check is `fq status`);
 pair once, from the host — the pairing is kept in the volume:
@@ -224,10 +230,11 @@ in the volume, and its backup sets stay on the guest until
 to the stack.
 
 ```sh
-~/fq-dogfood/deploy.sh              # upgrade to the newest main build (the images' main-latest)
-~/fq-dogfood/deploy.sh --force      # redeploy/restart the same build (a .env, fqd.toml or secrets change)
-~/fq-dogfood/deploy.sh 1a2b3c4d5e6f # roll back / pin (a unique prefix is fine for images already on the host)
-tail -f ~/fq-dogfood/logs/deploy.log # what the hourly deploy.sh --auto did
+cd ~/fq-dogfood
+docker compose run --rm ops deploy               # upgrade to the newest main build (the images' main-latest)
+docker compose run --rm ops deploy --force       # redeploy/restart the same build (a .env, fqd.toml or secrets change)
+docker compose run --rm ops deploy 1a2b3c4d5e6f  # roll back / pin (a unique prefix is fine for images already on the host)
+docker compose logs -f ops                       # what the hourly deploy --auto, hygiene and the nightly backup did
 cd ~/fq-dogfood && docker compose ps            # every service, its state and health (each image probes itself)
 docker compose logs -f fqd                      # the daemon's log (rotated by the driver: 5 × 50 MB)
 docker compose exec fqd fq status               # ask the daemon; fq doctor, fq workers list likewise
@@ -240,9 +247,10 @@ fqd fq reload` re-reads the agents directory and hot-swaps the registry
 (Design Principle 8), affecting the next trigger. **Config** changes do
 need one — `fqd.toml` is read once, at startup — so a `[providers]`,
 `[edge]`, `[summary]`, `[worker]` or retention edit takes effect on
-`deploy.sh --force`. A new value in `.secrets/env` or `.env` is the
-same story: an `env_file` is read when a container is *created*, which
-`deploy.sh --force` does and a restart does not. `fq-cron.toml` is the
+`docker compose run --rm ops deploy --force`. A new value in
+`.secrets/env` or `.env` is the same story: an `env_file` is read when a
+container is *created*, which a `deploy --force` does and a restart does
+not. `fq-cron.toml` is the
 exception: the scheduler watches it and reloads on edit.
 
 **Declared state is version-controlled, not hand-edited.** `agents/`,
@@ -261,24 +269,24 @@ the daemon's container (`docker compose exec fqd sh`, then `vi` under
 
 ```sh
 docker compose cp ~/new-agent.md fqd:/var/lib/factor-q/agents/   # then fq reload
-docker compose cp fqd:/var/lib/factor-q/fqd.toml ./fqd.toml       # out, to edit; cp back, then deploy.sh --force
+docker compose cp fqd:/var/lib/factor-q/fqd.toml ./fqd.toml       # out, to edit; cp back, then deploy --force
 ```
 
 One-line invocation summaries (#216): set `[summary] model = "<cheap-model>"`
-in `fqd.toml` and `deploy.sh --force`; the daemon keeps a one-line,
+in `fqd.toml` and `deploy --force`; the daemon keeps a one-line,
 cheap-model status per invocation on the dashboard. The model must be
 priced (the ADR-0004 startup guarantee applies, so deploy config-first);
 the summariser's own spend shows in `fq costs` as the reserved `summary`
 agent. Unset = disabled.
 
 If the dashboard shows a **"⚠ build skew"** banner (#168), it and the
-daemon come from different builds. `deploy.sh` moves all four together
+daemon come from different builds. The deploy moves all five together
 by construction, so in practice it means one container was recreated
-by hand from a different tag; a `deploy.sh --force` cures it.
+by hand from a different tag; a `deploy --force` cures it.
 
 ### Before any restart
 
-`deploy.sh`, `deploy.sh --force` and the two procedures below all stop
+The deploy, `deploy --force` and the two procedures below all stop
 the daemon. Two checks first, every time:
 
 1. **In-flight work.** `docker compose exec fqd fq invocation list` and
@@ -355,7 +363,7 @@ one window, because every consumer restarts:
    connected to it.
 3. `docker compose up -d --force-recreate nats`, then wait for
    `docker compose ps nats` to show `healthy`.
-4. `deploy.sh --force`: it recreates the three consumers with the new
+4. `docker compose run --rm ops deploy --force`: it recreates the three consumers with the new
    environment and verifies the stack.
 5. Verify: `fq status` answers; `docker compose logs github-watcher
    fq-cron` show no authorization errors; and an unauthenticated
@@ -425,16 +433,18 @@ is still live — the [migration
 plan](../../docs/plans/active/2026-09-05-dogfood-host-migration.md) has
 the details.
 
-## Continuous delivery: `deploy.sh --auto`
+## Continuous delivery: `deploy --auto`
 
-The [crontab](crontab) runs `deploy.sh --auto` hourly. It is the same
-deploy as by hand — pull `main-latest`, resolve it to a commit, prove
-every image reports it, drain, up, verify — with three differences for
-running unattended:
+The `ops` service runs `deploy --auto` hourly from the image's crontab
+([`ops.crontab`](ops.crontab)), as a one-shot sibling container that
+the deploy's own `compose up` cannot kill. It is the same deploy as by
+hand — pull `main-latest`, resolve it to a commit, prove every image
+reports it, drain, up, verify — with three differences for running
+unattended:
 
 - **Quiet when there is nothing to do.** One timestamped line in
-  `logs/deploy.log` per run; the narration starts only when a deploy is
-  actually going to happen.
+  `docker compose logs ops` per run; the narration starts only when a
+  deploy is actually going to happen.
 - **It waits its turn.** Before draining it asks the daemon, through
   the container's `fq`, whether any invocation is in flight, and defers
   to the next run if so, or if the daemon cannot be asked (an unpaired
@@ -466,13 +476,14 @@ Not Watchtower, deliberately: the five images are not published
 atomically (a poll mid-publish would recreate the daemon on one build
 and the dashboard on another), and an updater without a readiness check
 and a rollback is not delivery, it is roulette. The cadence is hourly
-rather than per-merge because the fleet merges its own PRs. `deploy.sh`
-by hand still works at any time; the two share a lock.
+rather than per-merge because the fleet merges its own PRs. A deploy by
+hand (`docker compose run --rm ops deploy`) still works at any time; the
+two share a lock.
 
 ## The ops service: `docker compose run --rm ops <verb>`
 
 The stack schedules its own maintenance
-([ADR-0036](../../docs/adrs/draft/0036-ops-image-and-scheduler-service.md)).
+([ADR-0036](../../docs/adrs/accepted/0036-ops-image-and-scheduler-service.md)).
 The `ops` service runs the commit's `fq-ops` image — the five scripts,
 their schedule (`ops.crontab`) under supercronic, and the docker CLI and
 compose plugin they drive the stack with — as the deploy user with the
@@ -483,16 +494,15 @@ inside reads the same `compose.yml`, `.env`, override and secrets, and
 every host path a script hands to `docker run -v` resolves. Every job on
 its crontab is a one-shot sibling container from the same image, never a
 process of the scheduler's own, so a deploy's `compose up` can recreate
-the service while a job runs. Today it runs hygiene every 30 minutes and
-the backup nightly; the hourly deploy still runs from the host crontab
-until the ADR's slice 3 moves it in.
+the service while a job runs. It runs the hourly deploy, hygiene every
+30 minutes and the backup nightly; nothing of ours runs from the host.
 
 Any verb runs the same way by hand, from any host with docker and this
-directory — `docker compose run --rm ops hygiene --report`,
-`… ops backup`, `… ops restore <set> --yes`, `… ops notify --test` — and
-the copies of the scripts in this directory stay for the deploy and for
-a host without the service up. `docker compose logs -f ops` is where the
-scheduled jobs' output goes; `hygiene`'s warnings and a failed `backup`
+directory — `docker compose run --rm ops deploy [sha]`,
+`… ops hygiene --report`, `… ops backup`, `… ops restore <set> --yes`,
+`… ops notify --test` — and there are no copies of the scripts on the
+host. `docker compose logs -f ops` is where the scheduled jobs' output
+goes; a deploy, a rollback, `hygiene`'s warnings and a failed `backup`
 still reach you through `notify.sh` as before.
 
 Four host facts in `.env` describe the service — `FQ_DOGFOOD` (this
@@ -500,33 +510,32 @@ directory's absolute path), `FQ_UID` and `FQ_DOCKER_GID` (the deploy
 user and the docker group), `FQ_HOST` (the name the notifications carry)
 — and `bootstrap.sh` writes them, appending to an `.env` that predates
 them. On a host that predates the service: re-run `bootstrap.sh` (the
-`curl` form), then `docker compose up -d ops`; the next hourly deploy
-would also bring it up, since `up` creates every service the file
-names. The oldest build the stack can run from then on is the first with
-an `fq-ops` image; `deploy.sh <older sha>` fails at `up`.
+`curl` form) — it writes the four values and removes the old crontab and
+the script copies — then `docker compose up -d ops`. The oldest build
+the stack can run from then on is the first with an `fq-ops` image;
+`deploy <older sha>` fails at `up`.
 
 ## Notifications: `notify.sh`
 
-The crontab sends the deploy's output to `logs/deploy.log` and the ops
-service's jobs log to its container, so cron mail never fires; without a
-channel of its own, a rollback or a full disk would sit in a log until
+The ops service's jobs log to its container (`docker compose logs ops`)
+and nothing mails; without a channel of its own, a rollback or a full disk would sit in a log until
 someone looked. `notify.sh <subject>`
 (body on stdin) is that channel: it runs `FQ_NOTIFY_HOOK` from `.env` —
 a shell command given the subject as `$1` and the body on stdin — and
 appends every message to `logs/notify.log` whether or not a hook is set.
 `.env.example` has one-line hooks for ntfy, Slack and mail;
-`./notify.sh --test` proves the one you chose. A missing hook is one
+`docker compose run --rm ops notify --test` proves the one you chose. A missing hook is one
 line on stderr in the calling script's log, next to the thing it could
 not deliver; a failing hook is reported the same way and never fails
 its caller.
 
-What goes through it, all unattended: `deploy.sh --auto`'s deploys
+What goes through it, all unattended: `deploy --auto`'s deploys
 (with the commits that landed — the formatting is the one part of
 `deploy.sh` with a test, `ops/dogfood/tests/render-changes.sh`, run by
 `just ops-ci`), rollbacks, failures and long deferrals; `hygiene`'s
-warnings, one message per run; a failed `backup --auto` — the last two
-from the ops service, signed with `FQ_HOST` rather than the container's
-name. A deploy by hand tells its terminal and nothing else.
+warnings, one message per run; a failed `backup --auto` — all from the
+ops service, signed with `FQ_HOST` rather than the container's name. A
+deploy by hand tells its terminal and nothing else.
 
 Machine-scrapeable metrics from the daemon itself are
 [#342](https://github.com/bricef/factor-q/issues/342), which this does
@@ -572,7 +581,7 @@ guest; until a hook names somewhere else, pull the newest set by hand
 interesting. Unattended, a failed backup goes through `notify.sh`; a
 backup that stops happening is `hygiene.sh`'s stale-set warning.
 
-`restore.sh <set> [--yes]` is the other half: it verifies the checksums,
+`docker compose run --rm ops restore <set> [--yes]` is the other half: it verifies the checksums,
 takes the stack down (volumes kept), refuses to overwrite a volume that
 already has content unless `--yes`, fills both volumes from the tarballs
 as root and hands them to the runtime user, and brings the stack up on
@@ -586,8 +595,8 @@ restore, `fq status` must show coordination caught up, not merely a
 daemon that started.
 
 **The drill**, once, and again after anything touches the layout: on a
-scratch VM, `bootstrap.sh`, copy a backup set over, `restore.sh <set>
---yes`, then `docker compose exec fqd fq status` and `fq invocation
+scratch VM, `bootstrap.sh`, copy a backup set over, `docker compose run
+--rm ops restore <set> --yes`, then `docker compose exec fqd fq status` and `fq invocation
 list` show the instance as it was. The `--yes` is not impatience: the
 image seeds the volume's layout on first mount, so a freshly
 bootstrapped host reads as occupied and the refusal is spurious
@@ -609,7 +618,7 @@ and the worked example with the day's real timings is the
 `migrate/take-set.sh` is what packaged a set out of a launcher host, if
 one ever needs packaging again.
 
-1. **Package the set on the source: `backup.sh`.** It is consistent by
+1. **Package the set on the source: `backup`.** It is consistent by
    construction — the scheduler, the daemon, the watcher and the broker
    are all stopped for the copy — and it carries what the new host needs:
    `state/edge/` (the edge identity), `state/client/` (the container's
@@ -618,7 +627,7 @@ one ever needs packaging again.
    and a `MANIFEST` naming the tag the set was taken at.
 
    ```sh
-   cd ~/fq-dogfood && ./backup.sh
+   cd ~/fq-dogfood && docker compose run --rm ops backup
    rsync -a backups/<utc-stamp> fq@<new-host>:fq-dogfood/backups/
    ```
 
@@ -637,12 +646,12 @@ one ever needs packaging again.
 
 3. **Bootstrap the destination** (above) with the same secrets and the
    same broker token, and `FQ_TAG` in `.env` naming the source's build.
-   Do not run `deploy.sh` yet — the restore brings the stack up itself,
+   Do not run the deploy yet — the restore brings the stack up itself,
    on the set's tag. A host with no public address gets the
    `DASH_INTERNAL_ADDR` and `compose.override.yml` two-liner from "An
    internal host" now, before anything starts.
 
-4. **`restore.sh <set> --yes`.** The flag is right here, not a
+4. **`docker compose run --rm ops restore <set> --yes`.** The flag is right here, not a
    workaround: the image seeds the volume's layout on first mount, so a
    freshly bootstrapped host reads as occupied and the refusal is
    spurious ([#671](https://github.com/bricef/factor-q/issues/671)). The
@@ -685,17 +694,17 @@ one ever needs packaging again.
    caught up (ignoring the `fq-summary ✗ lagging` line, #672);
    `fq invocation list` and `fq costs` showing the history that came
    across; one trigger end to end; the dashboard rendering a recent
-   transcript with no build-skew banner; `hygiene.sh --report` clean; and
-   `notify.sh --test` delivered.
+   transcript with no build-skew banner;
+   `docker compose run --rm ops hygiene --report` clean; and
+   `docker compose run --rm ops notify --test` delivered.
 
-8. **Then the schedules.** `bootstrap.sh` installs the crontab and it is
-   live from that moment, so on a move take it out (`crontab -r -u fq`)
-   before the restore and put it back once the acceptance above passes —
-   otherwise the hourly `deploy.sh --auto` can move the tag in the middle
-   of the move. The ops service's schedule is live whenever the service
-   is up, and `restore.sh` brings the whole stack up: stop it again
-   (`docker compose stop ops`) until acceptance, or the nightly backup
-   can stop the stack mid-move.
+8. **Then the schedule.** It lives in the `ops` service and is live
+   whenever the service is up — and the restore brings the whole stack
+   up. So right after the restore, `docker compose stop ops` until the
+   acceptance above passes, then `docker compose up -d ops`; otherwise
+   the hourly `deploy --auto` can move the tag, or the nightly backup
+   stop the stack, in the middle of the move. There is no host crontab
+   to take out or put back.
 
 The one move this has actually had — pre-flight, the rehearsal, the
 day's sequence, acceptance, rollback and retirement — is the

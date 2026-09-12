@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# ops/dogfood/hygiene.sh — the host's periodic check (ops/dogfood/crontab,
-# every 30 minutes): disk, the instance volume's subtrees, a bounded build
+# ops/dogfood/hygiene.sh — the host's periodic check (the ops service's
+# schedule, ops/dogfood/ops.crontab, every 30 minutes — ADR-0036): disk,
+# the instance volume's subtrees, a bounded build
 # cache, dangling images, the age of the newest backup. Prints a short
 # report; exits non-zero when a threshold is crossed and sends the
 # warnings through notify.sh (FQ_NOTIFY_HOOK). Nothing here touches the
@@ -52,7 +53,7 @@ finish() {
 # Sets are directories named <utc-stamp> (backup.sh), so the newest sorts last.
 newest="$(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | sort | tail -1)"
 if [ -z "$newest" ]; then
-    say "backups: none yet in $BACKUP_DIR (backup.sh runs nightly from the crontab)"
+    say "backups: none yet in $BACKUP_DIR (backup runs nightly from the ops service)"
 else
     stamp="$(basename "$newest")"
     taken="$(date -u -d "${stamp:0:8} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null || echo 0)"

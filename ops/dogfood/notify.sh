@@ -8,9 +8,10 @@
 # The unattended scripts call this for anything that needs a human:
 # deploy.sh --auto for a deploy, a rollback, a failure, or a deferral
 # that has gone on too long; hygiene.sh for a threshold crossed;
-# backup.sh --auto for a failed backup. The crontab sends every script's
-# output to a file under logs/, so cron mail never fires — without a
-# channel of its own a warning would sit in a log until someone looked.
+# backup.sh --auto for a failed backup. The ops service runs them from
+# the image's crontab (ADR-0036) and their output is its container log;
+# nothing mails — without a channel of its own a warning would sit in a
+# log until someone looked.
 #
 # The channel is FQ_NOTIFY_HOOK in $FQ_DOGFOOD/.env: a shell command, run
 # with the subject as $1 and the body on stdin (examples in .env.example:
