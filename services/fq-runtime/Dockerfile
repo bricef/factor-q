@@ -370,11 +370,17 @@ RUN set -eu; \
         "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-amd64"; \
     echo "${SUPERCRONIC_SHA256}  /usr/local/bin/supercronic" | sha256sum -c -; \
     chmod 755 /usr/local/bin/supercronic
+# The directories first, with their own modes: a COPY --chmod applies the
+# mode to every directory it creates on the way, so a 644 crontab copied
+# into a directory that does not exist yet leaves that directory 644 —
+# unreadable to the deploy user the service runs as, and supercronic
+# dies on "permission denied" opening its own crontab.
+RUN install -d -m 755 /usr/local/lib/fq-ops /etc/fq-ops
 COPY --chmod=755 ops/dogfood/deploy.sh ops/dogfood/hygiene.sh ops/dogfood/backup.sh \
                  ops/dogfood/restore.sh ops/dogfood/notify.sh /usr/local/lib/fq-ops/
 COPY --chmod=644 ops/dogfood/ops.crontab /etc/fq-ops/crontab
 COPY --chmod=755 ops/dogfood/fq-ops /usr/local/bin/fq-ops
-RUN printf '%s\n' "$FQ_OPS_SHA" > /etc/fq-ops/version
+RUN printf '%s\n' "$FQ_OPS_SHA" > /etc/fq-ops/version && chmod 644 /etc/fq-ops/version
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/fq-ops", "probe"]
 ENTRYPOINT ["/usr/local/bin/fq-ops"]
