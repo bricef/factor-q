@@ -12,6 +12,97 @@
 > [ops README](../../../ops/dogfood/README.md), and run the move with the
 > maintainer.
 
+## Outcome
+
+**Done 2026-09-12.** Downtime, old daemon stopped to `fq status` answering
+on the new host: **164 s**. The rehearsal on 2026-09-10 took 101 s to the
+same point.
+
+**Where it landed.** Not the public VM this plan assumed. The instance runs
+on `fq-dogfood`, an internal-only guest (vmid 103) created on 2026-09-10 on
+the `nest` Proxmox host: `10.20.0.10` on the internal bridge, reachable over
+the WireGuard tunnel and from its neighbours, with no public address. So
+pre-flight 5 and day step 5 — DNS and ACME — did not happen at all: the
+dashboard is `https://10.20.0.10/`, behind Caddy bound to the tunnel-side
+address with `tls internal` from its own CA, wired in by
+`infra/Caddyfile.internal`, `DASH_INTERNAL_ADDR` in `.secrets/caddy.env` and
+a host-authored `compose.override.yml`
+([#674](https://github.com/bricef/factor-q/issues/674)). `dev.lambda.works`
+was never repointed and now answers nowhere.
+
+**The day.** 08:15:13 the old host idle → watcher and cron SIGTERM → `fq
+down` (drained in 1 s) → `docker compose -f infra/docker-compose.yml down` →
+the set: 101 s, 214 MB, broker down → `rsync` 10 s → 08:17:34 adapters on
+and `FQ_TAG=ff7db0ee91c5` → `restore.sh <set> --yes` → 08:17:59 `Runtime
+ready`, and `fq status` answering through the carried pairing → the
+projection rebuilt itself (schema 0 → 1, replay from 385847) in about 30 s →
+all six services healthy → 08:20:27
+[#692](https://github.com/bricef/factor-q/issues/692) labelled
+`status:ready` → 08:20:59 claimed on the first poll → `m0-issue-fix` ran on
+the guest → 08:22:52 PR [#693](https://github.com/bricef/factor-q/pull/693)
+open ($0.10) → 08:24:12 the crontab installed. The first unattended deploy
+was the next `:17`.
+
+**Deviations from the plan.**
+
+- **An internal guest, not a public VM** — no DNS step, no ACME, an internal
+  certificate on the tunnel address (above).
+- **The rehearsal held the adapters off with a compose profile**, not
+  `docker compose stop`: `profiles: ["cutover"]` on `github-watcher` and
+  `fq-cron` in `compose.override.yml`, so a restart could not bring a second
+  watcher up beside the old host's. The profile was removed at cutover.
+- **The set carried two things this plan's packaging did not list**:
+  `home/.gitconfig` (the fleet's commit identity and `gh`'s credential
+  helper) and `state/client/` (the operator's pairing). So day step 4 was a
+  check, not a step — nothing re-paired, and the dashboard's token and
+  fingerprint stayed valid. Worth recording for the next host: a **copied**
+  identity mints no new admin token and writes no `state/edge/admin.token`;
+  the pairing in `connections.toml` is the only copy of it, and the README's
+  Bootstrap pairing block does not apply to a move.
+- **`restore.sh` needed `--yes` on a host that had never held an instance.**
+  The image seeds the volume layout on first mount and that trips its
+  occupied check
+  ([#671](https://github.com/bricef/factor-q/issues/671)); the flag is
+  correct there, not a hazard acknowledged.
+- **The instance was cleaned before the move.** The agents directory went
+  from nine definitions to five — `m0-loop`, `m0-review-fix`,
+  `m0-backlog-triage` and `openrouter-probe` retired — and the
+  `[providers.openrouter.pricing.*]` overrides were deleted from
+  `fqd.toml`, since the daemon has priced OpenRouter models from
+  OpenRouter's own catalogue since 2026-09-09. That last one is load-bearing
+  for the rollback: a daemon older than that refuses to start on the
+  override-free file, so a rollback to the old host must restore the old
+  `fqd.toml` first.
+- **Declared state is now version-controlled.** `agents/`, `fqd.toml` and
+  `fq-cron.toml` live in the `bricef/fq-dogfood` ops repo and are deployed
+  with `migrate/sync-config.sh`, rather than edited in the volume by hand.
+
+**Found by the move, and open.**
+[#671](https://github.com/bricef/factor-q/issues/671) (restore on a fresh
+host), [#672](https://github.com/bricef/factor-q/issues/672) (`fq status`
+reports `fq-summary ✗ lagging` on a filtered consumer with nothing pending —
+ignore that line), [#673](https://github.com/bricef/factor-q/issues/673) (the
+transcript page's 503; fixed before the move, and the advisory
+`Dashboard E2E` job of
+[#687](https://github.com/bricef/factor-q/issues/687) is what would catch the
+next one), [#684](https://github.com/bricef/factor-q/issues/684) (a daemon
+attaching to a restored stream with no durable halts `fq-coordination` and
+`fq-projector` at sequence 1 and still logs `Runtime ready` — never restore
+`nats-data` without its consumer state),
+[#694](https://github.com/bricef/factor-q/issues/694) (the watcher accepts
+only event `schema_version` 2, so every v3 completion is skipped and a
+claimed issue stays `status:in-progress`; claiming itself works). Backups are
+on the guest only until `FQ_BACKUP_HOOK` names an off-host copy.
+
+**Retirement (≈2026-09-19, after a week green).** The old host — the
+maintainer's devbox — is intact as the rollback until then, `fq-dashboard`
+aside: everything else is down. Retiring it is
+`docker compose -f infra/docker-compose.yml down -v`, then `releases/`,
+`current`, `logs/`, `cache/` and `~/.local/state/factor-q/edge/`. Then the
+chores listed below: the ops README's migration section becomes the
+next-host runbook, this plan moves to `closed/`, and
+[#587](https://github.com/bricef/factor-q/issues/587) closes.
+
 ## Assumptions
 
 - **A remote, dedicated VM** — Debian or Ubuntu, root at bootstrap,
@@ -21,7 +112,10 @@
   stack publishes nothing else. Outbound it needs `ghcr.io`, GitHub, the
   Anthropic API and wherever `FQ_NOTIFY_HOOK` delivers. A VM with no
   public address changes only the DNS and Caddy step: the dashboard is
-  reached by SSH tunnel and Caddy stays stopped.
+  reached by SSH tunnel and Caddy stays stopped. (Not what happened — see
+  Outcome: an internal guest with no public address, Caddy bound to the
+  tunnel-side address with `tls internal`, and no DNS step at all. Every
+  DNS and ACME step below is void with it.)
 - **Both hosts run at once** for the duration. The old host is untouched
   until retirement, which is the rollback; the new host is rehearsed on
   before the day.
@@ -48,12 +142,15 @@
   identity under `~/.local/state/factor-q/edge/` or `[state] directory`
   if `fqd.toml` sets it. It was at `9477254` (2026-08-25) when the
   [phase-0 plan](../closed/2026-09-04-production-readiness-phase-0.md) was written;
-  `./current/fq --version` says what it is now. Whatever it is, it is
+  `./current/fq --version` says what it is now. (`5afeacaf42b8` at the
+  cutover; the new host came up on `ff7db0ee91c5`.) Whatever it is, it is
   before #510, so the move also crosses the event `SCHEMA_VERSION` 2 → 3
   bump (see risks).
-- **The new host** does not exist yet.
+- **The new host** does not exist yet. (Created 2026-09-10 as the
+  internal guest `fq-dogfood`; see Outcome.)
 - **The compatibility read** of the live agent definitions against the
-  image has not been done (pre-flight 3).
+  image has not been done (pre-flight 3). (Done 2026-09-07; recorded on
+  #587.)
 
 ## Pre-flight (days before; no downtime)
 
@@ -125,6 +222,7 @@
    check that fails here fails on the day; fix it here.
 5. **DNS.** Lower the TTL on `dev.lambda.works` to a few minutes now, so
    the switch on the day propagates while the certificate is issued.
+   (Void — see Outcome.)
 6. **Hold the crontab on the new host** until acceptance: `crontab -u fq
    -r`. `deploy.sh --auto` would otherwise move the rehearsed instance to
    a newer build at :17, and `backup.sh --auto` would take sets of a
@@ -194,6 +292,7 @@ restore. Announce it; the fleet's `status:ready` issues wait.
    with the dashboard behind basic-auth. (`infra_caddy-data` could be
    copied across instead to keep the old certificate; re-issuing is one
    fewer volume to move and Let's Encrypt's normal limits allow it.)
+   (Void — see Outcome.)
 6. **Accept** (below). Then `crontab -u fq /opt/factor-q/ops/dogfood/crontab`
    and `./notify.sh --test`. The next `:17` is the first unattended
    deploy; the first nightly `backup.sh --auto` is the first real set.
@@ -213,7 +312,7 @@ All of these on the new host, with the old daemon down:
   watcher claims it within a poll, the agent runs on the new host, the
   outcome lands back on the issue.
 - The dashboard at `https://dev.lambda.works` with no build-skew banner,
-  and a recent transcript rendering.
+  and a recent transcript rendering. (Void — see Outcome.)
 - `hygiene.sh --report` clean; `logs/notify.log` has the test message
   and the hook delivered it.
 
@@ -260,7 +359,7 @@ Then the chores the move unblocks:
 | The event `SCHEMA_VERSION` 2 → 3 bump (#510) | first start on the new host | The projector continues from its durable position; transcripts recorded under v2 may not render until #409 — do **not** delete `cache/projection.db` to force a rebuild, it silently drops what it cannot parse |
 | An agent definition assumes a tool or a variable the image does not give it | first trigger | Pre-flight 3 reads every definition; `sandbox.env` allowlists; Dockerfile `tools` stage for a missing tool |
 | The identity cannot be read off the old host | pre-flight 4 | Rotate: fresh identity on first start, re-pair, re-mint the dashboard token |
-| ACME failed-validation limit | rehearsal; the day | Caddy stopped until DNS points at the host; TTL lowered ahead |
+| ACME failed-validation limit | rehearsal; the day | Caddy stopped until DNS points at the host; TTL lowered ahead (void — see Outcome) |
 | `deploy.sh --auto` fires at :17 mid-move | rehearsal; the day | Crontab held until acceptance; the scripts also share a lock |
 | A full disk on the new host | first weeks | `hygiene.sh` every 30 minutes with `FQ_NOTIFY_HOOK`; `FQ_BUILD_CACHE_MAX_GB` |
 | A wrong `fqd.toml` for the shape | restore | The three settings are edited into the staged copy. `restore.sh` brings the stack up without a readiness wait, so after it: `docker compose logs fqd` must show `Runtime ready`, not a refusal; a refusal is fixed in the volume (`docker compose cp`) and `deploy.sh --force` |
