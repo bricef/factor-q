@@ -232,6 +232,7 @@ pub(crate) enum Commands {
     Connect {
         /// Edge address. Defaults to `[daemon] addr` in the client's
         /// config, or to the sole paired daemon when there is only one
+        #[arg(id = "connect_addr")]
         addr: Option<String>,
         /// Capability token to present and store (the daemon wrote the
         /// admin token to `<state>/edge/admin.token` at first run; it is

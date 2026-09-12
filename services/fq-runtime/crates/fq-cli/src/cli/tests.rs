@@ -45,6 +45,37 @@ fn log_format_rejects_unknown_value() {
     );
 }
 
+/// `connect` keeps its positional address while also accepting the global
+/// `--addr`, including after the subcommand.
+#[test]
+fn connect_accepts_global_and_positional_addresses() {
+    fn effective_addr(args: &[&str]) -> Option<String> {
+        let cli = Cli::parse_from(args);
+        let positional = match cli.command {
+            Commands::Connect { addr, .. } => addr,
+            _ => panic!("expected connect command"),
+        };
+        positional.or(cli.global.addr)
+    }
+
+    assert_eq!(
+        effective_addr(&["fq", "--addr", "root.example:7777", "connect"]),
+        Some("root.example:7777".to_string())
+    );
+    assert_eq!(
+        effective_addr(&["fq", "connect", "positional.example:7777"]),
+        Some("positional.example:7777".to_string())
+    );
+    assert_eq!(
+        effective_addr(&["fq", "connect", "--addr", "global.example:7777"]),
+        Some("global.example:7777".to_string())
+    );
+
+    // Omitting both forms must still parse so the handler can reach the
+    // shared resolver and its `pass --addr` diagnostic.
+    assert_eq!(effective_addr(&["fq", "connect"]), None);
+}
+
 /// The JSON formatter layer builds and renders a structured event
 /// as parseable JSON with the fields intact. Uses a
 /// `tracing_subscriber::fmt` layer with a captured writer rather
