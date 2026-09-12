@@ -289,6 +289,13 @@ gate-adapters: install-nats
 # Compatibility name used by CI.
 go-ci: gate-adapters
 
+# The dogfood host's scripts (ops/dogfood) run unattended from cron and
+# have no compose stack to test against here; what can be tested without
+# one is. Bash only — no toolchain, seconds — so CI runs it on every push.
+# Run the ops script tests (the deploy message's change list).
+ops-ci:
+    bash ops/dogfood/tests/render-changes.sh
+
 # Run all quality checks — docs lint + link check + dependency audit + both
 # Rust gates + the Go adapters (the full local gate) — and print a per-phase
 # wall-clock timing summary at the end, so an operator can see where
@@ -353,6 +360,7 @@ ci:
     run_phase "dashboard"   just dashboard-ci
     run_phase "test-support" just test-support-ci
     run_phase "go-ci"       just go-ci
+    run_phase "ops-ci"      just ops-ci
 
 # === Container images (ADR-0035) ===
 #

@@ -15,7 +15,11 @@
 #                             with the same drain, checks and rollback as a
 #                             deploy by hand (ops/dogfood/crontab). A deploy,
 #                             a rollback, a failure and a deferral that has
-#                             lasted FQ_DEFER_WARN_HOURS go through notify.sh
+#                             lasted FQ_DEFER_WARN_HOURS go through notify.sh;
+#                             the deploy message lists the commits that landed
+#   deploy.sh --render-changes <from> <to> <owner/repo>
+#                             print that list for the commit subjects on stdin
+#                             and exit — the seam ops/dogfood/tests drives
 #
 # The host never compiles and never fetches a tarball. Every merge to main
 # publishes one image per binary to ghcr.io/bricef (`FQ_IMAGE_REPO` in .env),
@@ -89,6 +93,68 @@ deferring() {  # $1 = target sha, $2 = why
     printf '%s\t%s\t%s\n' "$1" "$since" "$notified" > "$file"
     defer "$2"
 }
+
+# --- what a deploy carries ---------------------------------------------------
+# The commits between the build that was live and the one just deployed,
+# so the deploy message says what landed rather than only that something
+# did. Asked of GitHub through the daemon container's own gh — it holds
+# GH_TOKEN and the network the agents use, and the host keeps no current
+# checkout (bootstrap.sh copies the scripts out; the clone stays where it
+# was) — via the compare endpoint, which needs no fetch and reads a
+# twelve-hex prefix. Best effort: the deploy is done by the time this is
+# asked, so a failure is one line in the message, never an error.
+changes_since() {  # $1 = from sha, $2 = to sha, $3 = owner/repo → subjects, newest first
+    local out
+    if ! out="$(docker compose exec -T fqd gh api "repos/$3/compare/$1...$2" \
+            --jq '.commits | reverse | .[].commit.message | split("\n")[0]' 2>&1)"; then
+        printf 'commit list unavailable: %s\n' "$(printf '%s\n' "$out" | grep -v '^$' | tail -1)"
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+# The message body, from the subjects on stdin. User-facing commits —
+# feat, fix, perf: the conventional types a reader of the dashboard would
+# notice — are listed, up to six of a hundred characters each; the rest
+# are counted by type, so a deploy of twelve docs commits is one line,
+# not twelve. The compare link is where the whole list lives. Pushover
+# caps a message at 1024 characters and notify.sh signs it, so the body
+# stops at 900.
+render_changes() {  # $1 = from sha, $2 = to sha, $3 = owner/repo; subjects on stdin
+    local from="$1" to="$2" repo="$3" line kind total=0 facing=0 listed="" others="" body
+    declare -A count=()
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        total=$((total + 1))
+        case "$line" in
+            feat|feat[\(:!]*|fix|fix[\(:!]*|perf|perf[\(:!]*)
+                facing=$((facing + 1))
+                [ "$facing" -le 6 ] && listed="$listed"$'\n'"• ${line:0:100}" ;;
+            *)
+                kind="${line%%:*}"; kind="${kind%%(*}"; kind="${kind%%!}"
+                case "$kind" in "$line"|*" "*) kind="other" ;; esac   # no "type:" prefix
+                count[$kind]=$(( ${count[$kind]:-0} + 1 )) ;;
+        esac
+    done
+    if [ "${#count[@]}" -gt 0 ]; then
+        others="$(for kind in "${!count[@]}"; do printf '%s\t%s\n' "${count[$kind]}" "$kind"; done \
+            | sort -k1,1nr -k2,2 | awk -F'\t' '{printf "%s%s %s", (NR>1?", ":""), $2, $1}')"
+    fi
+    if [ "$total" = 0 ]; then
+        body="no commits between $from and $to — the same build, or a step back"
+    else
+        body="from $from · $total commit$([ "$total" = 1 ] || echo s)$listed"
+        [ "$facing" -gt 6 ] && body="$body"$'\n'"+$((facing - 6)) more user-facing"
+        if [ "$facing" = 0 ]; then body="$body"$'\n'"no user-facing changes; $others"
+        elif [ -n "$others" ]; then body="$body"$'\n'"+$((total - facing)) other: $others"; fi
+    fi
+    body="$body"$'\n'"https://github.com/$repo/compare/$from...$to"
+    printf '%s\n' "${body:0:900}"
+}
+if [ "${1:-}" = "--render-changes" ]; then
+    [ $# -eq 4 ] || { echo "usage: deploy.sh --render-changes <from> <to> <owner/repo>  (subjects on stdin)" >&2; exit 2; }
+    render_changes "$2" "$3" "$4"
+    exit 0
+fi
 
 FORCE=0
 WANT="latest"
@@ -341,9 +407,22 @@ for name in fq-dogfood github-watcher fq-cron fq-dashboard; do
 done
 
 # --- done ------------------------------------------------------------------------
+# What landed, for the message and the terminal alike. GHW_REPO is the
+# repository the watcher already follows — the one these builds come from.
+GHW_REPO="$(sed -n 's/^GHW_REPO=\(.*\)$/\1/p' .env | tail -1)"
+if [ -z "$CURRENT" ] || [ "$CURRENT" = "$SHA" ]; then
+    changes="first deploy of $SHA on this host, or a redeploy — nothing to compare"
+elif [ -z "$GHW_REPO" ]; then
+    changes="commit list unavailable: GHW_REPO not set in .env"
+elif subjects="$(changes_since "$CURRENT" "$SHA" "$GHW_REPO")"; then
+    changes="$(printf '%s\n' "$subjects" | render_changes "$CURRENT" "$SHA" "$GHW_REPO")"
+else
+    changes="$subjects"$'\n'"https://github.com/$GHW_REPO/compare/$CURRENT...$SHA"
+fi
 printf '\n\033[1;32m════════════════════════════════════════════════════\n'
 printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
-notify "deployed $SHA" "from ${CURRENT:-<none>}. $(docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
+notify "deployed $SHA" "$changes"$'\n\n'"$(docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
+printf '%s\n' "$changes" | sed 's/^/    /'
 docker compose ps --format '    {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Image}}' 2>/dev/null || true
 printf '    rollback: %s %s   history: docker images %s/fq-dogfood\n' "$0" "${CURRENT:-<sha>}" "$REPO"
 printf '════════════════════════════════════════════════════\033[0m\n'
