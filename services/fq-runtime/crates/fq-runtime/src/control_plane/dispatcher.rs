@@ -2445,4 +2445,354 @@ You are a test agent."#
             .expect("task joins")
             .expect("clean exit");
     }
+
+    // --- #718: the per-agent concurrency cap -------------------------
+
+    /// A registry holding one agent whose definition declares
+    /// `max_concurrent: cap`, plus the directory it was written into so
+    /// a test can rewrite the definition and reload it.
+    fn registry_with_cap(agent_id_str: &str, cap: u32) -> (tempfile::TempDir, SharedRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        write_capped_definition(dir.path(), agent_id_str, cap);
+        let mut registry = AgentRegistry::new();
+        registry.load_file(&dir.path().join(format!("{agent_id_str}.md")));
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        (dir, shared_registry(registry))
+    }
+
+    fn write_capped_definition(dir: &std::path::Path, agent_id_str: &str, cap: u32) {
+        std::fs::write(
+            dir.join(format!("{agent_id_str}.md")),
+            format!(
+                "---\nname: {agent_id_str}\nmodel: claude-haiku\nbudget: 1.0\n\
+                 max_concurrent: {cap}\n---\n\nTest agent."
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Re-read the definitions from `dir` and swap them in, exactly as
+    /// `fq reload` does (`control_commands::reload_agents`): a new
+    /// registry behind the same handle, affecting the next admission.
+    async fn reload_from(dir: &std::path::Path, shared: &SharedRegistry) {
+        let registry = AgentRegistry::load_from_directory(dir, None).expect("reload");
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        *shared.write().await = Arc::new(registry);
+    }
+
+    /// Holds every invocation open until the test lets it finish, and
+    /// records the highest number that were open at once — which is the
+    /// only direct evidence a cap was honoured. `RecordingWorker`
+    /// returns instantly, so under it two invocations never overlap
+    /// whether the cap works or not.
+    struct CappedWorker {
+        starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>)>>,
+        open: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+        /// One permit per invocation the test allows to finish.
+        finish: tokio::sync::Semaphore,
+        /// When set, an invocation ends in a terminal executor error
+        /// instead of completing — the other exit path the slot must be
+        /// released on.
+        fail: std::sync::atomic::AtomicBool,
+        draining: std::sync::atomic::AtomicBool,
+    }
+
+    impl CappedWorker {
+        fn new() -> Arc<Self> {
+            Arc::new(CappedWorker {
+                starts: std::sync::Mutex::new(Vec::new()),
+                open: std::sync::atomic::AtomicUsize::new(0),
+                peak: std::sync::atomic::AtomicUsize::new(0),
+                finish: tokio::sync::Semaphore::new(0),
+                fail: std::sync::atomic::AtomicBool::new(false),
+                draining: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+        /// Let `n` more invocations finish.
+        fn let_finish(&self, n: usize) {
+            self.finish.add_permits(n);
+        }
+        fn started(&self) -> usize {
+            self.starts.lock().unwrap().len()
+        }
+        fn peak(&self) -> usize {
+            self.peak.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn attempts(&self) -> Vec<Option<u32>> {
+            self.starts.lock().unwrap().iter().map(|s| s.1).collect()
+        }
+        async fn wait_for_starts(&self, n: usize, within: Duration) {
+            let deadline = std::time::Instant::now() + within;
+            while self.started() < n {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "expected {n} start(s) within {within:?}, saw {}",
+                    self.started()
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Worker for CappedWorker {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn crate::llm::LlmClient,
+            _trigger: Trigger,
+            delivery_attempt: Option<u32>,
+            mut durable_start: crate::worker::DurableStart,
+        ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.starts
+                .lock()
+                .unwrap()
+                .push((std::time::Instant::now(), delivery_attempt));
+            let open = self.open.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(open, SeqCst);
+            durable_start.fire();
+            self.finish.acquire().await.expect("gate open").forget();
+            self.open.fetch_sub(1, SeqCst);
+            if self.fail.load(SeqCst) {
+                return Err(ExecutorError::InvocationFailed {
+                    kind: FailureKind::RuntimeError,
+                    message: "the invocation failed".to_string(),
+                });
+            }
+            Ok(crate::worker::InvocationOutcome::Completed {
+                invocation_id: Uuid::now_v7(),
+                response: canned_response(),
+                cost: 0.0,
+                duration_ms: 0,
+            })
+        }
+        async fn request_drain(&self, _req: crate::worker::DrainRequest) {
+            self.draining
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn drain_status(&self) -> crate::worker::DrainState {
+            if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::worker::DrainState::Draining
+            } else {
+                crate::worker::DrainState::Running
+            }
+        }
+    }
+
+    /// Spawn a dispatcher on its own consumer and filter for `agent`.
+    fn spawn_dispatcher(
+        bus: &EventBus,
+        agent_id_str: &str,
+        registry: SharedRegistry,
+        worker: Arc<dyn Worker>,
+        agent_caps: Arc<crate::control_plane::agent_cap::AgentConcurrency>,
+        max_concurrent: usize,
+    ) -> (
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    ) {
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let filter = crate::events::subjects::trigger(agent_id_str);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let dispatcher =
+            TriggerDispatcher::new(bus.clone(), registry, worker, llm, max_concurrent)
+                .with_agent_caps(agent_caps);
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, Some(&filter), shutdown_rx)
+                .await
+        });
+        (shutdown_tx, run)
+    }
+
+    async fn publish_triggers(bus: &EventBus, agent_id_str: &str, n: usize) {
+        let agent = AgentId::new(agent_id_str).unwrap();
+        for i in 0..n {
+            bus.publish_trigger(&agent, &json!({"input": i}))
+                .await
+                .expect("publish trigger");
+        }
+    }
+
+    async fn stop(shutdown_tx: oneshot::Sender<()>, run: tokio::task::JoinHandle<Result<(), DispatcherError>>) {
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("dispatcher exits")
+            .expect("task joins")
+            .expect("clean exit");
+    }
+
+    /// The issue's first acceptance criterion, whole: an agent with
+    /// `max_concurrent: 1` never has two invocations in flight while the
+    /// worker cap is 8, and the third trigger waits and then starts *as
+    /// its first delivery*.
+    ///
+    /// The wait is longer than the trigger durable's one-second ack
+    /// window with seven further permits open, so this is also the proof
+    /// that the hold keeps the delivery alive and consumes no
+    /// redelivery: without the in-progress acks JetStream would redeliver
+    /// into one of those open pulls and the worker would see an extra
+    /// start stamped `attempt: 2`.
+    #[tokio::test]
+    async fn an_agent_at_max_concurrent_one_runs_one_at_a_time_under_a_worker_cap_of_eight() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("capped-one");
+        let (_dir, registry) = registry_with_cap(&agent_id_str, 1);
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let (shutdown_tx, run) = spawn_dispatcher(
+            &bus,
+            &agent_id_str,
+            registry,
+            worker.clone(),
+            Arc::clone(&counts),
+            8,
+        );
+
+        publish_triggers(&bus, &agent_id_str, 3).await;
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+
+        // Past the ack window, with the other two triggers held.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            crate::bus::TRIGGER_RETRY_BACKOFF[0] < Duration::from_millis(1500),
+            "the hold must outlast the ack window for this test to prove anything"
+        );
+        assert_eq!(
+            worker.started(),
+            1,
+            "a capped agent starts one at a time even with seven permits free"
+        );
+        let listed = counts.snapshot();
+        assert_eq!(listed.len(), 1, "`fq doctor` names the agent: {listed:?}");
+        assert_eq!(listed[0].in_flight, 1);
+        assert_eq!(listed[0].cap, 1);
+        assert_eq!(listed[0].held, 2, "both waiting triggers are counted");
+
+        // One slot frees; exactly one held trigger takes it.
+        worker.let_finish(1);
+        worker.wait_for_starts(2, Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(worker.started(), 2, "the freed slot admits one, not both");
+
+        worker.let_finish(2);
+        worker.wait_for_starts(3, Duration::from_secs(10)).await;
+        assert_eq!(
+            worker.peak(),
+            1,
+            "never two invocations of a `max_concurrent: 1` agent at once"
+        );
+        assert_eq!(
+            worker.attempts(),
+            vec![Some(1), Some(1), Some(1)],
+            "held, not redelivered: every start is still a first delivery"
+        );
+
+        stop(shutdown_tx, run).await;
+        assert!(
+            counts.snapshot().is_empty(),
+            "every slot is given back once the runs end"
+        );
+    }
+
+    /// The other terminal exit path: an invocation that *fails* must
+    /// give its slot back, or the agent wedges at its cap forever with
+    /// nothing running. Same shape as the completion case, with the
+    /// worker returning a terminal executor error instead.
+    #[tokio::test]
+    async fn a_failed_invocation_gives_its_agents_slot_back() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("capped-fail");
+        let (_dir, registry) = registry_with_cap(&agent_id_str, 1);
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        worker
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (shutdown_tx, run) = spawn_dispatcher(
+            &bus,
+            &agent_id_str,
+            registry,
+            worker.clone(),
+            Arc::clone(&counts),
+            8,
+        );
+
+        publish_triggers(&bus, &agent_id_str, 2).await;
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+        worker.let_finish(1);
+        worker.wait_for_starts(2, Duration::from_secs(10)).await;
+        assert_eq!(
+            worker.attempts()[1],
+            Some(1),
+            "the trigger behind a failure is still its first delivery"
+        );
+        assert_eq!(counts.in_flight(&agent_id_str), 1, "only the second is running");
+
+        worker.let_finish(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while counts.in_flight(&agent_id_str) > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a failed invocation must release its slot"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        stop(shutdown_tx, run).await;
+    }
+
+    /// The issue's third acceptance criterion: `fq reload` picks up a
+    /// changed cap. Stronger than "for the next trigger" — the cap is
+    /// re-read off the current registry on every pass of the hold, so
+    /// the trigger *already waiting* starts, which is what an operator
+    /// raising a cap to unstick a queue is asking for.
+    ///
+    /// Nothing is released here: the first invocation is still running
+    /// when the second starts, so only the raised cap can explain it.
+    #[tokio::test]
+    async fn fq_reload_raises_a_cap_for_a_trigger_that_is_already_held() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("capped-reload");
+        let (dir, registry) = registry_with_cap(&agent_id_str, 1);
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let (shutdown_tx, run) = spawn_dispatcher(
+            &bus,
+            &agent_id_str,
+            registry.clone(),
+            worker.clone(),
+            Arc::clone(&counts),
+            8,
+        );
+
+        publish_triggers(&bus, &agent_id_str, 2).await;
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(worker.started(), 1, "the second trigger is held at cap 1");
+
+        write_capped_definition(dir.path(), &agent_id_str, 2);
+        reload_from(dir.path(), &registry).await;
+
+        worker.wait_for_starts(2, Duration::from_secs(10)).await;
+        assert_eq!(
+            worker.peak(),
+            2,
+            "the held trigger started beside the running one, on the reloaded cap"
+        );
+        assert_eq!(
+            worker.attempts(),
+            vec![Some(1), Some(1)],
+            "and it was still its first delivery when it did"
+        );
+
+        worker.let_finish(2);
+        stop(shutdown_tx, run).await;
+    }
 }
