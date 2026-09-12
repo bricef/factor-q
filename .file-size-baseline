@@ -33,6 +33,11 @@ services/fq-dashboard/src/render.rs 1122
 # budgeted, per the rule above, so the trade is visible in the diff.
 services/fq-runtime/crates/fq-runtime/src/control_plane/store.rs 1049
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs 2539
-services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1415
+# Raised by hand, 2026-09-12 (#467): `open_read_only` now checks the
+# recorded schema version instead of failing mid-query, and the new
+# `SchemaOutdated` error lives with the other `WorkerStoreError` variants.
+# The check belongs in the open path it guards; the error text belongs
+# with its type. Six lines net.
+services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1421
 services/fq-store/src/cli.rs 842
 services/fq-store/src/index.rs 848
