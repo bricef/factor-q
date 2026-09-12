@@ -446,11 +446,18 @@ unattended:
   `docker compose logs ops` per run; the narration starts only when a
   deploy is actually going to happen.
 - **It waits its turn.** Before draining it asks the daemon, through
-  the container's `fq`, whether any invocation is in flight, and defers
-  to the next run if so, or if the daemon cannot be asked (an unpaired
-  container is never assumed idle). This automates the first check of
-  "Before any restart", and it is why a merge lands on the next quiet
-  hour rather than interrupting the fleet's own builds.
+  the container's `fq doctor`, how many invocations are in flight —
+  the live execution count, which sees a trigger-dispatched run from
+  the instant it is dispatched, stuck ones included — and defers to the
+  next run if any, or if the daemon cannot be asked (an unpaired
+  container is never assumed idle). Not `fq invocation list --status
+  in_flight`: that listing is not written on dispatch and answered
+  "idle" while agents were mid-tool
+  ([#721](https://github.com/bricef/factor-q/issues/721)). The backup
+  and the cache prune ask the same question the same way. This
+  automates the first check of "Before any restart", and it is why a
+  merge lands on the next quiet hour rather than interrupting the
+  fleet's own builds.
 - **It rolls back by itself.** If the new build does not log `Runtime
   ready` (or logs a startup refusal), or the watcher, scheduler or
   dashboard does not come up healthy on its own probe, it puts the

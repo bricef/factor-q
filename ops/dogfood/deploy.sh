@@ -280,13 +280,22 @@ running_image() {  # $1 = service → the image its running container was create
 # How many invocations the running daemon has in flight, or "unknown"
 # when it cannot be asked (no container, or its fq is not paired yet —
 # the README's one-time step). Asked through the container's own client
-# over the edge, like every other question to the daemon.
+# over the edge, like every other question to the daemon — of `fq
+# doctor`, whose `executions.in_flight` is read from the live execution
+# table and counts a trigger-dispatched run from the instant it is
+# dispatched. NOT `fq invocation list --status in_flight`: that reads the
+# ownership table, which nothing writes on dispatch (#721), so it
+# answered "idle" while agents were mid-tool and the drain killed them.
+# Stuck invocations count too: a deploy waits until an operator drops
+# or resumes them, which FQ_DEFER_WARN_HOURS exists to surface.
 in_flight() {
     local cid out
     cid="$(docker compose ps -q --status running fqd 2>/dev/null | head -1)"
     [ -n "$cid" ] || { echo 0; return; }
-    out="$(docker compose exec -T fqd fq invocation list --status in_flight --json 2>/dev/null)" || { echo unknown; return; }
-    printf '%s' "$out" | { grep -o '"invocation_id"' || true; } | wc -l | tr -dc '0-9'
+    out="$(docker compose exec -T fqd fq doctor --json 2>/dev/null)" || { echo unknown; return; }
+    # -n with `try input`: exactly one answer whatever arrives — a count,
+    # or "unknown" for an empty, unparseable or execution-less report.
+    printf '%s' "$out" | jq -rn '(try input catch {}) | .executions.in_flight // "unknown"' 2>/dev/null || echo unknown
 }
 
 if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$SHA" ]; then
