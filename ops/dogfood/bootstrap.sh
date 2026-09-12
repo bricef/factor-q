@@ -156,8 +156,10 @@ printf '════════════════════════
 cat <<NEXT
 
 Left for you (ops/dogfood/README.md, "Bootstrap"):
-  1. $DOGFOOD/.secrets/env         — ANTHROPIC_API_KEY, GH_TOKEN (the broker token is already in)
+  1. $DOGFOOD/.secrets/env         — ANTHROPIC_API_KEY, OPENROUTER_API_KEY, GH_TOKEN (the broker token is already in)
+                                     one key per provider fqd.toml declares, or the daemon will not start
      $DOGFOOD/.secrets/caddy.env   — DASH_USER, DASH_HASH
+     no public address?            — DASH_INTERNAL_ADDR in caddy.env + compose.override.yml (README, "An internal host")
      docker login ghcr.io          — as $FQ_USER, if the packages are private
      $DOGFOOD/.env                 — FQ_NOTIFY_HOOK, where a rollback or a warning should reach you
                                      (then: sudo -iu $FQ_USER $DOGFOOD/notify.sh --test)
