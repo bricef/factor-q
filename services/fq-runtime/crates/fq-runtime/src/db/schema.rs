@@ -141,6 +141,29 @@ pub async fn read_schema_version(
     Ok(row.map(|r| r.get::<i64, _>(0) as u32))
 }
 
+/// Inspect a versioned store without creating or migrating anything.
+///
+/// A missing `schema_meta` table is a fresh/uninitialised file rather
+/// than a backend failure. Read-only callers use that distinction to
+/// tell operators whether to initialise or migrate the store.
+pub async fn inspect_readable_versioned(
+    pool: &Pool<Sqlite>,
+    class: &str,
+    binary_version: u32,
+) -> Result<Compatibility, sqlx::Error> {
+    let has_schema_meta: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_schema_meta {
+        return Ok(Compatibility::FreshInstall);
+    }
+
+    let recorded = read_schema_version(pool, class).await?;
+    Ok(check_compatibility(recorded, binary_version))
+}
+
 /// Record `version` for `class`, replacing any earlier row.
 pub async fn write_schema_version(
     pool: &Pool<Sqlite>,
