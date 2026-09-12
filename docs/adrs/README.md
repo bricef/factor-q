@@ -86,6 +86,7 @@ A design doc's *folder* answers the same question for prose:
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — unstarted, while the incident it fixes (#327) is still open |
+| [0036](draft/0036-ops-image-and-scheduler-service.md) | The stack schedules its own operations: an `fq-ops` image carries the deploy, hygiene and backup scripts and their schedule, a compose `ops` service fires each as a one-shot sibling container, and the host crontab and bootstrap's script copy retire; narrows [ADR-0035](accepted/0035-container-image-and-compose-supervision.md) clause 7 to "never into a container that runs the daemon or an agent" — proposed 2026-09-12 after #707, unstarted |
 
 ## Related guides
 
