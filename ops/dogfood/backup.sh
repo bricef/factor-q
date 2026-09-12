@@ -49,8 +49,11 @@ die() {
 exec 9>"$DOGFOOD/.deploy.lock"
 flock -n 9 || { [ "$AUTO" = 1 ] && { say "a deploy or backup is running — skipping"; exit 0; }; die "another deploy or backup holds $DOGFOOD/.deploy.lock"; }
 
+# The same question deploy.sh asks, of the same surface: `fq doctor`'s
+# live execution count, never `invocation list --status in_flight`,
+# which is blind to trigger-dispatched runs (#721).
 if [ "$AUTO" = 1 ] && [ -n "$(docker compose ps -q --status running fqd 2>/dev/null)" ]; then
-    inflight="$(if out="$(docker compose exec -T fqd fq invocation list --status in_flight --json 2>/dev/null)"; then printf '%s' "$out" | { grep -o '"invocation_id"' || true; } | wc -l | tr -dc '0-9'; else echo unknown; fi)"
+    inflight="$(if out="$(docker compose exec -T fqd fq doctor --json 2>/dev/null)"; then printf '%s' "$out" | jq -rn '(try input catch {}) | .executions.in_flight // "unknown"' 2>/dev/null || echo unknown; else echo unknown; fi)"
     [ "$inflight" = "0" ] || { say "${inflight} invocation(s) in flight (or the daemon cannot be asked) — deferring the backup"; exit 0; }
 fi
 

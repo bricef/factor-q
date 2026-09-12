@@ -109,7 +109,10 @@ if [ "$build_mb" -gt "$max_mb" ]; then
     if [ "$REPORT_ONLY" = 1 ]; then
         warn "build cache is ${build_mb}M, over ${CACHE_MAX_GB}G (report only — not pruned)"
     else
-        inflight="$(if out="$(docker compose exec -T fqd fq invocation list --status in_flight --json 2>/dev/null)"; then printf '%s' "$out" | { grep -o '"invocation_id"' || true; } | wc -l | tr -dc '0-9'; else echo unknown; fi)"
+        # deploy.sh's question, of the same surface: `fq doctor`'s live
+        # execution count, never `invocation list --status in_flight`,
+        # which is blind to trigger-dispatched runs (#721).
+        inflight="$(if out="$(docker compose exec -T fqd fq doctor --json 2>/dev/null)"; then printf '%s' "$out" | jq -rn '(try input catch {}) | .executions.in_flight // "unknown"' 2>/dev/null || echo unknown; else echo unknown; fi)"
         if [ "$inflight" = "0" ]; then
             say "build cache is ${build_mb}M, over ${CACHE_MAX_GB}G and the daemon is idle — emptying build/ (the next build is cold)"
             docker compose exec -T fqd sh -c 'cd /var/lib/factor-q/build && rm -rf target sccache cargo/registry go-cache go-mod' \
