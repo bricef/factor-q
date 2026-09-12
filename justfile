@@ -302,6 +302,7 @@ go-ci: gate-adapters
 # Run the ops script tests (the deploy message's change list).
 ops-ci:
     bash ops/dogfood/tests/render-changes.sh
+    bash ops/dogfood/tests/fq-ops.sh
 
 # Run all quality checks — docs lint + link check + dependency audit + both
 # Rust gates + the Go adapters (the full local gate) — and print a per-phase
@@ -396,7 +397,11 @@ docker-stage target:
 
 # Every image target, tagged factor-q/<name>:<tag> (default `latest`).
 # `minimal` is the daemon held to the bare envelope; `dogfood` is minimal's
-# binaries plus the fleet's toolchain; the rest are one static binary each.
+# binaries plus the fleet's toolchain; the adapters and the dashboard are
+# one static binary each; `ops` is the stack's own operations scripts and
+# their schedule (ADR-0036) — no binary, so the commit is stamped in by
+# build-arg the way build.rs stamps it into the binaries (-dirty and all),
+# and `fq-ops --version` reports it for the same coherence check.
 # Build every container image from the staged binaries.
 docker-build target tag="latest": (docker-stage target)
     docker build --target minimal   -t factor-q/fq-runtime:{{tag}}      -f services/fq-runtime/Dockerfile .
@@ -404,6 +409,7 @@ docker-build target tag="latest": (docker-stage target)
     docker build --target watcher   -t factor-q/github-watcher:{{tag}}  -f services/fq-runtime/Dockerfile .
     docker build --target cron      -t factor-q/fq-cron:{{tag}}         -f services/fq-runtime/Dockerfile .
     docker build --target dashboard -t factor-q/fq-dashboard:{{tag}}    -f services/fq-runtime/Dockerfile .
+    docker build --target ops       -t factor-q/fq-ops:{{tag}}          -f services/fq-runtime/Dockerfile --build-arg "FQ_OPS_SHA=$(git rev-parse --short=12 HEAD)$([ -z "$(git status --porcelain)" ] || printf -- -dirty)" .
 
 # An image that builds but cannot start is still broken (a leftover
 # `CMD ["run"]` once outlived the subcommand it named), and distroless has
@@ -421,12 +427,15 @@ docker-check tag="latest":
     echo "github-watcher:";                     docker run --rm factor-q/github-watcher:{{tag}} --version
     echo "fq-cron:";                            docker run --rm factor-q/fq-cron:{{tag}} --version
     echo "fq-dashboard:";                       docker run --rm factor-q/fq-dashboard:{{tag}} --version
+    echo "fq-ops — the ops image:";             docker run --rm factor-q/fq-ops:{{tag}} --version
+    echo "fq-ops — the crontab, the toolset, the scripts:"
+    docker run --rm factor-q/fq-ops:{{tag}} check
 
 # Where `docker-publish` pushes: <registry>/<image>:<tag>. The default is
 # the repository's own container registry; override for a fork or a mirror.
 docker_registry := env("FQ_DOCKER_REGISTRY", "ghcr.io/bricef")
 # Every image `docker-build` produces, by name; publish iterates this list.
-docker_images := "fq-runtime fq-dogfood github-watcher fq-cron fq-dashboard"
+docker_images := "fq-runtime fq-dogfood github-watcher fq-cron fq-dashboard fq-ops"
 
 # Publish every built image to the registry under two tags: the twelve-hex
 # commit the binaries inside it report, and the moving `main-latest`, the
@@ -450,6 +459,11 @@ docker-publish sha:
     [ -x dist/bin/fq ] || { echo "docker-publish: no dist/bin/fq — run 'just docker-build <target> $sha' first" >&2; exit 1; }
     stamped="$(dist/bin/fq --version | sed -nE 's/.*\(([0-9a-f]+(-dirty)?) .*/\1/p')"
     [ "$stamped" = "$sha" ] || { echo "docker-publish: dist/bin/fq reports '$stamped', not $sha — stale staging or a dirty build; refusing" >&2; exit 1; }
+    # The ops image carries no binary; its stamp is the build-arg
+    # docker-build passed, and the same rule applies to it.
+    docker image inspect "factor-q/fq-ops:${sha}" >/dev/null 2>&1 || { echo "docker-publish: factor-q/fq-ops:${sha} not built — run 'just docker-build <target> $sha' first" >&2; exit 1; }
+    ops_stamped="$(docker run --rm "factor-q/fq-ops:${sha}" --version | awk '{print $2}')"
+    [ "$ops_stamped" = "$sha" ] || { echo "docker-publish: factor-q/fq-ops:${sha} reports '$ops_stamped', not $sha — built from another commit or a dirty tree; refusing" >&2; exit 1; }
     for name in {{docker_images}}; do
         local_ref="factor-q/${name}:${sha}"
         docker image inspect "$local_ref" >/dev/null 2>&1 || { echo "docker-publish: $local_ref not built — run 'just docker-build <target> $sha' first" >&2; exit 1; }

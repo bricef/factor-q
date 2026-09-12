@@ -129,6 +129,9 @@ jobs:
               - 'rust-toolchain.toml'
               - 'adapters/*/go.mod'
               - '.github/workflows/ci.yml'
+              # The ops image carries these (ADR-0036), so a script change
+              # is an image change.
+              - 'ops/dogfood/**'
 
   docs-lint:
     name: Docs lint
