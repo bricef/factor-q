@@ -569,9 +569,11 @@ one ever needs packaging again.
    ```
 
 2. **The source's publishers stop before the destination's start.**
-   `docker compose stop github-watcher fq-cron fqd` — the two publishers
-   first, so nothing is claimed or fired mid-drain, then the daemon; the
-   dashboard last or never. Confirm with `fq workers list` that the
+   `docker compose stop github-watcher fq-cron`, then
+   `docker compose stop fqd` — two commands, because compose orders
+   nothing between services that do not depend on each other: the two
+   publishers first, so nothing is claimed or fired mid-drain, then the
+   daemon; the dashboard last or never. Confirm with `fq workers list` that the
    worker ended `shutdown`, not `stale`. Never run two watchers or two
    schedulers against one repository, or both claim the same issues: the
    old pair is down before the new pair is up, and the reverse on a
