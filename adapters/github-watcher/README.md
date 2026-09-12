@@ -34,6 +34,16 @@ ready ──trigger──▶ in-progress ──completed (task success/partial)�
                         └──failed (terminal / retries exhausted)──▶ failed
 ```
 
+> **⚠ Outcome observation is broken on `main` — fix tracked in
+> [#694](https://github.com/bricef/factor-q/issues/694).** The event
+> decoder accepts envelope `schema_version` 2 and nothing else, and every
+> event the runtime writes has been version 3 since
+> [#510](https://github.com/bricef/factor-q/issues/510) (2026-09-04), so
+> completions and failures are counted as version mismatches and skipped.
+> A claimed issue therefore stays `status:in-progress` until someone
+> relabels it by hand. Claiming and the merged-PR sweep read GitHub rather
+> than the event stream, and are unaffected.
+
 **On each poll**, for every open issue labelled `status:ready`:
 
 1. **Claim** the issue: add `in-progress`, **then** remove `ready`.
@@ -64,10 +74,13 @@ ever. If that rollback fails too, the issue really is stuck: the watcher
 says so, names both labels, and asks for a hand repair instead of
 promising a retry.
 
-**Observing the outcome** (closes the gap that stranded issue #9). The
-watcher subscribes to the triggered agent's lifecycle events
-(`fq.agent.<agent>.triggered` / `.completed` / `.failed`), binds each
-invocation to its issue via the `triggered` event's payload, and reacts:
+**Observing the outcome** (closes the gap that stranded issue #9). This is
+the half [#694](https://github.com/bricef/factor-q/issues/694) disables:
+what follows is what the watcher is built to do, not what a build from
+`main` does today. The watcher subscribes to the triggered agent's
+lifecycle events (`fq.agent.<agent>.triggered` / `.completed` /
+`.failed`), binds each invocation to its issue via the `triggered`
+event's payload, and reacts:
 
 - **completed** → routed by the agent's declared `task_status` (#125):
   `success`/`partial`/absent → `in-progress` → `in-review` only after verifying an open PR closes the issue (otherwise bounded retry); `failed`/`blocked`
