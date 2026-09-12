@@ -10,14 +10,16 @@
 //! by — see [`openrouter`]. The daemon layers it over this table.
 //!
 //! Loading strategy (see [`PricingTable::load`] and [`load_source`]):
-//! 1. Fetch the JSON from its remote.
-//! 2. On success, write it to the cache path and parse the fresh copy.
-//! 3. On fetch failure, log a warning and load the last cached copy.
-//! 4. On cache miss too, log another warning and return an empty table
+//! 1. Verify an existing cache for a pinned source before using or replacing it.
+//! 2. Fetch the JSON from its remote and verify its recorded SHA256.
+//! 3. On success, write it to the cache path and parse the fresh copy.
+//! 4. On fetch failure, load the already-verified cached copy.
+//! 5. On cache miss too, log another warning and return an empty table
 //!    (costs will be reported as $0 with a warning per unknown model).
 //!
-//! The runtime never blocks on pricing. Agents keep running even if we
-//! fall back to a stale cache or an empty table.
+//! The runtime tolerates unavailable pricing, but refuses to start if a
+//! pinned source or its cache fails integrity verification. Agents keep
+//! running when an unavailable source falls back to an intact stale cache.
 //!
 //! Note: this is a startup fetch. Once factor-q is a continuously
 //! running service (per VISION.md), pricing will need periodic refresh
@@ -32,13 +34,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::events::TokenUsage;
 
-/// URL of the LiteLLM pricing JSON, main branch.
-pub const LITELLM_PRICING_URL: &str =
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+/// URL of the LiteLLM pricing JSON, pinned at 2026-09-11 commit
+/// `362033cb2a703e591184a4ec5887a42ec7114873`.
+pub const LITELLM_PRICING_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/362033cb2a703e591184a4ec5887a42ec7114873/model_prices_and_context_window.json";
+
+const LITELLM_PRICING_REF: &str = "362033cb2a703e591184a4ec5887a42ec7114873";
+const PRICING_CHECKSUMS: &str = include_str!("../../../../../.pricing-checksum");
 
 /// Per-model input and output prices in USD per million tokens.
 #[derive(Debug, Clone, Copy)]
@@ -287,12 +293,30 @@ pub struct PricingSource<'a> {
 /// Fetch a pricing document, cache it to disk, and parse the fresh
 /// copy; fall back to the cached copy when the fetch or the parse
 /// fails, and to an empty table when there is no usable cache either.
-/// Never fails — the runtime does not block on pricing; the startup
-/// guarantee (ADR-0004) decides afterwards whether the result suffices.
+/// Availability failures fall back, and the startup guarantee (ADR-0004)
+/// decides afterwards whether the result suffices. Integrity failures are
+/// fatal because continuing would silently undermine budget enforcement.
 pub async fn load_source(source: PricingSource<'_>, cache_path: &Path) -> PricingTable {
     let name = source.name;
+    let expected_sha256 = (source.url == LITELLM_PRICING_URL).then(litellm_pricing_sha256);
+    if let Some(digest) = expected_sha256 {
+        info!(
+            source = name,
+            source_ref = LITELLM_PRICING_REF,
+            sha256 = digest,
+            "loading pinned pricing source"
+        );
+        if let Ok(cached) = fs::read_to_string(cache_path) {
+            verify_pricing_checksum(&cached, &cache_path.display().to_string(), digest)
+                .unwrap_or_else(|message| panic!("{message}"));
+        }
+    }
     match fetch(source.url).await {
         Ok(json) => {
+            if let Some(expected) = expected_sha256 {
+                verify_pricing_checksum(&json, source.url, expected)
+                    .unwrap_or_else(|message| panic!("{message}"));
+            }
             debug!(bytes = json.len(), source = name, "fetched pricing JSON");
             if let Err(err) = write_cache(cache_path, &json) {
                 warn!(error = %err, source = name, "failed to write pricing cache");
@@ -318,29 +342,39 @@ pub async fn load_source(source: PricingSource<'_>, cache_path: &Path) -> Pricin
 fn load_from_cache_or_empty(source: &PricingSource<'_>, cache_path: &Path) -> PricingTable {
     let name = source.name;
     match fs::read_to_string(cache_path) {
-        Ok(json) => match (source.parse)(&json) {
-            Ok(table) => {
-                // Serving from disk means the fresh fetch didn't
-                // land — surface it loudly with the cache age so
-                // reliance on possibly-stale prices is visible. The
-                // startup pricing guarantee still ensures declared
-                // models are *priced*; this flags that they may be
-                // *out of date* (runtime refresh is future work —
-                // issue #344, "Periodic LiteLLM pricing
-                // refresh").
-                warn!(
-                    entries = table.len(),
-                    path = %cache_path.display(),
-                    cache_age = %cache_age(cache_path),
-                    "using cached {name} pricing (fresh fetch unavailable); prices may be stale"
-                );
-                table
+        Ok(json) => {
+            if source.url == LITELLM_PRICING_URL {
+                verify_pricing_checksum(
+                    &json,
+                    &cache_path.display().to_string(),
+                    litellm_pricing_sha256(),
+                )
+                .unwrap_or_else(|message| panic!("{message}"));
             }
-            Err(err) => {
-                warn!(error = %err, path = %cache_path.display(), source = name, "cached pricing is corrupt; using empty table");
-                PricingTable::empty()
+            match (source.parse)(&json) {
+                Ok(table) => {
+                    // Serving from disk means the fresh fetch didn't
+                    // land — surface it loudly with the cache age so
+                    // reliance on possibly-stale prices is visible. The
+                    // startup pricing guarantee still ensures declared
+                    // models are *priced*; this flags that they may be
+                    // *out of date* (runtime refresh is future work —
+                    // issue #344, "Periodic LiteLLM pricing
+                    // refresh").
+                    warn!(
+                        entries = table.len(),
+                        path = %cache_path.display(),
+                        cache_age = %cache_age(cache_path),
+                        "using cached {name} pricing (fresh fetch unavailable); prices may be stale"
+                    );
+                    table
+                }
+                Err(err) => {
+                    warn!(error = %err, path = %cache_path.display(), source = name, "cached pricing is corrupt; using empty table");
+                    PricingTable::empty()
+                }
             }
-        },
+        }
         Err(_) => {
             warn!(
                 path = %cache_path.display(),
@@ -376,6 +410,28 @@ async fn fetch(url: &str) -> Result<String, PricingError> {
         .text()
         .await
         .map_err(|err| PricingError::Http(err.to_string()))
+}
+
+fn litellm_pricing_sha256() -> &'static str {
+    PRICING_CHECKSUMS
+        .lines()
+        .find(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .and_then(|line| line.split_whitespace().next())
+        .expect(".pricing-checksum must contain a digest")
+}
+
+fn verify_pricing_checksum(contents: &str, location: &str, expected: &str) -> Result<(), String> {
+    let actual = Sha256::digest(contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "pricing integrity check failed for {location}: expected SHA256 {expected}, got SHA256 {actual}"
+        ))
+    }
 }
 
 fn write_cache(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -658,10 +714,36 @@ mod tests {
         assert!(table.lookup("claude-haiku-test").is_some());
     }
 
+    #[test]
+    fn checksum_mismatch_names_file_and_both_digests() {
+        let error = verify_pricing_checksum("tampered", "/tmp/pricing.json", "expected-digest")
+            .unwrap_err();
+        assert!(error.contains("/tmp/pricing.json"));
+        assert!(error.contains("expected SHA256 expected-digest"));
+        assert!(error.contains(
+            "got SHA256 d121be3103007b41edf96f8262925f8c7d61894afe9a041843b631f69445bc57"
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "pricing integrity check failed for")]
+    fn tampered_cached_pricing_refuses_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pricing.json");
+        std::fs::write(&path, "tampered").unwrap();
+        let source = PricingSource {
+            name: "LiteLLM",
+            url: LITELLM_PRICING_URL,
+            parse: PricingTable::from_litellm_json,
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(load_source(source, &path));
+    }
+
     fn litellm_source() -> PricingSource<'static> {
         PricingSource {
             name: "LiteLLM",
-            url: LITELLM_PRICING_URL,
+            url: "test://litellm",
             parse: PricingTable::from_litellm_json,
         }
     }
