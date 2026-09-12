@@ -89,9 +89,11 @@ next one), [#684](https://github.com/bricef/factor-q/issues/684) (a daemon
 attaching to a restored stream with no durable halts `fq-coordination` and
 `fq-projector` at sequence 1 and still logs `Runtime ready` — never restore
 `nats-data` without its consumer state),
-[#694](https://github.com/bricef/factor-q/issues/694) (the watcher accepts
-only event `schema_version` 2, so every v3 completion is skipped and a
-claimed issue stays `status:in-progress`; claiming itself works). Backups are
+[#694](https://github.com/bricef/factor-q/issues/694) (the watcher accepted
+only event `schema_version` 2, so every v3 completion was skipped and a
+claimed issue stayed `status:in-progress`; claiming itself worked — fixed,
+and `just check-schema-versions` now fails the gate if a version bump
+outruns the watcher again). Backups are
 on the guest only until `FQ_BACKUP_HOOK` names an off-host copy.
 
 **Retirement (≈2026-09-19, after a week green).** The old host — the

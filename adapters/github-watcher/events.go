@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -40,6 +41,38 @@ type NatsOutcomeSource struct {
 // own.
 func NewNatsOutcomeSource(nc *nats.Conn, taskTemplate string, log *slog.Logger) *NatsOutcomeSource {
 	return &NatsOutcomeSource{nc: nc, taskTemplate: taskTemplate, log: log}
+}
+
+// supportedSchemaVersions are the envelope versions this watcher reads.
+//
+// It is a *superset* of what the runtime writes today, and deliberately
+// so. The watcher reads four fields out of the whole event schema —
+// `invocation_id`, `trigger_payload`, `task_status`, `error_kind` — and
+// those have been identical in every version since 2; the 2 → 3 bump
+// (<https://github.com/bricef/factor-q/issues/510>) changed message parts
+// inside `llm_request`/`llm_response`, which the watcher never decodes.
+// So for the watcher's purposes v3 is v2, and accepting both means a
+// version bump does not blind it to a stream that still carries older
+// events.
+//
+// What it must never do is refuse a version the runtime emits: between
+// #510 and <https://github.com/bricef/factor-q/issues/694> this was a
+// hard-coded `!= 2` while every event was a 3, so every completion was
+// skipped and no issue left `status:in-progress` for eight days. This set
+// is a hand-kept copy of the runtime's `SUPPORTED_SCHEMA_VERSIONS`
+// (`services/fq-runtime/crates/fq-ops/src/events/wire.rs`) because the
+// adapter talks to factor-q only through wire contracts and cannot read a
+// Rust const. `scripts/check-schema-versions.sh` (`just
+// check-schema-versions`, a phase of `just quality`) is what keeps the
+// copy honest: it fails the gate if the runtime declares a version this
+// list omits. Adding a version here is therefore a deliberate statement
+// that the four fields above still decode from it.
+var supportedSchemaVersions = []int{2, 3}
+
+// schemaVersionSupported reports whether an envelope version is one this
+// build reads.
+func schemaVersionSupported(version int) bool {
+	return slices.Contains(supportedSchemaVersions, version)
 }
 
 // eventEnvelope is the subset of the event-schema envelope the watcher
@@ -126,13 +159,14 @@ func (s *NatsOutcomeSource) decode(msg *nats.Msg) (OutcomeEvent, bool) {
 	if err := json.Unmarshal(msg.Data, &we); err != nil {
 		return OutcomeEvent{}, false
 	}
-	if we.Envelope.SchemaVersion != 2 {
+	if !schemaVersionSupported(we.Envelope.SchemaVersion) {
 		s.schemaVersionMismatches.Add(1)
 		log := s.log
 		if log == nil {
 			log = slog.Default()
 		}
-		log.Warn("skipping event with unsupported schema version", "schema_version", we.Envelope.SchemaVersion, "want", 2)
+		log.Warn("skipping event with unsupported schema version",
+			"schema_version", we.Envelope.SchemaVersion, "want", supportedSchemaVersions)
 		return OutcomeEvent{}, false
 	}
 	ev := OutcomeEvent{Kind: kind, InvocationID: we.Envelope.InvocationID}

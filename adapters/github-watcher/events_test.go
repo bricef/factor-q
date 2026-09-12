@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,10 +19,21 @@ import (
 // nested under payload.payload. Building fixtures this way is the whole
 // point — a flat fixture is what let the decode bug ship, so these tests
 // deliberately mirror the runtime serialization.
+//
+// It stamps envelope version 2, the older of the versions the watcher
+// reads; wireEventJSONAt stamps any version, and is how the current one is
+// covered.
 func wireEventJSON(t *testing.T, invID, eventType string, inner any) []byte {
 	t.Helper()
+	return wireEventJSONAt(t, 2, invID, eventType, inner)
+}
+
+// wireEventJSONAt is wireEventJSON with the envelope's schema_version
+// chosen by the caller.
+func wireEventJSONAt(t *testing.T, schemaVersion int, invID, eventType string, inner any) []byte {
+	t.Helper()
 	b, err := json.Marshal(map[string]any{
-		"envelope": map[string]any{"schema_version": 2, "invocation_id": invID},
+		"envelope": map[string]any{"schema_version": schemaVersion, "invocation_id": invID},
 		"payload": map[string]any{
 			"event_type": eventType,
 			"payload":    inner,
@@ -97,15 +111,82 @@ func TestDecodeFailedUnwrapsErrorKind(t *testing.T) {
 	}
 }
 
-func TestDecodeRejectsUnsupportedSchemaVersion(t *testing.T) {
-	var logs bytes.Buffer
-	s := &NatsOutcomeSource{taskTemplate: "issue #%d", log: slog.New(slog.NewTextHandler(&logs, nil))}
-	data := wireEventJSON(t, "inv-new", "completed", map[string]any{})
-	data = bytes.Replace(data, []byte(`"schema_version":2`), []byte(`"schema_version":3`), 1)
-	if ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data}); ok {
-		t.Fatalf("schema version 3 decoded unexpectedly: %+v", ev)
+// Every version in supportedSchemaVersions must actually decode. The set is
+// the watcher's half of the contract `just check-schema-versions` enforces
+// against the runtime's SUPPORTED_SCHEMA_VERSIONS, and a version listed
+// there but not decodable would satisfy the drift gate while skipping every
+// event all the same.
+func TestDecodeAcceptsEverySupportedSchemaVersion(t *testing.T) {
+	for _, version := range supportedSchemaVersions {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			s := &NatsOutcomeSource{taskTemplate: "issue #%d"}
+			data := wireEventJSONAt(t, version, "inv-v", "completed", map[string]any{"task_status": "success"})
+			ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data})
+			if !ok || ev.Kind != OutcomeCompleted || ev.InvocationID != "inv-v" || ev.TaskStatus != "success" {
+				t.Fatalf("v%d decode = %+v ok=%v, want completed/inv-v/success", version, ev, ok)
+			}
+			if n := s.schemaVersionMismatches.Load(); n != 0 {
+				t.Fatalf("v%d counted %d schema mismatches, want 0", version, n)
+			}
+		})
 	}
-	if s.schemaVersionMismatches.Load() != 1 || !strings.Contains(logs.String(), "unsupported schema version") {
-		t.Fatalf("mismatch count/log = %d/%q", s.schemaVersionMismatches.Load(), logs.String())
+}
+
+// A version the watcher does not read is still skipped and still counted —
+// the counter is the only signal that a bump has outrun this adapter.
+func TestDecodeRejectsUnsupportedSchemaVersion(t *testing.T) {
+	for _, version := range []int{1, 99} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			if schemaVersionSupported(version) {
+				t.Skipf("v%d is now supported; pick another out-of-set version", version)
+			}
+			var logs bytes.Buffer
+			s := &NatsOutcomeSource{taskTemplate: "issue #%d", log: slog.New(slog.NewTextHandler(&logs, nil))}
+			data := wireEventJSONAt(t, version, "inv-new", "completed", map[string]any{})
+			if ev, ok := s.decode(&nats.Msg{Subject: "fq.agent.a.completed", Data: data}); ok {
+				t.Fatalf("schema version %d decoded unexpectedly: %+v", version, ev)
+			}
+			if s.schemaVersionMismatches.Load() != 1 || !strings.Contains(logs.String(), "unsupported schema version") {
+				t.Fatalf("mismatch count/log = %d/%q", s.schemaVersionMismatches.Load(), logs.String())
+			}
+		})
+	}
+}
+
+// The regression guard for #694, end to end over the two halves that were
+// broken apart: a version-3 `triggered` binds the invocation to its issue
+// and a version-3 `completed` moves the issue on to in-review. Before the
+// fix both events were skipped at the version check, the binding was never
+// learned, no relabel was attempted, and the issue sat at in-progress —
+// which is exactly what #692 did for eight days' worth of fleet runs.
+func TestSchemaVersion3CompletionReachesInReview(t *testing.T) {
+	src := &labelSource{}
+	reactor := NewOutcomeReactor(src, outcomeConfig(), discardLogger())
+	reactor.Stamper = &fakeStamper{prsByIssue: map[int][]int{692: {693}}, bodies: map[int]string{693: "body"}}
+	source := &NatsOutcomeSource{taskTemplate: "Implement the fix described in GitHub issue #%d."}
+
+	for _, msg := range []*nats.Msg{
+		{Subject: "fq.agent.m0-issue-fix.triggered", Data: wireEventJSONAt(t, 3, "inv-692", "triggered", map[string]any{
+			"trigger_payload": map[string]any{
+				"task":   "Implement the fix described in GitHub issue #692.",
+				"github": map[string]any{"repo": "bricef/factor-q", "issue": 692},
+			},
+		})},
+		{Subject: "fq.agent.m0-issue-fix.completed", Data: wireEventJSONAt(t, 3, "inv-692", "completed", map[string]any{
+			"task_status": "success",
+		})},
+	} {
+		ev, ok := source.decode(msg)
+		if !ok {
+			t.Fatalf("v3 %s was skipped at decode; the watcher is deaf to what the runtime writes", msg.Subject)
+		}
+		reactor.React(context.Background(), ev)
+	}
+
+	if want := []string{"relabel #692 in-progress->in-review"}; !slices.Equal(src.ops, want) {
+		t.Errorf("ops = %v, want %v", src.ops, want)
+	}
+	if n := source.schemaVersionMismatches.Load(); n != 0 {
+		t.Errorf("schema mismatches = %d, want 0 for the version the runtime writes", n)
 	}
 }
