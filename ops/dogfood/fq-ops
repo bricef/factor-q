@@ -33,9 +33,14 @@ case "$verb" in
     schedule)
         exec supercronic -passthrough-logs "$ETC/crontab" ;;
     probe)
-        # The scheduler is PID 1 of the `ops` service (exec'd above). In a
-        # one-shot sibling PID 1 is the script, and the probe is not asked.
-        [ "$(cat /proc/1/comm 2>/dev/null || true)" = supercronic ] ;;
+        # Alive while a supercronic process exists in the container. Not
+        # "PID 1 is supercronic": the service runs under an init, which is
+        # PID 1 and reaps for it. A one-shot sibling has none, and nothing
+        # waits on a sibling's health.
+        for comm in /proc/[0-9]*/comm; do
+            [ "$(cat "$comm" 2>/dev/null || true)" = supercronic ] && exit 0
+        done
+        exit 1 ;;
     check)
         supercronic -test "$ETC/crontab"
         docker --version

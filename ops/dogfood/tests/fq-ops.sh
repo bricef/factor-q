@@ -34,8 +34,16 @@ if bash "$fq_ops" frobnicate >/dev/null 2>&1; then printf '  FAIL an unknown ver
 else printf '  ok   an unknown verb is refused (exit %s)\n' "$(bash "$fq_ops" frobnicate >/dev/null 2>&1; echo $?)"; fi
 [ "$(bash "$fq_ops" frobnicate 2>&1 >/dev/null; true)" != "" ] && printf '  ok   the refusal says which verb\n' || { printf '  FAIL the refusal is silent\n'; failed=1; }
 
-if bash "$fq_ops" probe 2>/dev/null; then printf '  FAIL probe passes outside the scheduler\n'; failed=1
-else printf '  ok   probe fails outside the scheduler\n'; fi
+if bash "$fq_ops" probe 2>/dev/null; then printf '  FAIL probe passes with no scheduler process\n'; failed=1
+else printf '  ok   probe fails with no scheduler process\n'; fi
+# A process whose comm is `supercronic` — anywhere, not PID 1: the service
+# runs under an init — is what the probe looks for. A symlink's basename
+# is the comm of what it executes.
+ln -s "$(command -v sleep)" "$work/supercronic"
+"$work/supercronic" 30 & fake=$!
+if bash "$fq_ops" probe 2>/dev/null; then printf '  ok   probe passes while a supercronic process runs\n'
+else printf '  FAIL probe fails with a supercronic process running\n'; failed=1; fi
+kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null
 
 if bash "$fq_ops" help | grep -q 'fq-ops --version'; then printf '  ok   help prints the usage\n'
 else printf '  FAIL help does not print the usage\n'; failed=1; fi
