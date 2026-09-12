@@ -12,7 +12,7 @@ systemd units — and retires the "no supervisor" carve-out of
 of [ADR-0022](0022-binary-distribution-and-licensing.md) stays as it is;
 images are a second artifact, not a replacement.
 
-Implementation: partial — the images (clauses 1, 3, 4 and the daemon's
+Implementation: complete — the images (clauses 1, 3, 4 and the daemon's
 half of 6 and 8) are built and published: `services/fq-runtime/Dockerfile`
 holds the `minimal`, `dogfood`, `watcher`, `cron` and `dashboard` targets,
 assembled from the release binaries rather than compiled in-image, with
@@ -33,8 +33,8 @@ instance restorable (slice 5); the adapter and dashboard images carry
 their own probes — each binary serves a loopback `/healthz` and asks it
 under the `HEALTHCHECK` — completing clause 8, `deploy.sh` waits on
 them, and `notify.sh` is the channel for what the unattended scripts
-find (slice 6 and after). Not built: the live instance has not yet been
-moved onto the stack (the runbook is in the ops README).
+find (slice 6 and after). The live instance moved onto the stack on
+2026-09-12 ([#587](https://github.com/bricef/factor-q/issues/587)).
 
 ## Context
 
