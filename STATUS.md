@@ -1,10 +1,12 @@
 # Status
 
 One screen: what runs today, where we are, what's next. Updated at
-milestone boundaries — **last: 2026-09-10** (the production-readiness
-Phase 0 plan closed with Phases 0 and 1 on `main`; before it,
-2026-08-26, ADR-0006 + ADR-0031: the edge migration gate reached zero
-on 2026-08-14 and the `fq`/`fqd` binary split shipped on 2026-08-23).
+milestone boundaries — **last: 2026-09-12** (the dogfood instance
+moved onto the compose stack; before it, 2026-09-10, the
+production-readiness Phase 0 plan closed with Phases 0 and 1 on
+`main`; before that, 2026-08-26, ADR-0006 + ADR-0031: the edge
+migration gate reached zero on 2026-08-14 and the `fq`/`fqd` binary
+split shipped on 2026-08-23).
 If this contradicts `git log`, trust the log and fix this file.
 
 ## Maturity: pre-alpha
@@ -198,11 +200,12 @@ The dogfood loop **lands PRs**: the daily `doc-drift` agent
 (fq-cron-scheduled) now opens its own docs-only PRs for drift it can
 verify and fix, and files issues for the rest; alongside it the
 `github-watcher` adapter triggers
-an `m0-issue-fix` agent on `status:ready`-labelled issues (agent definitions in
-the instance's own tree, outside the repo — `~/fq-dogfood` today, the
-instance volume once it moves onto the compose stack); the agent makes the change in a
-sandboxed working copy, validates with `just ci`, and opens a PR behind
-the human merge gate — the loop that met M0 (see the closed
+an `m0-issue-fix` agent on `status:ready`-labelled issues (agent
+definitions in the instance's own tree, outside this repo: the instance
+volume, version-controlled in the `bricef/fq-dogfood` ops repo); the
+agent makes the change in a sandboxed working copy, validates with
+`just ci`, and opens a PR behind the human merge gate — the loop that
+met M0 (see the closed
 [M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
 that track: exactly-once trigger dispatch
 ([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md)),

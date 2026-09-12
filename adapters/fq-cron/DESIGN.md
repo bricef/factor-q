@@ -450,7 +450,12 @@ separates ([ops/dogfood](../../ops/dogfood/README.md)):
 - The **jobs file** is host-side state at `~/fq-dogfood/fq-cron.toml` —
   the same tier as `fqd.toml` and `agents/`, which deploys never touch.
   Unlike `fqd.toml` it needs no explicit reload command: editing the
-  file *is* the deploy.
+  file *is* the deploy. *(2026-09-12: superseded in location, not in
+  tier — the instance moved onto the compose stack, so the file is
+  instance state in the volume at `/var/lib/factor-q/fq-cron.toml`,
+  mounted read-only into the scheduler and version-controlled in the
+  `bricef/fq-dogfood` ops repo. The tier and the reload-free deploy
+  stand.)*
 
 ## Testing
 
