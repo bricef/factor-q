@@ -206,7 +206,7 @@ image build takes seconds.
 | Target | Image | What it is |
 |---|---|---|
 | `minimal` | `factor-q/fq-runtime` | `fqd` + `fq` on `distroless/cc`. The bare envelope the daemon is held to: no shell, no init, configuration from one file and the environment, every piece of state under one volume. |
-| `dogfood` | `factor-q/fq-dogfood` | `minimal`'s binaries (copied, never rebuilt) on Debian with the toolchain the fleet's agents run: cargo 1.95 with rustfmt and clippy, Go, Node 20, `just`, `gh`, `git`, `jq`, `nats-server`, `sccache`. |
+| `dogfood` | `factor-q/fq-dogfood` | `minimal`'s binaries (copied, never rebuilt) on Debian with the toolchain the fleet's agents run: cargo 1.95 with rustfmt and clippy, Go, Node 20, `just`, `gh`, `git`, `jq`, `nats-server`, `sccache`, and the pinned `cargo-audit` / `cargo-deny` the audit gate needs. It also ships `/etc/gitconfig` with `gh`'s credential helper, so an agent pushing over HTTPS needs only `GH_TOKEN`; whose commit it is stays the definition's job. |
 | `watcher`, `cron`, `dashboard` | `factor-q/github-watcher`, `factor-q/fq-cron`, `factor-q/fq-dashboard` | one static binary each on `distroless/static`. |
 
 ```sh
