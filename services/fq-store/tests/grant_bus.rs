@@ -53,7 +53,7 @@ async fn drain_publishes_to_jetstream_and_round_trips() {
     log.append_revoked(id).await.unwrap();
 
     // Drain to a real broker.
-    let bus = NatsGrantBus::connect(&url, &stream_name, &prefix)
+    let bus = NatsGrantBus::connect(&url, None, &stream_name, &prefix)
         .await
         .expect("NATS reachable (just infra-up)");
     assert_eq!(drain(&log, &bus).await.unwrap(), 3);
@@ -88,4 +88,36 @@ async fn drain_publishes_to_jetstream_and_round_trips() {
 
     // Tidy up the test stream.
     js.delete_stream(&stream_name).await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_refuses_url_userinfo_without_echoing_it() {
+    let secret = "not-for-error-output";
+    let url = format!("nats://{secret}@127.0.0.1:4222");
+    let error = match NatsGrantBus::connect(&url, Some(secret), "unused", "unused").await {
+        Ok(_) => panic!("URL userinfo must be refused"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("`token` argument"), "{message}");
+    assert!(!message.contains(secret), "credential leaked: {message}");
+}
+
+#[tokio::test]
+async fn tokened_connect_authenticates_without_echoing_the_token() {
+    let token = format!("grant-bus-token-{}", unique());
+    let server = fq_test_support::NatsServer::start_with_token(&token);
+    let url = server.url().to_string();
+    assert!(!url.contains(&token), "test URL carries the token");
+
+    let stream = format!("FQ_GRANTS_TOKEN_TEST_{}", unique());
+    let prefix = format!("fq.test.grant.token{}", unique());
+    let result = NatsGrantBus::connect(&url, Some(&token), &stream, &prefix).await;
+    if let Err(error) = &result {
+        assert!(
+            !error.to_string().contains(&token),
+            "connect error leaked token: {error}"
+        );
+    }
+    result.expect("tokened connect must authenticate");
 }

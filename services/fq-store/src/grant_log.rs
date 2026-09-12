@@ -425,12 +425,36 @@ pub mod nats {
         subject_prefix: String,
     }
 
+    fn url_has_userinfo(url: &str) -> bool {
+        url.split(',').any(|entry| {
+            let authority = entry.split_once("://").map_or(entry, |(_, rest)| rest);
+            authority.split('/').next().unwrap_or("").contains('@')
+        })
+    }
+
     impl NatsGrantBus {
         /// Connect to NATS at `url` and ensure the stream `stream` exists,
         /// capturing `"<subject_prefix>.>"`. Production defaults: stream
-        /// `FQ_GRANTS`, prefix `fq.store.grant`.
-        pub async fn connect(url: &str, stream: &str, subject_prefix: &str) -> Result<Self> {
-            let client = async_nats::connect(url)
+        /// `FQ_GRANTS`, prefix `fq.store.grant`. Credentials must be supplied
+        /// through `token`; URL userinfo is refused so `url` is safe to print.
+        pub async fn connect(
+            url: &str,
+            token: Option<&str>,
+            stream: &str,
+            subject_prefix: &str,
+        ) -> Result<Self> {
+            if url_has_userinfo(url) {
+                return Err(StoreError::Bus(
+                    "NATS URL must not contain userinfo; pass credentials via the `token` argument"
+                        .into(),
+                ));
+            }
+            let options = match token {
+                Some(token) => async_nats::ConnectOptions::with_token(token.to_string()),
+                None => async_nats::ConnectOptions::new(),
+            };
+            let client = options
+                .connect(url)
                 .await
                 .map_err(|e| StoreError::Bus(format!("connect {url}: {e}")))?;
             let js = async_nats::jetstream::new(client);
