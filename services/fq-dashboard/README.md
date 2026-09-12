@@ -169,6 +169,7 @@ does not banner.
 just build-dashboard        # cargo build -p fq-dashboard
 just test-dashboard         # hermetic — spins a real edge in-process, no broker
 just dashboard-screenshots  # PNG of every page, from fixtures
+just dashboard-e2e          # two processes: a real daemon, real HTTP
 ```
 
 The tests serve a fixture surface over a **real** `fq-edge` with a token
@@ -183,3 +184,11 @@ HTML from canned, fixed-timestamp data: no daemon, no broker, so a
 visual diff is a rendering change and never the clock. That is what
 `scripts/dashboard-screenshots.sh` screenshots over `file://`, and what
 CI uploads as an artifact when dashboard code changes.
+
+`just dashboard-e2e` (#687) is the composition neither of those can
+reach: it runs a real `fqd` and the real `fq-dashboard` binary as
+processes and speaks HTTP to every page, including the transcript page
+that served 503 on the live instance for six days while every hermetic
+gate stayed green (#673). It is not part of `just ci` — two processes,
+slower than the rest — and CI runs it as the advisory `Dashboard E2E`
+job. Run it when the dashboard or the read surface changes.

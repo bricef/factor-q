@@ -402,7 +402,7 @@ docker-check tag="latest":
     echo "fq-dogfood — the daemon:";            docker run --rm factor-q/fq-dogfood:{{tag}} --version
     echo "fq-dogfood — the toolchain on the exec baseline PATH:"
     docker run --rm --entrypoint /usr/bin/env factor-q/fq-dogfood:{{tag}} -i PATH=/usr/local/bin:/usr/bin:/bin \
-        sh -c 'cargo --version && rustc --version && cargo fmt --version && cargo clippy --version && go version && node --version && npx --version && just --version && gh --version | head -1 && git --version && jq --version && nats-server --version && sccache --version'
+        sh -c 'cargo --version && rustc --version && cargo fmt --version && cargo clippy --version && go version && node --version && npx --version && just --version && gh --version | head -1 && git --version && jq --version && nats-server --version && sccache --version && cargo audit --version && cargo deny --version'
     echo "github-watcher:";                     docker run --rm factor-q/github-watcher:{{tag}} --version
     echo "fq-cron:";                            docker run --rm factor-q/fq-cron:{{tag}} --version
     echo "fq-dashboard:";                       docker run --rm factor-q/fq-dashboard:{{tag}} --version
