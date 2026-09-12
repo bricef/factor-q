@@ -53,10 +53,9 @@ impl TriggerDispatcher {
         // Counted, not gated (#718): the cap bounds what *starts*, and
         // this invocation was admitted when its trigger was. Holding it
         // back would keep the work on the host for longer, not less.
-        let _agent_slot = self.agent_caps.enter(
-            due.agent_id.as_str(),
-            loaded.agent.max_concurrent(),
-        );
+        let _agent_slot = self
+            .agent_caps
+            .enter(due.agent_id.as_str(), loaded.agent.max_concurrent());
         info!(
             invocation_id = %due.invocation_id,
             agent_id = %due.agent_id,

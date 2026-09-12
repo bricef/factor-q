@@ -701,9 +701,8 @@ Prompt body.
     /// legal because it *has* a meaning there (the daemon default).
     #[test]
     fn a_max_concurrent_of_zero_is_rejected_and_explained() {
-        let err =
-            parse_agent("---\nname: test\nmodel: test-model\nmax_concurrent: 0\n---\nprompt")
-                .expect_err("a cap of zero must not load");
+        let err = parse_agent("---\nname: test\nmodel: test-model\nmax_concurrent: 0\n---\nprompt")
+            .expect_err("a cap of zero must not load");
         let msg = err.to_string();
         assert!(
             msg.contains("max_concurrent"),

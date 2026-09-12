@@ -18,7 +18,15 @@
 #
 # clippy::too_many_lines is the complementary threshold gate (it counts
 # CODE lines, skipping comments and blanks) — tracked in #392.
-services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 558
+# Raised by hand, 2026-09-12 (#718): +3 for one more shared runtime
+# handle — the per-agent in-flight count. `run_hosted`'s whole job is
+# threading these, and one handle costs exactly three lines here: a name
+# in the `Assembled` destructure, a builder call on the dispatcher, and
+# a field in the `ResumeControl` literal. There is nothing to extract:
+# rustfmt puts one argument per line, so a helper taking the same values
+# costs at its call site what it saves in the body. Raised rather than
+# budgeted, per the rule above, so the trade is visible in the diff.
+services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 561
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 339
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 364
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 305

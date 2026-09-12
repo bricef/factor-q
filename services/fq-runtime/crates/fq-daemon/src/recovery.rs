@@ -258,6 +258,11 @@ pub(crate) async fn classify_in_flight(
 /// The handles come back so a graceful drain (ADR-0027) can wait for them
 /// to suspend at a step boundary before exiting. On a signal-driven
 /// shutdown they stay detached, as they always have.
+// Eight shared runtime handles, each of which a resume task genuinely
+// needs; grouping them into a struct would only move the same list one
+// line up. `ResumeControl::new` next door carries the same allow for
+// the same reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_resume_tasks(
     recoverable: Vec<ClassifiedInvocation>,
     registry: &AgentRegistry,

@@ -56,8 +56,8 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
-use crate::control_plane::agent_cap::AgentConcurrency;
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
+use crate::control_plane::agent_cap::AgentConcurrency;
 use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
 use crate::worker::{DeferralQueue, DrainState, DueResume, DurableStart, ExecutorError, Worker};
@@ -2597,9 +2597,8 @@ You are a test agent."#
         let consumer_name = unique_consumer_name();
         let filter = crate::events::subjects::trigger(agent_id_str);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let dispatcher =
-            TriggerDispatcher::new(bus.clone(), registry, worker, llm, max_concurrent)
-                .with_agent_caps(agent_caps);
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm, max_concurrent)
+            .with_agent_caps(agent_caps);
         let run = tokio::spawn(async move {
             dispatcher
                 .run_on_consumer(&consumer_name, Some(&filter), shutdown_rx)
@@ -2617,7 +2616,10 @@ You are a test agent."#
         }
     }
 
-    async fn stop(shutdown_tx: oneshot::Sender<()>, run: tokio::task::JoinHandle<Result<(), DispatcherError>>) {
+    async fn stop(
+        shutdown_tx: oneshot::Sender<()>,
+        run: tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    ) {
         let _ = shutdown_tx.send(());
         tokio::time::timeout(Duration::from_secs(10), run)
             .await
@@ -2712,9 +2714,7 @@ You are a test agent."#
         let (_dir, registry) = registry_with_cap(&agent_id_str, 1);
         let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
         let worker = CappedWorker::new();
-        worker
-            .fail
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        worker.fail.store(true, std::sync::atomic::Ordering::SeqCst);
         let (shutdown_tx, run) = spawn_dispatcher(
             &bus,
             &agent_id_str,
@@ -2733,7 +2733,11 @@ You are a test agent."#
             Some(1),
             "the trigger behind a failure is still its first delivery"
         );
-        assert_eq!(counts.in_flight(&agent_id_str), 1, "only the second is running");
+        assert_eq!(
+            counts.in_flight(&agent_id_str),
+            1,
+            "only the second is running"
+        );
 
         worker.let_finish(1);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);

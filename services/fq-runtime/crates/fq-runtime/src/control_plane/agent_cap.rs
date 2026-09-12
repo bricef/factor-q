@@ -224,7 +224,11 @@ mod tests {
     fn an_uncapped_agent_is_never_refused_and_never_reported() {
         let counts = AgentConcurrency::new();
         let slots: Vec<_> = (0..50)
-            .map(|_| counts.try_enter("chatty", None).expect("no cap, no refusal"))
+            .map(|_| {
+                counts
+                    .try_enter("chatty", None)
+                    .expect("no cap, no refusal")
+            })
             .collect();
         assert_eq!(counts.in_flight("chatty"), 50);
         assert!(
@@ -300,10 +304,7 @@ mod tests {
         assert_eq!(listed[0].cap, 1);
         assert_eq!(listed[0].held, 1);
         assert!(listed[0].is_at_cap());
-        assert_eq!(
-            listed[0].cap_summary(),
-            "1/1 in flight, 1 trigger(s) held"
-        );
+        assert_eq!(listed[0].cap_summary(), "1/1 in flight, 1 trigger(s) held");
     }
 
     /// A reload that raises the cap is picked up by the next admission,
@@ -317,7 +318,11 @@ mod tests {
         let _two = counts
             .try_enter("builder", Some(2))
             .expect("a raised cap admits the next trigger");
-        assert_eq!(counts.snapshot()[0].cap, 2, "and the report says the new one");
+        assert_eq!(
+            counts.snapshot()[0].cap,
+            2,
+            "and the report says the new one"
+        );
     }
 
     #[test]
