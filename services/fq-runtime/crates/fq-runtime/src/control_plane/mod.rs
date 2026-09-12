@@ -21,6 +21,10 @@
 //! - [`dispatcher`] — the trigger dispatcher, which consumes
 //!   `fq.trigger.>` from NATS and hands invocations to a
 //!   [`crate::worker::Worker`].
+//! - [`agent_cap`] — how many invocations of each agent are running,
+//!   shared by every path that starts one (#718). The dispatcher asks
+//!   it before admitting a trigger for an agent whose definition
+//!   declares `max_concurrent`; `fq doctor` reads its snapshot.
 //! - [`projection`] — the SQLite projection over the audit log
 //!   and the consumer that materialises events into it.
 //! - [`coordination_consumer`] — subscribes to
@@ -49,6 +53,7 @@
 //! plan steps progress.
 
 pub mod advisory_watch;
+pub mod agent_cap;
 pub mod coordination_consumer;
 pub mod dispatcher;
 pub mod durable_consumer;

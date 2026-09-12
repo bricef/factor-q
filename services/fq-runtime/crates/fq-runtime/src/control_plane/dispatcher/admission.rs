@@ -95,8 +95,9 @@ impl TriggerDispatcher {
     }
 
     /// Whether this dispatcher is on its way out: the worker is draining
-    /// or the loop has seen its shutdown signal.
-    fn stopping(&self) -> bool {
+    /// or the loop has seen its shutdown signal. Both holds — a paused
+    /// model's and a full agent's (#718) — let go on it.
+    pub(super) fn stopping(&self) -> bool {
         self.worker.drain_status() == DrainState::Draining || self.stopping.load(Ordering::SeqCst)
     }
 }

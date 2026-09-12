@@ -43,6 +43,7 @@
 //! see the failure even though the trigger is acked.
 
 mod admission;
+mod agent_cap;
 mod dead_letter;
 mod deferral;
 
@@ -55,6 +56,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
+use crate::control_plane::agent_cap::AgentConcurrency;
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
@@ -181,6 +183,11 @@ pub struct TriggerDispatcher {
     deferrals: DeferralQueue,
     /// The queue's drain end, taken by the loop when it starts.
     due: std::sync::Mutex<Option<mpsc::Receiver<DueResume>>>,
+    /// Per-agent in-flight counts (#718): consulted before a trigger
+    /// starts, so an agent at its definition's `max_concurrent` has its
+    /// next trigger held rather than run. Shared with the daemon's
+    /// resume paths, which count without being gated.
+    agent_caps: Arc<AgentConcurrency>,
     /// Set once the loop has seen its shutdown signal, so a trigger held
     /// for a paused model lets go rather than blocking the stop.
     stopping: AtomicBool,
@@ -204,6 +211,7 @@ impl TriggerDispatcher {
             throttle: Arc::new(ModelThrottle::inert()),
             deferrals,
             due: std::sync::Mutex::new(Some(due)),
+            agent_caps: AgentConcurrency::new(),
             stopping: AtomicBool::new(false),
         }
     }
@@ -212,6 +220,14 @@ impl TriggerDispatcher {
     /// triggers and the permits its calls take agree on one state.
     pub fn with_throttle(mut self, throttle: Arc<ModelThrottle>) -> Self {
         self.throttle = throttle;
+        self
+    }
+
+    /// Share the daemon's per-agent counts (#718), so the cap sees the
+    /// invocations recovery and `fq invocation resume` re-drive too, and
+    /// `fq doctor` reads the same numbers this dispatcher admits on.
+    pub fn with_agent_caps(mut self, agent_caps: Arc<AgentConcurrency>) -> Self {
+        self.agent_caps = agent_caps;
         self
     }
 
@@ -499,6 +515,15 @@ impl TriggerDispatcher {
         {
             return;
         }
+
+        // Admission, second rule (#718): an agent already running
+        // `max_concurrent` invocations starts no more. The slot is held
+        // for the rest of `handle`, so every way the invocation can end
+        // — completed, failed, deferred, drained, dropped, panicked —
+        // gives it back through `Drop`.
+        let Some(_agent_slot) = self.admit_agent_slot(msg, &agent_id, header_id).await else {
+            return;
+        };
 
         // Parse the payload as JSON. Empty body becomes null.
         let payload: serde_json::Value = if msg.payload.is_empty() {

@@ -73,6 +73,7 @@ pub(crate) fn register_doctor_report(
     let summary_enabled = facts.summary_enabled;
     let mcp_servers = facts.mcp_servers.clone();
     let throttle = facts.throttle.clone();
+    let agent_caps = facts.agent_caps.clone();
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -104,6 +105,7 @@ pub(crate) fn register_doctor_report(
             let bus = bus.clone();
             let mcp_servers = mcp_servers.clone();
             let throttle = throttle.clone();
+            let agent_caps = agent_caps.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -154,8 +156,10 @@ pub(crate) fn register_doctor_report(
                     fq_runtime::health::mcp_server_health(&mcp_servers),
                 )
                 // The throttle is live state, not a fold of the stores
-                // the builder reads (#278).
-                .with_throttled_models(throttle.snapshot(now_ms)))
+                // the builder reads (#278); so is the per-agent count
+                // (#718).
+                .with_throttled_models(throttle.snapshot(now_ms))
+                .with_agents_at_cap(agent_caps.snapshot()))
             }
         })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;

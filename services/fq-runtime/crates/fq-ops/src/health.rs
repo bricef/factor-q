@@ -362,5 +362,51 @@ impl ThrottledModel {
     }
 }
 
+/// One agent the dispatcher's per-agent concurrency cap is bounding
+/// right now (<https://github.com/bricef/factor-q/issues/718>), as every
+/// operator surface reads it: how many of its invocations are running,
+/// the cap its definition declares, and how many triggers are being held
+/// un-started because the cap is full. An agent with no `max_concurrent`
+/// in its definition is not listed at all, and neither is one running
+/// under its cap with nothing waiting.
+///
+/// Reported, not judged — the same tone as [`ThrottledModel`]. An agent
+/// at its cap is the runtime honouring the definition, not a fault; but
+/// an operator wondering why a labelled issue has not been picked up
+/// reads the answer here.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct AgentAtCap {
+    /// The agent id, as the definition's `name:` spells it.
+    pub agent: String,
+    /// Invocations of this agent the daemon is running at this instant
+    /// — trigger-started, deferral-resumed and recovery-resumed alike.
+    pub in_flight: u32,
+    /// `max_concurrent` from the definition that was current when the
+    /// last invocation was admitted. A reload changes it for the next
+    /// trigger, and this line with it.
+    pub cap: u32,
+    /// Triggers pulled, un-acked and waiting for a slot. Each is still
+    /// its first delivery; none has consumed a redelivery.
+    pub held: u32,
+}
+
+impl AgentAtCap {
+    /// The arithmetic behind a hold, phrased once so `fq doctor` and
+    /// any later surface cannot drift: the invocations running against
+    /// the cap, and the triggers waiting on them.
+    pub fn cap_summary(&self) -> String {
+        format!(
+            "{}/{} in flight, {} trigger(s) held",
+            self.in_flight, self.cap, self.held
+        )
+    }
+
+    /// Whether this agent is actually full — the line an operator is
+    /// looking for when the fleet is quiet.
+    pub fn is_at_cap(&self) -> bool {
+        self.in_flight >= self.cap
+    }
+}
+
 #[cfg(test)]
 mod tests;

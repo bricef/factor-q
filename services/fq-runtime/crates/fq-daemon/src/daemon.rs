@@ -390,6 +390,13 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // (#278): the handle goes everywhere an invocation can come back
     // `Deferred`, the drain end goes to the dispatcher.
     let (deferrals, due_resumes) = fq_runtime::worker::DeferralQueue::new();
+    // How many invocations of each agent are running (#718): one value,
+    // shared by the dispatcher (which admits triggers against it), the
+    // recovery resumes and `invocation.resume` (which count into it
+    // without being gated), and the health reports. It has to be one
+    // value or a restart that resumed three builds would be joined by
+    // three more.
+    let agent_caps = fq_runtime::control_plane::agent_cap::AgentConcurrency::new();
     // Retry transient LLM errors (rate limits, transport failures) with
     // backoff instead of failing the whole invocation (issue #10). This is
     // the daemon path — the one the fleet actually runs on. The throttle
@@ -474,6 +481,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         &bus,
         &worker_store,
         &deferrals,
+        &agent_caps,
     );
 
     // Sweep workspaces whose invocation is no longer in flight (plan §1:
@@ -511,5 +519,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         throttle,
         deferrals,
         due_resumes,
+        agent_caps,
     })
 }
