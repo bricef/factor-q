@@ -96,6 +96,9 @@ pub fn page_opts(title: &str, refresh_secs: Option<u64>, extra_head: &str, body:
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="manifest" href="/assets/manifest.webmanifest">
 {refresh}{extra_head}
 <title>{title} — fq</title>
 <style>
