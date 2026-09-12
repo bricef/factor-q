@@ -22,6 +22,9 @@
 set -euo pipefail
 
 DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
+# notify.sh lives beside this script — in the instance directory on the
+# host, in the image's script directory under the ops service (ADR-0036).
+NOTIFY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.sh"
 cd "$DOGFOOD" 2>/dev/null || { echo "backup: dogfood dir not found: $DOGFOOD" >&2; exit 2; }
 [ -f compose.yml ] || { echo "backup: no compose.yml in $DOGFOOD" >&2; exit 2; }
 AUTO=0; [ "${1:-}" = "--auto" ] && AUTO=1
@@ -37,7 +40,7 @@ say() { printf '%s %s\n' "$(now)" "$*"; }
 # (FQ_NOTIFY_HOOK): a nightly that fails quietly is the same as no backup.
 die() {
     printf '%s ERROR: %s\n' "$(now)" "$*" >&2
-    [ "$AUTO" = 1 ] && [ -x "$DOGFOOD/notify.sh" ] && { printf '%s\n' "$*" | "$DOGFOOD/notify.sh" "backup FAILED" || true; }
+    [ "$AUTO" = 1 ] && [ -x "$NOTIFY" ] && { printf '%s\n' "$*" | "$NOTIFY" "backup FAILED" || true; }
     exit 1
 }
 
