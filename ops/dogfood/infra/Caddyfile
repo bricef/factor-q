@@ -29,6 +29,10 @@
 	admin off
 }
 
+# The site address is this deployment's own name — edit it per host. The
+# live instance runs the internal shape instead (infra/Caddyfile.internal
+# and the README's "An internal host"); `dev.lambda.works` was the old
+# devbox's name and is retired.
 dev.lambda.works {
 	tls {
 		issuer acme {

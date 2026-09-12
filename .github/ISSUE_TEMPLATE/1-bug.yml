@@ -32,7 +32,7 @@ body:
       label: Steps to reproduce
       description: The exact steps or the trigger. If it can't be reproduced on demand, describe precisely what was observed and when.
       placeholder: |
-        1. `fq trigger m0-loop "..."`
+        1. `fq trigger m0-issue-fix "..."`
         2. ...
         3. observe ...
     validations:
