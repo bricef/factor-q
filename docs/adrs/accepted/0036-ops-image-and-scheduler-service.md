@@ -2,18 +2,28 @@
 
 ## Status
 
-Draft — proposed 2026-09-12. Refines
-[ADR-0035](../accepted/0035-container-image-and-compose-supervision.md):
+Accepted (2026-09-12; proposed the same day). Refines
+[ADR-0035](0035-container-image-and-compose-supervision.md):
 the image-per-binary, compose-as-supervisor, tag-bump-deploy shape stands
 unchanged, and this ADR moves the last host-side pieces of it — the
 crontab and the five operations scripts — into the stack. It narrows
 ADR-0035's clause 7 (the runtime socket is never mounted into any of our
 containers) to *never into a container that runs the daemon or an agent*,
-with that clause's reason intact. At acceptance ADR-0035's Status line
-gains a `Refined by ADR-0036` pointer; until then it is untouched.
+with that clause's reason intact; ADR-0035's Status line carries the
+`Refined by` pointer.
 
-Implementation: pending — nothing is built. The worked example that
-prompted it is
+Implementation: built, in the three slices the Implementation section
+lays out — the `fq-ops` image
+([#715](https://github.com/bricef/factor-q/pull/715)), the `ops` service
+running hygiene and backup
+([#716](https://github.com/bricef/factor-q/pull/716)), and the deploy as
+a sibling with the host crontab and bootstrap's script copy retired (the
+change that moved this record to `accepted/`). The acceptance drill —
+one hourly deploy from the scheduler, one unattended rollback of a
+broken ops image, a nightly set from the service, an empty host crontab
+— is the maintainer's to run on the dogfood guest after rollout; until
+it has run, this record says "built", not "proven". The worked example
+that prompted it is
 [#707](https://github.com/bricef/factor-q/pull/707) (merged 2026-09-12):
 a change to what the hourly deploy's notification says reached `main`
 with CI green and changed nothing on the dogfood host, because the host

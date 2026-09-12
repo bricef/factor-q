@@ -10,7 +10,11 @@ companion decision". It answers the decision
 systemd units — and retires the "no supervisor" carve-out of
 [#102](https://github.com/bricef/factor-q/issues/102). The tarball channel
 of [ADR-0022](0022-binary-distribution-and-licensing.md) stays as it is;
-images are a second artifact, not a replacement.
+images are a second artifact, not a replacement. Refined by
+[ADR-0036](0036-ops-image-and-scheduler-service.md): the host crontab
+and the operations scripts move into the stack as an `fq-ops` image and
+an `ops` service, and clause 7 narrows to the containers that run the
+daemon or an agent.
 
 Implementation: complete — the images (clauses 1, 3, 4 and the daemon's
 half of 6 and 8) are built and published: `services/fq-runtime/Dockerfile`

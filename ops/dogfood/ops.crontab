@@ -1,15 +1,21 @@
-# The ops image's schedule (ADR-0036). supercronic runs this file as the
+# The stack's own schedule (ADR-0036). supercronic runs this file as the
 # `ops` service's process, and every line is a one-shot sibling container
 # from the same image — `docker compose run` — never a job in the
-# scheduler's own process: the deploy's `compose up` may recreate the
-# scheduler while a job runs, and a sibling survives that. Times are UTC.
-# The working directory is the instance directory (the service's
+# scheduler's own process: the deploy's `compose up` recreates the
+# scheduler while the deploy runs, and a sibling survives that. Times are
+# UTC. The working directory is the instance directory (the service's
 # `working_dir`), so `docker compose` here reads the same compose.yml,
 # .env and override the host does; -T because there is no terminal, and
 # --no-deps because the stack is already up.
 #
-# The ADR's slice 2 brings the `ops` service up on this file with the two
-# lines below; the deploy joins at slice 3, when the host's crontab
-# (ops/dogfood/crontab) retires. Until then this file is inert.
+# Continuous delivery is `deploy --auto`, hourly: it pulls main-latest,
+# does nothing when that build is live, defers while an invocation is in
+# flight, and rolls back by itself when a build does not come up. Hourly
+# rather than per-merge because the fleet merges its own PRs; with the
+# idle check, a merge lands on the next quiet hour. Every job exits 0
+# quietly when there is nothing to do, so a line in `docker compose logs
+# ops` means something happened, and anything that needs a human goes
+# through notify (FQ_NOTIFY_HOOK in .env).
+17   *  * * *   docker compose run --rm -T --no-deps ops deploy --auto
 */30 *  * * *   docker compose run --rm -T --no-deps ops hygiene
 30   3  * * *   docker compose run --rm -T --no-deps ops backup --auto

@@ -403,8 +403,9 @@ restart policy, health ordering, a stop grace period above the drain
 deadline; no systemd units). Everything the daemon persists lives in one
 volume at `/var/lib/factor-q`. A deploy is a tag bump with a drain,
 verification on the running containers and rollback
-(`ops/dogfood/deploy.sh`; hourly as `--auto` with an idle check and
-automatic rollback); `bootstrap.sh` provisions a dedicated host;
+(`ops/dogfood/deploy.sh`, run from the stack's own `ops` service —
+ADR-0036 — hourly as `--auto` with an idle check and automatic
+rollback); `bootstrap.sh` provisions a dedicated host;
 `backup.sh` / `restore.sh` copy and restore the volumes. Packaging is not
 isolation: agents run inside the daemon's container, as its user, and
 the sandbox is the process sandbox below. The

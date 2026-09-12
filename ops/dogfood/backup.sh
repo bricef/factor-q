@@ -2,7 +2,8 @@
 # ops/dogfood/backup.sh — a consistent copy of the instance: the daemon's
 # volume (minus the regenerable build/ and the per-invocation workspace/)
 # and the broker's JetStream store, as two tarballs under
-# $FQ_DOGFOOD/backups/<utc-stamp>/. Nightly from ops/dogfood/crontab.
+# $FQ_DOGFOOD/backups/<utc-stamp>/. Nightly from the ops service's
+# schedule (ops/dogfood/ops.crontab, ADR-0036).
 #
 #   backup.sh             stop, copy, start — a minute or two of downtime,
 #                         the daemon drained on the way down (ADR-0027)

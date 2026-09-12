@@ -78,6 +78,7 @@ A design doc's *folder* answers the same question for prose:
 | [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
 | [0034](accepted/0034-reasoning-as-a-content-part.md) | Reasoning is a content part and `Message` is an enum over turn kinds; reasoning replays within an invocation and is stripped across one; parts stay internal and stop at the operator boundary, which receives a reasoning concept that distinguishes absence from opacity |
 | [0035](accepted/0035-container-image-and-compose-supervision.md) | The deployable unit is a container image tagged with its commit, and docker compose is the supervisor and stack definition — no systemd units; a minimal distroless image is the bare-envelope gate and a fat dogfood image layers the agent toolchain on it until the worker / control-plane split; refines [ADR-0027](accepted/0027-graceful-drain-deploys.md), answers #553 — built through #587 (images, publishing, the stack, the tag-bump deploy, bootstrap, backups, probes on every image); the live instance moved onto the stack on 2026-09-12 |
+| [0036](accepted/0036-ops-image-and-scheduler-service.md) | The stack schedules its own operations: an `fq-ops` image carries the deploy, hygiene and backup scripts and their schedule, a compose `ops` service fires each as a one-shot sibling container, and the host crontab and bootstrap's script copy retire; narrows [ADR-0035](accepted/0035-container-image-and-compose-supervision.md) clause 7 to "never into a container that runs the daemon or an agent" — accepted 2026-09-12, built through #715, #716 and the slice that accepted it; the acceptance drill on the guest is pending |
 
 ## Draft
 
@@ -86,7 +87,6 @@ A design doc's *folder* answers the same question for prose:
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — unstarted, while the incident it fixes (#327) is still open |
-| [0036](draft/0036-ops-image-and-scheduler-service.md) | The stack schedules its own operations: an `fq-ops` image carries the deploy, hygiene and backup scripts and their schedule, a compose `ops` service fires each as a one-shot sibling container, and the host crontab and bootstrap's script copy retire; narrows [ADR-0035](accepted/0035-container-image-and-compose-supervision.md) clause 7 to "never into a container that runs the daemon or an agent" — proposed 2026-09-12 after #707, unstarted |
 
 ## Related guides
 

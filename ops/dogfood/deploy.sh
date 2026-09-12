@@ -9,17 +9,25 @@
 #                             the images are already on this host)
 #   deploy.sh --force [...]   proceed even if already running the target
 #                             (a .env, fqd.toml or secrets change)
-#   deploy.sh --auto          unattended (cron): defer while an invocation is
-#                             in flight, and roll back by itself when the new
-#                             build does not come up — continuous delivery
-#                             with the same drain, checks and rollback as a
-#                             deploy by hand (ops/dogfood/crontab). A deploy,
-#                             a rollback, a failure and a deferral that has
-#                             lasted FQ_DEFER_WARN_HOURS go through notify.sh;
-#                             the deploy message lists the commits that landed
+#   deploy.sh --auto          unattended (the ops service's schedule): defer
+#                             while an invocation is in flight, and roll back
+#                             by itself when the new build does not come up —
+#                             continuous delivery with the same drain, checks
+#                             and rollback as a deploy by hand
+#                             (ops/dogfood/ops.crontab). A deploy, a rollback,
+#                             a failure and a deferral that has lasted
+#                             FQ_DEFER_WARN_HOURS go through notify.sh; the
+#                             deploy message lists the commits that landed
 #   deploy.sh --render-changes <from> <to> <owner/repo>
 #                             print that list for the commit subjects on stdin
 #                             and exit — the seam ops/dogfood/tests drives
+#
+# Runs from the fq-ops image (ADR-0036): `docker compose run --rm ops deploy
+# [...]` is this script, and nothing on the host runs it directly. It is
+# itself a one-shot sibling of the `ops` service, so the `up` below may
+# recreate the scheduler mid-deploy without touching this process; the
+# ops image is pulled, verified, waited on and rolled back with the rest,
+# and never stopped.
 #
 # The host never compiles and never fetches a tarball. Every merge to main
 # publishes one image per binary to ghcr.io/bricef (`FQ_IMAGE_REPO` in .env),
@@ -54,8 +62,13 @@ KEEP_IMAGES="${KEEP_IMAGES:-5}"      # local image tags kept per name, newest fi
 
 # The services a deploy restarts, with the image each runs, in the order
 # they are brought down (the reverse is compose's business on the way up).
+# The ops service is not among them: it is the scheduler this deploy runs
+# under, never stopped, recreated last by the `up` — but its image is
+# pulled, verified, waited on and rolled back like the others
+# (IMAGE_SERVICES), so a script change is deployed and undone as a build.
 STACK_SERVICES=(fq-cron fqd github-watcher fq-dashboard)
-declare -A IMAGE_OF=([fqd]=fq-dogfood [github-watcher]=github-watcher [fq-cron]=fq-cron [fq-dashboard]=fq-dashboard)
+IMAGE_SERVICES=("${STACK_SERVICES[@]}" ops)
+declare -A IMAGE_OF=([fqd]=fq-dogfood [github-watcher]=github-watcher [fq-cron]=fq-cron [fq-dashboard]=fq-dashboard [ops]=fq-ops)
 
 AUTO=0
 # --auto stays silent through the resolve/pull/verify preamble — an hourly
@@ -194,7 +207,8 @@ REPO="${REPO:-ghcr.io/bricef}"
 CURRENT="$(sed -n 's/^FQ_TAG=\(.*\)$/\1/p' .env | tail -1)"
 # What a failed deploy rolls back to: the tag that was live before, if it
 # differs from the target (a forced redeploy of the live tag has none).
-rollback_hint() { if [ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ]; then echo "Roll back: $0 $CURRENT"; else echo "Roll back: $0 <an earlier sha — docker images $REPO/fq-dogfood>"; fi; }
+DEPLOY_CMD="docker compose run --rm ops deploy"   # how a human spells this script (ADR-0036)
+rollback_hint() { if [ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ]; then echo "Roll back: $DEPLOY_CMD $CURRENT"; else echo "Roll back: $DEPLOY_CMD <an earlier sha — docker images $REPO/fq-dogfood>"; fi; }
 
 # The embedded-SHA readers, on an image rather than a file: the binary is
 # run through its entrypoint with --version. fqd prints
@@ -237,24 +251,24 @@ fi
 # already here (a rollback while the registry is unreachable); a tag that is
 # neither pullable nor local is not.
 log "Pulling $REPO/*:$SHA"
-for svc in "${STACK_SERVICES[@]}"; do
+for svc in "${IMAGE_SERVICES[@]}"; do
     ref="$REPO/${IMAGE_OF[$svc]}:$SHA"
     if ! docker pull -q "$ref" >/dev/null 2>&1; then
         docker image inspect "$ref" >/dev/null 2>&1 || die "cannot pull $ref and it is not on this host"
         printf '    (using local %s — pull failed)\n' "$ref"
     fi
 done
-ok "all four images present"
+ok "all five images present"
 
 # The coherence check deploy.sh always made on a bundle, on the images: the
 # binary inside each must report the commit its tag claims, with no -dirty.
 log "Verifying every image's binary reports $SHA"
-for svc in "${STACK_SERVICES[@]}"; do
+for svc in "${IMAGE_SERVICES[@]}"; do
     ref="$REPO/${IMAGE_OF[$svc]}:$SHA"
     got="$(version_sha "$ref")" || die "$ref: --version failed"
     [ "$got" = "$SHA" ] || die "$ref reports '$got', not $SHA — tag and content disagree; refusing"
 done
-ok "fqd, github-watcher, fq-cron and fq-dashboard all report $SHA"
+ok "fqd, github-watcher, fq-cron, fq-dashboard and fq-ops all report $SHA"
 
 # --- 3. early exit when the target is already live -------------------------
 running_image() {  # $1 = service → the image its running container was created from, or ""
@@ -277,7 +291,7 @@ in_flight() {
 
 if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$SHA" ]; then
     live=1
-    for svc in "${STACK_SERVICES[@]}"; do
+    for svc in "${IMAGE_SERVICES[@]}"; do
         [ "$(running_image "$svc")" = "$REPO/${IMAGE_OF[$svc]}:$SHA" ] || { live=0; break; }
     done
     if [ "$live" = 1 ]; then
@@ -349,23 +363,25 @@ bring_up() {  # $1 = sha
     [ "$ready" = 1 ] || { echo "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd)"; return 1; }
     ok "daemon ready"
 
-    for svc in "${STACK_SERVICES[@]}"; do
+    for svc in "${IMAGE_SERVICES[@]}"; do
         want="$REPO/${IMAGE_OF[$svc]}:$tag"
         got="$(running_image "$svc")"
         [ "$got" = "$want" ] || { echo "$svc runs '${got:-nothing}', not $want (docker compose ps)"; return 1; }
     done
-    ok "fqd, github-watcher, fq-cron and fq-dashboard run $tag"
+    ok "fqd, github-watcher, fq-cron, fq-dashboard and ops run $tag"
 
-    # The other three images carry their own probes (ADR-0035 clause 8):
-    # attached to the broker, serving. Wait for each to report healthy; an
-    # image from before the probes reports nothing and is not waited on.
-    # The daemon's probe is not waited on here — it needs the pairing that
-    # a fresh instance does not have yet; "Runtime ready" is its signal.
-    log "Waiting for the adapters' and the dashboard's probes (up to ${HEALTH_WAIT}s)"
+    # The other four images carry their own probes (ADR-0035 clause 8):
+    # attached to the broker, serving, scheduling. Wait for each to report
+    # healthy; an image from before the probes reports nothing and is not
+    # waited on. The daemon's probe is not waited on here — it needs the
+    # pairing that a fresh instance does not have yet; "Runtime ready" is
+    # its signal. The ops probe is the scheduler's own container, not the
+    # sibling this deploy runs in (`compose ps` never lists one-offs).
+    log "Waiting for the adapters', the dashboard's and the scheduler's probes (up to ${HEALTH_WAIT}s)"
     local pending="" state
     for _ in $(seq 1 "$HEALTH_WAIT"); do
         pending=""
-        for svc in github-watcher fq-cron fq-dashboard; do
+        for svc in github-watcher fq-cron fq-dashboard ops; do
             cid="$(docker compose ps -q "$svc" 2>/dev/null | head -1)"
             [ -n "$cid" ] || continue
             state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
@@ -375,7 +391,7 @@ bring_up() {  # $1 = sha
         sleep 1
     done
     [ -z "$pending" ] || { echo "not healthy after ${HEALTH_WAIT}s:$pending (docker inspect --format '{{json .State.Health}}' <container>)"; return 1; }
-    ok "github-watcher, fq-cron and fq-dashboard probes healthy"
+    ok "github-watcher, fq-cron, fq-dashboard and ops probes healthy"
 }
 
 [ -n "$CURRENT" ] && [ "$CURRENT" != "$SHA" ] && ok "moving from $CURRENT"
@@ -389,7 +405,7 @@ if ! reason="$(bring_up "$SHA")"; then
         log "ROLLING BACK to $CURRENT — $reason"
         if bring_up "$CURRENT" >/dev/null; then
             printf '\033[1;33m%s    ⟲ rolled back to %s after %s failed: %s\033[0m\n' "$(stamp)" "$CURRENT" "$SHA" "$reason" >&2
-            notify "rolled back to $CURRENT — $SHA failed" "$reason"$'\n'"The instance is on $CURRENT, the build it was on before. The failed containers went with the rollback; to look at the failure, deploy by hand — deploy.sh $SHA stops on the failed container instead of rolling back. deploy.sh --auto will try $SHA again next hour unless main moves on."
+            notify "rolled back to $CURRENT — $SHA failed" "$reason"$'\n'"The instance is on $CURRENT, the build it was on before. The failed containers went with the rollback; to look at the failure, deploy by hand — $DEPLOY_CMD $SHA stops on the failed container instead of rolling back. The hourly deploy will try $SHA again unless main moves on."
             exit 1
         fi
         die "rollback to $CURRENT ALSO failed — the stack needs a human (docker compose ps; docker compose logs fqd)"
@@ -427,5 +443,5 @@ printf '  DEPLOYED — factor-q dogfood stack @ %s\n' "$SHA"
 notify "deployed $SHA" "$changes"$'\n\n'"$(docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
 printf '%s\n' "$changes" | sed 's/^/    /'
 docker compose ps --format '    {{.Service}}\t{{.State}}\t{{.Health}}\t{{.Image}}' 2>/dev/null || true
-printf '    rollback: %s %s   history: docker images %s/fq-dogfood\n' "$0" "${CURRENT:-<sha>}" "$REPO"
+printf '    rollback: %s %s   history: docker images %s/fq-dogfood\n' "$DEPLOY_CMD" "${CURRENT:-<sha>}" "$REPO"
 printf '════════════════════════════════════════════════════\033[0m\n'
