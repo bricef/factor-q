@@ -100,6 +100,11 @@ sudo ops/dogfood/bootstrap.sh
 curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/ops/dogfood/bootstrap.sh | sudo bash
 ```
 
+Run from a checkout, it lays out that checkout as it is — pull first, or
+the "refresh" is whatever the checkout last saw. The `curl` form fetches
+`main` into `/opt/factor-q` before laying anything out, so it is the one
+to re-run after a merge.
+
 It installs Docker Engine and the compose plugin from Docker's
 repository (plus `git` and `cron`), asks the distribution's init to run
 the container runtime — the only thing we ask of it — creates the
