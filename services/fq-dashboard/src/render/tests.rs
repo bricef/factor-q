@@ -170,6 +170,28 @@ fn page_carries_refresh_and_escaped_title() {
     assert!(html.contains("<p>x</p>"));
 }
 
+/// Phones get their own layout: the shell declares a viewport, so a
+/// phone lays the page out at its real width instead of a 980px
+/// desktop emulation, and the stylesheet carries the one breakpoint
+/// every phone rule lives under. Both shells emit both. The
+/// screenshot script cannot see the meta tag (chromium's window size
+/// is the layout width there), which is why this test does.
+#[test]
+fn page_shell_declares_viewport_and_phone_breakpoint() {
+    for html in [page("t", 7, "<p>x</p>"), live_page("t", 7, "<p>x</p>")] {
+        assert!(
+            html.contains(
+                r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#
+            ),
+            "viewport meta missing: {html}"
+        );
+        assert!(
+            html.contains("@media (max-width: 40rem)"),
+            "phone breakpoint missing: {html}"
+        );
+    }
+}
+
 #[test]
 fn unreachable_shows_last_seen_or_never() {
     let never = unreachable("127.0.0.1:9471", "refused", None, 1_000);

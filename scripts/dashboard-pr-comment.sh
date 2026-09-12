@@ -68,22 +68,24 @@ body="${marker}
 Rendered from deterministic fixtures at [\`${short}\`](https://github.com/${repo}/commit/${head_sha}) · ${taken_at}.
 This comment renews in place on every dashboard-touching push — if the sha above is not the PR head, the gallery is stale.
 
-| | |
+| desktop | mobile |
 |---|---|"
-row=""
+# One row per page: the desktop shot beside its phone shot (the
+# `<page>.mobile.png` the screenshot script writes next to it), so the
+# two layouts of one page read side by side rather than wherever a
+# filename sort lands them. A page with no mobile shot leaves the cell
+# empty rather than shifting the next page into it.
 for f in "${pngs[@]}"; do
     name="$(basename "$f" .png)"
+    case "$name" in *.mobile) continue ;; esac
     cell="**${name}**<br>![${name}](${raw}/${name}.png)"
-    if [ -z "$row" ]; then
-        row="| ${cell} "
-    else
-        body="${body}
-${row}| ${cell} |"
-        row=""
+    mobile=""
+    if [ -f "${shots_dir}/${name}.mobile.png" ]; then
+        mobile="**${name}.mobile**<br>![${name}.mobile](${raw}/${name}.mobile.png)"
     fi
+    body="${body}
+| ${cell} | ${mobile} |"
 done
-[ -n "$row" ] && body="${body}
-${row}| |"
 
 # --- 3. upsert the comment --------------------------------------------------
 existing="$(gh api "repos/${repo}/issues/${pr}/comments" --paginate \
