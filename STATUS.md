@@ -114,10 +114,12 @@ it is the licence to keep changing shape quickly.
   a dedicated host, and `backup.sh` / `restore.sh` make the instance's
   one volume restorable — the build-out is
   [#587](https://github.com/bricef/factor-q/issues/587). The live
-  dogfood instance has not been moved onto the stack yet; the runbook is
-  in [ops/dogfood](ops/dogfood/README.md), and the move itself —
-  pre-flight, the restore set, the day's sequence, acceptance, rollback
-  and retirement — is the
+  dogfood instance moved onto the stack on 2026-09-12 and runs on a
+  dedicated internal host; deploys run hourly via `deploy.sh --auto`, and
+  `backup.sh` runs nightly. The runbook is in
+  [ops/dogfood](ops/dogfood/README.md), and the move itself — pre-flight,
+  the restore set, the day's sequence, acceptance, rollback and
+  retirement — is recorded in the
   [dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
   (opened 2026-09-05).
 
@@ -153,8 +155,8 @@ closed on 2026-09-10 with **Phases 0 and 1 on `main`** (Phase 0's exit
 criteria verified on the dogfood host 2026-09-04; Phase 1 code complete
 2026-09-06, follow-ups merged by 2026-09-09); the
 [dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
-carries them to the live instance, and Phase 2 (the record is
-trustworthy) is next, by hand, one PR at a time. The review's standing
+carried Phases 0 and 1 to the live instance on 2026-09-12, and
+Phase 2 (the record is trustworthy) is next, by hand, one PR at a time. The review's standing
 answer to "can we also…" **parks the storage M3–M5 track, Memory and
 Skills, and the multi-node vertical until Phase 2 is done**. So M3, then M4, then M5
 per the
