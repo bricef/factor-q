@@ -47,8 +47,8 @@ fq-dogfood/
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE / DASH_INTERNAL_ADDR on an internal host
-├── deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh   # copied by bootstrap.sh, run by the crontab
-├── logs/                    # deploy.log, hygiene.log, backup.log — the cron jobs' output; notify.log, every message sent
+├── deploy.sh, hygiene.sh, backup.sh, restore.sh, notify.sh   # copied by bootstrap.sh; deploy.sh runs from the crontab, the rest from the ops service's own copy (ADR-0036)
+├── logs/                    # deploy.log — the hourly deploy's output; notify.log, every message sent. hygiene and backup log to the ops service (`docker compose logs ops`)
 ├── backups/                 # backup.sh's sets, FQ_BACKUP_KEEP of them
 ├── .deploy.lock             # the flock deploy.sh, backup.sh and restore.sh share
 └── .deploy.deferred         # since when deploy.sh --auto has been deferring the same build
@@ -469,11 +469,48 @@ and a rollback is not delivery, it is roulette. The cadence is hourly
 rather than per-merge because the fleet merges its own PRs. `deploy.sh`
 by hand still works at any time; the two share a lock.
 
+## The ops service: `docker compose run --rm ops <verb>`
+
+The stack schedules its own maintenance
+([ADR-0036](../../docs/adrs/draft/0036-ops-image-and-scheduler-service.md)).
+The `ops` service runs the commit's `fq-ops` image — the five scripts,
+their schedule (`ops.crontab`) under supercronic, and the docker CLI and
+compose plugin they drive the stack with — as the deploy user with the
+docker group. It mounts two things: the runtime's socket, the one
+container that holds it (the daemon's never does; agents run there), and
+this directory at the same path it has on the host, so `docker compose`
+inside reads the same `compose.yml`, `.env`, override and secrets, and
+every host path a script hands to `docker run -v` resolves. Every job on
+its crontab is a one-shot sibling container from the same image, never a
+process of the scheduler's own, so a deploy's `compose up` can recreate
+the service while a job runs. Today it runs hygiene every 30 minutes and
+the backup nightly; the hourly deploy still runs from the host crontab
+until the ADR's slice 3 moves it in.
+
+Any verb runs the same way by hand, from any host with docker and this
+directory — `docker compose run --rm ops hygiene --report`,
+`… ops backup`, `… ops restore <set> --yes`, `… ops notify --test` — and
+the copies of the scripts in this directory stay for the deploy and for
+a host without the service up. `docker compose logs -f ops` is where the
+scheduled jobs' output goes; `hygiene`'s warnings and a failed `backup`
+still reach you through `notify.sh` as before.
+
+Four host facts in `.env` describe the service — `FQ_DOGFOOD` (this
+directory's absolute path), `FQ_UID` and `FQ_DOCKER_GID` (the deploy
+user and the docker group), `FQ_HOST` (the name the notifications carry)
+— and `bootstrap.sh` writes them, appending to an `.env` that predates
+them. On a host that predates the service: re-run `bootstrap.sh` (the
+`curl` form), then `docker compose up -d ops`; the next hourly deploy
+would also bring it up, since `up` creates every service the file
+names. The oldest build the stack can run from then on is the first with
+an `fq-ops` image; `deploy.sh <older sha>` fails at `up`.
+
 ## Notifications: `notify.sh`
 
-The crontab sends every script's output to a file under `logs/`, so
-cron mail never fires; without a channel of its own, a rollback or a
-full disk would sit in a log until someone looked. `notify.sh <subject>`
+The crontab sends the deploy's output to `logs/deploy.log` and the ops
+service's jobs log to its container, so cron mail never fires; without a
+channel of its own, a rollback or a full disk would sit in a log until
+someone looked. `notify.sh <subject>`
 (body on stdin) is that channel: it runs `FQ_NOTIFY_HOOK` from `.env` —
 a shell command given the subject as `$1` and the body on stdin — and
 appends every message to `logs/notify.log` whether or not a hook is set.
@@ -486,9 +523,10 @@ its caller.
 What goes through it, all unattended: `deploy.sh --auto`'s deploys
 (with the commits that landed — the formatting is the one part of
 `deploy.sh` with a test, `ops/dogfood/tests/render-changes.sh`, run by
-`just ops-ci`), rollbacks, failures and long deferrals; `hygiene.sh`'s warnings, one
-message per run; a failed `backup.sh --auto`. A deploy by hand tells
-its terminal and nothing else.
+`just ops-ci`), rollbacks, failures and long deferrals; `hygiene`'s
+warnings, one message per run; a failed `backup --auto` — the last two
+from the ops service, signed with `FQ_HOST` rather than the container's
+name. A deploy by hand tells its terminal and nothing else.
 
 Machine-scrapeable metrics from the daemon itself are
 [#342](https://github.com/bricef/factor-q/issues/342), which this does
@@ -496,11 +534,13 @@ not touch: it is the host's scripts speaking, not the runtime.
 
 ## Hygiene: `hygiene.sh`
 
-Every 30 minutes from the crontab, into `logs/hygiene.log`: the age of
-the newest backup set (warns past `FQ_BACKUP_STALE_HOURS`, 36 — a
-nightly that has quietly stopped), the disk docker lives on (warns above
-`FQ_DISK_WARN_PCT`, 80% — a full disk has killed the daemon and the
-broker before), `docker system df`, the instance volume by subtree, the
+Every 30 minutes from the ops service, into `docker compose logs ops`:
+the age of the newest backup set (warns past `FQ_BACKUP_STALE_HOURS`,
+36 — a nightly that has quietly stopped), the disk docker lives on
+(warns above `FQ_DISK_WARN_PCT`, 80% — a full disk has killed the daemon
+and the broker before; read through a one-off container with the data
+root mounted, so the reading is the same from the host and from the
+service), `docker system df`, the instance volume by subtree, the
 workspace count and how many are untouched for a week, and dangling
 images pruned. Above
 `FQ_BUILD_CACHE_MAX_GB` (60) it empties the daemon's `build/` subtree —
@@ -514,8 +554,8 @@ never prunes.
 
 ## Backups and the restore drill
 
-`backup.sh` (nightly at 03:30 from the crontab, `--auto` so it defers
-while an invocation is in flight) takes a **consistent** copy: it stops
+`backup.sh` (nightly at 03:30 from the ops service, `--auto` so it
+defers while an invocation is in flight) takes a **consistent** copy: it stops
 the scheduler, the daemon (a drain), the watcher and the broker, copies
 the instance volume minus `build/` and `workspace/` and the broker's
 JetStream store into `backups/<utc-stamp>/` as two tarballs with
@@ -648,11 +688,14 @@ one ever needs packaging again.
    transcript with no build-skew banner; `hygiene.sh --report` clean; and
    `notify.sh --test` delivered.
 
-8. **Then the crontab.** `bootstrap.sh` installs it and it is live from
-   that moment, so on a move take it out (`crontab -r -u fq`) before the
-   restore and put it back once the acceptance above passes — otherwise
-   the hourly `deploy.sh --auto` can move the tag, or the nightly
-   `backup.sh` stop the stack, in the middle of the move.
+8. **Then the schedules.** `bootstrap.sh` installs the crontab and it is
+   live from that moment, so on a move take it out (`crontab -r -u fq`)
+   before the restore and put it back once the acceptance above passes —
+   otherwise the hourly `deploy.sh --auto` can move the tag in the middle
+   of the move. The ops service's schedule is live whenever the service
+   is up, and `restore.sh` brings the whole stack up: stop it again
+   (`docker compose stop ops`) until acceptance, or the nightly backup
+   can stop the stack mid-move.
 
 The one move this has actually had — pre-flight, the rehearsal, the
 day's sequence, acceptance, rollback and retirement — is the

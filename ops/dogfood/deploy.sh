@@ -45,6 +45,9 @@
 set -euo pipefail
 
 DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
+# notify.sh lives beside this script — in the instance directory on the
+# host, in the image's script directory under the ops service (ADR-0036).
+NOTIFY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.sh"
 READY_WAIT="${READY_WAIT:-180}"      # seconds to wait for the daemon's "Runtime ready"
 HEALTH_WAIT="${HEALTH_WAIT:-90}"     # seconds to wait for the adapters' and dashboard's probes
 KEEP_IMAGES="${KEEP_IMAGES:-5}"      # local image tags kept per name, newest first
@@ -66,8 +69,8 @@ ok()  { [ "$QUIET" = 1 ] && return 0; printf '\033[1;32m%s    ✓ %s\033[0m\n' "
 # (FQ_NOTIFY_HOOK); by hand, the operator is looking at the terminal.
 notify() {  # $1 = subject, $2 = body
     [ "$AUTO" = 1 ] || return 0
-    [ -x "$DOGFOOD/notify.sh" ] || return 0
-    printf '%s\n' "$2" | "$DOGFOOD/notify.sh" "$1" || true
+    [ -x "$NOTIFY" ] || return 0
+    printf '%s\n' "$2" | "$NOTIFY" "$1" || true
 }
 die() { printf '\n\033[1;31m%s✗ ERROR: %s\033[0m\n' "$(stamp)" "$*" >&2; notify "deploy FAILED" "$*"; exit 1; }
 # A quiet exit for --auto: nothing to do, or not now. One line, exit 0, so

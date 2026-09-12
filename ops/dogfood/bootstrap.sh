@@ -121,6 +121,23 @@ seed() {  # $1 = template, $2 = destination, $3 = mode
     install -o "$FQ_USER" -g "$FQ_USER" -m "$3" "$1" "$2"; ok "$(basename "$2") created from $(basename "$1")"
 }
 seed "$SRC/.env.example" "$DOGFOOD/.env" 644 || true
+# The host as the ops service sees it (ADR-0036): four values compose
+# refuses to start the service without. Filled when the template left
+# them empty, appended when an .env predates them, never changed once
+# set — the same rule as every other host-authored value.
+ensure_env() {  # $1 = KEY, $2 = value
+    if grep -q "^$1=" "$DOGFOOD/.env"; then
+        [ -n "$(sed -n "s/^$1=\(.*\)$/\1/p" "$DOGFOOD/.env" | tail -1)" ] && return 0
+        sed -i "s#^$1=.*#$1=$2#" "$DOGFOOD/.env"
+    else
+        printf '%s=%s\n' "$1" "$2" >> "$DOGFOOD/.env"
+    fi
+    ok ".env: $1=$2"
+}
+ensure_env FQ_DOGFOOD "$DOGFOOD"
+ensure_env FQ_UID "$(id -u "$FQ_USER")"
+ensure_env FQ_DOCKER_GID "$(getent group docker | cut -d: -f3)"
+ensure_env FQ_HOST "$(hostname -s 2>/dev/null || hostname)"
 if seed "$SRC/env.example" "$DOGFOOD/.secrets/env" 600; then
     token="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     sed -i "s/^FQ_NATS_TOKEN=.*/FQ_NATS_TOKEN=$token/; s#^GHW_NATS_URL=.*#GHW_NATS_URL=nats://$token@nats:4222#; s#^FQCRON_NATS_URL=.*#FQCRON_NATS_URL=nats://$token@nats:4222#" "$DOGFOOD/.secrets/env"
@@ -144,7 +161,7 @@ fi
 # --- 5. the schedule ----------------------------------------------------------------------------
 if command -v crontab >/dev/null 2>&1; then
     sed "s#^FQ_DOGFOOD=.*#FQ_DOGFOOD=$DOGFOOD#" "$SRC/crontab" | crontab -u "$FQ_USER" -
-    ok "crontab installed for $FQ_USER (deploy.sh --auto hourly, hygiene.sh every 30 min, backup.sh nightly)"
+    ok "crontab installed for $FQ_USER (deploy.sh --auto hourly; hygiene and backup run from the ops service)"
 else
     printf '\033[1;33m    ⚠ no crontab on this host — install cron, then: sed "s#^FQ_DOGFOOD=.*#FQ_DOGFOOD=%s#" %s/crontab | crontab -u %s -\033[0m\n' "$DOGFOOD" "$SRC" "$FQ_USER"
 fi

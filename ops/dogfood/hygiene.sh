@@ -23,6 +23,9 @@
 set -euo pipefail
 
 DOGFOOD="${FQ_DOGFOOD:-$HOME/fq-dogfood}"
+# notify.sh lives beside this script — in the instance directory on the
+# host, in the image's script directory under the ops service (ADR-0036).
+NOTIFY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.sh"
 cd "$DOGFOOD" 2>/dev/null || { echo "hygiene: dogfood dir not found: $DOGFOOD" >&2; exit 2; }
 [ -f compose.yml ] || { echo "hygiene: no compose.yml in $DOGFOOD" >&2; exit 2; }
 
@@ -39,8 +42,8 @@ warn() { printf '%s WARNING: %s\n' "$(now)" "$*"; RC=1; WARNINGS="${WARNINGS}${W
 RC=0; WARNINGS=""
 # Every exit: the warnings, if any, through notify.sh (one message per run).
 finish() {
-    if [ "$RC" != 0 ] && [ -x "$DOGFOOD/notify.sh" ]; then
-        printf '%s\n' "$WARNINGS" | "$DOGFOOD/notify.sh" "hygiene: $(printf '%s\n' "$WARNINGS" | wc -l | tr -dc '0-9') warning(s)" || true
+    if [ "$RC" != 0 ] && [ -x "$NOTIFY" ]; then
+        printf '%s\n' "$WARNINGS" | "$NOTIFY" "hygiene: $(printf '%s\n' "$WARNINGS" | wc -l | tr -dc '0-9') warning(s)" || true
     fi
     exit "$RC"
 }
@@ -66,15 +69,23 @@ else
 fi
 
 # --- 1. the disk docker lives on -------------------------------------------------
+# Read from a one-off container with the data root mounted read-only, so
+# the reading is the same from the host and from the ops service
+# (ADR-0036), where the host's paths do not exist. Root, like backup.sh's
+# copies: the data root is not readable by the deploy user, and df only
+# needs the mount point.
 root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
-used="$(df --output=pcent "$root" 2>/dev/null | tail -1 | tr -dc '0-9')"
-avail="$(df -h --output=avail "$root" 2>/dev/null | tail -1 | tr -d ' ')"
+diskstat="$(docker compose run --rm -T --no-deps --user root -v "$root:/probe:ro" --entrypoint df ops -h --output=pcent,avail /probe 2>/dev/null | tail -1)"
+used="$(printf '%s' "$diskstat" | awk '{print $1}' | tr -dc '0-9')"
+avail="$(printf '%s' "$diskstat" | awk '{print $2}')"
 if [ -n "$used" ]; then
     if [ "$used" -ge "$WARN_PCT" ]; then
         warn "disk holding $root is ${used}% full (${avail} free; threshold ${WARN_PCT}%) — a full disk kills the daemon and the broker"
     else
         say "disk: ${used}% used, ${avail} free ($root)"
     fi
+else
+    say "disk: no reading for $root (docker compose run ops df failed — is the ops image pulled?)"
 fi
 say "docker: $(docker system df --format '{{.Type}} {{.Size}} (reclaimable {{.Reclaimable}})' 2>/dev/null | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
 

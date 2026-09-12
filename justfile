@@ -296,13 +296,16 @@ gate-adapters: install-nats
 # Compatibility name used by CI.
 go-ci: gate-adapters
 
-# The dogfood host's scripts (ops/dogfood) run unattended from cron and
-# have no compose stack to test against here; what can be tested without
-# one is. Bash only — no toolchain, seconds — so CI runs it on every push.
-# Run the ops script tests (the deploy message's change list).
+# The dogfood host's scripts (ops/dogfood) run unattended and have no
+# compose stack to test against here; what can be tested without one is:
+# the deploy message's change list, the ops image's entrypoint, and the
+# stack definition resolved by `docker compose config` (the plugin, no
+# daemon). No toolchain, seconds — so CI runs it on every push.
+# Run the ops script tests.
 ops-ci:
     bash ops/dogfood/tests/render-changes.sh
     bash ops/dogfood/tests/fq-ops.sh
+    bash ops/dogfood/tests/compose-config.sh
 
 # Run all quality checks — docs lint + link check + dependency audit + both
 # Rust gates + the Go adapters (the full local gate) — and print a per-phase
