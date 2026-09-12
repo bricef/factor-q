@@ -135,6 +135,14 @@ pub struct Agent {
     /// fallback) applies. Overriding here means `fq reload` picks up a
     /// change with no restart (Design Principle 8 / backlog §1.5.1.1).
     max_iterations: Option<u32>,
+    /// Optional per-agent bound on how many of this agent's invocations
+    /// the daemon runs at once (#718). `None` means unlimited within
+    /// `[worker] max_concurrent_invocations` — the behaviour before the
+    /// field existed. In the definition rather than the daemon config
+    /// for the same reason `max_iterations` is: the number describes the
+    /// agent's own workload, and `fq reload` picks a change up with no
+    /// restart.
+    max_concurrent: Option<u32>,
     effort: Option<Effort>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
@@ -181,6 +189,14 @@ impl Agent {
     /// default" — `max_iterations` in the runtime's `Config`.
     pub fn max_iterations(&self) -> Option<u32> {
         self.max_iterations
+    }
+
+    /// The agent's concurrency cap, if the definition sets one. `None`
+    /// means "as many at once as the worker cap allows" (#718). The
+    /// dispatcher reads this off the *current* registry at admission
+    /// time, so a reloaded definition governs the next trigger.
+    pub fn max_concurrent(&self) -> Option<u32> {
+        self.max_concurrent
     }
 
     /// The optional per-agent reasoning effort.
@@ -444,6 +460,7 @@ pub struct AgentBuilder {
     sandbox: Sandbox,
     budget: Option<f64>,
     max_iterations: Option<u32>,
+    max_concurrent: Option<u32>,
     effort: Option<Effort>,
     trigger: Option<String>,
     mcp_servers: Vec<McpServerDeclaration>,
@@ -504,6 +521,14 @@ impl AgentBuilder {
     /// fallback) applies.
     pub fn max_iterations(mut self, max_iterations: u32) -> Self {
         self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Bound how many of this agent's invocations run at once (#718).
+    /// Rejected by [`AgentBuilder::build`] if zero — see
+    /// [`BuildError::ZeroMaxConcurrent`].
+    pub fn max_concurrent(mut self, max_concurrent: u32) -> Self {
+        self.max_concurrent = Some(max_concurrent);
         self
     }
 
@@ -581,6 +606,16 @@ impl AgentBuilder {
         {
             return Err(BuildError::InvalidBudget(budget));
         }
+        // Refused rather than read as "unlimited": zero is the one value
+        // whose plain meaning — run none of them, ever — is never what
+        // an author wants, and an agent that silently never runs looks
+        // exactly like a broken trigger, which is the class of silence
+        // #514 closed at this same boundary. (`max_iterations: 0` is
+        // legal for the opposite reason: it *has* a meaning — fall back
+        // to the daemon default.)
+        if self.max_concurrent == Some(0) {
+            return Err(BuildError::ZeroMaxConcurrent);
+        }
 
         Ok(Agent {
             id,
@@ -590,6 +625,7 @@ impl AgentBuilder {
             sandbox: self.sandbox,
             budget: self.budget,
             max_iterations: self.max_iterations,
+            max_concurrent: self.max_concurrent,
             effort: self.effort,
             trigger: self.trigger,
             mcp_servers: self.mcp_servers,
@@ -617,6 +653,16 @@ pub enum BuildError {
 
     #[error("invalid budget: must be finite and non-negative, got {0}")]
     InvalidBudget(f64),
+
+    /// A cap of zero. Named rather than clamped, because the two
+    /// silent readings of `0` — "unlimited" and "never run" — are
+    /// opposites, and the author who typed it gets to be told which
+    /// one the runtime refused to guess.
+    #[error(
+        "invalid max_concurrent: must be at least 1 — 0 would mean the agent never runs; \
+         omit the field for no per-agent limit"
+    )]
+    ZeroMaxConcurrent,
 
     #[error("invalid static_resources entry: {0}")]
     InvalidStaticResource(String),
@@ -749,6 +795,24 @@ mod tests {
     fn max_iterations_override_is_stored() {
         let agent = valid_builder().max_iterations(250).build().unwrap();
         assert_eq!(agent.max_iterations(), Some(250));
+    }
+
+    #[test]
+    fn max_concurrent_defaults_to_none() {
+        let agent = valid_builder().build().unwrap();
+        assert!(agent.max_concurrent().is_none());
+    }
+
+    #[test]
+    fn max_concurrent_override_is_stored() {
+        let agent = valid_builder().max_concurrent(2).build().unwrap();
+        assert_eq!(agent.max_concurrent(), Some(2));
+    }
+
+    #[test]
+    fn a_zero_max_concurrent_is_rejected() {
+        let err = valid_builder().max_concurrent(0).build().unwrap_err();
+        assert!(matches!(err, BuildError::ZeroMaxConcurrent));
     }
 
     #[test]

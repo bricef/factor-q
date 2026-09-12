@@ -147,6 +147,9 @@ pub fn parse_agent_with_default(
     if let Some(max_iterations) = frontmatter.max_iterations {
         builder = builder.max_iterations(max_iterations);
     }
+    if let Some(max_concurrent) = frontmatter.max_concurrent {
+        builder = builder.max_concurrent(max_concurrent);
+    }
     if let Some(effort) = frontmatter.effort {
         builder = builder.effort(effort);
     }
@@ -289,6 +292,11 @@ struct Frontmatter {
     /// Optional per-agent override for the per-invocation LLM-turn cap.
     /// Absent = fall back to the daemon config default.
     max_iterations: Option<u32>,
+    /// Optional bound on how many of this agent's invocations run at
+    /// once (#718). Absent = unlimited within `[worker]
+    /// max_concurrent_invocations`. `0` is refused rather than read as
+    /// either bound — see [`crate::BuildError::ZeroMaxConcurrent`].
+    max_concurrent: Option<u32>,
     effort: Option<Effort>,
     trigger: Option<String>,
     #[serde(default)]
@@ -671,6 +679,40 @@ Prompt body.
     fn absent_reasoning_effort_uses_provider_default() {
         let agent = parse_agent("---\nname: test\nmodel: test-model\n---\nprompt").unwrap();
         assert_eq!(agent.effort(), None);
+    }
+
+    #[test]
+    fn parses_max_concurrent_from_frontmatter() {
+        let agent =
+            parse_agent("---\nname: test\nmodel: test-model\nmax_concurrent: 2\n---\nprompt")
+                .unwrap();
+        assert_eq!(agent.max_concurrent(), Some(2));
+    }
+
+    #[test]
+    fn absent_max_concurrent_is_unlimited_within_the_worker_cap() {
+        let agent = parse_agent("---\nname: test\nmodel: test-model\n---\nprompt").unwrap();
+        assert_eq!(agent.max_concurrent(), None);
+    }
+
+    /// A cap of zero is the one value with two opposite silent
+    /// readings — "unlimited" and "never run" — so the parser refuses
+    /// it and says which. Not a copy of `max_iterations: 0`, which is
+    /// legal because it *has* a meaning there (the daemon default).
+    #[test]
+    fn a_max_concurrent_of_zero_is_rejected_and_explained() {
+        let err =
+            parse_agent("---\nname: test\nmodel: test-model\nmax_concurrent: 0\n---\nprompt")
+                .expect_err("a cap of zero must not load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_concurrent"),
+            "the error must name the field, got: {msg}"
+        );
+        assert!(
+            msg.contains("at least 1"),
+            "the error must say what a legal value is, got: {msg}"
+        );
     }
 
     #[test]
