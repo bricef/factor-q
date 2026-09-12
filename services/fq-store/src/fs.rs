@@ -355,6 +355,12 @@ impl BlockStore for FilesystemStore {
         }
         Ok(out)
     }
+
+    async fn reap_staging_files(&self, cutoff: std::time::SystemTime) -> Result<(usize, u64)> {
+        let blocks = reap_staging_files_two_level(&self.root.join("blocks"), cutoff).await?;
+        let objects = reap_staging_files_two_level(&self.root.join("objects"), cutoff).await?;
+        Ok((blocks.0 + objects.0, blocks.1 + objects.1))
+    }
 }
 
 impl FilesystemStore {
@@ -417,6 +423,39 @@ async fn remove_file_idempotent(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Reap aged `.tmp.*` files two levels deep and total their count and size.
+async fn reap_staging_files_two_level(
+    dir: &Path,
+    cutoff: std::time::SystemTime,
+) -> Result<(usize, u64)> {
+    let mut reaped = (0, 0u64);
+    let mut shards = match tokio::fs::read_dir(dir).await {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(reaped),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(shard) = shards.next_entry().await? {
+        if !shard.file_type().await?.is_dir() {
+            continue;
+        }
+        let mut files = tokio::fs::read_dir(shard.path()).await?;
+        while let Some(file) = files.next_entry().await? {
+            if !file.file_name().to_string_lossy().starts_with(".tmp.")
+                || !file.file_type().await?.is_file()
+            {
+                continue;
+            }
+            let metadata = file.metadata().await?;
+            if metadata.modified()? <= cutoff {
+                remove_file_idempotent(&file.path()).await?;
+                reaped.0 += 1;
+                reaped.1 += metadata.len();
+            }
+        }
+    }
+    Ok(reaped)
 }
 
 /// List the files two levels deep under `dir` (the `<shard>/<file>` layout),

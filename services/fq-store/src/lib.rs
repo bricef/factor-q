@@ -183,4 +183,12 @@ pub trait BlockStore: ContentStore {
     /// Enumerate every stored object manifest as `(cid, last-modified)` — the
     /// object counterpart of [`list_stored_blocks`](Self::list_stored_blocks).
     async fn list_stored_objects(&self) -> Result<Vec<(Cid, std::time::SystemTime)>>;
+
+    /// Remove crash-orphaned `.tmp.*` staging files whose modification time is
+    /// at or before `cutoff`, returning `(file count, bytes)`. Backends without
+    /// filesystem staging files may keep the default no-op implementation.
+    async fn reap_staging_files(&self, cutoff: std::time::SystemTime) -> Result<(usize, u64)> {
+        let _ = cutoff;
+        Ok((0, 0))
+    }
 }

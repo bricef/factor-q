@@ -36,6 +36,10 @@ pub struct AuditReport {
     pub orphan_blocks: usize,
     /// Orphan object manifests (on disk, no index row, past grace) unlinked.
     pub orphan_objects: usize,
+    /// Crash-orphaned `.tmp.*` staging files past grace unlinked.
+    pub orphan_temps: usize,
+    /// Bytes occupied by the reaped staging files.
+    pub orphan_temp_bytes: u64,
     /// Refcounts corrected down to the recomputed truth (slice 6c).
     pub reconciled: usize,
     /// Invariant violations the audit will **not** auto-repair (slice 6c) — the
@@ -105,9 +109,10 @@ impl ReachabilityAuditor {
         // reclaimed, not merely eligible to be.
         let reclaimed = ReferenceCollector.collect(repo).await?;
 
-        // Phase 3 — reap orphan files. A file whose identity has no index row is a
-        // crash-orphaned write (fsync'd before its row committed). Only reap once
-        // it is older than the grace, so a live in-flight write is left alone.
+        // Phase 3 — reap orphan files. A file whose identity has no index row, or
+        // a `.tmp.*` file left before its atomic rename, is a crash-orphaned write.
+        // Only reap once it is older than the grace, so a live in-flight write is
+        // left alone.
         let now = SystemTime::now();
         let snapshot = index.snapshot().await?;
         let rowed_blocks: HashSet<(Cid, u32)> = snapshot
@@ -131,6 +136,10 @@ impl ReachabilityAuditor {
                 orphan_objects += 1;
             }
         }
+        let (orphan_temps, orphan_temp_bytes) = match now.checked_sub(grace) {
+            Some(cutoff) => content.reap_staging_files(cutoff).await?,
+            None => (0, 0),
+        };
 
         // Phase 4 — alarm. Anything the oracle still flags is a fault the audit
         // will not auto-repair: the forbidden state (a live object missing a
@@ -146,6 +155,8 @@ impl ReachabilityAuditor {
             reclaimed,
             orphan_blocks,
             orphan_objects,
+            orphan_temps,
+            orphan_temp_bytes,
             reconciled,
             alarms,
         })
@@ -245,6 +256,30 @@ mod tests {
         let report = ReachabilityAuditor.audit(&repo, LONG_GRACE).await.unwrap();
         assert_eq!(report.orphan_blocks, 0, "{report:?}");
         assert!(repo.content().has_block(&hash, 0).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reaps_aged_staging_files_and_spares_fresh_ones() {
+        let (dir, repo) = crate::test_support::repo().await;
+        let shard = dir.path().join("cas/blocks/aa");
+        std::fs::create_dir_all(&shard).unwrap();
+        let aged_tmp = shard.join(".tmp.111.1");
+        let fresh_tmp = shard.join(".tmp.111.2");
+        std::fs::write(&aged_tmp, b"aged staging bytes").unwrap();
+        std::fs::write(&fresh_tmp, b"fresh staging bytes").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&aged_tmp)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        let report = ReachabilityAuditor.audit(&repo, LONG_GRACE).await.unwrap();
+
+        assert_eq!(report.orphan_temps, 1, "{report:?}");
+        assert_eq!(report.orphan_temp_bytes, 18, "{report:?}");
+        assert!(!aged_tmp.exists());
+        assert!(fresh_tmp.exists());
     }
 
     #[tokio::test]

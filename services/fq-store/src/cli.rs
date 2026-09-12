@@ -667,6 +667,8 @@ async fn run_gc(
             "reclaimed_blocks": report.reclaimed.blocks,
             "orphan_blocks": report.orphan_blocks,
             "orphan_objects": report.orphan_objects,
+            "orphan_temps": report.orphan_temps,
+            "orphan_temp_bytes": report.orphan_temp_bytes,
             "reconciled": report.reconciled,
             "alarms": report.alarms.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
         });
@@ -688,6 +690,10 @@ fn print_gc_report(report: &AuditReport) {
     println!(
         "orphan files reaped   {}",
         report.orphan_blocks + report.orphan_objects
+    );
+    println!(
+        "staging files reaped  {} ({} bytes)",
+        report.orphan_temps, report.orphan_temp_bytes
     );
     println!("refcounts reconciled  {}", report.reconciled);
     if report.alarms.is_empty() {

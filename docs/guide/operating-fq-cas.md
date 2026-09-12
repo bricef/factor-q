@@ -61,13 +61,15 @@ $ fq-cas gc --json
   "reclaimed_blocks": 41,
   "orphan_blocks": 0,
   "orphan_objects": 0,
+  "orphan_temps": 0,
+  "orphan_temp_bytes": 0,
   "reconciled": 0,
   "alarms": []
 }
 ```
 
 Two things to know before you parse it. The object is **hand-built** at the
-CLI boundary rather than serialised from the report type, so treat these six
+CLI boundary rather than serialised from the report type, so treat these eight
 keys as the contract and not the internal struct. And each entry in `alarms`
 is a Rust **debug string**, not a nested object — a populated array looks
 like:
