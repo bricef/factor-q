@@ -310,12 +310,14 @@ role.
   endpoint on the daemon or an `exec`-form `HEALTHCHECK` that runs `fq`
   against the edge with a token from the state volume. The former needs
   daemon code; the latter needs no code and a credential in the probe.
-- **Migrating the live instance.** Whether the edge identity is copied
-  or rotated on the move. Rotating costs one re-pair of the operator's
-  client and one re-mint of the dashboard's token, and is the
-  recommended path; copying preserves every issued token. Either way
-  the move is one copy of the `~/fq-dogfood` tree into the volume,
-  minus `releases/`, `current` and `.secrets/`.
+- ~~**Migrating the live instance.** Whether the edge identity is
+  copied or rotated on the move.~~ **Answered 2026-09-12:** copied, on
+  the rehearsal and again on the cutover. The operator's pairing
+  travelled with it in `state/client/`, so no client re-paired and the
+  dashboard's token stayed valid. A copied identity mints no new admin
+  token and writes no `state/edge/admin.token` — the client-side pairing
+  is the only copy of it — so carrying `state/client/` is what makes the
+  copy cheaper than the rotation this ADR recommended.
 - **One volume for the whole stack.** Compose can mount subpaths of
   one named volume into several containers, which would fold the
   JetStream store and Caddy's data into the daemon's volume and make

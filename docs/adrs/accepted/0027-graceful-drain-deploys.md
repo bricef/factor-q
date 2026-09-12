@@ -21,7 +21,15 @@ dogfood deploy script uses it, citing this ADR by number. **Read the verb as
 Addendum. Manual rollback exists (`deploy.sh <previous-sha>`). Two of the
 Open questions have since been answered and are annotated there. Still open:
 the post-deploy health gate and automated rollback (#339) and an auto-deploy
-watcher. **Resolved 2026-09-05 by [#509](https://github.com/bricef/factor-q/issues/509)
+watcher. **Closed 2026-09-12 by
+[ADR-0035](0035-container-image-and-compose-supervision.md) /
+[#587](https://github.com/bricef/factor-q/issues/587):** both shipped with the
+compose stack. `ops/dogfood/deploy.sh` is the health gate and the rollback — it
+checks the tag on the running containers, waits for the daemon's `Runtime
+ready` and for each adapter's own probe, and returns to the previous tag when
+the new build does not come up — and `deploy.sh --auto` is the auto-deploy
+watcher, run hourly from the instance's crontab behind an idle check.
+**Resolved 2026-09-05 by [#509](https://github.com/bricef/factor-q/issues/509)
 / [#550](https://github.com/bricef/factor-q/issues/550):** the operator escape
 from a stalled drain listed below as still open now exists. The drain holds the
 signal streams and selects on them, so a **second SIGTERM** — or a Ctrl-C, or
@@ -163,9 +171,11 @@ archive service is itself unbuilt.
 - ~~**The drain deadline *T*** and the exact hard-stop fallback
   semantics.~~ **Answered.** *T* is `drain_deadline_ms`, a config setting
   defaulting to 120 s; past it, `fq down` hard-stops and recovery takes
-  over. The dogfood deploy script layers its own `DRAIN_WAIT` (default
-  180 s) on top. The operator-abort half is not answered — a stalled drain
-  still has no escape but SIGKILL (#509).
+  over. The dogfood deploy leaves the fallback to compose:
+  `stop_grace_period` (`FQ_STOP_GRACE`, 150 s by default) must exceed
+  `drain_deadline_ms`, and the two are changed together. The
+  operator-abort half is not answered — a stalled drain still has no
+  escape but SIGKILL (#509).
 - **Health-check definition** (consumers connected? a synthetic trigger
   round-trips?) and the **rollback mechanism** (image pinning, versions
   retained) — likely a companion ADR on the CD pipeline + safety layer.
