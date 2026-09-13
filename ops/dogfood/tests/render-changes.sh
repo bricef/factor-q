@@ -108,4 +108,23 @@ if [ "${#got}" -le 900 ]; then printf '  ok   the body stops at 900 characters (
 
 if bash "$deploy" --render-changes a b >/dev/null 2>&1; then printf '  FAIL --render-changes with too few arguments exited 0\n'; failed=1; else printf '  ok   --render-changes wants exactly three arguments\n'; fi
 
+# The repository the list is asked for is the watcher's, and it lives in
+# the watcher's file: env.example requires GHW_REPO in .secrets/env and
+# .env.example never carried it, so a lookup in .env finds nothing on a
+# host built from the templates — which is what happened, and the
+# message said "commit list unavailable" on every deploy. Judged on the
+# code alone, as idle-check.sh does; the comments may name the old form.
+code="$(mktemp)"
+grep -v '^[[:space:]]*#' "$deploy" > "$code"
+want="GHW_REPO=\\(.*\\)\$/\\1/p' .secrets/env"
+stale="GHW_REPO=\\(.*\\)\$/\\1/p' .env"
+if grep -qF "$want" "$code"; then
+    printf "  ok   the repository is read from .secrets/env, the watcher's file\n"
+else
+    printf '  FAIL deploy.sh does not read GHW_REPO from .secrets/env (env.example puts it there; .env.example never did)\n'; failed=1
+fi
+if grep -qF "$stale" "$code"; then
+    printf '  FAIL deploy.sh still looks for GHW_REPO in .env, where no template writes it\n'; failed=1
+fi
+rm -f "$code"
 [ "$failed" = 0 ] && echo "render-changes: all cases pass" || { echo "render-changes: FAILED" >&2; exit 1; }

@@ -472,8 +472,9 @@ unattended:
   to six, the rest counted by type, then the GitHub compare link. The
   list is asked of GitHub through the daemon container's own `gh` (it
   holds `GH_TOKEN`; the host keeps no current checkout), for the
-  repository `GHW_REPO` names — best effort, so a failure is one line
-  in the message, never a failed deploy. So does a deferral that
+  repository `GHW_REPO` in `.secrets/env` names — the watcher's own
+  setting, read from the watcher's own file — best effort, so a failure
+  is one line in the message, never a failed deploy. So does a deferral that
   has gone on for `FQ_DEFER_WARN_HOURS` (6): an invocation stuck in
   flight, or a container nobody paired, would otherwise keep every merge
   off the host with nothing but a quiet line an hour in the log. Reported
