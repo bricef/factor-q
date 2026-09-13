@@ -125,9 +125,7 @@ mod tests {
         let counts = AgentConcurrency::new();
         let id = Uuid::now_v7();
         let agent = AgentId::new("deferred-agent").unwrap();
-        let slot = counts
-            .try_enter(agent.as_str(), None)
-            .expect("no cap, no refusal");
+        let slot = counts.try_enter(&agent, None).expect("no cap, no refusal");
         queue.defer(id, agent.clone(), Duration::from_secs(30), slot);
         let early = tokio::time::timeout(Duration::from_secs(29), due.recv()).await;
         assert!(early.is_err(), "not before the delay");
@@ -149,17 +147,15 @@ mod tests {
         let (queue, mut due) = DeferralQueue::new();
         let counts = AgentConcurrency::new();
         let agent = AgentId::new("builder").unwrap();
-        let slot = counts
-            .try_enter(agent.as_str(), Some(1))
-            .expect("the first fits");
+        let slot = counts.try_enter(&agent, Some(1)).expect("the first fits");
         queue.defer(Uuid::now_v7(), agent.clone(), Duration::from_secs(30), slot);
         assert_eq!(
-            counts.in_flight(agent.as_str()),
+            counts.in_flight(&agent),
             1,
             "a deferral is not an exit: the WAL row is still in flight"
         );
         assert!(
-            counts.try_enter(agent.as_str(), Some(1)).is_none(),
+            counts.try_enter(&agent, Some(1)).is_none(),
             "a cap-1 agent with a sleeping invocation admits no second trigger"
         );
         let resume = tokio::time::timeout(Duration::from_secs(31), due.recv())
@@ -167,16 +163,12 @@ mod tests {
             .expect("due once the delay has run")
             .expect("the queue holds a sender");
         assert_eq!(
-            counts.in_flight(agent.as_str()),
+            counts.in_flight(&agent),
             1,
             "the resume arrives holding the one slot, not asking for another"
         );
         drop(resume);
-        assert_eq!(
-            counts.in_flight(agent.as_str()),
-            0,
-            "and dropping it releases it"
-        );
+        assert_eq!(counts.in_flight(&agent), 0, "and dropping it releases it");
     }
 
     #[tokio::test(start_paused = true)]
@@ -189,14 +181,12 @@ mod tests {
             Uuid::now_v7(),
             agent.clone(),
             Duration::from_millis(10),
-            counts
-                .try_enter(agent.as_str(), Some(1))
-                .expect("the first fits"),
+            counts.try_enter(&agent, Some(1)).expect("the first fits"),
         );
         // The timer task finishes without panicking, and the slot it was
         // carrying goes with it — a queue with no drain left must not
         // wedge the agent at its cap.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(counts.in_flight(agent.as_str()), 0);
+        assert_eq!(counts.in_flight(&agent), 0);
     }
 }

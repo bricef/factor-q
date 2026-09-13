@@ -69,13 +69,17 @@ use std::sync::{Arc, Mutex};
 
 use fq_ops::health::AgentAtCap;
 
+use crate::agent::AgentId;
+
 /// Per-agent in-flight counts, shared across the daemon.
 ///
-/// Cheap to ask: one short critical section over a map keyed by agent
-/// id, with no entry at all for an agent that is doing nothing.
+/// Cheap to ask: one short critical section over a map keyed by
+/// [`AgentId`] — the validated value every caller already holds, rather
+/// than a `String` each of them has to spell out of it — with no entry
+/// at all for an agent that is doing nothing.
 #[derive(Debug, Default)]
 pub struct AgentConcurrency {
-    agents: Mutex<HashMap<String, AgentState>>,
+    agents: Mutex<HashMap<AgentId, AgentState>>,
 }
 
 /// What is known about one agent right now. Dropped from the map the
@@ -112,9 +116,9 @@ impl AgentConcurrency {
     /// The check and the increment happen under one lock: two triggers
     /// racing for the last slot of a `max_concurrent: 1` agent cannot
     /// both see it free.
-    pub fn try_enter(self: &Arc<Self>, agent: &str, cap: Option<u32>) -> Option<AgentSlot> {
+    pub fn try_enter(self: &Arc<Self>, agent: &AgentId, cap: Option<u32>) -> Option<AgentSlot> {
         let mut agents = self.lock();
-        let state = agents.entry(agent.to_string()).or_default();
+        let state = agents.entry(agent.clone()).or_default();
         state.cap = cap;
         match cap {
             Some(cap) if state.in_flight >= cap => None,
@@ -122,7 +126,7 @@ impl AgentConcurrency {
                 state.in_flight += 1;
                 Some(AgentSlot {
                     counts: Arc::clone(self),
-                    agent: agent.to_string(),
+                    agent: agent.clone(),
                 })
             }
         }
@@ -144,26 +148,26 @@ impl AgentConcurrency {
     /// invocation never leaves the count — its [`AgentSlot`] rides the
     /// deferral queue — because a resume that re-entered here would be
     /// an admission the cap never made.
-    pub fn enter(self: &Arc<Self>, agent: &str, cap: Option<u32>) -> AgentSlot {
+    pub fn enter(self: &Arc<Self>, agent: &AgentId, cap: Option<u32>) -> AgentSlot {
         let mut agents = self.lock();
-        let state = agents.entry(agent.to_string()).or_default();
+        let state = agents.entry(agent.clone()).or_default();
         if cap.is_some() {
             state.cap = cap;
         }
         state.in_flight += 1;
         AgentSlot {
             counts: Arc::clone(self),
-            agent: agent.to_string(),
+            agent: agent.clone(),
         }
     }
 
     /// Mark a trigger as waiting for a slot, for as long as the
     /// returned ticket lives. Visibility only — it grants nothing.
-    pub fn hold(self: &Arc<Self>, agent: &str) -> HeldTrigger {
-        self.lock().entry(agent.to_string()).or_default().held += 1;
+    pub fn hold(self: &Arc<Self>, agent: &AgentId) -> HeldTrigger {
+        self.lock().entry(agent.clone()).or_default().held += 1;
         HeldTrigger {
             counts: Arc::clone(self),
-            agent: agent.to_string(),
+            agent: agent.clone(),
         }
     }
 
@@ -187,7 +191,9 @@ impl AgentConcurrency {
             .iter()
             .filter_map(|(agent, state)| {
                 Some(AgentAtCap {
-                    agent: agent.clone(),
+                    // The report row is where the id becomes a string:
+                    // it is a wire shape, and the runtime is not.
+                    agent: agent.as_str().to_string(),
                     in_flight: state.in_flight,
                     cap: state.cap?,
                     held: state.held,
@@ -201,17 +207,17 @@ impl AgentConcurrency {
 
     /// Invocations of `agent` running right now. For tests and for any
     /// caller that wants the raw number rather than the report.
-    pub fn in_flight(&self, agent: &str) -> u32 {
+    pub fn in_flight(&self, agent: &AgentId) -> u32 {
         self.lock().get(agent).map_or(0, |s| s.in_flight)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentState>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, AgentState>> {
         self.agents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn release(&self, agent: &str, what: fn(&mut AgentState)) {
+    fn release(&self, agent: &AgentId, what: fn(&mut AgentState)) {
         let mut agents = self.lock();
         let Some(state) = agents.get_mut(agent) else {
             return;
@@ -229,7 +235,7 @@ impl AgentConcurrency {
 #[derive(Debug)]
 pub struct AgentSlot {
     counts: Arc<AgentConcurrency>,
-    agent: String,
+    agent: AgentId,
 }
 
 impl Drop for AgentSlot {
@@ -244,7 +250,7 @@ impl Drop for AgentSlot {
 #[derive(Debug)]
 pub struct HeldTrigger {
     counts: Arc<AgentConcurrency>,
-    agent: String,
+    agent: AgentId,
 }
 
 impl Drop for HeldTrigger {
@@ -265,40 +271,50 @@ mod proptests;
 mod tests {
     use super::*;
 
+    /// The count is keyed by the validated id, so the tests name
+    /// their agents the way the daemon does.
+    fn id(name: &str) -> AgentId {
+        AgentId::new(name).expect("a legal agent id")
+    }
+
     #[test]
     fn an_uncapped_agent_is_never_refused_and_never_reported() {
         let counts = AgentConcurrency::new();
         let slots: Vec<_> = (0..50)
             .map(|_| {
                 counts
-                    .try_enter("chatty", None)
+                    .try_enter(&id("chatty"), None)
                     .expect("no cap, no refusal")
             })
             .collect();
-        assert_eq!(counts.in_flight("chatty"), 50);
+        assert_eq!(counts.in_flight(&id("chatty")), 50);
         assert!(
             counts.snapshot().is_empty(),
             "an agent with no declared cap is not a cap line"
         );
         drop(slots);
-        assert_eq!(counts.in_flight("chatty"), 0);
+        assert_eq!(counts.in_flight(&id("chatty")), 0);
     }
 
     #[test]
     fn a_cap_refuses_the_invocation_past_it_and_admits_again_when_one_ends() {
         let counts = AgentConcurrency::new();
-        let first = counts.try_enter("builder", Some(2)).expect("first fits");
-        let second = counts.try_enter("builder", Some(2)).expect("second fits");
+        let first = counts
+            .try_enter(&id("builder"), Some(2))
+            .expect("first fits");
+        let second = counts
+            .try_enter(&id("builder"), Some(2))
+            .expect("second fits");
         assert!(
-            counts.try_enter("builder", Some(2)).is_none(),
+            counts.try_enter(&id("builder"), Some(2)).is_none(),
             "the third must not start while two are running"
         );
         drop(first);
         let third = counts
-            .try_enter("builder", Some(2))
+            .try_enter(&id("builder"), Some(2))
             .expect("a freed slot admits the next one");
         drop((second, third));
-        assert_eq!(counts.in_flight("builder"), 0);
+        assert_eq!(counts.in_flight(&id("builder")), 0);
     }
 
     /// The guard is the decrement, so the exit paths are covered by
@@ -310,13 +326,13 @@ mod tests {
         let result = std::panic::catch_unwind({
             let counts = Arc::clone(&counts);
             move || {
-                let _slot = counts.try_enter("builder", Some(1)).unwrap();
+                let _slot = counts.try_enter(&id("builder"), Some(1)).unwrap();
                 panic!("the invocation task died");
             }
         });
         assert!(result.is_err());
-        assert_eq!(counts.in_flight("builder"), 0);
-        assert!(counts.try_enter("builder", Some(1)).is_some());
+        assert_eq!(counts.in_flight(&id("builder")), 0);
+        assert!(counts.try_enter(&id("builder"), Some(1)).is_some());
     }
 
     /// A resume counts against the cap but is never refused by it: the
@@ -325,23 +341,23 @@ mod tests {
     #[test]
     fn a_resume_counts_but_is_never_refused() {
         let counts = AgentConcurrency::new();
-        let recovered = counts.enter("builder", Some(1));
+        let recovered = counts.enter(&id("builder"), Some(1));
         assert!(
-            counts.try_enter("builder", Some(1)).is_none(),
+            counts.try_enter(&id("builder"), Some(1)).is_none(),
             "a recovery-resumed run fills the cap for new triggers"
         );
-        let also_recovered = counts.enter("builder", Some(1));
-        assert_eq!(counts.in_flight("builder"), 2);
+        let also_recovered = counts.enter(&id("builder"), Some(1));
+        assert_eq!(counts.in_flight(&id("builder")), 2);
         drop((recovered, also_recovered));
-        assert!(counts.try_enter("builder", Some(1)).is_some());
+        assert!(counts.try_enter(&id("builder"), Some(1)).is_some());
     }
 
     #[test]
     fn the_snapshot_names_the_full_agents_and_what_is_waiting() {
         let counts = AgentConcurrency::new();
-        let _full = counts.try_enter("m0-issue-fix", Some(1)).unwrap();
-        let _held = counts.hold("m0-issue-fix");
-        let _room = counts.try_enter("doc-drift", Some(4)).unwrap();
+        let _full = counts.try_enter(&id("m0-issue-fix"), Some(1)).unwrap();
+        let _held = counts.hold(&id("m0-issue-fix"));
+        let _room = counts.try_enter(&id("doc-drift"), Some(4)).unwrap();
         let listed = counts.snapshot();
         assert_eq!(listed.len(), 1, "only the full agent is a line: {listed:?}");
         assert_eq!(listed[0].agent, "m0-issue-fix");
@@ -358,10 +374,10 @@ mod tests {
     #[test]
     fn the_cap_is_whatever_the_caller_passes_this_time() {
         let counts = AgentConcurrency::new();
-        let _one = counts.try_enter("builder", Some(1)).unwrap();
-        assert!(counts.try_enter("builder", Some(1)).is_none());
+        let _one = counts.try_enter(&id("builder"), Some(1)).unwrap();
+        assert!(counts.try_enter(&id("builder"), Some(1)).is_none());
         let _two = counts
-            .try_enter("builder", Some(2))
+            .try_enter(&id("builder"), Some(2))
             .expect("a raised cap admits the next trigger");
         assert_eq!(
             counts.snapshot()[0].cap,
@@ -373,9 +389,9 @@ mod tests {
     #[test]
     fn a_quiet_agent_leaves_no_entry_behind() {
         let counts = AgentConcurrency::new();
-        drop(counts.try_enter("transient", Some(1)));
-        drop(counts.hold("transient"));
+        drop(counts.try_enter(&id("transient"), Some(1)));
+        drop(counts.hold(&id("transient")));
         assert!(counts.snapshot().is_empty());
-        assert_eq!(counts.in_flight("transient"), 0);
+        assert_eq!(counts.in_flight(&id("transient")), 0);
     }
 }

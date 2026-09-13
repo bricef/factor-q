@@ -64,11 +64,12 @@ expected, and gives the line and column:
 ```text
 agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
 expected one of `name`, `model`, `tools`, `sandbox`, `budget`,
-`max_iterations`, `effort`, `trigger`, `mcp`, `static_resources`,
-`sampling_budget`, `elicitation_budget` at line 3 column 1
+`max_iterations`, `max_concurrent`, `effort`, `trigger`, `mcp`,
+`static_resources`, `sampling_budget`, `elicitation_budget` at line 3
+column 1
 ```
 
-That list is the whole recognised set — twelve keys, and the error
+That list is the whole recognised set — thirteen keys, and the error
 prints them in the order the runtime declares them.
 
 Strictness is deliberate: a dropped key is silent, and silence here is

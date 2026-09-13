@@ -328,7 +328,7 @@ pub(crate) fn spawn_resume_tasks(
         // Taken before the task is spawned, so the count is right the
         // instant `assemble` returns — the dispatcher must not admit a
         // trigger in the window before a resume task is scheduled.
-        let agent_slot = agent_caps.enter(agent.id().as_str(), agent.max_concurrent());
+        let agent_slot = agent_caps.enter(agent.id(), agent.max_concurrent());
         resume_handles.push(tokio::spawn(async move {
             let agent_slot = agent_slot;
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
