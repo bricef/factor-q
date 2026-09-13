@@ -412,14 +412,15 @@ the throttle and stays on.
 An agent's own `max_concurrent`
 ([#718](https://github.com/bricef/factor-q/issues/718),
 [agent definitions](agent-definitions.md#iteration-cap-concurrency-cap-and-reasoning-effort))
-holds a trigger the same way, for the same reason and by the same
-mechanism: an agent already running as many invocations as its
-definition allows has its next trigger pulled, un-acked, kept alive and
-started when a slot frees, still as its first delivery. The two bounds
-are independent — the throttle protects the provider, the per-agent cap
-protects the host — and a trigger can wait on either. `fq doctor` lists
-the agents at their cap beside the throttled models, and neither is a
-doctor issue.
+holds a trigger the same way, for the same reason and by literally the
+same mechanism — one hold, one keepalive cadence, in the daemon's code
+as well as in this description: an agent already running as many
+invocations as its definition allows has its next trigger pulled,
+un-acked, kept alive and started when a slot frees, still as its first
+delivery. The two bounds are independent — the throttle protects the
+provider, the per-agent cap protects the host — and a trigger can wait
+on either. `fq doctor` lists the agents at their cap beside the
+throttled models, and neither is a doctor issue.
 
 **An invocation the throttle put down still counts against its agent's
 cap.** A deferred invocation is sleeping, not finished: its WAL row is
@@ -440,14 +441,29 @@ binary as the first delivery it still is. Nothing is lost if the requeue
 itself fails; the delivery is simply left un-acked, which is the old
 behaviour.
 
-**A trigger held at its agent's cap occupies no worker permit.** It
-gives the permit it was pulled under back for the length of the wait and
-takes a fresh one before it runs, so `max_concurrent_invocations` is
-sized for *running* work and nothing else: an agent waiting on its own
-cap never stops another agent from starting, and a worker cap raised for
-the LLM-bound agents stays available to them while a build-bound agent
-is full. What bounds the waiting triggers instead is what is queued on
-the trigger durable.
+**The two holds differ in exactly one thing: the worker permit.** A
+trigger held at its agent's cap **occupies no worker permit** — it gives
+the permit it was pulled under back for the length of the wait and takes
+a fresh one before it runs, so `max_concurrent_invocations` is sized for
+*running* work and nothing else: an agent waiting on its own cap never
+stops another agent from starting, and a worker cap raised for the
+LLM-bound agents stays available to them while a build-bound agent is
+full.
+
+A trigger held for a **paused model keeps its permit**. That is
+head-of-line blocking, and it is worth knowing before you size the
+worker cap: with every permit taken by triggers for one paused model,
+agents on other models do not run until the pause lifts. It is not a
+decision, it is where the work stopped —
+[#733](https://github.com/bricef/factor-q/issues/733) gives the pause
+hold the cap hold's treatment.
+
+What bounds the waiting triggers instead is the consumer's ack-pending
+window: the loop keeps pulling while a permit is free and a cap hold
+releases its permit, so triggers for a full agent are pulled and parked
+until `max_ack_pending` (twice the worker cap, or the NATS default of
+**1000**, whichever is larger) is reached. Each parked hold is one task
+and one in-progress ack per keepalive tick.
 
 ## When a tool hangs
 
