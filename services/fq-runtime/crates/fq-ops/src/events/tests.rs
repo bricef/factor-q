@@ -185,6 +185,55 @@ fn invocation_deferred_is_agent_scoped_and_names_its_reason() {
     assert_eq!(json["payload"]["retry_after_ms"], 300_000);
 }
 
+/// An operator signal is daemon-scoped: one `fq.system.*` subject
+/// whatever its source, the runtime on the envelope, and what it
+/// concerns in the payload. The three co-located derivations —
+/// `subject()`, `schema_id()`, `event_type()` — are asserted together
+/// because a payload that answered two of them consistently and the
+/// third from a stale copy is exactly the drift the co-location exists
+/// to prevent (#453's shape).
+#[test]
+fn an_operator_signal_is_system_scoped_and_names_its_kind() {
+    let runtime_id = Uuid::now_v7();
+    let invocation_id = Uuid::now_v7();
+    let event = Event::system(
+        runtime_id,
+        EventPayload::OperatorSignal(
+            crate::events::OperatorSignalPayload::notification(
+                crate::events::SignalKind::registered(
+                    crate::events::operator_signal::kinds::PRICING_CHANGE_REFUSED,
+                ),
+                "moonshotai/kimi-k3 input price moved 6.2x; kept the prior price",
+            )
+            .with_detail(json!({"model": "moonshotai/kimi-k3", "ratio": 6.2}))
+            .about_invocation(AgentId::new("researcher").unwrap(), invocation_id),
+        ),
+    );
+
+    assert_eq!(event.subject(), "fq.system.operator_signal");
+    assert_eq!(event.envelope.schema_id, "factor-q/operator_signal@1");
+    assert_eq!(event.payload.event_type(), "operator_signal");
+    assert!(
+        !event.payload.is_transient(),
+        "a signal an operator has not seen yet is history, not a ping"
+    );
+    // Daemon-scoped: the envelope names the runtime, and the invocation
+    // the signal concerns is payload data (see `SignalReferences`).
+    assert_eq!(event.envelope.agent_id, AgentId::system());
+    assert_eq!(event.envelope.invocation_id, runtime_id);
+
+    // Internally tagged: the wire shape is `{event_type, payload}`.
+    let json = serde_json::to_value(&event.payload).unwrap();
+    assert_eq!(json["event_type"], "operator_signal");
+    assert_eq!(json["payload"]["severity"], "notification");
+    assert_eq!(json["payload"]["kind"], "pricing.change_refused");
+    assert_eq!(json["payload"]["references"]["agent"], "researcher");
+    assert_eq!(
+        json["payload"]["references"]["invocation"],
+        invocation_id.to_string()
+    );
+}
+
 /// `invocation.stuck` must land inside `fq.agent.*.invocation.*` — the
 /// coordination consumer's filter — and name the invocation on the
 /// envelope rather than in the payload, so it reads like every other
@@ -1419,6 +1468,12 @@ fn schema_id_for_every_payload_variant() {
             logger: None,
             data: serde_json::Value::Null,
         }),
+        EventPayload::OperatorSignal(crate::events::OperatorSignalPayload::alert(
+            crate::events::SignalKind::registered(
+                crate::events::operator_signal::kinds::PRICING_STALE,
+            ),
+            String::new(),
+        )),
     ];
     for payload in cases {
         let id = schema_id_for(&payload);

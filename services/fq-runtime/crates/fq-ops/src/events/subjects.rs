@@ -28,6 +28,20 @@ pub const SYSTEM_MCP_LOG: &str = "fq.system.mcp.log";
 /// reader that wants only the failures reads the payload rather than a
 /// second subject that could drift from the first.
 pub const SYSTEM_MAINTENANCE: &str = "fq.system.maintenance";
+/// A component of the daemon saying an operator should look at something
+/// (<https://github.com/bricef/factor-q/issues/736>).
+///
+/// **One subject, not one per source.** The variable token in every
+/// other namespace here is a *scope identity* — an agent, a worker — and
+/// the trailing tokens are the closed type vocabulary this module owns.
+/// A `fq.system.operator_signal.<source>` would put an open-ended
+/// producer name in that position, so every new producer would mint a
+/// subject nothing had written down; and it would buy a wildcard that
+/// selects on source alone, while the pane selects on severity and
+/// source together. The selection therefore lives in the payload, where
+/// both halves of it are, and the subject stays a function of the event's
+/// type like every other `fq.system.*`.
+pub const SYSTEM_OPERATOR_SIGNAL: &str = "fq.system.operator_signal";
 /// Where an [`crate::events::EventPayload::Unknown`] would route if it
 /// were ever published. It never is — the variant only exists so a
 /// newer daemon's event type deserialises in an older binary — but

@@ -234,6 +234,15 @@ fn event_summary(event: &Event) -> String {
             },
             p.duration_ms
         ),
+        // Severity first, and spelled out: this is the one line an
+        // operator reads while deciding whether the thing wakes them,
+        // so the word that answers that comes before the vocabulary
+        // that identifies it. `detail` is deliberately not here — the
+        // summary is the producer's one line, and the particulars are
+        // what `fq events get` prints below it.
+        EventPayload::OperatorSignal(p) => {
+            format!("operator.{} {} {}", p.severity, p.kind, p.summary.trim())
+        }
         EventPayload::InvocationOperatorRecovered(p) => format!(
             "invocation.operator_recovered action={} phase={}{}",
             p.action,
@@ -508,6 +517,55 @@ pub(crate) fn describe_filter(filter: &EventFilter) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The renderer is total, and the one line it must never print for
+    /// a payload this build knows is the "unknown event_type" line — the
+    /// sentence reserved for an event a *newer* daemon wrote. An
+    /// operator signal exists to be read by a person, so a signal that
+    /// rendered as unreadable would be the one failure the type cannot
+    /// afford.
+    #[test]
+    fn an_operator_signal_renders_its_severity_kind_and_summary() {
+        use fq_ops::events::operator_signal::kinds;
+        use fq_ops::events::{OperatorSignalPayload, SignalKind};
+
+        let signal = |payload| {
+            let event = fq_ops::events::Event::system(
+                uuid::Uuid::now_v7(),
+                EventPayload::OperatorSignal(payload),
+            );
+            event_summary(&event)
+        };
+
+        let notification = signal(
+            OperatorSignalPayload::notification(
+                SignalKind::registered(kinds::PRICING_CHANGE_REFUSED),
+                "moonshotai/kimi-k3 input price moved 6.2x; kept the prior price",
+            )
+            .with_detail(serde_json::json!({"ratio": 6.2})),
+        );
+        assert_eq!(
+            notification,
+            "operator.notification pricing.change_refused moonshotai/kimi-k3 input price \
+             moved 6.2x; kept the prior price"
+        );
+
+        let alert = signal(OperatorSignalPayload::alert(
+            SignalKind::registered(kinds::PRICING_STALE),
+            "the pricing table has not refreshed for 26 hours",
+        ));
+        assert_eq!(
+            alert,
+            "operator.alert pricing.stale the pricing table has not refreshed for 26 hours"
+        );
+
+        for line in [notification, alert] {
+            assert!(
+                !line.contains("unknown event_type"),
+                "a payload this build knows rendered as unreadable: {line}"
+            );
+        }
+    }
 
     /// The tail's preamble, in the domain's terms rather than the
     /// transport's. It travelled with the daemon's Event atom while
