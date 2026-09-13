@@ -1223,6 +1223,69 @@ bound of 1 or less, a window that is not a duration — refuses the
 start. An operator who asked for a pin and silently got the live
 document has the opposite of what they configured.
 
+## Seeing what needs a person: the notifications pane
+
+The dashboard's **notifications** pane is where the daemon's components
+say an operator should look at something. It reads a resource of its
+own — `operator_signal` — folded from the `operator_signal` events on
+the log, so what the pane shows is a record rather than a message that
+was sent somewhere and forgotten.
+
+Two severities, and the difference is a human's hours:
+
+- A **notification** is handled during normal hours and looked at by
+  the operator. A refused pricing change is one: the daemon carries on
+  at the prior price, and someone should know.
+- An **alert** reaches the operator out of hours, escalates, and names
+  something the system cannot recover from on its own.
+
+The pane marks the two apart in form as well as colour — an alert wears
+a stripe down the row and the word `alert`, a notification wears a chip
+— because an out-of-hours page is read on a phone, in the dark, and a
+hue is not a distinction to bet that on.
+
+### What it shows
+
+- **`/notifications`** — newest first, one row per signal, with its
+  source, its kind, when it was raised and its one-line summary.
+  Filters for severity (`all` / `notifications` / `alerts`) and for
+  source; the filter rides the query string, so a link to a filtered
+  pane is a link somebody else can open.
+- **`/notifications/{id}`** — one signal in full: the structured
+  particulars its producer sent, links to the invocation, agent or page
+  it concerns, the envelope of the event it rode in on, and the signals
+  either side of it from the same source.
+- **The home page** carries the count: *N in the last 24h · M open
+  alerts*, linking into the pane. It is red only while an alert stands.
+
+From a terminal, `fq notifications list` is the same listing and
+`fq notifications show <event-id>` the same detail page; both take
+`--json`.
+
+### Retention: alerts are kept, notifications age out
+
+A notification lives as long as the event it was folded from — the
+event log's 30-day window, or whatever `[state] retention_days` says.
+**An alert is never swept.** The record that the system could not
+recover on its own and a person had to intervene is worth more than the
+log it arrived on, so the pane can still show what needed a human last
+quarter, whole, particulars included.
+
+That means the two counts on the home page are not symmetrical, and
+deliberately: notifications are counted inside a day, alerts are counted
+outright. There is no acknowledgement in this version, so "open alerts"
+means every alert this daemon has ever recorded rather than every unread
+one. A per-operator seen-mark is a later change, once there is more than
+one operator to have seen anything.
+
+### What this pane is not
+
+It does not page anybody. Fan-out to Slack and Pushover is a separate
+concern with no consumer yet: `ops/dogfood/notify.sh` keeps sending what
+it sends, and until a fan-out consumer exists an alert reaching this
+pane has not, by itself, woken anyone. Watch it, or watch the count on
+the home page.
+
 ## Quick reference
 
 | Goal | Command |
@@ -1246,6 +1309,9 @@ document has the opposite of what they configured.
 | See which pricing table this daemon accepted | `fq events query --event-type system_startup --limit 1` |
 | Refresh prices without restarting | an `fq-cron.toml` job publishing to `fq.maintenance.pricing_refresh` (see *Keeping the table fresh*) |
 | See what pricing changes were refused | `fq events query --event-type operator_signal` |
+| See what has asked for a person's attention | `fq notifications list`, or the dashboard's notifications pane |
+| See only what could not recover on its own | `fq notifications list --severity alert` (alerts are never swept, so this reaches back past everything else) |
+| Read one signal in full | `fq notifications show <event-id>` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |
