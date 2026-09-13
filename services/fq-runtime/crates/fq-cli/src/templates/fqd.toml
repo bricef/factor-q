@@ -465,6 +465,32 @@ models = ["claude-haiku-4-5"]
 # tasks holding the descriptors. Default 100.
 # accept_error_backoff_ms = 100
 
+[pricing]
+# Where model prices come from, and what the daemon accepts from them
+# (#735). The live LiteLLM table is the source and the discipline is on
+# acceptance: pinning a commit would turn "prices drift" into "the
+# daemon will not run a new model until a human bumps a SHA", because
+# LiteLLM adds models weekly and ADR-0004 refuses to start on a model
+# with no price. See docs/guide/operating-the-daemon.md, "Pricing: the
+# live table, and what the daemon accepts from it".
+#
+# "litellm-main" (default, the live document) or "pinned:<sha>", which
+# fetches that commit's copy forever. The pin is for an air-gapped or
+# regulated deployment that reviews the diff itself.
+# source = "litellm-main"
+#
+# How far a price may move, in either direction, and still be accepted.
+# Past it the model keeps its prior price, the rest of the table lands,
+# and a `pricing.change_refused` notification names the model, the
+# field, both figures and the ratio. Default 5.0 — a nonsense detector,
+# not a change detector: model prices move a lot and quickly.
+# max_drift_ratio = 5.0
+#
+# How old the accepted table may be before a load raises the
+# `pricing.stale` alert. Default "7d"; hours, minutes and seconds also
+# parse ("36h", "90m", "30s").
+# max_age = "7d"
+
 [maintenance]
 # The daemon-side maintenance consumer (#257). Recurring housekeeping
 # is SCHEDULED by fq-cron, the standalone adapter, and RUN here: the

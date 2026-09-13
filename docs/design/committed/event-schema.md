@@ -70,7 +70,8 @@ When present (on `llm.response` events, and on the `llm.failure` events that bil
   "cumulative_invocation_cost": 0.004523,
   "cumulative_agent_cost": 0.127890,
   "origin": { "kind": "agent_turn" },
-  "reported_cost": 0.001075
+  "reported_cost": 0.001075,
+  "pricing_table": "litellm-main@3f9a1c0b2d4e"
 }
 ```
 
@@ -83,6 +84,8 @@ one record.
 `reasoning_tokens` is the share of `output_tokens` the model spent thinking rather than speaking. It is carried here because the cost record is where anyone looks to ask what a call cost, and for a reasoning-first model that split is most of the answer — it was previously invisible in the cost data entirely. **It changes no figure**: reasoning is already inside `output_tokens`, so `output_cost` and `total_cost` are what they always were, and the pricing table is deliberately not told about it. **Absent where the provider does not report the split** — Anthropic never does — and present, as `0`, where a provider reported that none were spent. The two are different facts and stay distinguishable downstream: the projection stores NULL against `0`, `fq costs` prints `n/a` against `0`, and `--json` says `null` against `0` ([#536](https://github.com/bricef/factor-q/issues/536)). Read an absent key as "not reported", never as "no thinking happened".
 
 `reported_cost` is what the provider itself said the call cost — the billed figure OpenRouter returns on every response as `usage.cost`, its own fee and any cache discount included. **It changes no figure either**: `total_cost` is what the runtime's pricing table computed, because budgets are enforced on a rate known before the call, and that is the number every sum and ceiling reads. `reported_cost` is the number to reconcile that against. **Absent where the provider reported nothing** — the native Anthropic, OpenAI and Gemini wires carry no cost — which is not `0`; a free model through OpenRouter reports `0`.
+
+`pricing_table` names the accepted pricing table that produced the figures above — `<source>@<digest12>`, the short form of the provenance the run's `system.startup` event carries in full ([#735](https://github.com/bricef/factor-q/issues/735)). The cost-retention principle keeps spend figures indefinitely, and a figure nobody can attach to a price list is a number rather than a record; the same string is projected onto the cost row, which outlives the event under the retention sweep. **Absent where the table carried no provenance** — a test fixture, or a daemon serving an empty table — which is never a claim about the figures themselves.
 
 ### How a reader treats the version
 
@@ -711,9 +714,17 @@ Published by the daemon's summary consumer (#216) — never by an agent — unde
   "version": "0.1.0",
   "nats_url": "nats://localhost:4222",
   "agents_loaded": 3,
-  "pricing_entries": 12
+  "pricing_entries": 12,
+  "pricing_table": {
+    "source": "litellm-main",
+    "commit": "9c4f1b7a0e2d5836a1b0c9d8e7f6a5b4c3d2e1f0",
+    "digest": "3f9a1c0b2d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+    "accepted_at": "2026-09-13T09:00:00Z"
+  }
 }
 ```
+
+`pricing_table` is the provenance of the table this run accepted ([#735](https://github.com/bricef/factor-q/issues/735)): the configured source (`litellm-main` or `pinned:<sha>`), the upstream commit the document was read at (the GitHub contents API's latest commit for the file, or the raw URL's `ETag` where the API did not answer, absent where neither did), a SHA256 digest of exactly the bytes accepted — which are the bytes cached, and differ from what the source offered exactly when acceptance refused a change — and when it was accepted. Every cost record this run writes cites `<source>@<first 12 digest characters>`. Absent where no table was accepted at all, which is the empty-table case ADR-0004's startup guarantee refuses to run on anyway.
 
 `nats_url` is host and port only. The daemon refuses a `[nats] url` that carries a credential and takes the broker token from the environment variable `[nats] token_env` names, so this payload — served whole by `event.get` to any `read:event` holder — cannot contain one ([#540](https://github.com/bricef/factor-q/issues/540)).
 
@@ -860,8 +871,9 @@ A component of the daemon saying an operator should look at something ([#736](ht
 
 | Kind | Severity | Producer | `detail` |
 |---|---|---|---|
-| `pricing.change_refused` | `notification` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `model`, `field`, `old`, `new`, `ratio`, `rule` (`drift_bound` or `zero_price`) |
-| `pricing.stale` | `alert` | Pricing refresh ([#735](https://github.com/bricef/factor-q/issues/735)) | `last_refresh_ms`, `window_hours` |
+| `pricing.change_refused` | `notification` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `model`, `field` (the upstream field name), `old` and `new` (per token, as the source states prices; `old` is absent for a new model refused at admission), `ratio` (absent where the change has none — a new model, or a prior price of zero), `rule` (`drift_bound` or `zero_price`). One per model per load |
+| `pricing.fetch_failed` | `notification` | The pricing load ([#735](https://github.com/bricef/factor-q/issues/735)) | `error`. The daemon is serving the last table it accepted |
+| `pricing.stale` | `alert` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `last_refresh_ms` (epoch ms of the last acceptance), `window_hours` |
 | `deploy.succeeded` | `notification` | Reserved — the deploy message ([PR #707](https://github.com/bricef/factor-q/pull/707)) reaches Pushover today and becomes this event's second producer | `build`, `compare_url`, the commit list the message names |
 
 Adding a kind is three steps and no schema change: a `pub const` in `kinds` listed in `kinds::REGISTERED`, a row in this table naming its severity and its `detail` fields, and the producer.
