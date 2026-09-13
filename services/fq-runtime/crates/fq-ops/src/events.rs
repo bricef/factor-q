@@ -93,6 +93,11 @@ pub mod operator_signal;
 /// `crate::events` stays the import path for every one of them.
 mod payloads;
 
+/// Which pricing table priced a run: [`PricingProvenance`], carried on
+/// `system.startup` and cited by every cost record. Re-exported below,
+/// so `crate::events` stays the import path.
+mod pricing;
+
 /// Which event types are transient — operational signal the operator
 /// surface does not serve, written down once.
 pub mod transient;
@@ -112,6 +117,7 @@ pub use operator_signal::{
     OperatorSignalPayload, SignalKind, SignalKindError, SignalReferences, SignalSeverity,
 };
 pub use payloads::*;
+pub use pricing::PricingProvenance;
 pub use wire::{EventParseError, SUPPORTED_SCHEMA_VERSIONS, declared_schema_version};
 
 /// A complete event: envelope + payload + annotations.
