@@ -416,8 +416,9 @@ the three to report healthy after every deploy.
 
 The stack that runs the images is
 [`ops/dogfood/compose.yml`](../../ops/dogfood/compose.yml): the broker,
-the proxy, the daemon, the watcher, the dashboard and the scheduler,
-with restart policy, health ordering on the broker, a stop grace period
+the proxy, the daemon, the watcher, the dashboard, the scheduler and the
+`ops` service that runs the operations scripts on their schedule
+(ADR-0036), with restart policy, health ordering on the broker, a stop grace period
 longer than the drain deadline, resource limits on the daemon and
 rotated logs. [`ops/dogfood/README.md`](../../ops/dogfood/README.md) is
 the operator's guide to it — bootstrap of a dedicated host, the
@@ -425,9 +426,9 @@ tag-bump `deploy.sh` and its hourly `--auto` mode, hygiene, backups and
 the restore drill, and the migration runbook. In short:
 
 ```sh
-sudo ops/dogfood/bootstrap.sh          # a fresh Debian/Ubuntu host: docker, the deploy user, the tree, the crontab
-~/fq-dogfood/deploy.sh                 # pull main-latest, verify, drain, up, verify — or deploy.sh <sha> to roll back
-docker compose exec fqd fq status      # ask the daemon, through the container's own client
+sudo ops/dogfood/bootstrap.sh             # a fresh Debian/Ubuntu host: docker, the deploy user, the tree
+docker compose run --rm ops deploy        # pull main-latest, verify, drain, up, verify — or `ops deploy <sha>` to roll back
+docker compose exec fqd fq status         # ask the daemon, through the container's own client
 ```
 
 ## Status
