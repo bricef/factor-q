@@ -330,12 +330,16 @@ pub(crate) fn spawn_resume_tasks(
         // trigger in the window before a resume task is scheduled.
         let agent_slot = agent_caps.enter(agent.id().as_str(), agent.max_concurrent());
         resume_handles.push(tokio::spawn(async move {
-            let _agent_slot = agent_slot;
+            let agent_slot = agent_slot;
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
+                // The slot goes on the queue with the resume (#718): a
+                // recovered invocation that defers again is still one of
+                // this agent's in-flight runs, and taking a second slot
+                // when it wakes would be a second entry for one run.
                 Ok(fq_runtime::InvocationOutcome::Deferred {
                     invocation_id,
                     resume_after,
-                }) => deferrals.defer(invocation_id, agent_id, resume_after),
+                }) => deferrals.defer(invocation_id, agent_id, resume_after, agent_slot),
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
                     ?outcome,

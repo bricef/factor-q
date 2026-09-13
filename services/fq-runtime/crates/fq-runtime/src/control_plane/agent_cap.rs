@@ -4,9 +4,33 @@
 //!
 //! One [`AgentConcurrency`] lives in the daemon and is shared by every
 //! place an invocation actually starts — the dispatcher's trigger path,
-//! its deferral resumes, startup recovery's resume tasks and `fq
-//! invocation resume`. The dispatcher reads it to decide whether a new
-//! trigger may start; `fq doctor` reads it to say what is being held.
+//! startup recovery's resume tasks and `fq invocation resume`. The
+//! dispatcher reads it to decide whether a new trigger may start; `fq
+//! doctor` reads it to say what is being held.
+//!
+//! # The invariant, and its one exception
+//!
+//! **`in_flight(agent) ≤ max_concurrent(agent)` for everything this
+//! daemon starts.** [`AgentConcurrency::try_enter`] is the only way in
+//! for a trigger, and the check and the increment are one critical
+//! section, so the bound cannot be raced past. A *deferral* does not
+//! leave the count: the [`AgentSlot`] travels with the sleeping
+//! invocation inside `DueResume` and comes back with its resume, so the
+//! deferral path needs no entry of its own (see
+//! `worker::deferral`). That was the hole the first shape of this module
+//! had — a resume re-entered through [`AgentConcurrency::enter`], which
+//! refuses nothing, so a persistently throttled model turned a capped
+//! agent's held backlog into an uncapped burst.
+//!
+//! The exception is a resume of work *this process did not admit*:
+//! startup recovery and `fq invocation resume`. A restart resumes what
+//! it finds, and it may find more than the cap now allows; it admits
+//! nothing new until it is back under cap, which is exactly what
+//! `try_enter` gives. Refusing those would leave a half-done invocation
+//! unresumed while it still occupies the host. So the property that
+//! holds unconditionally is
+//! `in_flight(agent) ≤ max(cap, invocations recovered at start)`, and
+//! `control_plane::agent_cap::proptests` is that sentence as a test.
 //!
 //! # Why a count here and not a query of the WAL
 //!
@@ -104,15 +128,22 @@ impl AgentConcurrency {
         }
     }
 
-    /// Count an invocation that is *not* being admitted — a resume of
-    /// work the cap already let in. Never refused.
+    /// Count an invocation this process did not admit — a resume of
+    /// work that was in flight before this daemon (or this operator
+    /// command) reached it. Never refused, and the **only** way the
+    /// count can exceed a cap.
     ///
-    /// A resume finishes an invocation that is already occupying the
-    /// host; holding it back would extend the time its slot stays
-    /// occupied rather than shorten it, and for startup recovery it
-    /// would leave a half-done invocation unresumed. So the cap bounds
-    /// *starts*, and every running invocation — however it started —
-    /// counts against it.
+    /// Its two callers are startup recovery (`recovery::spawn_resume
+    /// _tasks`) and `fq invocation resume`. Both are finishing an
+    /// invocation whose WAL row is already in flight: holding it back
+    /// would extend the time the host stays occupied rather than
+    /// shorten it, and for startup recovery it would leave a half-done
+    /// invocation unresumed.
+    ///
+    /// It is deliberately *not* the deferral path's entry. A deferred
+    /// invocation never leaves the count — its [`AgentSlot`] rides the
+    /// deferral queue — because a resume that re-entered here would be
+    /// an admission the cap never made.
     pub fn enter(self: &Arc<Self>, agent: &str, cap: Option<u32>) -> AgentSlot {
         let mut agents = self.lock();
         let state = agents.entry(agent.to_string()).or_default();
@@ -222,6 +253,13 @@ impl Drop for HeldTrigger {
             .release(&self.agent, |s| s.held = s.held.saturating_sub(1));
     }
 }
+
+/// The invariant as a property over random histories, in its own file
+/// because it is a different kind of test from the examples below:
+/// those pin one behaviour each, this one pins the sentence in this
+/// module's doc.
+#[cfg(test)]
+mod proptests;
 
 #[cfg(test)]
 mod tests {

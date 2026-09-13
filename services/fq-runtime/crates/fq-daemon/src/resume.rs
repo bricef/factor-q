@@ -253,13 +253,15 @@ pub(crate) async fn handle_resume_request(
         .agent_caps
         .enter(agent.id().as_str(), agent.max_concurrent());
     tokio::spawn(async move {
-        let _agent_slot = agent_slot;
+        let agent_slot = agent_slot;
         match runner.resume(&agent, llm.as_ref(), invocation_id).await {
-            // Still rate-limited (#278): back on the queue, not lost.
+            // Still rate-limited (#278): back on the queue, not lost —
+            // and the cap slot goes with it (#718), so the sleeping
+            // invocation still counts and its resume needs no new entry.
             Ok(fq_runtime::InvocationOutcome::Deferred {
                 invocation_id,
                 resume_after,
-            }) => deferrals.defer(invocation_id, agent_id, resume_after),
+            }) => deferrals.defer(invocation_id, agent_id, resume_after, agent_slot),
             Ok(_) => {}
             Err(err) => {
                 tracing::error!(error = %err, %invocation_id, "operator resume failed");

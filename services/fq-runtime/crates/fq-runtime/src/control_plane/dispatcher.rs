@@ -565,9 +565,11 @@ impl TriggerDispatcher {
         // Admission, second rule (#718): an agent already running
         // `max_concurrent` invocations starts no more. Both the slot and
         // the worker permit are held for the rest of `handle`, so every
-        // way the invocation can end — completed, failed, deferred,
-        // drained, dropped, panicked — gives them back through `Drop`.
-        let Some((_agent_slot, _permit)) = self
+        // way the invocation can end — completed, failed, drained,
+        // dropped, panicked — gives them back through `Drop`. A deferral
+        // is the one outcome that is not an ending: `conclude` hands the
+        // slot to the deferral queue with the resume.
+        let Some((agent_slot, _permit)) = self
             .admit_agent_slot(msg, &agent_id, header_id, permit)
             .await
         else {
@@ -702,7 +704,7 @@ impl TriggerDispatcher {
             }
         }
 
-        self.conclude(agent_id, result);
+        self.conclude(agent_id, result, agent_slot);
     }
 
     async fn ack(
