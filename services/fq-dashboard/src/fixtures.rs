@@ -378,6 +378,8 @@ fn agent_detail_view() -> fq_ops::agent_view::AgentDetailView {
         mcp_servers: vec!["github".to_string()],
         budget: Some(12.0),
         max_iterations: Some(200),
+        // The build-bound fixer is the agent the cap was written for.
+        max_concurrent: Some(2),
         effort: Some("high".to_string()),
         trigger: Some("m0-issue-fix".to_string()),
         path: "/home/fq/agents/m0-issue-fix.md".to_string(),

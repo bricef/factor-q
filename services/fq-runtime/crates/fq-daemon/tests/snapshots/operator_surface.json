@@ -1026,6 +1026,15 @@
               "null"
             ]
           },
+          "max_concurrent": {
+            "description": "How many invocations of this agent the daemon runs at once.\n`None` is the declaration's own absence — unlimited within the\nworker's `max_concurrent_invocations` — and is rendered as that\nrather than omitted, because \"what cap did I set on this agent?\"\nis a question every other limit on this view answers.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_iterations": {
             "format": "uint32",
             "minimum": 0,

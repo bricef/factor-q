@@ -525,7 +525,11 @@ effort: high            # reasoning effort for each request
   their cap and how many triggers are waiting ("Agents at cap"), so the
   wait is visible rather than a queue that appears to have stalled. `fq
   reload` picks up a changed cap, including for a trigger that is already
-  waiting.
+  waiting. What the cap *is* reads off the same surfaces as the agent's
+  other limits — `fq agent validate` prints it whether or not it is set,
+  and the dashboard's agent page has a row for it — so the question "what
+  did I set on this agent?" has an answer that does not depend on the
+  agent being full at the time.
 - **`effort`** sets the model's reasoning effort per request: `minimal`,
   `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
   default. `minimal` exists for a real failure mode rather than for
@@ -774,9 +778,10 @@ code blocks — anything that helps the LLM understand its task.
 
 ```sh
 # Check that the definition parses correctly (offline, no daemon needed).
-# `budget` and `max_iterations` print whether or not they are set —
-# `budget: not set (no cap)` rather than an omitted line, so an absence
-# is something you can read rather than something you have to notice.
+# `budget`, `max_iterations` and `max_concurrent` print whether or not
+# they are set — `budget: not set (no cap)` rather than an omitted line,
+# so an absence is something you can read rather than something you have
+# to notice.
 fq agent validate agents/my-agent.md
 
 # List the agents the running daemon has loaded — its live registry,

@@ -116,6 +116,10 @@ pub(crate) fn validate_agent(path: &Path) -> anyhow::Result<()> {
                 Some(n) => println!("  max_iterations: {n}"),
                 None => println!("  max_iterations: not set (daemon default)"),
             }
+            match agent.max_concurrent() {
+                Some(n) => println!("  max_concurrent: {n}"),
+                None => println!("  max_concurrent: not set (worker cap)"),
+            }
             if let Some(effort) = agent.effort() {
                 println!("  effort:  {effort:?}");
             }

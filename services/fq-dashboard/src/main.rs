@@ -468,6 +468,7 @@ mod tests {
             mcp_servers: Vec::new(),
             budget: None,
             max_iterations: None,
+            max_concurrent: None,
             effort: None,
             trigger: None,
             path: "agents/probe.md".to_string(),
