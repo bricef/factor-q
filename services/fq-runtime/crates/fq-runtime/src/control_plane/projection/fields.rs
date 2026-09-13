@@ -150,6 +150,17 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
         | EventPayload::WorkerOrphaned(_)
         | EventPayload::McpServerLog(_)
         | EventPayload::MaintenanceRun(_)
+        // An operator signal has no model, no tokens and no cost, and
+        // its severity/kind/source are not columns here: `error_kind`
+        // and `error_message` mean "this invocation failed, and how",
+        // and filling them with a signal's kind and summary would put
+        // notifications into every failure count in the tree. The pane's
+        // own index — severity, source, and the alert table that outlives
+        // the log — is the projection work in
+        // <https://github.com/bricef/factor-q/issues/736>; until then the
+        // envelope columns record that the signal happened and the
+        // payload is read from the log.
+        | EventPayload::OperatorSignal(_)
         | EventPayload::InvocationOperatorRecovered(_)
         | EventPayload::InvocationOperatorResumed(_)
         // A type this binary cannot read: the envelope columns still

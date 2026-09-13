@@ -81,6 +81,14 @@ mod envelope;
 /// stays the import path for every one of these types.
 pub mod llm;
 
+// The operator-signal payload and its kind registry. Documented by its
+// own `//!` header — an outer comment here would be merged with it and
+// resolved in *this* scope, so its links to `kinds` would not resolve
+// (the same reason `subjects` above has none). The types are re-exported
+// below, so `crate::events` stays their import path; the registry keeps
+// its own name, `operator_signal::kinds`.
+pub mod operator_signal;
+
 /// The per-event payload structs. Re-exported below, so
 /// `crate::events` stays the import path for every one of them.
 mod payloads;
@@ -99,6 +107,9 @@ pub use llm::{
     LlmRequestPayload, LlmResponsePayload, Message, MessageToolCall, Reasoning, ReasoningContent,
     RequestParams, StopReason, TokenUsage, ToolResult, ToolSchema, assistant_parts, assistant_text,
     assistant_tool_calls, reduce_reasoning,
+};
+pub use operator_signal::{
+    OperatorSignalPayload, SignalKind, SignalKindError, SignalReferences, SignalSeverity,
 };
 pub use payloads::*;
 pub use wire::{EventParseError, SUPPORTED_SCHEMA_VERSIONS, declared_schema_version};
@@ -445,6 +456,7 @@ impl EventPayload {
             Self::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
             Self::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
             Self::MaintenanceRun(_) => subjects::SYSTEM_MAINTENANCE.to_string(),
+            Self::OperatorSignal(_) => subjects::SYSTEM_OPERATOR_SIGNAL.to_string(),
             Self::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
             Self::WorkerOrphaned(p) => subjects::worker_orphaned(p.worker_id.as_str()),
             Self::InvocationArchiveAcked(p) => {
@@ -483,6 +495,7 @@ impl EventPayload {
             Self::WorkerOrphaned(_) => "factor-q/worker_orphaned@1",
             Self::McpServerLog(_) => "factor-q/mcp_server_log@1",
             Self::MaintenanceRun(_) => "factor-q/maintenance_run@1",
+            Self::OperatorSignal(_) => "factor-q/operator_signal@1",
             Self::Unknown => "factor-q/unknown@1",
         }
     }
@@ -694,6 +707,24 @@ pub enum EventPayload {
     /// maintenance task is the runtime's own housekeeping, tied to no
     /// agent and no invocation.
     MaintenanceRun(MaintenanceRunPayload),
+
+    /// A component of the daemon saying an operator should look at
+    /// something (<https://github.com/bricef/factor-q/issues/736>): a
+    /// refused pricing change, a stale table, a deploy that landed.
+    ///
+    /// **One event type, a registry of kinds.** What is being reported
+    /// is [`SignalKind`] data rather than a variant here, because the
+    /// producers are unrelated components and the readers — the pane,
+    /// the detail page — do the same thing with all of them: show a
+    /// person a line, a severity and some particulars. A variant per
+    /// producer would make every new signal a schema change and an
+    /// arm in every exhaustive match in the tree, to say something the
+    /// vocabulary already says.
+    ///
+    /// Daemon-scoped: it rides `fq.system.operator_signal` and its
+    /// envelope names the runtime. What it concerns rides
+    /// [`SignalReferences`] — see that type for why.
+    OperatorSignal(OperatorSignalPayload),
 
     /// An `event_type` this binary has never heard of — a payload
     /// minted by a newer daemon and read by an older one.

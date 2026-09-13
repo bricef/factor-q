@@ -462,6 +462,30 @@ fn exemplars() -> Vec<Event> {
                 duration_ms: 1,
             }),
         ),
+        // The operator signal (#736), with every optional part filled
+        // in: an exemplar that omitted `detail` or `references` would
+        // pin only the half of the wire shape a bare signal writes, and
+        // the parts a reader has to find are exactly the ones a producer
+        // fills in.
+        system_event(
+            28,
+            EventPayload::OperatorSignal(
+                OperatorSignalPayload::notification(
+                    SignalKind::registered(operator_signal::kinds::PRICING_CHANGE_REFUSED),
+                    "moonshotai/kimi-k3 input price moved 6.2x; kept the prior price",
+                )
+                .with_detail(json!({
+                    "model": "moonshotai/kimi-k3",
+                    "field": "input_cost_per_token",
+                    "old": 0.0000006,
+                    "new": 0.0000037,
+                    "ratio": 6.17,
+                    "rule": "drift_bound",
+                }))
+                .about_invocation(AgentId::new(AGENT).unwrap(), invocation())
+                .with_url("https://github.com/BerriAI/litellm/commits/main"),
+            ),
+        ),
     ]
 }
 
