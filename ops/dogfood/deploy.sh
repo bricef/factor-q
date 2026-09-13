@@ -436,12 +436,16 @@ done
 
 # --- done ------------------------------------------------------------------------
 # What landed, for the message and the terminal alike. GHW_REPO is the
-# repository the watcher already follows — the one these builds come from.
-GHW_REPO="$(sed -n 's/^GHW_REPO=\(.*\)$/\1/p' .env | tail -1)"
+# repository the watcher already follows — the one these builds come
+# from — read from where the watcher reads it: .secrets/env, the file
+# env.example requires it in. (.env never carried it, so the lookup that
+# used to look there found nothing on every host and the list was never
+# rendered; the guest's first deploy from the ops service showed it.)
+GHW_REPO="$(sed -n 's/^GHW_REPO=\(.*\)$/\1/p' .secrets/env | tail -1)"
 if [ -z "$CURRENT" ] || [ "$CURRENT" = "$SHA" ]; then
     changes="first deploy of $SHA on this host, or a redeploy — nothing to compare"
 elif [ -z "$GHW_REPO" ]; then
-    changes="commit list unavailable: GHW_REPO not set in .env"
+    changes="commit list unavailable: GHW_REPO not set in .secrets/env"
 elif subjects="$(changes_since "$CURRENT" "$SHA" "$GHW_REPO")"; then
     changes="$(printf '%s\n' "$subjects" | render_changes "$CURRENT" "$SHA" "$GHW_REPO")"
 else
