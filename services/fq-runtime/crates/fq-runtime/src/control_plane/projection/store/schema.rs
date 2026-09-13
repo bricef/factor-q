@@ -87,12 +87,23 @@ use crate::db::schema::{Compatibility, check_compatibility, read_user_version, s
 ///   the retention sweep and past stream retention the projection is
 ///   the only copy of the spend, so it has to be the only copy of the
 ///   prices that produced it.
-pub const PROJECTION_SCHEMA_VERSION: u32 = 2;
+/// - **v3** — `operator_signals`, the index behind the dashboard's
+///   notifications pane. A bump rather than an `ALTER`, because the
+///   history is in the events: every `operator_signal` the stream
+///   still holds is re-derived by the replay, so a daemon that
+///   upgrades finds its pane populated instead of empty back to the
+///   moment of the upgrade.
+pub const PROJECTION_SCHEMA_VERSION: u32 = 3;
 
 /// The tables a rebuild drops and recreates — the projection proper.
 /// `projection_meta` is deliberately not among them: it records the
 /// rebuild.
-pub(super) const PROJECTION_TABLES: [&str; 3] = ["events", "invocation_summary", "triggers"];
+pub(super) const PROJECTION_TABLES: [&str; 4] = [
+    "events",
+    "invocation_summary",
+    "triggers",
+    "operator_signals",
+];
 
 /// The schema, whole, at [`PROJECTION_SCHEMA_VERSION`]. Run on a fresh
 /// file and on a rebuild; `IF NOT EXISTS` keeps it idempotent on a file
@@ -174,6 +185,49 @@ CREATE TABLE IF NOT EXISTS triggers (
 CREATE INDEX IF NOT EXISTS idx_triggers_agent_time ON triggers(agent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_triggers_time ON triggers(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_triggers_seq ON triggers(seq);
+
+-- What a component of the daemon said an operator should look at,
+-- projected from `operator_signal` events -- the index behind the
+-- dashboard's notifications pane. Keyed on `event_id`, so the row and
+-- the event it folds are the same identity and a redelivery upserts.
+--
+-- THE ONE TABLE THE SWEEP TOUCHES BY PREDICATE. Notifications age out
+-- with the log they came from, and ALERTS ARE KEPT INDEFINITELY,
+-- because an alert is the record that a person had to intervene and
+-- that record has to outlive the 30-day log. The other exemptions here
+-- are structural (a whole table the sweep never names) and this one
+-- cannot be: two severities live in one resource, so the pane can
+-- order them against each other, and splitting the table to dodge a
+-- WHERE clause would buy a structural exemption at the price of a
+-- UNION on every read. `sweep_operator_signals` is the only writer of
+-- that clause and its test is what keeps it honest.
+--
+-- `detail` and `refs` hold the payload's two JSON sub-objects
+-- verbatim, so the detail page needs no second hop into the log --
+-- which matters precisely because the log ages out from under an alert
+-- that the pane still shows. NULL when the payload carried neither.
+-- (`references` is a SQL keyword, hence `refs`.)
+--
+-- `seq` is the log position of the event this row folds, NULL when the
+-- delivery carried no JetStream metadata. (No semicolons in these
+-- comments -- the schema runner splits statements on them.)
+CREATE TABLE IF NOT EXISTS operator_signals (
+    event_id        TEXT PRIMARY KEY,
+    seq             INTEGER,
+    timestamp       TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    invocation_id   TEXT NOT NULL,
+    severity        TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    detail          TEXT,
+    refs            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_signals_time ON operator_signals(timestamp);
+CREATE INDEX IF NOT EXISTS idx_operator_signals_severity_time ON operator_signals(severity, timestamp);
+CREATE INDEX IF NOT EXISTS idx_operator_signals_source_time ON operator_signals(source, timestamp);
 "#;
 
 /// The index that makes "a dead letter is requeued at most once" a
