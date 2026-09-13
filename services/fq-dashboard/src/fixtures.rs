@@ -27,6 +27,15 @@ mod costs;
 
 use costs::{agent_cost_detail, cost_report, day_cost_report};
 
+mod notifications;
+
+pub(crate) use notifications::signal_counts;
+#[cfg(test)]
+pub(crate) use notifications::{
+    signal_detail as notification_signal_detail,
+    signal_detail_for as notification_signal_detail_for, signals as notification_signals,
+};
+
 pub(crate) fn active_rows() -> Vec<fq_ops::views::ActiveInvocationView> {
     vec![
         fq_ops::views::ActiveInvocationView {
@@ -395,7 +404,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::live_page(
                 "health",
                 REFRESH_SECS,
-                &render::health(&status_report(), &doctor_report()),
+                &render::health(&status_report(), &doctor_report(), &signal_counts()),
             ),
         ),
         (
@@ -498,6 +507,41 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                 "agent · m0-issue-fix",
                 REFRESH_SECS,
                 &render::agent_detail(&agent_detail_view()),
+            ),
+        ),
+        (
+            "notifications",
+            render::live_page(
+                "notifications",
+                REFRESH_SECS,
+                &crate::pages::notifications::pane::notifications(
+                    &notifications::signals(),
+                    &Default::default(),
+                    NOW_MS,
+                ),
+            ),
+        ),
+        (
+            // The empty pane is a fixture in its own right: "nothing
+            // has asked for a person's attention" is the state an
+            // operator sees most days, and a gallery that never shows
+            // it cannot catch it turning into a bare heading.
+            "notifications-empty",
+            render::live_page(
+                "notifications",
+                REFRESH_SECS,
+                &crate::pages::notifications::pane::notifications(&[], &Default::default(), NOW_MS),
+            ),
+        ),
+        (
+            "notification-detail",
+            render::live_page(
+                "notification · pricing.stale",
+                REFRESH_SECS,
+                &crate::pages::notifications::pane::notification_detail(
+                    &notifications::signal_detail(),
+                    NOW_MS,
+                ),
             ),
         ),
         (

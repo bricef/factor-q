@@ -43,7 +43,8 @@ mod render;
 
 use pages::{
     agent_costs_page, agent_page, agents_page, costs_page, events_page, health_page,
-    invocation_page, invocations_page, transcript_page, transcript_stream,
+    invocation_page, invocations_page, notification_page, notifications_page, transcript_page,
+    transcript_stream,
 };
 
 /// This build's git SHA (stamped by build.rs). Compared against the
@@ -101,6 +102,7 @@ struct Args {
 /// | `read:cost` | `/costs`, `/costs/{agent}` |
 /// | `read:event` | `/events` |
 /// | `read:invocation` | `/invocations`, `/invocations/{id}` |
+/// | `read:operator_signal` | `/notifications`, `/notifications/{id}`, and the home page's count |
 /// | `read:turn` | the transcript page and its live tail |
 ///
 /// Deliberately not `read:*`, which would additionally grant `worker`,
@@ -112,6 +114,7 @@ const REQUIRED_GRANTS: &[&str] = &[
     "read:cost",
     "read:event",
     "read:invocation",
+    "read:operator_signal",
     "read:turn",
 ];
 
@@ -296,6 +299,8 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/assets/{name}", get(pages::assets::asset))
         .route("/events", get(events_page))
+        .route("/notifications", get(notifications_page))
+        .route("/notifications/{id}", get(notification_page))
         .route("/costs", get(costs_page))
         .route("/costs/{agent}", get(agent_costs_page))
         .route("/agents", get(agents_page))
@@ -414,11 +419,13 @@ mod tests {
     use fq_ops::agent_view::{AgentDetailView, AgentEntryView, AgentSummaryView};
     use fq_ops::surface::{
         AgentListFilter, AgentViewKey, CostByAgentParams, CostSummaryParams, DoctorReport,
-        EventFilter, InvocationListFilter, InvocationViewKey, StatusReport, TurnFilter,
+        EventFilter, InvocationListFilter, InvocationViewKey, OperatorSignalCounts,
+        OperatorSignalCountsParams, OperatorSignalFilter, OperatorSignalKey, StatusReport,
+        TurnFilter,
     };
     use fq_ops::views::{
         ActiveInvocationView, AgentCostDetailView, CostReport, EventView, InvocationDetailView,
-        InvocationSummaryView,
+        InvocationSummaryView, OperatorSignalDetailView, OperatorSignalView,
     };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -627,6 +634,53 @@ mod tests {
             )
             .expect("register invocation.active");
         registry
+            .view::<OperatorSignalKey, OperatorSignalDetailView, OperatorSignalView, OperatorSignalFilter, _, _, _, _>(
+                fq_ops::View::new::<OperatorSignalKey, OperatorSignalDetailView, OperatorSignalView, OperatorSignalFilter>(
+                    Domain::OperatorSignal,
+                    "operator signals",
+                    fq_ops::Stability::Experimental,
+                ),
+                |key: OperatorSignalKey| async move {
+                    crate::fixtures::notification_signal_detail_for(&key.event_id).ok_or(
+                        WireError::NotFound {
+                            op: "operator_signal.get".into(),
+                            message: format!("no operator signal `{}`", key.event_id),
+                        },
+                    )
+                },
+                |filter: OperatorSignalFilter| async move {
+                    // The filter is applied here, so the page test can
+                    // prove the narrowing travels rather than that the
+                    // renderer sieved rows it was handed.
+                    Ok(crate::fixtures::notification_signals()
+                        .into_iter()
+                        .filter(|row| {
+                            filter
+                                .severity
+                                .as_deref()
+                                .is_none_or(|want| row.severity.as_str() == want)
+                                && filter
+                                    .source
+                                    .as_deref()
+                                    .is_none_or(|want| row.source == want)
+                        })
+                        .collect::<Vec<OperatorSignalView>>())
+                },
+            )
+            .expect("register operator signal view");
+        registry
+            .report::<OperatorSignalCountsParams, OperatorSignalCounts, _, _>(
+                fq_ops::Report::new::<OperatorSignalCountsParams, OperatorSignalCounts>(
+                    fq_ops::OperatorSignalReport::Counts,
+                    "how much has asked for a person",
+                    fq_ops::Stability::Experimental,
+                ),
+                |_params: OperatorSignalCountsParams| async move {
+                    Ok(crate::fixtures::signal_counts())
+                },
+            )
+            .expect("register operator_signal.counts");
+        registry
             .report::<DoctorParams, DoctorReport, _, _>(
                 fq_ops::Report::new::<DoctorParams, DoctorReport>(
                     fq_ops::ControlReport::Doctor,
@@ -755,6 +809,15 @@ mod tests {
         );
         // …and the doctor's half of the page arrived with it.
         assert!(html.contains("2 in-flight (1 working"), "got: {html}");
+        // The third read: what has asked for a person, and the way in.
+        assert!(
+            html.contains("2 in the last 24h") && html.contains("1 open alert"),
+            "the home page must carry the notification counts: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/notifications">"#),
+            "the nav and the count both lead to the pane: {html}"
+        );
         assert!(
             !html.contains("build skew"),
             "matched builds must not banner: {html}"
@@ -933,6 +996,82 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(ct.starts_with("text/javascript"), "got: {ct}");
+    }
+
+    /// **The notifications pane, end to end over the real wire.**
+    ///
+    /// The narrowing is the interesting half: the fake edge applies the
+    /// filter, so a pane that rendered every row and sieved them in the
+    /// renderer would fail here. The detail page is asserted through
+    /// the same router, because the walk from a listing to a signal is
+    /// the pane's whole reason for having two pages.
+    #[tokio::test]
+    async fn the_notifications_pane_lists_narrows_and_opens_a_signal() {
+        let edge = spawn_edge(&format!("0.1.0+{OWN_SHA}")).await;
+        let app = app(state_for(&edge));
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/notifications").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("▲ alert"), "got: {html}");
+        assert!(
+            html.contains(r#"<span class="chip">notification</span>"#),
+            "got: {html}"
+        );
+        assert!(html.contains("pricing.stale"), "got: {html}");
+        assert!(html.contains("deploy.succeeded"), "got: {html}");
+
+        // Narrowed to alerts: the filter travelled, so the deploy
+        // notification is not in the answer at all.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/notifications?severity=alert")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("pricing.stale"), "got: {html}");
+        assert!(
+            !html.contains("deploy.succeeded"),
+            "the severity filter must travel to the daemon: {html}"
+        );
+
+        // …and one signal opens.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/notifications/019f6a01-0000-7000-8000-0000000000a1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("window_hours"), "the particulars: {html}");
+        assert!(
+            html.contains("factor-q/operator_signal@1"),
+            "the envelope: {html}"
+        );
+
+        // An id nothing indexes is a 404, not a banner.
+        let resp = app
+            .oneshot(
+                Request::get("/notifications/no-such-signal")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// The invocations page carries both reads — the live report above

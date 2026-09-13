@@ -10,7 +10,7 @@ use super::*;
 fn health_links_working_and_stuck_ids() {
     let status = crate::fixtures::status_report();
     let doctor = crate::fixtures::doctor_report();
-    let html = health(&status, &doctor);
+    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
     assert!(html.contains("2 in-flight (1 working"), "got: {html}");
     assert!(
         html.contains(r#"<a href="/invocations/019f5b3f-31fb-7ae0-b130-3d65ccf40375">"#),
@@ -29,7 +29,7 @@ fn health_links_working_and_stuck_ids() {
 fn health_shows_throttled_models() {
     let mut status = crate::fixtures::status_report();
     let doctor = crate::fixtures::doctor_report();
-    let html = health(&status, &doctor);
+    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
     assert!(
         html.contains(r#"<th>throttled models</th><td class="warn">"#),
         "got: {html}"
@@ -44,7 +44,7 @@ fn health_shows_throttled_models() {
     );
 
     status.throttled_models.clear();
-    let html = health(&status, &doctor);
+    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
     assert!(
         html.contains(r#"<th>throttled models</th><td class="ok">none</td>"#),
         "got: {html}"
@@ -58,6 +58,7 @@ fn health_shows_redelivery_pressure() {
     let html = health(
         &crate::fixtures::status_report(),
         &crate::fixtures::doctor_report(),
+        &crate::fixtures::signal_counts(),
     );
     assert!(html.contains("redelivered 4"), "got: {html}");
 }
@@ -70,6 +71,7 @@ fn the_health_table_separates_the_backlog_from_the_work_in_hand() {
     let html = health(
         &crate::fixtures::status_report(),
         &crate::fixtures::doctor_report(),
+        &crate::fixtures::signal_counts(),
     );
     assert!(
         html.contains("<th>state</th><th>pending</th><th>in flight</th>"),
@@ -110,7 +112,11 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             malformed_acked: 0,
         }],
     }];
-    let html = health(&status, &crate::fixtures::doctor_report());
+    let html = health(
+        &status,
+        &crate::fixtures::doctor_report(),
+        &crate::fixtures::signal_counts(),
+    );
     assert!(
         html.contains(
             r#"<td>fq-summary</td><td><span class="ok">✓ caught up</span></td><td>0</td>"#
@@ -152,7 +158,11 @@ fn health_shows_a_halted_consumer_and_the_malformed_count() {
     {
         *malformed_acked = 2;
     }
-    let html = health(&status, &crate::fixtures::doctor_report());
+    let html = health(
+        &status,
+        &crate::fixtures::doctor_report(),
+        &crate::fixtures::signal_counts(),
+    );
     assert!(
         html.contains("✗ halted on schema_version 2 (reads [3])"),
         "got: {html}"
