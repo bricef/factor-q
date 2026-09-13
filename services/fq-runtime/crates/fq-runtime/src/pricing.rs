@@ -9,21 +9,29 @@
 //! an operator routes through OpenRouter under the ids they are routed
 //! by — see [`openrouter`]. The daemon layers it over this table.
 //!
-//! Loading strategy (see [`PricingTable::load`] and [`load_source`]):
+//! Loading strategy (see [`live::load_accepted`] and [`load_source`]):
 //! 1. Fetch the JSON from its remote.
-//! 2. On success, write it to the cache path and parse the fresh copy.
+//! 2. On success, put the fetched table through
+//!    [`accept`](accept::accept) against the last accepted one, write
+//!    what was accepted to the cache path, and serve it.
 //! 3. On fetch failure, log a warning and load the last cached copy.
 //! 4. On cache miss too, log another warning and return an empty table
 //!    (costs will be reported as $0 with a warning per unknown model).
 //!
+//! **The cache holds accepted tables only** — step 2 writes what
+//! acceptance produced, not what the source offered, so "the last
+//! accepted table" step 1 compares against is a file rather than a
+//! notion (<https://github.com/bricef/factor-q/issues/735>).
+//!
 //! The runtime never blocks on pricing. Agents keep running even if we
 //! fall back to a stale cache or an empty table.
 //!
-//! Note: this is a startup fetch. Once factor-q is a continuously
-//! running service (per VISION.md), pricing will need periodic refresh
-//! through the future internal job scheduler — see the phase 1 plan's
-//! deferred work section.
+//! Note: this is a startup fetch. The periodic refresh that calls
+//! [`accept`](accept::accept) again on a timer is
+//! <https://github.com/bricef/factor-q/issues/344>.
 
+pub mod accept;
+pub mod live;
 pub mod openrouter;
 
 use std::collections::HashMap;
@@ -34,7 +42,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-use crate::events::TokenUsage;
+use crate::events::{PricingProvenance, TokenUsage};
 
 /// URL of the LiteLLM pricing JSON, main branch.
 pub const LITELLM_PRICING_URL: &str =
@@ -94,6 +102,12 @@ pub struct PricingTable {
     /// Populated only for models the source lists a window for; absent
     /// otherwise (looked up as `None`). See [`PricingTable::context_window`].
     context_windows: HashMap<String, u32>,
+    /// Which table this is: the source it was accepted from, the
+    /// upstream commit, and the digest of the accepted bytes. Stamped by
+    /// [`live::load_accepted`] after acceptance; `None` on a table built
+    /// in a test or in memory, which is why every consumer treats it as
+    /// optional rather than assuming a load path ran.
+    provenance: Option<PricingProvenance>,
 }
 
 impl PricingTable {
@@ -107,7 +121,29 @@ impl PricingTable {
         Self {
             entries,
             context_windows: HashMap::new(),
+            provenance: None,
         }
+    }
+
+    /// Which table this is, when it came off a load path that recorded
+    /// it. See [`PricingProvenance`].
+    pub fn provenance(&self) -> Option<&PricingProvenance> {
+        self.provenance.as_ref()
+    }
+
+    /// The short reference a cost record cites for the prices it used —
+    /// [`PricingProvenance::version`]. `None` on a table with no
+    /// recorded provenance.
+    pub fn version(&self) -> Option<String> {
+        self.provenance.as_ref().map(PricingProvenance::version)
+    }
+
+    /// Stamp this table with the provenance of the bytes it was accepted
+    /// from. The load path's last step; nothing else calls it, because a
+    /// table nobody accepted has no provenance to claim.
+    pub fn with_provenance(mut self, provenance: PricingProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// Number of models in the table.
@@ -197,9 +233,23 @@ impl PricingTable {
         // 2000000.0), and occasional stray field types that a strict
         // typed map parse rejects wholesale — bricking every model's
         // pricing, which then fails the startup pricing guarantee.
-        let raw: HashMap<String, serde_json::Value> =
+        let raw: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(json).map_err(|err| PricingError::Parse(err.to_string()))?;
+        Ok(Self::from_litellm_document(&raw))
+    }
 
+    /// Read an already-parsed LiteLLM document into a table.
+    ///
+    /// The acceptance path (<https://github.com/bricef/factor-q/issues/735>)
+    /// needs the document as well as the table: it decides on prices and
+    /// then writes back the *entries* it accepted, so that the cached
+    /// bytes are a faithful splice of upstream documents rather than a
+    /// re-serialisation of parsed floats — a float that has been through
+    /// per-million and back is not always the float it started as, and a
+    /// digest over one would move on a daemon restart that changed
+    /// nothing. So the document is the unit that is fetched, spliced,
+    /// cached and digested, and this is the one place it becomes prices.
+    pub fn from_litellm_document(raw: &serde_json::Map<String, serde_json::Value>) -> Self {
         let mut entries = HashMap::with_capacity(raw.len());
         let mut context_windows = HashMap::new();
         let mut skipped = 0usize;
@@ -212,7 +262,7 @@ impl PricingTable {
             // Per-entry deserialize: a malformed entry is dropped
             // (its model just goes unpriced/unknown-window), never
             // fatal to the rest of the table.
-            let entry: LiteLlmEntry = match serde_json::from_value(value) {
+            let entry: LiteLlmEntry = match LiteLlmEntry::deserialize(value) {
                 Ok(entry) => entry,
                 Err(_) => {
                     skipped += 1;
@@ -232,7 +282,7 @@ impl PricingTable {
                 continue;
             };
             entries.insert(
-                model,
+                model.clone(),
                 ModelPricing {
                     input_per_million: input * 1_000_000.0,
                     output_per_million: output * 1_000_000.0,
@@ -251,25 +301,26 @@ impl PricingTable {
                 "skipped LiteLLM entries that failed to deserialize"
             );
         }
-        Ok(Self {
+        Self {
             entries,
             context_windows,
-        })
+            provenance: None,
+        }
     }
 
-    /// Load the pricing table: fetch from LiteLLM, cache to disk, fall
-    /// back to the cached copy on failure, and return an empty table if
-    /// neither source is available.
+    /// Load the pricing table under the default acceptance rules: fetch
+    /// LiteLLM's main-branch document, accept it against the last
+    /// accepted table, cache what was accepted, and fall back to that
+    /// cache when the fetch fails.
+    ///
+    /// The daemon calls [`live::load_accepted`] directly — it wants the
+    /// refusals and the staleness verdict to publish as operator
+    /// signals, and the operator's `[pricing]` settings to apply. This
+    /// is the same load with the defaults and only the table kept.
     pub async fn load(cache_path: &Path) -> Self {
-        load_source(
-            PricingSource {
-                name: "LiteLLM",
-                url: LITELLM_PRICING_URL,
-                parse: Self::from_litellm_json,
-            },
-            cache_path,
-        )
-        .await
+        live::load_accepted(live::LoadSettings::default(), cache_path)
+            .await
+            .table
     }
 }
 
@@ -352,12 +403,19 @@ fn load_from_cache_or_empty(source: &PricingSource<'_>, cache_path: &Path) -> Pr
     }
 }
 
-async fn fetch(url: &str) -> Result<String, PricingError> {
-    let client = reqwest::Client::builder()
+/// The HTTP client every pricing fetch uses: one timeout, one
+/// user-agent, built the same way whether the caller wants a document,
+/// its `ETag` or the commit it was published at.
+pub(crate) fn http_client() -> Result<reqwest::Client, PricingError> {
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!("factor-q/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|err| PricingError::Http(err.to_string()))?;
+        .map_err(|err| PricingError::Http(err.to_string()))
+}
+
+async fn fetch(url: &str) -> Result<String, PricingError> {
+    let client = http_client()?;
 
     let response = client
         .get(url)
@@ -485,6 +543,14 @@ pub enum PricingError {
 
     #[error("HTTP error fetching pricing: {0}")]
     Http(String),
+
+    /// The configured `[pricing] source` is not one — see
+    /// [`live::TableSource::parse`]. Config validation refuses it at
+    /// startup rather than silently falling back to the live document:
+    /// an operator who asked for a pin and got `main` has the opposite
+    /// of what they configured.
+    #[error("invalid pricing source: {0}")]
+    Source(String),
 }
 
 #[cfg(test)]

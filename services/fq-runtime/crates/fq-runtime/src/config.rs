@@ -24,6 +24,7 @@ mod error;
 mod maintenance;
 mod mcp;
 mod nats;
+mod pricing;
 mod stuck;
 mod tools;
 pub use bus::BusConfig;
@@ -32,6 +33,7 @@ pub use error::ConfigError;
 pub use maintenance::MaintenanceConfig;
 pub use mcp::McpConfig;
 pub use nats::NatsConfig;
+pub use pricing::PricingConfig;
 pub use tools::{ExecToolConfig, ToolsConfig};
 
 /// Runtime configuration for the factor-q daemon.
@@ -86,6 +88,10 @@ pub struct Config {
     /// is still retrying counts as stuck.
     #[serde(default)]
     pub bus: BusConfig,
+    /// Where the price list comes from, and what the daemon accepts
+    /// from it (#735).
+    #[serde(default)]
+    pub pricing: PricingConfig,
 }
 
 /// `[state]` — durable runtime state: where it lives, and how long
@@ -662,6 +668,7 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             mcp: McpConfig::default(),
             bus: BusConfig::default(),
+            pricing: PricingConfig::default(),
         }
     }
 }
