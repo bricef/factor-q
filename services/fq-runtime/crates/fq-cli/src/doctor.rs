@@ -345,14 +345,27 @@ fn render_agents_at_cap(agents: &[fq_ops::health::AgentAtCap]) -> String {
     if agents.is_empty() {
         return "Agents at cap: none\n".to_string();
     }
+    // The header counts the agents that are actually full, not the lines
+    // below it. An agent can be listed with a slot already free — the
+    // window between an invocation ending and the held trigger's next
+    // poll — and counting it "at cap" would say something untrue of it.
+    let at_cap = agents.iter().filter(|a| a.is_at_cap()).count();
     let held: u32 = agents.iter().map(|a| a.held).sum();
     let mut out = format!(
-        "Agents at cap: {} ({held} trigger(s) held) — each agent's own `max_concurrent`; \
+        "Agents at cap: {at_cap} ({held} trigger(s) held) — each agent's own `max_concurrent`; \
          nothing to fix\n",
-        agents.len()
     );
     for agent in agents {
-        out.push_str(&format!("  {}: {}\n", agent.agent, agent.cap_summary()));
+        let state = if agent.is_at_cap() {
+            "at cap"
+        } else {
+            "a slot has freed; starting"
+        };
+        out.push_str(&format!(
+            "  {}: {state}; {}\n",
+            agent.agent,
+            agent.cap_summary()
+        ));
     }
     out.push_str(
         "  -> a held trigger is still its first delivery; it starts when a slot frees. \

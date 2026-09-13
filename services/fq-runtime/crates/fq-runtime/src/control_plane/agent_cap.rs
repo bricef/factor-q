@@ -139,23 +139,30 @@ impl AgentConcurrency {
     /// What `fq doctor` reports: every agent with a declared cap that is
     /// either full or holding a trigger, agent id first.
     ///
-    /// An agent running *under* its cap is left out on purpose. It is
-    /// not the answer to any question an operator is asking here — "why
-    /// has nothing picked this up" — and listing it would bury the one
-    /// line that is.
+    /// An agent running *under* its cap with nothing waiting is left out
+    /// on purpose. It is not the answer to any question an operator is
+    /// asking here — "why has nothing picked this up" — and listing it
+    /// would bury the one line that is.
+    ///
+    /// The two reasons to be listed are kept apart:
+    /// [`AgentAtCap::is_at_cap`] decides the first, and a renderer asks
+    /// it rather than re-deriving the comparison. They come apart for
+    /// real, in the window between a slot freeing and the held trigger's
+    /// next poll: the agent is under its cap and a trigger is still
+    /// waiting, and saying "at cap" of it would be wrong.
     pub fn snapshot(&self) -> Vec<AgentAtCap> {
         let agents = self.lock();
         let mut listed: Vec<AgentAtCap> = agents
             .iter()
             .filter_map(|(agent, state)| {
-                let cap = state.cap?;
-                (state.in_flight >= cap || state.held > 0).then(|| AgentAtCap {
+                Some(AgentAtCap {
                     agent: agent.clone(),
                     in_flight: state.in_flight,
-                    cap,
+                    cap: state.cap?,
                     held: state.held,
                 })
             })
+            .filter(|a| a.is_at_cap() || a.held > 0)
             .collect();
         listed.sort_by(|a, b| a.agent.cmp(&b.agent));
         listed
