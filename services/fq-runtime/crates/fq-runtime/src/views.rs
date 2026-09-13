@@ -22,6 +22,9 @@
 // them count spend the engine owes to no invocation.
 mod costs;
 
+// The operator-signal reads behind the dashboard's notifications pane.
+mod signals;
+
 // The conversation reads — payload-bearing, WAL-backed, and the only
 // reads here that are not header folds.
 mod transcript;

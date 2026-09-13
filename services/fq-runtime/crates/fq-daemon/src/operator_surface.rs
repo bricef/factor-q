@@ -175,6 +175,7 @@ pub fn operator_registry(
     let active_views = views.clone();
     let worker_views = views.clone();
     let cost_views = views.clone();
+    let signal_views = views.clone();
     let doctor_views = views.clone();
     let doctor_bus = deps.bus.clone();
     let status_views = views.clone();
@@ -213,6 +214,7 @@ pub fn operator_registry(
     crate::trigger_command::register_trigger_surface(&mut registry, trigger_bus, trigger_views)?;
     crate::control_commands::register_control_commands(&mut registry, machinery)?;
     crate::cost_report::register_cost_reports(&mut registry, cost_views)?;
+    crate::operator_signal_view::register_operator_signal_view(&mut registry, signal_views)?;
     crate::health_surface::register_health_reports(
         &mut registry,
         (doctor_views, status_views),

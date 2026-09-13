@@ -315,6 +315,106 @@ fn default_invocation_limit() -> i64 {
     50
 }
 
+// ---------------------------------------------------------------------
+// OperatorSignal
+// ---------------------------------------------------------------------
+
+/// The most operator signals one List page may carry, whatever a caller
+/// asks for — refused rather than quietly applied, the discipline every
+/// list atom on this surface follows.
+///
+/// Two orders of magnitude under the Event atom's 2,000, because these
+/// rows are not the same size and the population is not the same
+/// population. An index row here carries a whole `summary` line — an
+/// unbounded producer-written sentence, in practice one or two hundred
+/// bytes — where an event row carries extracted scalars. And a signal
+/// is by construction rare: it is the subset of what happens that was
+/// worth a person's attention, so a page an operator will actually read
+/// is the bound worth having, not the largest the frame would survive.
+/// A day of a busy fleet is tens of rows.
+pub const OPERATOR_SIGNAL_LIST_MAX_LIMIT: u32 = 500;
+
+/// Get identity for an operator signal: the `event_id` of the
+/// `operator_signal` event it folds.
+///
+/// The signal has no identity of its own and should not acquire one. It
+/// *is* that event, indexed — so the key is the event's, and the same
+/// string reads the raw envelope back through `event.get` for as long
+/// as the log still holds it.
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OperatorSignalKey {
+    pub event_id: String,
+}
+
+/// List selection for the OperatorSignal view — the typed, schema'd
+/// filter (never a query language).
+///
+/// The two narrowings are the two the pane offers, and they are the two
+/// an operator triages by: *how loudly is this saying it* and *who is
+/// saying it*.
+#[derive(Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OperatorSignalFilter {
+    /// `notification` or `alert`. Absent lists both. An unrecognised
+    /// value is refused rather than answered with nothing: there are
+    /// exactly two severities, so a typo is a mistake in the request
+    /// and an empty list would read as "nothing to see".
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// One component's signals — the kind's first segment
+    /// (`pricing`, `deploy`). A source no producer has used matches
+    /// nothing rather than failing: sources are values, and a newer
+    /// daemon has components this build has never heard of.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Only signals at or after this RFC3339 instant.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Cap on one List page — the most recent N matching rows, and at
+    /// most 500 of them (this property's `maximum`). Absent asks for
+    /// the default 50.
+    ///
+    /// **A larger N is refused, never quietly shrunk**, as on every
+    /// other list here: a page the daemon shortened is
+    /// indistinguishable from a listing that ended. Narrow with
+    /// `severity`, `source` or `since` for more than a page.
+    #[serde(default)]
+    #[schemars(range(max = OPERATOR_SIGNAL_LIST_MAX_LIMIT))]
+    pub limit: Option<u32>,
+}
+
+/// The two severities a caller may name, as the wire spells them —
+/// the contract fact, kept with the filter it bounds rather than in
+/// either of the places that check it.
+pub const OPERATOR_SIGNAL_SEVERITIES: [&str; 2] = ["notification", "alert"];
+
+/// The typed parameters of `operator_signal.counts`.
+#[derive(Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OperatorSignalCountsParams {
+    /// Lower bound on the **notification** count, in RFC3339. Absent
+    /// counts every notification still indexed.
+    ///
+    /// It bounds one of the two counts and not the other, and the
+    /// asymmetry is the retention rule showing through rather than an
+    /// oversight: a notification is interesting inside a window and is
+    /// swept when it leaves one, while an alert is never swept and
+    /// counting alerts inside a window would answer a different
+    /// question from the one this report exists for.
+    #[serde(default)]
+    pub notifications_since: Option<String>,
+}
+
+/// What `operator_signal.counts` answers with: the two numbers the
+/// dashboard's home line says out loud.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
+pub struct OperatorSignalCounts {
+    /// Notifications indexed at or after `notifications_since`.
+    pub notifications: i64,
+    /// Every alert on the record — alerts are never swept, and this
+    /// build has no acknowledgement, so an alert stays counted once it
+    /// has happened.
+    pub alerts: i64,
+}
+
 mod doctor;
 
 pub use doctor::{

@@ -2211,6 +2211,306 @@
     }
   },
   {
+    "view": {
+      "description": "Two severities, and the difference is a human's hours. A `notification` is handled during normal hours and looked at by the operator; an `alert` reaches the operator out of hours and names something the system cannot recover from on its own. `kind` is a dotted name whose FIRST SEGMENT IS THE SOURCE — `pricing.change_refused` is the `pricing` component saying it — so the two cannot disagree; `source` on the filter narrows by that segment. The kind vocabulary is a registry that grows without a schema change, so a kind this build has never heard of is a value to show, not an error. Get answers with the whole signal: its structured `detail` exactly as the producer sent it, the references it points at, and the ids of the signals either side of it FROM THE SAME SOURCE, in the same order List renders. List answers with index rows — identity, time, severity, source, kind and the one summary line — most recent `limit` first. Every row's `event_id` reads the whole signal back through Get, and always resolves: the row is the signal, so there is no payload behind it for retention to take away. RETENTION IS NOT THE SAME FOR THE TWO SEVERITIES. Notifications age out with the event log they were folded from, on the daemon's `retention_days` window. ALERTS ARE NEVER SWEPT and have no expiry: the record that a person had to intervene outlives the log it arrived on, so a listing narrowed to alerts reaches back past everything else here. There is no stream. These are folds of `operator_signal` events, and tailing them is `event.stream` narrowed to that event type — one cursor over one log rather than two that could disagree. `event_id` is the identity of the producing event, so the same string reads the raw envelope back through `event.get` for as long as the log holds it.",
+      "domain": "operator_signal",
+      "filter_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "List selection for the OperatorSignal view — the typed, schema'd\nfilter (never a query language).\n\nThe two narrowings are the two the pane offers, and they are the two\nan operator triages by: *how loudly is this saying it* and *who is\nsaying it*.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "Cap on one List page — the most recent N matching rows, and at\nmost 500 of them (this property's `maximum`). Absent asks for\nthe default 50.\n\n**A larger N is refused, never quietly shrunk**, as on every\nother list here: a page the daemon shortened is\nindistinguishable from a listing that ended. Narrow with\n`severity`, `source` or `since` for more than a page.",
+            "format": "uint32",
+            "maximum": 500,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "severity": {
+            "default": null,
+            "description": "`notification` or `alert`. Absent lists both. An unrecognised\nvalue is refused rather than answered with nothing: there are\nexactly two severities, so a typo is a mistake in the request\nand an empty list would read as \"nothing to see\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "default": null,
+            "description": "Only signals at or after this RFC3339 instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "default": null,
+            "description": "One component's signals — the kind's first segment\n(`pricing`, `deploy`). A source no producer has used matches\nnothing rather than failing: sources are values, and a newer\ndaemon has components this build has never heard of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "OperatorSignalFilter",
+        "type": "object"
+      },
+      "index_schema": {
+        "$defs": {
+          "SignalSeverity": {
+            "description": "How loudly a signal is saying it — and, concretely, whether it is\nallowed to wake somebody.\n\nTwo variants, and no `Info`: a signal nobody is expected to look at\nis a log line, and the log already has those. The value of the pane\nis that everything in it was worth a person's attention.\n`JsonSchema` because the severity is also a *declared* shape: the\noperator surface's `operator_signal` view carries it on every index\nrow and on the whole signal, so the two-value vocabulary is\npublished on `operator_surface.json` rather than left for a client\nto infer from strings it has seen.",
+            "oneOf": [
+              {
+                "const": "notification",
+                "description": "Handled during normal hours, and looked at by the operator. It\nmay also travel to a Slack channel or similar. A deploy that\nsucceeded is a notification; so is a refused pricing change,\nbecause the daemon carries on at the prior price.",
+                "type": "string"
+              },
+              {
+                "const": "alert",
+                "description": "Reaches the operator out of hours, escalates, and requires human\nintervention: the system cannot recover from this on its own. A\nservice that has stopped accepting requests with no graceful\nrecovery path is an alert.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One operator signal as the pane's list shows it: the OperatorSignal\nview's **index** row (`operator_signal.list`).\n\nA line, a severity and where it came from — no `detail` and no\nreferences, because a list is what an operator reads while deciding\nwhich one to open. `event_id` is the identity that reads the whole\nsignal back through `operator_signal.get`, and it always resolves:\nthe row *is* the signal, so unlike an event index row there is no\npayload behind it that retention can take away.",
+        "properties": {
+          "event_id": {
+            "description": "The identity of the `operator_signal` event this folds — and of\nthe signal itself.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What it is, as `<source>.<name>`. A value, not a closed\nvocabulary: the kind registry grows without a schema change, so\na newer daemon has kinds this build has never heard of and a\nreader shows them rather than refusing them.",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/$defs/SignalSeverity",
+            "description": "Notification or alert — whether this was allowed to wake\nsomebody."
+          },
+          "source": {
+            "description": "The component that raised it: the kind's first segment.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "The one line the row shows.",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "When the component said it (RFC3339, the envelope's timestamp).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "timestamp",
+          "severity",
+          "source",
+          "kind",
+          "summary"
+        ],
+        "title": "OperatorSignalView",
+        "type": "object"
+      },
+      "key_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Get identity for an operator signal: the `event_id` of the\n`operator_signal` event it folds.\n\nThe signal has no identity of its own and should not acquire one. It\n*is* that event, indexed — so the key is the event's, and the same\nstring reads the raw envelope back through `event.get` for as long\nas the log still holds it.",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id"
+        ],
+        "title": "OperatorSignalKey",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "state_schema": {
+        "$defs": {
+          "SignalReferencesView": {
+            "description": "What a signal points at, when it points at something — the wire\nshape of the payload's references.\n\nEvery field a plain string, the way every other view DTO here\nrenders an identity: a reader turns them into links, and a typed\n`AgentId` or `Uuid` on the wire would buy validation a reader\ncannot act on anyway.",
+            "properties": {
+              "agent": {
+                "default": null,
+                "description": "The agent the signal concerns, if it concerns one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "invocation": {
+                "default": null,
+                "description": "The invocation the signal concerns, if it concerns one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "url": {
+                "default": null,
+                "description": "Somewhere to look: a pull request, a CI run, a page.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "SignalSeverity": {
+            "description": "How loudly a signal is saying it — and, concretely, whether it is\nallowed to wake somebody.\n\nTwo variants, and no `Info`: a signal nobody is expected to look at\nis a log line, and the log already has those. The value of the pane\nis that everything in it was worth a person's attention.\n`JsonSchema` because the severity is also a *declared* shape: the\noperator surface's `operator_signal` view carries it on every index\nrow and on the whole signal, so the two-value vocabulary is\npublished on `operator_surface.json` rather than left for a client\nto infer from strings it has seen.",
+            "oneOf": [
+              {
+                "const": "notification",
+                "description": "Handled during normal hours, and looked at by the operator. It\nmay also travel to a Slack channel or similar. A deploy that\nsucceeded is a notification; so is a refused pricing change,\nbecause the daemon carries on at the prior price.",
+                "type": "string"
+              },
+              {
+                "const": "alert",
+                "description": "Reaches the operator out of hours, escalates, and requires human\nintervention: the system cannot recover from this on its own. A\nservice that has stopped accepting requests with no graceful\nrecovery path is an alert.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One whole operator signal: the OperatorSignal view's **state**, what\n`operator_signal.get` answers with.\n\nThe particulars are here rather than a hop away. An alert outlives\nthe log it was folded from — it is never swept, and the log keeps\nthirty days — so a detail page that read `detail` back out of the\nlog would go blank on exactly the signals worth keeping.",
+        "properties": {
+          "agent_id": {
+            "description": "The envelope's agent. `system` for every signal a daemon\ncomponent raises, which is all of them today — what a signal\n*concerns* is [`Self::references`], deliberately not the\nenvelope.",
+            "type": "string"
+          },
+          "detail": {
+            "default": null,
+            "description": "The structured particulars, exactly as the producer sent them\nand shaped by the kind. `null` when the producer sent none;\nnever parsed by the runtime, rendered by the page and read by a\nperson."
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "invocation_id": {
+            "description": "The envelope's invocation.",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "newer_from_source": {
+            "default": null,
+            "description": "The next signal from the same source, later in time — the row\n*above* this one in the pane. `None` at the head of that\nsource's history.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "older_from_source": {
+            "default": null,
+            "description": "The previous signal from the same source. `None` at the tail.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "references": {
+            "$ref": "#/$defs/SignalReferencesView",
+            "default": {
+              "agent": null,
+              "invocation": null,
+              "url": null
+            }
+          },
+          "seq": {
+            "default": null,
+            "description": "Where the producing event sits in the log, when the projection\nrecorded a position. `None` for a row projected without\nJetStream metadata — the signal is whole either way; only the\nwalk back to the raw envelope is unavailable.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "severity": {
+            "$ref": "#/$defs/SignalSeverity"
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "timestamp",
+          "agent_id",
+          "invocation_id",
+          "severity",
+          "source",
+          "kind",
+          "summary"
+        ],
+        "title": "OperatorSignalDetailView",
+        "type": "object"
+      },
+      "summary": "A thing a component of the daemon said an operator should look at.",
+      "version": 1
+    }
+  },
+  {
+    "report": {
+      "description": "Two counts, and only one of them takes a window. `notifications_since` bounds the notification count; the alert count is every alert indexed, because alerts are never swept and counting them inside a window would answer a different question. This build has no acknowledgement, so an alert stays counted once it has happened — the number says how many alerts this daemon has ever recorded, not how many are unread. Both counts are reads of the same index `operator_signal.list` pages, so a count and a listing narrowed the same way agree.",
+      "domain": "operator_signal",
+      "name": "counts",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "What `operator_signal.counts` answers with: the two numbers the\ndashboard's home line says out loud.",
+        "properties": {
+          "alerts": {
+            "description": "Every alert on the record — alerts are never swept, and this\nbuild has no acknowledgement, so an alert stays counted once it\nhas happened.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "notifications": {
+            "description": "Notifications indexed at or after `notifications_since`.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "notifications",
+          "alerts"
+        ],
+        "title": "OperatorSignalCounts",
+        "type": "object"
+      },
+      "params_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "The typed parameters of `operator_signal.counts`.",
+        "properties": {
+          "notifications_since": {
+            "default": null,
+            "description": "Lower bound on the **notification** count, in RFC3339. Absent\ncounts every notification still indexed.\n\nIt bounds one of the two counts and not the other, and the\nasymmetry is the retention rule showing through rather than an\noversight: a notification is interesting inside a window and is\nswept when it leaves one, while an alert is never swept and\ncounting alerts inside a window would answer a different\nquestion from the one this report exists for.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "OperatorSignalCountsParams",
+        "type": "object"
+      },
+      "stability": "experimental",
+      "summary": "How many notifications landed inside a window, and how many alerts stand on the record.",
+      "version": 1
+    }
+  },
+  {
     "report": {
       "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation that has crossed no step boundary within `stuck_after_ms`, with no tool or model call open recently enough to explain the silence. That threshold is derived from this daemon's own call deadlines — twice the longest a single step can legitimately take — so it is reported rather than assumed, and it is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one.",
       "domain": "control",

@@ -65,6 +65,7 @@ pub enum Domain {
     Event,
     Invocation,
     Operation,
+    OperatorSignal,
     Trigger,
     Turn,
     Worker,
