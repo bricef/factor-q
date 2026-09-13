@@ -127,7 +127,7 @@ modules and types that implement them.
 
 ### Event bus (`fq-runtime/src/bus.rs`)
 
-Two JetStream streams:
+Three JetStream streams (plus the advisory capture stream):
 - **`fq-events`** — subjects `fq.agent.>` and `fq.system.>`,
   Limits retention (30 days), S2 compression. Holds the full
   event trail: agent lifecycle events plus system lifecycle events
@@ -137,8 +137,17 @@ Two JetStream streams:
   on its own behalf for `fq trigger` (the `trigger.publish` command) and
   for the first-party adapters that write the subject directly under the
   trigger wire contract.
+- **`fq-maintenance`** — subject `fq.maintenance.>`, Limits retention
+  (24 hours). Holds pending *maintenance commands*: an external
+  scheduler (`fq-cron`) publishes `fq.maintenance.<task>` when a
+  schedule fires, and the daemon's maintenance consumer runs the named
+  housekeeping task in process and answers with a `maintenance_run`
+  event on `fq.system.maintenance` (#257). Its own stream because a
+  command is not a fact and does not belong in the event log
+  (ADR-0026), and because the trigger stream's dead-letter machinery is
+  shaped around agent dispatch.
 
-`EventBus::connect()` ensures both streams exist on startup.
+`EventBus::connect()` ensures every stream exists on startup.
 Publishing awaits the JetStream ack. Subscription uses core NATS
 subscribe (for live tailing) or durable pull consumers (for the
 projection and dispatcher).
@@ -329,8 +338,9 @@ Two crates, split along the transport line:
 
 A standalone Go binary, not part of the daemon: it reads cron jobs
 from a hot-reloaded TOML file and publishes their payloads to NATS
-subjects (typically `fq.trigger.<agent>`), reaching factor-q only
-through the documented trigger wire contract. Durable fire state lives
+subjects (typically `fq.trigger.<agent>`, or `fq.maintenance.<task>`
+to ask the daemon to run one of its own housekeeping tasks), reaching
+factor-q only through the documented wire contracts. Durable fire state lives
 in a JetStream KV bucket so restarts do not double-fire or silently
 skip, with a per-job missed-fire policy. See its
 [design](adapters/fq-cron/DESIGN.md). The sibling `github-watcher`

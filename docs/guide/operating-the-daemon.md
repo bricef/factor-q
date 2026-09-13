@@ -813,6 +813,112 @@ when that replaces the current route.
 **Rule for new producers:** choose the class first and name its recovery path;
 if there is no recovery path, it is an alert.
 
+## Scheduling maintenance with fq-cron
+
+The daemon has no scheduler and is not getting one. Recurring
+housekeeping — a pricing refresh, a CAS reachability audit, a TTL
+sweep — is scheduled by [fq-cron](../../adapters/fq-cron/README.md),
+the standalone adapter, and *run* by the daemon's **maintenance
+consumer**: fq-cron publishes to `fq.maintenance.<task>` when a
+schedule fires, and the daemon runs the named task in process
+(<https://github.com/bricef/factor-q/issues/257>).
+
+The split is deliberate. A maintenance task works on the daemon's own
+state — its stores, its pricing table, its projection — which no
+out-of-process scheduler can reach; and time-driven firing is a
+scheduling problem the daemon should not re-solve. So fq-cron keeps
+knowing nothing about factor-q beyond a subject and a payload, and the
+daemon gains a consumer rather than a cron.
+
+### The tasks this build knows
+
+| Task | Subject | What it does |
+| --- | --- | --- |
+| `ping` | `fq.maintenance.ping` | Nothing. Succeeds and says `pong` — the way to prove the whole path is wired on an instance. |
+
+The registry is closed: a subject naming anything else is **refused**,
+loudly and on the record, rather than dropped. Check what an instance
+knows by scheduling `ping` and reading the outcome.
+
+### A worked job
+
+`fq-cron.toml` — on the dogfood instance this is instance state at
+`/var/lib/factor-q/fq-cron.toml`, and editing it *is* the deploy:
+
+```toml
+[[job]]
+name = "maintenance-ping"
+schedule = "@every 1h"
+subject = "fq.maintenance.ping"
+# The payload is unused by `ping` and opaque to fq-cron; the two
+# template variables make the log line and the run id legible.
+payload_json = '{"job": "{{job}}", "slot": "{{scheduled_time}}"}'
+```
+
+Three fields of that job are load-bearing:
+
+- **`subject`** must be a concrete `fq.maintenance.<task>` — one token
+  after the prefix, matching a task name above. A dotted tail is not a
+  task name with a dot in it, and is refused.
+- **`durable`** is left at its default `true`. A durable publish sets
+  `Nats-Msg-Id: fq-cron/<job>@<slot>`, which is the **run id** the
+  daemon dedupes on; a `durable = false` job is a core-NATS publish
+  that no stream captures, so nothing would ever run it.
+- **`catch_up`** stays at its default `skip` unless the task is worth
+  running late. `once` fires one missed slot on startup, which is the
+  right setting for a nightly sweep and the wrong one for anything
+  whose moment has passed.
+
+### Reading the outcome
+
+Every message the consumer resolves produces one `maintenance_run`
+event on `fq.system.maintenance` — successes, failures, and refusals
+alike:
+
+```console
+$ fq events query --event-type maintenance_run
+maintenance.run task=ping run_id=fq-cron/maintenance-ping@2026-09-13T02:00:00Z succeeded: pong (0ms)
+```
+
+A refusal prints `refused:` with the name that was asked for and the
+names this build knows; a failure prints `FAILED:` with the task's own
+error. **A failed run is over** — the message is acked and nothing is
+retried inside the ack loop, because the schedule is the retry and a
+redelivered run would stack up behind the next fire.
+
+The durable is `fq-maintenance` on the `fq-maintenance` stream, and
+`fq doctor` lists it beside the others, so a consumer that has stopped
+keeping up is read the same way as any other (see *When a consumer
+stops making progress*, above).
+
+### Delivery, and what runs twice
+
+Delivery is at-least-once. The consumer holds a bounded ledger of the
+run ids it has resolved and answers a redelivery from the ledger
+instead of running the task again — proven by a test that makes
+JetStream redeliver a command underneath the run in flight. The ledger
+is in-process, so a daemon restarted between a run and its ack will
+run that task once more; every registered task is therefore convergent
+by construction (a refresh that overwrites, an audit that recomputes),
+never accumulative.
+
+### Turning it off
+
+```toml
+[maintenance]
+# Default true. Set false on every daemon but one when several run
+# against a single broker, or the sweep runs once per daemon.
+enabled = false
+# Ack window for the maintenance durable, ms. Default 60000 — sized
+# for a task that fetches over the network, not for a SQLite write.
+ack_wait_ms = 60000
+```
+
+A disabled daemon creates no durable and consumes nothing; the stream
+still exists, so fq-cron's publishes succeed and the commands age out
+after 24 hours. `fq doctor` stops expecting the consumer, rather than
+reporting a permanent `Missing` nobody can clear.
+
 ## Quick reference
 
 | Goal | Command |
@@ -831,6 +937,8 @@ if there is no recovery path, it is an alert.
 | Find invocations that stopped making progress | `fq doctor` (the executions line names them), `fq events query --event-type invocation_stuck` |
 | See which models a provider is throttling | `fq status`, `fq doctor` (the throttled-models block: pause end, permits, 429s) |
 | Find invocations put down for a rate limit | `fq events query --event-type invocation_deferred` (they resume on their own) |
+| Schedule recurring maintenance | an `fq-cron.toml` job publishing to `fq.maintenance.<task>` (see *Scheduling maintenance with fq-cron*) |
+| See what maintenance has run | `fq events query --event-type maintenance_run` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |
@@ -839,6 +947,8 @@ if there is no recovery path, it is an alert.
 ## See also
 
 - ADR-0027 — graceful drain for deploys (the machinery used by `fq down`).
+- `adapters/fq-cron/DESIGN.md` — the scheduler that fires the
+  maintenance jobs above: its durability, reload and missed-fire rules.
 - ADR-0006 Appendix E — why stale-worker reclamation is a daemon sweep
   and not an operator verb.
 - `fq status`, `fq doctor`, `fq workers list` — confirm the daemon and
