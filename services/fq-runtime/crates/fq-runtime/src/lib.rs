@@ -89,7 +89,8 @@ pub use control_plane::projection::{ProjectionConsumer, ProjectionStore};
 pub use control_plane::{
     AdvisoryWatch, AdvisoryWatchError, CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore,
     ControlPlaneStoreError, CoordinationConsumer, CoordinationConsumerError, HeartbeatConsumer,
-    HeartbeatConsumerError, OwnerStatus, SummaryConsumer, SummaryConsumerError,
+    HeartbeatConsumerError, MaintenanceConsumer, MaintenanceConsumerError, MaintenanceTask,
+    OwnerStatus, SummaryConsumer, SummaryConsumerError,
 };
 pub use db::{RuntimeDbPaths, SplitOutcome, split_legacy_events_db};
 pub use llm::{ChatRequest, ChatResponse, LlmClient, LlmError};

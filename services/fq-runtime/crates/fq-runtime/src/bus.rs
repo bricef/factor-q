@@ -15,7 +15,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::events::Event;
-use crate::events::subjects::ALL_TRIGGERS;
+use crate::events::subjects::{ALL_MAINTENANCE, ALL_TRIGGERS};
 
 mod consumers;
 mod ledger;
@@ -63,6 +63,42 @@ pub const EVENT_STREAM_SUBJECTS: &[&str] = &["fq.agent.>", "fq.system.>", "fq.wo
 
 /// Default retention for the event stream.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
+
+/// Name of the JetStream stream that holds pending maintenance
+/// commands (#257) — the subjects an external scheduler (fq-cron)
+/// publishes to ask this daemon to run a named housekeeping task.
+///
+/// **Its own stream, not the event stream.** Under ADR-0026 the event
+/// log is the system of record for *facts*; a maintenance command is
+/// an instruction, and admitting one to `fq-events` would put it in
+/// front of every whole-stream durable there — the projector included
+/// — which would read it as an event, find no envelope, and count it
+/// malformed. It would also inherit the event stream's 30-day
+/// retention and S2 compression, neither of which a command that is
+/// stale within the hour wants.
+///
+/// **And not the trigger stream either**, though the delivery profile
+/// matches: `fq-triggers` carries a finite `max_deliver`, a retry
+/// backoff schedule and a MAX_DELIVERIES advisory capture, all of them
+/// shaped around dispatching an agent invocation with a dead-letter
+/// path. A maintenance command has none of that. Widening the trigger
+/// stream's subject set would also not reach an existing deployment:
+/// `ensure_trigger_stream` is `get_or_create` only, so a
+/// broker that already holds `fq-triggers` would silently keep the old
+/// subject list and every maintenance publish would fail with "no
+/// stream matches subject".
+///
+/// Same shape as the trigger stream otherwise: `Limits` retention,
+/// file storage, [`DEFAULT_MAINTENANCE_MAX_AGE`], no compression.
+pub const MAINTENANCE_STREAM_NAME: &str = "fq-maintenance";
+
+/// Retention for the maintenance stream. A maintenance command is
+/// worth running late — a daemon restarted at 02:05 should still run
+/// the 02:00 sweep — and worthless a day later, by which time the next
+/// scheduled fire has been and gone. Matches the trigger stream's
+/// window for the same reason: a safety net against a backlog, not a
+/// promise that a command lives that long.
+pub const DEFAULT_MAINTENANCE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Name of the JetStream stream that holds pending agent triggers.
 /// Separate from the event stream because triggers have different
@@ -298,6 +334,7 @@ impl EventBus {
         bus.ensure_event_stream().await?;
         bus.ensure_trigger_stream().await?;
         bus.ensure_advisory_stream().await?;
+        bus.ensure_maintenance_stream().await?;
         Ok(bus)
     }
 
@@ -403,6 +440,35 @@ impl EventBus {
                 retention: stream::RetentionPolicy::Limits,
                 storage: stream::StorageType::File,
                 max_age: DEFAULT_TRIGGER_MAX_AGE,
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Ensure the maintenance command stream exists (#257).
+    ///
+    /// Ensured unconditionally, even when `[maintenance] enabled` is
+    /// false. A publisher must have somewhere to publish: fq-cron's
+    /// durable publish of a job whose subject no stream matches is a
+    /// *permanent* error on its side — the job is marked unhealthy
+    /// until a reload (fq-cron D5) — so a daemon that creates the
+    /// stream only when it intends to consume would turn "maintenance
+    /// is switched off here" into "the scheduler is broken". With the
+    /// stream always present, a disabled daemon simply leaves the
+    /// commands to age out.
+    async fn ensure_maintenance_stream(&self) -> Result<(), BusError> {
+        debug!(
+            stream = MAINTENANCE_STREAM_NAME,
+            "ensuring JetStream maintenance stream exists"
+        );
+        self.jetstream
+            .get_or_create_stream(stream::Config {
+                name: MAINTENANCE_STREAM_NAME.to_string(),
+                subjects: vec![ALL_MAINTENANCE.to_string()],
+                retention: stream::RetentionPolicy::Limits,
+                storage: stream::StorageType::File,
+                max_age: DEFAULT_MAINTENANCE_MAX_AGE,
                 ..Default::default()
             })
             .await?;

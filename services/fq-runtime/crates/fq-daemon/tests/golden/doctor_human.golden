@@ -12,12 +12,13 @@ Ambiguous invocations: 0
 Permanent failures: 1
   tool_error: 1
   -> `fq invocation list --status=failed` to inspect
-Consumers: 5 checked, 0 unhealthy
+Consumers: 6 checked, 0 unhealthy
   fq-projector: ok (pending #)
   fq-coordination: ok (pending #)
   fq-heartbeat: ok (pending #)
   fq-dispatcher: ok (pending #)
   fq-advisory-watch: ok (pending #)
+  fq-maintenance: ok (pending #)
 Throttled models: none
 Agents at cap: none
 Dead-letters: none

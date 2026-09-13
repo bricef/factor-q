@@ -70,7 +70,7 @@ pub(crate) fn register_doctor_report(
     facts: &crate::operator_surface::DaemonFacts,
 ) -> anyhow::Result<()> {
     let stuck_after_ms = facts.stuck_after_ms;
-    let summary_enabled = facts.summary_enabled;
+    let enabled_consumers = facts.enabled_consumers;
     let mcp_servers = facts.mcp_servers.clone();
     let throttle = facts.throttle.clone();
     let agent_caps = facts.agent_caps.clone();
@@ -141,7 +141,7 @@ pub(crate) fn register_doctor_report(
                 let failures = views.failures().await.map_err(internal)?;
                 let consumers = fq_runtime::health::probe_core_consumers(
                     &bus.jetstream(),
-                    summary_enabled,
+                    enabled_consumers,
                     bus.redelivery_policy(),
                     bus.consumer_ledger(),
                 )

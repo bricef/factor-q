@@ -68,7 +68,7 @@ pub(crate) fn register_status_report(
     let legacy_events_db = facts.legacy_events_db.clone();
     let drain_deadline_ms_value = facts.drain_deadline_ms;
     let stuck_after_ms_value = facts.stuck_after_ms;
-    let summary_enabled = facts.summary_enabled;
+    let enabled_consumers = facts.enabled_consumers;
     let mcp_servers = facts.mcp_servers.clone();
     let throttle = facts.throttle.clone();
     let decl = fq_ops::Report::new::<StatusParams, StatusReport>(
@@ -122,7 +122,7 @@ pub(crate) fn register_status_report(
                 };
                 let streams = fq_runtime::health::probe_core_streams(
                     &bus.jetstream(),
-                    summary_enabled,
+                    enabled_consumers,
                     bus.redelivery_policy(),
                     bus.consumer_ledger(),
                 )

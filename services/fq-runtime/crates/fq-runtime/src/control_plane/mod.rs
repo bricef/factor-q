@@ -42,6 +42,11 @@
 //!   invocation-level verdict every health surface shares, and the
 //!   stuck sweep the coordination consumer runs beside its
 //!   stale-worker one (#37).
+//! - [`maintenance`] — the maintenance consumer (#257): runs the
+//!   named housekeeping task an external scheduler (fq-cron) asks
+//!   for on `fq.maintenance.<task>`, and records the outcome. Not on
+//!   the shared durable loop, because its messages are scheduler
+//!   payloads rather than events — see the module doc.
 //! - [`advisory_watch`] — drains the captured JetStream
 //!   MAX_DELIVERIES advisories for the trigger stream and emits
 //!   the dead-letter events the dispatcher's inline path cannot
@@ -59,6 +64,7 @@ pub mod dispatcher;
 pub mod durable_consumer;
 pub mod heartbeat_consumer;
 pub mod liveness;
+pub mod maintenance;
 pub mod operator;
 pub mod projection;
 pub mod retention;
@@ -68,6 +74,7 @@ pub mod summary_consumer;
 pub use advisory_watch::{AdvisoryWatch, AdvisoryWatchError};
 pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError};
 pub use heartbeat_consumer::{HeartbeatConsumer, HeartbeatConsumerError};
+pub use maintenance::{MaintenanceConsumer, MaintenanceConsumerError, MaintenanceTask};
 pub use store::{
     CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow,
     OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, WorkerRow, WorkerStatus,

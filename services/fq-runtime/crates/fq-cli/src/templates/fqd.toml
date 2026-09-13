@@ -465,6 +465,32 @@ models = ["claude-haiku-4-5"]
 # tasks holding the descriptors. Default 100.
 # accept_error_backoff_ms = 100
 
+[maintenance]
+# The daemon-side maintenance consumer (#257). Recurring housekeeping
+# is SCHEDULED by fq-cron, the standalone adapter, and RUN here: the
+# adapter publishes to `fq.maintenance.<task>` when a schedule fires
+# and the daemon runs the named task in process. See
+# docs/guide/operating-the-daemon.md, "Scheduling maintenance with
+# fq-cron", for a worked job.
+#
+# Run the tasks a scheduler asks for. Default true — a consumer that
+# does nothing until something is published costs a durable and no
+# work, whereas off-by-default would make the first scheduled job on a
+# new instance silently do nothing. Set false on every daemon but one
+# where several run against a single broker, or every sweep runs once
+# per daemon. A disabled daemon still lets the scheduler publish (the
+# stream is created either way); the commands simply age out.
+# enabled = true
+#
+# Ack window for the maintenance durable, in ms. Default 60000, rather
+# than the `[bus]` value below: that one is sized for a handler that
+# writes to SQLite and returns, and a maintenance task is not that
+# shape — a pricing refresh fetches over the network, an audit walks a
+# store. A task slower than its window is redelivered underneath the
+# run still in flight; the daemon's run-id ledger stops that becoming a
+# second run, but the right fix is a window that fits the work.
+# ack_wait_ms = 60000
+
 [bus]
 # How every durable consumer on the event bus handles redelivery when
 # its handler fails transiently — a full disk under the projection, a

@@ -62,6 +62,7 @@ pub async fn fqd_main() -> ExitCode {
 mod boot;
 mod daemon;
 mod hosted;
+mod maintenance_task;
 mod signals;
 
 use crate::daemon::run_daemon;

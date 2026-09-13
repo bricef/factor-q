@@ -30,10 +30,10 @@ use async_nats::jetstream::consumer::{self, FromConsumer};
 use tracing::debug;
 
 use super::{
-    ADVISORY_STREAM_NAME, BusError, EventBus, STREAM_NAME, TRIGGER_MAX_DELIVER,
-    TRIGGER_RETRY_BACKOFF, TRIGGER_STREAM_NAME,
+    ADVISORY_STREAM_NAME, BusError, EventBus, MAINTENANCE_STREAM_NAME, STREAM_NAME,
+    TRIGGER_MAX_DELIVER, TRIGGER_RETRY_BACKOFF, TRIGGER_STREAM_NAME,
 };
-use crate::events::subjects::ALL_TRIGGERS;
+use crate::events::subjects::{ALL_MAINTENANCE, ALL_TRIGGERS};
 
 /// `max_deliver` for a durable with no dead-letter path: JetStream's
 /// "no limit". Spelled as a named constant because `-1` at a call site
@@ -353,6 +353,69 @@ impl EventBus {
             "getting/creating durable advisory consumer"
         );
         self.durable(ADVISORY_STREAM_NAME, name, None, event_stream_config())
+            .await
+    }
+
+    /// Create (or open) the durable JetStream pull consumer on the
+    /// maintenance command stream (#257).
+    ///
+    /// `filter_subject` is [`ALL_MAINTENANCE`] in production; tests
+    /// narrow it to one task's subject so parallel consumers on a
+    /// shared broker never eat each other's commands.
+    ///
+    /// **A first creation starts at `New`, not at the beginning**, and
+    /// that is the whole delivery policy in one word. The stream holds
+    /// commands, so replaying its history means *running* it: a daemon
+    /// whose durable is created fresh — a new deployment, a broker
+    /// restored from a message-only export, a `--maintenance` flag
+    /// turned back on — would otherwise execute up to a day of
+    /// scheduled sweeps in one burst, which is cost as a first-order
+    /// safety concern (design principle 4) and the consumer-side mirror
+    /// of fq-cron's own rule that a job with no recorded state never
+    /// catches up (D6). An *existing* durable keeps its acked position,
+    /// so an ordinary restart still picks up whatever it missed.
+    ///
+    /// The same choice is what keeps this consumer clear of #669's
+    /// asymmetry by construction rather than by a floor search: the
+    /// halt on unsupported history exists because a durable on the
+    /// *event* stream may meet a well-formed envelope whose version
+    /// this build cannot read. Nothing on this stream is an
+    /// [`crate::events::Event`] — the bodies are opaque scheduler
+    /// payloads with no envelope and no `schema_version` — so there is
+    /// no version to halt on, and the replay floor #648 built for the
+    /// projector has nothing to measure here.
+    pub async fn maintenance_consumer(
+        &self,
+        name: &str,
+        filter_subject: &str,
+        ack_wait: Option<Duration>,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        debug!(
+            consumer = name,
+            filter = filter_subject,
+            "getting/creating durable maintenance consumer"
+        );
+        self.durable(
+            MAINTENANCE_STREAM_NAME,
+            name,
+            ack_wait,
+            consumer::pull::Config {
+                filter_subject: filter_subject.to_string(),
+                deliver_policy: consumer::DeliverPolicy::New,
+                ..event_stream_config()
+            },
+        )
+        .await
+    }
+
+    /// [`Self::maintenance_consumer`] over every task's subject — what
+    /// the daemon runs.
+    pub async fn all_maintenance_consumer(
+        &self,
+        name: &str,
+        ack_wait: Option<Duration>,
+    ) -> Result<consumer::PullConsumer, BusError> {
+        self.maintenance_consumer(name, ALL_MAINTENANCE, ack_wait)
             .await
     }
 

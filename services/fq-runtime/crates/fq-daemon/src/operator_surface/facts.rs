@@ -31,11 +31,13 @@ pub struct DaemonFacts {
     /// `control.status` reports it. Anything given a different number
     /// would call the same invocation something else.
     pub stuck_after_ms: i64,
-    /// Whether `[summary]` names a model. Health expects the summary
-    /// durable only when one is configured — a daemon without a
-    /// summariser has no such consumer, and reporting it missing would
-    /// be a permanent red nobody can clear (#549).
-    pub summary_enabled: bool,
+    /// Which of the two optional durables this daemon actually runs:
+    /// the summariser (only when `[summary]` names a model) and the
+    /// maintenance consumer (`[maintenance] enabled`). Health expects
+    /// a durable only when it is configured — reporting one missing
+    /// that the daemon was told not to create would be a permanent red
+    /// nobody can clear (#549).
+    pub enabled_consumers: fq_runtime::health::EnabledConsumers,
     /// The live `server → starting | ready | unavailable` table for the
     /// shared MCP servers (#548). Both health reports name the
     /// unavailable ones, because an unavailable server is a standing

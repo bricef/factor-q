@@ -26,7 +26,7 @@
 # rustfmt puts one argument per line, so a helper taking the same values
 # costs at its call site what it saves in the body. Raised rather than
 # budgeted, per the rule above, so the trade is visible in the diff.
-services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 561
+services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 560
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 339
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 364
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 305

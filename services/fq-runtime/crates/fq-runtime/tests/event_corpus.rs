@@ -449,6 +449,19 @@ fn exemplars() -> Vec<Event> {
                 retry_after_ms: 300_000,
             }),
         ),
+        // The maintenance outcome (#257) — a system event with no
+        // agent and no invocation, like the startup/shutdown pair.
+        system_event(
+            27,
+            EventPayload::MaintenanceRun(MaintenanceRunPayload {
+                task: "ping".to_string(),
+                run_id: "fq-cron/maintenance-ping@2026-09-13T02:00:00Z".to_string(),
+                outcome: MaintenanceOutcome::Succeeded {
+                    detail: "pong".to_string(),
+                },
+                duration_ms: 1,
+            }),
+        ),
     ]
 }
 

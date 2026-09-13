@@ -21,6 +21,13 @@ pub const SYSTEM_RECOVERY: &str = "fq.system.recovery";
 /// Daemon-scoped log records forwarded from connected MCP servers
 /// (ADR-0020).
 pub const SYSTEM_MCP_LOG: &str = "fq.system.mcp.log";
+/// The outcome of one maintenance task run (#257): what ran, under
+/// which run id, and how it ended. One subject for every outcome —
+/// success, failure, and the refusal of a task name this build does
+/// not know — because they are one fact with three endings, and a
+/// reader that wants only the failures reads the payload rather than a
+/// second subject that could drift from the first.
+pub const SYSTEM_MAINTENANCE: &str = "fq.system.maintenance";
 /// Where an [`crate::events::EventPayload::Unknown`] would route if it
 /// were ever published. It never is — the variant only exists so a
 /// newer daemon's event type deserialises in an older binary — but
@@ -215,6 +222,58 @@ pub fn trigger(agent_id: &str) -> String {
     format!("{TRIGGER_PREFIX}{agent_id}")
 }
 
+/// The maintenance namespace: one subject per task,
+/// `fq.maintenance.<task>` (#257).
+///
+/// This is the **inbound** half of maintenance — a command an external
+/// scheduler (fq-cron) publishes, asking the daemon to run a named
+/// task. The outcome it produces is an event on
+/// [`SYSTEM_MAINTENANCE`], which is a different namespace on a
+/// different stream, and deliberately so: the event log is the system
+/// of record for *facts* ([ADR-0026]), and a command is not one.
+///
+/// Like `fq.trigger.>`, this rides its own JetStream stream (the
+/// runtime's `bus::MAINTENANCE_STREAM_NAME`) rather than the event
+/// stream — short retention, no compression, and no envelope version,
+/// since the body is an opaque scheduler payload rather than an
+/// [`crate::events::Event`]. NATS forbids two streams claiming
+/// overlapping subjects, so `fq.maintenance.>` is disjoint from both
+/// the event stream's subject set and `fq.trigger.>`, and that
+/// disjointness is what keeps all three streams legal.
+///
+/// [ADR-0026]: https://github.com/bricef/factor-q/blob/main/docs/adrs/accepted/0026-event-log-system-of-record.md
+pub const MAINTENANCE_PREFIX: &str = "fq.maintenance.";
+
+/// Every maintenance task's subject. Two roles, one string: the
+/// subject set the maintenance stream captures, and the maintenance
+/// consumer's durable filter.
+pub const ALL_MAINTENANCE: &str = "fq.maintenance.>";
+
+/// One maintenance task's subject.
+///
+/// Takes a `&str` because the task name on the wire is whatever the
+/// scheduler published — the daemon's own closed registry
+/// (`control_plane::maintenance::MaintenanceTask`) is what turns a
+/// token into a task, and refuses the ones it does not know.
+pub fn maintenance(task: &str) -> String {
+    format!("{MAINTENANCE_PREFIX}{task}")
+}
+
+/// Recover the task token from a maintenance subject.
+///
+/// Exactly three dot-separated tokens, and the task is the whole of
+/// the third — the same shape as [`agent_id_from_trigger`], so a
+/// dotted tail (`fq.maintenance.a.b`) is refused rather than silently
+/// truncated to its first token.
+pub fn task_from_maintenance(subject: &str) -> Option<&str> {
+    let mut parts = subject.splitn(3, '.');
+    let (first, second, third) = (parts.next()?, parts.next()?, parts.next()?);
+    if first != "fq" || second != "maintenance" || validate_token(third).is_err() {
+        return None;
+    }
+    Some(third)
+}
+
 /// Recover the agent id from a trigger subject.
 ///
 /// Agent ids are validated to contain no dots (see
@@ -243,6 +302,42 @@ mod tests {
     fn the_trigger_wildcard_and_constructor_share_one_namespace() {
         assert_eq!(ALL_TRIGGERS, format!("{TRIGGER_PREFIX}>"));
         assert!(trigger("researcher").starts_with(TRIGGER_PREFIX));
+    }
+
+    /// Same relationship, same reason, one namespace over (#257).
+    #[test]
+    fn the_maintenance_wildcard_and_constructor_share_one_namespace() {
+        assert_eq!(ALL_MAINTENANCE, format!("{MAINTENANCE_PREFIX}>"));
+        assert!(maintenance("ping").starts_with(MAINTENANCE_PREFIX));
+    }
+
+    #[test]
+    fn a_maintenance_subject_round_trips_through_its_task() {
+        assert_eq!(task_from_maintenance(&maintenance("ping")), Some("ping"));
+    }
+
+    /// A dotted tail is not a task name with a dot in it — it is a
+    /// subject this daemon has no task for, and saying so is the whole
+    /// point of a closed registry.
+    #[test]
+    fn only_a_single_token_maintenance_subject_yields_a_task() {
+        assert_eq!(task_from_maintenance("fq.maintenance.a.b"), None);
+        assert_eq!(task_from_maintenance("fq.maintenance."), None);
+        assert_eq!(task_from_maintenance("fq.maintenance"), None);
+        assert_eq!(task_from_maintenance("fq.trigger.researcher"), None);
+        assert_eq!(task_from_maintenance(""), None);
+    }
+
+    /// The three streams' subject sets must stay disjoint — NATS
+    /// refuses overlapping claims, so an overlap is a daemon that will
+    /// not start rather than a subtle routing bug.
+    #[test]
+    fn the_maintenance_namespace_overlaps_neither_triggers_nor_events() {
+        assert!(!maintenance("ping").starts_with(TRIGGER_PREFIX));
+        assert!(!maintenance("ping").starts_with("fq.system."));
+        assert!(!maintenance("ping").starts_with("fq.agent."));
+        assert!(!maintenance("ping").starts_with("fq.worker."));
+        assert!(!SYSTEM_MAINTENANCE.starts_with(MAINTENANCE_PREFIX));
     }
 
     #[test]

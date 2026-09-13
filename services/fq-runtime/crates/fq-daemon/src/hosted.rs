@@ -143,20 +143,8 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         due_resumes,
         agent_caps,
     } = a;
-    // Publish a system.startup event before spawning any tasks.
-    // If this fails the daemon cannot produce lifecycle events at
-    // all, which is a bad starting point — bail out loudly.
-    let startup_event = Event::system(
-        runtime_id,
-        EventPayload::SystemStartup(SystemStartupPayload {
-            runtime_id,
-            version: version.to_string(),
-            nats_url: config.nats.url.clone(),
-            agents_loaded,
-            pricing_entries,
-        }),
-    );
-    bus.publish(&startup_event)
+    let startup = startup_event(runtime_id, version, &config, agents_loaded, pricing_entries);
+    bus.publish(&startup)
         .await
         .context("failed to publish system.startup event")?;
 
@@ -301,6 +289,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         .with_llm_deadline(config.worker.llm_timeouts().request);
         tokio::spawn(async move { sc.run(summary_shutdown_rx).await })
     });
+
+    // Spawn the maintenance consumer (#257): the housekeeping tasks an
+    // external scheduler asks for on `fq.maintenance.<task>`.
+    let (maint_shutdown_tx, mut maint_handle) =
+        crate::maintenance_task::spawn(&bus, runtime_id, &config);
 
     // Spawn the advisory watch (#169). Drains the captured JetStream
     // MAX_DELIVERIES advisories for the trigger stream and emits the
@@ -499,6 +492,10 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             let err_msg = describe_task_result("advisory watch", result);
             ("task_failed", false, Some(("advisory_watch", err_msg)))
         }
+        result = &mut maint_handle => {
+            let err_msg = describe_task_result("maintenance consumer", result);
+            ("task_failed", false, Some(("maintenance_consumer", err_msg)))
+        }
         result = &mut hb_producer_handle => {
             let err_msg = describe_task_result("heartbeat producer", result);
             ("task_failed", false, Some(("heartbeat_producer", err_msg)))
@@ -623,6 +620,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let _ = hb_consumer_shutdown_tx.send(());
     let _ = summary_shutdown_tx.send(());
     let _ = advisory_shutdown_tx.send(());
+    let _ = maint_shutdown_tx.send(());
     let _ = hb_producer_shutdown_tx.send(());
     let _ = archive_ack_shutdown_tx.send(());
     let _ = archive_retry_shutdown_tx.send(());
@@ -636,6 +634,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         ),
         teardown::join_fallible("heartbeat consumer", hb_consumer_handle),
         teardown::join_fallible("advisory watch", advisory_handle),
+        teardown::join_fallible("maintenance consumer", maint_handle),
         teardown::join_fallible("heartbeat producer", hb_producer_handle),
         teardown::join_fallible("archive-ack consumer", archive_ack_handle),
         teardown::join_fallible("archive retry sweeper", archive_retry_handle),
@@ -690,6 +689,33 @@ fn edge_limits(config: &Config) -> fq_edge::EdgeLimits {
     }
 }
 
+/// The `system.startup` event this daemon announces itself with.
+///
+/// A builder rather than a block inside `run_hosted` because that
+/// function is pinned at its size budget and may only shrink
+/// (`.function-size-baseline`), and this is the piece of it that
+/// depends on the fewest of its locals — five values in, one out.
+/// Publishing stays at the call site, where the `?` that bails out on
+/// a daemon unable to produce lifecycle events belongs.
+fn startup_event(
+    runtime_id: Uuid,
+    version: &str,
+    config: &Config,
+    agents_loaded: u32,
+    pricing_entries: u32,
+) -> Event {
+    Event::system(
+        runtime_id,
+        EventPayload::SystemStartup(SystemStartupPayload {
+            runtime_id,
+            version: version.to_string(),
+            nats_url: config.nats.url.clone(),
+            agents_loaded,
+            pricing_entries,
+        }),
+    )
+}
+
 /// What `control.status` answers about this daemon: where its state
 /// lives and how long it will take to stop. All three come from the
 /// config it was started with, so the report describes the process
@@ -705,7 +731,10 @@ fn daemon_facts(
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,
         stuck_after_ms: config.stuck_after_ms(),
-        summary_enabled: config.summary.model.is_some(),
+        enabled_consumers: fq_runtime::health::EnabledConsumers {
+            summary: config.summary.model.is_some(),
+            maintenance: config.maintenance.enabled,
+        },
         mcp_servers,
         throttle,
         agent_caps,

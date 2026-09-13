@@ -23,13 +23,14 @@ pub use fq_ops::health::{
 };
 
 use crate::bus::{
-    ADVISORY_STREAM_NAME, ConsumerLedger, ConsumerRecord, ConsumerRedeliveryPolicy, STREAM_NAME,
-    TRIGGER_STREAM_NAME,
+    ADVISORY_STREAM_NAME, ConsumerLedger, ConsumerRecord, ConsumerRedeliveryPolicy,
+    MAINTENANCE_STREAM_NAME, STREAM_NAME, TRIGGER_STREAM_NAME,
 };
 use crate::control_plane::advisory_watch::CONSUMER_NAME as ADVISORY_CONSUMER;
 use crate::control_plane::coordination_consumer::CONSUMER_NAME as COORDINATION_CONSUMER;
 use crate::control_plane::dispatcher::CONSUMER_NAME as DISPATCHER_CONSUMER;
 use crate::control_plane::heartbeat_consumer::CONSUMER_NAME as HEARTBEAT_CONSUMER;
+use crate::control_plane::maintenance::CONSUMER_NAME as MAINTENANCE_CONSUMER;
 use crate::control_plane::projection::consumer::CONSUMER_NAME as PROJECTOR_CONSUMER;
 use crate::control_plane::summary_consumer::CONSUMER_NAME as SUMMARY_CONSUMER;
 
@@ -42,23 +43,52 @@ pub const EVENT_STREAM_CONSUMERS: [&str; 3] = [
     HEARTBEAT_CONSUMER,
 ];
 
+/// The durables a daemon runs only when its config asks for them.
+///
+/// Both are `Missing` in a way health must not report as a fault when
+/// they are switched off: a daemon with no `[summary] model` never
+/// creates the summariser, and one with `[maintenance] enabled =
+/// false` never creates the maintenance consumer. A bare pair of
+/// `bool`s at four call sites is how the two get swapped by accident,
+/// so they travel as one named value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnabledConsumers {
+    /// `[summary] model` is set.
+    pub summary: bool,
+    /// `[maintenance] enabled` (the default).
+    pub maintenance: bool,
+}
+
+impl Default for EnabledConsumers {
+    /// What a stock `fqd.toml` produces: no summariser, maintenance on.
+    fn default() -> Self {
+        Self {
+            summary: false,
+            maintenance: true,
+        }
+    }
+}
+
 /// Which durables a daemon expects to find, per stream, in the order
 /// health reports them.
 ///
-/// `summary_enabled` is the daemon's own `[summary] model`: the
-/// summariser is only a required consumer when one is configured, and a
-/// daemon without one would otherwise report a permanent, unfixable
-/// `Missing`.
-pub fn core_streams(summary_enabled: bool) -> Vec<(&'static str, Vec<&'static str>)> {
+/// The conditional entries are `enabled`'s: a consumer this daemon was
+/// configured not to run is not expected, because a daemon without one
+/// would otherwise report a permanent, unfixable `Missing`.
+pub fn core_streams(enabled: EnabledConsumers) -> Vec<(&'static str, Vec<&'static str>)> {
     let mut event_consumers = EVENT_STREAM_CONSUMERS.to_vec();
-    if summary_enabled {
+    if enabled.summary {
         event_consumers.push(SUMMARY_CONSUMER);
     }
-    vec![
+    let mut streams = vec![
         (STREAM_NAME, event_consumers),
         (TRIGGER_STREAM_NAME, vec![DISPATCHER_CONSUMER]),
         (ADVISORY_STREAM_NAME, vec![ADVISORY_CONSUMER]),
-    ]
+    ];
+    if enabled.maintenance {
+        streams.push((MAINTENANCE_STREAM_NAME, vec![MAINTENANCE_CONSUMER]));
+    }
+    streams
 }
 
 /// Probe one stream and each durable it is expected to carry. Never
@@ -241,12 +271,12 @@ fn is_stuck(
 /// are `control.status`'s subject and are not repeated here.
 pub async fn probe_core_consumers(
     js: &async_nats::jetstream::Context,
-    summary_enabled: bool,
+    enabled: EnabledConsumers,
     policy: ConsumerRedeliveryPolicy,
     ledger: &ConsumerLedger,
 ) -> Vec<ConsumerHealth> {
     let mut out = Vec::new();
-    for (stream, expected) in core_streams(summary_enabled) {
+    for (stream, expected) in core_streams(enabled) {
         match probe_stream(js, stream, &expected, policy, ledger).await {
             StreamHealth::Available { consumers, .. } => out.extend(consumers),
             StreamHealth::Unavailable { .. } => {
@@ -262,11 +292,11 @@ pub async fn probe_core_consumers(
 /// Probe every stream this daemon expects, in order.
 pub async fn probe_core_streams(
     js: &async_nats::jetstream::Context,
-    summary_enabled: bool,
+    enabled: EnabledConsumers,
     policy: ConsumerRedeliveryPolicy,
     ledger: &ConsumerLedger,
 ) -> Vec<StreamHealth> {
-    let streams = core_streams(summary_enabled);
+    let streams = core_streams(enabled);
     let mut out = Vec::with_capacity(streams.len());
     for (stream, consumers) in streams {
         out.push(probe_stream(js, stream, &consumers, policy, ledger).await);
