@@ -36,9 +36,20 @@
 //!
 //! So the permit is given back for the length of the hold and a fresh
 //! one is taken on the way out. The worker cap bounds *running*
-//! invocations; waiting is free. What bounds the parked holds instead is
-//! what is queued on the durable — each is one task and one un-acked
-//! message, and the loop only pulls while a permit is free.
+//! invocations; waiting is free.
+//!
+//! What bounds the parked holds instead is the consumer's ack-pending
+//! window, and it is worth stating as the number it is rather than as
+//! "what is queued": the loop pulls whenever a permit is free and a hold
+//! releases its permit, so triggers for a full agent are pulled and
+//! parked until `max_ack_pending` — `max(2 × worker cap,
+//! NATS_DEFAULT_MAX_ACK_PENDING)`, so **1000** on any ordinary
+//! deployment. Each parked hold is one task, one un-acked message, one
+//! registry read-lock and one in-progress ack per
+//! [`HOLD_KEEPALIVE`](super::admission::HOLD_KEEPALIVE) tick. NATS will
+//! not mind 4000 acks a second; the daemon's own reload latency is the
+//! thing that would notice, and an event-driven wake off `AgentSlot`'s
+//! `Drop` is the shape that would fix it if it ever does.
 //!
 //! **The order on the way out is agent slot first, then worker permit.**
 //! A slot held while waiting for a permit is fine and cannot cycle:
@@ -72,6 +83,11 @@
 //! model has not taken a slot, so it is not occupying its agent's cap
 //! while it waits on something unrelated.
 //!
+//! **A reload that removes the agent ends the hold.** The trigger is
+//! acked and dropped, exactly as one arriving a second later would be —
+//! see [`TriggerDispatcher::refuse_removed`], which is also where the
+//! edited-definition case is written down.
+//!
 //! **A drain or shutdown during a hold requeues the trigger** rather
 //! than leaving the delivery un-acked, because a cap hold can outlast a
 //! deploy and an un-acked hold is charged a delivery on the way back —
@@ -87,6 +103,14 @@ use tracing::{debug, info, warn};
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
+
+/// What the registry has to say about a held trigger's agent.
+enum Declared {
+    /// Still loaded; this is its `max_concurrent` (`None` = uncapped).
+    Cap(Option<u32>),
+    /// Gone — a reload removed the definition while the trigger waited.
+    Removed,
+}
 
 impl TriggerDispatcher {
     /// Hold `msg` while `agent` is at its cap. Returns at once for an
@@ -111,17 +135,19 @@ impl TriggerDispatcher {
         payload: &serde_json::Value,
         permit: OwnedSemaphorePermit,
     ) -> Option<(AgentSlot, OwnedSemaphorePermit)> {
-        let cap = self.declared_cap(agent).await;
-        if let Some(slot) = self.agent_caps.try_enter(agent.as_str(), cap) {
+        let Declared::Cap(cap) = self.declared(agent).await else {
+            return self.refuse_removed(msg, agent, trigger_id).await;
+        };
+        if let Some(slot) = self.agent_caps.try_enter(agent, cap) {
             return Some((slot, permit));
         }
         // Counted from here so `fq doctor` can say how many are waiting;
         // dropped on every exit below, including the interrupted one.
-        let _waiting = self.agent_caps.hold(agent.as_str());
+        let _waiting = self.agent_caps.hold(agent);
         info!(
             agent_id = %agent,
             trigger_id = %trigger_name(trigger_id),
-            in_flight = self.agent_caps.in_flight(agent.as_str()),
+            in_flight = self.agent_caps.in_flight(agent),
             max_concurrent = cap.unwrap_or(0),
             "agent is at its concurrency cap; holding the trigger un-started until a slot frees"
         );
@@ -133,10 +159,12 @@ impl TriggerDispatcher {
                 self.requeue_held(msg, agent, trigger_id, payload).await;
                 return None;
             }
-            // Re-read every tick: a slot may have freed, and `fq reload`
-            // may have changed the cap itself.
-            let cap = self.declared_cap(agent).await;
-            let Some(slot) = self.agent_caps.try_enter(agent.as_str(), cap) else {
+            // Re-read every tick: a slot may have freed, `fq reload` may
+            // have changed the cap, and it may have taken the agent away.
+            let Declared::Cap(cap) = self.declared(agent).await else {
+                return self.refuse_removed(msg, agent, trigger_id).await;
+            };
+            let Some(slot) = self.agent_caps.try_enter(agent, cap) else {
                 continue;
             };
             // Slot first, permit second. A permit is almost always free
@@ -226,17 +254,46 @@ impl TriggerDispatcher {
         }
     }
 
-    /// `max_concurrent` as the *current* registry declares it, or `None`
-    /// for an agent that declares none — which is also the answer for an
-    /// agent a reload has just removed, so a vanished definition does
-    /// not leave a trigger held forever. (The unknown-agent path is
-    /// upstream of here; a removal mid-hold is the only way to reach
-    /// this case.)
-    async fn declared_cap(&self, agent: &AgentId) -> Option<u32> {
-        self.registry
-            .read()
-            .await
-            .get_loaded(agent)
-            .and_then(|loaded| loaded.agent.max_concurrent())
+    /// What the *current* registry says about a held trigger's agent.
+    ///
+    /// Asked on every tick, so `fq reload` reaches a trigger that is
+    /// already waiting — including the reload that takes the agent away.
+    async fn declared(&self, agent: &AgentId) -> Declared {
+        match self.registry.read().await.get_loaded(agent) {
+            Some(loaded) => Declared::Cap(loaded.agent.max_concurrent()),
+            None => Declared::Removed,
+        }
+    }
+
+    /// A reload removed the agent while its trigger waited.
+    ///
+    /// Refused the way the same trigger would be refused had it arrived
+    /// one second later: acked and dropped, with the line `handle` logs
+    /// for an unknown agent. Reading `None` as "no cap" — which is what
+    /// this did — *admitted* the trigger and ran the definition clone
+    /// taken before the hold, so an agent an operator had deleted kept
+    /// starting invocations, and a trigger's fate depended on whether it
+    /// arrived before or after the reload.
+    ///
+    /// The other half of a mid-hold reload is unchanged and deliberate:
+    /// a definition that was *edited* runs as it was when the trigger
+    /// was pulled (ADR-0020, refresh between invocations). Only the cap
+    /// is re-read live, because that is the number an operator changes
+    /// to unstick the queue this trigger is in.
+    async fn refuse_removed(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        agent: &AgentId,
+        trigger_id: Option<uuid::Uuid>,
+    ) -> Option<(AgentSlot, OwnedSemaphorePermit)> {
+        warn!(
+            agent_id = %agent,
+            trigger_id = %trigger_name(trigger_id),
+            "agent was removed while its trigger was held; dropping the trigger \
+             rather than running a definition that is no longer loaded"
+        );
+        self.ack(msg, trigger_id, "agent removed during a cap hold")
+            .await;
+        None
     }
 }

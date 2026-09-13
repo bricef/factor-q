@@ -41,6 +41,7 @@ use std::collections::HashMap;
 use proptest::prelude::*;
 
 use super::{AgentConcurrency, AgentSlot};
+use crate::agent::AgentId;
 
 /// Three agents: a build-bound one at 1, a middling one at 2, and an
 /// LLM-bound one with no cap at all (the case that must stay free).
@@ -49,6 +50,11 @@ const FLEET: [(&str, Option<u32>); 3] = [
     ("doc-drift", Some(2)),
     ("probe", None),
 ];
+
+/// The fleet's ids, validated once — the count is keyed by [`AgentId`].
+fn agent_id(index: usize) -> AgentId {
+    AgentId::new(FLEET[index].0).expect("the fleet's ids are legal")
+}
 
 /// One live claim, and whether the cap ever agreed to it.
 struct Claim {
@@ -122,10 +128,10 @@ impl Fleet {
         self.running.clear();
         self.sleeping.clear();
         for (agent, in_flight) in found {
-            let (id, cap) = FLEET[agent];
+            let (id, cap) = (agent_id(agent), FLEET[agent].1);
             for _ in 0..in_flight {
                 self.running.entry(agent).or_default().push(Claim {
-                    _slot: counts.enter(id, cap),
+                    _slot: counts.enter(&id, cap),
                     recovered: true,
                 });
             }
@@ -138,7 +144,7 @@ fn check(fleet: &Fleet, counts: &AgentConcurrency) -> Result<(), TestCaseError> 
     for (agent, (id, cap)) in FLEET.iter().enumerate() {
         let live = fleet.live(agent);
         prop_assert_eq!(
-            counts.in_flight(id) as usize,
+            counts.in_flight(&agent_id(agent)) as usize,
             live,
             "the count and the fleet disagree about {}",
             id
@@ -174,8 +180,8 @@ proptest! {
             match step {
                 // The trigger path: gated, and refused when full.
                 Step::Trigger(agent) => {
-                    let (id, cap) = FLEET[agent];
-                    if let Some(slot) = counts.try_enter(id, cap) {
+                    let (id, cap) = (agent_id(agent), FLEET[agent].1);
+                    if let Some(slot) = counts.try_enter(&id, cap) {
                         fleet.running.entry(agent).or_default().push(Claim { _slot: slot, recovered: false });
                     }
                 }
@@ -221,22 +227,21 @@ proptest! {
 #[test]
 fn the_pre_fix_deferral_wiring_breaks_the_property() {
     let counts = AgentConcurrency::new();
+    let builder = agent_id(0);
     // One invocation of a cap-1 agent is running.
-    let running = counts
-        .try_enter("m0-issue-fix", Some(1))
-        .expect("the first fits");
+    let running = counts.try_enter(&builder, Some(1)).expect("the first fits");
     // Its model 429s, so it defers. Pre-fix, `handle` returned and the
     // slot went with it — the sleeping invocation stopped counting.
     drop(running);
     // The held trigger behind it sees a free slot and starts.
     let _next = counts
-        .try_enter("m0-issue-fix", Some(1))
+        .try_enter(&builder, Some(1))
         .expect("the cap thinks the agent is idle");
     // The pause lifts and the deferred invocation resumes, through the
     // entry that refuses nothing.
-    let _resumed = counts.enter("m0-issue-fix", Some(1));
+    let _resumed = counts.enter(&builder, Some(1));
     assert_eq!(
-        counts.in_flight("m0-issue-fix"),
+        counts.in_flight(&builder),
         2,
         "two invocations of a max_concurrent: 1 agent — what carrying the slot across the \
          deferral prevents"

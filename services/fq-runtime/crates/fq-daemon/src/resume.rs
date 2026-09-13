@@ -249,9 +249,7 @@ pub(crate) async fn handle_resume_request(
     let runner = control.runner.clone();
     let llm = control.llm.clone();
     let deferrals = control.deferrals.clone();
-    let agent_slot = control
-        .agent_caps
-        .enter(agent.id().as_str(), agent.max_concurrent());
+    let agent_slot = control.agent_caps.enter(agent.id(), agent.max_concurrent());
     tokio::spawn(async move {
         let agent_slot = agent_slot;
         match runner.resume(&agent, llm.as_ref(), invocation_id).await {

@@ -2910,15 +2910,12 @@ You are a test agent."#
             Some(1),
             "the trigger behind a failure is still its first delivery"
         );
-        assert_eq!(
-            counts.in_flight(&agent_id_str),
-            1,
-            "only the second is running"
-        );
+        let capped = AgentId::new(&agent_id_str).unwrap();
+        assert_eq!(counts.in_flight(&capped), 1, "only the second is running");
 
         worker.let_finish(1);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while counts.in_flight(&agent_id_str) > 0 {
+        while counts.in_flight(&capped) > 0 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "a failed invocation must release its slot"
@@ -3010,6 +3007,127 @@ You are a test agent."#
         );
 
         next.let_finish(10);
+        stop(shutdown_tx, run).await;
+    }
+
+    /// Review finding P2: the **permit re-acquire** path, which no test
+    /// reached.
+    ///
+    /// `a_held_trigger_gives_its_worker_permit_back_so_other_agents_run`
+    /// runs at worker cap 2, where the capped agent's own cap already
+    /// limits it to one — so its `peak() == 2` holds whether or not a
+    /// held trigger ever takes a fresh permit. At worker cap **1** the
+    /// only permit is the one the running invocation holds, so every
+    /// held trigger must re-acquire on its way out or nothing after the
+    /// first ever runs. It is also the only place the `Err(_) =>
+    /// drop(slot)` back-off is exercised: the consume loop and three
+    /// parked holds compete for one permit as each invocation ends.
+    #[tokio::test]
+    async fn a_held_trigger_takes_a_fresh_worker_permit_to_run() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let capped = unique_agent_id("capped-repermit");
+        let other = unique_agent_id("uncapped-repermit");
+
+        let dir = tempfile::tempdir().unwrap();
+        write_capped_definition(dir.path(), &capped, 1);
+        std::fs::write(
+            dir.path().join(format!("{other}.md")),
+            format!("---\nname: {other}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."),
+        )
+        .unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).expect("load");
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        let registry = shared_registry(registry);
+
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        // Worker cap 1: one permit for the whole fleet.
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 1)
+            .with_agent_caps(Arc::clone(&counts));
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, None, shutdown_rx)
+                .await
+        });
+
+        publish_triggers(&bus, &capped, 3).await;
+        publish_triggers(&bus, &other, 1).await;
+        // Nothing is gated on the test's timing: each invocation returns
+        // as soon as it starts, and the assertion is that all four get
+        // there.
+        worker.let_finish(10);
+
+        worker.wait_for_starts(4, Duration::from_secs(20)).await;
+        assert_eq!(
+            worker.peak(),
+            1,
+            "worker cap 1 means one at a time, held triggers included"
+        );
+        assert_eq!(
+            worker.started_for(&capped),
+            3,
+            "every held trigger of the capped agent re-acquired a permit and ran"
+        );
+        assert_eq!(worker.started_for(&other), 1);
+
+        stop(shutdown_tx, run).await;
+    }
+
+    /// Review finding C7: a trigger held past its agent's **removal**
+    /// must not start.
+    ///
+    /// The hold re-reads the registry every tick, and a removed agent
+    /// used to read as "no cap" — which admitted the trigger and ran the
+    /// definition clone taken before the hold. So an operator who
+    /// deleted a definition and reloaded still got invocations of it,
+    /// while the same trigger arriving one second later was acked and
+    /// dropped as unknown. Now both are dropped.
+    #[tokio::test]
+    async fn a_trigger_held_past_its_agents_removal_is_dropped_not_run() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("capped-removed");
+        let (dir, registry) = registry_with_cap(&agent_id_str, 1);
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let (shutdown_tx, run) = spawn_dispatcher(
+            &bus,
+            &agent_id_str,
+            registry.clone(),
+            worker.clone(),
+            Arc::clone(&counts),
+            8,
+        );
+
+        publish_triggers(&bus, &agent_id_str, 2).await;
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(worker.started(), 1, "the second trigger is held at cap 1");
+
+        // The operator deletes the definition and reloads.
+        std::fs::remove_file(dir.path().join(format!("{agent_id_str}.md"))).unwrap();
+        reload_from(dir.path(), &registry).await;
+
+        // The running invocation finishes, so a slot is free — the only
+        // thing that can keep the held trigger from starting now is the
+        // removal itself.
+        worker.let_finish(10);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            worker.started(),
+            1,
+            "a deleted agent must not run: the held trigger is dropped, not admitted"
+        );
+        assert!(
+            counts.snapshot().is_empty(),
+            "and the hold is over rather than parked forever: {:?}",
+            counts.snapshot()
+        );
+
         stop(shutdown_tx, run).await;
     }
 
