@@ -430,6 +430,16 @@ cannot turn a capped agent's queue into a burst: whatever the pause
 does to the timing, no more than `max_concurrent` of that agent's
 invocations are ever in flight at once.
 
+**A deploy during a cap hold costs the trigger nothing.** A cap hold is
+bounded by the invocation ahead of it rather than by a pause, so it
+routinely outlasts a restart — and a held delivery left un-acked comes
+back charged one attempt, five of which dead-letter a trigger that was
+never refused on its merits. So a drain or shutdown mid-hold **requeues**
+the trigger under its own id: the same trigger, arriving at the next
+binary as the first delivery it still is. Nothing is lost if the requeue
+itself fails; the delivery is simply left un-acked, which is the old
+behaviour.
+
 **A trigger held at its agent's cap occupies no worker permit.** It
 gives the permit it was pulled under back for the length of the wait and
 takes a fresh one before it runs, so `max_concurrent_invocations` is

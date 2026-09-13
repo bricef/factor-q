@@ -68,8 +68,12 @@
 //! model has not taken a slot, so it is not occupying its agent's cap
 //! while it waits on something unrelated.
 //!
-//! A drain or shutdown during a hold still leaves the delivery un-acked
-//! for the next binary, exactly as [`super::admission`] documents.
+//! **A drain or shutdown during a hold requeues the trigger** rather
+//! than leaving the delivery un-acked, because a cap hold can outlast a
+//! deploy and an un-acked hold is charged a delivery on the way back —
+//! see [`TriggerDispatcher::requeue_held`]. The pause hold in
+//! [`super::admission`] still leaves its delivery un-acked; a pause is
+//! tens of seconds, so it does not reach the same arithmetic.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -120,12 +124,14 @@ impl TriggerDispatcher {
     /// `Some((slot, permit))` is the agent's claim on its own cap and
     /// its claim on the worker cap, both for as long as the invocation
     /// runs; `None` means a drain or shutdown landed during the hold and
-    /// the delivery is being left for the next binary.
+    /// the trigger has been requeued for the next binary
+    /// ([`Self::requeue_held`]).
     pub(super) async fn admit_agent_slot(
         &self,
         msg: &async_nats::jetstream::Message,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
+        payload: &serde_json::Value,
         permit: OwnedSemaphorePermit,
     ) -> Option<(AgentSlot, OwnedSemaphorePermit)> {
         let cap = self.declared_cap(agent).await;
@@ -147,11 +153,7 @@ impl TriggerDispatcher {
         drop(permit);
         loop {
             if self.stopping() {
-                debug!(
-                    agent_id = %agent,
-                    trigger_id = %trigger_name(trigger_id),
-                    "drain or shutdown during a cap hold; leaving the trigger for the next binary"
-                );
+                self.requeue_held(msg, agent, trigger_id, payload).await;
                 return None;
             }
             self.keep_alive(msg, trigger_id).await;
@@ -178,6 +180,74 @@ impl TriggerDispatcher {
                 }
                 Err(_) => drop(slot),
             }
+        }
+    }
+
+    /// Give a held trigger back to the stream, so a restart mid-hold
+    /// costs it nothing.
+    ///
+    /// Leaving the delivery un-acked — what a drain did before — is free
+    /// for a pause hold measured in tens of seconds and is *not* free
+    /// here. A cap hold is bounded by the invocation ahead of it, which
+    /// for a build-bound agent is a `just ci` pass; a backlog of ten
+    /// issues at cap 2 is hours of holding, and the dogfood instance
+    /// deploys hourly. Each deploy mid-hold would charge the trigger one
+    /// delivery: `attempt: 2` in the transcript preamble (which the
+    /// redelivery-storm notes read as the tell for a bug), and after
+    /// [`TRIGGER_MAX_DELIVER`](crate::bus::TRIGGER_MAX_DELIVER)
+    /// deliveries a `trigger_exhausted` dead letter for an issue nobody
+    /// ever touched. A NAK is not the alternative — that counts as a
+    /// delivery too.
+    ///
+    /// So the trigger is republished under the same
+    /// `Fq-Trigger-Id` and the original delivery acked: the same trigger,
+    /// by name, arriving at the next binary as the first attempt it
+    /// still is. It goes to the back of the stream, which is what a hold
+    /// already promises — "a hold is a race, not a queue".
+    ///
+    /// **Publish first, ack second.** A crash between the two redelivers
+    /// the original, which is exactly where a requeue-less drain leaves
+    /// us; the reverse order could ack a trigger that was never
+    /// republished. A publish that fails leaves the delivery un-acked
+    /// for the same reason — the old behaviour is the fallback, never a
+    /// dropped trigger.
+    ///
+    /// **The consume loop must have stopped pulling first**, which is
+    /// why it drops its message stream before it awaits the tasks that
+    /// call this. A pull request left outstanding at the server takes
+    /// the fresh copy the instant it is published, into a dispatcher
+    /// that is on its way out and will never ack it — so the trigger
+    /// reaches the next binary as `attempt: 2` after all, and the
+    /// requeue buys a round trip and nothing else. That ordering is
+    /// load-bearing, and the test below is what would catch it moving.
+    async fn requeue_held(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        agent: &AgentId,
+        trigger_id: Option<uuid::Uuid>,
+        payload: &serde_json::Value,
+    ) {
+        // A header-less external trigger has no name until `delivered`
+        // mints one, and it never got that far — so name it here and
+        // requeue it under that, rather than sending an anonymous copy.
+        let id = trigger_id.unwrap_or_else(uuid::Uuid::now_v7);
+        match self.bus.publish_trigger_named(agent, id, payload).await {
+            Ok(_) => {
+                debug!(
+                    agent_id = %agent,
+                    trigger_id = %id,
+                    "drain or shutdown during a cap hold; requeued the trigger \
+                     for the next binary as its first delivery"
+                );
+                self.ack(msg, Some(id), "requeued from a cap hold").await;
+            }
+            Err(err) => warn!(
+                agent_id = %agent,
+                trigger_id = %trigger_name(trigger_id),
+                error = %err,
+                "failed to requeue a held trigger; leaving the delivery un-acked, \
+                 which redelivers it to the next binary at the cost of one attempt"
+            ),
         }
     }
 
