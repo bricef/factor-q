@@ -51,7 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -188,6 +188,12 @@ pub struct TriggerDispatcher {
     /// next trigger held rather than run. Shared with the daemon's
     /// resume paths, which count without being gated.
     agent_caps: Arc<AgentConcurrency>,
+    /// The worker-cap permits (#70). Owned here rather than created by
+    /// the consume loop because a trigger held at its agent's cap gives
+    /// its permit back for the length of the hold and takes a fresh one
+    /// to run (#718): the worker cap bounds running invocations, and
+    /// waiting is free.
+    permits: Arc<Semaphore>,
     /// Set once the loop has seen its shutdown signal, so a trigger held
     /// for a paused model lets go rather than blocking the stop.
     stopping: AtomicBool,
@@ -202,12 +208,14 @@ impl TriggerDispatcher {
         max_concurrent: usize,
     ) -> Self {
         let (deferrals, due) = DeferralQueue::new();
+        let max_concurrent = max_concurrent.max(1);
         Self {
             bus,
             registry,
             worker,
             llm,
-            max_concurrent: max_concurrent.max(1),
+            permits: Arc::new(Semaphore::new(max_concurrent)),
+            max_concurrent,
             throttle: Arc::new(ModelThrottle::inert()),
             deferrals,
             due: std::sync::Mutex::new(Some(due)),
@@ -311,7 +319,7 @@ impl TriggerDispatcher {
         // awaiting `run` itself, and spawning without tracking would
         // silently regress that drain coverage.
         let this = Arc::new(self);
-        let semaphore = Arc::new(Semaphore::new(this.max_concurrent));
+        let semaphore = Arc::clone(&this.permits);
         let mut in_flight: JoinSet<()> = JoinSet::new();
         // Deferred invocations come back through here (#278), under the
         // same permit a trigger takes.
@@ -377,8 +385,7 @@ impl TriggerDispatcher {
                         Some(Ok(msg)) => {
                             let dispatcher = Arc::clone(&this);
                             in_flight.spawn(async move {
-                                dispatcher.handle(&msg).await;
-                                drop(permit);
+                                dispatcher.handle(&msg, permit).await;
                             });
                         }
                         Some(Err(err)) => {
@@ -430,7 +437,11 @@ impl TriggerDispatcher {
         }
     }
 
-    async fn handle(&self, msg: &async_nats::jetstream::Message) {
+    /// Dispatch one trigger. `permit` is the worker-cap permit it was
+    /// pulled under; it is given back for the length of any hold at the
+    /// agent's cap and re-taken before the invocation runs, so it is
+    /// returned here rather than by the caller.
+    async fn handle(&self, msg: &async_nats::jetstream::Message, permit: OwnedSemaphorePermit) {
         // A drain requested after this trigger was pulled but before it
         // was dispatched: leave it un-acked so it redelivers to the next
         // binary rather than starting an invocation that would only
@@ -516,16 +527,10 @@ impl TriggerDispatcher {
             return;
         }
 
-        // Admission, second rule (#718): an agent already running
-        // `max_concurrent` invocations starts no more. The slot is held
-        // for the rest of `handle`, so every way the invocation can end
-        // — completed, failed, deferred, drained, dropped, panicked —
-        // gives it back through `Drop`.
-        let Some(_agent_slot) = self.admit_agent_slot(msg, &agent_id, header_id).await else {
-            return;
-        };
-
-        // Parse the payload as JSON. Empty body becomes null.
+        // Parse the payload as JSON. Empty body becomes null. Before the
+        // per-agent cap below, so a poison payload is refused now rather
+        // than after occupying a hold for however long the agent stays
+        // full. (The pause hold above is #278's and is left as it was.)
         let payload: serde_json::Value = if msg.payload.is_empty() {
             serde_json::Value::Null
         } else {
@@ -546,6 +551,18 @@ impl TriggerDispatcher {
                     return;
                 }
             }
+        };
+
+        // Admission, second rule (#718): an agent already running
+        // `max_concurrent` invocations starts no more. Both the slot and
+        // the worker permit are held for the rest of `handle`, so every
+        // way the invocation can end — completed, failed, deferred,
+        // drained, dropped, panicked — gives them back through `Drop`.
+        let Some((_agent_slot, _permit)) = self
+            .admit_agent_slot(msg, &agent_id, header_id, permit)
+            .await
+        else {
+            return;
         };
 
         // The trigger's *first handling*: the message becomes a named
@@ -840,6 +857,17 @@ mod tests {
 
     fn unique_agent_id(prefix: &str) -> String {
         format!("{prefix}-{}", Uuid::now_v7().simple())
+    }
+
+    /// A worker-cap permit off the dispatcher's own semaphore, for the
+    /// tests that drive `handle` directly instead of through the consume
+    /// loop. `handle` owns the permit now: it gives it back for the
+    /// length of a cap hold and takes a fresh one to run (#718).
+    async fn a_permit(d: &TriggerDispatcher) -> OwnedSemaphorePermit {
+        Arc::clone(&d.permits)
+            .acquire_owned()
+            .await
+            .expect("dispatcher semaphore is never closed")
     }
 
     fn unique_consumer_name() -> String {
@@ -1365,7 +1393,8 @@ You are a test agent."#
         };
 
         let d = dispatcher.clone();
-        let handle = tokio::spawn(async move { d.handle(&msg).await });
+        let permit = a_permit(&d).await;
+        let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
 
         // Wait until the invocation has actually entered (and blocked).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1508,7 +1537,8 @@ You are a test agent."#
         };
 
         let d = dispatcher.clone();
-        let handle = tokio::spawn(async move { d.handle(&msg).await });
+        let permit = a_permit(&d).await;
+        let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
 
         // Wait until the invocation is in-flight (and blocked).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1640,7 +1670,8 @@ You are a test agent."#
 
         // The worker returns its error before any WAL write; `handle`
         // classifies it and ACKs (permanent) or NAKs (transient).
-        dispatcher.handle(&msg).await;
+        let permit = a_permit(&dispatcher).await;
+        dispatcher.handle(&msg, permit).await;
 
         // A NAK redelivers the trigger; an ACK consumes it. Re-poll the
         // same stream: a redelivered message means it was NAK'd. The
@@ -2486,7 +2517,7 @@ You are a test agent."#
     /// returns instantly, so under it two invocations never overlap
     /// whether the cap works or not.
     struct CappedWorker {
-        starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>)>>,
+        starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>, String)>>,
         open: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
         /// One permit per invocation the test allows to finish.
@@ -2522,6 +2553,26 @@ You are a test agent."#
         fn attempts(&self) -> Vec<Option<u32>> {
             self.starts.lock().unwrap().iter().map(|s| s.1).collect()
         }
+        /// How many invocations of one agent have started.
+        fn started_for(&self, agent: &str) -> usize {
+            self.starts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.2 == agent)
+                .count()
+        }
+        async fn wait_for_agent_starts(&self, agent: &str, n: usize, within: Duration) {
+            let deadline = std::time::Instant::now() + within;
+            while self.started_for(agent) < n {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "expected {n} start(s) of {agent} within {within:?}, saw {}",
+                    self.started_for(agent)
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
         async fn wait_for_starts(&self, n: usize, within: Duration) {
             let deadline = std::time::Instant::now() + within;
             while self.started() < n {
@@ -2539,17 +2590,18 @@ You are a test agent."#
     impl Worker for CappedWorker {
         async fn run_invocation(
             &self,
-            _agent: &Agent,
+            agent: &Agent,
             _llm: &dyn crate::llm::LlmClient,
             _trigger: Trigger,
             delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             use std::sync::atomic::Ordering::SeqCst;
-            self.starts
-                .lock()
-                .unwrap()
-                .push((std::time::Instant::now(), delivery_attempt));
+            self.starts.lock().unwrap().push((
+                std::time::Instant::now(),
+                delivery_attempt,
+                agent.id().as_str().to_string(),
+            ));
             let open = self.open.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(open, SeqCst);
             durable_start.fire();
@@ -2666,10 +2718,18 @@ You are a test agent."#
             "the hold must outlast the ack window for this test to prove anything"
         );
         assert_eq!(
-            worker.started(),
+            worker.peak(),
             1,
             "a capped agent starts one at a time even with seven permits free"
         );
+        assert!(
+            worker.attempts().iter().all(|a| a == &Some(1)),
+            "a held trigger must not be redelivered, got {:?}. A `Some(2)` here is a \
+             keepalive tick that slipped past the durable's one-second first-delivery \
+             window — the duplicate-invocation class #327 owns — and not the cap failing",
+            worker.attempts()
+        );
+        assert_eq!(worker.started(), 1, "and so exactly one has started");
         let listed = counts.snapshot();
         assert_eq!(listed.len(), 1, "`fq doctor` names the agent: {listed:?}");
         assert_eq!(listed[0].in_flight, 1);
@@ -2700,6 +2760,86 @@ You are a test agent."#
             counts.snapshot().is_empty(),
             "every slot is given back once the runs end"
         );
+    }
+
+    /// The blocker the review found, as a test: **a held trigger must
+    /// not occupy a worker permit.**
+    ///
+    /// The consume loop takes a permit before it pulls, and the permit
+    /// rides into the spawned task. If a cap hold parked there, a capped
+    /// agent's backlog would eat the worker cap and the *rest of the
+    /// fleet would stop* — the inverse of what #718 is for, and silent,
+    /// because every held trigger would look healthy.
+    ///
+    /// Worker cap 2, agent A at `max_concurrent: 1`, three A triggers
+    /// ahead of one B trigger on the queue. A runs one; A's other two
+    /// park; B must still start. Holding the permits, the loop stalls
+    /// with both taken and B is never even pulled — `expected 1 start(s)
+    /// of B` is what that failure reads as.
+    #[tokio::test]
+    async fn a_held_trigger_gives_its_worker_permit_back_so_other_agents_run() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let capped = unique_agent_id("capped-blocks");
+        let other = unique_agent_id("uncapped-runs");
+
+        // Both agents in one registry, and no subject filter: the broker
+        // is private to this test, so the dispatcher can consume the
+        // whole trigger stream without competing with anything.
+        let dir = tempfile::tempdir().unwrap();
+        write_capped_definition(dir.path(), &capped, 1);
+        std::fs::write(
+            dir.path().join(format!("{other}.md")),
+            format!("---\nname: {other}\nmodel: claude-haiku\nbudget: 1.0\n---\n\nTest agent."),
+        )
+        .unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).expect("load");
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        let registry = shared_registry(registry);
+
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        // Worker cap 2: one for the running invocation, one for the rest
+        // of the fleet. Under the bug the second is swallowed by a hold.
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 2)
+            .with_agent_caps(Arc::clone(&counts));
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, None, shutdown_rx)
+                .await
+        });
+
+        publish_triggers(&bus, &capped, 3).await;
+        publish_triggers(&bus, &other, 1).await;
+
+        worker
+            .wait_for_agent_starts(&other, 1, Duration::from_secs(10))
+            .await;
+        assert_eq!(
+            worker.started_for(&capped),
+            1,
+            "the capped agent still runs exactly one"
+        );
+        assert_eq!(
+            worker.peak(),
+            2,
+            "the capped agent's run and the other agent's run are concurrent, \
+             so both worker permits are doing work rather than waiting"
+        );
+        let listed = counts.snapshot();
+        assert_eq!(
+            listed.len(),
+            1,
+            "only the capped agent is a line: {listed:?}"
+        );
+        assert_eq!(listed[0].held, 2, "its other two triggers are parked");
+
+        // Enough gate permits for anything that starts on the way out.
+        worker.let_finish(10);
+        stop(shutdown_tx, run).await;
     }
 
     /// The other terminal exit path: an invocation that *fails* must
