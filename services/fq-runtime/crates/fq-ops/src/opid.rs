@@ -196,6 +196,34 @@ pub enum ControlReport {
     Status,
 }
 
+/// The OperatorSignal domain's reports. One, and it exists because a
+/// *count* is not a page: the dashboard's home line says how many
+/// notifications landed in the last day and how many alerts stand on
+/// the record, and a List capped at a page cannot answer either
+/// honestly — a full page and a saturated one look the same.
+///
+/// The same shape as [`CostReport::Summary`], which folds the same
+/// projection into totals for the same reason, and scoped to the
+/// domain it counts so a grant of `read:operator_signal` covers the
+/// count and the rows alike.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum OperatorSignalReport {
+    /// `operator_signal.counts` — how many notifications landed inside
+    /// a window, and how many alerts are on the record at all.
+    Counts,
+}
+
 /// A domain verb's identity, typed: the domain and the verb arrive
 /// together, so only pairs a domain actually declares can be named
 /// in code. `Unknown` exists for one reason — graceful version skew:
@@ -331,6 +359,7 @@ pub enum ReportId {
     Cost(CostReport),
     Control(ControlReport),
     Invocation(InvocationReport),
+    OperatorSignal(OperatorSignalReport),
     Unknown { domain: String, name: String },
 }
 
@@ -340,6 +369,7 @@ impl ReportId {
             ReportId::Cost(_) => Some(Domain::Cost),
             ReportId::Control(_) => Some(Domain::Control),
             ReportId::Invocation(_) => Some(Domain::Invocation),
+            ReportId::OperatorSignal(_) => Some(Domain::OperatorSignal),
             ReportId::Unknown { .. } => None,
         }
     }
@@ -359,6 +389,7 @@ impl ReportId {
             ReportId::Cost(r) => (*r).into(),
             ReportId::Control(r) => (*r).into(),
             ReportId::Invocation(r) => (*r).into(),
+            ReportId::OperatorSignal(r) => (*r).into(),
             ReportId::Unknown { name, .. } => name,
         }
     }
@@ -379,6 +410,12 @@ impl From<ControlReport> for ReportId {
 impl From<InvocationReport> for ReportId {
     fn from(report: InvocationReport) -> Self {
         ReportId::Invocation(report)
+    }
+}
+
+impl From<OperatorSignalReport> for ReportId {
+    fn from(report: OperatorSignalReport) -> Self {
+        ReportId::OperatorSignal(report)
     }
 }
 
@@ -409,6 +446,9 @@ impl From<ReportIdWire> for ReportId {
                 Domain::Invocation => InvocationReport::from_str(&wire.name)
                     .ok()
                     .map(ReportId::Invocation),
+                Domain::OperatorSignal => OperatorSignalReport::from_str(&wire.name)
+                    .ok()
+                    .map(ReportId::OperatorSignal),
                 _ => None,
             });
         typed.unwrap_or(ReportId::Unknown {

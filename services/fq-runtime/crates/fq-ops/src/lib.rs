@@ -61,6 +61,6 @@ pub use model::{
 };
 pub use opid::{
     Control, ControlReport, CostReport, DeadLetter, Invocation, InvocationReport, OpCategory, OpId,
-    ReportId, Trigger, VerbId,
+    OperatorSignalReport, ReportId, Trigger, VerbId,
 };
 pub use registry::{Entry, Registry, RegistryError, Resolved};

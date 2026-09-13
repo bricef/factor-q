@@ -60,7 +60,12 @@ use crate::agent::AgentId;
 /// Two variants, and no `Info`: a signal nobody is expected to look at
 /// is a log line, and the log already has those. The value of the pane
 /// is that everything in it was worth a person's attention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because the severity is also a *declared* shape: the
+/// operator surface's `operator_signal` view carries it on every index
+/// row and on the whole signal, so the two-value vocabulary is
+/// published on `operator_surface.json` rather than left for a client
+/// to infer from strings it has seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalSeverity {
     /// Handled during normal hours, and looked at by the operator. It

@@ -21,6 +21,7 @@ mod edge_identity;
 mod event_atom;
 mod health_surface;
 mod invocation_view;
+mod operator_signal_view;
 mod operator_surface;
 mod pricing;
 mod projection_command;

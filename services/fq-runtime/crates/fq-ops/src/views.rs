@@ -430,6 +430,102 @@ pub struct InvocationDetailView {
     pub cost: Option<InvocationCostView>,
 }
 
+/// One operator signal as the pane's list shows it: the OperatorSignal
+/// view's **index** row (`operator_signal.list`).
+///
+/// A line, a severity and where it came from — no `detail` and no
+/// references, because a list is what an operator reads while deciding
+/// which one to open. `event_id` is the identity that reads the whole
+/// signal back through `operator_signal.get`, and it always resolves:
+/// the row *is* the signal, so unlike an event index row there is no
+/// payload behind it that retention can take away.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct OperatorSignalView {
+    /// The identity of the `operator_signal` event this folds — and of
+    /// the signal itself.
+    pub event_id: String,
+    /// When the component said it (RFC3339, the envelope's timestamp).
+    pub timestamp: String,
+    /// Notification or alert — whether this was allowed to wake
+    /// somebody.
+    pub severity: crate::events::SignalSeverity,
+    /// The component that raised it: the kind's first segment.
+    pub source: String,
+    /// What it is, as `<source>.<name>`. A value, not a closed
+    /// vocabulary: the kind registry grows without a schema change, so
+    /// a newer daemon has kinds this build has never heard of and a
+    /// reader shows them rather than refusing them.
+    pub kind: String,
+    /// The one line the row shows.
+    pub summary: String,
+}
+
+/// What a signal points at, when it points at something — the wire
+/// shape of the payload's references.
+///
+/// Every field a plain string, the way every other view DTO here
+/// renders an identity: a reader turns them into links, and a typed
+/// `AgentId` or `Uuid` on the wire would buy validation a reader
+/// cannot act on anyway.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, schemars::JsonSchema)]
+pub struct SignalReferencesView {
+    /// The agent the signal concerns, if it concerns one.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// The invocation the signal concerns, if it concerns one.
+    #[serde(default)]
+    pub invocation: Option<String>,
+    /// Somewhere to look: a pull request, a CI run, a page.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// One whole operator signal: the OperatorSignal view's **state**, what
+/// `operator_signal.get` answers with.
+///
+/// The particulars are here rather than a hop away. An alert outlives
+/// the log it was folded from — it is never swept, and the log keeps
+/// thirty days — so a detail page that read `detail` back out of the
+/// log would go blank on exactly the signals worth keeping.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
+pub struct OperatorSignalDetailView {
+    pub event_id: String,
+    pub timestamp: String,
+    /// The envelope's agent. `system` for every signal a daemon
+    /// component raises, which is all of them today — what a signal
+    /// *concerns* is [`Self::references`], deliberately not the
+    /// envelope.
+    pub agent_id: String,
+    /// The envelope's invocation.
+    pub invocation_id: String,
+    /// Where the producing event sits in the log, when the projection
+    /// recorded a position. `None` for a row projected without
+    /// JetStream metadata — the signal is whole either way; only the
+    /// walk back to the raw envelope is unavailable.
+    #[serde(default)]
+    pub seq: Option<u64>,
+    pub severity: crate::events::SignalSeverity,
+    pub source: String,
+    pub kind: String,
+    pub summary: String,
+    /// The structured particulars, exactly as the producer sent them
+    /// and shaped by the kind. `null` when the producer sent none;
+    /// never parsed by the runtime, rendered by the page and read by a
+    /// person.
+    #[serde(default)]
+    pub detail: serde_json::Value,
+    #[serde(default)]
+    pub references: SignalReferencesView,
+    /// The next signal from the same source, later in time — the row
+    /// *above* this one in the pane. `None` at the head of that
+    /// source's history.
+    #[serde(default)]
+    pub newer_from_source: Option<String>,
+    /// The previous signal from the same source. `None` at the tail.
+    #[serde(default)]
+    pub older_from_source: Option<String>,
+}
+
 /// Fold two reasoning-token totals the way the projection's `SUM` does
 /// within a group: an unreported split (`None`) contributes nothing and
 /// says nothing.

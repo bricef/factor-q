@@ -94,6 +94,7 @@ The initial catalogue:
 | Worker | view | presents as a fold — registration + heartbeats + ownership — but `coordination_worker` is **primary state, not derived**: `register_worker` writes the row directly and the coordination sweep flips `status` on heartbeat timeout, so nothing replays it back. Hence retention rather than rebuild: `worker_id` is the daemon's `runtime_id`, a fresh UUID per run, so the table gains a row per restart and the daemon collects stale ones on a schedule (`state.stale_worker_retention_days`) |
 | Agent | view | the daemon's registry snapshot (reload swaps it); its index rows are agent definitions and nothing else — a file that failed to parse never became an agent, so it belongs to the machinery |
 | Control | synthetic | the daemon machinery itself — a permission scope with **no generic reads**, carrying the lifecycle verbs (down, reload; room for future ones such as peer join) and scoping the machinery reports (`control.status`, which answers with machinery state **including the registry's own, load errors and all**; `control.doctor`) |
+| OperatorSignal | view | fold of the `operator_signal` events: what a component of the daemon said a person should look at, indexed by severity and source. A view rather than an atom because the fact is the *event* — already on the surface as Event — and this is the projection's fold of it, which is also why it declares no stream: tailing signals is `event.stream` narrowed to that type, and a second cursor over one log could only disagree with the first |
 | Operation | view | the surface describing itself: the catalogue of promises |
 
 Domains need not all carry catalogue resources: `Cost` exists purely as
@@ -677,11 +678,12 @@ remains declared is declared on purpose.
 | `invocation.list` / `.show` | List / Get(Invocation) |
 | `worker.list` / `.show` | List / Get(Worker) |
 | `agent.list` / `.show` | List / Get(Agent) |
+| `operator_signal.list` / `.get` | List / Get(OperatorSignal) |
 | `registry.describe` | List(Operation) |
 | `traversal.status` / `.tail` — **planned** | Get(Traversal) / Stream(TraversalEvent) |
 | `trigger.publish` · `invocation.drop` · `invocation.resume` · `dead_letter.requeue` · `control.down` · `control.reload` | domain verbs |
 | `traversal.run` — **planned** | a domain verb, when there is a graph executor to run |
-| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) · `invocation.active` (scope `Invocation`) | reports |
+| `cost.summary` · `cost.by_agent` (scope `Cost`) · `control.doctor` · `control.status` (scope `Control`) · `invocation.active` (scope `Invocation`) · `operator_signal.counts` (scope `OperatorSignal`) | reports |
 | `runtime.health` · `runtime.status` · `runtime.version` | `control.status` — one machinery report |
 
 **Planned rows are not surface.** Nothing named `traversal` exists in
