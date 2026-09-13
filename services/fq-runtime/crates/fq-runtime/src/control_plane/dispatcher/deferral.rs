@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use super::TriggerDispatcher;
 use crate::agent::AgentId;
+use crate::control_plane::agent_cap::AgentSlot;
 use crate::worker::{DueResume, ExecutorError, InvocationOutcome};
 
 impl TriggerDispatcher {
@@ -16,16 +17,24 @@ impl TriggerDispatcher {
     /// logged — the executor already emitted `failed`, the trigger is
     /// acked and the WAL owns recovery, so there is nothing to
     /// redeliver.
+    ///
+    /// `slot` is the invocation's claim on its agent's cap, handed over
+    /// because this is where the invocation's fate is decided (#718): a
+    /// deferral puts the claim on the queue with the resume, and every
+    /// other outcome drops it here, which is the invocation ending.
     pub(super) fn conclude(
         &self,
         agent_id: AgentId,
         result: Result<InvocationOutcome, ExecutorError>,
+        slot: AgentSlot,
     ) {
         match result {
             Ok(InvocationOutcome::Deferred {
                 invocation_id,
                 resume_after,
-            }) => self.deferrals.defer(invocation_id, agent_id, resume_after),
+            }) => self
+                .deferrals
+                .defer(invocation_id, agent_id, resume_after, slot),
             Ok(_) => {}
             Err(err) => {
                 warn!(
@@ -40,31 +49,40 @@ impl TriggerDispatcher {
 
     /// Resume `due.invocation_id` now. The caller holds the concurrency
     /// permit; this is the invocation itself, however long it runs.
+    ///
+    /// **No entry into the count happens here (#718).** The invocation
+    /// never left it: `due.slot` is the very claim its trigger was
+    /// admitted under, carried across the sleep by the deferral queue.
+    /// Taking a fresh one here — which is what this did before — made a
+    /// deferral a hole in the cap, because the entry it took was the
+    /// ungated one.
     pub(super) async fn resume_deferred(&self, due: DueResume) {
+        let DueResume {
+            invocation_id,
+            agent_id,
+            deferred_for,
+            slot,
+        } = due;
         let registry = self.registry.read().await.clone();
-        let Some(loaded) = registry.get_loaded(&due.agent_id) else {
+        let Some(loaded) = registry.get_loaded(&agent_id) else {
             warn!(
-                invocation_id = %due.invocation_id,
-                agent_id = %due.agent_id,
+                invocation_id = %invocation_id,
+                agent_id = %agent_id,
                 "deferred invocation's agent is no longer loaded; leaving its row for triage"
             );
+            // `slot` drops with this return: an invocation nobody will
+            // resume is not one of that agent's in-flight runs.
             return;
         };
-        // Counted, not gated (#718): the cap bounds what *starts*, and
-        // this invocation was admitted when its trigger was. Holding it
-        // back would keep the work on the host for longer, not less.
-        let _agent_slot = self
-            .agent_caps
-            .enter(due.agent_id.as_str(), loaded.agent.max_concurrent());
         info!(
-            invocation_id = %due.invocation_id,
-            agent_id = %due.agent_id,
-            deferred_for_ms = due.deferred_for.as_millis() as u64,
+            invocation_id = %invocation_id,
+            agent_id = %agent_id,
+            deferred_for_ms = deferred_for.as_millis() as u64,
             "resuming a deferred invocation"
         );
         match self
             .worker
-            .resume_invocation(&loaded.agent, self.llm.as_ref(), due.invocation_id)
+            .resume_invocation(&loaded.agent, self.llm.as_ref(), invocation_id)
             .await
         {
             Ok(InvocationOutcome::Deferred {
@@ -72,15 +90,15 @@ impl TriggerDispatcher {
                 resume_after,
             }) => self
                 .deferrals
-                .defer(invocation_id, due.agent_id, resume_after),
+                .defer(invocation_id, agent_id, resume_after, slot),
             Ok(outcome) => debug!(
-                invocation_id = %due.invocation_id,
+                invocation_id = %invocation_id,
                 ?outcome,
                 "deferred invocation resumed to an outcome"
             ),
             Err(err) => {
                 warn!(
-                    invocation_id = %due.invocation_id,
+                    invocation_id = %invocation_id,
                     error = %err,
                     "deferred invocation's resume returned an error"
                 );

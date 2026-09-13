@@ -421,6 +421,15 @@ protects the host — and a trigger can wait on either. `fq doctor` lists
 the agents at their cap beside the throttled models, and neither is a
 doctor issue.
 
+**An invocation the throttle put down still counts against its agent's
+cap.** A deferred invocation is sleeping, not finished: its WAL row is
+still in flight, `fq doctor` still counts it, and it keeps the slot it
+was admitted under until it ends for real — its resume runs on that
+slot rather than taking a new one. So a persistently throttled model
+cannot turn a capped agent's queue into a burst: whatever the pause
+does to the timing, no more than `max_concurrent` of that agent's
+invocations are ever in flight at once.
+
 **A trigger held at its agent's cap occupies no worker permit.** It
 gives the permit it was pulled under back for the length of the wait and
 takes a fresh one before it runs, so `max_concurrent_invocations` is
