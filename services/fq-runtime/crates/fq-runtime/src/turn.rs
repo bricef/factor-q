@@ -314,6 +314,7 @@ mod tests {
             origin: Default::default(),
             reasoning_tokens: None,
             reported_cost: None,
+            pricing_table: None,
         })
     }
 

@@ -182,8 +182,8 @@ impl ProjectionStore {
             r#"
             INSERT INTO events
                 (event_id, seq, timestamp, agent_id, invocation_id, event_type,
-                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_cost, error_kind, error_message, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_cost, pricing_table, error_kind, error_message, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 seq = COALESCE(excluded.seq, events.seq),
                 timestamp = excluded.timestamp,
@@ -197,6 +197,7 @@ impl ProjectionStore {
                 cache_write_tokens = excluded.cache_write_tokens,
                 reasoning_tokens = excluded.reasoning_tokens,
                 total_cost = excluded.total_cost,
+                pricing_table = excluded.pricing_table,
                 error_kind = excluded.error_kind,
                 error_message = excluded.error_message,
                 duration_ms = excluded.duration_ms
@@ -215,6 +216,7 @@ impl ProjectionStore {
         .bind(fields.cache_write_tokens)
         .bind(fields.reasoning_tokens)
         .bind(fields.total_cost)
+        .bind(fields.pricing_table)
         .bind(fields.error_kind)
         .bind(fields.error_message)
         .bind(fields.duration_ms)

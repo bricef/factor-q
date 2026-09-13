@@ -372,6 +372,9 @@ impl SummaryConsumer {
             cumulative_invocation_cost: total_cost,
             cumulative_agent_cost: total_cost,
             origin: Default::default(),
+            // The summariser's spend is traceable to its prices like
+            // everyone else's (#735).
+            pricing_table: self.pricing.version(),
             reasoning_tokens: response.usage.reasoning_tokens,
             reported_cost: response.reported_cost_usd,
         });

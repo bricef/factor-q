@@ -787,6 +787,7 @@ mod tests {
                     nats_url: String::new(),
                     agents_loaded: 0,
                     pricing_entries: 0,
+                    pricing_table: None,
                 },
             ),
         );

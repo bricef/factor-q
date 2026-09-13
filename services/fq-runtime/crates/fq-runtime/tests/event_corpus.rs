@@ -37,6 +37,18 @@ use serde_json::{Value, json};
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
+/// The accepted pricing table this corpus's run was priced by (#735):
+/// a fixed source, commit and digest, so the golden is a function of the
+/// serialisers and nothing else.
+fn corpus_provenance() -> PricingProvenance {
+    PricingProvenance {
+        source: "litellm-main".to_string(),
+        commit: Some("9c4f1b7a0e2d5836a1b0c9d8e7f6a5b4c3d2e1f0".to_string()),
+        digest: "3f9a1c0b2d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8".to_string(),
+        accepted_at: Utc.with_ymd_and_hms(2026, 9, 13, 9, 0, 0).unwrap(),
+    }
+}
+
 fn corpus_dir(version: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/corpus/events")
@@ -249,6 +261,9 @@ fn exemplars() -> Vec<Event> {
             cumulative_agent_cost: 0.000216,
             origin: LlmCallOrigin::AgentTurn,
             reported_cost: None,
+            // Every cost row cites the table that priced it (#735); the
+            // whole provenance rides `system.startup` below.
+            pricing_table: Some(corpus_provenance().version()),
         }),
         chained(
             5,
@@ -388,6 +403,7 @@ fn exemplars() -> Vec<Event> {
                 nats_url: "nats://127.0.0.1:4222".to_string(),
                 agents_loaded: 1,
                 pricing_entries: 12,
+                pricing_table: Some(corpus_provenance()),
             }),
         ),
         system_event(

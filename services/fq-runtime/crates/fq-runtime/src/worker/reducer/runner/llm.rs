@@ -353,6 +353,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             output_cost,
             total_cost,
             ctx.totals.total_cost,
+            self.config.pricing.version(),
         );
         if let Some(message) = context_warning {
             response_event = response_event.annotate(

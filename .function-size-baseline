@@ -26,7 +26,13 @@
 # rustfmt puts one argument per line, so a helper taking the same values
 # costs at its call site what it saves in the body. Raised rather than
 # budgeted, per the rule above, so the trade is visible in the diff.
-services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 560
+#
+# Lowered by hand, 2026-09-13 (#735): -2. The startup announcement grew
+# a second thing to publish — the pricing load's operator signals — and
+# `announce_startup` took both, so the four lines that published the
+# startup event inline became two. Lowered here rather than by
+# `--bless`, which rewrites the whole file and would drop these notes.
+services/fq-runtime/crates/fq-daemon/src/hosted.rs::run_hosted 558
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::resume 339
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 364
 services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 305

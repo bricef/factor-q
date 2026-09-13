@@ -96,7 +96,10 @@ pub(crate) struct Assembled {
     /// shutdown that stops both in the right order (#548).
     pub mcp: crate::shared_servers::SharedServers,
     pub agents_loaded: u32,
-    pub pricing_entries: u32,
+    /// This run's price list: how many models it covers, which accepted
+    /// table it came from, and what the load wants an operator told
+    /// (#735). Announced with the startup event below.
+    pub pricing_load: crate::pricing::PricingStartup,
     pub resume_handles: Vec<tokio::task::JoinHandle<()>>,
     /// The worker's provider throttle (#278): the LLM stack already
     /// takes permits from it; the dispatcher holds triggers on it and
@@ -136,17 +139,15 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         mut signals,
         mcp,
         agents_loaded,
-        pricing_entries,
+        pricing_load,
         resume_handles,
         throttle,
         deferrals,
         due_resumes,
         agent_caps,
     } = a;
-    let startup = startup_event(runtime_id, version, &config, agents_loaded, pricing_entries);
-    bus.publish(&startup)
-        .await
-        .context("failed to publish system.startup event")?;
+    let startup = startup_event(runtime_id, version, &config, agents_loaded, &pricing_load);
+    announce_startup(&bus, runtime_id, &startup, pricing_load.signals).await?;
 
     // Everything the edge's registry is built from, constructed
     // before it and before any task is spawned. These are plain
@@ -702,7 +703,7 @@ fn startup_event(
     version: &str,
     config: &Config,
     agents_loaded: u32,
-    pricing_entries: u32,
+    pricing: &crate::pricing::PricingStartup,
 ) -> Event {
     Event::system(
         runtime_id,
@@ -711,9 +712,40 @@ fn startup_event(
             version: version.to_string(),
             nats_url: config.nats.url.clone(),
             agents_loaded,
-            pricing_entries,
+            pricing_entries: pricing.entries,
+            pricing_table: pricing.provenance.clone(),
         }),
     )
+}
+
+/// Announce the daemon, then whatever the pricing load wants an operator
+/// to know: a refused change, a failed fetch, a table past its staleness
+/// window (#735).
+///
+/// The order is deliberate. The startup event carries the provenance of
+/// the table this run accepted, so it is the record every signal after
+/// it — and every cost row — is read against. The signals are
+/// daemon-scoped events like the startup itself, and a daemon that
+/// cannot publish its own lifecycle events is not one that should carry
+/// on, which is why these `?` alongside it.
+async fn announce_startup(
+    bus: &EventBus,
+    runtime_id: Uuid,
+    startup: &Event,
+    signals: Vec<fq_runtime::events::OperatorSignalPayload>,
+) -> anyhow::Result<()> {
+    bus.publish(startup)
+        .await
+        .context("failed to publish system.startup event")?;
+    for signal in signals {
+        bus.publish(&Event::system(
+            runtime_id,
+            EventPayload::OperatorSignal(signal),
+        ))
+        .await
+        .context("failed to publish a pricing operator signal")?;
+    }
+    Ok(())
 }
 
 /// What `control.status` answers about this daemon: where its state

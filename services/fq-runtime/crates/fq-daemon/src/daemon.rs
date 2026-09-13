@@ -356,12 +356,17 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // coverage guarantee (ADR-0004) — fail-fast before serving any
     // trigger.
     let pricing_cache = crate::pricing::litellm_cache_path(&config.cache.directory);
-    let pricing = Arc::new(build_validated_pricing(
-        &config,
-        &registry,
-        crate::pricing::load_pricing_sources(&config).await,
-    )?);
+    let (accepted, pricing_signals) = crate::pricing::load_pricing_sources(&config).await?;
+    let pricing = Arc::new(build_validated_pricing(&config, &registry, accepted)?);
     let pricing_entries = pricing.len() as u32;
+    // What the load wants said on the log once the bus is announced
+    // (#735): the table it accepted, and any refusal, failed fetch or
+    // stale window it saw on the way.
+    let pricing_load = crate::pricing::PricingStartup {
+        entries: pricing_entries,
+        provenance: pricing.provenance().cloned(),
+        signals: pricing_signals,
+    };
     println!(
         "  pricing entries:  {} (cache: {})",
         pricing_entries,
@@ -514,7 +519,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         signals,
         mcp,
         agents_loaded,
-        pricing_entries,
+        pricing_load,
         resume_handles,
         throttle,
         deferrals,

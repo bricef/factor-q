@@ -27,6 +27,12 @@ pub(super) struct Fields {
     /// report the provider did not make (#536).
     pub(super) reasoning_tokens: Option<i64>,
     pub(super) total_cost: Option<f64>,
+    /// Which pricing table produced `total_cost` (#735). Projected
+    /// beside the figure and not only onto the event, because the
+    /// cost-retention principle keeps these rows after the log they were
+    /// folded from has been swept — past retention this is the only copy
+    /// of the spend, so it has to be the only copy of its provenance too.
+    pub(super) pricing_table: Option<String>,
     pub(super) error_kind: Option<String>,
     pub(super) error_message: Option<String>,
     pub(super) duration_ms: Option<i64>,
@@ -66,6 +72,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
             if let Some(cost) = &event.envelope.cost {
                 f.model = Some(cost.model.clone());
                 f.total_cost = Some(cost.total_cost);
+                f.pricing_table = cost.pricing_table.clone();
             }
             f
         }
@@ -83,6 +90,11 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
                 error_message: Some(p.error_message.clone()),
                 duration_ms: Some(p.duration_ms as i64),
                 total_cost: event.envelope.cost.as_ref().map(|c| c.total_cost),
+                pricing_table: event
+                    .envelope
+                    .cost
+                    .as_ref()
+                    .and_then(|c| c.pricing_table.clone()),
                 ..Default::default()
             };
             if let Some(usage) = p.usage {
@@ -108,6 +120,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
                 f.cache_write_tokens = Some(cost.cache_write_tokens as i64);
                 f.reasoning_tokens = cost.reasoning_tokens.map(i64::from);
                 f.total_cost = Some(cost.total_cost);
+                f.pricing_table = cost.pricing_table.clone();
             }
             f
         }

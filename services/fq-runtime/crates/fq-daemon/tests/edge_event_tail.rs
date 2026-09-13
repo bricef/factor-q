@@ -153,6 +153,7 @@ fn fixture_events() -> Vec<Event> {
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     });
     let tool = stamp(
         Event::new(

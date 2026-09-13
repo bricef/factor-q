@@ -130,6 +130,7 @@ fn cost(seq: u32, total_cost: f64, model: &str) -> CostMetadata {
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     }
 }
 

@@ -151,6 +151,7 @@ fn cost(call: u32, total: f64, cumulative: f64, reasoning_tokens: Option<u32>) -
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens,
         reported_cost: None,
+        pricing_table: None,
     }
 }
 
@@ -256,6 +257,7 @@ fn invocation_summary(invocation: &str, seq: u32, at_ms: i64, total_cost: f64) -
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     })
 }
 
