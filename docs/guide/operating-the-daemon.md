@@ -760,6 +760,59 @@ projector's: `fq projection rebuild` resets `fq-projector` under the
 running daemon, because the daemon stops that consumer itself before
 deleting the durable and starts it again after.
 
+## Notifications and alerts
+
+Use these terms consistently on dashboards, in runbooks, and in producer
+names:
+
+- A **notification** is handled during normal hours and looked at by the
+  operator. It may go to Slack or a similar channel. A successful deploy and a
+  pricing change refused by the drift bound are notifications.
+- An **alert** reaches the operator out of hours because the system cannot
+  recover on its own. It escalates and requires human intervention. A service
+  that is blocked, no longer accepts requests, and has no graceful recovery
+  path raises an alert.
+
+To choose between them, ask: **can the system recover on its own, and can this
+wait until morning?** “Yes” to both means notification; “no” to either means
+alert.
+
+### Current signal classification
+
+“Current channel” describes where the signal is sent now, not where it should
+ultimately be rendered. `notify.sh` uses the configured `FQ_NOTIFY_HOOK`
+(Pushover on the dogfood host). Rows marked “once reported” name signals that
+exist today but do not yet have an out-of-band producer.
+
+| Signal | Class | Current channel | Recovery path |
+| --- | --- | --- | --- |
+| Successful deploy (`deploy.sh` via `notify.sh`) | Notification | Pushover | None needed; the new version is already serving. |
+| Deploy deferred past `FQ_DEFER_WARN_HOURS` (`deploy.sh` via `notify.sh`) | Notification | Pushover | The hourly deploy retries; a new target clears the deferral, or the operator follows the continuous-delivery runbook. |
+| Failed deploy whose rollback succeeds (`deploy.sh` via `notify.sh`) | Notification | Pushover | The script restores the previously serving version and the hourly deploy retries. |
+| Failed deploy whose rollback also fails (`deploy.sh` via `notify.sh`) | Alert | Pushover | None; the operator must restore service. |
+| Hygiene backup-age, disk, or build-cache report (`hygiene.sh` via `notify.sh`) | Notification | Pushover | The next scheduled check clears transient findings; `FQ_BUILD_CACHE_MAX_GB` pruning reclaims the build cache when no invocation is in flight. |
+| Disk full / daemon or broker unable to continue | Alert | None | None; the operator must reclaim space and restore service. |
+| Unattended backup failure (`backup.sh` via `notify.sh`) | Notification, except an unsuccessful stack restart is an alert | Pushover | The next nightly run retries ordinary backup or off-host-copy failures; a failed `docker compose up` has no automatic recovery. |
+| Watcher `schemaVersionMismatches` (once reported; follow-up to #717) | Alert | None | None; an incompatible watcher skips every event it consumes and must be upgraded or rolled back. |
+| `fq doctor`: stale workers | Notification | `fq doctor` | The daemon reclaims stale workers; inspect with `fq workers list --stale-only` if they persist. |
+| `fq doctor`: stuck executions / `invocation_stuck` | Alert | `fq doctor` and event stream | None; inspect with `fq invocation show`, then resume or drop the invocation. |
+| `fq doctor`: ambiguous invocations | Alert | `fq doctor` | None; inspect, then resume or drop each invocation. |
+| `fq doctor`: permanent failures | Notification | `fq doctor` | The invocation has ended safely; inspect the failed invocation and fix its cause during normal hours. |
+| `fq doctor`: stuck consumers | Alert | `fq doctor` | None; use the named durable and its reported error to restore consumption. |
+| `fq doctor`: unavailable shared MCP servers | Alert when required work is blocked; otherwise notification | `fq doctor` | The supervisor retries startup; if required work remains blocked, fix the server or its configuration. |
+| `fq doctor`: throttled models or agents at concurrency caps | Notification | `fq doctor` | Provider backoff and available agent slots release held work automatically. |
+| `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. |
+| Pricing change refused by the drift bound (#735) | Notification | None (producer in #735) | The last accepted pricing remains in use; review and accept the change during normal hours. |
+| Pricing data stale (#735) | Alert | None (producer in #735) | None once the safe staleness limit is exhausted; restore the pricing source or provide an override. |
+| Summary consumer `start`, `progress`, and `outcome` lines | Neither; these are the record | Event stream and dashboard | Not applicable; consumers display the durable record and do not page on it. |
+
+Notifications belong in the dashboard notification pane (#736) and may also
+go to Slack. Alerts go to Pushover today and to the alerting design in #342
+when that replaces the current route.
+
+**Rule for new producers:** choose the class first and name its recovery path;
+if there is no recovery path, it is an alert.
+
 ## Quick reference
 
 | Goal | Command |
