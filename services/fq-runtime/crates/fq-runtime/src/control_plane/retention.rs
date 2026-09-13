@@ -237,11 +237,24 @@ impl RetentionSweeper {
     ) -> Result<(u64, u64), super::store::ControlPlaneStoreError> {
         let archive_deleted = self.store.sweep_archive(cutoff_ms).await?;
         let event_deleted = if let Some(store) = &self.projection_store {
-            store.sweep_events(cutoff_ms).await.map_err(|err| {
+            let events = store.sweep_events(cutoff_ms).await.map_err(|err| {
                 super::store::ControlPlaneStoreError::Backend(format!(
                     "projection retention sweep failed: {err}"
                 ))
-            })?
+            })?;
+            // The pane's index ages on the same window and in the same
+            // tick, minus the alerts it never sweeps — see
+            // `sweep_operator_signals`. Counted into the same total: it
+            // is one retention pass over one projection.
+            let signals = store
+                .sweep_operator_signals(cutoff_ms)
+                .await
+                .map_err(|err| {
+                    super::store::ControlPlaneStoreError::Backend(format!(
+                        "operator-signal retention sweep failed: {err}"
+                    ))
+                })?;
+            events + signals
         } else {
             0
         };

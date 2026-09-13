@@ -22,6 +22,7 @@ use crate::agent::AgentId;
 use crate::events::{Event, EventPayload};
 
 mod costs;
+mod operator_signals;
 mod rebuild;
 mod schema;
 mod triggers;
@@ -116,7 +117,13 @@ impl ProjectionStore {
     /// deletes only from `events`. Same intent as the cost exemption —
     /// a key domain fact outliving the log it was recorded on — reached
     /// without a second clause to keep in step. `invocation_summary` is
-    /// untouched for the same reason.
+    /// untouched for the same reason, and so is `operator_signals` —
+    /// which has a sweep of its own
+    /// ([`ProjectionStore::sweep_operator_signals`], run beside this
+    /// one) because two severities share that table and only one of
+    /// them ages out: **an alert is never swept**, a notification is.
+    /// That is the single predicate exemption in the whole sweep, and
+    /// the reasoning is on the method that carries it.
     ///
     /// Deletes in batches: the first sweep after an upgrade can face
     /// months of backlog, and one unbounded DELETE would hold the
@@ -229,6 +236,12 @@ impl ProjectionStore {
         // summary line below: one event, one row in `events`, and a
         // second table maintained beside it.
         self.insert_trigger(event, seq).await?;
+
+        // And an `operator_signal` writes the pane's row beside its
+        // event row, for the same reason and with the same shape: the
+        // whole signal in one place, so a detail page needs no hop into
+        // a log that an alert deliberately outlives.
+        self.insert_operator_signal(event, seq).await?;
 
         // Summary events additionally maintain the per-invocation
         // current line (#216). Last write wins; `Outcome` lines are
