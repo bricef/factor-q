@@ -78,7 +78,16 @@ use crate::db::schema::{Compatibility, check_compatibility, read_user_version, s
 ///   present and is rebuilt on first open — which is what backfills
 ///   `reasoning_tokens` and the cache columns for every event the
 ///   stream still holds.
-pub const PROJECTION_SCHEMA_VERSION: u32 = 1;
+/// - **v2** — `events.pricing_table`: which accepted pricing table
+///   produced a row's `total_cost`
+///   (<https://github.com/bricef/factor-q/issues/735>). A bump rather
+///   than an `ALTER`, because the events carry the value and a replay
+///   backfills it — the case the version log exists for. The column has
+///   to live here and not only on the event: cost rows are exempt from
+///   the retention sweep and past stream retention the projection is
+///   the only copy of the spend, so it has to be the only copy of the
+///   prices that produced it.
+pub const PROJECTION_SCHEMA_VERSION: u32 = 2;
 
 /// The tables a rebuild drops and recreates — the projection proper.
 /// `projection_meta` is deliberately not among them: it records the
@@ -103,6 +112,7 @@ CREATE TABLE IF NOT EXISTS events (
     cache_write_tokens INTEGER,
     reasoning_tokens INTEGER,
     total_cost      REAL,
+    pricing_table   TEXT,
     error_kind      TEXT,
     error_message   TEXT,
     duration_ms     INTEGER

@@ -98,6 +98,8 @@ pub(crate) fn llm_response_event(
     output_cost: f64,
     total_cost: f64,
     cumulative_cost: f64,
+    // Which pricing table produced the three figures above (#735).
+    pricing_table: Option<String>,
 ) -> Event {
     Event::new(
         agent_id.clone(),
@@ -126,6 +128,7 @@ pub(crate) fn llm_response_event(
         cumulative_agent_cost: cumulative_cost,
         origin,
         reported_cost: response.reported_cost_usd,
+        pricing_table,
     })
 }
 
@@ -165,6 +168,8 @@ pub(crate) fn llm_failure_event(
     call: &FailedCall<'_>,
     priced: Option<(f64, f64, f64)>,
     cumulative_cost: f64,
+    // Which pricing table produced `priced`, when anything did (#735).
+    pricing_table: Option<String>,
 ) -> Event {
     let event = Event::new(
         call.agent_id.clone(),
@@ -198,5 +203,6 @@ pub(crate) fn llm_failure_event(
         cumulative_agent_cost: cumulative_cost,
         origin: call.origin.clone(),
         reported_cost: call.reported_cost_usd,
+        pricing_table,
     })
 }

@@ -23,7 +23,8 @@
       "cumulative_agent_cost": 0.000216,
       "origin": {
         "kind": "agent_turn"
-      }
+      },
+      "pricing_table": "litellm-main@3f9a1c0b2d4e"
     }
   },
   "payload": {

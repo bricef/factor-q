@@ -93,6 +93,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &call,
                 priced,
                 totals.total_cost,
+                self.config.pricing.version(),
             ),
         )
         .await

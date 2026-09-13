@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use fq_runtime::agent::AgentRegistry;
-use fq_runtime::pricing::openrouter;
+use fq_runtime::events::{OperatorSignalPayload, PricingProvenance};
+use fq_runtime::pricing::{live, openrouter};
 use fq_runtime::{Config, PricingTable};
 
 /// The LiteLLM snapshot's file name under the cache directory.
@@ -22,13 +23,42 @@ const LITELLM_CACHE_FILE: &str = "pricing.json";
 /// The OpenRouter catalogue's file name under the cache directory.
 const OPENROUTER_CACHE_FILE: &str = "openrouter-pricing.json";
 
+/// What the pricing load wants said about it once the bus is up: how
+/// many models it priced, which table it accepted, and what an operator
+/// should look at.
+///
+/// One value rather than three fields on `Assembled`: they are one
+/// fact — this run's price list — and `run_hosted` threads them to one
+/// place, the startup announcement.
+pub(crate) struct PricingStartup {
+    /// Entries in the merged table, after overrides.
+    pub(crate) entries: u32,
+    /// The accepted LiteLLM table this run loaded (#735). Cited by every
+    /// cost record the run writes.
+    pub(crate) provenance: Option<PricingProvenance>,
+    /// Refusals, a failed fetch, a stale table — one signal each.
+    pub(crate) signals: Vec<OperatorSignalPayload>,
+}
+
 /// Load the pricing sources the config calls for: always LiteLLM, plus
 /// OpenRouter's catalogue when some provider is routed there. Each is
 /// fetched, cached and fallen back on independently; the result is the
 /// base [`build_validated_pricing`] merges overrides into.
-pub(crate) async fn load_pricing_sources(config: &Config) -> PricingTable {
+///
+/// The LiteLLM table goes through acceptance (#735) and comes back with
+/// its provenance and whatever the acceptance step wants an operator to
+/// know; the returned signals are published once the bus is announced.
+/// An unreadable `[pricing]` section is an error rather than a fallback:
+/// an operator who asked for a pin and got the live document has the
+/// opposite of what they configured.
+pub(crate) async fn load_pricing_sources(
+    config: &Config,
+) -> anyhow::Result<(PricingTable, Vec<OperatorSignalPayload>)> {
     let cache_dir = &config.cache.directory;
-    let mut pricing = PricingTable::load(&cache_dir.join(LITELLM_CACHE_FILE)).await;
+    let settings = config.pricing.load_settings()?;
+    let load = live::load_accepted(settings, &cache_dir.join(LITELLM_CACHE_FILE)).await;
+    let signals = load.signals();
+    let mut pricing = load.table;
     // Group by endpoint so one catalogue serves every provider on it;
     // in practice there is one OpenRouter provider, but two would be
     // one fetch, not two.
@@ -46,7 +76,7 @@ pub(crate) async fn load_pricing_sources(config: &Config) -> PricingTable {
         let coverage = price_openrouter_models(&mut pricing, &catalogue, models);
         coverage.report();
     }
-    pricing
+    Ok((pricing, signals))
 }
 
 /// How the models routed through OpenRouter came to be priced.

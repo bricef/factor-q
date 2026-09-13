@@ -168,6 +168,89 @@ async fn enforce_pricing_refuses_to_dispatch_an_unpriced_model() {
     }
 }
 
+/// #735, the other half of "refused at admission": a new model the
+/// source prices at zero never enters the table, and the ADR-0004
+/// backstop is what the operator then meets. The two rules are one
+/// guarantee — nothing runs at $0 — so this asserts the join rather
+/// than the halves.
+#[tokio::test]
+async fn a_model_refused_at_admission_is_refused_at_dispatch() {
+    use crate::pricing::accept::{AcceptanceRules, accept};
+
+    let dir = tempdir().unwrap();
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap(),
+    );
+
+    // The source offers a brand-new model at zero. Acceptance drops it.
+    let mut candidate = PricingTable::empty();
+    candidate.insert(
+        "free/model",
+        ModelPricing {
+            input_per_million: 0.0,
+            output_per_million: 0.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    let (accepted, refusals) = accept(
+        &PricingTable::empty(),
+        candidate,
+        AcceptanceRules::default(),
+    );
+    assert_eq!(refusals.len(), 1, "the model is refused at admission");
+    assert!(accepted.lookup("free/model").is_none());
+
+    let agent = Agent::builder()
+        .id(unique_agent_id("free"))
+        .model("free/model")
+        .system_prompt("be brief")
+        .budget(1.0)
+        .build()
+        .unwrap();
+    let llm = FixtureClient::new();
+    llm.push_response(canned("should not be used", 10, 5));
+
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(
+                    Arc::new(crate::test_support::sim::RecordingSink::new()) as Arc<dyn EventSink>
+                )
+                .pricing(Arc::new(accepted))
+                .store(store)
+                .worker_id(test_worker_id())
+                .enforce_pricing(true)
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let outcome = runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await;
+
+    match outcome {
+        Err(ExecutorError::Llm(crate::llm::LlmError::UnpricedModel(model))) => {
+            assert_eq!(model, "free/model");
+        }
+        other => panic!("expected an UnpricedModel failure, got {other:?}"),
+    }
+}
+
 /// A runner whose shared MCP server table says `server` is
 /// unavailable, and an agent that declares it. The states table is the
 /// daemon's; here it is constructed directly, which is the honest

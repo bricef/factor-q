@@ -53,6 +53,7 @@ fn summary_event_costing(
         origin: Default::default(),
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     })
 }
 
@@ -433,7 +434,50 @@ fn sample_llm_response_of_model(
         origin: crate::events::LlmCallOrigin::AgentTurn,
         reasoning_tokens,
         reported_cost: None,
+        pricing_table: None,
     })
+}
+
+/// #735: a projected cost row cites the table that priced it, and
+/// survives the retention sweep still citing it. Past stream retention
+/// this row is the only copy of the spend, so it has to be the only copy
+/// of the prices too — a figure nobody can attach to a price list is a
+/// number rather than a record.
+#[tokio::test]
+async fn a_cost_row_keeps_the_pricing_table_that_priced_it_past_the_sweep() {
+    let dir = tempdir().unwrap();
+    let store = ProjectionStore::open(&dir.path().join("projection.db"))
+        .await
+        .unwrap();
+    let inv = Uuid::now_v7();
+    let mut event = sample_llm_response_with_cost("priced", inv, 0.0011);
+    if let Some(cost) = event.envelope.cost.as_mut() {
+        cost.pricing_table = Some("litellm-main@3f9a1c0b2d4e".to_string());
+    }
+    store.insert_event(&event, None).await.unwrap();
+
+    let cited: Option<String> = sqlx::query_scalar("SELECT pricing_table FROM events")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(cited.as_deref(), Some("litellm-main@3f9a1c0b2d4e"));
+
+    // Age the row well past any retention window and sweep: a
+    // cost-bearing row stays, and so does its provenance.
+    sqlx::query("UPDATE events SET timestamp = ?")
+        .bind("2020-01-01T00:00:00Z")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store
+        .sweep_events(chrono::Utc::now().timestamp_millis())
+        .await
+        .unwrap();
+    let cited: Option<String> = sqlx::query_scalar("SELECT pricing_table FROM events")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(cited.as_deref(), Some("litellm-main@3f9a1c0b2d4e"));
 }
 
 fn sample_completed(agent: &str, inv: Uuid) -> Event {
@@ -557,6 +601,7 @@ fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
         origin: crate::events::LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     })
 }
 
