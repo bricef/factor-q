@@ -71,15 +71,16 @@ const MODEL: &str = "claude-haiku-4-5";
 /// The grants the dashboard's token must carry.
 ///
 /// Copied from `REQUIRED_GRANTS` in `services/fq-dashboard/src/main.rs`
-/// — the dashboard refuses to start without all six, and this crate
-/// cannot link the dashboard to read them. One place here, so a drift
-/// is one edit.
+/// — the dashboard refuses to start without every one of them, and
+/// this crate cannot link the dashboard to read them. One place here,
+/// so a drift is one edit.
 const DASHBOARD_GRANTS: &[&str] = &[
     "read:agent",
     "read:control",
     "read:cost",
     "read:event",
     "read:invocation",
+    "read:operator_signal",
     "read:turn",
 ];
 
@@ -648,6 +649,11 @@ async fn check_pages(at: &str, invocation: &str, version: &str) {
     let resp = get(at, "/", budget).await;
     assert_reached_the_daemon("/", &resp);
     assert_contains("/", &resp, version);
+    // The home line's counts come from `operator_signal.counts`, a
+    // third read on this page; zeros against a daemon with nothing
+    // raised, and rendered rather than skipped.
+    assert_contains("/", &resp, "0 in the last 24h");
+    assert_contains("/", &resp, "0 open alerts");
     assert!(
         !resp.body.contains("build skew"),
         "GET / reported build skew — the daemon and the dashboard were built from \
@@ -668,6 +674,33 @@ async fn check_pages(at: &str, invocation: &str, version: &str) {
     let resp = get(at, "/events", budget).await;
     assert_reached_the_daemon("/events", &resp);
     assert_contains("/events", &resp, AGENT);
+
+    // The notifications pane. Nothing in this run raises a signal —
+    // the first producer is a later change — so what is proved here is
+    // the half a hermetic test cannot: the page reaches the daemon,
+    // the daemon serves `operator_signal.list`, and the empty answer
+    // renders as the empty pane rather than a 503. That is exactly the
+    // failure mode this whole suite exists for: the transcript page
+    // served 503 for six days with every hermetic gate green.
+    let resp = get(at, "/notifications", budget).await;
+    assert_reached_the_daemon("/notifications", &resp);
+    assert_eq!(resp.status, 200, "GET /notifications");
+    assert_contains("/notifications", &resp, "no operator signals");
+
+    // The severity filter travels to the daemon rather than being
+    // applied in the renderer, so an unfiltered and a filtered page are
+    // two different requests over the wire.
+    let resp = get(at, "/notifications?severity=alert", budget).await;
+    assert_reached_the_daemon("/notifications?severity=alert", &resp);
+    assert_eq!(resp.status, 200, "GET /notifications?severity=alert");
+    assert_contains("/notifications?severity=alert", &resp, "<b>alerts</b>");
+
+    // A signal nothing indexes is a 404 through the real Get, not a
+    // banner over a page that failed to load.
+    let path = format!("/notifications/{id}");
+    let resp = get(at, &path, budget).await;
+    assert_reached_the_daemon(&path, &resp);
+    assert_eq!(resp.status, 404, "GET {path}");
 
     let resp = get(at, "/costs", budget).await;
     assert_reached_the_daemon("/costs", &resp);

@@ -37,7 +37,9 @@ use serde::de::DeserializeOwned;
 use crate::{AppState, render, skew};
 
 pub(crate) mod assets;
+pub(crate) mod notifications;
 mod transcript;
+pub(crate) use notifications::{notification_page, notifications_page, signal_counts};
 pub(crate) use transcript::{transcript_page, transcript_stream};
 
 /// Epoch-ms clock for age rendering.
@@ -100,7 +102,7 @@ pub(crate) enum CallError {
 /// mode the freeze existed to detect is largely gone with it. Skew is
 /// still worth reporting, so the version is taken from
 /// `control.status` where the health page already asks for it.
-async fn edge_or_unreachable(state: &AppState, title: &str) -> Result<EdgeClient, Page> {
+pub(crate) async fn edge_or_unreachable(state: &AppState, title: &str) -> Result<EdgeClient, Page> {
     EdgeClient::connect(&state.edge_addr, state.edge_fingerprint, &state.edge_token)
         .await
         .map_err(|err| unreachable_page(state, title, &format!("edge: {err}")))
@@ -234,7 +236,15 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
             return unreachable_page(&state, "health", &err);
         }
     };
-    ok_page(&state, "health", &render::health(&status, &doctor))
+    // Third read, and the cheapest of the three: two indexed counts.
+    // It answers zeros against a daemon with no pane rather than
+    // failing the page — see `signal_counts`.
+    let signals = signal_counts(&client).await;
+    ok_page(
+        &state,
+        "health",
+        &render::health(&status, &doctor, &signals),
+    )
 }
 
 /// The invocations page: the "Active now" table above the list.

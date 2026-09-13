@@ -34,6 +34,18 @@ td.n { text-align: right; font-variant-numeric: tabular-nums; }
 .bar { display: inline-block; vertical-align: baseline; width: 72px; height: 7px; background: #21252b; margin-right: 0.5rem; }
 .bar i { display: block; height: 100%; background: #7aa2e8; opacity: 0.55; }
 tr.sub td, tr.sub th { border-top: 2px solid #3a3f47; }
+/* Notifications pane. SEVERITY IS CARRIED IN FORM, NOT ONLY IN COLOUR:
+   an alert row wears a stripe down its left edge and the word `alert`
+   behind a triangle, a notification wears an outlined chip. Hue repeats
+   that reading, it never carries it alone -- three hues on a dark
+   ground is not a distinction to bet an out-of-hours page on, and a row
+   printed, screenshotted in greyscale, or read by someone who does not
+   see red still says which it is. */
+tr.alert td:first-child { border-left: 3px solid #e06c6c; }
+.chip { border: 1px solid #3a3f47; border-radius: 2px; padding: 0 0.35rem; color: #9aa1ab; font-size: 0.85em; }
+/* The badge, the age and the kind are short and fixed-shape; only the
+   summary is unbounded, so it is the one column allowed to wrap. */
+table.signals td:nth-child(-n+4) { white-space: nowrap; }
 /* Spend-over-time bars (costs page). Single series, one hue; the
    value lives in the hover title and on the tallest bar's label —
    quiet buckets render as gaps, not lies. */
@@ -67,9 +79,9 @@ details { margin: 0.3rem 0; } summary { cursor: pointer; color: #9aa1ab; }
   /* The nav becomes a full-width tab bar pinned to the top, so a long
      page (events, a transcript) can change section without scrolling
      back up. The negative margins let its background span the body's
-     side margins while stuck; space-between spreads the five short
-     labels across the width, wrapping only on a screen narrower than
-     they are. It sits outside #main, so live-region morphs never
+     side margins while stuck; space-between spreads the six short
+     labels across the width, wrapping onto a second line on a screen
+     narrower than they are. It sits outside #main, so live-region morphs never
      touch it. */
   nav { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; column-gap: 0.75rem; margin: -0.75rem -0.75rem 0.5rem; padding: 0 0.75rem; background: #14161a; border-bottom: 1px solid #21252b; }
   nav a { margin-right: 0; padding: 0.6rem 0; }

@@ -13,7 +13,7 @@ notices.
 **Over the daemon's authenticated edge, as a second principal.** It is
 the first process other than an operator's own `fq` that needs an
 identity of its own. Every page invokes declared operations with a token
-*attenuated* to six read grants, so a compromised dashboard can read
+*attenuated* to seven read grants, so a compromised dashboard can read
 exactly what it renders and command nothing.
 
 That is also why this crate links no store. It depends on `fq-edge`
@@ -36,11 +36,13 @@ browsers keep a full-page `<meta refresh>` via `<noscript>`.
 
 | Route | Reads | Grant |
 |---|---|---|
-| `/` | `control.status` + `control.doctor` | `read:control` |
+| `/` | `control.status` + `control.doctor` + `operator_signal.counts` | `read:control`, `read:operator_signal` |
 | `/invocations` | `invocation.active` + `invocation.list` | `read:invocation` |
 | `/invocations/{id}` | `invocation.get` | `read:invocation` |
 | `/invocations/{id}/transcript` | `invocation.get` + `turn.list`, tailed live by `turn.stream` | `read:invocation`, `read:turn` |
 | `/events` | `event.list` | `read:event` |
+| `/notifications` | `operator_signal.list` | `read:operator_signal` |
+| `/notifications/{id}` | `operator_signal.get` | `read:operator_signal` |
 | `/costs` | `cost.summary` | `read:cost` |
 | `/costs/{agent}` | `cost.by_agent` | `read:cost` |
 | `/agents` | `agent.list` | `read:agent` |
@@ -122,10 +124,11 @@ admin token itself. Minting is offline — no daemon round-trip:
 ```sh
 fq token attenuate --addr "$FQ_EDGE" \
   --grant read:agent --grant read:control --grant read:cost \
-  --grant read:event --grant read:invocation --grant read:turn
+  --grant read:event --grant read:invocation \
+  --grant read:operator_signal --grant read:turn
 ```
 
-Six grants, one per domain the pages render, all `read`. Deliberately
+Seven grants, one per domain the pages render, all `read`. Deliberately
 not `read:*`, which would additionally grant `worker`, `dead_letter`,
 `trigger` and `operation` — four domains no page here renders.
 Attenuation only ever narrows, so this token can read exactly what the

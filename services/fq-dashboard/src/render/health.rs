@@ -5,7 +5,7 @@
 //! grows is to split it, not to raise its budget.
 
 use fq_ops::health::StreamHealth;
-use fq_ops::surface::{DoctorReport, StatusReport};
+use fq_ops::surface::{DoctorReport, OperatorSignalCounts, StatusReport};
 
 use super::consumers::consumer_row;
 use super::{esc, inv_link};
@@ -25,8 +25,35 @@ fn linked_ids(ids: &[String]) -> String {
     )
 }
 
+/// The home page's one-line count: how many notifications landed in the
+/// last day, and how many alerts stand on the record.
+///
+/// "Open" rather than "unread" is deliberate and the line says so in
+/// its hover: this build has no acknowledgement, so an alert stays
+/// counted once it has happened. A number that claimed to be unread and
+/// never fell would be worse than one that says what it is.
+fn counts_row(counts: &OperatorSignalCounts) -> String {
+    let class = if counts.alerts > 0 { "bad" } else { "ok" };
+    format!(
+        r#"<tr><th>notifications</th><td class="{class}"><a href="/notifications">{} in the last 24h</a> · <a href="/notifications?severity=alert" title="every alert on record — alerts are never swept, and this build has no acknowledgement">{} open alert{}</a></td></tr>"#,
+        counts.notifications,
+        counts.alerts,
+        if counts.alerts == 1 { "" } else { "s" },
+    )
+}
+
 /// The health page body.
-pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
+///
+/// `signals` is the notifications pane's two counts, rendered as one
+/// row in the Runtime block. It is a third read rather than a field on
+/// either report because the counts belong to their own resource — and
+/// it degrades to zeros against a daemon that has no pane, which is
+/// what keeps the whole health view rendering across a build skew.
+pub fn health(
+    status: &StatusReport,
+    doctor: &DoctorReport,
+    signals: &OperatorSignalCounts,
+) -> String {
     let mut b = String::new();
 
     b.push_str(&format!(
@@ -115,6 +142,12 @@ pub fn health(status: &StatusReport, doctor: &DoctorReport) -> String {
             lines.join("<br>")
         ));
     }
+    // What has asked for a person's attention, and the way into the
+    // pane that shows it. Red only when an alert stands: a
+    // notification is normal-hours work, and a home page that shouted
+    // about every one of them would train the operator to ignore the
+    // row that matters.
+    b.push_str(&counts_row(signals));
     b.push_str("</table>");
 
     if !doctor.failures.is_empty() {

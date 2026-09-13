@@ -104,7 +104,7 @@ pub fn page_opts(title: &str, refresh_secs: Option<u64>, extra_head: &str, body:
 <style>
 {style}</style>
 </head><body>
-<nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/costs">costs</a><a href="/agents">agents</a></nav>
+<nav><a href="/">health</a><a href="/invocations">invocations</a><a href="/events">events</a><a href="/notifications">notifications</a><a href="/costs">costs</a><a href="/agents">agents</a></nav>
 <h1>{title}</h1>
 {body}
 </body></html>
