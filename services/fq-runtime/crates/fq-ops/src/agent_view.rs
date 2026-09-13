@@ -78,6 +78,12 @@ pub struct AgentDetailView {
     pub mcp_servers: Vec<String>,
     pub budget: Option<f64>,
     pub max_iterations: Option<u32>,
+    /// How many invocations of this agent the daemon runs at once.
+    /// `None` is the declaration's own absence — unlimited within the
+    /// worker's `max_concurrent_invocations` — and is rendered as that
+    /// rather than omitted, because "what cap did I set on this agent?"
+    /// is a question every other limit on this view answers.
+    pub max_concurrent: Option<u32>,
     pub effort: Option<String>,
     pub trigger: Option<String>,
     /// The definition file the agent was loaded from.

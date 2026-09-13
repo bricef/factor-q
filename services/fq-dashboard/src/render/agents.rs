@@ -80,6 +80,17 @@ pub fn agent_detail(d: &AgentDetailView) -> String {
     if let Some(max) = d.max_iterations {
         b.push_str(&format!("<tr><th>max iterations</th><td>{max}</td></tr>"));
     }
+    // The agent's own concurrency cap (#718), beside the other limits it
+    // declares. Absent means the worker cap is the only bound, which is
+    // said rather than left to be inferred from a missing row — the same
+    // reason `fq agent validate` prints "not set".
+    b.push_str(&format!(
+        "<tr><th>max concurrent</th><td>{}</td></tr>",
+        match d.max_concurrent {
+            Some(max) => max.to_string(),
+            None => r#"<span class="muted">not set (worker cap)</span>"#.to_string(),
+        }
+    ));
     if let Some(trigger) = &d.trigger {
         b.push_str(&format!(
             "<tr><th>trigger</th><td>fq.trigger.{}</td></tr>",

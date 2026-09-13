@@ -76,6 +76,7 @@ impl From<&LoadedAgent> for AgentDetailView {
                 .collect(),
             budget: agent.budget(),
             max_iterations: agent.max_iterations(),
+            max_concurrent: agent.max_concurrent(),
             // The definition frontmatter's own lowercase spelling.
             effort: agent.effort().map(|e| {
                 match e {
@@ -215,5 +216,34 @@ mod tests {
         assert_eq!(detail.tools, vec!["exec".to_string()]);
         assert_eq!(detail.budget, Some(0.10));
         assert!(detail.path.ends_with("probe.md"), "got: {}", detail.path);
+    }
+
+    /// Every limit an agent declares reaches the detail view (#718): the
+    /// cap is projected like `budget` and `max_iterations` beside it,
+    /// and an agent that declares none says so with `None` rather than
+    /// by the field being absent from the projection.
+    #[test]
+    fn the_detail_carries_the_agents_own_concurrency_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("builder.md"),
+            "---\nname: builder\nmodel: claude-haiku-4-5\nmax_concurrent: 2\n---\n\nBuild.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("chatty.md"),
+            "---\nname: chatty\nmodel: claude-haiku-4-5\n---\n\nTalk.\n",
+        )
+        .unwrap();
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
+        let detail = |id: &str| {
+            AgentDetailView::from(
+                registry
+                    .get_loaded(&crate::AgentId::new(id).unwrap())
+                    .expect("loaded"),
+            )
+        };
+        assert_eq!(detail("builder").max_concurrent, Some(2));
+        assert_eq!(detail("chatty").max_concurrent, None);
     }
 }

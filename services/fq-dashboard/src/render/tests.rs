@@ -965,6 +965,7 @@ fn agent_detail_collapses_and_escapes_the_prompt() {
         mcp_servers: vec!["github".to_string()],
         budget: Some(12.0),
         max_iterations: Some(200),
+        max_concurrent: Some(2),
         effort: Some("high".to_string()),
         trigger: Some("m0-issue-fix".to_string()),
         path: "/home/fq/agents/m0-issue-fix.md".to_string(),
