@@ -969,6 +969,131 @@ still exists, so fq-cron's publishes succeed and the commands age out
 after 24 hours. `fq doctor` stops expecting the consumer, rather than
 reporting a permanent `Missing` nobody can clear.
 
+## Pricing: the live table, and what the daemon accepts from it
+
+Prices come from the [LiteLLM
+table](https://github.com/BerriAI/litellm)'s `main` branch, fetched at
+startup. **The live table is the source, and the discipline is on
+acceptance** ([#735](https://github.com/bricef/factor-q/issues/735)).
+
+Pinning a commit would look safer and is not. LiteLLM adds models
+weekly, and under [ADR-0004](../adrs/accepted/0004-cost-controls-from-day-one.md) a
+model with no price is a daemon that refuses to start — so a pinned
+table turns "prices drift" into "the daemon will not run a new model
+until a human bumps a SHA", which is an automated process made manual,
+and manual processes go stale. The threat was never that upstream
+changed; that is what the source is for. The threat is upstream
+changing *badly*: a price zeroed by mistake or by compromise, a nonsense
+multiplier, a malformed file. So the daemon judges every table it is
+offered, model by model, against the last one it accepted.
+
+### The rules
+
+1. **A price that moves by more than 5× in either direction is not
+   accepted for that model.** The prior price stays, every other change
+   in the table lands, and the refusal is recorded. The bound is a
+   nonsense detector, not a change detector: model prices move a lot
+   and quickly, and 5× is the margin that separates a repricing from a
+   mistake.
+2. **A model priced at zero where it was not is refused the same way.**
+   A *new* model priced at zero is refused at admission: it never
+   enters the table, so ADR-0004's at-use backstop refuses the dispatch
+   rather than letting it run and track as $0.
+3. **A new model is admitted only if every token category it reports
+   carries a positive price.**
+4. **A refused model reverts whole.** Half a model's prices from one
+   document and half from another is not a price list, so the refusal
+   names the first field that failed and the model keeps all of its
+   prior figures.
+
+A model the source has stopped listing is not carried over: a startup
+load is a safe boundary.
+
+### Where a refusal shows up
+
+Each refused model raises one `pricing.change_refused` operator signal
+per load — a notification, not an alert, because the daemon carries on
+at the prior price and nothing is broken. Its `detail` names the model,
+the upstream field, the old and new prices (per token, as the upstream
+file states them), the ratio, and which rule refused it:
+
+```sh
+# What has been refused, and why
+fq events query --event-type operator_signal
+```
+
+Models refused **at admission** raise nothing, and deliberately: the
+live table lists several hundred free, local and embedding entries
+priced at zero, so every start refuses every one of them. That is a
+standing property of the source rather than something that happened, it
+is identical on every load, and there is nothing to do about it — so it
+is a count in the daemon's log line (with the names at `debug`) rather
+than three hundred lines in a pane. The moment one of them matters —
+something declares it — ADR-0004's startup guarantee refuses to run and
+names it, which is louder than any notification.
+
+A fetch that does not land raises `pricing.fetch_failed` and the daemon
+serves the last table it accepted. A table that has not refreshed
+within `[pricing] max_age` raises `pricing.stale` — an **alert**, since
+no further attempt recovers a source that has stopped answering, and
+prices silently older than the models they price is the failure
+ADR-0004's guarantee exists to prevent.
+
+### What is on disk, and what is on the record
+
+The cache under `[cache] directory` holds **accepted tables only**:
+`pricing.json` is the table the daemon accepted, models in name order,
+and `pricing.provenance.json` beside it says which document it came
+from — the upstream commit and a SHA256 digest of exactly those bytes.
+That pair is what "the last accepted table" means, and it is what the
+next load's 5× bound is measured against. Editing `pricing.json` by
+hand is not forbidden and is not hidden either: the digest stops
+matching, and the daemon serves the file while claiming nothing about
+where it came from.
+
+The same provenance rides the `system.startup` event, and every cost
+row cites the short version derived from it
+(`litellm-main@3f9a1c0b2d4e`) — on the event and on the projected row,
+which outlives the event under the retention sweep. A spend figure is
+traceable to the prices that produced it for as long as the figure is
+kept:
+
+```sh
+# Which table this daemon is running on
+fq events query --event-type system_startup --limit 1
+```
+
+The version names the accepted LiteLLM table. Prices layered over it —
+OpenRouter's catalogue for models routed there, and
+`[providers.<name>.pricing]` overrides — are configuration, and are
+reported at boot rather than folded into the digest.
+
+### Configuration
+
+```toml
+[pricing]
+# Where the table comes from: "litellm-main" (default, the live
+# document) or "pinned:<sha>", which fetches that commit's copy
+# forever. Pinning is for an air-gapped or regulated deployment that
+# reviews the diff itself; it must not become the default, for the
+# reason above.
+source = "litellm-main"
+
+# How far a price may move, in either direction, and still be accepted.
+# Default 5.0.
+max_drift_ratio = 5.0
+
+# How old the accepted table may be before a load raises the
+# `pricing.stale` alert. Default "7d"; also accepts hours, minutes and
+# seconds ("36h", "90m", "30s").
+max_age = "7d"
+```
+
+A setting that does not parse — a source that is neither spelling, a
+bound of 1 or less, a window that is not a duration — refuses the
+start. An operator who asked for a pin and silently got the live
+document has the opposite of what they configured.
+
 ## Quick reference
 
 | Goal | Command |
@@ -989,6 +1114,8 @@ reporting a permanent `Missing` nobody can clear.
 | Find invocations put down for a rate limit | `fq events query --event-type invocation_deferred` (they resume on their own) |
 | Schedule recurring maintenance | an `fq-cron.toml` job publishing to `fq.maintenance.<task>` (see *Scheduling maintenance with fq-cron*) |
 | See what maintenance has run | `fq events query --event-type maintenance_run` |
+| See which pricing table this daemon accepted | `fq events query --event-type system_startup --limit 1` |
+| See what pricing changes were refused | `fq events query --event-type operator_signal` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |

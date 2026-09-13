@@ -729,7 +729,13 @@ recognises. Examples:
 Cost is calculated from the
 [LiteLLM pricing table](https://github.com/BerriAI/litellm),
 fetched at daemon start and merged with any
-`[providers.<name>.pricing]` overrides. Models declared under a provider
+`[providers.<name>.pricing]` overrides. The live table is the source and
+the discipline is on what the daemon **accepts** from it: a price that
+moves by more than 5x in either direction, or drops to zero, keeps its
+prior figure and raises an operator notification, and a new model priced
+at zero is never admitted — see
+[the operator guide](operating-the-daemon.md#pricing-the-live-table-and-what-the-daemon-accepts-from-it)
+for the rules, the `[pricing]` settings and where a refusal shows up. Models declared under a provider
 whose `base_url` is `openrouter.ai` are priced from
 [OpenRouter's own model catalogue](https://openrouter.ai/api/v1/models)
 instead — fetched and cached the same way, keyed by the ids OpenRouter
@@ -742,6 +748,12 @@ OpenRouter also reports what it billed on every response; the runtime
 records that beside the figure it computed (`reported_cost` on the cost
 record) without charging it to any budget — see the
 [event schema](../design/committed/event-schema.md#cost-metadata).
+
+Every cost record also cites the pricing table that produced its
+figures (`pricing_table`, e.g. `litellm-main@3f9a1c0b2d4e`), and the
+`system.startup` event carries that table's upstream commit and digest
+in full, so a spend figure is traceable to the prices it was computed
+from.
 
 An identifier that resolves to no price is not tolerated at any stage —
 that is the whole of ADR-0004's guarantee, since a model tracking as $0
