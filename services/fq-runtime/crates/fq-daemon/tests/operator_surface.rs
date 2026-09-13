@@ -100,7 +100,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(scratch.path())),
                 drain_deadline_ms: 180_000,
                 stuck_after_ms: 4_210_000,
-                summary_enabled: false,
+                enabled_consumers: fq_runtime::health::EnabledConsumers::default(),
                 mcp_servers: Default::default(),
                 throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
                 agent_caps: fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),

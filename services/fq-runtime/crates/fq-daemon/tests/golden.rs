@@ -1029,16 +1029,47 @@ fn golden_doctor_human() {
     let markers: Vec<&str> = std::iter::once("for ")
         .chain(VOLATILE_CONSUMER_FIGURES.iter().copied())
         .collect();
-    check_golden_edge("doctor_human", &["doctor"], &markers);
+    check_golden_on_settled_consumers("doctor_human", &["doctor"], &markers);
 }
 
 #[test]
 fn golden_doctor_json() {
-    check_golden_edge(
+    check_golden_on_settled_consumers(
         "doctor_json",
         &["doctor", "--json"],
         VOLATILE_CONSUMER_FIGURES,
     );
+}
+
+/// A doctor golden, taken once every durable exists.
+///
+/// The daemon's consumers are created by its hosted tasks *after* the
+/// edge starts serving, so a report taken the instant the fixture is
+/// answerable can legitimately catch one as `missing` — the report is
+/// right and the golden is asserting about a moment
+/// (<https://github.com/bricef/factor-q/issues/670>). Waiting for the
+/// roster to settle keeps the golden pinning the daemon's steady state,
+/// which is what it is for, rather than admitting an absence into the
+/// expectation file.
+fn check_golden_on_settled_consumers(name: &str, args: &[&str], volatile_markers: &[&str]) {
+    let fixture = EdgeFixture::start();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (exit, stdout, stderr) = fixture.run_fq(&["doctor", "--json"]);
+        assert_eq!(exit, Some(0), "fq doctor --json; stderr:\n{stderr}");
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).expect("doctor --json is JSON");
+        let consumers = report["consumers"].as_array().expect("consumers").clone();
+        if !consumers.is_empty() && consumers.iter().all(|c| c.get("active").is_some()) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a durable never appeared: {stdout}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    check_golden_on(fixture, name, args, volatile_markers);
 }
 
 /// What the flip costs, stated: `fq doctor` reports the daemon's

@@ -20,7 +20,7 @@
 //! reachable by piping `--json` through `jq` and no other way.
 
 use fq_edge::wire::WireError;
-use fq_ops::events::{Event, EventPayload, EventState};
+use fq_ops::events::{Event, EventPayload, EventState, MaintenanceOutcome};
 
 use crate::cli::GlobalArgs;
 use crate::edge_call::{edge_client_for, edge_invoke, next_event_batch};
@@ -223,6 +223,17 @@ fn event_summary(event: &Event) -> String {
         EventPayload::McpServerLog(p) => {
             format!("mcp.log server={} level={} {}", p.server, p.level, p.data)
         }
+        EventPayload::MaintenanceRun(p) => format!(
+            "maintenance.run task={} run_id={} {} ({}ms)",
+            p.task,
+            p.run_id,
+            match &p.outcome {
+                MaintenanceOutcome::Succeeded { detail } => format!("succeeded: {detail}"),
+                MaintenanceOutcome::Failed { error } => format!("FAILED: {error}"),
+                MaintenanceOutcome::Refused { reason } => format!("refused: {reason}"),
+            },
+            p.duration_ms
+        ),
         EventPayload::InvocationOperatorRecovered(p) => format!(
             "invocation.operator_recovered action={} phase={}{}",
             p.action,

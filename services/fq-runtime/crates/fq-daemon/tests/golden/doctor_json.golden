@@ -87,6 +87,18 @@
         "stuck": false,
         "malformed_acked": 0
       }
+    },
+    {
+      "active": {
+        "name": "fq-maintenance",
+        "delivered": #,
+        "ack_pending": #,
+        "num_pending": #,
+        "num_redelivered": #,
+        "redeliveries": #,
+        "stuck": false,
+        "malformed_acked": 0
+      }
     }
   ],
   "mcp_servers": [],

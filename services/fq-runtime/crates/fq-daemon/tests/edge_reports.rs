@@ -282,6 +282,34 @@ fn control_status() -> OpId {
     OpId::Report(ReportId::Control(ControlReport::Status))
 }
 
+/// Wait until every durable this daemon expects has been created.
+///
+/// The consumers are made by the hosted tasks *after* the edge starts
+/// serving, so a report taken the instant the daemon is connectable can
+/// legitimately catch one that does not exist yet and report it
+/// `Missing` — which is the probe telling the truth, and the two tests
+/// below asserting about a moment rather than about the daemon
+/// (<https://github.com/bricef/factor-q/issues/670>). Polling until the
+/// roster settles keeps the assertions exact instead of loosening them
+/// to accept an absence.
+async fn wait_for_durables(client: &fq_edge::EdgeClient) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let report = invoke(client, control_doctor(), json!({}))
+            .await
+            .expect("report");
+        let consumers = report["consumers"].as_array().expect("consumers").clone();
+        if !consumers.is_empty() && consumers.iter().all(|c| c.get("active").is_some()) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a durable never appeared: {report}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Close enough for money: the figures cross a JSON wire as f64, so
 /// exact equality would be asserting about IEEE-754 rather than about
 /// the report.
@@ -444,6 +472,7 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
             .await
             .expect("connect edge");
 
+    wait_for_durables(&client).await;
     let report = invoke(&client, control_doctor(), json!({}))
         .await
         .expect("report");
@@ -482,6 +511,7 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
             "fq-heartbeat",
             "fq-dispatcher",
             "fq-advisory-watch",
+            "fq-maintenance",
         ],
         "every durable this daemon runs is reported: {report}"
     );
@@ -507,6 +537,7 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
             .await
             .expect("connect edge");
 
+    wait_for_durables(&client).await;
     let report = invoke(&client, control_status(), json!({}))
         .await
         .expect("report");
@@ -532,8 +563,9 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
     let streams = report["streams"].as_array().expect("streams");
     assert_eq!(
         streams.len(),
-        3,
-        "all three core streams are probed — events, triggers, advisories: {report}"
+        4,
+        "all four core streams are probed — events, triggers, advisories, \
+         maintenance: {report}"
     );
     // Every durable this daemon expects, named, and none of them stuck
     // on a freshly-started fixture (#549). This used to be one
@@ -556,8 +588,10 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
             "fq-heartbeat",
             "fq-dispatcher",
             "fq-advisory-watch",
+            "fq-maintenance",
         ],
-        "this fixture configures no summariser, so it is not expected: {report}"
+        "this fixture configures no summariser, so it is not expected; \
+         maintenance is on by default, so it is: {report}"
     );
     assert!(
         streams

@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000027",
+    "trace_id": "01990000-0000-7000-8000-000000002000",
+    "agent_id": "system",
+    "invocation_id": "01990000-0000-7000-8000-000000002000",
+    "schema_id": "factor-q/maintenance_run@1",
+    "timestamp": "2026-09-07T12:00:27Z"
+  },
+  "payload": {
+    "event_type": "maintenance_run",
+    "payload": {
+      "task": "ping",
+      "run_id": "fq-cron/maintenance-ping@2026-09-13T02:00:00Z",
+      "outcome": {
+        "status": "succeeded",
+        "detail": "pong"
+      },
+      "duration_ms": 1
+    }
+  }
+}

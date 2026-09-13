@@ -444,6 +444,7 @@ impl EventPayload {
             Self::SystemTaskFailed(_) => subjects::SYSTEM_TASK_FAILED.to_string(),
             Self::SystemRecovery(_) => subjects::SYSTEM_RECOVERY.to_string(),
             Self::McpServerLog(_) => subjects::SYSTEM_MCP_LOG.to_string(),
+            Self::MaintenanceRun(_) => subjects::SYSTEM_MAINTENANCE.to_string(),
             Self::WorkerHeartbeat(p) => subjects::worker_heartbeat(p.worker_id.as_str()),
             Self::WorkerOrphaned(p) => subjects::worker_orphaned(p.worker_id.as_str()),
             Self::InvocationArchiveAcked(p) => {
@@ -481,6 +482,7 @@ impl EventPayload {
             Self::WorkerHeartbeat(_) => "factor-q/worker_heartbeat@1",
             Self::WorkerOrphaned(_) => "factor-q/worker_orphaned@1",
             Self::McpServerLog(_) => "factor-q/mcp_server_log@1",
+            Self::MaintenanceRun(_) => "factor-q/maintenance_run@1",
             Self::Unknown => "factor-q/unknown@1",
         }
     }
@@ -685,6 +687,13 @@ pub enum EventPayload {
     /// notification drain (ADR-0020). Daemon-scoped — no agent or
     /// invocation.
     McpServerLog(McpServerLogPayload),
+
+    /// One maintenance task run, as it ended (#257) — emitted by the
+    /// daemon's maintenance consumer for every message it resolves off
+    /// `fq.maintenance.>`, refusals included. Daemon-scoped: a
+    /// maintenance task is the runtime's own housekeeping, tied to no
+    /// agent and no invocation.
+    MaintenanceRun(MaintenanceRunPayload),
 
     /// An `event_type` this binary has never heard of — a payload
     /// minted by a newer daemon and read by an older one.

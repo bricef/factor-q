@@ -563,6 +563,51 @@ pub struct InvocationDeferredPayload {
     pub retry_after_ms: u64,
 }
 
+/// One maintenance task run, as it ended (#257).
+///
+/// Emitted by the daemon's maintenance consumer for every message it
+/// resolves off `fq.maintenance.>` — including the ones it refuses, so
+/// a task name this build does not know is a record rather than a
+/// dropped message. A *suppressed redelivery* emits nothing: one run
+/// id produces exactly one of these, which is what makes "the task did
+/// not run twice" observable from the event log alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceRunPayload {
+    /// The task token exactly as it appeared on the subject. A
+    /// `String` rather than the runtime's closed task enum because a
+    /// refusal has, by definition, no enum value to name — and the
+    /// operator looking at the refusal needs to see what was actually
+    /// published.
+    pub task: String,
+    /// What made this run distinct from a redelivery of itself: the
+    /// publisher's `Nats-Msg-Id` (fq-cron sets
+    /// `fq-cron/<job>@<slot>`), or `seq:<stream sequence>` when the
+    /// message carried no id.
+    pub run_id: String,
+    /// How it ended.
+    pub outcome: MaintenanceOutcome,
+    /// Wall time the task itself took. Zero on a refusal — nothing ran.
+    pub duration_ms: u64,
+}
+
+/// The three ways a maintenance message resolves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MaintenanceOutcome {
+    /// The task ran and reported success. `detail` is the task's own
+    /// one-line account of what it did, for the operator surface.
+    Succeeded { detail: String },
+    /// The task ran and failed. The run is over — the message is
+    /// acked, not retried, because the schedule is the retry: a
+    /// maintenance task redelivered inside its own cadence would stack
+    /// up behind the next fire (fq-cron D5's "fires never queue").
+    Failed { error: String },
+    /// Nothing ran: the subject named a task this build has no
+    /// registry entry for, or was not a maintenance subject at all.
+    /// A typed refusal, never a silent drop.
+    Refused { reason: String },
+}
+
 /// A log record a connected MCP server emitted (`notifications/message`),
 /// forwarded to the event bus by the daemon's notification drain
 /// (ADR-0020). Daemon-scoped: shared MCP servers are not tied to a

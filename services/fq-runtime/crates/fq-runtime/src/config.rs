@@ -21,6 +21,7 @@ use serde::Deserialize;
 mod bus;
 mod edge;
 mod error;
+mod maintenance;
 mod mcp;
 mod nats;
 mod stuck;
@@ -28,6 +29,7 @@ mod tools;
 pub use bus::BusConfig;
 pub use edge::EdgeConfig;
 pub use error::ConfigError;
+pub use maintenance::MaintenanceConfig;
 pub use mcp::McpConfig;
 pub use nats::NatsConfig;
 pub use tools::{ExecToolConfig, ToolsConfig};
@@ -74,6 +76,11 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
+    /// Whether this daemon runs the maintenance tasks a scheduler
+    /// publishes to `fq.maintenance.<task>`, and the ack window one
+    /// gets (#257).
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
     /// How every durable consumer on the event bus paces redelivery of
     /// a message its handler keeps failing on, and when a consumer that
     /// is still retrying counts as stuck.
@@ -648,6 +655,7 @@ impl Default for Config {
             worker: WorkerConfig::default(),
             state: StateConfig::default(),
             summary: SummaryConfig::default(),
+            maintenance: MaintenanceConfig::default(),
             max_iterations: default_max_iterations(),
             drain_deadline_ms: default_drain_deadline_ms(),
             edge: EdgeConfig::default(),

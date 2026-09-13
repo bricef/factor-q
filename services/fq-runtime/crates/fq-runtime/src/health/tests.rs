@@ -17,12 +17,15 @@ use crate::events::{Event, EventPayload, WorkerHeartbeatPayload};
 use crate::worker::WorkerId;
 
 /// The roster is what "every consumer" means, so it is asserted rather
-/// than left to the call sites: three streams, and the summariser only
-/// where one is configured.
+/// than left to the call sites: the always-on streams, plus the two
+/// durables a daemon only expects when its config asks for them.
 #[test]
-fn the_expected_roster_covers_every_durable_and_only_expects_a_configured_summariser() {
-    let without = core_streams(false);
-    let names: Vec<&str> = without
+fn the_expected_roster_covers_every_durable_and_only_expects_configured_ones() {
+    let neither = core_streams(EnabledConsumers {
+        summary: false,
+        maintenance: false,
+    });
+    let names: Vec<&str> = neither
         .iter()
         .flat_map(|(_, c)| c.iter().copied())
         .collect();
@@ -35,19 +38,38 @@ fn the_expected_roster_covers_every_durable_and_only_expects_a_configured_summar
             "fq-dispatcher",
             "fq-advisory-watch",
         ],
-        "every durable the daemon creates, and no summariser without one configured"
+        "every unconditional durable, and neither optional one"
     );
     assert_eq!(
-        without.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        neither.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
         vec!["fq-events", "fq-triggers", "fq-advisories"]
     );
 
-    let with = core_streams(true);
-    let names: Vec<&str> = with.iter().flat_map(|(_, c)| c.iter().copied()).collect();
+    let both = core_streams(EnabledConsumers {
+        summary: true,
+        maintenance: true,
+    });
+    let names: Vec<&str> = both.iter().flat_map(|(_, c)| c.iter().copied()).collect();
     assert!(
         names.contains(&"fq-summary"),
         "a configured summariser is a required consumer: {names:?}"
     );
+    assert!(
+        names.contains(&"fq-maintenance"),
+        "an enabled maintenance consumer is a required consumer: {names:?}"
+    );
+    assert!(
+        both.iter().any(|(s, _)| *s == "fq-maintenance"),
+        "and its stream is probed: {both:?}"
+    );
+
+    // The default: maintenance on, no summariser (#257).
+    let names: Vec<&str> = core_streams(EnabledConsumers::default())
+        .iter()
+        .flat_map(|(_, c)| c.iter().copied())
+        .collect();
+    assert!(names.contains(&"fq-maintenance"));
+    assert!(!names.contains(&"fq-summary"));
 }
 
 #[test]
@@ -508,7 +530,10 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
 
     let consumers = probe_core_consumers(
         &bus.jetstream(),
-        true,
+        EnabledConsumers {
+            summary: true,
+            maintenance: true,
+        },
         ConsumerRedeliveryPolicy::default(),
         bus.consumer_ledger(),
     )
@@ -523,6 +548,7 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
             "fq-summary",
             "fq-dispatcher",
             "fq-advisory-watch",
+            "fq-maintenance",
         ],
         "every expected durable is reported, existing or not"
     );
@@ -530,6 +556,6 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
         consumers
             .iter()
             .all(|c| matches!(c, ConsumerHealth::Missing { .. })),
-        "no daemon has run against this broker, so all six are missing: {consumers:?}"
+        "no daemon has run against this broker, so all seven are missing: {consumers:?}"
     );
 }

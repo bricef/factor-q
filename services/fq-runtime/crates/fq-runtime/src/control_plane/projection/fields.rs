@@ -149,6 +149,7 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
         | EventPayload::WorkerHeartbeat(_)
         | EventPayload::WorkerOrphaned(_)
         | EventPayload::McpServerLog(_)
+        | EventPayload::MaintenanceRun(_)
         | EventPayload::InvocationOperatorRecovered(_)
         | EventPayload::InvocationOperatorResumed(_)
         // A type this binary cannot read: the envelope columns still
