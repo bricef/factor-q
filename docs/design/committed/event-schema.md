@@ -233,6 +233,7 @@ Concrete subjects:
 | `fq.system.recovery` | Daemon-startup snapshot of in-flight invocation categorisation |
 | `fq.system.mcp.log` | A log record forwarded from a connected MCP server (ADR-0020); daemon-scoped, so no agent or invocation |
 | `fq.system.maintenance` | One maintenance task run, as it ended (#257) — success, failure, or the refusal of a task name this build does not know; daemon-scoped |
+| `fq.system.operator_signal` | A component of the daemon says an operator should look at something ([#736](https://github.com/bricef/factor-q/issues/736)) — one subject for every source, because the pane selects on severity and source together and both live in the payload |
 
 ### Rationale
 
@@ -801,6 +802,60 @@ One maintenance task run, as it ended (<https://github.com/bricef/factor-q/issue
 - **`task` is a string, not the daemon's task enum.** A refusal has no enum value to name, and the operator reading it needs to see what was actually published.
 - **`run_id` is what makes a redelivery distinguishable from a second run**: the publisher's `Nats-Msg-Id` (fq-cron sets `fq-cron/<job>@<slot>`), or `seq:<stream sequence>` when the message carried none. One run id produces exactly one of these events — a suppressed redelivery emits nothing — which is what makes "the task did not run twice" answerable from the log alone.
 - **`duration_ms` is zero on a refusal**, because nothing ran.
+
+### `operator_signal`
+
+A component of the daemon saying an operator should look at something ([#736](https://github.com/bricef/factor-q/issues/736)). Subject: `fq.system.operator_signal`.
+
+```json
+{
+  "severity": "notification",
+  "kind": "pricing.change_refused",
+  "summary": "moonshotai/kimi-k3 input price moved 6.2x; kept the prior price",
+  "detail": {
+    "model": "moonshotai/kimi-k3",
+    "field": "input_cost_per_token",
+    "old": 6e-7,
+    "new": 3.7e-6,
+    "ratio": 6.17,
+    "rule": "drift_bound"
+  },
+  "references": {
+    "agent": "corpus-agent",
+    "invocation": "01990000-0000-7000-8000-000000001000",
+    "url": "https://github.com/BerriAI/litellm/commits/main"
+  }
+}
+```
+
+`detail` and `references` are omitted entirely when empty. Only `severity`, `kind` and `summary` are always present.
+
+**The two severities**, which are the contract the dashboard's pane implements and the operator guide records:
+
+| Severity | What it means |
+|---|---|
+| `notification` | Handled during normal hours and looked at by the operator; it may also travel to a Slack channel or similar. A deploy that succeeded is a notification, and so is a refused pricing change — the daemon carries on at the prior price. |
+| `alert` | Reaches the operator out of hours, escalates, and requires human intervention: the system cannot recover from it on its own. A service that has stopped accepting requests with no graceful recovery path is an alert. |
+
+**The kind registry.** A kind is `<source>.<name>` — lowercase `[a-z0-9_]` segments, at least two — and the first segment is the component that owns it. Every kind is spelled once, in `fq_ops::events::operator_signal::kinds`, and documented here; a producer mints one through `SignalKind::registered`, which takes registry entries and nothing else.
+
+| Kind | Severity | Producer | `detail` |
+|---|---|---|---|
+| `pricing.change_refused` | `notification` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `model`, `field`, `old`, `new`, `ratio`, `rule` (`drift_bound` or `zero_price`) |
+| `pricing.stale` | `alert` | Pricing refresh ([#735](https://github.com/bricef/factor-q/issues/735)) | `last_refresh_ms`, `window_hours` |
+| `deploy.succeeded` | `notification` | Reserved — the deploy message ([PR #707](https://github.com/bricef/factor-q/pull/707)) reaches Pushover today and becomes this event's second producer | `build`, `compare_url`, the commit list the message names |
+
+Adding a kind is three steps and no schema change: a `pub const` in `kinds` listed in `kinds::REGISTERED`, a row in this table naming its severity and its `detail` fields, and the producer.
+
+**Design notes:**
+
+- **One event type, a registry of kinds.** The producers are unrelated components; the readers — the pane, the detail page — do the same thing with all of them, which is show a person a line, a severity and some particulars. A variant per producer would make every new signal a schema change and an arm in every exhaustive match in the tree, to say something the vocabulary already says.
+- **The source is the kind's first segment, not a second field.** A payload carrying both `source: "pricing"` and `kind: "pricing.change_refused"` spells one fact twice, and two spellings of one fact drift — the failure the subject vocabulary was consolidated to stop, one layer up. The pane's source filter reads the prefix.
+- **Daemon-scoped, so the envelope names the runtime.** The component that raised the signal is a part of the daemon rather than a step of somebody's invocation, so putting a concerned agent in `envelope.agent_id` would attribute a daemon's observation to whichever agent happened to be running — the fiction `mcp_server_log` refuses for the same reason. What the signal concerns rides `references`: present when there is an invocation or a page to open, absent otherwise, and never a claim about where the event came from.
+- **One subject, not one per source.** The variable token in every other namespace is a scope identity — an agent, a worker — and the trailing tokens are the closed type vocabulary. `fq.system.operator_signal.<source>` would put an open-ended producer name in that position, so every new producer would mint a subject nothing had written down, and it would buy a wildcard that selects on source alone while the pane selects on severity and source together. Kind segments are nonetheless validated tightly enough to be legal subject tokens, so a later per-source subject needs no re-validation of the log.
+- **`detail` is producer-defined and never parsed by the runtime.** The pane renders it and a person reads it; what each kind puts there is documented in the registry above, which is the contract a reader relies on rather than a schema the daemon enforces.
+- **Rides the event log, with the log's retention.** ADR-0026 makes the log the system of record, and 30 days is enough for notifications. Alerts are rarer and worth keeping longer than the log does; the projection that outlives the log for them is part of the pane's work ([#736](https://github.com/bricef/factor-q/issues/736)), not of this vocabulary.
+- **Not the fan-out.** `ops/dogfood/notify.sh` still sends what it sends to Pushover. Nothing here delivers a signal anywhere; it records that one was raised, so the pane can show it and a future fan-out consumer can read it.
 
 ## Invariants
 
