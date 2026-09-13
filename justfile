@@ -304,6 +304,7 @@ go-ci: gate-adapters
 # Run the ops script tests.
 ops-ci:
     bash ops/dogfood/tests/render-changes.sh
+    bash ops/dogfood/tests/deploy-log.sh
     bash ops/dogfood/tests/fq-ops.sh
     bash ops/dogfood/tests/idle-check.sh
     bash ops/dogfood/tests/ops-crontab.sh

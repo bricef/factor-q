@@ -170,6 +170,12 @@ there is a root shell on the host. The reason is about *which* container.
    other service's does — the container log, rotated by the driver, read
    with `docker compose logs ops` — and `notify.log` stays the durable
    record of every message sent, because it is written on the bind mount.
+   *Amended 2026-09-13, from the guest's first scheduled deploy:* the
+   deploy's own output is the one exception. Its `up` recreates the
+   scheduler that captured it and `--rm` removes the sibling it ran in,
+   so a deploy that succeeded left no line anywhere but its notification;
+   `deploy --auto` therefore appends to `logs/deploy.log` on the bind
+   mount, and the scheduler's log keeps supercronic's one line per run.
 
 ## Rationale
 

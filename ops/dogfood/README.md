@@ -47,7 +47,7 @@ fq-dogfood/
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE / DASH_INTERNAL_ADDR on an internal host
-├── logs/                    # notify.log — every message sent; the scheduled jobs (deploy, hygiene, backup) log to the ops service (`docker compose logs ops`)
+├── logs/                    # notify.log — every message sent; deploy.log — the unattended deploy's runs (the one job whose scheduler log cannot outlive it); hygiene and backup log to the ops service (`docker compose logs ops`)
 ├── backups/                 # backup's sets, FQ_BACKUP_KEEP of them
 ├── .deploy.lock             # the flock deploy, backup and restore share
 └── .deploy.deferred         # since when deploy --auto has been deferring the same build
@@ -234,7 +234,8 @@ cd ~/fq-dogfood
 docker compose run --rm ops deploy               # upgrade to the newest main build (the images' main-latest)
 docker compose run --rm ops deploy --force       # redeploy/restart the same build (a .env, fqd.toml or secrets change)
 docker compose run --rm ops deploy 1a2b3c4d5e6f  # roll back / pin (a unique prefix is fine for images already on the host)
-docker compose logs -f ops                       # what the hourly deploy --auto, hygiene and the nightly backup did
+docker compose logs -f ops                       # hygiene, the nightly backup, and one "job succeeded/failed" line per deploy run
+tail -f logs/deploy.log                          # what the hourly deploy --auto did: deferrals, deploys, rollbacks
 cd ~/fq-dogfood && docker compose ps            # every service, its state and health (each image probes itself)
 docker compose logs -f fqd                      # the daemon's log (rotated by the driver: 5 × 50 MB)
 docker compose exec fqd fq status               # ask the daemon; fq doctor, fq workers list likewise
@@ -443,8 +444,13 @@ reports it, drain, up, verify — with three differences for running
 unattended:
 
 - **Quiet when there is nothing to do.** One timestamped line in
-  `docker compose logs ops` per run; the narration starts only when a
-  deploy is actually going to happen.
+  `logs/deploy.log` per run; the narration starts only when a deploy
+  is actually going to happen. The file, not the scheduler's log, is
+  the deploy's record: its own `up` recreates the scheduler container
+  that captured its output, and a one-off is removed when it exits, so
+  a deploy that succeeded would otherwise leave nothing behind but its
+  notification. `docker compose logs ops` keeps supercronic's one
+  "job succeeded/failed" line per run.
 - **It waits its turn.** Before draining it asks the daemon, through
   the container's `fq doctor`, how many invocations are in flight —
   the live execution count, which sees a trigger-dispatched run from
@@ -508,9 +514,10 @@ Any verb runs the same way by hand, from any host with docker and this
 directory — `docker compose run --rm ops deploy [sha]`,
 `… ops hygiene --report`, `… ops backup`, `… ops restore <set> --yes`,
 `… ops notify --test` — and there are no copies of the scripts on the
-host. `docker compose logs -f ops` is where the scheduled jobs' output
-goes; a deploy, a rollback, `hygiene`'s warnings and a failed `backup`
-still reach you through `notify.sh` as before.
+host. `docker compose logs -f ops` is where hygiene's and the backup's
+output goes, and `logs/deploy.log` the unattended deploy's (above); a
+deploy, a rollback, `hygiene`'s warnings and a failed `backup` still
+reach you through `notify.sh` as before.
 
 Four host facts in `.env` describe the service — `FQ_DOGFOOD` (this
 directory's absolute path), `FQ_UID` and `FQ_DOCKER_GID` (the deploy
@@ -524,8 +531,8 @@ the stack can run from then on is the first with an `fq-ops` image;
 
 ## Notifications: `notify.sh`
 
-The ops service's jobs log to its container (`docker compose logs ops`)
-and nothing mails; without a channel of its own, a rollback or a full disk would sit in a log until
+The ops service's jobs log to its container (`docker compose logs ops`;
+the deploy to `logs/deploy.log`) and nothing mails; without a channel of its own, a rollback or a full disk would sit in a log until
 someone looked. `notify.sh <subject>`
 (body on stdin) is that channel: it runs `FQ_NOTIFY_HOOK` from `.env` —
 a shell command given the subject as `$1` and the body on stdin — and
