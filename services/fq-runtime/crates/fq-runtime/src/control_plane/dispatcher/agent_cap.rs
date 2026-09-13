@@ -4,20 +4,24 @@
 //! acks — until one of that agent's invocations ends, then started as
 //! the first attempt it still is.
 //!
-//! The mechanism is deliberately the one [`super::admission`] already
-//! uses for a paused model, and for the same reasons: a NAK per refusal
-//! would burn the trigger durable's bounded redeliveries, dead-letter a
-//! trigger after four refusals, and stamp `attempt: N` into the
-//! transcript preamble. An in-progress ack resets the ack window without
-//! counting as a delivery, so a held trigger consumes nothing and starts
-//! as `attempt: 1`. That module's doc is the reference for the trade;
-//! this one says what is different.
+//! The waiting itself is not this module's: each pass is
+//! [`TriggerDispatcher::hold_tick`](super::admission), the one hold both
+//! admission rules run on — one cadence, one keepalive, one
+//! "still your first delivery" guarantee. A NAK per refusal would burn
+//! the trigger durable's bounded redeliveries, dead-letter a trigger
+//! after four refusals, and stamp `attempt: N` into the transcript
+//! preamble; an in-progress ack resets the ack window without counting
+//! as a delivery. `admission`'s doc is the reference for that trade.
+//! What this module owns is the *cap*: what the hold waits on, what it
+//! does with the worker permit, and what an interrupted delivery gets.
 //!
 //! # A hold occupies no worker permit
 //!
-//! This is the one place the two holds must *not* behave alike, and it
+//! This is the one place the two holds do *not* behave alike, and it
 //! decides whether the feature does what the issue asks or the exact
-//! inverse of it.
+//! inverse of it. (The pause hold keeps its permit and has the same
+//! problem for the same reason —
+//! <https://github.com/bricef/factor-q/issues/733>.)
 //!
 //! The consume loop takes a `[worker] max_concurrent_invocations` permit
 //! *before* pulling a trigger, and the permit rides into the spawned
@@ -50,11 +54,11 @@
 //!
 //! # What else is different
 //!
-//! **The cap is re-read every tick, not once.** The wait loop asks the
-//! *current* registry for `max_concurrent` on each pass, so `fq reload`
-//! reaches a trigger that is already waiting — an operator who raises a
-//! cap to unstick a queue does not also have to restart the daemon. The
-//! model-pause hold has no equivalent because a pause is not
+//! **The cap is re-read every tick, not once.** This module's poll asks
+//! the *current* registry for `max_concurrent` on each pass, so `fq
+//! reload` reaches a trigger that is already waiting — an operator who
+//! raises a cap to unstick a queue does not also have to restart the
+//! daemon. The model-pause hold has no equivalent because a pause is not
 //! configuration.
 //!
 //! **Admission is an acquisition, not a question.** The slot is taken
@@ -76,40 +80,13 @@
 //! tens of seconds, so it does not reach the same arithmetic.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use async_nats::jetstream::AckKind;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
-
-/// How often a cap hold re-checks — and, because the check follows an
-/// in-progress ack, how often the delivery is kept alive.
-///
-/// **Its own constant, not `admission::HOLD_KEEPALIVE`, because
-/// the margin has to hold for a different length of time.** The trigger
-/// durable's real first-delivery deadline is one second
-/// (`TRIGGER_RETRY_BACKOFF[0]`; JetStream replaces `ack_wait` with
-/// `backoff[0]` wherever a schedule is set), and one slipped tick means
-/// a redelivery, a second `handle` for the same trigger, `attempt: 2`
-/// and a duplicate invocation.
-///
-/// A pause hold is bounded by the pause — tens of ticks. A cap hold is
-/// bounded by the *invocation ahead of it*, which for a build-bound
-/// agent is a `just ci` pass of ~17 minutes on the same box: thousands
-/// of ticks, every one of which has to land, on a machine that is busy
-/// compiling. 250 ms leaves 750 ms of slack per tick rather than 600 ms,
-/// which is the margin that number buys.
-///
-/// It is slack against a one-second window and not a fix for it. The
-/// window itself belongs to
-/// <https://github.com/bricef/factor-q/issues/327>, which owns the
-/// duplicate-invocation class this guards against; widening it is that
-/// issue's to do, not this module's.
-pub(super) const CAP_POLL: Duration = Duration::from_millis(250);
 
 impl TriggerDispatcher {
     /// Hold `msg` while `agent` is at its cap. Returns at once for an
@@ -152,23 +129,21 @@ impl TriggerDispatcher {
         // the loop can go on pulling and other agents go on running.
         drop(permit);
         loop {
-            if self.stopping() {
+            if !self.hold_tick(msg, trigger_id).await {
                 self.requeue_held(msg, agent, trigger_id, payload).await;
                 return None;
             }
-            self.keep_alive(msg, trigger_id).await;
-            tokio::time::sleep(CAP_POLL).await;
-            // Re-read: a slot may have freed, and `fq reload` may have
-            // changed the cap itself.
+            // Re-read every tick: a slot may have freed, and `fq reload`
+            // may have changed the cap itself.
             let cap = self.declared_cap(agent).await;
             let Some(slot) = self.agent_caps.try_enter(agent.as_str(), cap) else {
                 continue;
             };
             // Slot first, permit second. A permit is almost always free
             // the instant a slot is — the invocation that just ended
-            // released both — but if the loop pulled with it first,
-            // give the slot back rather than block a runnable agent
-            // behind a waiter, and ask again next tick.
+            // released both — but if the loop pulled with it first, give
+            // the slot back rather than block a runnable agent behind a
+            // waiter, and ask again next tick.
             match Arc::clone(&self.permits).try_acquire_owned() {
                 Ok(permit) => {
                     debug!(
@@ -248,24 +223,6 @@ impl TriggerDispatcher {
                 "failed to requeue a held trigger; leaving the delivery un-acked, \
                  which redelivers it to the next binary at the cost of one attempt"
             ),
-        }
-    }
-
-    /// Reset the delivery's ack window without counting as a delivery.
-    /// A failure keeps the hold going: the worst case is the window
-    /// expiring and JetStream redelivering, which is where we would be
-    /// without the hold at all.
-    async fn keep_alive(
-        &self,
-        msg: &async_nats::jetstream::Message,
-        trigger_id: Option<uuid::Uuid>,
-    ) {
-        if let Err(err) = msg.ack_with(AckKind::Progress).await {
-            warn!(
-                error = %err,
-                trigger_id = %trigger_name(trigger_id),
-                "failed to keep a cap-held trigger alive"
-            );
         }
     }
 
