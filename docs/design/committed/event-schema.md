@@ -232,12 +232,14 @@ Concrete subjects:
 | `fq.system.task_failed` | A hosted task inside `fqd` exited with an error |
 | `fq.system.recovery` | Daemon-startup snapshot of in-flight invocation categorisation |
 | `fq.system.mcp.log` | A log record forwarded from a connected MCP server (ADR-0020); daemon-scoped, so no agent or invocation |
+| `fq.system.maintenance` | One maintenance task run, as it ended (#257) — success, failure, or the refusal of a task name this build does not know; daemon-scoped |
 
 ### Rationale
 
 - **Agent ID in the subject, not just the payload.** A consumer can subscribe to `fq.agent.researcher.>` to only see events from the researcher agent without filtering in application code.
 - **Hierarchical types** (`llm.request` vs `llm.response`). Allows wildcards: `fq.agent.*.llm.>` matches all LLM events across all agents.
 - **System events are a separate namespace.** Runtime lifecycle is not tied to any agent.
+- **`fq.maintenance.>` is not in this table, and that is the point.** It is the *inbound* half of maintenance — commands an external scheduler (fq-cron) publishes to ask the daemon to run a named housekeeping task — and commands are not facts, so they do not belong in the event log (ADR-0026). They ride their own JetStream stream (`fq-maintenance`, 24h, uncompressed), disjoint from both the event stream's subject set and `fq.trigger.>`; the daemon's maintenance consumer answers each one with a `maintenance_run` event on `fq.system.maintenance`, which *is* a fact and is in the table above.
 - **Worker-scoped subjects (`fq.worker.>`)** for events whose audience is one specific worker rather than every consumer of the agent's lifecycle: heartbeats, and the control-plane → worker `invocation.archive_acked` reply. Worker-scoped subscriptions stay narrow with a single filter (`fq.worker.{worker_id}.>`) and avoid cross-worker delivery noise. The fan-out subjects (`fq.agent.>`) remain the canonical place for invocation lifecycle events the rest of the system should see. `worker.orphaned` also rides this namespace — not because its audience is the (dead) worker, but because it is worker- not agent-scoped; system-wide reactors subscribe with the `fq.worker.*.orphaned` wildcard.
 - **WAL middle-state events** (`llm.dispatched`, `tool.dispatched`) sit between the request and result. They're an operational signal — recovery uses the SQLite WAL rows, not these events, but they let observers see "the call has returned, we're about to write the result."
 
@@ -771,6 +773,34 @@ A log record a connected MCP server emitted (`notifications/message`), bridged o
 - **Daemon-scoped, so it carries no agent or invocation.** Shared MCP servers outlive any one invocation and serve several agents; attributing their logs to whichever agent happened to be running when they spoke would be a fiction. This is why the event sits in the `fq.system.*` namespace rather than under `fq.agent.*`.
 - **`data` is passed through as the server sent it.** The daemon does not reshape or validate the body — it is another process's log line, and the value of forwarding it is that it arrives unedited.
 - **`level` is the MCP level name** (`"debug"` through `"emergency"`), not the runtime's own `tracing` vocabulary.
+
+### `maintenance_run`
+
+One maintenance task run, as it ended (<https://github.com/bricef/factor-q/issues/257>). Emitted by the daemon's maintenance consumer for every message it resolves off `fq.maintenance.>`, refusals included. Subject: `fq.system.maintenance`.
+
+```json
+{
+  "task": "ping",
+  "run_id": "fq-cron/maintenance-ping@2026-09-13T02:00:00Z",
+  "outcome": { "status": "succeeded", "detail": "pong" },
+  "duration_ms": 1
+}
+```
+
+`outcome` is one of three, tagged by `status`:
+
+| `status` | Fields | Meaning |
+|---|---|---|
+| `succeeded` | `detail` | The task ran and reported success; `detail` is its own one-line account. |
+| `failed` | `error` | The task ran and failed. The run is over — the message is acked, and the next scheduled fire is the retry. |
+| `refused` | `reason` | Nothing ran: the subject named a task this build has no registry entry for, or was not a `fq.maintenance.<task>` subject at all. |
+
+**Design notes:**
+
+- **Daemon-scoped**, like `system.startup` and `mcp_server_log`: maintenance is the runtime's own housekeeping, tied to no agent and no invocation.
+- **`task` is a string, not the daemon's task enum.** A refusal has no enum value to name, and the operator reading it needs to see what was actually published.
+- **`run_id` is what makes a redelivery distinguishable from a second run**: the publisher's `Nats-Msg-Id` (fq-cron sets `fq-cron/<job>@<slot>`), or `seq:<stream sequence>` when the message carried none. One run id produces exactly one of these events — a suppressed redelivery emits nothing — which is what makes "the task did not run twice" answerable from the log alone.
+- **`duration_ms` is zero on a refusal**, because nothing ran.
 
 ## Invariants
 

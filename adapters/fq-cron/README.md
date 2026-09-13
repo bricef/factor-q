@@ -10,7 +10,11 @@ NATS.
 
 - A NATS server with JetStream enabled.
 - For durable trigger subjects, a stream that captures the subject (normally
-  the stream owned by `fqd`).
+  the stream owned by `fqd`). The daemon owns three: `fq.trigger.<agent>`
+  starts an agent invocation, and `fq.maintenance.<task>` asks the daemon to
+  run one of its own housekeeping tasks — see
+  [operating the daemon](../../docs/guide/operating-the-daemon.md#scheduling-maintenance-with-fq-cron)
+  for the task list and a worked job.
 
 ## Configuration
 
