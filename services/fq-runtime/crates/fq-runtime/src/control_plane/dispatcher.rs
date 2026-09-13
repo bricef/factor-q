@@ -437,6 +437,49 @@ impl TriggerDispatcher {
         }
     }
 
+    /// Who the trigger is for, or `None` once it has been acked and
+    /// dropped: a subject that is not `fq.trigger.<agent>`, or an agent
+    /// id that is not a legal subject token. Both are permanent — a
+    /// redelivery would fail identically — so both consume the message
+    /// rather than NAK it, and neither has a name to report yet beyond
+    /// whatever the publisher stamped.
+    ///
+    /// Its own function because `handle` is at the 250-line cap and this
+    /// is the part of it with no bearing on anything after: two
+    /// validations that either yield an `AgentId` or end the delivery.
+    async fn addressee(&self, msg: &async_nats::jetstream::Message) -> Option<AgentId> {
+        let Some(agent_id_str) = agent_id_from_subject(&msg.subject) else {
+            warn!(
+                subject = %msg.subject,
+                "trigger with unexpected subject format, dropping"
+            );
+            self.ack(
+                msg,
+                crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                "bad subject",
+            )
+            .await;
+            return None;
+        };
+        match AgentId::new(agent_id_str) {
+            Ok(id) => Some(id),
+            Err(err) => {
+                warn!(
+                    agent_id = %agent_id_str,
+                    error = %err,
+                    "trigger for invalid agent id, dropping"
+                );
+                self.ack(
+                    msg,
+                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    "invalid agent id",
+                )
+                .await;
+                None
+            }
+        }
+    }
+
     /// Dispatch one trigger. `permit` is the worker-cap permit it was
     /// pulled under; it is given back for the length of any hold at the
     /// agent's cap and re-taken before the invocation runs, so it is
@@ -456,42 +499,8 @@ impl TriggerDispatcher {
             return;
         }
 
-        // Parse the agent id out of the subject. Invalid format →
-        // ack and drop (redelivery won't help).
-        let agent_id_str = match agent_id_from_subject(&msg.subject) {
-            Some(id) => id.to_string(),
-            None => {
-                warn!(
-                    subject = %msg.subject,
-                    "trigger with unexpected subject format, dropping"
-                );
-                self.ack(
-                    msg,
-                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
-                    "bad subject",
-                )
-                .await;
-                return;
-            }
-        };
-
-        // Validate and look up the agent.
-        let agent_id = match AgentId::new(&agent_id_str) {
-            Ok(id) => id,
-            Err(err) => {
-                warn!(
-                    agent_id = %agent_id_str,
-                    error = %err,
-                    "trigger for invalid agent id, dropping"
-                );
-                self.ack(
-                    msg,
-                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
-                    "invalid agent id",
-                )
-                .await;
-                return;
-            }
+        let Some(agent_id) = self.addressee(msg).await else {
+            return;
         };
         // Read the registry through the swappable handle. Cloning the
         // inner Arc under a short read lock gives this invocation a
