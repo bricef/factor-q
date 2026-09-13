@@ -519,10 +519,13 @@ effort: high            # reasoning effort for each request
   A trigger for an agent already at its cap is **held**, not dropped and
   not failed: pulled, un-acked, kept alive, and started when one of that
   agent's invocations ends — still as its first delivery, with no retry
-  consumed. `fq doctor` names the agents at their cap and how many
-  triggers are waiting ("Agents at cap"), so the wait is visible rather
-  than a queue that appears to have stalled. `fq reload` picks up a
-  changed cap, including for a trigger that is already waiting.
+  consumed. A held trigger **occupies no worker permit**: the worker cap
+  bounds running invocations, so an agent waiting on its own cap never
+  stops another agent from starting. `fq doctor` names the agents at
+  their cap and how many triggers are waiting ("Agents at cap"), so the
+  wait is visible rather than a queue that appears to have stalled. `fq
+  reload` picks up a changed cap, including for a trigger that is already
+  waiting.
 - **`effort`** sets the model's reasoning effort per request: `minimal`,
   `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
   default. `minimal` exists for a real failure mode rather than for

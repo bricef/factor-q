@@ -421,6 +421,15 @@ protects the host — and a trigger can wait on either. `fq doctor` lists
 the agents at their cap beside the throttled models, and neither is a
 doctor issue.
 
+**A trigger held at its agent's cap occupies no worker permit.** It
+gives the permit it was pulled under back for the length of the wait and
+takes a fresh one before it runs, so `max_concurrent_invocations` is
+sized for *running* work and nothing else: an agent waiting on its own
+cap never stops another agent from starting, and a worker cap raised for
+the LLM-bound agents stays available to them while a build-bound agent
+is full. What bounds the waiting triggers instead is what is queued on
+the trigger durable.
+
 ## When a tool hangs
 
 Every tool call has a deadline too, applied at the one place all of
