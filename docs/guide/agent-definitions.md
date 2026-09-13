@@ -489,12 +489,13 @@ budget: 0.50   # half a dollar per invocation
 Omit `budget` to run without a ceiling. This is not recommended
 for unattended agents.
 
-## Iteration cap and reasoning effort
+## Iteration cap, concurrency cap and reasoning effort
 
-Two further optional fields tune the invocation itself.
+Three further optional fields tune what the agent costs to run.
 
 ```yaml
 max_iterations: 40      # per-agent cap on LLM turns
+max_concurrent: 2       # how many of this agent run at once
 effort: high            # reasoning effort for each request
 ```
 
@@ -503,6 +504,28 @@ effort: high            # reasoning effort for each request
   literal, including `0`: an agent with `max_iterations: 0` stops before
   its first model turn. Hitting the cap is a failure, not a completion —
   it is the exit an agent takes when it never called `report_outcome`.
+- **`max_concurrent`** bounds how many invocations of *this* agent the
+  daemon runs at once. It is the agent's own limit, beside its budget and
+  its iteration cap, and it exists because `[worker]
+  max_concurrent_invocations` is one number for every agent: a build-bound
+  agent that clones a repository and runs a full CI pass needs a much
+  smaller number than an agent that only talks to a model, and without a
+  per-agent cap the worker cap has to be set for the worst one. Omit it
+  for no per-agent limit — as many at once as the worker cap allows, which
+  is what every agent did before the field existed. `0` is refused at
+  load: it would mean the agent never runs, and an agent that silently
+  never runs looks exactly like a broken trigger.
+
+  A trigger for an agent already at its cap is **held**, not dropped and
+  not failed: pulled, un-acked, kept alive, and started when one of that
+  agent's invocations ends — still as its first delivery, with no retry
+  consumed. A held trigger **occupies no worker permit**: the worker cap
+  bounds running invocations, so an agent waiting on its own cap never
+  stops another agent from starting. `fq doctor` names the agents at
+  their cap and how many triggers are waiting ("Agents at cap"), so the
+  wait is visible rather than a queue that appears to have stalled. `fq
+  reload` picks up a changed cap, including for a trigger that is already
+  waiting.
 - **`effort`** sets the model's reasoning effort per request: `minimal`,
   `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
   default. `minimal` exists for a real failure mode rather than for
@@ -512,8 +535,9 @@ effort: high            # reasoning effort for each request
   routes carry it back on the next turn, and which do not yet — is in
   [Reasoning models](reasoning-models.md).
 
-Both are top-level keys, so a typo in either is refused at load rather
-than ignored — see [The frontmatter is strict](#the-frontmatter-is-strict).
+All three are top-level keys, so a typo in any of them is refused at load
+rather than ignored — see
+[The frontmatter is strict](#the-frontmatter-is-strict).
 
 ## MCP servers
 

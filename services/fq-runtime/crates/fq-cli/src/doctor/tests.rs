@@ -494,6 +494,82 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
     );
 }
 
+/// The per-agent cap (#718): an agent at its `max_concurrent` is
+/// listed with the invocations against the cap and the triggers waiting
+/// on them, and is **not** an issue — a full agent is the runtime
+/// honouring the definition. A fleet holding nothing says "none" so the
+/// block is always on the page.
+#[test]
+fn agents_at_cap_are_listed_without_becoming_an_issue() {
+    let quiet = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&quiet);
+    assert!(out.contains("Agents at cap: none\n"), "got:\n{out}");
+
+    let report = quiet.with_agents_at_cap(vec![fq_ops::health::AgentAtCap {
+        agent: "m0-issue-fix".to_string(),
+        in_flight: 2,
+        cap: 2,
+        held: 1,
+    }]);
+    assert!(!report.has_issues(), "an agent at its cap is not an issue");
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("Verdict: All clear."), "got:\n{out}");
+    assert!(
+        out.contains("Agents at cap: 1 (1 trigger(s) held)"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("  m0-issue-fix: at cap; 2/2 in flight, 1 trigger(s) held"),
+        "the line names the agent, its state, the arithmetic and what is waiting: {out}"
+    );
+    assert!(
+        out.contains("still its first delivery"),
+        "the next-step line says a held trigger has not been redelivered: {out}"
+    );
+}
+
+/// The window between an invocation ending and the held trigger's next
+/// poll: the agent is listed because something is still waiting, but it
+/// is *not* at its cap, and neither the header count nor the line may
+/// say it is. Before `is_at_cap()` was asked rather than re-derived, this
+/// rendered as "Agents at cap: 1" over "0/1 in flight".
+#[test]
+fn an_agent_with_a_freed_slot_is_not_counted_as_at_cap() {
+    let quiet = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    let report = quiet.with_agents_at_cap(vec![fq_ops::health::AgentAtCap {
+        agent: "m0-issue-fix".to_string(),
+        in_flight: 0,
+        cap: 1,
+        held: 1,
+    }]);
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("Agents at cap: 0 (1 trigger(s) held)"),
+        "no agent is at its cap, and one trigger is waiting: {out}"
+    );
+    assert!(
+        out.contains("  m0-issue-fix: a slot has freed; starting; 0/1 in flight"),
+        "the line says what is actually true of it: {out}"
+    );
+    assert!(!report.has_issues(), "still not an issue");
+}
+
 /// The provider throttle (#278): a throttled model is listed with its
 /// pause and permits, points at the deferral events, and is **not** an
 /// issue — the runtime absorbing a provider's backpressure is the

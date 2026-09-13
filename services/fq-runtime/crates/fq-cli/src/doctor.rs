@@ -115,6 +115,14 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // fleet is quiet, so it is on the page an operator opens first.
     out.push_str(&render_throttled_models(&report.throttled_models));
 
+    // Per-agent caps (#718): what the agents' own `max_concurrent` is
+    // holding back. Beside the throttle block and in the same tone —
+    // not an issue, because a full agent is the runtime honouring the
+    // definition — but a held trigger is otherwise invisible, and an
+    // operator wondering why a labelled issue has not been picked up
+    // reads the answer here.
+    out.push_str(&render_agents_at_cap(&report.agents_at_cap));
+
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
     if report.dead_letters.exhausted_triggers > 0 {
         out.push_str(&format!(
@@ -318,6 +326,50 @@ fn render_throttled_models(models: &[fq_ops::health::ThrottledModel]) -> String 
     }
     out.push_str(
         "  -> `fq events query --event-type invocation_deferred` for the invocations put down\n",
+    );
+    out
+}
+
+/// Pure: the per-agent cap block of `fq doctor` (#718). One line per
+/// agent that is full or holding triggers, with the invocations against
+/// the cap and how many triggers are waiting on them. "none" when
+/// nothing is being held, so the block is always on the page and its
+/// absence never has to be read as "not checked" — the same rule the
+/// throttle block follows.
+///
+/// A held trigger is not a queue an operator can list: it is pulled,
+/// un-acked and un-started, and no other surface names it. This line is
+/// the whole of its visibility, so it says the count rather than only
+/// that something is held.
+fn render_agents_at_cap(agents: &[fq_ops::health::AgentAtCap]) -> String {
+    if agents.is_empty() {
+        return "Agents at cap: none\n".to_string();
+    }
+    // The header counts the agents that are actually full, not the lines
+    // below it. An agent can be listed with a slot already free — the
+    // window between an invocation ending and the held trigger's next
+    // poll — and counting it "at cap" would say something untrue of it.
+    let at_cap = agents.iter().filter(|a| a.is_at_cap()).count();
+    let held: u32 = agents.iter().map(|a| a.held).sum();
+    let mut out = format!(
+        "Agents at cap: {at_cap} ({held} trigger(s) held) — each agent's own `max_concurrent`; \
+         nothing to fix\n",
+    );
+    for agent in agents {
+        let state = if agent.is_at_cap() {
+            "at cap"
+        } else {
+            "a slot has freed; starting"
+        };
+        out.push_str(&format!(
+            "  {}: {state}; {}\n",
+            agent.agent,
+            agent.cap_summary()
+        ));
+    }
+    out.push_str(
+        "  -> a held trigger is still its first delivery; it starts when a slot frees. \
+         Raise `max_concurrent` in the definition and `fq reload` to widen one\n",
     );
     out
 }

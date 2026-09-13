@@ -18,7 +18,7 @@
 //! operator reads which one rather than that something is wrong.
 
 pub use fq_ops::health::{
-    ConsumerHealth, ConsumerProgress, McpServerHealth, StreamHealth, ThrottledModel,
+    AgentAtCap, ConsumerHealth, ConsumerProgress, McpServerHealth, StreamHealth, ThrottledModel,
     UnsupportedEvent,
 };
 

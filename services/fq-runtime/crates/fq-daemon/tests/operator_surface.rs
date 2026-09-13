@@ -88,6 +88,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
         agents.clone(),
         Arc::new(UnusedLlm),
         fq_runtime::worker::DeferralQueue::new().0,
+        fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
     ));
     let registry = fq_daemon::operator_registry(
         views,
@@ -102,6 +103,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
                 summary_enabled: false,
                 mcp_servers: Default::default(),
                 throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
+                agent_caps: fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
             },
             bus,
             projection: projection_store,

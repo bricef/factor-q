@@ -258,6 +258,11 @@ pub(crate) async fn classify_in_flight(
 /// The handles come back so a graceful drain (ADR-0027) can wait for them
 /// to suspend at a step boundary before exiting. On a signal-driven
 /// shutdown they stay detached, as they always have.
+// Eight shared runtime handles, each of which a resume task genuinely
+// needs; grouping them into a struct would only move the same list one
+// line up. `ResumeControl::new` next door carries the same allow for
+// the same reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_resume_tasks(
     recoverable: Vec<ClassifiedInvocation>,
     registry: &AgentRegistry,
@@ -269,6 +274,12 @@ pub(crate) fn spawn_resume_tasks(
     // is still rate-limited — and goes back on the queue the dispatcher
     // drains, rather than being logged and forgotten.
     deferrals: &fq_runtime::worker::DeferralQueue,
+    // A resumed invocation is running work, so it counts against its
+    // agent's `max_concurrent` for as long as it runs (#718). Counted,
+    // never gated: recovery exists to finish what was already started,
+    // and refusing it would leave a half-done invocation unresumed while
+    // still occupying the host's workspace.
+    agent_caps: &Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
 ) -> Vec<JoinHandle<()>> {
     let resume_count = recoverable.len();
     // Track the resume tasks' handles so a graceful drain (ADR-0027) can
@@ -314,7 +325,12 @@ pub(crate) fn spawn_resume_tasks(
         let bus = bus.clone();
         let wstore = worker_store.clone();
         let deferrals = deferrals.clone();
+        // Taken before the task is spawned, so the count is right the
+        // instant `assemble` returns — the dispatcher must not admit a
+        // trigger in the window before a resume task is scheduled.
+        let agent_slot = agent_caps.enter(agent.id().as_str(), agent.max_concurrent());
         resume_handles.push(tokio::spawn(async move {
+            let _agent_slot = agent_slot;
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 Ok(fq_runtime::InvocationOutcome::Deferred {
                     invocation_id,
