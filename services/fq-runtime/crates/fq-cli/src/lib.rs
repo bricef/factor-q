@@ -19,7 +19,8 @@ use clap::Parser;
 use crate::agents::{list_agents, validate_agent};
 use crate::cli::{
     AgentCommands, Cli, Commands, DeadLetterCommands, EventCommands, InvocationCommands,
-    OpsCommands, ProjectionCommands, TokenCommands, WorkerCommands, init_tracing,
+    NotificationCommands, OpsCommands, ProjectionCommands, TokenCommands, WorkerCommands,
+    init_tracing,
 };
 use crate::connections::{connect, ops_list, token_attenuate};
 use crate::control::{down_daemon, reload_daemon};
@@ -30,6 +31,7 @@ use crate::events::{get_event, query_events, tail_events};
 use crate::invocations::{
     invocation_drop, invocation_list, invocation_resume, invocation_show, invocation_transcript,
 };
+use crate::notifications::{list_notifications, show_notification};
 use crate::project::init_project;
 use crate::projection::rebuild_projection;
 use crate::status::show_status;
@@ -133,6 +135,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 get_event(&cli.global, &event_id, json).await?
             }
         },
+        Commands::Notifications { command } => match command {
+            NotificationCommands::List {
+                severity,
+                source,
+                since,
+                limit,
+                json,
+            } => list_notifications(&cli.global, severity, source, since, limit, json).await?,
+            NotificationCommands::Show { event_id, json } => {
+                show_notification(&cli.global, &event_id, json).await?
+            }
+        },
         Commands::Costs { agent, since, json } => {
             show_costs(&cli.global, agent.as_deref(), since.as_deref(), json).await?
         }
@@ -226,6 +240,7 @@ mod doctor;
 mod edge_call;
 mod events;
 mod invocations;
+mod notifications;
 mod project;
 mod projection;
 mod status;

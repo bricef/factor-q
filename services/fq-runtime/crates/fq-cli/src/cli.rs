@@ -147,6 +147,18 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: EventCommands,
     },
+    /// Operator signals: what a component of the daemon said someone
+    /// should look at
+    ///
+    /// Both severities live here. A `notification` is handled during
+    /// normal hours; an `alert` names something the system could not
+    /// recover from on its own, and is never swept, so `--severity
+    /// alert` reaches back past everything else. Asks the daemon
+    /// (`operator_signal.list` / `.get`), so it needs one running.
+    Notifications {
+        #[command(subcommand)]
+        command: NotificationCommands,
+    },
     /// Show cost breakdown
     ///
     /// Answers over the whole recorded history unless `--since`
@@ -576,6 +588,44 @@ pub(crate) enum EventCommands {
         /// shortened id is refused rather than guessed at.
         event_id: String,
         /// Emit the event as JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NotificationCommands {
+    /// List the operator signals this daemon has raised, newest first
+    List {
+        /// Only one severity: notification or alert
+        #[arg(long)]
+        severity: Option<String>,
+        /// Only one component — the kind's first segment (pricing, deploy)
+        #[arg(long)]
+        source: Option<String>,
+        /// Signals at or after this time: a date, a UTC date-time, or RFC3339
+        #[arg(long, value_parser = fq_ops::views::since::lower_bound)]
+        since: Option<String>,
+        /// Maximum rows in one page, at most 500. A bigger ask is
+        /// refused, not shortened — so fewer rows than you asked for
+        /// means there are no more. For more, narrow the query.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one whole signal back by its identity — the `event-id`
+    /// `fq notifications list` prints in its last column, passed
+    /// through unchanged. List carries no particulars; this shows the
+    /// structured `detail` the producer sent, what the signal points
+    /// at, and the signals either side of it from the same source.
+    Show {
+        /// The signal's identity, exactly as the listing prints it. A
+        /// whole UUID: there is no prefix matching, so a shortened id
+        /// is refused rather than guessed at.
+        event_id: String,
+        /// Emit the signal as JSON instead of human-readable output.
         #[arg(long)]
         json: bool,
     },
