@@ -185,6 +185,18 @@ for arg in "$@"; do
 done
 
 cd "$DOGFOOD" 2>/dev/null || die "dogfood dir not found: $DOGFOOD (set FQ_DOGFOOD)"
+# Unattended, this run's lines go to logs/deploy.log on the bind mount,
+# not to the scheduler's log the way hygiene's and backup's do: the `up`
+# below recreates the scheduler that captured them, and `--rm` removes
+# the sibling this runs in when it exits, so a deploy that succeeded
+# left nothing behind but its notification (the guest's first deploy
+# from the ops service, 2026-09-13). The file outlives both, and
+# supercronic's own "job succeeded/failed" line still marks every run
+# in `docker compose logs ops`. By hand, the terminal is the log.
+if [ "$AUTO" = 1 ]; then
+    mkdir -p logs
+    exec >> logs/deploy.log 2>&1
+fi
 [ -f compose.yml ] || die "no compose.yml in $DOGFOOD — copy ops/dogfood/compose.yml here"
 [ -f .env ] || die "no .env in $DOGFOOD — start from ops/dogfood/.env.example"
 for f in env dashboard.env nats-auth.conf caddy.env; do
