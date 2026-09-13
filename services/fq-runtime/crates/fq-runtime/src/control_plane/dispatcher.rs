@@ -412,6 +412,9 @@ impl TriggerDispatcher {
         // mid-invocation. The daemon awaits `run` through its
         // dispatcher handle, so teardown ordering is unchanged. A
         // trigger held for a paused model lets go on this flag.
+        // Stop pulling first: an interrupted hold requeues its trigger
+        // (#718) and an open pull request would swallow the fresh copy.
+        drop(messages);
         this.stopping.store(true, Ordering::SeqCst);
         while let Some(joined) = in_flight.join_next().await {
             log_invocation_task(joined);
@@ -563,14 +566,11 @@ impl TriggerDispatcher {
         };
 
         // Admission, second rule (#718): an agent already running
-        // `max_concurrent` invocations starts no more. Both the slot and
-        // the worker permit are held for the rest of `handle`, so every
-        // way the invocation can end — completed, failed, drained,
-        // dropped, panicked — gives them back through `Drop`. A deferral
-        // is the one outcome that is not an ending: `conclude` hands the
-        // slot to the deferral queue with the resume.
+        // `max_concurrent` invocations starts no more. Slot and permit
+        // ride the rest of `handle` and come back through `Drop` —
+        // except on a deferral, where `conclude` hands the slot on.
         let Some((agent_slot, _permit)) = self
-            .admit_agent_slot(msg, &agent_id, header_id, permit)
+            .admit_agent_slot(msg, &agent_id, header_id, &payload, permit)
             .await
         else {
             return;
@@ -2656,8 +2656,34 @@ You are a test agent."#
         oneshot::Sender<()>,
         tokio::task::JoinHandle<Result<(), DispatcherError>>,
     ) {
+        spawn_dispatcher_on(
+            bus,
+            &unique_consumer_name(),
+            agent_id_str,
+            registry,
+            worker,
+            agent_caps,
+            max_concurrent,
+        )
+    }
+
+    /// The same, on a durable the caller names — so a test can stop one
+    /// dispatcher and start the next on the same consumer, which is what
+    /// a restart looks like to JetStream: the delivery counts carry over.
+    fn spawn_dispatcher_on(
+        bus: &EventBus,
+        consumer_name: &str,
+        agent_id_str: &str,
+        registry: SharedRegistry,
+        worker: Arc<dyn Worker>,
+        agent_caps: Arc<crate::control_plane::agent_cap::AgentConcurrency>,
+        max_concurrent: usize,
+    ) -> (
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    ) {
         let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
-        let consumer_name = unique_consumer_name();
+        let consumer_name = consumer_name.to_string();
         let filter = crate::events::subjects::trigger(agent_id_str);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker, llm, max_concurrent)
@@ -2899,6 +2925,91 @@ You are a test agent."#
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        stop(shutdown_tx, run).await;
+    }
+
+    /// Review finding C4: **a restart mid-hold must not charge the held
+    /// trigger a delivery.**
+    ///
+    /// A cap hold is bounded by the invocation ahead of it, not by a
+    /// pause, so it routinely outlasts a deploy — and an un-acked
+    /// delivery comes back as `attempt: 2`, five of which dead-letter a
+    /// trigger nobody ever refused on its merits. The hold requeues the
+    /// trigger under its own id instead, so the next binary sees a first
+    /// delivery.
+    ///
+    /// Both dispatchers run on the *same durable consumer*, which is
+    /// what makes the assertion mean anything: JetStream's delivery
+    /// count is per consumer, so a fresh one would report `attempt: 1`
+    /// whatever the shutdown did with the message.
+    #[tokio::test]
+    async fn a_restart_during_a_cap_hold_does_not_charge_the_trigger_a_delivery() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("capped-restart");
+        let (_dir, registry) = registry_with_cap(&agent_id_str, 1);
+        let consumer_name = unique_consumer_name();
+
+        let counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let worker = CappedWorker::new();
+        let (shutdown_tx, run) = spawn_dispatcher_on(
+            &bus,
+            &consumer_name,
+            &agent_id_str,
+            registry.clone(),
+            worker.clone(),
+            counts,
+            8,
+        );
+
+        publish_triggers(&bus, &agent_id_str, 2).await;
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+        // Past the durable's first-delivery window, so the second
+        // trigger is genuinely being held alive rather than merely
+        // in-flight.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(worker.started(), 1, "the second trigger is held at cap 1");
+
+        // The deploy lands mid-hold.
+        let _ = shutdown_tx.send(());
+        // Long enough for the hold to see `stopping` on its next tick
+        // (CAP_POLL) and requeue.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        worker.let_finish(10);
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("dispatcher exits")
+            .expect("task joins")
+            .expect("clean exit");
+        assert_eq!(
+            worker.started(),
+            1,
+            "the held trigger did not start on the way out"
+        );
+
+        // The next binary, on the same durable.
+        let next_counts = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let next = CappedWorker::new();
+        let (shutdown_tx, run) = spawn_dispatcher_on(
+            &bus,
+            &consumer_name,
+            &agent_id_str,
+            registry,
+            next.clone(),
+            next_counts,
+            8,
+        );
+        next.wait_for_starts(1, Duration::from_secs(10)).await;
+        assert_eq!(
+            next.attempts(),
+            vec![Some(1)],
+            "a restart during a hold must cost the trigger nothing: an `attempt: 2` here \
+             is the held delivery being charged, which after {} of them dead-letters a \
+             trigger that was never refused on its merits",
+            TRIGGER_MAX_DELIVER
+        );
+
+        next.let_finish(10);
         stop(shutdown_tx, run).await;
     }
 
