@@ -97,4 +97,20 @@ pub struct CostMetadata {
     /// and Gemini wires carry no cost), which is not `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_cost: Option<f64>,
+    /// Which pricing table produced the figures above —
+    /// [`PricingProvenance::version`](crate::events::PricingProvenance::version),
+    /// e.g. `litellm-main@3f9a1c0b2d4e`.
+    ///
+    /// The cost-retention principle keeps spend figures indefinitely, and
+    /// a figure nobody can attach to a price list is a number rather than
+    /// a record ([#735](https://github.com/bricef/factor-q/issues/735)).
+    /// The short form is cited here and the whole provenance — upstream
+    /// commit, full digest, acceptance time — rides the `system.startup`
+    /// event of the run that wrote this row.
+    ///
+    /// Absent where the table carried no provenance: a test fixture, or a
+    /// daemon serving an empty table. Not a claim that the price was
+    /// zero, and never load-bearing for a figure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_table: Option<String>,
 }

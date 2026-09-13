@@ -414,6 +414,18 @@ pub struct SystemStartupPayload {
     pub agents_loaded: u32,
     /// Number of pricing entries loaded.
     pub pricing_entries: u32,
+    /// Which pricing table this run accepted: its source, the upstream
+    /// commit it was read at, and the digest of the bytes accepted
+    /// ([#735](https://github.com/bricef/factor-q/issues/735)). Every
+    /// cost record this run writes cites the short version derived from
+    /// it, so a spend figure is traceable to the prices that produced
+    /// it.
+    ///
+    /// `None` where no table was accepted at all — no fetch, no cache —
+    /// which is the empty-table case ADR-0004's startup guarantee
+    /// refuses to run on anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_table: Option<crate::events::PricingProvenance>,
 }
 
 /// Published when the `fqd` daemon shuts down.

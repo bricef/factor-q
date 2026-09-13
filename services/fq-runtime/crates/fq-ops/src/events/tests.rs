@@ -502,6 +502,7 @@ fn event_for_system_uses_runtime_id_as_trace_id() {
             nats_url: "nats://localhost:4222".to_string(),
             agents_loaded: 0,
             pricing_entries: 0,
+            pricing_table: None,
         }),
     );
     assert_eq!(event.envelope.trace_id, runtime_id);
@@ -1029,6 +1030,7 @@ fn system_events_have_null_parent() {
             nats_url: String::new(),
             agents_loaded: 0,
             pricing_entries: 0,
+            pricing_table: None,
         }),
         EventPayload::SystemShutdown(SystemShutdownPayload {
             runtime_id,
@@ -1089,6 +1091,7 @@ fn event_with_cost_sets_envelope_cost() {
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     };
     let event = event.with_cost(cost.clone());
     assert_eq!(event.envelope.cost.as_ref(), Some(&cost));
@@ -1112,6 +1115,7 @@ fn cost_metadata_round_trips_on_envelope() {
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     };
     let event = Event::new(
         AgentId::new("agent").unwrap(),
@@ -1435,6 +1439,7 @@ fn schema_id_for_every_payload_variant() {
             nats_url: String::new(),
             agents_loaded: 0,
             pricing_entries: 0,
+            pricing_table: None,
         }),
         EventPayload::SystemShutdown(SystemShutdownPayload {
             runtime_id: inv,
@@ -1532,6 +1537,7 @@ fn reasoning_tokens_keep_unreported_apart_from_zero_on_the_wire() {
         origin: LlmCallOrigin::AgentTurn,
         reasoning_tokens: None,
         reported_cost: None,
+        pricing_table: None,
     };
     let unreported_json = serde_json::to_value(&cost).unwrap();
     assert!(
@@ -1573,9 +1579,11 @@ fn reported_cost_rides_the_cost_record_and_is_absent_when_unreported() {
         cumulative_agent_cost: 0.000027,
         origin: LlmCallOrigin::default(),
         reported_cost: None,
+        pricing_table: None,
     };
     let reported = CostMetadata {
         reported_cost: Some(0.0000285),
+        pricing_table: None,
         ..unreported.clone()
     };
 

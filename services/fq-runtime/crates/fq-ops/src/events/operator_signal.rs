@@ -234,6 +234,13 @@ pub mod kinds {
     /// guarantee exists to prevent.
     pub const PRICING_STALE: &str = "pricing.stale";
 
+    /// The pricing document could not be fetched, so the daemon is
+    /// serving the last table it accepted
+    /// (<https://github.com/bricef/factor-q/issues/735>). A
+    /// notification: last-known-good is a working state, and the alert
+    /// for one that stays that way too long is [`PRICING_STALE`].
+    pub const PRICING_FETCH_FAILED: &str = "pricing.fetch_failed";
+
     /// A new build reached the dogfood instance and came up
     /// (<https://github.com/bricef/factor-q/pull/707>). A notification.
     /// Reserved: the deploy message reaches Pushover today and becomes
@@ -243,7 +250,12 @@ pub mod kinds {
     /// The registry as values — what
     /// [`SignalKind::registered`](super::SignalKind::registered) will
     /// accept, and the set a test checks.
-    pub const REGISTERED: &[&str] = &[PRICING_CHANGE_REFUSED, PRICING_STALE, DEPLOY_SUCCEEDED];
+    pub const REGISTERED: &[&str] = &[
+        PRICING_CHANGE_REFUSED,
+        PRICING_FETCH_FAILED,
+        PRICING_STALE,
+        DEPLOY_SUCCEEDED,
+    ];
 }
 
 /// What a signal is *about*, when it is about something addressable.
