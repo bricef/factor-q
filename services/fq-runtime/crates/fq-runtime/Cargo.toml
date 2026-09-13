@@ -65,6 +65,10 @@ async-trait = { workspace = true }
 genai = "=0.7.0-beta.23"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+# The digest that names an accepted pricing table (#735). Same version
+# the edge hashes capability tokens with — one hash implementation in
+# the workspace, not two.
+sha2 = "0.11"
 strum = { workspace = true }
 
 [features]
