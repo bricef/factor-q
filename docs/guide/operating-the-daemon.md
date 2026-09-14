@@ -1274,6 +1274,14 @@ recover on its own and a person had to intervene is worth more than the
 log it arrived on, so the pane can still show what needed a human last
 quarter, whole, particulars included.
 
+**Neither is the signal that resolved one.** A recovery is a
+notification (see below), but an alert is closed by that row existing,
+so letting it age out would re-open an alert answered a month earlier —
+and nothing could ever close it again. An alert's record is the pair, so
+retention keeps the pair: a notification naming another signal in
+`resolves` is kept for as long as the alert it closed. An ordinary
+notification, which closes nothing, still goes with the log.
+
 That means the two counts on the home page are not symmetrical, and
 deliberately: notifications are counted inside a day, alerts are not
 counted inside a window at all. What bounds them is resolution.

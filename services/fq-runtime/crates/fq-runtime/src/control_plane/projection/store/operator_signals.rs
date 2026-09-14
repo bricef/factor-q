@@ -178,7 +178,8 @@ impl ProjectionStore {
     }
 
     /// Delete swept-out operator signals older than `cutoff_ms`,
-    /// **except alerts**. Returns the number of rows deleted.
+    /// **except alerts and the notifications that resolve them**.
+    /// Returns the number of rows deleted.
     ///
     /// **Alerts are never swept.** A notification is a thing an
     /// operator reads during normal hours, and once the event it was
@@ -189,7 +190,19 @@ impl ProjectionStore {
     /// arrived on — so it stays, with no expiry, and the pane can still
     /// show what needed a human last quarter.
     ///
-    /// This is the **one predicate exemption** in the sweep, and the
+    /// **A signal that resolves another is never swept either**, at any
+    /// severity. The row that closes an alert is a *notification* (the
+    /// recovery of an alert is not itself alarming), so severity alone
+    /// would delete it the day the log it arrived on aged out — and an
+    /// alert is closed by the *existence* of that row, not by a flag on
+    /// itself ([`Self::operator_signal_counts`]). Sweeping it re-opens
+    /// an alert that was answered a month ago, for ever, on the one
+    /// count the home page reads. An alert's record is the pair, so
+    /// retention keeps the pair: `resolves IS NULL` in the predicate is
+    /// the whole of it, and it costs one small index row per closed
+    /// alert.
+    ///
+    /// These are the **two predicate exemptions** in the sweep, and the
     /// deliberate exception to the rule stated on
     /// [`ProjectionStore::sweep_events`]: cost rows, triggers and
     /// summaries are exempt structurally, by living in a table this
@@ -197,8 +210,9 @@ impl ProjectionStore {
     /// pane orders them against each other, and splitting them to win
     /// a structural exemption would cost a UNION on every read of the
     /// pane. The clause is written once, here, and
-    /// `an_alert_survives_the_sweep_and_a_notification_does_not` is
-    /// what stops it drifting.
+    /// `an_alert_survives_the_sweep_and_a_notification_does_not` and
+    /// `a_recovery_outlives_the_window_so_a_closed_alert_stays_closed`
+    /// are what stop it drifting.
     ///
     /// Batched like the event sweep, and for the same reason.
     pub async fn sweep_operator_signals(&self, cutoff_ms: i64) -> Result<u64, StoreError> {
@@ -220,7 +234,8 @@ impl ProjectionStore {
             let result = sqlx::query(
                 "DELETE FROM operator_signals WHERE rowid IN \
                  (SELECT rowid FROM operator_signals \
-                  WHERE timestamp < ? AND severity <> ? LIMIT ?)",
+                  WHERE timestamp < ? AND severity <> ? AND resolves IS NULL \
+                  LIMIT ?)",
             )
             .bind(&cutoff)
             .bind(severity_name(SignalSeverity::Alert))

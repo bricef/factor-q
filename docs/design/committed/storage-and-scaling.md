@@ -262,10 +262,12 @@ migration**:
 **What a rebuild keeps.** Everything below the floor: history from
 before an envelope bump, which this build cannot read and the replay
 never reaches, stays in the file exactly as the older build projected
-it. And four kinds of row outlive the log they were folded from by
+it. And five kinds of row outlive the log they were folded from by
 design, wherever they sit: cost-bearing `events` rows (`total_cost IS
 NOT NULL`), every `invocation_summary` line, every `triggers` record,
-and every alert in `operator_signals`. The floor step never deletes them — a cost row at or above the
+every alert in `operator_signals`, and every `operator_signals` row
+whose `resolves` names another — an alert's record is the pair, and
+sweeping the notification that closed one would re-open it. The floor step never deletes them — a cost row at or above the
 floor is kept and refreshed by the replay (`insert_event` is an upsert
 on `event_id`), so a message that ages out of retention between the
 delete and its replay cannot take a spend figure with it. History
