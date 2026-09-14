@@ -527,6 +527,49 @@ fn each_refused_model_gets_its_own_notification() {
     );
 }
 
+/// A pin chooses the *document*, never the rules. A pinned commit whose
+/// copy of the table moves a price 6x is refused exactly as `main`'s
+/// would be — the discipline is on acceptance, and the source setting is
+/// upstream of it rather than an exemption from it.
+#[test]
+fn a_pinned_source_is_judged_by_the_same_rules() {
+    let cache = cache();
+    let pinned = LoadSettings {
+        source: TableSource::Pinned("f00dcafe".to_string()),
+        ..LoadSettings::default()
+    };
+    settle(
+        &pinned,
+        &cache.path,
+        fetched(document(&[("a/one", 1e-6, 5e-6)])),
+        pinned.source.commit().map(str::to_string),
+        now(),
+    );
+
+    let load = settle(
+        &pinned,
+        &cache.path,
+        fetched(document(&[("a/one", 6e-6, 5e-6)])),
+        pinned.source.commit().map(str::to_string),
+        now(),
+    );
+
+    assert_eq!(
+        input_per_million(&load.table, "a/one"),
+        1.0,
+        "a pin is not an exemption from the bound"
+    );
+    assert_eq!(load.refusals.len(), 1);
+    assert!(!load.refusals[0].is_admission());
+    let signals = load.signals();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].kind.as_str(), "pricing.change_refused");
+    // ... and the provenance still says which pin it was.
+    let provenance = load.table.provenance().expect("stamped");
+    assert_eq!(provenance.source, "pinned:f00dcafe");
+    assert_eq!(provenance.commit.as_deref(), Some("f00dcafe"));
+}
+
 #[test]
 fn the_source_setting_round_trips() {
     assert_eq!(
