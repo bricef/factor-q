@@ -224,7 +224,10 @@ pub mod kinds {
     /// A live pricing table proposed a change that acceptance refused —
     /// a drift beyond the bound, or a price of zero
     /// (<https://github.com/bricef/factor-q/issues/735>). A
-    /// notification: the daemon carries on at the prior price.
+    /// notification: the daemon carries on at the prior price. One per
+    /// model per run, and a restart between a refresh and its ack
+    /// re-runs the refresh, so the same refusal can appear twice under
+    /// different envelopes.
     pub const PRICING_CHANGE_REFUSED: &str = "pricing.change_refused";
 
     /// The pricing table has not refreshed within its staleness window
@@ -246,9 +249,12 @@ pub mod kinds {
     /// notification: the schedule is the retry, so the daemon carries on
     /// and the next fire tries again — but unattended work that stopped
     /// working, with nobody watching the log, is exactly what the pane
-    /// exists for. Raised once per run and never on a redelivery; a
-    /// *refused* task (a name this build does not know) raises nothing,
-    /// because that is a `fq-cron.toml` error its own owner sees.
+    /// exists for. Raised once per run and never on a redelivery within
+    /// one daemon's lifetime — the ledger that suppresses it is in
+    /// process, so a restart between a run and its ack re-runs the task
+    /// and repeats this. A *refused* task (a name this build does not
+    /// know) raises nothing, because that is a `fq-cron.toml` error its
+    /// own owner sees.
     pub const MAINTENANCE_RUN_FAILED: &str = "maintenance.run_failed";
 
     /// A new build reached the dogfood instance and came up

@@ -823,6 +823,83 @@ async fn a_failed_maintenance_run_notifies_an_operator() {
     let _ = handle.await;
 }
 
+/// The other half of "once per failed run": a redelivery of a run that
+/// already failed raises **no second notification**.
+///
+/// The outcome gates the signals, so this is the same rule the ledger
+/// keeps for the task — but it is the rule an operator feels, because a
+/// duplicate notification is a second thing in the pane for one thing
+/// that happened. The redelivery is genuine: the ack window is a second
+/// and the failing task is held for two, so the server redelivers
+/// underneath the run in flight, and the durable's own counter is
+/// asserted so the test cannot pass vacuously.
+#[tokio::test]
+async fn a_redelivered_failure_does_not_notify_twice() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+    let mut outcomes = bus
+        .subscribe(subjects::SYSTEM_MAINTENANCE.to_string())
+        .await
+        .expect("subscribe to maintenance outcomes");
+    let mut signals = bus
+        .subscribe(subjects::SYSTEM_OPERATOR_SIGNAL.to_string())
+        .await
+        .expect("subscribe to operator signals");
+
+    // No pricing refresh wired, so the task is known and fails.
+    let subject = MaintenanceTask::PricingRefresh.subject();
+    let (shutdown, handle, name) = spawn(
+        &bus,
+        subject.clone(),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    publish_command(
+        &bus,
+        &subject,
+        Some("fq-cron/pricing-refresh@2026-09-14T00:00:00Z"),
+    )
+    .await;
+
+    let event = next_outcome(&mut outcomes, Duration::from_secs(20)).await;
+    assert!(
+        matches!(outcome_of(&event), MaintenanceOutcome::Failed { .. }),
+        "the run fails: {:?}",
+        outcome_of(&event)
+    );
+
+    // Long enough that a second run — which would take another
+    // `task_delay` to reach its publish — would have raised its signal.
+    let raised = drain_signals(&mut signals, Duration::from_secs(6)).await;
+    let kinds: Vec<&str> = raised.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["maintenance.run_failed"],
+        "one notification for one run, whatever the broker delivered"
+    );
+
+    let stream = bus
+        .jetstream()
+        .get_stream(crate::bus::MAINTENANCE_STREAM_NAME)
+        .await
+        .expect("maintenance stream");
+    let mut durable = stream
+        .get_consumer::<async_nats::jetstream::consumer::pull::Config>(&name)
+        .await
+        .expect("the test durable");
+    let info = durable.info().await.expect("consumer info");
+    assert!(
+        info.delivered.consumer_sequence > 1,
+        "no redelivery happened, so this test proved nothing: {:?}",
+        info.delivered
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
+}
+
 /// A refusal raises nothing: a task name this build does not know is a
 /// `fq-cron.toml` error, and its owner reads the refusal on the log.
 #[tokio::test]
