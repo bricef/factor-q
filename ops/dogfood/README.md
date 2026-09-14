@@ -206,14 +206,18 @@ three values into `.secrets/dashboard.env`, then recreate the dashboard
 ```sh
 docker compose exec fqd fq token attenuate --addr 127.0.0.1:9470 \
   --grant read:agent --grant read:control --grant read:cost \
-  --grant read:event --grant read:invocation --grant read:turn
+  --grant read:event --grant read:invocation \
+  --grant read:operator_signal --grant read:turn
 # FQ_EDGE=127.0.0.1:9470, FQ_EDGE_FINGERPRINT=<state/edge/fingerprint>, FQ_EDGE_TOKEN=<the output>
 docker compose up -d fq-dashboard
 ```
 
-Six grants, one per domain the pages render, all `read`; attenuation
+Seven grants, one per domain the pages render, all `read`; attenuation
 only narrows, so the dashboard can read exactly what it shows and
-command nothing. Reach it via SSH tunnel to `127.0.0.1:9472`, or through
+command nothing. `read:operator_signal` is the notifications pane's —
+**a token minted before it existed has six, and the pane and the home
+page's count are refused under it** (the home row then reads *unknown*
+in amber rather than a green zero, which is how you tell). Reach it via SSH tunnel to `127.0.0.1:9472`, or through
 Caddy — on a public host at that host's own name, on an internal one at
 `https://{$DASH_INTERNAL_ADDR}` (the live instance: `https://10.20.0.10/`
 over the tunnel, see "An internal host"). TLS-only, basic-auth plus a
@@ -273,6 +277,17 @@ doctor` lists the `fq-maintenance` consumer, and only then commit the
 `[[job]]` block and sync. A tick that fires in between is dropped, not
 queued — the durable starts at the end of its stream (see *Scheduling
 maintenance with fq-cron* in `docs/guide/operating-the-daemon.md`).
+
+**The dashboard's token must be re-minted for the notifications pane.**
+`read:operator_signal` is new with the pane, and the token in
+`.secrets/dashboard.env` predates it. Nothing fails loudly: the daemon
+serves the pane, the dashboard's credential is refused for it, and the
+home page's notification row reads `unknown` in amber while every other
+page keeps working. Re-mint with all seven grants (*The dashboard's
+identity*, above), rewrite `.secrets/dashboard.env`, and `docker compose
+up -d --force-recreate fq-dashboard` — an `env_file` is read only on
+create, so a restart alone keeps the old token. The unattended CD does
+not do this; it is a one-off on the deploy that first carries the pane.
 
 **Editing files in the volume.** The config and the agents live inside
 `fq-dogfood_fq-data`, not on the host's filesystem. Edit them through
