@@ -10,6 +10,19 @@
 //! through it would ack every command as malformed and count it on the
 //! parse ledger. The ack policy is the same in spirit; what differs is
 //! what a message *is*.
+//!
+//! **So the `select!`/ack plumbing below is hand-rolled deliberately,
+//! and it is still debt** — the fourth copy of a shape #192 exists to
+//! keep in one place. The seam that would close it is a `run_loop`
+//! generic over its admission (`Fn(&Message) -> Admission<T>`), with
+//! this consumer passing an identity admission; that refactor touches
+//! every control-plane consumer, so it is filed rather than done here:
+//! <https://github.com/bricef/factor-q/issues/748>. Read that before
+//! re-deriving why this module does not call
+//! [`crate::control_plane::durable_consumer::run_durable_consumer`] —
+//! and note the one policy difference it must preserve: a failed task
+//! is **acked**, never NAK'd (the schedule is the retry); only a
+//! failure to publish the outcome NAKs.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
