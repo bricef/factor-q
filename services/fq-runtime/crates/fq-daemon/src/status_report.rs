@@ -145,7 +145,7 @@ pub(crate) fn register_status_report(
                 // Clone the inner Arc out of the lock so the wire work
                 // never holds it — the dispatcher's discipline, and the
                 // Agent view's.
-                let snapshot = agents.read().await.clone();
+                let snapshot = agents.current();
                 Ok(StatusReport {
                     version: FQ_VERSION.to_string(),
                     drain_deadline_ms: drain_deadline_ms_value,

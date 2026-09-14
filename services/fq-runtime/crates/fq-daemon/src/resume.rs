@@ -237,7 +237,8 @@ pub(crate) async fn handle_resume_request(
         tracing::warn!(error = %err, "failed to publish invocation.operator_resumed");
     }
 
-    let Some(agent) = control.registry.read().await.get(&agent_id).cloned() else {
+    let registry = control.registry.current();
+    let Some(agent) = registry.get(&agent_id).cloned() else {
         return InvocationResumeResponse {
             ok: false,
             message: format!("agent {} is not loaded", state.agent_id),

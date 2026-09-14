@@ -185,7 +185,7 @@ async fn reload_agents(
             for err in registry.errors() {
                 tracing::warn!(error = %err, "agent load error during reload");
             }
-            *shared.write().await = Arc::new(registry);
+            shared.swap(registry);
             tracing::info!(
                 agents = count,
                 errors = error_count,
