@@ -869,6 +869,28 @@ Three fields of that job are load-bearing:
   right setting for a nightly sweep and the wrong one for anything
   whose moment has passed.
 
+**Deploy the daemon first, then add the job.** The order is
+load-bearing in both directions:
+
+1. A daemon build with the maintenance consumer has to have *started*
+   against this broker at least once, because that start is what
+   creates the `fq-maintenance` stream and the durable. A durable
+   publish to a subject no stream matches is a configuration error on
+   fq-cron's side, not a transient one: it is logged loudly and **the
+   job is marked unhealthy until a reload** ([fq-cron
+   D5](../../adapters/fq-cron/DESIGN.md)). Adding the job first does
+   not queue a tick, it breaks the job.
+2. Even once the stream exists, the durable is created at the end of it
+   (see *What never runs*, below), so a tick that fires between adding
+   the job and the daemon's first start is dropped rather than run
+   late.
+
+So: deploy the daemon, confirm `fq doctor` lists the `fq-maintenance`
+consumer, and only then add the `[[job]]` block. On an instance where
+maintenance is switched off, the stream still exists — a disabled
+daemon creates it and consumes nothing — so fq-cron's publishes keep
+succeeding and the commands age out.
+
 ### Reading the outcome
 
 Every message the consumer resolves produces one `maintenance_run`

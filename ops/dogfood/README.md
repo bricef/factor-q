@@ -263,6 +263,17 @@ removes retired definitions and runs `fq reload` — `--restart` for
 hot-reloads by itself. The commands below are for reading the volume and
 for one-off repair: anything left in it by hand is gone at the next sync.
 
+**A new `fq.maintenance.*` job goes in after the daemon, never before.**
+The daemon's maintenance consumer is what creates the `fq-maintenance`
+stream, and fq-cron treats a durable publish to a subject no stream
+matches as a *configuration* error: the job is logged unhealthy and
+stays that way until a reload, rather than retried. So deploy the daemon
+build that knows the task first, check `docker compose exec fqd fq
+doctor` lists the `fq-maintenance` consumer, and only then commit the
+`[[job]]` block and sync. A tick that fires in between is dropped, not
+queued — the durable starts at the end of its stream (see *Scheduling
+maintenance with fq-cron* in `docs/guide/operating-the-daemon.md`).
+
 **Editing files in the volume.** The config and the agents live inside
 `fq-dogfood_fq-data`, not on the host's filesystem. Edit them through
 the daemon's container (`docker compose exec fqd sh`, then `vi` under
