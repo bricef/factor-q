@@ -61,14 +61,51 @@ fn spawn(
     task_delay: Duration,
 ) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>, String) {
     let name = format!("fq-maintenance-test-{}", Uuid::now_v7().simple());
+    let (tx, handle) = spawn_named(bus, &name, filter_subject, ack_wait, task_delay);
+    (tx, handle, name)
+}
+
+/// [`spawn`] under a durable name the caller chooses — what a restart
+/// looks like from the broker's side, where the durable is the identity
+/// and the process is not.
+fn spawn_named(
+    bus: &EventBus,
+    name: &str,
+    filter_subject: String,
+    ack_wait: Duration,
+    task_delay: Duration,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let consumer = MaintenanceConsumer::new(bus.clone(), Uuid::now_v7(), ack_wait)
-        .with_test_scope(name.clone(), filter_subject)
+        .with_test_scope(name.to_string(), filter_subject)
         .with_task_delay(task_delay);
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         consumer.run(rx).await.expect("maintenance consumer runs");
     });
-    (tx, handle, name)
+    (tx, handle)
+}
+
+/// Wait until the named durable exists on the maintenance stream, so a
+/// test that depends on "the consumer was here" says so to the broker
+/// rather than to a sleep.
+async fn await_durable(bus: &EventBus, name: &str) {
+    let stream = bus
+        .jetstream()
+        .get_stream(crate::bus::MAINTENANCE_STREAM_NAME)
+        .await
+        .expect("maintenance stream");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(name)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("durable {name} never appeared on the maintenance stream");
 }
 
 /// The whole path, end to end: fq-cron's publish, the durable, the
@@ -246,4 +283,135 @@ fn an_unknown_name_is_a_typed_refusal() {
             known: "ping".to_string(),
         }
     );
+}
+
+/// The `DeliverPolicy::New` decision, asserted: a command published
+/// while no durable exists is **never run**, not even when the daemon
+/// that would have run it starts a second later.
+///
+/// This is the rule the operator relies on — fq-cron's schedule is the
+/// retry, and a tick missed while the daemon was down stays missed —
+/// and it is also the rule that would be silently inverted by someone
+/// "fixing" the policy to `All` after a report that a command went
+/// missing. The consequence being bought is on the other side: no
+/// deployment ever executes a day of accumulated sweeps in one burst.
+///
+/// The guard against a vacuous pass is the second command: published
+/// *after* the durable exists, it runs, so the consumer was alive, the
+/// filter matched, and the first command's silence is the policy rather
+/// than a broken fixture.
+#[tokio::test]
+async fn a_command_published_before_the_durable_exists_is_never_run() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+    let mut outcomes = bus
+        .subscribe(subjects::SYSTEM_MAINTENANCE.to_string())
+        .await
+        .expect("subscribe to maintenance outcomes");
+
+    let subject = MaintenanceTask::Ping.subject();
+    // Published into the stream with nothing consuming it: the daemon
+    // is down, or this build's consumer has never run here.
+    publish_command(
+        &bus,
+        &subject,
+        Some("fq-cron/ping@while-the-daemon-was-down"),
+    )
+    .await;
+
+    let (shutdown, handle, name) = spawn(
+        &bus,
+        subject.clone(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
+    await_durable(&bus, &name).await;
+    publish_command(
+        &bus,
+        &subject,
+        Some("fq-cron/ping@after-the-daemon-came-back"),
+    )
+    .await;
+
+    let event = next_outcome(&mut outcomes, Duration::from_secs(10)).await;
+    let EventPayload::MaintenanceRun(payload) = &event.payload else {
+        panic!("expected a maintenance_run event, got {:?}", event.payload);
+    };
+    assert_eq!(
+        payload.run_id, "fq-cron/ping@after-the-daemon-came-back",
+        "the first outcome must be the command published after the durable existed"
+    );
+
+    // The missed command would land here if the durable had started at
+    // the beginning of the stream.
+    let second = tokio::time::timeout(Duration::from_secs(3), outcomes.next()).await;
+    assert!(
+        second.is_err(),
+        "a command published before the durable existed was run: {second:?}"
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
+}
+
+/// The other half of the same decision: an **existing** durable keeps
+/// its position, so an ordinary restart picks up what was published
+/// while the process was gone.
+///
+/// `New` is a rule about the durable's first creation, not about every
+/// start — a daemon that has run here before misses nothing by
+/// restarting. Without that, a deploy would silently drop whichever
+/// scheduled fire landed in the seconds a restart takes.
+#[tokio::test]
+async fn a_restart_picks_up_a_command_published_while_the_consumer_was_stopped() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+    let mut outcomes = bus
+        .subscribe(subjects::SYSTEM_MAINTENANCE.to_string())
+        .await
+        .expect("subscribe to maintenance outcomes");
+
+    let subject = MaintenanceTask::Ping.subject();
+    let name = format!("fq-maintenance-test-{}", Uuid::now_v7().simple());
+
+    // First start: the durable is created, and then the process goes
+    // away — a redeploy, a crash, a `fq down`.
+    let (shutdown, handle) = spawn_named(
+        &bus,
+        &name,
+        subject.clone(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
+    await_durable(&bus, &name).await;
+    let _ = shutdown.send(());
+    handle.await.expect("first consumer stops");
+
+    publish_command(&bus, &subject, Some("fq-cron/ping@during-the-restart")).await;
+
+    // Second start, same durable name: a new process, the broker's same
+    // consumer.
+    let (shutdown, handle) = spawn_named(
+        &bus,
+        &name,
+        subject.clone(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
+
+    let event = next_outcome(&mut outcomes, Duration::from_secs(10)).await;
+    let EventPayload::MaintenanceRun(payload) = &event.payload else {
+        panic!("expected a maintenance_run event, got {:?}", event.payload);
+    };
+    assert_eq!(payload.run_id, "fq-cron/ping@during-the-restart");
+    assert!(
+        matches!(&payload.outcome, MaintenanceOutcome::Succeeded { .. }),
+        "the missed command runs on the restart: {:?}",
+        payload.outcome
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
 }

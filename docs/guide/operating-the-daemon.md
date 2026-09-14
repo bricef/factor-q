@@ -902,6 +902,34 @@ run that task once more; every registered task is therefore convergent
 by construction (a refresh that overwrites, an audit that recomputes),
 never accumulative.
 
+### What never runs: a tick the daemon was not there for
+
+The durable is created **at the end of the stream**, so a command
+published before it existed at all is *dropped, not queued*. Three
+things follow, and an operator can rely on all three:
+
+- **A missed tick stays missed.** If the daemon is down when a schedule
+  fires, that fire does not run when it comes back. fq-cron's schedule
+  is the retry: the next tick is the recovery, and for an hourly job
+  that is an hour away. Nothing catches up, and nothing is queued
+  waiting to.
+- **An ordinary restart misses nothing.** That rule is about the
+  durable's *first creation*, not about every start. Once
+  `fq-maintenance` exists on the broker it keeps its acked position, so
+  a command published during a redeploy runs as soon as the consumer is
+  back.
+- **A first deployment never stampedes.** A durable created fresh — a
+  new instance, a broker restored from a message-only export,
+  `enabled` flipped back to true — would otherwise run up to a day of
+  accumulated sweeps in one burst. Cost is a first-order safety concern
+  (design principle 4), and this is the consumer-side mirror of
+  fq-cron's own rule that a job with no recorded state never catches
+  up.
+
+Both halves are asserted against a real broker, because the tempting
+answer to "a scheduled command went missing" is to replay the stream
+from its beginning — which buys the stampede back.
+
 ### Turning it off
 
 ```toml
