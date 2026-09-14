@@ -137,4 +137,32 @@ check "a wedged daemon still fails at READY_WAIT" 1 8 "did not log 'Runtime read
 run "$tmp/panic.log" 5
 check "a panic in a big log stops the wait" 1 2 "the daemon failed to start on 7d4433690051"
 
+# 5. A failed wait says what the daemon was saying. Unattended, the
+#    rollback replaces the container before anyone reads the
+#    notification, so "docker compose logs fqd" points at evidence that
+#    no longer exists; the deploy log has to carry it.
+contains() {  # contains <name> <needle>
+    if printf '%s' "$out" | grep -qF -- "$2"; then printf '  ok   %s\n' "$1"
+    else printf '  FAIL %s: output does not contain %q\n      %s\n' "$1" "$2" "$out"; failed=1; fi
+}
+run "$tmp/wedged.log" 3
+contains "a timed-out wait quotes the daemon log"    "--- last 30 lines of the daemon log ---"
+contains "  … the lines themselves, indented"        "    | 2026-09-14T13:29:"
+contains "  … and closes the quote"                  "--- end of the daemon log ---"
+# The reason stays the last line: deploy.sh reads it off the tail to
+# notify with, and to decide whether to roll back.
+if [ "$(printf '%s\n' "$out" | tail -1)" = "the daemon did not log 'Runtime ready' within 3s (docker compose logs fqd)" ]; then
+    printf '  ok   the reason is still the last line\n'
+else
+    printf '  FAIL the reason is not the last line: %q\n' "$(printf '%s\n' "$out" | tail -1)"; failed=1
+fi
+run "$tmp/panic.log" 5
+contains "a refused start quotes the log too"        "--- last 30 lines of the daemon log ---"
+
+# 6. A container that logged nothing at all says so, rather than
+#    printing an empty quote block.
+: > "$tmp/silent.log"
+run "$tmp/silent.log" 2
+check "a silent container says it was silent" 1 6 "the daemon logged nothing since it was started"
+
 [ "$failed" = 0 ] && echo "ready-check: all cases pass" || { echo "ready-check: FAILED" >&2; exit 1; }

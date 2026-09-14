@@ -208,22 +208,46 @@ daemon_failed()  {
     return "$rc"
 }
 
+# What the daemon was actually saying when the wait ended badly. The
+# reason line used to be the whole story and it sent the operator to
+# `docker compose logs fqd` — a container that, unattended, the rollback
+# has already replaced by the time anyone reads the notification, so the
+# evidence was gone. Under --auto the deploy log is the only record
+# there will ever be, so it carries the tail rather than a pointer to it.
+# Indented, so the deploy's own output is still legible, and never last:
+# the caller reads the reason off the final line.
+LOG_TAIL="${LOG_TAIL:-30}"       # daemon log lines quoted when the wait fails
+quote_log() {  # $1 = the log read since the container started
+    local shown
+    shown="$(printf '%s\n' "$1" | tail -n "$LOG_TAIL")"
+    if [ -z "${shown//[[:space:]]/}" ]; then
+        printf 'the daemon logged nothing since it was started\n'
+        return 0
+    fi
+    printf -- '--- last %s lines of the daemon log ---\n' "$LOG_TAIL"
+    printf '%s\n' "$shown" | sed 's/^/    | /'
+    printf -- '--- end of the daemon log ---\n'
+}
+
 # The ready loop, as its own function so ops/dogfood/tests can drive it
 # against a stub daemon (`deploy.sh --wait-ready <cid> <since> <tag>`)
 # without a compose stack. Returns 0 once the daemon is ready; otherwise
-# prints the reason on its last line and returns 1.
+# prints what the daemon said and then the reason, on its last line, and
+# returns 1.
 wait_ready() {  # $1 = container id, $2 = read logs since, $3 = tag being deployed
     local cid="$1" started="$2" tag="$3" fresh="" tick
     for tick in $(seq 1 "$READY_WAIT"); do
         : "$tick"
         fresh="$(docker logs --since "$started" "$cid" 2>&1 || true)"
         if daemon_failed "$fresh"; then
+            quote_log "$fresh"
             echo "the daemon failed to start on $tag (docker compose logs fqd)"
             return 1
         fi
         daemon_ready "$fresh" && return 0
         sleep 1
     done
+    quote_log "$fresh"
     echo "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd)"
     return 1
 }
