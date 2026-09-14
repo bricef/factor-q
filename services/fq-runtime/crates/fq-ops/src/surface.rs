@@ -398,7 +398,9 @@ pub struct OperatorSignalCountsParams {
     /// oversight: a notification is interesting inside a window and is
     /// swept when it leaves one, while an alert is never swept and
     /// counting alerts inside a window would answer a different
-    /// question from the one this report exists for.
+    /// question from the one this report exists for. What bounds the
+    /// alert count is not time but resolution — see
+    /// [`OperatorSignalCounts::open_alerts`].
     #[serde(default)]
     pub notifications_since: Option<String>,
 }
@@ -409,10 +411,17 @@ pub struct OperatorSignalCountsParams {
 pub struct OperatorSignalCounts {
     /// Notifications indexed at or after `notifications_since`.
     pub notifications: i64,
-    /// Every alert on the record — alerts are never swept, and this
-    /// build has no acknowledgement, so an alert stays counted once it
-    /// has happened.
-    pub alerts: i64,
+    /// Alerts on the record that no later signal has resolved.
+    ///
+    /// The field is named for what it counts. An alert closes when a
+    /// later signal names it in `resolves` — this build has no
+    /// *acknowledgement*, which is a person marking something read, and
+    /// that is a different thing from a component saying the condition
+    /// it raised the alert about has passed. Counting every alert on
+    /// record instead would give a number that can only grow: alerts
+    /// are never swept, so a week of a broken upstream reads as
+    /// twenty-eight things to act on and the line stops being read.
+    pub open_alerts: i64,
 }
 
 mod doctor;

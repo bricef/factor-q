@@ -1256,7 +1256,10 @@ hue is not a distinction to bet that on.
   it concerns, the envelope of the event it rode in on, and the signals
   either side of it from the same source.
 - **The home page** carries the count: *N in the last 24h · M open
-  alerts*, linking into the pane. It is red only while an alert stands.
+  alerts*, linking into the pane. It is red only while an alert is
+  open, and amber saying *unknown* if the count could not be read —
+  which is not a count of zero, and most often means the dashboard's
+  token predates the `read:operator_signal` grant.
 
 From a terminal, `fq notifications list` is the same listing and
 `fq notifications show <event-id>` the same detail page; both take
@@ -1272,11 +1275,29 @@ log it arrived on, so the pane can still show what needed a human last
 quarter, whole, particulars included.
 
 That means the two counts on the home page are not symmetrical, and
-deliberately: notifications are counted inside a day, alerts are counted
-outright. There is no acknowledgement in this version, so "open alerts"
-means every alert this daemon has ever recorded rather than every unread
-one. A per-operator seen-mark is a later change, once there is more than
-one operator to have seen anything.
+deliberately: notifications are counted inside a day, alerts are not
+counted inside a window at all. What bounds them is resolution.
+
+### Open and resolved: what closes an alert
+
+**An alert is open until a later signal resolves it.** A signal may name
+the one it closes — the earlier signal's event id, in the payload's
+`resolves` — and a recovery normally does, as a *notification* carrying
+the same `kind`, because the end of an alarm is not itself alarming. The
+home page's *M open alerts* is that fold: alerts with no resolver. It
+falls when the component that raised the alert says the condition has
+passed.
+
+The pane shows both ends. A resolved alert loses its stripe, reads
+`▲ alert · resolved`, and carries a link to the signal that closed it;
+the resolving signal carries a link back to the alert it closed. Nothing
+is deleted — a resolved alert is history and stays listed, and
+`fq notifications show` prints `resolved-by` (or `state open`) for it.
+
+This is **not** an acknowledgement. There is no seen-mark in this
+version: reading a signal does not close it, and only another signal
+does. A per-operator seen-mark is a later change, once there is more
+than one operator to have seen anything.
 
 ### What this pane is not
 

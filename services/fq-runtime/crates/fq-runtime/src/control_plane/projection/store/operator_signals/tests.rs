@@ -37,6 +37,19 @@ fn alert() -> Event {
     ))
 }
 
+/// The recovery of `alert`: the same kind, a notification, naming the
+/// alert it closes. That shape is the producer's contract — the topic
+/// has not changed, only its state.
+fn recovery_of(alert: &Event) -> Event {
+    signal_event(
+        OperatorSignalPayload::notification(
+            SignalKind::registered(kinds::PRICING_STALE),
+            "the pricing table refreshed",
+        )
+        .resolving(alert.envelope.event_id),
+    )
+}
+
 /// Backdate a row so a sweep at a later cutoff reaches it.
 async fn backdate(store: &ProjectionStore, event: &Event) {
     for table in ["events", "operator_signals"] {
@@ -310,4 +323,104 @@ async fn a_redelivery_refreshes_the_row_and_keeps_its_position() {
         .unwrap()
         .unwrap();
     assert_eq!(whole.seq, Some(11), "a redelivery must not unlocate a row");
+}
+
+/// **An alert is open until a later signal resolves it, and the count
+/// says so.**
+///
+/// The rule the home page's number rests on. Both directions over rows
+/// of identical severity: an alert nothing has answered is counted, and
+/// the same alert once a recovery names it is not. Without this the
+/// count can only grow — a week of a broken upstream is twenty-eight
+/// things to act on, none of which can ever close.
+#[tokio::test]
+async fn a_resolved_alert_is_not_an_open_one() {
+    let (_dir, store) = store().await;
+    let standing = alert();
+    let recovered = alert();
+    store.insert_event(&standing, None).await.unwrap();
+    store.insert_event(&recovered, None).await.unwrap();
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 2, "nothing has resolved either of them yet");
+
+    let recovery = recovery_of(&recovered);
+    store.insert_event(&recovery, None).await.unwrap();
+    let (notifications, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 1, "the resolved alert is no longer open");
+    assert_eq!(
+        notifications, 1,
+        "…and the recovery is itself a notification, counted as one"
+    );
+
+    // A resolution is not a deletion: the alert is still on the record,
+    // still listed, and still whole. "Closed" is a state, not a sweep.
+    let rows = store
+        .query_operator_signals(Some("alert"), None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "both alerts are still listed");
+}
+
+/// The relation is readable from both ends, which is what the detail
+/// page renders: the alert names what closed it, and the recovery names
+/// what it closed.
+#[tokio::test]
+async fn the_resolution_is_readable_from_both_ends() {
+    let (_dir, store) = store().await;
+    let raised = alert();
+    let recovery = recovery_of(&raised);
+    store.insert_event(&raised, None).await.unwrap();
+    store.insert_event(&recovery, None).await.unwrap();
+
+    let raised_id = raised.envelope.event_id.to_string();
+    let recovery_id = recovery.envelope.event_id.to_string();
+
+    let closed = store.operator_signal(&raised_id).await.unwrap().unwrap();
+    assert_eq!(closed.resolved_by.as_deref(), Some(recovery_id.as_str()));
+    assert_eq!(closed.resolves, None);
+
+    let closer = store.operator_signal(&recovery_id).await.unwrap().unwrap();
+    assert_eq!(closer.resolves.as_deref(), Some(raised_id.as_str()));
+    assert_eq!(closer.resolved_by, None);
+
+    // And on the index row the pane lists, so a reader sees the state
+    // without opening the signal.
+    let rows = store
+        .query_operator_signals(None, None, None, 10)
+        .await
+        .unwrap();
+    let row = |id: &str| {
+        rows.iter()
+            .find(|r| r.event_id == id)
+            .expect("the row is listed")
+    };
+    assert_eq!(
+        row(&raised_id).resolved_by.as_deref(),
+        Some(recovery_id.as_str())
+    );
+    assert_eq!(
+        row(&recovery_id).resolves.as_deref(),
+        Some(raised_id.as_str())
+    );
+    assert_eq!(row(&recovery_id).resolved_by, None);
+}
+
+/// A resolution that arrives before the signal it names — a redelivery
+/// out of order, or a projector that folded the recovery first — is not
+/// refused and is not lost: the edge is a value on the row, so the
+/// count is right as soon as both rows exist, whichever order they
+/// landed in.
+#[tokio::test]
+async fn a_resolution_may_be_indexed_before_the_signal_it_closes() {
+    let (_dir, store) = store().await;
+    let raised = alert();
+    let recovery = recovery_of(&raised);
+    store.insert_event(&recovery, None).await.unwrap();
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 0, "nothing is open: the alert is not indexed yet");
+
+    store.insert_event(&raised, None).await.unwrap();
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 0, "and it arrives already resolved");
 }

@@ -26,12 +26,14 @@ fn linked_ids(ids: &[String]) -> String {
 }
 
 /// The home page's one-line count: how many notifications landed in the
-/// last day, and how many alerts stand on the record.
+/// last day, and how many alerts are still open.
 ///
 /// "Open" rather than "unread" is deliberate and the line says so in
-/// its hover: this build has no acknowledgement, so an alert stays
-/// counted once it has happened. A number that claimed to be unread and
-/// never fell would be worse than one that says what it is.
+/// its hover: an alert closes when a later signal resolves it — the
+/// component saying the condition has passed — and not when a person
+/// looks at it. There is no acknowledgement in this build, and a number
+/// that claimed to be unread would be worse than one that says what it
+/// is.
 ///
 /// `None` is **unknown** — the counts call did not answer. It renders
 /// amber and says so, because the alternative is the one answer this
@@ -45,12 +47,12 @@ fn counts_row(counts: Option<&OperatorSignalCounts>) -> String {
         return r#"<tr><th>notifications</th><td class="warn"><a href="/notifications">unknown</a> — the daemon did not answer <code>operator_signal.counts</code>; this is not a count of zero</td></tr>"#
             .to_string();
     };
-    let class = if counts.alerts > 0 { "bad" } else { "ok" };
+    let class = if counts.open_alerts > 0 { "bad" } else { "ok" };
     format!(
-        r#"<tr><th>notifications</th><td class="{class}"><a href="/notifications">{} in the last 24h</a> · <a href="/notifications?severity=alert" title="every alert on record — alerts are never swept, and this build has no acknowledgement">{} open alert{}</a></td></tr>"#,
+        r#"<tr><th>notifications</th><td class="{class}"><a href="/notifications">{} in the last 24h</a> · <a href="/notifications?severity=alert" title="alerts no later signal has resolved — alerts are never swept, and this build has no acknowledgement, so this falls when the condition passes and not when you read it">{} open alert{}</a></td></tr>"#,
         counts.notifications,
-        counts.alerts,
-        if counts.alerts == 1 { "" } else { "s" },
+        counts.open_alerts,
+        if counts.open_alerts == 1 { "" } else { "s" },
     )
 }
 

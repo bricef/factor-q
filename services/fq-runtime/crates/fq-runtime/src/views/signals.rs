@@ -52,18 +52,18 @@ impl Views {
     }
 
     /// How many notifications landed at or after `notifications_since`,
-    /// and how many alerts stand on the record — the home page's line.
+    /// and how many alerts are still open — the home page's line.
     pub async fn operator_signal_counts(
         &self,
         notifications_since: Option<&str>,
     ) -> Result<fq_ops::surface::OperatorSignalCounts, ViewsError> {
-        let (notifications, alerts) = self
+        let (notifications, open_alerts) = self
             .projection
             .operator_signal_counts(notifications_since)
             .await?;
         Ok(fq_ops::surface::OperatorSignalCounts {
             notifications,
-            alerts,
+            open_alerts,
         })
     }
 }

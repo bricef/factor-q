@@ -129,6 +129,18 @@ fn render_signal(signal: &OperatorSignalDetailView) -> String {
     if let Some(url) = &signal.references.url {
         out.push_str(&format!("url           {url}\n"));
     }
+    // The open/closed state, which is what decides whether this alert is
+    // one of the ones `operator_signal.counts` is counting. Both
+    // directions of the relation print, because a signal can close an
+    // earlier one and be closed by a later one.
+    if let Some(id) = &signal.resolved_by {
+        out.push_str(&format!("resolved-by   {id}\n"));
+    } else if signal.severity.is_alert() {
+        out.push_str("state         open (no later signal has resolved it)\n");
+    }
+    if let Some(id) = &signal.resolves {
+        out.push_str(&format!("resolves      {id}\n"));
+    }
     // The particulars, pretty-printed, or a line saying there are
     // none — an absent block and a block that failed to render must
     // not look the same.

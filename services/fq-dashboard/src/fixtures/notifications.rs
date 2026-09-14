@@ -23,6 +23,12 @@ use super::NOW_MS;
 const STALE_ID: &str = "019f6a01-0000-7000-8000-0000000000a1";
 const REFUSED_ID: &str = "019f6a00-0000-7000-8000-0000000000a2";
 const DEPLOYED_ID: &str = "019f69ff-0000-7000-8000-0000000000a3";
+/// A yesterday's alert and the notification that closed it — the pair
+/// that makes *open* a visible state rather than a word in a tooltip.
+/// The gallery needs both an open alert and a resolved one or the two
+/// renderings are never compared.
+const OLD_STALE_ID: &str = "019f69f0-0000-7000-8000-0000000000a4";
+const RECOVERED_ID: &str = "019f69f1-0000-7000-8000-0000000000a5";
 
 /// A fixed RFC3339 instant `ms_ago` before the fixtures' frozen now.
 fn at(ms_ago: i64) -> String {
@@ -45,6 +51,8 @@ pub(crate) fn signals() -> Vec<OperatorSignalView> {
             summary: "the live pricing table has not refreshed in 31h — prices are older \
                       than the models they price"
                 .into(),
+            resolves: None,
+            resolved_by: None,
         },
         OperatorSignalView {
             event_id: REFUSED_ID.into(),
@@ -53,6 +61,8 @@ pub(crate) fn signals() -> Vec<OperatorSignalView> {
             source: "pricing".into(),
             kind: "pricing.change_refused".into(),
             summary: "moonshotai/kimi-k3 input price moved 6.2x; kept the prior price".into(),
+            resolves: None,
+            resolved_by: None,
         },
         OperatorSignalView {
             event_id: DEPLOYED_ID.into(),
@@ -61,6 +71,28 @@ pub(crate) fn signals() -> Vec<OperatorSignalView> {
             source: "deploy".into(),
             kind: "deploy.succeeded".into(),
             summary: "build ff7db0ee91c5 came up on fq-dogfood".into(),
+            resolves: None,
+            resolved_by: None,
+        },
+        OperatorSignalView {
+            event_id: RECOVERED_ID.into(),
+            timestamp: at(20 * 3600 * 1000),
+            severity: SignalSeverity::Notification,
+            source: "pricing".into(),
+            kind: "pricing.stale".into(),
+            summary: "the live pricing table refreshed — 1,412 entries, 3m old".into(),
+            resolves: Some(OLD_STALE_ID.into()),
+            resolved_by: None,
+        },
+        OperatorSignalView {
+            event_id: OLD_STALE_ID.into(),
+            timestamp: at(26 * 3600 * 1000),
+            severity: SignalSeverity::Alert,
+            source: "pricing".into(),
+            kind: "pricing.stale".into(),
+            summary: "the live pricing table has not refreshed in 25h".into(),
+            resolves: None,
+            resolved_by: Some(RECOVERED_ID.into()),
         },
     ]
 }
@@ -90,17 +122,21 @@ pub(crate) fn signal_detail() -> OperatorSignalDetailView {
             invocation_id: None,
             url: Some("https://github.com/BerriAI/litellm/commits/main".into()),
         },
+        resolves: None,
+        resolved_by: None,
         newer_from_source: None,
         older_from_source: Some(REFUSED_ID.into()),
     }
 }
 
-/// The home page's counts, consistent with the rows above: two
-/// notifications inside the day, one alert standing.
+/// The home page's counts, consistent with the rows above: three
+/// notifications inside the day, and one of the two alerts still open —
+/// the older one was resolved, which is the whole reason the number is
+/// a fold and not a row count.
 pub(crate) fn signal_counts() -> OperatorSignalCounts {
     OperatorSignalCounts {
-        notifications: 2,
-        alerts: 1,
+        notifications: 3,
+        open_alerts: 1,
     }
 }
 

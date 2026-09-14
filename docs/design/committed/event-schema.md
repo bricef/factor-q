@@ -861,7 +861,7 @@ A component of the daemon saying an operator should look at something ([#736](ht
 - **A recovery is normally a notification resolving an alert** — the end of an alarm is not itself alarming — and it names the **same `kind`** as the signal it resolves: the topic has not changed, only its state. The severity column in the registry below is therefore the severity a kind is *raised* at.
 - **A notification may be resolved too**, by whatever answers it; nothing about `resolves` is specific to alerts.
 - **Nothing validates the id.** The producer holds it because it published the signal it is now closing, and a claim about the log is answered by reading the log — the same reason the daemon never parses `detail`.
-- The projection index and the "open alerts" count that reads it are the pane's work ([#736](https://github.com/bricef/factor-q/issues/736)); this vocabulary only records which signal closed which.
+- **The index reads it as an edge, in both directions.** The projection stores `resolves` on the signal's row (`operator_signals.resolves`, indexed) and answers `resolved_by` — the first later signal naming this one — as a correlated lookup. `operator_signal.counts`' `open_alerts` is `severity = 'alert' AND NOT EXISTS (a row resolving it)`, which is what makes the home page's number one that can fall ([#736](https://github.com/bricef/factor-q/issues/736)). A resolution is not a deletion and not an acknowledgement: the resolved signal stays on the record, stays listed, and stays exempt from the sweep if it is an alert.
 
 **The two severities**, which are the contract the dashboard's pane implements and the operator guide records:
 

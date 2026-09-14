@@ -139,6 +139,13 @@ pub(crate) fn register_operator_signal_view(
          summary line — most recent `limit` first. Every row's `event_id` reads the \
          whole signal back through Get, and always resolves: the row is the signal, so \
          there is no payload behind it for retention to take away. \
+         AN ALERT IS OPEN UNTIL A LATER SIGNAL CLOSES IT. A signal may name the one it \
+         closes, by event id, in `resolves`; every row here carries that and also \
+         `resolved_by`, the first later signal that named it. An alert whose \
+         `resolved_by` is null is one of the ones `operator_signal.counts` calls open. \
+         A resolution is a relation between two signals on one log and not an \
+         acknowledgement: a resolved alert is history, not something a person marked \
+         read, and it stays listed. \
          RETENTION IS NOT THE SAME FOR THE TWO SEVERITIES. Notifications age out with \
          the event log they were folded from, on the daemon's `retention_days` window. \
          ALERTS ARE NEVER SWEPT and have no expiry: the record that a person had to \
@@ -207,19 +214,21 @@ fn register_counts_report(
 ) -> anyhow::Result<()> {
     let decl = fq_ops::Report::new::<OperatorSignalCountsParams, OperatorSignalCounts>(
         fq_ops::OperatorSignalReport::Counts,
-        "How many notifications landed inside a window, and how many alerts stand on \
-         the record.",
+        "How many notifications landed inside a window, and how many alerts are still \
+         open.",
         fq_ops::Stability::Experimental,
     )
     .description(
         "Two counts, and only one of them takes a window. `notifications_since` bounds \
-         the notification count; the alert count is every alert indexed, because alerts \
-         are never swept and counting them inside a window would answer a different \
-         question. This build has no acknowledgement, so an alert stays counted once it \
-         has happened — the number says how many alerts this daemon has ever recorded, \
-         not how many are unread. Both counts are reads of the same index \
-         `operator_signal.list` pages, so a count and a listing narrowed the same way \
-         agree.",
+         the notification count; the alert count is bounded by RESOLUTION instead, \
+         because alerts are never swept and counting them inside a window would answer a \
+         different question. AN ALERT IS OPEN UNTIL A LATER SIGNAL RESOLVES IT — names \
+         its `event_id` in that signal's `resolves` — so `open_alerts` is a fold over \
+         the log rather than a row count, and it falls when the component that raised \
+         the alert says the condition has passed. It is not an unread count: this build \
+         has no acknowledgement, and a resolved alert stays on the record and stays \
+         listable. Both counts are reads of the same index `operator_signal.list` pages, \
+         so a count and a listing narrowed the same way agree.",
     );
     registry
         .report::<OperatorSignalCountsParams, OperatorSignalCounts, _, _>(

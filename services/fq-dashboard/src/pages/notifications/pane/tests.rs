@@ -181,8 +181,124 @@ fn a_hostile_summary_is_escaped() {
         source: "pricing".into(),
         kind: "pricing.change_refused".into(),
         summary: "<script>alert(1)</script>".into(),
+        resolves: None,
+        resolved_by: None,
     }];
     let html = notifications(&rows, &SignalFilters::default(), 1_783_803_600_000);
     assert!(!html.contains("<script>"), "got: {html}");
     assert!(html.contains("&lt;script&gt;"), "got: {html}");
+}
+
+/// **A resolved alert reads as resolved, on the row.**
+///
+/// The count on the home page is a fold over `resolves`, so the pane
+/// has to show the same state or the two disagree: an operator who
+/// sees "1 open alert" and then a list of two alerts with nothing to
+/// tell them apart learns that the number is wrong. The stripe is the
+/// carrier — it means *this is open* — and the row says the word as
+/// well, because the stripe's absence is not a signal on its own.
+#[test]
+fn a_resolved_alert_is_marked_resolved_and_loses_the_stripe() {
+    let rows = rows();
+    let html = notifications(&rows, &SignalFilters::default(), 1_783_803_600_000);
+
+    let open = rows
+        .iter()
+        .find(|r| r.severity.is_alert() && r.resolved_by.is_none())
+        .expect("the fixture has an open alert");
+    let closed = rows
+        .iter()
+        .find(|r| r.severity.is_alert() && r.resolved_by.is_some())
+        .expect("the fixture has a resolved alert");
+    // Rows are found by their summary rather than by their identity:
+    // a resolved row also *links* to the signal that closed it, so
+    // matching on the id alone picks up the wrong row.
+    let row_of = |summary: &str| {
+        html.split("<tr")
+            .find(|row| row.contains(summary))
+            .map(|row| format!("<tr{row}"))
+            .expect("the row is rendered")
+    };
+
+    let open_row = row_of(&open.summary);
+    assert!(
+        open_row.starts_with(r#"<tr class="alert">"#),
+        "an open alert keeps the stripe: {open_row}"
+    );
+    assert!(open_row.contains("▲ alert"), "got: {open_row}");
+    assert!(
+        !open_row.contains("resolved"),
+        "and claims nothing about being closed: {open_row}"
+    );
+
+    let closed_row = row_of(&closed.summary);
+    assert!(
+        !closed_row.starts_with(r#"<tr class="alert">"#),
+        "a resolved alert drops the stripe: {closed_row}"
+    );
+    assert!(
+        closed_row.contains("▲ alert · resolved"),
+        "…and says so in words: {closed_row}"
+    );
+    assert!(
+        closed_row.contains(&format!(
+            r#"resolved by <a href="/notifications/{}">"#,
+            closed.resolved_by.as_deref().unwrap()
+        )),
+        "with the link to what closed it: {closed_row}"
+    );
+
+    // And the other end of the relation: the recovery names what it
+    // resolved, so the walk works from either row.
+    let recovery = rows
+        .iter()
+        .find(|r| r.resolves.is_some())
+        .expect("the fixture has a resolving signal");
+    assert!(
+        row_of(&recovery.summary).contains(&format!(
+            r#"resolves <a href="/notifications/{}">"#,
+            recovery.resolves.as_deref().unwrap()
+        )),
+        "got: {html}"
+    );
+}
+
+/// The detail page carries the same relation, in both directions, and
+/// names an unresolved alert's state rather than leaving it implied by
+/// an absent row.
+#[test]
+fn the_detail_page_says_whether_an_alert_is_open() {
+    let mut signal = fixtures::notification_signal_detail();
+    assert!(signal.severity.is_alert(), "the fixture is the alert");
+
+    let html = notification_detail(&signal, 1_783_803_600_000);
+    assert!(
+        html.contains(r#"<th>state</th><td><span class="bad">open</span>"#),
+        "an alert nothing has resolved says it is open: {html}"
+    );
+
+    signal.resolved_by = Some("019f69f1-0000-7000-8000-0000000000a5".into());
+    let html = notification_detail(&signal, 1_783_803_600_000);
+    assert!(
+        html.contains(
+            r#"<th>resolved by</th><td><a href="/notifications/019f69f1-0000-7000-8000-0000000000a5">"#
+        ),
+        "got: {html}"
+    );
+    assert!(
+        !html.contains("<th>state</th>"),
+        "a resolved alert is not also open: {html}"
+    );
+    assert!(html.contains("▲ alert · resolved"), "got: {html}");
+
+    // The other direction, on the signal that did the resolving.
+    signal.resolved_by = None;
+    signal.resolves = Some("019f69f0-0000-7000-8000-0000000000a4".into());
+    let html = notification_detail(&signal, 1_783_803_600_000);
+    assert!(
+        html.contains(
+            r#"<th>resolves</th><td><a href="/notifications/019f69f0-0000-7000-8000-0000000000a4">"#
+        ),
+        "got: {html}"
+    );
 }
