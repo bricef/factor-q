@@ -890,11 +890,16 @@ Three fields of that job are load-bearing:
 **Deploy the daemon first, then add the job.** The order is
 load-bearing in both directions:
 
-1. A daemon build with the maintenance consumer has to have *started*
-   against this broker at least once, because that start is what
-   creates the `fq-maintenance` stream and the durable. A durable
-   publish to a subject no stream matches is a configuration error on
-   fq-cron's side, not a transient one: it is logged loudly and **the
+1. A build with the maintenance consumer has to have *connected* to
+   this broker at least once, because connecting is what creates the
+   `fq-maintenance` stream (the daemon's maintenance consumer then
+   creates the durable on it). Any factor-q process that connects the
+   event bus creates the stream — a `fq` CLI call against this broker
+   counts — but in practice it is the daemon's start, and fq-cron is
+   the one process that never does it, because it publishes without the
+   bus. A durable publish to a subject no stream matches is a
+   configuration error on fq-cron's side, not a transient one: it is
+   logged loudly and **the
    job is marked unhealthy until a reload** ([fq-cron
    D5](../../adapters/fq-cron/DESIGN.md)). Adding the job first does
    not queue a tick, it breaks the job.
