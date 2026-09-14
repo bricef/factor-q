@@ -41,9 +41,16 @@ STUB
 chmod +x "$tmp/bin/docker"
 
 # The daemon's real startup preamble, copied from the lines fq-daemon
-# prints on the way up (src/daemon.rs, src/hosted.rs) and from the
+# prints on the way up (src/daemon.rs, src/hosted.rs), from the
 # registry's unenforced-`sandbox.network` warning (fq-agent/src/registry.rs),
-# which the dogfood instance emits once per agent that declares hosts.
+# which the dogfood instance emits once per agent that declares hosts,
+# and from the pricing load (fq-runtime/src/pricing/live.rs), which since
+# #744 reports what it accepted and what it turned away on every start.
+#
+# Every line here is a line a HEALTHY daemon logs. Two of them say
+# "refus" — `refused_changes=0` at INFO, "refusing MCP tool
+# registration" at WARN — and the failure check must read straight past
+# both; the first is what broke every deploy on 2026-09-14 (#752).
 preamble() {
     cat <<'LOG'
 factor-q runtime starting
@@ -56,7 +63,9 @@ factor-q runtime starting
 2026-09-14T13:28:44.118221Z  WARN fq_agent::registry: sandbox.network is declared but NOT enforced: this agent has ambient network access and can reach any host. The declaration is currently a no-op (#35); enforcement is tracked by #208 (proxy) and #209 (ADR-0010). agent="issue-fixer" path=/var/lib/factor-q/agents/issue-fixer.md
 2026-09-14T13:28:44.118402Z  WARN fq_agent::registry: sandbox.network is declared but NOT enforced: this agent has ambient network access and can reach any host. The declaration is currently a no-op (#35); enforcement is tracked by #208 (proxy) and #209 (ADR-0010). agent="pr-reviewer" path=/var/lib/factor-q/agents/pr-reviewer.md
 2026-09-14T13:28:44.118533Z  WARN fq_agent::registry: sandbox.network is declared but NOT enforced: this agent has ambient network access and can reach any host. The declaration is currently a no-op (#35); enforcement is tracked by #208 (proxy) and #209 (ADR-0010). agent="backlog-groomer" path=/var/lib/factor-q/agents/backlog-groomer.md
+2026-09-14T13:28:44.203118Z  WARN fq_daemon::shared_servers: refusing MCP tool registration server="playwright" error=server did not come up within 10s
   agents loaded:    9 (errors: 0)
+2026-09-14T13:28:45.771904Z  INFO fq_runtime::pricing::live: accepted a pricing table entries=2935 refused_changes=0 not_admitted=336 source=litellm-main
   edge:             0.0.0.0:9470
   worker db:        /var/lib/factor-q/state/worker.db
   control-plane db: /var/lib/factor-q/state/control_plane.db
@@ -164,5 +173,55 @@ contains "a refused start quotes the log too"        "--- last 30 lines of the d
 : > "$tmp/silent.log"
 run "$tmp/silent.log" 2
 check "a silent container says it was silent" 1 6 "the daemon logged nothing since it was started"
+
+# 7. The other false-negative's mirror image: a HEALTHY start declared
+#    dead. The failure check used to be a case-insensitive `refus(e|ing)`
+#    over the whole log, so the pricing line every start logs since #744
+#    — `refused_changes=0`, a second before "Runtime ready" — matched it,
+#    and every deploy from 2026-09-14 12:25 UTC said "the daemon failed
+#    to start" and rolled a good build back (#752, four times that day).
+#    The preamble above carries that line, and the WARN about an MCP
+#    server whose tools are refused, so cases 1 and 2 already cover it;
+#    this is the same start with READY_WAIT long enough that a wait would
+#    show, so a regression reads as a failure rather than as slowness.
+{ preamble; ready_lines; chatter 1200; } > "$tmp/healthy.log"
+run "$tmp/healthy.log" 30
+check "a healthy start is not read as a refusal" 0 3 ""
+
+# 8. And in the bytes `docker logs` really hands over. tracing colours
+#    its output whether or not stderr is a terminal, and docker passes
+#    the escapes through untouched, so the level tag a check reads is
+#    "\e[32m INFO\e[0m" rather than " INFO ". A rule that skips routine
+#    lines has to see the level through the colour.
+esc=$'\033'; dim="${esc}[2m"; off="${esc}[0m"; ital="${esc}[3m"; green="${esc}[32m"
+{
+    preamble
+    printf '%s\n' "${dim}2026-09-14T17:17:47.098277Z${off} ${green} INFO${off} ${dim}fq_runtime::pricing::live${off}${dim}:${off} accepted a pricing table ${ital}entries${off}${dim}=${off}2935 ${ital}refused_changes${off}${dim}=${off}0 ${ital}not_admitted${off}${dim}=${off}336 ${ital}source${off}${dim}=${off}litellm-main"
+    ready_lines
+} > "$tmp/coloured.log"
+run "$tmp/coloured.log" 30
+check "a coloured INFO pricing line is not a refusal" 0 3 ""
+
+# 9. A daemon that genuinely refuses still stops the wait at once. The
+#    coverage guarantee (ADR-0004) is the one that fires in practice: a
+#    declared model no provider routes, or one with no price, and
+#    `validate_model_registry` ends the start.
+{ preamble; printf '%s\n' \
+    "2026-09-14T13:28:46.001122Z ERROR fqd: model registry validation failed:" \
+    '  - agent "issue-fixer" declares model "anthropic/claude-nope-5", which no provider routes' \
+    ; chatter 1200; } > "$tmp/refused.log"
+run "$tmp/refused.log" 30
+check "a registry refusal stops the wait" 1 3 "the daemon failed to start on 7d4433690051"
+
+# 10. The same refusal as the daemon actually prints it. A fatal leaves
+#     fqd through `eprintln!("{err:#}")` (fq-daemon's `fqd_main`), so it
+#     carries no level tag at all — it must be caught by what it says,
+#     not by the level it was not tagged with.
+{ preamble; printf '%s\n' \
+    "model registry validation failed:" \
+    '  - agent "issue-fixer" declares model "anthropic/claude-nope-5", which no provider routes' \
+    ; } > "$tmp/fatal.log"
+run "$tmp/fatal.log" 30
+check "an untagged fatal stops the wait" 1 3 "the daemon failed to start on 7d4433690051"
 
 [ "$failed" = 0 ] && echo "ready-check: all cases pass" || { echo "ready-check: FAILED" >&2; exit 1; }

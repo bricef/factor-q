@@ -198,12 +198,56 @@ fi
 # the same hazard; this is the other place it lived.
 daemon_ready()   { case "$1" in *"Runtime ready"*) return 0 ;; *) return 1 ;; esac; }
 # A start that has already failed, so the loop stops instead of waiting
-# out READY_WAIT: a registry the daemon refuses, a panic. Case-insensitive
-# extended-regex match, in the shell for the same reason as above.
+# out READY_WAIT: a registry the daemon refuses, a panic.
+#
+# What it must NOT match is a healthy daemon talking about refusals,
+# which it does on every start. Since the pricing stack (#744) the load
+# reports what it accepted and what it turned away:
+#
+#   … INFO fq_runtime::pricing::live: accepted a pricing table entries=2935 refused_changes=0 …
+#
+# and an MCP server that did not come up logs "refusing MCP tool
+# registration" at WARN. The pattern here used to be a case-insensitive
+# `refus(e|ing)` over the whole log; `refused_changes=0` matched it a
+# second before the daemon logged "Runtime ready", so from 2026-09-14
+# 12:25 UTC EVERY deploy declared the daemon dead the moment it came
+# alive, and --auto rolled a good build back four times (#752).
+#
+# So two conditions, both on one line:
+#
+#   1. the line is not one the daemon tagged TRACE/DEBUG/INFO/WARN —
+#      a fatal leaves fqd through `eprintln!("{err:#}")` (fq-daemon's
+#      `fqd_main`) with no level tag at all, a panic likewise, and an
+#      ERROR is not routine. tracing writes the level in ANSI and
+#      `docker logs` passes the escapes through byte for byte, so the
+#      tag is matched through the colour codes;
+#   2. the line carries a phrase the daemon uses only when a start is
+#      over: `validate_model_registry`'s "model registry validation
+#      failed" (fq-runtime/src/config.rs), the panic hook's "panicked
+#      at", a refusal to start.
+#
+# Phrases, not substrings: a start either ends or it does not, and the
+# words for that are few. The level test is the second lock — it keeps
+# an agent's output or a trigger's title quoting one of them from
+# reading as the daemon's own death.
+#
+# Matched with bash's own `[[`, NEVER by piping the log into `grep`,
+# for the reason daemon_ready gives above.
+DAEMON_ANSI=$'(\033\\[[0-9;]*m)*'      # tracing's colour codes, which docker logs keeps
+# <ts> <level> — the shape tracing's text format gives a routine line.
+DAEMON_ROUTINE="^${DAEMON_ANSI}[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]*${DAEMON_ANSI}[[:space:]]+${DAEMON_ANSI}[[:space:]]*(TRACE|DEBUG|INFO|WARN)${DAEMON_ANSI}[[:space:]]"
+DAEMON_FATAL='registry validation failed|panicked at|refus(ing|ed) to start'
 daemon_failed()  {
-    local rc=0
+    local line rc=1
     shopt -s nocasematch
-    [[ "$1" =~ registry\ validation\ failed|refus(e|ing)|panicked ]] || rc=1
+    # The whole log first: no fatal phrase anywhere and there is nothing
+    # to walk — this runs once a second against a log that only grows.
+    if [[ "$1" =~ $DAEMON_FATAL ]]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ $DAEMON_ROUTINE ]]; then continue; fi
+            if [[ "$line" =~ $DAEMON_FATAL ]]; then rc=0; break; fi
+        done <<< "$1"
+    fi
     shopt -u nocasematch
     return "$rc"
 }
