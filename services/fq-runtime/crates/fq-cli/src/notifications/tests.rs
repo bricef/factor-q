@@ -20,6 +20,8 @@ fn signal() -> OperatorSignalDetailView {
             url: Some("https://example.invalid/run/1".into()),
             ..SignalReferencesView::default()
         },
+        resolves: None,
+        resolved_by: None,
         newer_from_source: None,
         older_from_source: Some("01990000-0000-7000-8000-000000000027".into()),
     }
@@ -74,4 +76,42 @@ fn a_long_summary_is_capped_on_a_char_boundary() {
     assert!(capped.ends_with('…'));
     // Short lines are untouched — no ellipsis on a summary that fits.
     assert_eq!(display_cap("short", 52), "short");
+}
+
+/// **Whether an alert is still open is printed, and so is the relation
+/// either way.** `fq notifications show` is what an operator reads over
+/// SSH when the dashboard is not reachable, so the state the home page
+/// counts on has to be legible here too.
+#[test]
+fn the_open_state_and_the_resolution_are_printed() {
+    let open = render_signal(&signal());
+    assert!(
+        open.contains("state         open (no later signal has resolved it)"),
+        "got: {open}"
+    );
+
+    let mut closed = signal();
+    closed.resolved_by = Some("01990000-0000-7000-8000-000000000029".into());
+    let out = render_signal(&closed);
+    assert!(
+        out.contains("resolved-by   01990000-0000-7000-8000-000000000029"),
+        "got: {out}"
+    );
+    assert!(
+        !out.contains("state         open"),
+        "a resolved alert is not also open: {out}"
+    );
+
+    let mut recovery = signal();
+    recovery.severity = SignalSeverity::Notification;
+    recovery.resolves = Some("01990000-0000-7000-8000-000000000027".into());
+    let out = render_signal(&recovery);
+    assert!(
+        out.contains("resolves      01990000-0000-7000-8000-000000000027"),
+        "got: {out}"
+    );
+    assert!(
+        !out.contains("state         open"),
+        "only an alert has an open state to report: {out}"
+    );
 }

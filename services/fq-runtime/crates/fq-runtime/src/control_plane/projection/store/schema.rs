@@ -88,9 +88,10 @@ use crate::db::schema::{Compatibility, check_compatibility, read_user_version, s
 ///   the only copy of the spend, so it has to be the only copy of the
 ///   prices that produced it.
 /// - **v3** — `operator_signals`, the index behind the dashboard's
-///   notifications pane. A bump rather than an `ALTER`, because the
-///   history is in the events: every `operator_signal` the stream
-///   still holds is re-derived by the replay, so a daemon that
+///   notifications pane, including the `resolves` edge that decides
+///   which alerts are still open. A bump rather than an `ALTER`,
+///   because the history is in the events: every `operator_signal` the
+///   stream still holds is re-derived by the replay, so a daemon that
 ///   upgrades finds its pane populated instead of empty back to the
 ///   moment of the upgrade.
 pub const PROJECTION_SCHEMA_VERSION: u32 = 3;
@@ -209,8 +210,17 @@ CREATE INDEX IF NOT EXISTS idx_triggers_seq ON triggers(seq);
 -- (`references` is a SQL keyword, hence `refs`.)
 --
 -- `seq` is the log position of the event this row folds, NULL when the
--- delivery carried no JetStream metadata. (No semicolons in these
--- comments -- the schema runner splits statements on them.)
+-- delivery carried no JetStream metadata.
+--
+-- `resolves` is the event_id of the signal this one closes, NULL for
+-- every signal that closes nothing. IT IS WHAT MAKES AN ALERT COUNT
+-- FALL: an alert is open until some later signal names it here, so
+-- "how many alerts are open" is a NOT EXISTS against this column rather
+-- than a row count that can only ever grow. Not a foreign key -- the
+-- resolving signal may arrive before the projector has folded the one
+-- it resolves, and a producer's claim about the log is answered by
+-- reading the log rather than refused at insert. (No semicolons in
+-- these comments -- the schema runner splits statements on them.)
 CREATE TABLE IF NOT EXISTS operator_signals (
     event_id        TEXT PRIMARY KEY,
     seq             INTEGER,
@@ -222,12 +232,18 @@ CREATE TABLE IF NOT EXISTS operator_signals (
     kind            TEXT NOT NULL,
     summary         TEXT NOT NULL,
     detail          TEXT,
-    refs            TEXT
+    refs            TEXT,
+    resolves        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_operator_signals_time ON operator_signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_operator_signals_severity_time ON operator_signals(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_operator_signals_source_time ON operator_signals(source, timestamp);
+-- The open-alert count and the pane's per-row "resolved by" both probe
+-- this column by value, once per candidate alert. Without the index
+-- each probe is a scan of the table, and the table is the one that is
+-- never swept.
+CREATE INDEX IF NOT EXISTS idx_operator_signals_resolves ON operator_signals(resolves);
 "#;
 
 /// The index that makes "a dead letter is requeued at most once" a

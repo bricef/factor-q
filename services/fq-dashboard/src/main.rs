@@ -828,7 +828,7 @@ mod tests {
         assert!(html.contains("2 in-flight (1 working"), "got: {html}");
         // The third read: what has asked for a person, and the way in.
         assert!(
-            html.contains("2 in the last 24h") && html.contains("1 open alert"),
+            html.contains("3 in the last 24h") && html.contains("1 open alert"),
             "the home page must carry the notification counts: {html}"
         );
         assert!(

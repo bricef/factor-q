@@ -458,6 +458,21 @@ pub struct OperatorSignalView {
     pub kind: String,
     /// The one line the row shows.
     pub summary: String,
+    /// The signal this one closes, when it closes one — the payload's
+    /// `resolves`, as the producer sent it. A recovery names the alert
+    /// it is the recovery of.
+    #[serde(default)]
+    pub resolves: Option<String>,
+    /// The signal that closed **this** one, when something has. The
+    /// projection's answer rather than the producer's: it is the first
+    /// later signal whose `resolves` names this row.
+    ///
+    /// The two together are what makes *open* a state a row can be in.
+    /// An alert with `resolved_by: None` is one of the alerts the home
+    /// page counts; an alert with one is history, and the pane says so
+    /// on the row rather than making an operator open it to find out.
+    #[serde(default)]
+    pub resolved_by: Option<String>,
 }
 
 /// What a signal points at, when it points at something — the wire
@@ -516,6 +531,16 @@ pub struct OperatorSignalDetailView {
     pub detail: serde_json::Value,
     #[serde(default)]
     pub references: SignalReferencesView,
+    /// The signal this one closes, when it closes one — the payload's
+    /// `resolves`, verbatim. A resolving signal is normally a
+    /// notification carrying the same `kind` as the alert it closes.
+    #[serde(default)]
+    pub resolves: Option<String>,
+    /// The signal that closed this one, when something has — the first
+    /// later signal whose `resolves` names this one. An alert with none
+    /// is still open, and is one of the alerts the home page counts.
+    #[serde(default)]
+    pub resolved_by: Option<String>,
     /// The next signal from the same source, later in time — the row
     /// *above* this one in the pane. `None` at the head of that
     /// source's history.

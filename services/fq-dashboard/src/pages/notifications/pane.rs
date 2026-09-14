@@ -90,20 +90,53 @@ fn selector(label: &str, target: &SignalFilters, current: &SignalFilters) -> Str
 /// The severity badge: the word, a glyph, and a colour — in that order
 /// of importance. `<b>` on the alert so weight carries it too where the
 /// hue does not.
-fn severity_badge(severity: SignalSeverity) -> String {
-    match severity {
-        SignalSeverity::Alert => r#"<span class="bad"><b>▲ alert</b></span>"#.to_string(),
-        SignalSeverity::Notification => r#"<span class="chip">notification</span>"#.to_string(),
+///
+/// A **resolved** alert drops the stripe's urgency and says so: it is
+/// still an alert (that is what happened) and it is no longer one of
+/// the ones the home page counts, so the badge carries the state rather
+/// than leaving the row looking identical to an open one.
+fn severity_badge(severity: SignalSeverity, resolved: bool) -> String {
+    match (severity, resolved) {
+        (SignalSeverity::Alert, false) => r#"<span class="bad"><b>▲ alert</b></span>"#.to_string(),
+        (SignalSeverity::Alert, true) => {
+            r#"<span class="muted">▲ alert · resolved</span>"#.to_string()
+        }
+        (SignalSeverity::Notification, _) => {
+            r#"<span class="chip">notification</span>"#.to_string()
+        }
     }
 }
 
 /// The row class that draws the alert stripe. Notifications get none —
-/// a stripe on everything is a stripe on nothing.
-fn severity_row_class(severity: SignalSeverity) -> &'static str {
-    match severity {
-        SignalSeverity::Alert => r#" class="alert""#,
-        SignalSeverity::Notification => "",
+/// a stripe on everything is a stripe on nothing — and neither does a
+/// resolved alert, for the same reason: the stripe means *this is open*.
+fn severity_row_class(severity: SignalSeverity, resolved: bool) -> &'static str {
+    match (severity, resolved) {
+        (SignalSeverity::Alert, false) => r#" class="alert""#,
+        _ => "",
     }
+}
+
+/// The muted "resolved by <link>" a row carries when something closed
+/// it, and the "resolves <link>" a resolving signal carries. Empty
+/// otherwise, which is every signal that neither closed nor was closed.
+fn resolution_note(resolves: &Option<String>, resolved_by: &Option<String>) -> String {
+    let link = |label: &str, id: &String| {
+        format!(
+            r#" <span class="muted">{} <a href="/notifications/{}">{}</a></span>"#,
+            esc(label),
+            esc(id),
+            esc(&id.chars().take(8).collect::<String>()),
+        )
+    };
+    let mut out = String::new();
+    if let Some(id) = resolved_by {
+        out.push_str(&link("· resolved by", id));
+    }
+    if let Some(id) = resolves {
+        out.push_str(&link("· resolves", id));
+    }
+    out
 }
 
 /// The pane: newest first, one row per signal, severity in form as well
@@ -169,15 +202,17 @@ pub(crate) fn notifications(
         r#"<table class="signals"><tr><th>severity</th><th>when</th><th>source</th><th>kind</th><th>summary</th></tr>"#,
     );
     for row in rows {
+        let resolved = row.resolved_by.is_some();
         b.push_str(&format!(
-            r#"<tr{}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><a href="/notifications/{}">{}</a></td></tr>"#,
-            severity_row_class(row.severity),
-            severity_badge(row.severity),
+            r#"<tr{}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><a href="/notifications/{}">{}</a>{}</td></tr>"#,
+            severity_row_class(row.severity, resolved),
+            severity_badge(row.severity, resolved),
             esc(&age(instant_ms(&row.timestamp).unwrap_or(now_ms), now_ms)),
             esc(&row.source),
             esc(&row.kind),
             esc(&row.event_id),
             esc(&row.summary),
+            resolution_note(&row.resolves, &row.resolved_by),
         ));
     }
     b.push_str("</table>");
@@ -217,13 +252,35 @@ pub(crate) fn notification_detail(signal: &OperatorSignalDetailView, now_ms: i64
     );
     b.push_str(&format!(
         "<p>{} <b>{}</b></p>",
-        severity_badge(signal.severity),
+        severity_badge(signal.severity, signal.resolved_by.is_some()),
         esc(&signal.summary),
     ));
 
     b.push_str("<table>");
     b.push_str(&field("source", &esc(&signal.source)));
     b.push_str(&field("kind", &esc(&signal.kind)));
+    // The two halves of one relation, and a page can carry either or
+    // both: a signal may close an earlier one and be closed by a later
+    // one in turn. Both are links, because the useful next click from
+    // "resolved" is the thing that resolved it.
+    let signal_link = |id: &String| {
+        format!(
+            r#"<a href="/notifications/{}">{}</a>"#,
+            esc(id),
+            esc(&id.chars().take(8).collect::<String>())
+        )
+    };
+    if let Some(id) = &signal.resolved_by {
+        b.push_str(&field("resolved by", &signal_link(id)));
+    } else if signal.severity.is_alert() {
+        b.push_str(&field(
+            "state",
+            r#"<span class="bad">open</span> <span class="muted">— no later signal has resolved it</span>"#,
+        ));
+    }
+    if let Some(id) = &signal.resolves {
+        b.push_str(&field("resolves", &signal_link(id)));
+    }
     b.push_str(&field(
         "raised",
         &format!(

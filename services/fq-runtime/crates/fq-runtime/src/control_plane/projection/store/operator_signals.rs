@@ -28,11 +28,29 @@ use crate::views::{OperatorSignalDetailView, OperatorSignalView, SignalReference
 /// The columns a whole signal is read from, in the order
 /// [`signal_at`] expects them.
 const SIGNAL_COLUMNS: &str = "event_id, seq, timestamp, agent_id, invocation_id, \
-                              severity, source, kind, summary, detail, refs";
+                              severity, source, kind, summary, detail, refs, resolves";
 
 /// The columns one index row is read from — no payload, because the
 /// pane's list shows a line and a severity and nothing else.
-const SIGNAL_INDEX_COLUMNS: &str = "event_id, timestamp, severity, source, kind, summary";
+///
+/// `resolved_by` is the exception, and it is not a column: it is the
+/// identity of the signal that closes this one, looked up through
+/// [`RESOLVED_BY`]. The pane shows an alert's state on its own row, and
+/// a state that needed a second query per row would be a page of
+/// queries.
+const SIGNAL_INDEX_COLUMNS: &str = "event_id, timestamp, severity, source, kind, summary, resolves";
+
+/// The correlated lookup that answers "which signal closed this one",
+/// as a select-list expression over an outer row aliased `s`.
+///
+/// `MIN(event_id)` rather than an `ORDER BY … LIMIT 1`: the first
+/// resolution is the one that closed it, ties are broken by identity
+/// the way every other listing here breaks them, and the aggregate form
+/// lets SQLite answer straight off `idx_operator_signals_resolves`.
+/// Nothing stops two producers both claiming to have resolved a signal;
+/// the count only asks whether *any* did.
+const RESOLVED_BY: &str =
+    "(SELECT MIN(r.event_id) FROM operator_signals r WHERE r.resolves = s.event_id)";
 
 /// The severity as the row stores it — the wire spelling, so the
 /// column's vocabulary and the payload's are one vocabulary rather
@@ -127,8 +145,8 @@ impl ProjectionStore {
         sqlx::query(
             "INSERT INTO operator_signals
                  (event_id, seq, timestamp, agent_id, invocation_id,
-                  severity, source, kind, summary, detail, refs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  severity, source, kind, summary, detail, refs, resolves)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(event_id) DO UPDATE SET
                  seq = COALESCE(excluded.seq, operator_signals.seq),
                  timestamp = excluded.timestamp,
@@ -139,7 +157,8 @@ impl ProjectionStore {
                  kind = excluded.kind,
                  summary = excluded.summary,
                  detail = excluded.detail,
-                 refs = excluded.refs",
+                 refs = excluded.refs,
+                 resolves = excluded.resolves",
         )
         .bind(event.envelope.event_id.to_string())
         .bind(seq.map(|s| s as i64))
@@ -152,6 +171,7 @@ impl ProjectionStore {
         .bind(signal.summary.as_str())
         .bind(encode(&signal.detail, "detail")?)
         .bind(refs)
+        .bind(signal.resolves.map(|id| id.to_string()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -222,7 +242,9 @@ impl ProjectionStore {
     ) -> Result<Option<OperatorSignalDetailView>, StoreError> {
         let mut qb = QueryBuilder::new("SELECT ");
         qb.push(SIGNAL_COLUMNS)
-            .push(" FROM operator_signals WHERE event_id = ")
+            .push(", ")
+            .push(RESOLVED_BY)
+            .push(" FROM operator_signals s WHERE event_id = ")
             .push_bind(event_id);
         let row = qb.build().fetch_optional(&self.pool).await?;
         row.map(|row| signal_at(&row)).transpose()
@@ -247,7 +269,10 @@ impl ProjectionStore {
         limit: i64,
     ) -> Result<Vec<OperatorSignalView>, StoreError> {
         let mut qb = QueryBuilder::new("SELECT ");
-        qb.push(SIGNAL_INDEX_COLUMNS).push(" FROM operator_signals");
+        qb.push(SIGNAL_INDEX_COLUMNS)
+            .push(", ")
+            .push(RESOLVED_BY)
+            .push(" FROM operator_signals s");
         narrow(&mut qb, severity, source, since, false);
         qb.push(" ORDER BY timestamp DESC, event_id DESC LIMIT ")
             .push_bind(limit);
@@ -263,6 +288,8 @@ impl ProjectionStore {
                     source: row.try_get(3).map_err(column)?,
                     kind: row.try_get(4).map_err(column)?,
                     summary: row.try_get(5).map_err(column)?,
+                    resolves: row.try_get(6).map_err(column)?,
+                    resolved_by: row.try_get(7).map_err(column)?,
                 })
             })
             .collect()
@@ -321,12 +348,28 @@ impl ProjectionStore {
     }
 
     /// How many notifications landed at or after `since`, and how many
-    /// alerts are on the record at all.
+    /// alerts are still **open**.
     ///
     /// The asymmetry is the retention rule showing through: a
     /// notification is only interesting inside a window, and alerts are
     /// never swept, so counting them inside one would answer a
     /// different question from the one the home line asks.
+    ///
+    /// **Open is a fold, not a row count.** An alert is open until some
+    /// later signal names it in `resolves`, so the count is a
+    /// `NOT EXISTS` against the same table — index-covered by
+    /// `idx_operator_signals_resolves`, which is why the whole answer is
+    /// two indexed reads and not a scan of a table that is never swept.
+    /// Counting rows instead gives a number that can only ever grow: a
+    /// week of a broken upstream reads as twenty-eight things to act on,
+    /// none of which can close, and a count that never falls is a count
+    /// nobody reads.
+    ///
+    /// No `timestamp >` clause pairs with the `resolves` match, and it
+    /// would buy nothing: a producer holds the id because it published
+    /// the signal it is now closing, so the resolution is later by
+    /// construction. Leaving it out keeps the probe a single-column
+    /// index lookup.
     pub async fn operator_signal_counts(
         &self,
         notifications_since: Option<&str>,
@@ -335,12 +378,16 @@ impl ProjectionStore {
         qb.push_bind(severity_name(SignalSeverity::Notification));
         push_filter(&mut qb, true, "timestamp >= ", notifications_since);
         let notifications: i64 = qb.build_query_scalar().fetch_one(&self.pool).await?;
-        let alerts: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM operator_signals WHERE severity = ?")
-                .bind(severity_name(SignalSeverity::Alert))
-                .fetch_one(&self.pool)
-                .await?;
-        Ok((notifications, alerts))
+        let open_alerts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operator_signals s \
+             WHERE s.severity = ? \
+               AND NOT EXISTS (SELECT 1 FROM operator_signals r \
+                               WHERE r.resolves = s.event_id)",
+        )
+        .bind(severity_name(SignalSeverity::Alert))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((notifications, open_alerts))
     }
 }
 
@@ -362,6 +409,8 @@ fn signal_at(row: &sqlx::sqlite::SqliteRow) -> Result<OperatorSignalDetailView, 
             .map(str::to_owned)
     };
     Ok(OperatorSignalDetailView {
+        resolves: row.try_get(11).map_err(column)?,
+        resolved_by: row.try_get(12).map_err(column)?,
         seq: row
             .try_get::<Option<i64>, _>(1)
             .map_err(column)?
