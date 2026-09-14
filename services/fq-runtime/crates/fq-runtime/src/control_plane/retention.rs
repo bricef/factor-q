@@ -201,19 +201,25 @@ impl RetentionSweeper {
 
     async fn sweep_once(&self) -> Result<(), super::store::ControlPlaneStoreError> {
         let now_ms = Utc::now().timestamp_millis();
-        let (archive_deleted, event_deleted) = if self.retention_days < 0 {
-            (0, 0)
+        let (archive_deleted, event_deleted, signal_deleted) = if self.retention_days < 0 {
+            (0, 0, 0)
         } else {
             self.sweep_archive_and_events(sweep_cutoff_ms(now_ms, self.retention_days))
                 .await?
         };
         let worker_deleted = self.sweep_stale_workers(now_ms).await?;
-        let deleted = archive_deleted + event_deleted + worker_deleted;
+        let deleted = archive_deleted + event_deleted + signal_deleted + worker_deleted;
         if deleted > 0 {
             info!(
                 deleted_rows = deleted,
                 archive_deleted_rows = archive_deleted,
                 event_deleted_rows = event_deleted,
+                // Its own figure rather than folded into the events'.
+                // They are two populations with two retention rules —
+                // one sweeps everything past the cutoff, the other
+                // keeps every alert — so a single number could not be
+                // read against either.
+                operator_signal_deleted_rows = signal_deleted,
                 stale_worker_deleted_rows = worker_deleted,
                 retention_days = self.retention_days,
                 stale_worker_retention_days = self.stale_worker_retention_days,
@@ -230,35 +236,34 @@ impl RetentionSweeper {
         Ok(())
     }
 
-    /// The step-10 half: archived invocations and projected events.
+    /// The step-10 half: archived invocations, projected events, and
+    /// the pane's index — counted apart, because they are three
+    /// populations under three rules.
     async fn sweep_archive_and_events(
         &self,
         cutoff_ms: i64,
-    ) -> Result<(u64, u64), super::store::ControlPlaneStoreError> {
+    ) -> Result<(u64, u64, u64), super::store::ControlPlaneStoreError> {
         let archive_deleted = self.store.sweep_archive(cutoff_ms).await?;
-        let event_deleted = if let Some(store) = &self.projection_store {
-            let events = store.sweep_events(cutoff_ms).await.map_err(|err| {
+        let Some(store) = &self.projection_store else {
+            return Ok((archive_deleted, 0, 0));
+        };
+        let event_deleted = store.sweep_events(cutoff_ms).await.map_err(|err| {
+            super::store::ControlPlaneStoreError::Backend(format!(
+                "projection retention sweep failed: {err}"
+            ))
+        })?;
+        // The pane's index ages on the same window and in the same
+        // tick, minus the alerts it never sweeps — see
+        // `sweep_operator_signals`.
+        let signal_deleted = store
+            .sweep_operator_signals(cutoff_ms)
+            .await
+            .map_err(|err| {
                 super::store::ControlPlaneStoreError::Backend(format!(
-                    "projection retention sweep failed: {err}"
+                    "operator-signal retention sweep failed: {err}"
                 ))
             })?;
-            // The pane's index ages on the same window and in the same
-            // tick, minus the alerts it never sweeps — see
-            // `sweep_operator_signals`. Counted into the same total: it
-            // is one retention pass over one projection.
-            let signals = store
-                .sweep_operator_signals(cutoff_ms)
-                .await
-                .map_err(|err| {
-                    super::store::ControlPlaneStoreError::Backend(format!(
-                        "operator-signal retention sweep failed: {err}"
-                    ))
-                })?;
-            events + signals
-        } else {
-            0
-        };
-        Ok((archive_deleted, event_deleted))
+        Ok((archive_deleted, event_deleted, signal_deleted))
     }
 
     /// The membership half: `coordination_worker` rows that went

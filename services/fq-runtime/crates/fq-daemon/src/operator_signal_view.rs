@@ -50,6 +50,20 @@ fn list_limit(filter: &OperatorSignalFilter) -> Result<u32, WireError> {
     let Some(limit) = filter.limit else {
         return Ok(OPERATOR_SIGNAL_LIST_DEFAULT_LIMIT);
     };
+    // Zero is not a page size, and answering it with an empty listing
+    // is the same defect as a silently shortened one: "no signals
+    // matched" and "you asked for none" are different facts and must
+    // not print the same. Absent means the default; zero means a
+    // mistake.
+    if limit == 0 {
+        return Err(WireError::InvalidInput {
+            op: "operator_signal.list".into(),
+            message: "limit 0 is not a page size — an empty answer would be \
+                      indistinguishable from a listing with nothing in it. Omit `limit` \
+                      for the default page, or ask for at least 1."
+                .into(),
+        });
+    }
     if limit > OPERATOR_SIGNAL_LIST_MAX_LIMIT {
         return Err(WireError::InvalidInput {
             op: "operator_signal.list".into(),

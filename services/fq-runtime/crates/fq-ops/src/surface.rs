@@ -332,6 +332,26 @@ fn default_invocation_limit() -> i64 {
 /// worth a person's attention, so a page an operator will actually read
 /// is the bound worth having, not the largest the frame would survive.
 /// A day of a busy fleet is tens of rows.
+///
+/// **Against the frame, the way every cap here is measured.** One List
+/// answer is one frame and both ends of the edge frame with
+/// `LengthDelimitedCodec::new()`, whose ceiling is 8 MiB. An index row
+/// is two identities, an RFC3339 timestamp, a severity, a source, a
+/// kind and the summary — call the fixed part ~250 bytes and the
+/// summary one or two hundred more. 500 rows leaves 16,777 bytes for
+/// each: forty times a realistic row, and a full page of them is under
+/// 3% of the frame.
+///
+/// That headroom is not a *bound*, and the same caveat that applies to
+/// the Event and DeadLetter caps applies here
+/// (<https://github.com/bricef/factor-q/issues/465>): `summary` is a
+/// producer-written sentence that nothing truncates on the way in, so
+/// enough of them could in principle outgrow the frame at any page
+/// size. What keeps this atom furthest from that cliff is that List
+/// answers with *index* rows — `detail` and `references`, the two
+/// genuinely unbounded fields on a signal, are Get's and Get answers one
+/// row. The byte-budgeted page in #465 subsumes this number when it
+/// lands.
 pub const OPERATOR_SIGNAL_LIST_MAX_LIMIT: u32 = 500;
 
 /// Get identity for an operator signal: the `event_id` of the
@@ -377,8 +397,12 @@ pub struct OperatorSignalFilter {
     /// other list here: a page the daemon shortened is
     /// indistinguishable from a listing that ended. Narrow with
     /// `severity`, `source` or `since` for more than a page.
+    ///
+    /// Zero is refused too, for the mirror reason: an empty answer to
+    /// `limit = 0` and an empty answer to "nothing matched" are the
+    /// same bytes. Omit the field for the default page.
     #[serde(default)]
-    #[schemars(range(max = OPERATOR_SIGNAL_LIST_MAX_LIMIT))]
+    #[schemars(range(min = 1, max = OPERATOR_SIGNAL_LIST_MAX_LIMIT))]
     pub limit: Option<u32>,
 }
 

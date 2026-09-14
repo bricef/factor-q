@@ -35,19 +35,21 @@
 //! ## What a rebuild keeps
 //!
 //! At open, **every row**: the rebuild transaction carries the whole of
-//! `events`, `invocation_summary` and `triggers` into the recreated
-//! tables, so the file stays readable and no history is lost while the
-//! rebuild waits on the consumer. Which rows the replay can re-derive
+//! [`PROJECTION_TABLES`] — `events`, `invocation_summary`, `triggers`
+//! and `operator_signals` — into the recreated tables, so the file
+//! stays readable and no history is lost while the rebuild waits on the
+//! consumer. Which rows the replay can re-derive
 //! is a fact about the stream, decided where the bus is held: the
 //! consumer's reset finds the replay floor and drops the `events` rows
 //! at or above it (they come back from the replay), keeping the rows
 //! below it — history from before an envelope bump, which this build
-//! cannot read and the replay never reaches — as they are. Three kinds
+//! cannot read and the replay never reaches — as they are. Four kinds
 //! of row are never dropped at all, because they outlive the log they
 //! were folded from by design: cost-bearing `events` rows (`total_cost
 //! IS NOT NULL` — spend is kept indefinitely, and past stream retention
 //! the projection is its only copy), every `invocation_summary` line,
-//! and every `triggers` record. The replay **refreshes** whichever of
+//! every `triggers` record, and every alert in `operator_signals`. The
+//! replay **refreshes** whichever of
 //! them the stream still holds — `insert_event` is an upsert on
 //! `event_id` — so history inside the replay is re-derived whole, and
 //! history outside it keeps the shape it had. Nothing the sweep would

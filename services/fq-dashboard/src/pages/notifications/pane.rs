@@ -36,16 +36,39 @@ pub(crate) struct SignalFilters {
     pub(crate) source: Option<String>,
 }
 
+/// One query-string value, percent-encoded then HTML-escaped — in that
+/// order, because they answer different questions and only one of them
+/// makes a URL.
+///
+/// Escaping alone was wrong even where it is currently harmless: `&`
+/// becomes `&amp;`, which an HTML parser turns back into a `&` and a
+/// URL parser then reads as a parameter separator. Sources and
+/// severities are closed enough today that nothing can carry one, which
+/// is exactly why it would have gone unnoticed when a kind's vocabulary
+/// widened.
+fn query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    esc(&out)
+}
+
 impl SignalFilters {
     /// The canonical query string for this state; the default view
     /// keeps the bare URL.
     fn query(&self) -> String {
         let mut params: Vec<String> = Vec::new();
         if let Some(severity) = &self.severity {
-            params.push(format!("severity={}", esc(severity)));
+            params.push(format!("severity={}", query_value(severity)));
         }
         if let Some(source) = &self.source {
-            params.push(format!("source={}", esc(source)));
+            params.push(format!("source={}", query_value(source)));
         }
         if params.is_empty() {
             String::new()
@@ -216,6 +239,17 @@ pub(crate) fn notifications(
         ));
     }
     b.push_str("</table>");
+    // A full page and a listing that ended look identical, which is the
+    // whole reason `operator_signal.counts` exists — so the pane must
+    // not commit the sin it was built to avoid. Saying "at least" is
+    // the honest form: the page is exactly the cap, so whether there is
+    // one more row or a thousand is not something this answer knows.
+    if rows.len() as u32 >= super::SIGNAL_PAGE_LIMIT {
+        b.push_str(&format!(
+            r#"<p class="warn">showing the most recent {} — this page is full, so there are probably more. Narrow by severity or source to see further back.</p>"#,
+            super::SIGNAL_PAGE_LIMIT
+        ));
+    }
     // Alerts are the reason the table is kept past the log's window, so
     // the pane says so rather than letting a reader wonder why a
     // three-month-old row is still here.
@@ -234,6 +268,31 @@ fn instant_ms(timestamp: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|t| t.timestamp_millis())
+}
+
+/// Somewhere to look, as a link — but **only** for `http://` and
+/// `https://`.
+///
+/// `esc` escapes HTML; it does not escape a scheme. `javascript:` and
+/// `data:` survive it intact and an `href` will run them. The row is
+/// copied verbatim out of an event whose producers are daemon-internal
+/// today and are not required to stay that way — `references.url` is
+/// documented as "a pull request, a CI run, a page", which is a value a
+/// future webhook-shaped producer could carry from outside. Anything
+/// else is shown as text: an operator can still read it and decide,
+/// which is strictly more than a link that silently does not work.
+fn external_link(url: &str) -> String {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return format!(
+            r#"<a href="{}" rel="noreferrer noopener">{}</a>"#,
+            esc(url),
+            esc(url)
+        );
+    }
+    format!(
+        r#"{} <span class="muted">— not a web address, so not a link</span>"#,
+        esc(url)
+    )
 }
 
 /// A `<tr>` of one label and one value, both escaped by the caller's
@@ -312,14 +371,7 @@ pub(crate) fn notification_detail(signal: &OperatorSignalDetailView, now_ms: i64
         ));
     }
     if let Some(url) = &signal.references.url {
-        b.push_str(&field(
-            "look at",
-            &format!(
-                r#"<a href="{}" rel="noreferrer noopener">{}</a>"#,
-                esc(url),
-                esc(url)
-            ),
-        ));
+        b.push_str(&field("look at", &external_link(url)));
     }
     b.push_str("</table>");
 
