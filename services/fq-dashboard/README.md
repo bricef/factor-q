@@ -194,7 +194,7 @@ just dashboard-e2e          # two processes: a real daemon, real HTTP
 ```
 
 The tests serve a fixture surface over a **real** `fq-edge` with a token
-attenuated to exactly the six grants, and drive the router end to end
+attenuated to exactly the seven grants, and drive the router end to end
 with `tower::ServiceExt::oneshot`. Both sides of the wire use the
 declared shapes, so a renamed field fails this compile. One test drops a
 grant and asserts the page it serves is refused — the attenuation is

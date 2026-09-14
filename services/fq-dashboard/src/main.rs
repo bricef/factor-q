@@ -7,9 +7,10 @@
 //!
 //! **It reads over the authenticated edge, as a second principal.**
 //! Every page invokes declared operations with a token
-//! attenuated to six read grants — `agent`, `control`, `cost`,
-//! `event`, `invocation`, `turn` — so a compromised dashboard can read
-//! exactly what it renders and command nothing. The token is minted
+//! attenuated to seven read grants — `agent`, `control`, `cost`,
+//! `event`, `invocation`, `operator_signal`, `turn` — so a compromised
+//! dashboard can read exactly what it renders and command nothing. The
+//! token is minted
 //! offline from the admin token (`fq token attenuate`) and reaches
 //! this process through its environment; the daemon's certificate
 //! fingerprint is pinned the same way. Both are required: with no
@@ -73,7 +74,7 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9472", env = "FQ_EDGE")]
     edge: String,
     /// The dashboard's capability token — an attenuated admin token
-    /// granting only the six reads it renders. Mint with
+    /// granting only the seven reads it renders. Mint with
     /// `fq token attenuate` (see the startup refusal for the exact
     /// invocation). Required. `hide_env_values`: clap would otherwise
     /// print the token itself in `--help` whenever the variable is set.
