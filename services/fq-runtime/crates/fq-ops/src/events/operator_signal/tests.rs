@@ -151,8 +151,8 @@ fn a_signal_round_trips_with_its_detail_and_references() {
     assert_eq!(json["severity"], "alert");
     assert_eq!(json["kind"], "pricing.stale");
     assert_eq!(json["detail"]["window_hours"], 24);
-    assert_eq!(json["references"]["agent"], "researcher");
-    assert_eq!(json["references"]["invocation"], invocation.to_string());
+    assert_eq!(json["references"]["agent_id"], "researcher");
+    assert_eq!(json["references"]["invocation_id"], invocation.to_string());
     assert_eq!(
         json["references"]["url"],
         "https://github.com/bricef/factor-q/actions/runs/1"
@@ -162,7 +162,7 @@ fn a_signal_round_trips_with_its_detail_and_references() {
     assert_eq!(read.severity, SignalSeverity::Alert);
     assert_eq!(read.kind, payload.kind);
     assert_eq!(read.source(), "pricing");
-    assert_eq!(read.references.invocation, Some(invocation));
+    assert_eq!(read.references.invocation_id, Some(invocation));
 }
 
 /// A kind that reached the wire malformed is refused at the payload

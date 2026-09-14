@@ -227,9 +227,9 @@ fn an_operator_signal_is_system_scoped_and_names_its_kind() {
     assert_eq!(json["event_type"], "operator_signal");
     assert_eq!(json["payload"]["severity"], "notification");
     assert_eq!(json["payload"]["kind"], "pricing.change_refused");
-    assert_eq!(json["payload"]["references"]["agent"], "researcher");
+    assert_eq!(json["payload"]["references"]["agent_id"], "researcher");
     assert_eq!(
-        json["payload"]["references"]["invocation"],
+        json["payload"]["references"]["invocation_id"],
         invocation_id.to_string()
     );
 }

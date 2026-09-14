@@ -821,8 +821,8 @@ A component of the daemon saying an operator should look at something ([#736](ht
     "rule": "drift_bound"
   },
   "references": {
-    "agent": "corpus-agent",
-    "invocation": "01990000-0000-7000-8000-000000001000",
+    "agent_id": "corpus-agent",
+    "invocation_id": "01990000-0000-7000-8000-000000001000",
     "url": "https://github.com/BerriAI/litellm/commits/main"
   }
 }
@@ -851,7 +851,7 @@ Adding a kind is three steps and no schema change: a `pub const` in `kinds` list
 
 - **One event type, a registry of kinds.** The producers are unrelated components; the readers — the pane, the detail page — do the same thing with all of them, which is show a person a line, a severity and some particulars. A variant per producer would make every new signal a schema change and an arm in every exhaustive match in the tree, to say something the vocabulary already says.
 - **The source is the kind's first segment, not a second field.** A payload carrying both `source: "pricing"` and `kind: "pricing.change_refused"` spells one fact twice, and two spellings of one fact drift — the failure the subject vocabulary was consolidated to stop, one layer up. The pane's source filter reads the prefix.
-- **Daemon-scoped, so the envelope names the runtime.** The component that raised the signal is a part of the daemon rather than a step of somebody's invocation, so putting a concerned agent in `envelope.agent_id` would attribute a daemon's observation to whichever agent happened to be running — the fiction `mcp_server_log` refuses for the same reason. What the signal concerns rides `references`: present when there is an invocation or a page to open, absent otherwise, and never a claim about where the event came from.
+- **Daemon-scoped, so the envelope names the runtime.** The component that raised the signal is a part of the daemon rather than a step of somebody's invocation, so putting a concerned agent in `envelope.agent_id` would attribute a daemon's observation to whichever agent happened to be running — the fiction `mcp_server_log` refuses for the same reason. What the signal concerns rides `references`: present when there is an invocation or a page to open, absent otherwise, and never a claim about where the event came from. The identities there are spelled `agent_id` and `invocation_id`, exactly as the envelope spells them, so joining a signal to the invocation it concerns is reading one key rather than two that happen to mean the same thing.
 - **One subject, not one per source.** The variable token in every other namespace is a scope identity — an agent, a worker — and the trailing tokens are the closed type vocabulary. `fq.system.operator_signal.<source>` would put an open-ended producer name in that position, so every new producer would mint a subject nothing had written down, and it would buy a wildcard that selects on source alone while the pane selects on severity and source together. Kind segments are nonetheless validated tightly enough to be legal subject tokens, so a later per-source subject needs no re-validation of the log.
 - **`detail` is producer-defined and never parsed by the runtime.** The pane renders it and a person reads it; what each kind puts there is documented in the registry above, which is the contract a reader relies on rather than a schema the daemon enforces.
 - **Rides the event log, with the log's retention.** ADR-0026 makes the log the system of record, and 30 days is enough for notifications. Alerts are rarer and worth keeping longer than the log does; the projection that outlives the log for them is part of the pane's work ([#736](https://github.com/bricef/factor-q/issues/736)), not of this vocabulary.
