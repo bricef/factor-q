@@ -424,3 +424,86 @@ async fn a_resolution_may_be_indexed_before_the_signal_it_closes() {
     let (_, open) = store.operator_signal_counts(None).await.unwrap();
     assert_eq!(open, 0, "and it arrives already resolved");
 }
+
+/// **End to end across the seam: the producer raises a standing
+/// condition, the producer closes it, and the pane's count falls.**
+///
+/// Every other test here hand-builds the pair, which proves the index
+/// but assumes the shape. This one takes the signals from
+/// [`PricingEpisodes`] — the code that actually mints them on a
+/// refresh — so the two halves are only ever right together. If a
+/// producer stopped naming the raising id, or closed an episode under a
+/// different kind, the count would silently stop falling and nothing
+/// else in this file would notice.
+#[tokio::test]
+async fn a_pricing_alert_and_the_recovery_that_closes_it_leave_nothing_open() {
+    use crate::pricing::PricingTable;
+    use crate::pricing::episodes::PricingEpisodes;
+    use crate::pricing::live::{AcceptedLoad, Staleness};
+
+    let load = |stale: bool| AcceptedLoad {
+        table: PricingTable::empty(),
+        refusals: Vec::new(),
+        staleness: stale.then(|| Staleness {
+            accepted_at: chrono::Utc::now() - chrono::Duration::days(9),
+            age: std::time::Duration::from_secs(9 * 24 * 3_600),
+            max_age: std::time::Duration::from_secs(7 * 24 * 3_600),
+        }),
+        fetch_error: None,
+    };
+
+    let (_dir, store) = store().await;
+    let episodes = PricingEpisodes::new();
+    let runtime = Uuid::now_v7();
+
+    // The refresh that finds the table past its window.
+    let raised = episodes.edges(&load(true), load(true).signals());
+    let raised_id = {
+        let mut ids = Vec::new();
+        for signal in raised {
+            let id = signal.event_id.to_string();
+            let kind = signal.kind().as_str().to_string();
+            store
+                .insert_event(&signal.into_event(runtime), None)
+                .await
+                .unwrap();
+            ids.push((kind, id));
+        }
+        let (_, id) = ids
+            .iter()
+            .find(|(kind, _)| kind == kinds::PRICING_STALE)
+            .expect("a table past its window raises pricing.stale");
+        id.clone()
+    };
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 1, "the stale table is something to act on");
+
+    // The refresh that lands a document, which ends the episode.
+    let recovered = episodes.edges(&load(false), load(false).signals());
+    assert_eq!(recovered.len(), 1, "one recovery, for the one open episode");
+    let recovery_id = recovered[0].event_id.to_string();
+    store
+        .insert_event(
+            &recovered.into_iter().next().unwrap().into_event(runtime),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 0, "the recovery closed it; nothing is open");
+
+    // And the detail page reads the pair from both ends, without the
+    // producer's in-process memory, which is gone the moment it restarts.
+    let alert = store.operator_signal(&raised_id).await.unwrap().unwrap();
+    assert_eq!(alert.severity, SignalSeverity::Alert);
+    assert_eq!(alert.resolved_by.as_deref(), Some(recovery_id.as_str()));
+    let recovery = store.operator_signal(&recovery_id).await.unwrap().unwrap();
+    assert_eq!(recovery.severity, SignalSeverity::Notification);
+    assert_eq!(
+        recovery.kind.as_str(),
+        kinds::PRICING_STALE,
+        "the topic is the same"
+    );
+    assert_eq!(recovery.resolves.as_deref(), Some(raised_id.as_str()));
+}
