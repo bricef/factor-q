@@ -80,6 +80,11 @@ fn a_first_load_accepts_the_document_and_records_its_provenance() {
         provenance.commit.as_deref(),
         Some("f00dcafe0000000000000000000000000000abcd")
     );
+    assert_eq!(
+        provenance.etag.as_deref(),
+        Some("etag-of-the-blob"),
+        "the blob's ETag is recorded as an ETag, beside the commit"
+    );
     assert_eq!(provenance.accepted_at, now());
     // The digest names exactly the bytes in the cache.
     let bytes = std::fs::read(&cache.path).unwrap();
@@ -321,6 +326,27 @@ fn a_failed_fetch_serves_the_last_accepted_table() {
     assert_eq!(signals.len(), 1);
     assert_eq!(signals[0].kind.as_str(), "pricing.fetch_failed");
     assert_eq!(signals[0].severity, SignalSeverity::Notification);
+}
+
+/// A load where the commits API did not answer records no commit at
+/// all: the `ETag` is a blob identifier, and offering it as a commit
+/// would send a reader looking for a sha that upstream never had.
+#[test]
+fn a_load_with_no_commit_records_the_etag_and_no_commit() {
+    let cache = cache();
+    let load = settle(
+        &settings(),
+        &cache.path,
+        fetched(document(&[("a/one", 1e-6, 5e-6)])),
+        None,
+        now(),
+    );
+
+    let provenance = load.table.provenance().expect("stamped");
+    assert_eq!(provenance.commit, None);
+    assert_eq!(provenance.etag.as_deref(), Some("etag-of-the-blob"));
+    // The digest is what identifies the table either way.
+    assert_eq!(provenance.digest.len(), 64);
 }
 
 /// A document that does not parse is a failed fetch by another name.

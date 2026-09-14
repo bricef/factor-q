@@ -4,6 +4,7 @@ fn provenance(source: &str, digest: &str) -> PricingProvenance {
     PricingProvenance {
         source: source.to_string(),
         commit: Some("f00dcafe".to_string()),
+        etag: Some("0badc0de".to_string()),
         digest: digest.to_string(),
         accepted_at: Utc::now(),
     }
@@ -46,6 +47,38 @@ fn an_absent_commit_is_omitted_from_the_wire() {
     p.commit = None;
     let json = serde_json::to_value(&p).unwrap();
     assert!(json.get("commit").is_none());
+    assert_eq!(json["etag"], serde_json::json!("0badc0de"));
+    let back: PricingProvenance = serde_json::from_value(json).unwrap();
+    assert_eq!(back, p);
+}
+
+/// The commit and the `ETag` are separate fields because they are
+/// separate facts: one names the file's history, the other the blob that
+/// arrived. A provenance that has only an `ETag` says so rather than
+/// offering it as a commit, which is what a reader would otherwise look
+/// up upstream and not find.
+#[test]
+fn an_etag_never_stands_in_for_a_commit() {
+    let mut p = provenance("litellm-main", "abcdef0123456789");
+    p.commit = None;
+    p.etag = Some("f00dcafe".to_string());
+    let json = serde_json::to_value(&p).unwrap();
+    assert!(json.get("commit").is_none(), "{json}");
+    assert_eq!(json["etag"], serde_json::json!("f00dcafe"));
+}
+
+/// Both are optional and both drop out of the wire when unknown — a
+/// table the daemon fetched with neither is still identified by its
+/// digest.
+#[test]
+fn a_provenance_with_neither_still_names_its_table() {
+    let mut p = provenance("litellm-main", "aa".repeat(32).as_str());
+    p.commit = None;
+    p.etag = None;
+    let json = serde_json::to_value(&p).unwrap();
+    assert!(json.get("commit").is_none());
+    assert!(json.get("etag").is_none());
+    assert_eq!(p.version(), "litellm-main@aaaaaaaaaaaa");
     let back: PricingProvenance = serde_json::from_value(json).unwrap();
     assert_eq!(back, p);
 }

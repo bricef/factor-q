@@ -19,6 +19,7 @@
       "pricing_table": {
         "source": "litellm-main",
         "commit": "9c4f1b7a0e2d5836a1b0c9d8e7f6a5b4c3d2e1f0",
+        "etag": "6f1a2b3c4d5e6f708192a3b4c5d6e7f8a9b0c1d2",
         "digest": "3f9a1c0b2d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
         "accepted_at": "2026-09-13T09:00:00Z"
       }

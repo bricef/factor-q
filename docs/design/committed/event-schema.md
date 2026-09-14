@@ -718,13 +718,16 @@ Published by the daemon's summary consumer (#216) — never by an agent — unde
   "pricing_table": {
     "source": "litellm-main",
     "commit": "9c4f1b7a0e2d5836a1b0c9d8e7f6a5b4c3d2e1f0",
+    "etag": "6f1a2b3c4d5e6f708192a3b4c5d6e7f8a9b0c1d2",
     "digest": "3f9a1c0b2d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
     "accepted_at": "2026-09-13T09:00:00Z"
   }
 }
 ```
 
-`pricing_table` is the provenance of the table this run accepted ([#735](https://github.com/bricef/factor-q/issues/735)): the configured source (`litellm-main` or `pinned:<sha>`), the upstream commit the document was read at (the GitHub contents API's latest commit for the file, or the raw URL's `ETag` where the API did not answer, absent where neither did), a SHA256 digest of exactly the bytes accepted — which are the bytes cached, and differ from what the source offered exactly when acceptance refused a change — and when it was accepted. Every cost record this run writes cites `<source>@<first 12 digest characters>`. Absent where no table was accepted at all, which is the empty-table case ADR-0004's startup guarantee refuses to run on anyway.
+`pricing_table` is the provenance of the table this run accepted ([#735](https://github.com/bricef/factor-q/issues/735)): the configured source (`litellm-main` or `pinned:<sha>`), `commit` — the file's latest commit at fetch time, best-effort, from the GitHub contents API or named by a pin, absent where the API did not answer — `etag`, the raw URL's `ETag` for the blob actually fetched (absent where the response carried none), a SHA256 digest of exactly the bytes accepted — which are the bytes cached, and differ from what the source offered exactly when acceptance refused a change — and when it was accepted. Every cost record this run writes cites `<source>@<first 12 digest characters>`. Absent where no table was accepted at all, which is the empty-table case ADR-0004's startup guarantee refuses to run on anyway.
+
+`commit` and `etag` are two fields rather than one because they answer different questions and a short hex `ETag` is indistinguishable in shape from a sha. **Neither identifies the table** — the digest does. The document is fetched from a CDN-cached raw URL and the commit is asked for at a later instant, so `commit` is the file's newest commit at fetch time and may be one ahead of the bytes; `etag` is the CDN's identifier for the bytes that did arrive.
 
 `nats_url` is host and port only. The daemon refuses a `[nats] url` that carries a credential and takes the broker token from the environment variable `[nats] token_env` names, so this payload — served whole by `event.get` to any `read:event` holder — cannot contain one ([#540](https://github.com/bricef/factor-q/issues/540)).
 
