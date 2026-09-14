@@ -358,6 +358,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     let pricing_cache = crate::pricing::litellm_cache_path(&config.cache.directory);
     let loaded = crate::pricing::load_pricing_sources(&config).await?;
     let pricing_signals = loaded.signals;
+    let pricing_episodes = loaded.episodes;
     let (table, overlay) =
         build_validated_pricing(&config, &registry, loaded.table, loaded.overlay)?;
     let pricing_entries = table.len() as u32;
@@ -371,7 +372,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     };
     // From here the table is held behind a handle the scheduled refresh
     // can swap (#344); nothing downstream sees a `PricingTable` again.
-    let pricing = crate::pricing::DaemonPricing::new(&config, table, overlay)?;
+    let pricing = crate::pricing::DaemonPricing::new(&config, table, overlay, pricing_episodes)?;
     println!(
         "  pricing entries:  {} (cache: {})",
         pricing_entries,

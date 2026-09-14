@@ -44,7 +44,7 @@ use tracing::{debug, info, warn};
 use super::accept::{AcceptanceRules, Refusal, accept, accepted_document};
 use super::{PricingError, PricingTable};
 use crate::events::operator_signal::kinds;
-use crate::events::{OperatorSignalPayload, PricingProvenance, SignalKind};
+use crate::events::{OperatorSignalPayload, PendingSignal, PricingProvenance, SignalKind};
 
 /// The GitHub contents API query that answers "what commit last touched
 /// this file?" — one entry, newest first.
@@ -187,15 +187,20 @@ impl AcceptedLoad {
     /// recovers a source that has stopped answering, and prices silently
     /// older than the models they price is the failure ADR-0004's
     /// guarantee exists to prevent.
-    pub fn signals(&self) -> Vec<OperatorSignalPayload> {
-        let mut signals = Vec::new();
+    /// Each signal is minted with the `event_id` it will be published
+    /// under, so a producer that raises a condition can name it again
+    /// when it resolves it — see [`PricingEpisodes`](super::episodes::PricingEpisodes),
+    /// which is what decides whether these actually go out.
+    pub fn signals(&self) -> Vec<PendingSignal> {
+        let mut signals: Vec<PendingSignal> = Vec::new();
         if let Some(error) = &self.fetch_error {
             signals.push(
                 OperatorSignalPayload::notification(
                     SignalKind::registered(kinds::PRICING_FETCH_FAILED),
                     format!("pricing fetch failed; serving the last accepted table ({error})"),
                 )
-                .with_detail(json!({ "error": error })),
+                .with_detail(json!({ "error": error }))
+                .into(),
             );
         }
         // A refused *change* is news: something that was priced moved
@@ -210,7 +215,7 @@ impl AcceptedLoad {
         // startup guarantee refuses to run and names it, which is louder
         // than any notification.
         for refusal in self.refusals.iter().filter(|r| !r.is_admission()) {
-            signals.push(refusal_signal(refusal));
+            signals.push(refusal_signal(refusal).into());
         }
         if let Some(stale) = &self.staleness {
             signals.push(
@@ -224,7 +229,8 @@ impl AcceptedLoad {
                 .with_detail(json!({
                     "last_refresh_ms": stale.accepted_at.timestamp_millis(),
                     "window_hours": stale.max_age.as_secs() / 3_600,
-                })),
+                }))
+                .into(),
             );
         }
         signals

@@ -37,7 +37,7 @@ use crate::bus::{BusError, EventBus};
 use crate::events::operator_signal::kinds;
 use crate::events::{
     Event, EventPayload, MaintenanceOutcome, MaintenanceRunPayload, OperatorSignalPayload,
-    SignalKind, subjects,
+    PendingSignal, SignalKind, subjects,
 };
 
 use super::task::{MaintenanceContext, MaintenanceTask};
@@ -318,7 +318,7 @@ impl MaintenanceConsumer {
                 );
                 let error = err.to_string();
                 let signal = run_failed_signal(task, run_id, &error, duration_ms);
-                (MaintenanceOutcome::Failed { error }, vec![signal])
+                (MaintenanceOutcome::Failed { error }, vec![signal.into()])
             }
         };
         Resolved {
@@ -398,17 +398,16 @@ impl MaintenanceConsumer {
     }
 
     /// Put what the run wants an operator told on the log, in order.
-    async fn publish_signals(&self, run_id: &str, signals: &[OperatorSignalPayload]) {
+    async fn publish_signals(&self, run_id: &str, signals: &[PendingSignal]) {
         for signal in signals {
-            let event = Event::system(
-                self.runtime_id,
-                EventPayload::OperatorSignal(signal.clone()),
-            );
+            // Published under the id the producer minted, which is what
+            // a later signal's `resolves` names (#745, review C-5/E-7).
+            let event = signal.clone().into_event(self.runtime_id);
             if let Err(err) = self.bus.publish(&event).await {
                 warn!(
                     consumer = %self.consumer_name,
                     run_id,
-                    kind = %signal.kind,
+                    kind = %signal.payload.kind,
                     error = %err,
                     "failed to publish a maintenance operator signal; the outcome event is on the log"
                 );
@@ -449,7 +448,7 @@ impl MaintenanceConsumer {
 #[derive(Debug, Clone)]
 struct Resolved {
     payload: MaintenanceRunPayload,
-    signals: Vec<OperatorSignalPayload>,
+    signals: Vec<PendingSignal>,
 }
 
 impl Resolved {

@@ -35,6 +35,7 @@
 //! reasons in that module's header.
 
 pub mod accept;
+pub mod episodes;
 pub mod live;
 pub mod openrouter;
 pub mod refresh;

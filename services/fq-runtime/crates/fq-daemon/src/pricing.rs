@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use fq_runtime::agent::AgentRegistry;
-use fq_runtime::events::{OperatorSignalPayload, PricingProvenance};
+use fq_runtime::events::{PendingSignal, PricingProvenance};
+use fq_runtime::pricing::episodes::PricingEpisodes;
 use fq_runtime::pricing::{live, openrouter};
 use fq_runtime::{Config, PricingOverlay, PricingRefresh, PricingTable, ServedPricing};
 
@@ -37,7 +38,7 @@ pub(crate) struct PricingStartup {
     /// cost record the run writes.
     pub(crate) provenance: Option<PricingProvenance>,
     /// Refusals, a failed fetch, a stale table — one signal each.
-    pub(crate) signals: Vec<OperatorSignalPayload>,
+    pub(crate) signals: Vec<PendingSignal>,
 }
 
 /// Load the pricing sources the config calls for: always LiteLLM, plus
@@ -55,7 +56,12 @@ pub(crate) async fn load_pricing_sources(config: &Config) -> anyhow::Result<Load
     let cache_dir = &config.cache.directory;
     let settings = config.pricing.load_settings()?;
     let load = live::load_accepted(settings, &cache_dir.join(LITELLM_CACHE_FILE)).await;
-    let signals = load.signals();
+    // The startup load opens the same episodes a refresh does: a table
+    // found stale at boot is one alert, and the refresh six hours later
+    // must not raise a second for the same episode (#745, review
+    // C-5/E-7). Hence one value, shared from here.
+    let episodes = PricingEpisodes::new();
+    let signals = episodes.edges(&load, load.signals());
     let mut overlay = PricingOverlay::new();
     let mut pricing = load.table;
     // Group by endpoint so one catalogue serves every provider on it;
@@ -80,6 +86,7 @@ pub(crate) async fn load_pricing_sources(config: &Config) -> anyhow::Result<Load
         table: pricing,
         signals,
         overlay,
+        episodes,
     })
 }
 
@@ -90,10 +97,13 @@ pub(crate) struct LoadedPricing {
     /// over it.
     pub(crate) table: PricingTable,
     /// What the load wants an operator told, once the bus is announced.
-    pub(crate) signals: Vec<OperatorSignalPayload>,
+    pub(crate) signals: Vec<PendingSignal>,
     /// Which of those prices are *not* the LiteLLM table's, so a later
     /// refresh does not overwrite them with it (#344).
     pub(crate) overlay: PricingOverlay,
+    /// Which standing conditions this load reported, so the scheduled
+    /// refresh continues the episode rather than starting a new one.
+    pub(crate) episodes: PricingEpisodes,
 }
 
 /// How the models routed through OpenRouter came to be priced.
@@ -245,6 +255,7 @@ impl DaemonPricing {
         config: &Config,
         table: PricingTable,
         overlay: PricingOverlay,
+        episodes: PricingEpisodes,
     ) -> anyhow::Result<Self> {
         let served = ServedPricing::new(table);
         let refresh = PricingRefresh::new(
@@ -252,6 +263,7 @@ impl DaemonPricing {
             litellm_cache_path(&config.cache.directory),
             overlay,
             served.clone(),
+            episodes,
         );
         Ok(Self { served, refresh })
     }
