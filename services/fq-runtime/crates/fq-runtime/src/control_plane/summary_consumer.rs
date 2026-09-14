@@ -521,6 +521,7 @@ mod tests {
                 output_per_million: 5.0,
                 cache_read_per_million: None,
                 cache_write_per_million: None,
+                cache_write_1h_per_million: None,
             },
         );
         Arc::new(PricingTable::from_map(entries))

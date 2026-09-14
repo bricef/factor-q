@@ -8,6 +8,7 @@ fn priced(input: f64, output: f64) -> ModelPricing {
         output_per_million: output,
         cache_read_per_million: None,
         cache_write_per_million: None,
+        cache_write_1h_per_million: None,
     }
 }
 
@@ -145,6 +146,7 @@ fn a_new_model_with_a_zero_cache_rate_is_not_admitted() {
             output_per_million: 5.0,
             cache_read_per_million: Some(0.0),
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         },
     )]);
     let (accepted, refusals) = accept(
@@ -254,6 +256,7 @@ fn a_newly_published_zero_cache_rate_reverts_rather_than_dropping_the_model() {
             output_per_million: 5.0,
             cache_read_per_million: Some(0.0),
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         },
     )]);
     let (accepted, refusals) = accept(&prior, candidate, AcceptanceRules::default());
@@ -293,6 +296,22 @@ fn a_refused_model_reverts_every_field_not_just_the_offending_one() {
     );
 }
 
+#[test]
+fn a_sixfold_one_hour_cache_price_move_is_refused() {
+    let mut before = priced(3.0, 15.0);
+    before.cache_write_1h_per_million = Some(6.0);
+    let mut after = before;
+    after.cache_write_1h_per_million = Some(36.0);
+
+    let (_, refusals) = accept(
+        &table(&[("m", before)]),
+        table(&[("m", after)]),
+        AcceptanceRules::default(),
+    );
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].field, PriceField::CacheWrite1h);
+}
+
 /// Dropping a published cache rate is not a refusable change: a model
 /// without one is charged at the base input rate, which never
 /// under-bills.
@@ -305,6 +324,7 @@ fn losing_a_cache_rate_is_accepted() {
             output_per_million: 5.0,
             cache_read_per_million: Some(0.1),
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         },
     )]);
     let candidate = table(&[("m", priced(1.0, 5.0))]);
@@ -378,6 +398,7 @@ fn entry(input: f64) -> Value {
     json!({
         "input_cost_per_token": input,
         "output_cost_per_token": 5e-6,
+        "cache_creation_input_token_cost_above_1hr": 2e-6,
         "litellm_provider": "somebody",
     })
 }
@@ -455,6 +476,10 @@ fn the_accepted_document_reparses_to_the_accepted_table() {
         assert_eq!(
             reparsed.lookup(model).unwrap().input_per_million,
             accepted.lookup(model).unwrap().input_per_million,
+        );
+        assert_eq!(
+            reparsed.lookup(model).unwrap().cache_write_1h_per_million,
+            accepted.lookup(model).unwrap().cache_write_1h_per_million,
         );
     }
 }

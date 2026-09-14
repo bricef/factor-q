@@ -280,6 +280,7 @@ mod tests {
             output_per_million: output,
             cache_read_per_million: None,
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         }
     }
 

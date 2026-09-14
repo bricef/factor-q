@@ -416,6 +416,8 @@ fn sample_llm_response_of_model(
                 cache_read_tokens: 20,
                 cache_write_tokens: 10,
                 reasoning_tokens,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
             },
         }),
     )
@@ -551,6 +553,8 @@ fn sample_llm_response(agent: &str, inv: Uuid) -> Event {
                 output_tokens: 3,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             },
         }),
@@ -567,6 +571,8 @@ fn sample_llm_failure(agent: &str, inv: Uuid, cost: Option<f64>) -> Event {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        cache_write_5m_tokens: None,
+        cache_write_1h_tokens: None,
         reasoning_tokens: None,
     });
     let event = Event::new(

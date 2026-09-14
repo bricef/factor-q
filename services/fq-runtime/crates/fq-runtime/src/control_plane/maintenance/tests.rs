@@ -507,6 +507,7 @@ fn priced(input_per_token: f64) -> ModelPricing {
         output_per_million: input_per_token * 5_000_000.0,
         cache_read_per_million: None,
         cache_write_per_million: None,
+        cache_write_1h_per_million: None,
     }
 }
 

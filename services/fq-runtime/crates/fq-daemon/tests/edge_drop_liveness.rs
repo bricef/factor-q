@@ -121,6 +121,8 @@ impl LlmClient for ParkedLlm {
                 output_tokens: 20,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             },
             reported_cost_usd: None,
@@ -188,6 +190,7 @@ impl Surface {
                 output_per_million: 5.0,
                 cache_read_per_million: None,
                 cache_write_per_million: None,
+                cache_write_1h_per_million: None,
             },
         );
         let runner = Arc::new(fq_runtime::ReducerRunner::new(

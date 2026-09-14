@@ -1,0 +1,42 @@
+{
+  "requests": [
+    {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "hello",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "claude-sonnet-test",
+      "stream": false
+    }
+  ],
+  "turns": [
+    {
+      "parts": [
+        {
+          "kind": "text",
+          "text": "cached"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": {
+        "cache_read_tokens": 0,
+        "cache_write_1h_tokens": 15,
+        "cache_write_5m_tokens": 5,
+        "cache_write_tokens": 20,
+        "input_tokens": 100,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

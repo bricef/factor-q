@@ -73,6 +73,8 @@ fn llm_response(agent: &str, inv: Uuid, reasoning_tokens: Option<u32>) -> Event 
                 cache_read_tokens: 20,
                 cache_write_tokens: 10,
                 reasoning_tokens,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
             },
         }),
     )

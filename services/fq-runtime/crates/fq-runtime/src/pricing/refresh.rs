@@ -399,6 +399,7 @@ fn moved(previous: &ModelPricing, proposed: &ModelPricing) -> bool {
         || previous.output_per_million != proposed.output_per_million
         || previous.cache_read_per_million != proposed.cache_read_per_million
         || previous.cache_write_per_million != proposed.cache_write_per_million
+        || previous.cache_write_1h_per_million != proposed.cache_write_1h_per_million
 }
 
 /// The models a refresh must leave priced: everything the served table

@@ -41,6 +41,7 @@ fn document() -> impl Strategy<Value = PricingTable> {
                         output_per_million: input * 5.0,
                         cache_read_per_million: None,
                         cache_write_per_million: None,
+                        cache_write_1h_per_million: None,
                     },
                 );
             }
@@ -60,6 +61,7 @@ fn overlay() -> impl Strategy<Value = PricingOverlay> {
                     output_per_million: input * 5.0,
                     cache_read_per_million: None,
                     cache_write_per_million: None,
+                    cache_write_1h_per_million: None,
                 },
             );
         }
