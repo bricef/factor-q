@@ -219,6 +219,75 @@ const FREE_MODELS: [&str; 30] = [
     "free/a25", "free/a26", "free/a27", "free/a28", "free/a29", "free/a30",
 ];
 
+/// The migration case, and the one that matters for the deployment that
+/// exists: before acceptance shipped, the cache was the **raw fetched
+/// document** — several hundred free, local and embedding entries at $0 —
+/// and it has no provenance sidecar. Those entries are not a prior price
+/// to bound anything against, so the first load under acceptance judges
+/// each of them at admission and drops it, rather than laundering the $0
+/// into the accepted table and serving it as a price for ever.
+#[test]
+fn a_raw_cache_without_a_sidecar_does_not_launder_its_zero_prices() {
+    let cache = cache();
+    // Written by the old loader: the fetched document, verbatim, with no
+    // sidecar beside it.
+    std::fs::write(
+        &cache.path,
+        document(&[("free/model", 0.0, 0.0), ("a/one", 1e-6, 5e-6)]),
+    )
+    .unwrap();
+    assert!(!provenance_path(&cache.path).exists());
+
+    let load = settle(
+        &settings(),
+        &cache.path,
+        fetched(document(&[("free/model", 0.0, 0.0), ("a/one", 1e-6, 5e-6)])),
+        None,
+        now(),
+    );
+
+    assert!(
+        load.table.lookup("free/model").is_none(),
+        "a zero-priced cache entry must not become an accepted price"
+    );
+    assert_eq!(input_per_million(&load.table, "a/one"), 1.0);
+    let cached: serde_json::Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(&cache.path).unwrap()).unwrap();
+    assert!(
+        !cached.contains_key("free/model"),
+        "and the rewritten cache must not hold it either"
+    );
+    assert_eq!(load.refusals.len(), 1);
+    assert!(load.refusals[0].is_admission());
+    assert!(
+        load.signals().is_empty(),
+        "a standing property of the source, not news"
+    );
+}
+
+/// A model that was free upstream and now costs money is admitted at the
+/// new price on the next load — and the cache carries the new figure, so
+/// the load after that bounds against it like any other price.
+#[test]
+fn a_cached_zero_price_that_starts_costing_money_is_admitted() {
+    let cache = cache();
+    std::fs::write(&cache.path, document(&[("free/model", 0.0, 0.0)])).unwrap();
+
+    let load = settle(
+        &settings(),
+        &cache.path,
+        fetched(document(&[("free/model", 1e-6, 5e-6)])),
+        None,
+        now(),
+    );
+
+    assert_eq!(input_per_million(&load.table, "free/model"), 1.0);
+    assert!(load.refusals.is_empty(), "{:?}", load.refusals);
+    let cached: serde_json::Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(&cache.path).unwrap()).unwrap();
+    assert_eq!(cached["free/model"]["input_cost_per_token"], json!(1e-6));
+}
+
 /// Rule 6: a failed fetch keeps last-known-good, says so, and is a
 /// notification rather than an alert.
 #[test]

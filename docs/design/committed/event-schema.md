@@ -871,7 +871,7 @@ A component of the daemon saying an operator should look at something ([#736](ht
 
 | Kind | Severity | Producer | `detail` |
 |---|---|---|---|
-| `pricing.change_refused` | `notification` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `model`, `field` (the upstream field name), `old` and `new` (per token, as the source states prices; `old` is absent for a new model refused at admission), `ratio` (absent where the change has none — a new model, or a prior price of zero), `rule` (`drift_bound` or `zero_price`). One per model per load |
+| `pricing.change_refused` | `notification` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `model`, `field` (the upstream field name), `old` and `new` (per token, as the source states prices; `old` is absent where the last accepted table priced nothing for that field — a model judged at admission, or a category it did not price), `ratio` (absent where the change has no ratio, for the same two reasons), `rule` (`drift_bound` or `zero_price`). One per model per load |
 | `pricing.fetch_failed` | `notification` | The pricing load ([#735](https://github.com/bricef/factor-q/issues/735)) | `error`. The daemon is serving the last table it accepted |
 | `pricing.stale` | `alert` | Pricing acceptance ([#735](https://github.com/bricef/factor-q/issues/735)) | `last_refresh_ms` (epoch ms of the last acceptance), `window_hours` |
 | `deploy.succeeded` | `notification` | Reserved — the deploy message ([PR #707](https://github.com/bricef/factor-q/pull/707)) reaches Pushover today and becomes this event's second producer | `build`, `compare_url`, the commit list the message names |

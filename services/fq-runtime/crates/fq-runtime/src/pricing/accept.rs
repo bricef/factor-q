@@ -25,7 +25,12 @@
 //!    letting it run at $0.
 //! 3. **Plausibility floor for new models.** A model with no prior is
 //!    accepted only if every token category it reports carries a
-//!    positive price.
+//!    positive price. **A prior that fails this floor is not a prior:**
+//!    a zero in the cache is no price to bound a move against, so the
+//!    model is judged at admission instead. Still zero, and it is
+//!    dropped; priced at last, and it is admitted on plausibility alone.
+//!    No accepted table therefore holds a price of zero, whichever route
+//!    the model took into it.
 //!
 //! **One refusal per model.** A model whose change is refused reverts
 //! whole — a table cannot hold half a model's prices from one document
@@ -155,6 +160,24 @@ impl std::fmt::Display for RefusalRule {
     }
 }
 
+/// What a refusal did with the model — the fact every reader of a
+/// refusal switches on, so it is carried rather than inferred.
+///
+/// It was inferred, from `old.is_none()`, and that is a different
+/// question: a model whose prior reported no cache rate and whose
+/// candidate reports one at zero has no `old` for the field that failed
+/// and still reverts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// The model keeps the entry the last accepted table gave it. The
+    /// table stays priced; only this change is refused.
+    KeptPriorPrice,
+    /// The model is absent from the accepted table: there was no usable
+    /// prior price to fall back to, so ADR-0004's at-use backstop is
+    /// what refuses a dispatch that names it.
+    NotAdmitted,
+}
+
 /// One model's proposed change, refused. Prices are per token, as the
 /// source states them.
 #[derive(Debug, Clone, PartialEq)]
@@ -162,28 +185,36 @@ pub struct Refusal {
     pub model: String,
     /// The first field that failed, in [`PriceField::ORDER`].
     pub field: PriceField,
-    /// What the last accepted table said. `None` for a new model
-    /// refused at admission — there is no prior price, which is why the
-    /// model is dropped rather than reverted.
+    /// What the last accepted table said *for this field*. `None` where
+    /// it said nothing: a model with no prior entry, one whose prior
+    /// price failed the plausibility floor, or a category the prior did
+    /// not report at all.
     pub old: Option<f64>,
     /// What the candidate proposed.
     pub new: f64,
     /// `new / old` (or its reciprocal, whichever is the larger move).
-    /// `None` where the change has no ratio: a new model, or a prior
-    /// price of zero.
+    /// `None` where the change has no ratio: a model judged at
+    /// admission, or a category the prior did not price.
     pub ratio: Option<f64>,
     pub rule: RefusalRule,
+    /// What became of the model.
+    pub disposition: Disposition,
 }
 
 impl Refusal {
-    /// Whether this refusal dropped the model rather than reverting it —
-    /// true exactly when there was no prior price to revert to.
+    /// Whether this refusal dropped the model rather than reverting it.
     pub fn is_admission(&self) -> bool {
-        self.old.is_none()
+        self.disposition == Disposition::NotAdmitted
     }
 
     /// The one line an operator reads while deciding whether to open it.
     pub fn summary(&self) -> String {
+        if self.is_admission() {
+            return format!(
+                "{} reports {} = {} and has no accepted price; not admitted to the table",
+                self.model, self.field, self.new
+            );
+        }
         match (self.ratio, self.old) {
             (Some(ratio), _) => format!(
                 "{} {} moved {:.1}x; kept the prior price",
@@ -194,7 +225,7 @@ impl Refusal {
                 self.model, self.field, self.new
             ),
             (None, None) => format!(
-                "{} is new and reports {} = {}; not admitted to the table",
+                "{} newly reports {} = {}; kept the prior price",
                 self.model, self.field, self.new
             ),
         }
@@ -205,8 +236,9 @@ impl Refusal {
 /// serve and what to say about it.
 ///
 /// The result starts from the candidate and is *repaired*: a model whose
-/// change is refused carries its prior price, a new model refused at
-/// admission is absent, and everything else is the candidate's. Models
+/// change is refused carries its prior price, a model refused at
+/// admission is absent — a new one, or one whose prior price was not a
+/// price at all — and everything else is the candidate's. Models
 /// the candidate no longer lists are not carried over — a load is a safe
 /// boundary, where a mid-flight refresh is not
 /// (<https://github.com/bricef/factor-q/issues/344> owns that).
@@ -228,7 +260,21 @@ pub fn accept(
     models.sort();
     for model in models {
         let proposed = accepted.entries[&model];
-        match prior.entries.get(&model) {
+        // A prior that fails the plausibility floor is not a prior. It is
+        // a price of zero (or worse) sitting in the cache — from a table
+        // written before acceptance existed, or from a document that was
+        // accepted when the floor was looser — and there is no ratio to
+        // a zero, so bounding a move against it can only ever keep the
+        // zero. The model is judged as if it were new instead: a
+        // candidate that is still zero is refused at admission and
+        // dropped, exactly as it would have been on a clean cache, and
+        // one that now carries a real price is admitted on plausibility
+        // alone.
+        match prior
+            .entries
+            .get(&model)
+            .filter(|previous| judge_admission(&model, previous).is_none())
+        {
             Some(previous) => {
                 if let Some(refusal) = judge_change(&model, previous, &proposed, rules) {
                     accepted.entries.insert(model, *previous);
@@ -247,6 +293,11 @@ pub fn accept(
 }
 
 /// A model that was priced before: the bound and the zero rule.
+///
+/// `previous` is a *usable* prior — one that passes the plausibility
+/// floor — because [`accept`] judges a model whose prior does not at
+/// admission instead. That is what makes "the ratio to the prior price"
+/// a number and not a division by zero.
 fn judge_change(
     model: &str,
     previous: &ModelPricing,
@@ -264,6 +315,7 @@ fn judge_change(
                 new: field.per_token(proposed).unwrap_or(0.0),
                 ratio,
                 rule,
+                disposition: Disposition::KeptPriorPrice,
             })
         };
         let (Some(new_price), Some(old_price)) = (new, old) else {
@@ -281,16 +333,16 @@ fn judge_change(
             continue;
         };
         if !is_positive(new_price) {
-            // A change to zero, negative or NaN. `old` zero and `new`
-            // zero is not a change at all, and falls through.
-            if is_positive(old_price) {
-                return refusal(RefusalRule::ZeroPrice, None);
-            }
-            continue;
+            // A change to zero, negative or NaN. `previous` passed the
+            // plausibility floor before this ran, so `old_price` is a
+            // real price and this is always a refusal.
+            return refusal(RefusalRule::ZeroPrice, None);
         }
         if !is_positive(old_price) {
-            // Zero to something: a real move with no ratio to measure it
-            // by. Refused as drift — the operator sees the pair of
+            // Unreachable through [`accept`], which judges a model whose
+            // prior fails the floor at admission instead. Kept as the
+            // safe answer for any other caller: a move off zero has no
+            // ratio to measure it by, so the operator sees the pair of
             // numbers and decides.
             return refusal(RefusalRule::DriftBound, None);
         }
@@ -302,8 +354,11 @@ fn judge_change(
     None
 }
 
-/// A model with no prior: the plausibility floor. Every token category
-/// it reports must carry a positive price, or it is not admitted.
+/// A model with no usable prior: the plausibility floor. Every token
+/// category it reports must carry a positive price, or it is not
+/// admitted. Also the test for whether a prior *is* usable — a cached
+/// entry that would not be admitted today is not a price to judge a
+/// change against.
 fn judge_admission(model: &str, proposed: &ModelPricing) -> Option<Refusal> {
     for field in PriceField::ORDER {
         let Some(price) = field.per_token(proposed) else {
@@ -317,6 +372,7 @@ fn judge_admission(model: &str, proposed: &ModelPricing) -> Option<Refusal> {
                 new: price,
                 ratio: None,
                 rule: RefusalRule::ZeroPrice,
+                disposition: Disposition::NotAdmitted,
             });
         }
     }
@@ -347,7 +403,14 @@ pub(crate) fn accepted_document(
 ) -> Map<String, Value> {
     let mut document = fetched;
     for refusal in refusals {
-        match prior.get(&refusal.model) {
+        // `is_admission()` — not "is the model in the prior document?" —
+        // decides. A model whose prior price failed the floor *is* in
+        // that document, and splicing it back would put the $0 the table
+        // just refused into the bytes the daemon serves next time.
+        match prior
+            .get(&refusal.model)
+            .filter(|_| !refusal.is_admission())
+        {
             Some(entry) => {
                 document.insert(refusal.model.clone(), entry.clone());
             }
