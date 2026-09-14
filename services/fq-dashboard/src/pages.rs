@@ -68,22 +68,35 @@ pub(crate) type Page = (StatusCode, Html<String>);
 
 /// Why an edge call did not produce an answer.
 ///
-/// Three outcomes, because three different things are true of the
+/// Four outcomes, because four different things are true of the
 /// daemon in each. `NotFound` is the request being fine and the entity
 /// not being there, which several pages turn into a 404.
+/// [`NotRegistered`](Self::NotRegistered) is the *operation* not being
+/// on this daemon's surface — build skew, and a fact about the daemon
+/// rather than about the entity asked for.
 /// [`Unreachable`](Self::Unreachable) is the call never reaching an
 /// answer — the connection broke, or the deadline passed — and nothing
 /// can be said about what the daemon thinks. [`Failed`](Self::Failed)
 /// is an answer: the daemon replied, and the reply was an error (or was
 /// not the shape this build reads).
 ///
-/// The last two used to be one variant, which is how the transcript
-/// page came to print "runtime unreachable" over a daemon that was up
-/// and answering (<https://github.com/bricef/factor-q/issues/673>).
-/// Pages that report both the same way say so with an or-pattern,
-/// rather than by the distinction not existing.
+/// `Unreachable` and `Failed` used to be one variant, which is how the
+/// transcript page came to print "runtime unreachable" over a daemon
+/// that was up and answering
+/// (<https://github.com/bricef/factor-q/issues/673>). `NotRegistered`
+/// is the same lesson one layer up: a page that wants to degrade
+/// gracefully across a build skew has to be able to *say* skew, and
+/// folding it into `Failed` left the notifications pane inferring it
+/// from `NotFound` — which the wire never sends for an unregistered
+/// op, so the graceful arm was unreachable and every other failure
+/// took its place.
+///
+/// Pages that report several of these the same way say so with an
+/// or-pattern, rather than by the distinction not existing.
 pub(crate) enum CallError {
     NotFound,
+    /// This daemon does not serve the operation at all.
+    NotRegistered(String),
     /// No answer arrived: transport, or the RPC deadline.
     Unreachable(String),
     /// An answer arrived and it was not one this page can render.
@@ -125,6 +138,9 @@ pub(crate) async fn call<T: DeserializeOwned>(
         // "unreachable".
         Err(err) => Err(CallError::Unreachable(format!("rpc: {err}"))),
         Ok(Err(WireError::NotFound { .. })) => Err(CallError::NotFound),
+        Ok(Err(err @ WireError::NotRegistered { .. })) => {
+            Err(CallError::NotRegistered(err.to_string()))
+        }
         Ok(Err(err)) => Err(CallError::Failed(err.to_string())),
         Ok(Ok(value)) => {
             serde_json::from_value(value).map_err(|err| CallError::Failed(format!("decode: {err}")))
@@ -213,7 +229,9 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.status is not registered");
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "health", &err);
         }
     };
@@ -232,18 +250,21 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.doctor is not registered");
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "health", &err);
         }
     };
     // Third read, and the cheapest of the three: two indexed counts.
-    // It answers zeros against a daemon with no pane rather than
-    // failing the page — see `signal_counts`.
+    // It answers zeros against a daemon with no pane, and `None` — a
+    // row that says *unknown* — when the call failed for any other
+    // reason, rather than failing the whole page. See `signal_counts`.
     let signals = signal_counts(&client).await;
     ok_page(
         &state,
         "health",
-        &render::health(&status, &doctor, &signals),
+        &render::health(&status, &doctor, signals.as_ref()),
     )
 }
 
@@ -280,7 +301,9 @@ pub(crate) async fn invocations_page(
     {
         Ok(active) => active,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "invocations", &err);
         }
     };
@@ -302,7 +325,9 @@ pub(crate) async fn invocations_page(
     {
         Ok(items) => items,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "invocations", &err);
         }
     };
@@ -349,7 +374,9 @@ pub(crate) async fn invocation_page(
                 )),
             );
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "invocation", &err);
         }
     };
@@ -390,7 +417,9 @@ pub(crate) async fn events_page(
     let rows: Vec<EventView> = match call(&client, OpId::List(Domain::Event), filter).await {
         Ok(rows) => rows,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "events", &err);
         }
     };
@@ -441,7 +470,9 @@ pub(crate) async fn costs_page(
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "costs", "cost.summary is not registered");
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "costs", &err);
         }
     };
@@ -470,7 +501,11 @@ pub(crate) async fn costs_page(
             Err(CallError::NotFound) => {
                 return unreachable_page(&state, "costs", "cost.summary is not registered");
             }
-            Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            Err(
+                CallError::Unreachable(err)
+                | CallError::Failed(err)
+                | CallError::NotRegistered(err),
+            ) => {
                 return unreachable_page(&state, "costs", &err);
             }
         }
@@ -525,7 +560,9 @@ pub(crate) async fn agent_costs_page(
                 )),
             );
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "costs", &err);
         }
     };
@@ -565,7 +602,9 @@ pub(crate) async fn agents_page(State(state): State<Arc<AppState>>) -> Page {
     {
         Ok(entries) => entries,
         Err(CallError::NotFound) => Vec::new(),
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "agents", &err);
         }
     };
@@ -600,7 +639,9 @@ pub(crate) async fn agent_page(State(state): State<Arc<AppState>>, Path(id): Pat
                 )),
             );
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "agent", &err);
         }
     };

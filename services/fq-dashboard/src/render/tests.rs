@@ -10,7 +10,7 @@ use super::*;
 fn health_links_working_and_stuck_ids() {
     let status = crate::fixtures::status_report();
     let doctor = crate::fixtures::doctor_report();
-    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
+    let html = health(&status, &doctor, Some(&crate::fixtures::signal_counts()));
     assert!(html.contains("2 in-flight (1 working"), "got: {html}");
     assert!(
         html.contains(r#"<a href="/invocations/019f5b3f-31fb-7ae0-b130-3d65ccf40375">"#),
@@ -29,7 +29,7 @@ fn health_links_working_and_stuck_ids() {
 fn health_shows_throttled_models() {
     let mut status = crate::fixtures::status_report();
     let doctor = crate::fixtures::doctor_report();
-    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
+    let html = health(&status, &doctor, Some(&crate::fixtures::signal_counts()));
     assert!(
         html.contains(r#"<th>throttled models</th><td class="warn">"#),
         "got: {html}"
@@ -44,7 +44,7 @@ fn health_shows_throttled_models() {
     );
 
     status.throttled_models.clear();
-    let html = health(&status, &doctor, &crate::fixtures::signal_counts());
+    let html = health(&status, &doctor, Some(&crate::fixtures::signal_counts()));
     assert!(
         html.contains(r#"<th>throttled models</th><td class="ok">none</td>"#),
         "got: {html}"
@@ -58,7 +58,7 @@ fn health_shows_redelivery_pressure() {
     let html = health(
         &crate::fixtures::status_report(),
         &crate::fixtures::doctor_report(),
-        &crate::fixtures::signal_counts(),
+        Some(&crate::fixtures::signal_counts()),
     );
     assert!(html.contains("redelivered 4"), "got: {html}");
 }
@@ -71,7 +71,7 @@ fn the_health_table_separates_the_backlog_from_the_work_in_hand() {
     let html = health(
         &crate::fixtures::status_report(),
         &crate::fixtures::doctor_report(),
-        &crate::fixtures::signal_counts(),
+        Some(&crate::fixtures::signal_counts()),
     );
     assert!(
         html.contains("<th>state</th><th>pending</th><th>in flight</th>"),
@@ -115,7 +115,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
     let html = health(
         &status,
         &crate::fixtures::doctor_report(),
-        &crate::fixtures::signal_counts(),
+        Some(&crate::fixtures::signal_counts()),
     );
     assert!(
         html.contains(
@@ -161,7 +161,7 @@ fn health_shows_a_halted_consumer_and_the_malformed_count() {
     let html = health(
         &status,
         &crate::fixtures::doctor_report(),
-        &crate::fixtures::signal_counts(),
+        Some(&crate::fixtures::signal_counts()),
     );
     assert!(
         html.contains("✗ halted on schema_version 2 (reads [3])"),
@@ -1674,4 +1674,43 @@ fn by_model_tables_render_the_cache_and_reasoning_columns() {
             "a reported zero renders as a count: {table}"
         );
     }
+}
+
+/// **A counts read that failed is not a green zero.**
+///
+/// The two arms are different claims about the daemon and the row has
+/// to tell them apart. Zeros are an answer — nothing has asked for a
+/// person — and wear the `ok` class. `None` is the read not having
+/// happened, and must never render as a count, because `0 open alerts`
+/// in green is exactly the sentence an operator stops reading the page
+/// after.
+#[test]
+fn a_counts_read_that_failed_says_unknown_rather_than_zero() {
+    let status = crate::fixtures::status_report();
+    let doctor = crate::fixtures::doctor_report();
+
+    let zeros = fq_ops::surface::OperatorSignalCounts::default();
+    let answered = health(&status, &doctor, Some(&zeros));
+    assert!(
+        answered.contains(r#"<td class="ok"><a href="/notifications">0 in the last 24h</a>"#),
+        "a daemon with nothing to say renders zeros, in green: {answered}"
+    );
+    assert!(answered.contains("0 open alerts"), "got: {answered}");
+
+    let unknown = health(&status, &doctor, None);
+    assert!(
+        unknown.contains(r#"<th>notifications</th><td class="warn">"#),
+        "an unanswered read is amber: {unknown}"
+    );
+    assert!(
+        unknown.contains("unknown"),
+        "…and says so in words: {unknown}"
+    );
+    assert!(
+        !unknown.contains("open alert"),
+        "no count is rendered at all, in either direction: {unknown}"
+    );
+    // The rest of the health view still renders: the row degrades, the
+    // page does not.
+    assert!(unknown.contains("2 in-flight (1 working"), "got: {unknown}");
 }

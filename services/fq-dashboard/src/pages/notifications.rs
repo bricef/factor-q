@@ -76,10 +76,15 @@ pub(crate) async fn notifications_page(
         Ok(filter) => filter,
         Err(err) => return unreachable_page(&state, "notifications", &format!("encode: {err}")),
     };
+    // The same split the counts make, and for the same reason: a
+    // daemon that does not serve the view has no pane, which is
+    // honestly an empty listing. A denied grant or a daemon error is
+    // not — the empty state reads "nothing has asked for a person's
+    // attention", which is a claim this page would have no basis for.
     let rows: Vec<OperatorSignalView> =
         match call(&client, OpId::List(Domain::OperatorSignal), filter).await {
             Ok(rows) => rows,
-            Err(CallError::NotFound) => Vec::new(),
+            Err(CallError::NotFound | CallError::NotRegistered(_)) => Vec::new(),
             Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
                 return unreachable_page(&state, "notifications", &err);
             }
@@ -123,7 +128,9 @@ pub(crate) async fn notification_page(
                 )),
             );
         }
-        Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+        Err(
+            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
+        ) => {
             return unreachable_page(&state, "notification", &err);
         }
     };
@@ -134,24 +141,42 @@ pub(crate) async fn notification_page(
     )
 }
 
-/// The home page's counts, over an already-dialled client.
+/// The home page's counts, over an already-dialled client. `None` is
+/// **unknown** — the call did not answer, and the row says so.
 ///
-/// Zeros rather than an error when the report is not registered: an
-/// older daemon simply has no pane, and a home page that refused to
-/// render over that would trade the whole health view for a line.
-pub(crate) async fn signal_counts(client: &EdgeClient) -> OperatorSignalCounts {
+/// Several failures, and only one of them is a zero.
+/// [`CallError::NotRegistered`] is a complete answer about an older
+/// daemon: it does not serve `operator_signal.counts`, so it has no
+/// pane and there are genuinely no signals — zeros, and the home page
+/// renders the rest of the health view rather than trading it for a
+/// line. `NotFound` joins it because a report that answered so would be
+/// saying the same thing about itself.
+///
+/// Everything else — a denied grant, a decode failure, a daemon error,
+/// a connection that broke under the call — says nothing about how many
+/// alerts stand. Rendering those as `0` is the worst answer available:
+/// green, specific, and wrong precisely when an operator is looking at
+/// the page to find out whether anything needs them. The deployed
+/// failure is the first of them (a token minted before
+/// `read:operator_signal` existed), which is why this is a distinction
+/// and not a comment.
+pub(crate) async fn signal_counts(client: &EdgeClient) -> Option<OperatorSignalCounts> {
     let since = (chrono::Utc::now() - chrono::Duration::milliseconds(COUNT_WINDOW_MS)).to_rfc3339();
-    let params = match serde_json::to_value(OperatorSignalCountsParams {
+    let params = serde_json::to_value(OperatorSignalCountsParams {
         notifications_since: Some(since),
-    }) {
-        Ok(params) => params,
-        Err(_) => return OperatorSignalCounts::default(),
-    };
-    call(
+    })
+    .ok()?;
+    match call(
         client,
         OpId::Report(ReportId::OperatorSignal(OperatorSignalReport::Counts)),
         params,
     )
     .await
-    .unwrap_or_default()
+    {
+        Ok(counts) => Some(counts),
+        Err(CallError::NotFound | CallError::NotRegistered(_)) => {
+            Some(OperatorSignalCounts::default())
+        }
+        Err(CallError::Unreachable(_) | CallError::Failed(_)) => None,
+    }
 }

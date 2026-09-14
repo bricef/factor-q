@@ -494,7 +494,11 @@ mod tests {
     /// those have their own suites (`golden.rs`, `operator_surface.rs`)
     /// and reproducing them here would be a second copy free to drift
     /// from the first.
-    fn fixture_registry(version: &str) -> EdgeRegistry {
+    /// `pane = false` is the older daemon: the OperatorSignal view and
+    /// its counts report are simply not registered, so every call to
+    /// either comes back `NotFound`. That is the one failure the pages
+    /// are allowed to render as "nothing here" rather than as a fault.
+    fn fixture_registry_with_pane(version: &str, pane: bool) -> EdgeRegistry {
         use fq_ops::surface::{ActiveParams, DoctorParams, StatusParams};
         use fq_ops::turn::TurnState;
 
@@ -633,7 +637,8 @@ mod tests {
                 |_params: ActiveParams| async move { Ok(crate::fixtures::active_rows()) },
             )
             .expect("register invocation.active");
-        registry
+        if pane {
+            registry
             .view::<OperatorSignalKey, OperatorSignalDetailView, OperatorSignalView, OperatorSignalFilter, _, _, _, _>(
                 fq_ops::View::new::<OperatorSignalKey, OperatorSignalDetailView, OperatorSignalView, OperatorSignalFilter>(
                     Domain::OperatorSignal,
@@ -668,18 +673,19 @@ mod tests {
                 },
             )
             .expect("register operator signal view");
-        registry
-            .report::<OperatorSignalCountsParams, OperatorSignalCounts, _, _>(
-                fq_ops::Report::new::<OperatorSignalCountsParams, OperatorSignalCounts>(
-                    fq_ops::OperatorSignalReport::Counts,
-                    "how much has asked for a person",
-                    fq_ops::Stability::Experimental,
-                ),
-                |_params: OperatorSignalCountsParams| async move {
-                    Ok(crate::fixtures::signal_counts())
-                },
-            )
-            .expect("register operator_signal.counts");
+            registry
+                .report::<OperatorSignalCountsParams, OperatorSignalCounts, _, _>(
+                    fq_ops::Report::new::<OperatorSignalCountsParams, OperatorSignalCounts>(
+                        fq_ops::OperatorSignalReport::Counts,
+                        "how much has asked for a person",
+                        fq_ops::Stability::Experimental,
+                    ),
+                    |_params: OperatorSignalCountsParams| async move {
+                        Ok(crate::fixtures::signal_counts())
+                    },
+                )
+                .expect("register operator_signal.counts");
+        }
         registry
             .report::<DoctorParams, DoctorReport, _, _>(
                 fq_ops::Report::new::<DoctorParams, DoctorReport>(
@@ -710,6 +716,16 @@ mod tests {
     }
 
     async fn spawn_edge_with(version: &str, grants: &[&str]) -> TestEdge {
+        spawn_edge_from(version, grants, true).await
+    }
+
+    /// An edge whose surface has no notifications pane at all — the
+    /// older daemon the counts' zero arm exists for.
+    async fn spawn_edge_without_the_pane(version: &str) -> TestEdge {
+        spawn_edge_from(version, REQUIRED_GRANTS, false).await
+    }
+
+    async fn spawn_edge_from(version: &str, grants: &[&str], pane: bool) -> TestEdge {
         let identity = EdgeIdentity::provision().unwrap();
         let fingerprint = identity.fingerprint();
         let admin = identity.mint_admin_token().unwrap();
@@ -721,7 +737,7 @@ mod tests {
             })
             .collect();
         let token = fq_edge::attenuate(&admin, &grants).unwrap();
-        let registry = Arc::new(fixture_registry(version));
+        let registry = Arc::new(fixture_registry_with_pane(version, pane));
         let (addr, serving) = fq_edge::bind("127.0.0.1:0", &identity, registry)
             .await
             .unwrap();
@@ -1121,6 +1137,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// **A denied counts call must not render as a green zero.**
+    ///
+    /// This is the shape the dogfood deploy lands in: the runbook's
+    /// token was minted before `read:operator_signal` existed, so the
+    /// home page's third read is refused while every other page keeps
+    /// working. The old code turned that refusal into `0 open alerts`
+    /// in green — a specific, reassuring, wrong answer on the one page
+    /// an operator opens to find out whether anything needs them.
+    ///
+    /// Both surfaces are asserted, because they fail differently by
+    /// design: the home row degrades (the rest of the health view is
+    /// worth more than the line) and the list page refuses outright
+    /// (an empty pane *is* the answer "nothing has asked for you", and
+    /// this page has no basis for it).
+    #[tokio::test]
+    async fn a_denied_counts_call_is_unknown_not_zero() {
+        let grants: Vec<&str> = REQUIRED_GRANTS
+            .iter()
+            .copied()
+            .filter(|g| *g != "read:operator_signal")
+            .collect();
+        let edge = spawn_edge_with(&format!("0.1.0+{OWN_SHA}"), &grants).await;
+        let app = app(state_for(&edge));
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the health view still renders"
+        );
+        let html = body_string(resp).await;
+        assert!(
+            html.contains(r#"<th>notifications</th><td class="warn">"#),
+            "the counts row is amber and unknown: {html}"
+        );
+        assert!(html.contains("unknown"), "got: {html}");
+        assert!(
+            !html.contains("open alert"),
+            "no alert count is claimed at all: {html}"
+        );
+        assert!(html.contains("2 in-flight (1 working"), "got: {html}");
+
+        // The list page's own arm: a refusal is the unreachable page,
+        // never the "nothing has asked for a person" empty state.
+        let resp = app
+            .oneshot(Request::get("/notifications").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let html = body_string(resp).await;
+        assert!(html.contains("denied"), "the refusal is shown: {html}");
+        assert!(
+            !html.contains("Nothing has asked for a person's attention"),
+            "a refusal must not read as an empty pane: {html}"
+        );
+    }
+
+    /// The other arm, and the reason the first one is a distinction
+    /// rather than a blanket refusal: a daemon with no pane at all —
+    /// an older build, where the view and the report are unregistered —
+    /// answers zeros and an empty listing, and both pages render
+    /// normally. Losing this would make a build skew take the home page
+    /// down with it.
+    #[tokio::test]
+    async fn a_daemon_with_no_pane_reads_as_zero_and_empty() {
+        let edge = spawn_edge_without_the_pane(&format!("0.1.0+{OWN_SHA}")).await;
+        let app = app(state_for(&edge));
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(
+            html.contains(r#"<td class="ok"><a href="/notifications">0 in the last 24h</a>"#),
+            "an unregistered report is honestly zero: {html}"
+        );
+        assert!(html.contains("0 open alerts"), "got: {html}");
+
+        let resp = app
+            .oneshot(Request::get("/notifications").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            body_string(resp)
+                .await
+                .contains("Nothing has asked for a person's attention"),
+            "an unregistered view is honestly an empty pane"
+        );
     }
 
     /// #673, the other half: an edge that **stops answering** is still

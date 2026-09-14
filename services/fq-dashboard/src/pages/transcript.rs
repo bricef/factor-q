@@ -280,7 +280,12 @@ pub(crate) async fn transcript_page(
             // on the instance was unreadable for a reason neither of
             // those would explain (#673). The error goes on the
             // transcript page, in the page's own frame.
-            Err(CallError::Failed(err)) => return transcript_error_page(&state, &id, &err),
+            // Build skew reads the same way here: the daemon answered,
+            // and its answer is that this build does not serve
+            // `turn.list`. That belongs on the transcript page too.
+            Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+                return transcript_error_page(&state, &id, &err);
+            }
         };
     if turns.is_empty() {
         return (
