@@ -165,6 +165,59 @@ fn a_signal_round_trips_with_its_detail_and_references() {
     assert_eq!(read.references.invocation_id, Some(invocation));
 }
 
+/// A recovery names the alert it closes, by event id, and the id
+/// survives the wire — the pane's open-alert count is a fold over
+/// exactly this field, so a `resolves` that did not round-trip would
+/// leave every alert open for ever without failing anything else.
+///
+/// The other half of the rule is that a signal resolving nothing writes
+/// nothing: `resolves` is absent from the wire when `None`, which is
+/// what keeps the events already on the log — and the committed corpus
+/// files — byte-identical to what they were before the field existed.
+#[test]
+fn a_resolving_signal_names_the_signal_it_resolves_and_is_silent_otherwise() {
+    let alert_id = Uuid::now_v7();
+    let recovery = OperatorSignalPayload::notification(
+        SignalKind::registered(kinds::PRICING_STALE),
+        "the pricing table refreshed; the staleness alert is resolved",
+    )
+    .resolving(alert_id);
+
+    let json = serde_json::to_value(&recovery).unwrap();
+    assert_eq!(json["resolves"], alert_id.to_string());
+    // A recovery is a notification: the end of an alarm is not itself
+    // alarming, and it names the same kind as the alert it closes.
+    assert_eq!(json["severity"], "notification");
+    assert_eq!(json["kind"], "pricing.stale");
+
+    let read: OperatorSignalPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(read.resolves, Some(alert_id));
+
+    // The alert it resolves carries no `resolves` of its own, and the
+    // key is absent rather than null — an explicit `"resolves": null`
+    // would move every event already written.
+    let alert = OperatorSignalPayload::alert(
+        SignalKind::registered(kinds::PRICING_STALE),
+        "the pricing table has not refreshed for 26 hours",
+    );
+    let json = serde_json::to_value(&alert).unwrap();
+    assert!(
+        json.get("resolves").is_none(),
+        "a signal that resolves nothing writes nothing: {json}"
+    );
+    let read: OperatorSignalPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(read.resolves, None);
+
+    // And an event written before the field existed still reads.
+    let old: OperatorSignalPayload = serde_json::from_value(json!({
+        "severity": "alert",
+        "kind": "pricing.stale",
+        "summary": "the pricing table has not refreshed for 26 hours",
+    }))
+    .unwrap();
+    assert_eq!(old.resolves, None);
+}
+
 /// A kind that reached the wire malformed is refused at the payload
 /// boundary rather than reaching a pane that groups by source. (An
 /// `event_type` this build does not know degrades to

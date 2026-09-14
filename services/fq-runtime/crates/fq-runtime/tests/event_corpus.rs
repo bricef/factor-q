@@ -1,8 +1,10 @@
 //! The golden event corpus
 //! (<https://github.com/bricef/factor-q/issues/409>): one file per event
-//! type this build writes, serialised by the real serialisers and
-//! committed under `tests/corpus/events/v3/`, plus hand-written v1 and
-//! v2 envelopes under `v1/` and `v2/`, taken from the schema changelog.
+//! type this build writes — plus, for a type whose optional parts one
+//! exemplar cannot pin, a named variant filed as
+//! `<event_type>.<variant>.json` — serialised by the real serialisers
+//! and committed under `tests/corpus/events/v3/`, plus hand-written v1
+//! and v2 envelopes under `v1/` and `v2/`, taken from the schema changelog.
 //! Replayed through the projection consumer's parse boundary on every
 //! CI run.
 //!
@@ -489,8 +491,57 @@ fn exemplars() -> Vec<Event> {
     ]
 }
 
+/// The named variants: a second committed file for a type one exemplar
+/// cannot pin, filed under `<event_type>.<variant>.json` and held to
+/// every property the one-per-type files are — admitted, projected, and
+/// re-serialised to exactly these bytes.
+///
+/// A variant is never a substitute for a type's own exemplar: the
+/// coverage assertion below still demands one per kind, so a type can
+/// only *add* a shape here, never replace the one a reader looks for
+/// first.
+fn variants() -> Vec<(&'static str, Event)> {
+    vec![(
+        // An operator signal resolving an earlier one (#736). The
+        // exemplar above is a signal that opens something; this is the
+        // one that closes it, and `resolves` is the only field between
+        // them. It is worth its own file because the pane's open-alert
+        // count is a fold over exactly that field, and a fold over a
+        // field nothing pins is a count that can silently stop working.
+        "resolving",
+        system_event(
+            29,
+            EventPayload::OperatorSignal(
+                OperatorSignalPayload::notification(
+                    SignalKind::registered(operator_signal::kinds::PRICING_STALE),
+                    "the pricing table refreshed; the staleness alert is resolved",
+                )
+                .with_detail(json!({"last_refresh_ms": 1_788_000_000_000i64}))
+                // A recovery is a notification naming the alert it
+                // closes, by the alert's `envelope.event_id`.
+                .resolving(fixed(28)),
+            ),
+        ),
+    )]
+}
+
 fn file_for(event: &Event) -> String {
     format!("{}.json", event.payload.event_type())
+}
+
+/// Every committed v3 file, as `(name, event)`: one per event type, then
+/// the named variants.
+fn committed_files(exemplars: Vec<Event>) -> Vec<(String, Event)> {
+    exemplars
+        .into_iter()
+        .map(|event| (file_for(&event), event))
+        .chain(variants().into_iter().map(|(variant, event)| {
+            (
+                format!("{}.{variant}.json", event.payload.event_type()),
+                event,
+            )
+        }))
+        .collect()
 }
 
 /// Every event type this build writes has a committed file, the file is
@@ -519,34 +570,43 @@ async fn every_current_event_type_has_a_file_that_projects() {
     );
     assert_eq!(covered.len(), exemplars.len(), "one exemplar per kind");
 
+    // One file per type, plus the named variants.
+    let files = committed_files(exemplars);
+
     if std::env::var_os("UPDATE_CORPUS").is_some() {
         std::fs::create_dir_all(&dir).unwrap();
-        for event in &exemplars {
+        for (name, event) in &files {
             let json = serde_json::to_string_pretty(&serde_json::to_value(event).unwrap()).unwrap();
-            std::fs::write(dir.join(file_for(event)), format!("{json}\n")).unwrap();
+            std::fs::write(dir.join(name), format!("{json}\n")).unwrap();
         }
     }
 
-    // The committed set is exactly the exemplar set: a stale file for a
-    // type that no longer exists is as wrong as a missing one.
-    let expected_files: BTreeSet<String> = exemplars.iter().map(file_for).collect();
+    // The committed set is exactly the set these exemplars write: a
+    // stale file for a type that no longer exists is as wrong as a
+    // missing one.
+    let expected_files: BTreeSet<String> = files.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(
+        expected_files.len(),
+        files.len(),
+        "two exemplars are filed under one name"
+    );
     let actual_files: BTreeSet<String> = json_files(&dir)
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     assert_eq!(
         actual_files, expected_files,
-        "tests/corpus/events/v3 must hold one file per event type; run \
-         UPDATE_CORPUS=1 cargo test -p fq-runtime --test event_corpus"
+        "tests/corpus/events/v3 must hold one file per event type and one per named \
+         variant; run UPDATE_CORPUS=1 cargo test -p fq-runtime --test event_corpus"
     );
 
     let scratch = tempfile::tempdir().unwrap();
     let store = ProjectionStore::open(&scratch.path().join("projection.db"))
         .await
         .expect("open a projection store");
-    for (i, exemplar) in exemplars.iter().enumerate() {
+    for (i, (name, exemplar)) in files.iter().enumerate() {
         let seq = i as u64 + 1;
-        let path = dir.join(file_for(exemplar));
+        let path = dir.join(name);
         let bytes = std::fs::read(&path).unwrap();
         let event = match admit(&bytes, &exemplar.subject(), Some(seq)) {
             Admission::Event(event) => *event,

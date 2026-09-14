@@ -828,7 +828,26 @@ A component of the daemon saying an operator should look at something ([#736](ht
 }
 ```
 
-`detail` and `references` are omitted entirely when empty. Only `severity`, `kind` and `summary` are always present.
+`detail`, `resolves` and `references` are omitted entirely when empty. Only `severity`, `kind` and `summary` are always present.
+
+**Resolving a signal.** An alert is **open** until a later signal resolves it. A signal resolving another names it by `envelope.event_id`:
+
+```json
+{
+  "severity": "notification",
+  "kind": "pricing.stale",
+  "summary": "the pricing table refreshed; the staleness alert is resolved",
+  "detail": {
+    "last_refresh_ms": 1788000000000
+  },
+  "resolves": "01990000-0000-7000-8000-000000000028"
+}
+```
+
+- **A recovery is normally a notification resolving an alert** — the end of an alarm is not itself alarming — and it names the **same `kind`** as the signal it resolves: the topic has not changed, only its state. The severity column in the registry below is therefore the severity a kind is *raised* at.
+- **A notification may be resolved too**, by whatever answers it; nothing about `resolves` is specific to alerts.
+- **Nothing validates the id.** The producer holds it because it published the signal it is now closing, and a claim about the log is answered by reading the log — the same reason the daemon never parses `detail`.
+- The projection index and the "open alerts" count that reads it are the pane's work ([#736](https://github.com/bricef/factor-q/issues/736)); this vocabulary only records which signal closed which.
 
 **The two severities**, which are the contract the dashboard's pane implements and the operator guide records:
 
@@ -854,6 +873,7 @@ Adding a kind is three steps and no schema change: a `pub const` in `kinds` list
 - **Daemon-scoped, so the envelope names the runtime.** The component that raised the signal is a part of the daemon rather than a step of somebody's invocation, so putting a concerned agent in `envelope.agent_id` would attribute a daemon's observation to whichever agent happened to be running — the fiction `mcp_server_log` refuses for the same reason. What the signal concerns rides `references`: present when there is an invocation or a page to open, absent otherwise, and never a claim about where the event came from. The identities there are spelled `agent_id` and `invocation_id`, exactly as the envelope spells them, so joining a signal to the invocation it concerns is reading one key rather than two that happen to mean the same thing.
 - **One subject, not one per source.** The variable token in every other namespace is a scope identity — an agent, a worker — and the trailing tokens are the closed type vocabulary. `fq.system.operator_signal.<source>` would put an open-ended producer name in that position, so every new producer would mint a subject nothing had written down, and it would buy a wildcard that selects on source alone while the pane selects on severity and source together. Kind segments are nonetheless validated tightly enough to be legal subject tokens, so a later per-source subject needs no re-validation of the log.
 - **`detail` is producer-defined and never parsed by the runtime.** The pane renders it and a person reads it; what each kind puts there is documented in the registry above, which is the contract a reader relies on rather than a schema the daemon enforces.
+- **Open and resolved is a relation between events, not a field on one.** There is no `status` a later writer mutates: ADR-0026 makes the log the system of record, so "this alert is closed" is a second event naming the first, and the count of open alerts is a fold over the log rather than a row anyone edits. Without it the count could only ever grow — a week of a broken upstream would read as twenty-eight things to act on, none of which could ever close — and a count that only grows is one nobody reads.
 - **Rides the event log, with the log's retention.** ADR-0026 makes the log the system of record, and 30 days is enough for notifications. Alerts are rarer and worth keeping longer than the log does; the projection that outlives the log for them is part of the pane's work ([#736](https://github.com/bricef/factor-q/issues/736)), not of this vocabulary.
 - **Not the fan-out.** `ops/dogfood/notify.sh` still sends what it sends to Pushover. Nothing here delivers a signal anywhere; it records that one was raised, so the pane can show it and a future fan-out consumer can read it.
 

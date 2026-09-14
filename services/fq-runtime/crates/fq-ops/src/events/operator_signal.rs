@@ -19,6 +19,13 @@
 //! guide records; it is a property of the situation, not of how bad the
 //! producer feels about it.
 //!
+//! **An alert is open until a later signal resolves it.** A signal may
+//! name the one it closes — [`resolves`](OperatorSignalPayload::resolves),
+//! an event id — and a recovery normally does so as a notification,
+//! because the end of an alarm is not itself alarming. Nothing else
+//! closes one: without this, "open alerts" is a number that can only
+//! grow, and a number that can only grow is one nobody reads.
+//!
 //! **One namespace, one home** — the [`subjects`](super::subjects)
 //! discipline, applied to kinds. A kind is a dotted name whose first
 //! segment is the component that owns it, and every kind this build
@@ -320,6 +327,34 @@ pub struct OperatorSignalPayload {
     /// honest one.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub detail: Value,
+    /// The [`event_id`] of the signal this one resolves, when it
+    /// resolves one.
+    ///
+    /// **An alert is open until a later signal resolves it.** Without
+    /// this, "how many alerts are open" can only ever grow: a pane
+    /// counting every alert on record shows a week of a broken upstream
+    /// as twenty-eight things to act on, none of which can ever close,
+    /// and a count that only grows is a count nobody reads. So a
+    /// recovery says which signal it is the recovery *of*, by id, and
+    /// the count is a fold over the log rather than a row count.
+    ///
+    /// A notification may carry it too, and normally does: the recovery
+    /// of an alert is not itself alarming, so it is a notification
+    /// naming the alert it closes. A resolving signal names the same
+    /// [`kind`](Self::kind) as the signal it resolves — the topic has
+    /// not changed, only its state — so the registry's severity is the
+    /// severity a kind is *raised* at.
+    ///
+    /// Not part of [`references`](Self::references), which is where a
+    /// person looks *next*: this is a relation between two events on
+    /// one log, the payload's counterpart to
+    /// [`parent_event_id`](crate::events::Envelope::parent_event_id),
+    /// and it is what the pane's index reads rather than what it renders
+    /// as a link.
+    ///
+    /// [`event_id`]: crate::events::Envelope::event_id
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves: Option<Uuid>,
     /// What to look at next, when there is something.
     #[serde(default, skip_serializing_if = "SignalReferences::is_empty")]
     pub references: SignalReferences,
@@ -344,6 +379,7 @@ impl OperatorSignalPayload {
             kind,
             summary: summary.into(),
             detail: Value::Null,
+            resolves: None,
             references: SignalReferences::default(),
         }
     }
@@ -359,6 +395,20 @@ impl OperatorSignalPayload {
     pub fn about_invocation(mut self, agent: AgentId, invocation: Uuid) -> Self {
         self.references.agent_id = Some(agent);
         self.references.invocation_id = Some(invocation);
+        self
+    }
+
+    /// Say which earlier signal this one resolves, by its
+    /// `envelope.event_id` — the recovery of an alert, or the answer to
+    /// a notification that asked for something.
+    ///
+    /// The producer holds that id because it published the signal it is
+    /// now closing; nothing here checks that the id names a signal, for
+    /// the same reason nothing parses `detail` — a claim about the log
+    /// is answered by reading the log, and a reader that cannot find the
+    /// resolved signal has learned something true.
+    pub fn resolving(mut self, signal: Uuid) -> Self {
+        self.resolves = Some(signal);
         self
     }
 
