@@ -460,6 +460,8 @@ impl SimWorld {
                     output_tokens: 10,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    cache_write_5m_tokens: None,
+                    cache_write_1h_tokens: None,
                     reasoning_tokens: None,
                 },
                 reported_cost_usd: None,
@@ -746,6 +748,7 @@ pub(crate) fn migration_fixture_pricing() -> Arc<PricingTable> {
             output_per_million: 0.0,
             cache_read_per_million: None,
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         },
     );
     Arc::new(PricingTable::from_map(entries))
@@ -804,6 +807,8 @@ mod tests {
                 output_tokens: 10,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             },
             reported_cost_usd: None,
@@ -826,6 +831,8 @@ mod tests {
                 output_tokens: 8,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             },
             reported_cost_usd: None,
@@ -853,6 +860,8 @@ mod tests {
                 output_tokens: 10,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             },
             reported_cost_usd: None,
@@ -2320,6 +2329,7 @@ mod budget_properties {
             output_per_million: 50.0,
             cache_read_per_million: Some(1.0),
             cache_write_per_million: Some(12.5),
+            cache_write_1h_per_million: None,
         }
     }
 
@@ -2340,6 +2350,8 @@ mod budget_properties {
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             reasoning_tokens: None,
         }
     }
@@ -2601,6 +2613,7 @@ mod soak {
             output_per_million: 50.0,
             cache_read_per_million: Some(1.0),
             cache_write_per_million: Some(12.5),
+            cache_write_1h_per_million: None,
         }
     }
 
@@ -2632,6 +2645,8 @@ mod soak {
                 output_tokens: pick(&mut rng, 80_000) as u32,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 reasoning_tokens: None,
             })
             .collect();
@@ -3672,6 +3687,7 @@ mod concurrency {
                 output_per_million: 0.0,
                 cache_read_per_million: None,
                 cache_write_per_million: None,
+                cache_write_1h_per_million: None,
             },
         );
         let pricing = Arc::new(PricingTable::from_map(entries));

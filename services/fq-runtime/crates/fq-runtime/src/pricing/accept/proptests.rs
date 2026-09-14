@@ -52,13 +52,17 @@ fn model_pricing() -> impl Strategy<Value = ModelPricing> {
         price(),
         proptest::option::of(price()),
         proptest::option::of(price()),
+        proptest::option::of(price()),
     )
-        .prop_map(|(input, output, cache_read, cache_write)| ModelPricing {
-            input_per_million: input,
-            output_per_million: output,
-            cache_read_per_million: cache_read,
-            cache_write_per_million: cache_write,
-        })
+        .prop_map(
+            |(input, output, cache_read, cache_write, cache_write_1h)| ModelPricing {
+                input_per_million: input,
+                output_per_million: output,
+                cache_read_per_million: cache_read,
+                cache_write_per_million: cache_write,
+                cache_write_1h_per_million: cache_write_1h,
+            },
+        )
 }
 
 fn pricing_table() -> impl Strategy<Value = PricingTable> {

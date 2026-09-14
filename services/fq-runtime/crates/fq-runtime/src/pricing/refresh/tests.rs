@@ -19,6 +19,7 @@ fn priced(input: f64) -> ModelPricing {
         output_per_million: input * 5.0,
         cache_read_per_million: None,
         cache_write_per_million: None,
+        cache_write_1h_per_million: None,
     }
 }
 

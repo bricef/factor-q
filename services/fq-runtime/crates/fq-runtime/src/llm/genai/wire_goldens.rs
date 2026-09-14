@@ -158,6 +158,8 @@ fn anthropic_turn(
         output_tokens,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        cache_write_5m_tokens: None,
+        cache_write_1h_tokens: None,
         thinking_tokens: None,
     }
 }
@@ -619,6 +621,37 @@ async fn anthropic_thinking_share_reaches_reasoning_tokens() {
         "no thinking engaged: unreported, never a zero"
     );
     mock.shutdown().await;
+}
+
+/// Anthropic's TTL-specific cache-creation wire survives decoding and is
+/// priced at the one-hour rate rather than the ordinary five-minute rate.
+#[tokio::test]
+async fn anthropic_cache_write_ttl_split() {
+    const MODEL: &str = "claude-sonnet-test";
+    let mock = anthropic_mock().await;
+    mock.push_response(MockResponse::text("cached", 80, 5).with_cache_write_ttl(5, 15));
+    let client = GenAiClient::with_base_url(mock.base_url()).expect("client builds");
+    let response = send(&client, MODEL, &[Message::user("hello")], vec![], None).await;
+
+    assert_eq!(response.usage.cache_write_5m_tokens, Some(5));
+    assert_eq!(response.usage.cache_write_1h_tokens, Some(15));
+    let pricing = crate::pricing::ModelPricing {
+        input_per_million: 3.0,
+        output_per_million: 15.0,
+        cache_read_per_million: Some(0.3),
+        cache_write_per_million: Some(3.75),
+        cache_write_1h_per_million: Some(6.0),
+    };
+    let (input_cost, _, _) = pricing.calculate(&response.usage);
+    assert!((input_cost - 0.00034875).abs() < 1e-12);
+
+    let requests = mock.received_requests();
+    mock.shutdown().await;
+    pin(
+        "anthropic_cache_write_ttl_split",
+        vec![decoded(&response)],
+        requests,
+    );
 }
 
 // endregion: anthropic

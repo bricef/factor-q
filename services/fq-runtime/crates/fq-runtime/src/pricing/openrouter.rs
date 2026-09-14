@@ -151,6 +151,7 @@ pub fn from_openrouter_json(json: &str) -> Result<PricingTable, PricingError> {
                 output_per_million: completion * 1_000_000.0,
                 cache_read_per_million: pricing.input_cache_read.map(|c| c * 1_000_000.0),
                 cache_write_per_million: pricing.input_cache_write.map(|c| c * 1_000_000.0),
+                cache_write_1h_per_million: None,
             },
         );
     }

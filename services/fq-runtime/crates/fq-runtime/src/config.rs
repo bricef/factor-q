@@ -533,6 +533,7 @@ impl ModelPriceOverride {
             output_per_million: self.output_per_mtok,
             cache_read_per_million: self.cache_read_per_mtok,
             cache_write_per_million: self.cache_write_per_mtok,
+            cache_write_1h_per_million: None,
         }
     }
 }
@@ -1108,6 +1109,7 @@ models = ["llama-3.1-8b-instant"]
             output_per_million: output,
             cache_read_per_million: None,
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         }
     }
 

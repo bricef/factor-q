@@ -58,6 +58,8 @@ pub struct MockResponse {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_write_tokens: u32,
+    pub cache_write_5m_tokens: Option<u32>,
+    pub cache_write_1h_tokens: Option<u32>,
     /// `usage.output_tokens_details.thinking_tokens`, the share of
     /// `output_tokens` spent thinking — reported when adaptive thinking
     /// engaged; absent otherwise.
@@ -98,6 +100,8 @@ impl MockResponse {
             output_tokens,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             thinking_tokens: None,
         }
     }
@@ -132,6 +136,14 @@ impl MockResponse {
         self
     }
 
+    /// Report cache-write usage split by Anthropic's cache TTL.
+    pub fn with_cache_write_ttl(mut self, five_minute: u32, one_hour: u32) -> Self {
+        self.cache_write_tokens = five_minute.saturating_add(one_hour);
+        self.cache_write_5m_tokens = Some(five_minute);
+        self.cache_write_1h_tokens = Some(one_hour);
+        self
+    }
+
     /// Report the thinking share of `output_tokens`, as Anthropic does
     /// when adaptive thinking engaged.
     pub fn with_thinking_tokens(mut self, thinking_tokens: u32) -> Self {
@@ -161,6 +173,8 @@ impl MockResponse {
             output_tokens,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             thinking_tokens: None,
         }
     }
@@ -231,6 +245,12 @@ impl MockResponse {
                 "cache_creation_input_tokens": self.cache_write_tokens,
             },
         });
+        if self.cache_write_5m_tokens.is_some() || self.cache_write_1h_tokens.is_some() {
+            body["usage"]["cache_creation"] = json!({
+                "ephemeral_5m_input_tokens": self.cache_write_5m_tokens.unwrap_or(0),
+                "ephemeral_1h_input_tokens": self.cache_write_1h_tokens.unwrap_or(0),
+            });
+        }
         if let Some(thinking_tokens) = self.thinking_tokens {
             body["usage"]["output_tokens_details"] = json!({ "thinking_tokens": thinking_tokens });
         }

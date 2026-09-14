@@ -737,13 +737,22 @@ fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
     let input_tokens = usage.prompt_tokens.unwrap_or(0).max(0) as u32;
     let output_tokens = usage.completion_tokens.unwrap_or(0).max(0) as u32;
 
-    let (cache_read, cache_write) = match &usage.prompt_tokens_details {
-        Some(d) => (
-            d.cached_tokens.unwrap_or(0).max(0) as u32,
-            d.cache_creation_tokens.unwrap_or(0).max(0) as u32,
-        ),
-        None => (0, 0),
-    };
+    let (cache_read, cache_write, cache_write_5m, cache_write_1h) =
+        match &usage.prompt_tokens_details {
+            Some(d) => (
+                d.cached_tokens.unwrap_or(0).max(0) as u32,
+                d.cache_creation_tokens.unwrap_or(0).max(0) as u32,
+                d.cache_creation_details
+                    .as_ref()
+                    .and_then(|split| split.ephemeral_5m_tokens)
+                    .map(|tokens| tokens.max(0) as u32),
+                d.cache_creation_details
+                    .as_ref()
+                    .and_then(|split| split.ephemeral_1h_tokens)
+                    .map(|tokens| tokens.max(0) as u32),
+            ),
+            None => (0, 0, None, None),
+        };
 
     // The thought-vs-spoken split. Providers fold reasoning into
     // `completion_tokens`, so this is a decomposition of a number we
@@ -776,6 +785,8 @@ fn convert_usage(usage: &provider::chat::Usage) -> TokenUsage {
         output_tokens,
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
+        cache_write_5m_tokens: cache_write_5m,
+        cache_write_1h_tokens: cache_write_1h,
         reasoning_tokens,
     }
 }
@@ -1671,6 +1682,7 @@ mod tests {
             output_per_million: 15.0,
             cache_read_per_million: Some(0.3),
             cache_write_per_million: Some(3.75),
+            cache_write_1h_per_million: None,
         };
 
         let without = TokenUsage {
@@ -1678,6 +1690,8 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 200,
             cache_write_tokens: 100,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             reasoning_tokens: None,
         };
         let with_split = TokenUsage {
@@ -1811,6 +1825,8 @@ mod tests {
             output_tokens: 10,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             reasoning_tokens: Some(99),
         };
         assert_eq!(usage.spoken_tokens(), 0);
@@ -1855,6 +1871,8 @@ mod tests {
             output_tokens: 20,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             thinking_tokens: None,
         });
         mock.push_response(MockResponse::text("Done.", 120, 5));

@@ -442,6 +442,12 @@ pub struct TokenUsage {
     pub cache_read_tokens: u32,
     #[serde(default)]
     pub cache_write_tokens: u32,
+    /// Provider-reported five-minute subset of `cache_write_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_tokens: Option<u32>,
+    /// Provider-reported one-hour subset of `cache_write_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u32>,
     /// The share of `output_tokens` the model spent thinking rather than
     /// speaking. **A decomposition, not an addition** — providers already
     /// fold reasoning into the completion count, so this never changes

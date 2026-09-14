@@ -82,6 +82,7 @@ pub enum PriceField {
     Output,
     CacheRead,
     CacheWrite,
+    CacheWrite1h,
 }
 
 impl PriceField {
@@ -92,14 +93,20 @@ impl PriceField {
             Self::Output => "output_cost_per_token",
             Self::CacheRead => "cache_read_input_token_cost",
             Self::CacheWrite => "cache_creation_input_token_cost",
+            Self::CacheWrite1h => "cache_creation_input_token_cost_above_1hr",
         }
     }
 
     /// The order fields are judged in, which is the order a refusal
     /// picks its field from. Fixed so the same pair of tables always
     /// produces the same refusal.
-    pub const ORDER: [PriceField; 4] =
-        [Self::Input, Self::Output, Self::CacheRead, Self::CacheWrite];
+    pub const ORDER: [PriceField; 5] = [
+        Self::Input,
+        Self::Output,
+        Self::CacheRead,
+        Self::CacheWrite,
+        Self::CacheWrite1h,
+    ];
 
     /// This field's price on a model, as the table stores it. `None`
     /// where the model reports no such price at all.
@@ -115,6 +122,7 @@ impl PriceField {
             Self::Output => Some(pricing.output_per_million),
             Self::CacheRead => pricing.cache_read_per_million,
             Self::CacheWrite => pricing.cache_write_per_million,
+            Self::CacheWrite1h => pricing.cache_write_1h_per_million,
         }
     }
 

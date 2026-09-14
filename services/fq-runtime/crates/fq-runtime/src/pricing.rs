@@ -62,6 +62,9 @@ pub struct ModelPricing {
     pub output_per_million: f64,
     pub cache_read_per_million: Option<f64>,
     pub cache_write_per_million: Option<f64>,
+    /// Price for one-hour cache writes. When absent, one-hour writes use the
+    /// ordinary cache-write rate for backward-compatible billing.
+    pub cache_write_1h_per_million: Option<f64>,
 }
 
 impl ModelPricing {
@@ -80,6 +83,10 @@ impl ModelPricing {
     pub fn calculate(&self, usage: &TokenUsage) -> (f64, f64, f64) {
         let read = usage.cache_read_tokens;
         let write = usage.cache_write_tokens;
+        // TTL details are optional. Without them, preserve the historical rule:
+        // bill the undifferentiated total at the 5-minute cache-write rate.
+        let write_1h = usage.cache_write_1h_tokens.unwrap_or(0).min(write);
+        let write_5m = write.saturating_sub(write_1h);
         let uncached = usage
             .input_tokens
             .saturating_sub(read.saturating_add(write));
@@ -89,9 +96,11 @@ impl ModelPricing {
         let write_rate = self
             .cache_write_per_million
             .unwrap_or(self.input_per_million);
+        let write_1h_rate = self.cache_write_1h_per_million.unwrap_or(write_rate);
         let input_cost = ((uncached as f64) * self.input_per_million
             + (read as f64) * read_rate
-            + (write as f64) * write_rate)
+            + (write_5m as f64) * write_rate
+            + (write_1h as f64) * write_1h_rate)
             / 1_000_000.0;
         let output_cost = (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0;
         (input_cost, output_cost, input_cost + output_cost)
@@ -298,6 +307,9 @@ impl PricingTable {
                         .map(|c| c * 1_000_000.0),
                     cache_write_per_million: entry
                         .cache_creation_input_token_cost
+                        .map(|c| c * 1_000_000.0),
+                    cache_write_1h_per_million: entry
+                        .cache_creation_input_token_cost_above_1hr
                         .map(|c| c * 1_000_000.0),
                 },
             );
@@ -521,6 +533,7 @@ struct LiteLlmEntry {
     output_cost_per_token: Option<f64>,
     cache_read_input_token_cost: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
+    cache_creation_input_token_cost_above_1hr: Option<f64>,
 }
 
 /// Deserialize `max_input_tokens` tolerantly (#120). LiteLLM carries
@@ -585,7 +598,8 @@ mod tests {
             "input_cost_per_token": 0.000003,
             "output_cost_per_token": 0.000015,
             "cache_read_input_token_cost": 0.0000003,
-            "cache_creation_input_token_cost": 0.00000375
+            "cache_creation_input_token_cost": 0.00000375,
+            "cache_creation_input_token_cost_above_1hr": 0.000006
         },
         "grok-float-window": {
             "max_input_tokens": 2000000.0,
@@ -625,6 +639,7 @@ mod tests {
         assert!((sonnet.output_per_million - 15.0).abs() < 1e-9);
         assert!((sonnet.cache_read_per_million.unwrap() - 0.3).abs() < 1e-9);
         assert!((sonnet.cache_write_per_million.unwrap() - 3.75).abs() < 1e-9);
+        assert!((sonnet.cache_write_1h_per_million.unwrap() - 6.0).abs() < 1e-9);
     }
 
     #[test]
@@ -705,6 +720,7 @@ mod tests {
             output_per_million: 5.0,
             cache_read_per_million: None,
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         };
         let (input, output, total) = pricing.calculate(&usage(100, 200, 0, 0));
         assert!((input - 0.0001).abs() < 1e-9);
@@ -745,6 +761,7 @@ mod tests {
             output_per_million: output,
             cache_read_per_million: None,
             cache_write_per_million: None,
+            cache_write_1h_per_million: None,
         }
     }
 
@@ -805,6 +822,7 @@ mod tests {
                 output_per_million: 1.5,
                 cache_read_per_million: None,
                 cache_write_per_million: None,
+                cache_write_1h_per_million: None,
             },
         );
         let p = table.lookup("custom/model").expect("inserted entry");
@@ -910,6 +928,8 @@ mod tests {
             output_tokens: output,
             cache_read_tokens: read,
             cache_write_tokens: write,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
             reasoning_tokens: None,
         }
     }
@@ -937,6 +957,37 @@ mod tests {
         // Sanity: strictly cheaper than the same prompt uncached.
         let (uncached_input, _, _) = sonnet.calculate(&usage(100_000, 0, 0, 0));
         assert!(input < uncached_input);
+    }
+
+    #[test]
+    fn calculate_prices_one_hour_cache_writes_at_the_higher_rate() {
+        let table = PricingTable::from_litellm_json(LITELLM_SAMPLE).unwrap();
+        let sonnet = table.lookup("claude-sonnet-test").unwrap();
+        let mut split = usage(100_000, 0, 0, 20_000);
+        split.cache_write_5m_tokens = Some(5_000);
+        split.cache_write_1h_tokens = Some(15_000);
+
+        // 80k*$3/M + 5k*$3.75/M + 15k*$6/M = $0.34875.
+        let (input, _, total) = sonnet.calculate(&split);
+        assert!(
+            (input - 0.34875).abs() < 1e-9,
+            "fq costs input figure was {input}"
+        );
+        assert!((total - 0.34875).abs() < 1e-9);
+
+        // An undifferentiated write total keeps the historical 5m price.
+        let (undifferentiated, _, _) = sonnet.calculate(&usage(100_000, 0, 0, 20_000));
+        assert!((undifferentiated - 0.315).abs() < 1e-9);
+
+        let legacy = ModelPricing {
+            cache_write_1h_per_million: None,
+            ..*sonnet
+        };
+        let (legacy_split, _, _) = legacy.calculate(&split);
+        assert!(
+            (legacy_split - undifferentiated).abs() < 1e-12,
+            "a row without the 1h field must retain 5m pricing"
+        );
     }
 
     #[test]
