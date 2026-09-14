@@ -197,7 +197,11 @@ CREATE INDEX IF NOT EXISTS idx_triggers_seq ON triggers(seq);
 -- THE ONE TABLE THE SWEEP TOUCHES BY PREDICATE. Notifications age out
 -- with the log they came from, and ALERTS ARE KEPT INDEFINITELY,
 -- because an alert is the record that a person had to intervene and
--- that record has to outlive the 30-day log. The other exemptions here
+-- that record has to outlive the 30-day log. SO IS ANY SIGNAL WITH A
+-- NON-NULL `resolves`, whatever its severity: an alert's record is the
+-- pair, and deleting the notification that closed one would re-open it
+-- (the count below is a NOT EXISTS over this table, not a flag on the
+-- alert). The other exemptions here
 -- are structural (a whole table the sweep never names) and this one
 -- cannot be: two severities live in one resource, so the pane can
 -- order them against each other, and splitting the table to dodge a

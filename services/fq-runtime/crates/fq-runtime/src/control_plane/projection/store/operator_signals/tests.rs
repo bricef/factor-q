@@ -160,6 +160,61 @@ async fn an_alert_survives_the_sweep_and_a_notification_does_not() {
     assert_eq!(store.sweep_operator_signals(cutoff()).await.unwrap(), 0);
 }
 
+/// **A recovery outlives the window, so the alert it closed stays
+/// closed.**
+///
+/// The half of the exemption that is easy to miss: the row that closes
+/// an alert is a *notification*, so a sweep that reads severity alone
+/// deletes it on the thirty-first day. The alert it closed is exempt
+/// and stays, the `NOT EXISTS` that made it closed finds nothing, and
+/// it re-opens — a month late, on a page nobody was watching, and for
+/// ever. An alert's record is the pair, so the sweep keeps both halves
+/// of it.
+///
+/// The ordinary notification of identical age is here to keep the
+/// exemption from widening into "nothing is swept": it closes nothing,
+/// so it goes.
+#[tokio::test]
+async fn a_recovery_outlives_the_window_so_a_closed_alert_stays_closed() {
+    let (_dir, store) = store().await;
+    let raised = alert();
+    let recovery = recovery_of(&raised);
+    let ordinary = notification();
+    for event in [&raised, &recovery, &ordinary] {
+        store.insert_event(event, None).await.unwrap();
+        backdate(&store, event).await;
+    }
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 0, "the recovery closed it before the sweep ran");
+
+    assert_eq!(
+        store.sweep_operator_signals(cutoff()).await.unwrap(),
+        1,
+        "the notification that resolves nothing is the only row swept"
+    );
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 0, "and it is still closed once the sweep has run");
+
+    // Both ends of the relation are still readable, so the detail page
+    // can still say what closed this alert years after the log let the
+    // recovery's event go.
+    let raised_id = raised.envelope.event_id.to_string();
+    let recovery_id = recovery.envelope.event_id.to_string();
+    let closed = store.operator_signal(&raised_id).await.unwrap().unwrap();
+    assert_eq!(closed.resolved_by.as_deref(), Some(recovery_id.as_str()));
+    let closer = store
+        .operator_signal(&recovery_id)
+        .await
+        .unwrap()
+        .expect("a resolving notification is kept as part of the alert's record");
+    assert_eq!(closer.resolves.as_deref(), Some(raised_id.as_str()));
+
+    // The exemption is not a one-shot, here either.
+    assert_eq!(store.sweep_operator_signals(cutoff()).await.unwrap(), 0);
+}
+
 /// A notification inside the window is left alone: the sweep bounds by
 /// time as well as by severity, so "alerts are kept" must not have
 /// become "nothing is swept".
