@@ -41,7 +41,6 @@ fn a_page_over_the_cap_is_refused_rather_than_shortened() {
 #[test]
 fn under_the_cap_the_page_is_the_callers_own_number() {
     for asked in [
-        0,
         1,
         OPERATOR_SIGNAL_LIST_DEFAULT_LIMIT,
         OPERATOR_SIGNAL_LIST_MAX_LIMIT,
@@ -54,6 +53,24 @@ fn under_the_cap_the_page_is_the_callers_own_number() {
     assert_eq!(
         list_limit(&filter_with_limit(None)).ok(),
         Some(OPERATOR_SIGNAL_LIST_DEFAULT_LIMIT)
+    );
+}
+
+/// **Zero is a mistake, not a page size.** It used to be served, and
+/// answered with an empty array — which the CLI prints as "No operator
+/// signals matched". That is the cap's own failure mode inverted: the
+/// caller's own error comes back looking exactly like a true answer
+/// about the fleet.
+#[test]
+fn a_page_of_zero_is_refused_rather_than_answered_with_nothing() {
+    let err = list_limit(&filter_with_limit(Some(0)))
+        .expect_err("limit 0 must be refused, not answered empty");
+    assert!(
+        matches!(&err, WireError::InvalidInput { op, message }
+            if op == "operator_signal.list"
+                && message.contains("not a page size")
+                && message.contains("at least 1")),
+        "expected an InvalidInput naming the mistake and the way out; got {err:?}"
     );
 }
 

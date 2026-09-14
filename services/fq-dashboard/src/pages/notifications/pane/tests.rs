@@ -302,3 +302,109 @@ fn the_detail_page_says_whether_an_alert_is_open() {
         "got: {html}"
     );
 }
+
+/// **A full page says it is full.** A listing that ended and a listing
+/// the cap cut short are the same bytes, and this pane's own design
+/// argues that point at length to justify the counts report — so it
+/// must not then truncate in silence. Under the cap it says nothing:
+/// a "there may be more" on every page is a line nobody reads.
+#[test]
+fn a_page_at_the_cap_says_there_are_probably_more() {
+    let one = rows().into_iter().next().expect("a fixture row");
+    let short = notifications(&rows(), &SignalFilters::default(), 1_783_803_600_000);
+    assert!(
+        !short.contains("this page is full"),
+        "a short page claims nothing: {short}"
+    );
+
+    let full: Vec<OperatorSignalView> = (0..super::super::SIGNAL_PAGE_LIMIT)
+        .map(|n| OperatorSignalView {
+            event_id: format!("019f6a01-0000-7000-8000-{n:012}"),
+            ..one.clone()
+        })
+        .collect();
+    let html = notifications(&full, &SignalFilters::default(), 1_783_803_600_000);
+    assert!(html.contains("this page is full"), "got: {html}");
+    assert!(
+        html.contains(&format!(
+            "showing the most recent {}",
+            super::super::SIGNAL_PAGE_LIMIT
+        )),
+        "and names the number: {html}"
+    );
+}
+
+/// **`references.url` is a link only for http(s).** `esc` escapes
+/// HTML, not a scheme: `javascript:` survives it whole and an `href`
+/// runs it. The row is copied verbatim from an event payload, so the
+/// check belongs at the render rather than in a promise about
+/// producers.
+#[test]
+fn a_reference_url_is_a_link_only_for_a_web_address() {
+    let mut signal = fixtures::notification_signal_detail();
+
+    signal.references.url = Some("https://example.invalid/run/1".into());
+    let html = notification_detail(&signal, 1_783_803_600_000);
+    assert!(
+        html.contains(r#"<a href="https://example.invalid/run/1" rel="noreferrer noopener">"#),
+        "got: {html}"
+    );
+
+    for hostile in [
+        "javascript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "JavaScript:alert(1)",
+    ] {
+        signal.references.url = Some(hostile.into());
+        let html = notification_detail(&signal, 1_783_803_600_000);
+        assert!(
+            !html.contains(&format!(r#"href="{hostile}"#)),
+            "{hostile} must not become an href: {html}"
+        );
+        assert!(
+            html.contains("not a link"),
+            "…and the page says why: {html}"
+        );
+    }
+}
+
+/// The filter links are URLs, so their values are percent-encoded
+/// before they are HTML-escaped. Escaping alone turns `&` into `&amp;`,
+/// which a browser reads back as a parameter separator.
+#[test]
+fn a_filter_value_is_percent_encoded_in_the_link() {
+    let filters = SignalFilters {
+        severity: None,
+        source: Some("a&b c".into()),
+    };
+    let html = notifications(&rows(), &filters.with_source(None), 1_783_803_600_000);
+    let target = notifications(&[], &filters, 1_783_803_600_000);
+    assert!(
+        target.contains("<b>a&amp;b c</b>"),
+        "the active filter is shown as text, escaped: {target}"
+    );
+    // And the link that selects it carries the encoded form.
+    let html = format!(
+        "{html}{}",
+        selector("x", &filters, &SignalFilters::default())
+    );
+    assert!(
+        html.contains("source=a%26b%20c"),
+        "the query value is percent-encoded: {html}"
+    );
+}
+
+/// The detail page escapes producer-written text too, not only the
+/// listing — the summary, the kind and the structured `detail` all come
+/// off the wire unescaped.
+#[test]
+fn a_hostile_signal_is_escaped_on_the_detail_page_too() {
+    let mut signal = fixtures::notification_signal_detail();
+    signal.summary = "<script>alert('summary')</script>".into();
+    signal.kind = "pricing.<img src=x onerror=1>".into();
+    signal.detail = serde_json::json!({ "<script>": "</script>" });
+    let html = notification_detail(&signal, 1_783_803_600_000);
+    assert!(!html.contains("<script>"), "got: {html}");
+    assert!(!html.contains("<img src=x"), "got: {html}");
+    assert!(html.contains("&lt;script&gt;"), "got: {html}");
+}

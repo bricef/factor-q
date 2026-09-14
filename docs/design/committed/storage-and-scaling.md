@@ -147,8 +147,8 @@ projection (event counts, failure tallies) cover at most this window.
 
 ### Schema
 
-`projection.db` holds three tables. `events` is the one this page
-sizes; the other two are small and mentioned because a backup or a
+`projection.db` holds four tables. `events` is the one this page
+sizes; the other three are small and mentioned because a backup or a
 rebuild has to account for them.
 
 ```sql
@@ -186,6 +186,20 @@ CREATE INDEX idx_events_time ON events(timestamp);
   from the sweep *structurally* rather than by predicate: the sweep
   deletes from `events` only, so a trigger's record outlives the log
   it was noticed on without a second clause to keep in step.
+- **`operator_signals`** — what a component said an operator should
+  look at, whole: severity, source, kind, summary, the structured
+  `detail` and references, and `resolves` (the signal this one closes,
+  indexed — an alert is open until something names it there). The
+  dashboard's notifications pane and `fq notifications` read it, and
+  Get answers from here rather than hopping to the log *because* of the
+  retention rule below. **It is the sweep's one predicate exemption**:
+  notifications age out on the same window as `events`, and alerts are
+  never swept. Two severities share one table so the pane can order
+  them against each other, and splitting them to win a structural
+  exemption would cost a UNION on every read of the pane; the clause is
+  written once, in `sweep_operator_signals`. Past stream retention this
+  table is an alert's only copy, so it carries the same backup
+  obligation the cost rows do.
 
 There is no `cumulative_cost` and no `tool_name` column; running
 totals are computed at query time, and a tool's name is read from the
@@ -248,10 +262,10 @@ migration**:
 **What a rebuild keeps.** Everything below the floor: history from
 before an envelope bump, which this build cannot read and the replay
 never reaches, stays in the file exactly as the older build projected
-it. And three kinds of row outlive the log they were folded from by
+it. And four kinds of row outlive the log they were folded from by
 design, wherever they sit: cost-bearing `events` rows (`total_cost IS
-NOT NULL`), every `invocation_summary` line, and every `triggers`
-record. The floor step never deletes them — a cost row at or above the
+NOT NULL`), every `invocation_summary` line, every `triggers` record,
+and every alert in `operator_signals`. The floor step never deletes them — a cost row at or above the
 floor is kept and refreshed by the replay (`insert_event` is an upsert
 on `event_id`), so a message that ages out of retention between the
 delete and its replay cannot take a spend figure with it. History

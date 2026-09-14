@@ -2220,10 +2220,10 @@
         "properties": {
           "limit": {
             "default": null,
-            "description": "Cap on one List page — the most recent N matching rows, and at\nmost 500 of them (this property's `maximum`). Absent asks for\nthe default 50.\n\n**A larger N is refused, never quietly shrunk**, as on every\nother list here: a page the daemon shortened is\nindistinguishable from a listing that ended. Narrow with\n`severity`, `source` or `since` for more than a page.",
+            "description": "Cap on one List page — the most recent N matching rows, and at\nmost 500 of them (this property's `maximum`). Absent asks for\nthe default 50.\n\n**A larger N is refused, never quietly shrunk**, as on every\nother list here: a page the daemon shortened is\nindistinguishable from a listing that ended. Narrow with\n`severity`, `source` or `since` for more than a page.\n\nZero is refused too, for the mirror reason: an empty answer to\n`limit = 0` and an empty answer to \"nothing matched\" are the\nsame bytes. Omit the field for the default page.",
             "format": "uint32",
             "maximum": 500,
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
