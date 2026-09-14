@@ -379,6 +379,12 @@ pub struct OperatorSignalPayload {
     /// not changed, only its state — so the registry's severity is the
     /// severity a kind is *raised* at.
     ///
+    /// **Resolution does not chain.** An alert closed by R stays closed
+    /// if some later signal resolves R in turn: "open" asks only whether
+    /// *any* signal names the alert, never what has since become of the
+    /// one that did. Nothing produces such a chain today, and a reader
+    /// that walked one would be re-opening answered alerts.
+    ///
     /// Not part of [`references`](Self::references), which is where a
     /// person looks *next*: this is a relation between two events on
     /// one log, the payload's counterpart to
