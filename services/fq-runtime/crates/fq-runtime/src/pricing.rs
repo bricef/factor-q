@@ -26,13 +26,19 @@
 //! The runtime never blocks on pricing. Agents keep running even if we
 //! fall back to a stale cache or an empty table.
 //!
-//! Note: this is a startup fetch. The periodic refresh that calls
-//! [`accept`](accept::accept) again on a timer is
-//! <https://github.com/bricef/factor-q/issues/344>.
+//! That is the **startup** load. The same acceptance runs again on a
+//! schedule — see [`refresh`], which fq-cron fires through the
+//! maintenance consumer and which swaps its result into the
+//! [`served`](served::ServedPricing) table a running daemon reads
+//! (<https://github.com/bricef/factor-q/issues/344>). A refresh only ever
+//! widens the priced set; removals are applied by the next start, for the
+//! reasons in that module's header.
 
 pub mod accept;
 pub mod live;
 pub mod openrouter;
+pub mod refresh;
+pub mod served;
 
 use std::collections::HashMap;
 use std::fs;

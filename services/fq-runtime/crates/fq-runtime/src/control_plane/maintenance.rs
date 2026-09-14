@@ -42,17 +42,22 @@
 //!   would stack up behind the next fire. The only NAK is a failure to
 //!   publish the outcome, which redelivers a message the ledger then
 //!   answers by re-publishing the recorded outcome — never by running
-//!   the task a second time.
+//!   the task a second time. A failed run also raises a
+//!   `maintenance.run_failed`
+//!   [operator signal](crate::events::OperatorSignalPayload): unattended
+//!   work that stopped working, with nobody watching the log, is what
+//!   the notification pane exists for.
 //!
 //! Adding a task is a variant on [`MaintenanceTask`], an arm in its
-//! `name`/`run` matches, and a line in the operating guide. Nothing in
-//! this module's plumbing changes.
+//! `name`/`run` matches, whatever it needs on [`MaintenanceContext`],
+//! and a line in the operating guide. Nothing in this module's plumbing
+//! changes.
 
 mod consumer;
 mod task;
 
 pub use consumer::{CONSUMER_NAME, MaintenanceConsumer, MaintenanceConsumerError};
-pub use task::{MaintenanceContext, MaintenanceFailure, MaintenanceTask, UnknownTask};
+pub use task::{MaintenanceContext, MaintenanceFailure, MaintenanceTask, TaskOutcome, UnknownTask};
 
 #[cfg(test)]
 mod tests;

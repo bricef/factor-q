@@ -3,15 +3,15 @@
 
 use super::*;
 
-fn payload(run_id: &str) -> MaintenanceRunPayload {
-    MaintenanceRunPayload {
+fn resolved(run_id: &str) -> Resolved {
+    Resolved::just(MaintenanceRunPayload {
         task: "ping".to_string(),
         run_id: run_id.to_string(),
         outcome: MaintenanceOutcome::Succeeded {
             detail: "pong".to_string(),
         },
         duration_ms: 0,
-    }
+    })
 }
 
 /// The property the ledger exists for: an id it has seen is never
@@ -35,9 +35,9 @@ fn a_started_run_is_never_reported_as_unseen() {
 fn a_held_outcome_is_returned_to_the_redelivery() {
     let mut ledger = RunLedger::new(4);
     ledger.start("a");
-    ledger.hold("a", payload("a"));
+    ledger.hold("a", resolved("a"));
     let held = ledger.lookup("a").expect("seen").expect("held");
-    assert_eq!(held.run_id, "a");
+    assert_eq!(held.payload.run_id, "a");
     ledger.resolved("a");
     assert!(
         ledger.lookup("a").expect("still seen").is_none(),
@@ -66,7 +66,7 @@ fn the_ledger_evicts_the_oldest_and_stays_within_capacity() {
 fn starting_a_known_id_twice_is_a_no_op() {
     let mut ledger = RunLedger::new(4);
     ledger.start("a");
-    ledger.hold("a", payload("a"));
+    ledger.hold("a", resolved("a"));
     ledger.start("a");
     assert_eq!(ledger.order.len(), 1, "no duplicate order entry");
     assert!(

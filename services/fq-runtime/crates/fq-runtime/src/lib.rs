@@ -99,6 +99,8 @@ pub use mcp::{
     McpServerState, McpServerStates, ProgressRegistry, RootsHandle, ServerRequest,
     advertised_roots_from_tool_sandbox, roots_from_tool_sandbox,
 };
+pub use pricing::refresh::{PricingOverlay, PricingRefresh};
+pub use pricing::served::ServedPricing;
 pub use pricing::{ModelPricing, PricingTable};
 pub use tools::ToolRegistry;
 pub use trigger::{PublishedTrigger, TRIGGER_ID_HEADER, Trigger};

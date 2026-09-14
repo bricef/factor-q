@@ -156,8 +156,13 @@ pub struct RunnerConfig {
     /// Where the canonical event sequence is published: the NATS
     /// [`EventBus`] in production, an in-memory sink in the sim.
     pub(super) sink: Arc<dyn EventSink>,
-    /// Model→price lookup for cost accounting.
-    pub(super) pricing: Arc<PricingTable>,
+    /// Model→price lookup for cost accounting. A *handle* on the table
+    /// the daemon is serving, not a table: the scheduled refresh
+    /// (<https://github.com/bricef/factor-q/issues/344>) swaps a new one
+    /// in underneath every runner, and a runner that had been handed an
+    /// `Arc<PricingTable>` at construction would price every invocation
+    /// it ever ran at boot-time prices.
+    pub(super) pricing: ServedPricing,
     /// Three-state WAL / invocation-state persistence
     /// (data-architecture.md §5.5).
     pub(super) store: Arc<WorkerStore>,
@@ -240,7 +245,7 @@ impl RunnerConfig {
 #[derive(Default)]
 pub struct RunnerConfigBuilder {
     sink: Option<Arc<dyn EventSink>>,
-    pricing: Option<Arc<PricingTable>>,
+    pricing: Option<ServedPricing>,
     store: Option<Arc<WorkerStore>>,
     worker_id: Option<WorkerId>,
     clock: Option<Arc<dyn Clock>>,
@@ -274,9 +279,12 @@ impl RunnerConfigBuilder {
         self
     }
 
-    /// Model→price lookup for cost accounting.
-    pub fn pricing(mut self, pricing: Arc<PricingTable>) -> Self {
-        self.pricing = Some(pricing);
+    /// Model→price lookup for cost accounting. Takes the daemon's
+    /// [`ServedPricing`] handle, or an `Arc<PricingTable>` — a runner
+    /// with no daemon around it (a test, the sim) passes the table it
+    /// built and never swaps it.
+    pub fn pricing(mut self, pricing: impl Into<ServedPricing>) -> Self {
+        self.pricing = Some(pricing.into());
         self
     }
 

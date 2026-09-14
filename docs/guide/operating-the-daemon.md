@@ -835,6 +835,7 @@ daemon gains a consumer rather than a cron.
 | Task | Subject | What it does |
 | --- | --- | --- |
 | `ping` | `fq.maintenance.ping` | Nothing. Succeeds and says `pong` — the way to prove the whole path is wired on an instance. |
+| `pricing_refresh` | `fq.maintenance.pricing_refresh` | Fetches the live pricing document, puts it through the acceptance rules below, and swaps the result into the table this daemon is serving. See *Keeping the table fresh*, below. |
 
 The registry is closed: a subject naming anything else is **refused**,
 loudly and on the record, rather than dropped. Check what an instance
@@ -854,6 +855,23 @@ subject = "fq.maintenance.ping"
 # template variables make the log line and the run id legible.
 payload_json = '{"job": "{{job}}", "slot": "{{scheduled_time}}"}'
 ```
+
+The refresh that keeps prices current is the same shape, and **every six
+hours** is the cadence to start from: LiteLLM's document changes a few
+times a day, and four fetches a day is well inside an unauthenticated
+GitHub budget while keeping the table no more than a quarter-day behind.
+
+```toml
+[[job]]
+name = "pricing-refresh"
+schedule = "@every 6h"
+subject = "fq.maintenance.pricing_refresh"
+payload_json = '{"job": "{{job}}", "slot": "{{scheduled_time}}"}'
+```
+
+On the dogfood instance this job lives in that instance's fq-cron config,
+which is deployed from the `fq-dogfood` ops repository and is not in this
+one — editing it there *is* the deploy.
 
 Three fields of that job are load-bearing:
 
@@ -907,6 +925,19 @@ names this build knows; a failure prints `FAILED:` with the task's own
 error. **A failed run is over** — the message is acked and nothing is
 retried inside the ack loop, because the schedule is the retry and a
 redelivered run would stack up behind the next fire.
+
+A failure also raises a `maintenance.run_failed` operator signal — a
+notification, since the next fire tries again — carrying the task, the
+run id and the error. It is what makes unattended work that stopped
+working visible to somebody who is not reading the log:
+
+```sh
+fq events query --event-type operator_signal
+```
+
+A *refusal* raises nothing. A task name this build does not know is a
+`fq-cron.toml` error, and the operator who wrote that file is the one
+reading the refusal on the maintenance log.
 
 The durable is `fq-maintenance` on the `fq-maintenance` stream, and
 `fq doctor` lists it beside the others, so a consumer that has stopped
@@ -973,8 +1004,11 @@ reporting a permanent `Missing` nobody can clear.
 
 Prices come from the [LiteLLM
 table](https://github.com/BerriAI/litellm)'s `main` branch, fetched at
-startup. **The live table is the source, and the discipline is on
-acceptance** ([#735](https://github.com/bricef/factor-q/issues/735)).
+startup and again on a schedule
+([#344](https://github.com/bricef/factor-q/issues/344); see *Keeping the
+table fresh*, below). **The live table is the source, and the discipline
+is on acceptance**
+([#735](https://github.com/bricef/factor-q/issues/735)).
 
 Pinning a commit would look safer and is not. LiteLLM adds models
 weekly, and under [ADR-0004](../adrs/accepted/0004-cost-controls-from-day-one.md) a
@@ -1015,8 +1049,67 @@ offered, model by model, against the last one it accepted.
    names the first field that failed and the model keeps all of its
    prior figures.
 
-A model the source has stopped listing is not carried over: a startup
-load is a safe boundary.
+A model the source has stopped listing is not carried over **at
+startup**, which is a safe boundary because nothing is running yet. A
+*refresh* keeps it; see *Keeping the table fresh*.
+
+### Keeping the table fresh
+
+A daemon that runs for weeks would otherwise serve the prices it booted
+on. The `pricing_refresh` maintenance task fetches the document again on
+whatever cadence `fq-cron.toml` fires it at (*Scheduling maintenance with
+fq-cron*, above; six hours is the suggested start), runs the same
+acceptance rules, and swaps the result into the table the daemon is
+serving — including the invocations already in flight. The refresh reads
+and writes the same `[pricing] source` and the same cache file the
+startup load used, so each document is judged against the one before it.
+
+**A refresh only ever widens the priced set.** New models and accepted
+price changes land immediately. A model that upstream has stopped listing
+**keeps its price**: under
+[ADR-0004](../adrs/accepted/0004-cost-controls-from-day-one.md) a model
+with no price is a *refused dispatch*, so a table that narrowed under a
+running invocation would break it mid-flight, which is the failure that
+issue exists to prevent.
+
+**Removals are applied at the next daemon start.** The cache a refresh
+writes is the accepted document, so a model upstream dropped is already
+absent from it; the next start therefore neither compares against it nor
+serves it, and retired prices do not accumulate across restarts. Start is
+the boundary because it is the only moment at which "nothing is using
+this model" is a fact rather than an estimate — and it is where the
+coverage guarantee is enforced with an operator in front of it, since a
+start that would leave a declared model unpriced refuses to run and names
+it. A daemon holds a retired price for at most one lifetime; restart it
+if that matters.
+
+Prices layered over the accepted table — OpenRouter's catalogue for the
+models routed there, and `[providers.<name>.pricing]` overrides — are
+configuration, and a refresh does not move them. An override is your
+answer to a price the source gets wrong; it changes when you change it,
+not on a timer.
+
+What an operator sees:
+
+| What happened | Where it shows |
+| --- | --- |
+| The refresh ran | one `maintenance_run` event: `N entries (N new, N repriced, N refused)`, plus a count of models no longer listed upstream |
+| A change was refused | one `pricing.change_refused` notification per model, exactly as at startup — model, field, old, new, ratio, rule |
+| The fetch did not land | one `pricing.fetch_failed` notification. The run still **succeeds**: serving the last accepted table is a working state, and the outcome line says `fetch failed; still serving the last accepted table` |
+| The table is past `[pricing] max_age` | the `pricing.stale` alert, raised by each refresh that fails to land a document. A refresh that lands one raises nothing, which is how the alert clears: it stops recurring |
+| The task itself failed | `maintenance.run_failed` (see *Reading the outcome*, above) |
+
+```sh
+# What the last refresh did
+fq events query --event-type maintenance_run
+
+# What it refused, and why
+fq events query --event-type operator_signal
+```
+
+Turning the schedule off is removing the job from `fq-cron.toml`; the
+daemon then behaves exactly as it did before — prices are fetched at
+startup and not again.
 
 ### Where a refusal shows up
 
@@ -1131,6 +1224,7 @@ document has the opposite of what they configured.
 | Schedule recurring maintenance | an `fq-cron.toml` job publishing to `fq.maintenance.<task>` (see *Scheduling maintenance with fq-cron*) |
 | See what maintenance has run | `fq events query --event-type maintenance_run` |
 | See which pricing table this daemon accepted | `fq events query --event-type system_startup --limit 1` |
+| Refresh prices without restarting | an `fq-cron.toml` job publishing to `fq.maintenance.pricing_refresh` (see *Keeping the table fresh*) |
 | See what pricing changes were refused | `fq events query --event-type operator_signal` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |

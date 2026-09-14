@@ -41,6 +41,10 @@ pub mod fault;
 pub mod gauge;
 pub mod mock_anthropic;
 pub mod mock_gemini;
+/// The upstream pricing document, mocked. Crate-test-only: no sibling
+/// crate needs it, and `axum` is a dev-dependency here.
+#[cfg(test)]
+pub mod mock_litellm;
 pub mod mock_openai;
 #[cfg(test)]
 pub mod oracle;

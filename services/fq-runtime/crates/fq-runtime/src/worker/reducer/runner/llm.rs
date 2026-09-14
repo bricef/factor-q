@@ -114,7 +114,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// fails the invocation, a sampling request declines). Unreachable
     /// when the startup pricing guarantee holds — defence in depth.
     fn unpriced_model_refusal(&self, model: &str) -> Option<crate::llm::LlmError> {
-        (self.config.enforce_pricing && self.config.pricing.lookup(model).is_none())
+        (self.config.enforce_pricing && self.config.pricing.price(model).is_none())
             .then(|| crate::llm::LlmError::UnpricedModel(model.to_string()))
     }
 
@@ -280,7 +280,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // caught by the slice-6 budget-across-resume property; the
         // old comment claimed the cost was "filled in below", which
         // never happened).
-        let pricing = self.config.pricing.lookup(&request.model);
+        let pricing = self.config.pricing.price(&request.model);
         if pricing.is_none() {
             warn!(
                 model = %request.model,

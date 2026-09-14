@@ -26,9 +26,11 @@
 //! suffices, and it is the thing that refuses to run.
 //!
 //! The periodic refresh (<https://github.com/bricef/factor-q/issues/344>)
-//! is not here. It calls [`accept`] on its own schedule with its own
-//! boundary rules; this path is what happens at startup, where there is
-//! nothing in flight to widen for.
+//! is not here, but it runs this: [`refresh`](super::refresh) calls the
+//! same load on its schedule and then applies its own widen-only merge
+//! before swapping the result in. This path is what happens at startup,
+//! where there is nothing in flight to widen for — which is why a model
+//! the source has stopped listing is dropped here and held there.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -253,7 +255,25 @@ fn refusal_signal(refusal: &Refusal) -> OperatorSignalPayload {
 /// Never fails. A fetch that does not land leaves the last accepted
 /// table in place and says so.
 pub async fn load_accepted(settings: LoadSettings, cache_path: &Path) -> AcceptedLoad {
-    let fetched = fetch_document(&settings.source).await;
+    let url = settings.source.url();
+    load_accepted_from(&url, settings, cache_path).await
+}
+
+/// [`load_accepted`], reading the document from `url` rather than from
+/// the source's own address.
+///
+/// The seam the periodic refresh takes
+/// (<https://github.com/bricef/factor-q/issues/344>), so a test can put a
+/// mock LiteLLM document through the whole path — fetch, accept, cache,
+/// signals — without `[pricing] source` growing a spelling for "some
+/// other URL". `settings.source` still names what the table *is*: it is
+/// what the provenance records and what a pin's commit is read from.
+pub(crate) async fn load_accepted_from(
+    url: &str,
+    settings: LoadSettings,
+    cache_path: &Path,
+) -> AcceptedLoad {
+    let fetched = fetch_document(url).await;
     let commit = match (&fetched, settings.source.commit()) {
         // A pin knows its own commit; asking GitHub would only confirm
         // the sha we already fetched by.
@@ -497,11 +517,10 @@ fn digest_of(bytes: &[u8]) -> String {
         .collect()
 }
 
-async fn fetch_document(source: &TableSource) -> Result<FetchedDocument, PricingError> {
+async fn fetch_document(url: &str) -> Result<FetchedDocument, PricingError> {
     let client = super::http_client()?;
-    let url = source.url();
     let response = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|err| PricingError::Http(err.to_string()))?;

@@ -46,8 +46,7 @@ use fq_runtime::events::{Event, EventPayload, SystemShutdownPayload, SystemStart
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{DrainReason, DrainRequest};
 use fq_runtime::{
-    Config, ControlPlaneStore, EventBus, PricingTable, ProjectionStore, SharedRegistry,
-    TriggerDispatcher,
+    Config, ControlPlaneStore, EventBus, ProjectionStore, SharedRegistry, TriggerDispatcher,
 };
 use uuid::Uuid;
 
@@ -79,7 +78,7 @@ pub(crate) struct Assembled {
     pub worker_store: Arc<fq_runtime::WorkerStore>,
     pub registry: Arc<fq_runtime::AgentRegistry>,
     pub llm: Arc<dyn LlmClient>,
-    pub pricing: Arc<PricingTable>,
+    pub pricing: crate::pricing::DaemonPricing,
     pub resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
     pub worker: Arc<dyn fq_runtime::Worker>,
     pub worker_id: fq_runtime::worker::WorkerId,
@@ -280,7 +279,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         let sc = fq_runtime::SummaryConsumer::new(
             bus.clone(),
             llm.clone(),
-            pricing.clone(),
+            pricing.served.clone(),
             model,
             config.summary.max_line_chars,
         )
@@ -294,7 +293,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // Spawn the maintenance consumer (#257): the housekeeping tasks an
     // external scheduler asks for on `fq.maintenance.<task>`.
     let (maint_shutdown_tx, mut maint_handle) =
-        crate::maintenance_task::spawn(&bus, runtime_id, &config);
+        crate::maintenance_task::spawn(&bus, runtime_id, &config, pricing.refresh);
 
     // Spawn the advisory watch (#169). Drains the captured JetStream
     // MAX_DELIVERIES advisories for the trigger stream and emits the
