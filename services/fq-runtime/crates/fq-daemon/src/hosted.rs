@@ -731,18 +731,17 @@ async fn announce_startup(
     bus: &EventBus,
     runtime_id: Uuid,
     startup: &Event,
-    signals: Vec<fq_runtime::events::OperatorSignalPayload>,
+    signals: Vec<fq_runtime::events::PendingSignal>,
 ) -> anyhow::Result<()> {
     bus.publish(startup)
         .await
         .context("failed to publish system.startup event")?;
     for signal in signals {
-        bus.publish(&Event::system(
-            runtime_id,
-            EventPayload::OperatorSignal(signal),
-        ))
-        .await
-        .context("failed to publish a pricing operator signal")?;
+        // Under the id it was minted with, so the refresh that ends a
+        // condition can resolve the signal that raised it (#745).
+        bus.publish(&signal.into_event(runtime_id))
+            .await
+            .context("failed to publish a pricing operator signal")?;
     }
     Ok(())
 }

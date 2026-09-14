@@ -10,6 +10,7 @@ use chrono::Utc;
 use super::*;
 use crate::events::{PricingProvenance, SignalSeverity};
 use crate::pricing::accept::{Disposition, PriceField, Refusal, RefusalRule};
+use crate::pricing::episodes::PricingEpisodes;
 use crate::pricing::live::Staleness;
 
 fn priced(input: f64) -> ModelPricing {
@@ -45,6 +46,7 @@ fn refresh(current: PricingTable, overlay: PricingOverlay) -> PricingRefresh {
         std::path::PathBuf::from("/nonexistent/pricing.json"),
         overlay,
         ServedPricing::new(current),
+        PricingEpisodes::new(),
     )
 }
 
@@ -192,7 +194,7 @@ fn a_failed_fetch_is_a_run_that_kept_the_table_it_had() {
         "fetch failed; still serving the last accepted table (1 entries)"
     );
     assert_eq!(input(refresh.served(), "a/one"), 1.0);
-    let kinds: Vec<&str> = outcome.signals.iter().map(|s| s.kind.as_str()).collect();
+    let kinds: Vec<&str> = outcome.signals.iter().map(|s| s.kind().as_str()).collect();
     assert_eq!(kinds, vec!["pricing.fetch_failed"]);
 }
 
@@ -228,7 +230,7 @@ fn the_loads_signals_ride_the_run() {
     let signals: Vec<(&str, SignalSeverity)> = outcome
         .signals
         .iter()
-        .map(|s| (s.kind.as_str(), s.severity))
+        .map(|s| (s.kind().as_str(), s.payload.severity))
         .collect();
     assert_eq!(
         signals,
@@ -404,6 +406,67 @@ fn a_model_that_was_not_admitted_is_not_a_refused_change() {
         "the line separates the two: {detail}"
     );
     // And the count an operator can act on matches what was published.
-    let signals: Vec<&str> = outcome.signals.iter().map(|s| s.kind.as_str()).collect();
+    let signals: Vec<&str> = outcome.signals.iter().map(|s| s.kind().as_str()).collect();
     assert_eq!(signals, vec!["pricing.change_refused"]);
+}
+
+/// Review C-5/E-7, through the refresh rather than the episode value:
+/// the standing conditions are raised on the edge, so a broken upstream
+/// is one alert however long it lasts, and the refresh that fixes it
+/// closes that alert by name.
+#[test]
+fn a_broken_upstream_is_one_alert_and_one_recovery() {
+    let refresh = refresh(table(&[("a/one", 1.0)]), PricingOverlay::new());
+    let stale = || AcceptedLoad {
+        table: table(&[("a/one", 1.0)]),
+        refusals: Vec::new(),
+        staleness: Some(Staleness {
+            accepted_at: Utc::now() - chrono::Duration::days(9),
+            age: Duration::from_secs(9 * 24 * 3_600),
+            max_age: Duration::from_secs(7 * 24 * 3_600),
+        }),
+        fetch_error: Some("connection refused".to_string()),
+    };
+
+    let first = refresh.settle(stale()).expect("settled");
+    let kinds: Vec<&str> = first.signals.iter().map(|s| s.kind().as_str()).collect();
+    assert_eq!(kinds, vec!["pricing.fetch_failed", "pricing.stale"]);
+    let alert = first
+        .signals
+        .iter()
+        .find(|s| s.kind().as_str() == "pricing.stale")
+        .expect("raised");
+
+    for run in 2..=3 {
+        let again = refresh.settle(stale()).expect("settled");
+        assert!(
+            again.signals.is_empty(),
+            "refresh {run} re-raised a condition already reported"
+        );
+    }
+
+    let landed = refresh
+        .settle(load(table(&[("a/one", 1.0)])))
+        .expect("settled");
+    let recoveries: Vec<(&str, SignalSeverity, Option<uuid::Uuid>)> = landed
+        .signals
+        .iter()
+        .map(|s| (s.kind().as_str(), s.payload.severity, s.payload.resolves))
+        .collect();
+    assert_eq!(
+        recoveries,
+        vec![
+            (
+                "pricing.stale",
+                SignalSeverity::Notification,
+                Some(alert.event_id)
+            ),
+            (
+                "pricing.fetch_failed",
+                SignalSeverity::Notification,
+                Some(first.signals[0].event_id)
+            ),
+        ],
+        "each recovery names the signal it closes"
+    );
 }

@@ -447,5 +447,62 @@ impl OperatorSignalPayload {
     }
 }
 
+/// A signal and the `event_id` it will be published under.
+///
+/// **An alert is open until a later signal's `resolves` names its
+/// `event_id`**, so a producer that raises an alert it intends to close
+/// later has to know that id *before* the alert is on the log. Producers
+/// here return signals rather than publishing them — the maintenance
+/// consumer publishes them behind the outcome that gates them, which is
+/// what makes "once per run, never on a replay" one rule in one place —
+/// so the id cannot come back from the publisher without a callback
+/// pointing the wrong way. Minting it at the producer and stamping it on
+/// the envelope is the seam that keeps the publishing rule where it is.
+///
+/// A producer with nothing to resolve never needs this type: `.into()`
+/// from a payload mints an id it can ignore.
+#[derive(Debug, Clone)]
+pub struct PendingSignal {
+    /// The `envelope.event_id` this signal will carry. A v7 uuid, minted
+    /// at the moment the signal was decided rather than at publish, so
+    /// it still sorts by when it happened.
+    pub event_id: Uuid,
+    /// What to say.
+    pub payload: OperatorSignalPayload,
+}
+
+impl PendingSignal {
+    /// Mint an id for `payload`, so a later signal can name it.
+    pub fn new(payload: OperatorSignalPayload) -> Self {
+        Self {
+            event_id: Uuid::now_v7(),
+            payload,
+        }
+    }
+
+    /// The kind this signal carries — what a caller filters on without
+    /// reaching through the payload.
+    pub fn kind(&self) -> &SignalKind {
+        &self.payload.kind
+    }
+
+    /// The event that puts this signal on the log, under the id it was
+    /// minted with.
+    pub fn into_event(self, runtime_id: Uuid) -> crate::events::Event {
+        let mut event = crate::events::Event::system(
+            runtime_id,
+            crate::events::EventPayload::OperatorSignal(self.payload),
+        );
+        event.envelope.event_id = self.event_id;
+        event
+    }
+}
+
+impl From<OperatorSignalPayload> for PendingSignal {
+    fn from(payload: OperatorSignalPayload) -> Self {
+        Self::new(payload)
+    }
+}
+
 #[cfg(test)]
 mod tests;

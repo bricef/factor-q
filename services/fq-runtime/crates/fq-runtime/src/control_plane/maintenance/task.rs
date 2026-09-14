@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::events::{OperatorSignalPayload, subjects};
+use crate::events::{PendingSignal, subjects};
 use crate::pricing::refresh::PricingRefresh;
 
 /// Every maintenance task this build can run, as values.
@@ -123,8 +123,10 @@ impl MaintenanceTask {
 pub struct TaskOutcome {
     /// The one-line detail on the `maintenance_run` event.
     pub detail: String,
-    /// Operator signals to publish with the outcome, in order.
-    pub signals: Vec<OperatorSignalPayload>,
+    /// Operator signals to publish with the outcome, in order. Each
+    /// carries the `event_id` it will be published under, so a signal
+    /// that raises a condition can be named by the one that resolves it.
+    pub signals: Vec<PendingSignal>,
 }
 
 impl TaskOutcome {
@@ -135,7 +137,7 @@ impl TaskOutcome {
         }
     }
 
-    pub fn with_signals(mut self, signals: Vec<OperatorSignalPayload>) -> Self {
+    pub fn with_signals(mut self, signals: Vec<PendingSignal>) -> Self {
         self.signals = signals;
         self
     }

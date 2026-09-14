@@ -324,8 +324,8 @@ fn a_failed_fetch_serves_the_last_accepted_table() {
     );
     let signals = load.signals();
     assert_eq!(signals.len(), 1);
-    assert_eq!(signals[0].kind.as_str(), "pricing.fetch_failed");
-    assert_eq!(signals[0].severity, SignalSeverity::Notification);
+    assert_eq!(signals[0].kind().as_str(), "pricing.fetch_failed");
+    assert_eq!(signals[0].payload.severity, SignalSeverity::Notification);
 }
 
 /// A load where the commits API did not answer records no commit at
@@ -417,12 +417,12 @@ fn a_table_past_its_window_alerts() {
     let signals = load.signals();
     let alert = signals
         .iter()
-        .find(|s| s.kind.as_str() == "pricing.stale")
+        .find(|s| s.kind().as_str() == "pricing.stale")
         .expect("a stale alert");
-    assert_eq!(alert.severity, SignalSeverity::Alert);
-    assert_eq!(alert.detail["window_hours"], json!(168));
+    assert_eq!(alert.payload.severity, SignalSeverity::Alert);
+    assert_eq!(alert.payload.detail["window_hours"], json!(168));
     assert_eq!(
-        alert.detail["last_refresh_ms"],
+        alert.payload.detail["last_refresh_ms"],
         json!(now().timestamp_millis())
     );
 }
@@ -482,20 +482,23 @@ fn a_refusal_signal_names_model_field_old_new_ratio_and_rule() {
     let signals = load.signals();
     assert_eq!(signals.len(), 1, "one notification per model per load");
     let signal = &signals[0];
-    assert_eq!(signal.kind.as_str(), "pricing.change_refused");
-    assert_eq!(signal.severity, SignalSeverity::Notification);
+    assert_eq!(signal.kind().as_str(), "pricing.change_refused");
+    assert_eq!(signal.payload.severity, SignalSeverity::Notification);
     assert_eq!(
-        signal.summary,
+        signal.payload.summary,
         "moonshotai/kimi-k3 input_cost_per_token moved 6.2x; kept the prior price"
     );
-    assert_eq!(signal.detail["model"], json!("moonshotai/kimi-k3"));
-    assert_eq!(signal.detail["field"], json!("input_cost_per_token"));
+    assert_eq!(signal.payload.detail["model"], json!("moonshotai/kimi-k3"));
+    assert_eq!(
+        signal.payload.detail["field"],
+        json!("input_cost_per_token")
+    );
     // Per token, as the source states prices — within the rounding a
     // trip through per-million and back costs.
-    assert!((signal.detail["old"].as_f64().unwrap() - 6e-7).abs() < 1e-18);
-    assert!((signal.detail["new"].as_f64().unwrap() - 3.7e-6).abs() < 1e-18);
-    assert_eq!(signal.detail["rule"], json!("drift_bound"));
-    let ratio = signal.detail["ratio"].as_f64().unwrap();
+    assert!((signal.payload.detail["old"].as_f64().unwrap() - 6e-7).abs() < 1e-18);
+    assert!((signal.payload.detail["new"].as_f64().unwrap() - 3.7e-6).abs() < 1e-18);
+    assert_eq!(signal.payload.detail["rule"], json!("drift_bound"));
+    let ratio = signal.payload.detail["ratio"].as_f64().unwrap();
     assert!((ratio - 6.166).abs() < 0.01, "{ratio}");
 }
 
@@ -523,7 +526,7 @@ fn each_refused_model_gets_its_own_notification() {
     assert!(
         signals
             .iter()
-            .all(|s| s.kind.as_str() == "pricing.change_refused")
+            .all(|s| s.kind().as_str() == "pricing.change_refused")
     );
 }
 
@@ -563,7 +566,7 @@ fn a_pinned_source_is_judged_by_the_same_rules() {
     assert!(!load.refusals[0].is_admission());
     let signals = load.signals();
     assert_eq!(signals.len(), 1);
-    assert_eq!(signals[0].kind.as_str(), "pricing.change_refused");
+    assert_eq!(signals[0].kind().as_str(), "pricing.change_refused");
     // ... and the provenance still says which pin it was.
     let provenance = load.table.provenance().expect("stamped");
     assert_eq!(provenance.source, "pinned:f00dcafe");

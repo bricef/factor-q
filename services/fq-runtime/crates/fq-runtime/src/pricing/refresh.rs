@@ -66,9 +66,10 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
-use crate::events::OperatorSignalPayload;
+use crate::events::PendingSignal;
 
 use super::accept::Refusal;
+use super::episodes::PricingEpisodes;
 use super::live::{self, AcceptedLoad, LoadSettings};
 use super::served::ServedPricing;
 use super::{ModelPricing, PricingTable};
@@ -183,9 +184,12 @@ impl RefreshReport {
 #[derive(Debug)]
 pub struct RefreshOutcome {
     pub report: RefreshReport,
-    /// The load's own signals: a refused change per model, a failed
-    /// fetch, a table past its staleness window.
-    pub signals: Vec<OperatorSignalPayload>,
+    /// What this refresh wants an operator told: a refused change per
+    /// model, and the *edges* of the two standing conditions — a failed
+    /// fetch or a stale table raised once per episode, and a
+    /// notification resolving each when the next document lands (see
+    /// [`PricingEpisodes`]).
+    pub signals: Vec<PendingSignal>,
 }
 
 /// A refresh that did not happen. Not a fetch that failed — that is a
@@ -213,6 +217,10 @@ pub struct PricingRefresh {
     cache_path: PathBuf,
     overlay: PricingOverlay,
     served: ServedPricing,
+    /// Which standing conditions have already been reported, shared with
+    /// the startup load so a table found stale at boot and still stale
+    /// at this refresh is one episode rather than two.
+    episodes: PricingEpisodes,
     /// Where the document is fetched from — derived from
     /// `settings.source` at construction, and pointed elsewhere only by
     /// the test-only seam below.
@@ -227,6 +235,7 @@ impl PricingRefresh {
         cache_path: impl Into<PathBuf>,
         overlay: PricingOverlay,
         served: ServedPricing,
+        episodes: PricingEpisodes,
     ) -> Self {
         let upstream = settings.source.url();
         Self {
@@ -234,6 +243,7 @@ impl PricingRefresh {
             cache_path: cache_path.into(),
             overlay,
             served,
+            episodes,
             upstream,
         }
     }
@@ -276,7 +286,7 @@ impl PricingRefresh {
     /// Everything after the network: the merge, the guard, the swap.
     /// Separated so the rules are testable without a socket.
     fn settle(&self, load: AcceptedLoad) -> Result<RefreshOutcome, RefreshError> {
-        let signals = load.signals();
+        let signals = self.episodes.edges(&load, load.signals());
         let current = self.served.current();
         let (next, mut report) = merge(&current, &load.table, &self.overlay);
         let (not_admitted, refused): (Vec<&Refusal>, Vec<&Refusal>) =

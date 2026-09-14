@@ -114,7 +114,8 @@ pub use llm::{
     assistant_tool_calls, reduce_reasoning,
 };
 pub use operator_signal::{
-    OperatorSignalPayload, SignalKind, SignalKindError, SignalReferences, SignalSeverity,
+    OperatorSignalPayload, PendingSignal, SignalKind, SignalKindError, SignalReferences,
+    SignalSeverity,
 };
 pub use payloads::*;
 pub use pricing::PricingProvenance;

@@ -527,6 +527,7 @@ fn refresh_against(
         cache_path,
         PricingOverlay::new(),
         served.clone(),
+        crate::pricing::episodes::PricingEpisodes::new(),
     )
     .with_upstream(upstream.url());
     (refresh, served)

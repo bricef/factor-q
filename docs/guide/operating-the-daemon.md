@@ -1095,8 +1095,8 @@ What an operator sees:
 | --- | --- |
 | The refresh ran | one `maintenance_run` event: `N entries (N new, N repriced, N refused, N not admitted)`, plus a count of models no longer listed upstream |
 | A change was refused | one `pricing.change_refused` notification per model, exactly as at startup — model, field, old, new, ratio, rule |
-| The fetch did not land | one `pricing.fetch_failed` notification. The run still **succeeds**: serving the last accepted table is a working state, and the outcome line says `fetch failed; still serving the last accepted table` |
-| The table is past `[pricing] max_age` | the `pricing.stale` alert, raised by each refresh that fails to land a document. A refresh that lands one raises nothing, which is how the alert clears: it stops recurring |
+| The fetch did not land | one `pricing.fetch_failed` notification, on the **first** refresh that fails and not again until one succeeds. The run still **succeeds**: serving the last accepted table is a working state, and the outcome line says `fetch failed; still serving the last accepted table` |
+| The table is past `[pricing] max_age` | one `pricing.stale` alert, raised **once** when the table crosses the window. The first refresh that lands a document publishes a `pricing.stale` notification naming that alert in `resolves`, which is what closes it |
 | The task itself failed | `maintenance.run_failed` (see *Reading the outcome*, above) |
 
 ```sh
@@ -1146,6 +1146,20 @@ within `[pricing] max_age` raises `pricing.stale` — an **alert**, since
 no further attempt recovers a source that has stopped answering, and
 prices silently older than the models they price is the failure
 ADR-0004's guarantee exists to prevent.
+
+Both are **conditions, not events**, so both are raised on the edge:
+once when the condition begins, and never again while it holds. The
+first load that fetches and accepts a document publishes a notification
+of the same kind naming the signal it closes, and the pane's "open
+alerts" count falls by one. Without that, a refresh every six hours
+turns a week of a broken upstream into twenty-eight open alerts that
+nothing can ever close.
+
+The memory is the running daemon's. Restart it while the table is stale
+and the startup load raises a fresh alert — a new episode, naming the
+age it found — while the alert the previous run raised stays open,
+because the run that would have resolved it is gone. Resolve it by
+reading the log: the newer alert is the live one.
 
 ### What is on disk, and what is on the record
 
