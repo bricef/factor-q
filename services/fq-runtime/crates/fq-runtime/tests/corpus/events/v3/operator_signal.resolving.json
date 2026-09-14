@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "schema_version": 3,
+    "event_id": "01990000-0000-7000-8000-000000000029",
+    "trace_id": "01990000-0000-7000-8000-000000002000",
+    "agent_id": "system",
+    "invocation_id": "01990000-0000-7000-8000-000000002000",
+    "schema_id": "factor-q/operator_signal@1",
+    "timestamp": "2026-09-07T12:00:29Z"
+  },
+  "payload": {
+    "event_type": "operator_signal",
+    "payload": {
+      "severity": "notification",
+      "kind": "pricing.stale",
+      "summary": "the pricing table refreshed; the staleness alert is resolved",
+      "detail": {
+        "last_refresh_ms": 1788000000000
+      },
+      "resolves": "01990000-0000-7000-8000-000000000028"
+    }
+  }
+}
