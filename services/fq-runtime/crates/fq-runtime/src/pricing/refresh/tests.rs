@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use super::*;
 use crate::events::{PricingProvenance, SignalSeverity};
-use crate::pricing::accept::{PriceField, Refusal, RefusalRule};
+use crate::pricing::accept::{Disposition, PriceField, Refusal, RefusalRule};
 use crate::pricing::live::Staleness;
 
 fn priced(input: f64) -> ModelPricing {
@@ -33,6 +33,7 @@ fn provenance() -> PricingProvenance {
     PricingProvenance {
         source: "litellm-main".to_string(),
         commit: Some("f00dcafe".to_string()),
+        etag: Some("\"f00dcafe\"".to_string()),
         digest: format!("f00dcafe1234{}", "0".repeat(52)),
         accepted_at: Utc::now(),
     }
@@ -208,6 +209,7 @@ fn the_loads_signals_ride_the_run() {
                 new: 6e-6,
                 ratio: Some(6.0),
                 rule: RefusalRule::DriftBound,
+                disposition: Disposition::KeptPriorPrice,
             }],
             staleness: Some(Staleness {
                 accepted_at: Utc::now() - chrono::Duration::days(9),
