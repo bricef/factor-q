@@ -532,6 +532,83 @@ mod tests {
         assert_eq!(projection.count().await.unwrap(), 1);
     }
 
+    /// **The tick actually sweeps the pane's index, and keeps the
+    /// alerts.**
+    ///
+    /// `sweep_operator_signals` had a two-directional unit test and no
+    /// caller test, so deleting the call from `sweep_archive_and_events`
+    /// left every test green while notifications accumulated for ever.
+    /// This is the wiring, asserted where the wiring is: one old
+    /// notification and one old alert of identical age, one tick, and
+    /// the two outcomes must differ.
+    #[tokio::test]
+    async fn the_retention_tick_sweeps_notifications_and_keeps_alerts() {
+        use super::super::projection::ProjectionStore;
+        use crate::events::{
+            Event, EventPayload, OperatorSignalPayload, SignalKind, operator_signal::kinds,
+        };
+        use chrono::Utc;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        fn signal(payload: OperatorSignalPayload, age_days: i64) -> Event {
+            let mut event = Event::system(Uuid::now_v7(), EventPayload::OperatorSignal(payload));
+            event.envelope.timestamp = Utc::now() - chrono::Duration::days(age_days);
+            event
+        }
+
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let projection = Arc::new(
+            ProjectionStore::open(&dir.path().join("projection.db"))
+                .await
+                .unwrap(),
+        );
+
+        let swept = signal(
+            OperatorSignalPayload::notification(
+                SignalKind::registered(kinds::PRICING_CHANGE_REFUSED),
+                "a price moved 6.2x; kept the prior price",
+            ),
+            3,
+        );
+        let kept = signal(
+            OperatorSignalPayload::alert(
+                SignalKind::registered(kinds::PRICING_STALE),
+                "the pricing table has not refreshed in 31h",
+            ),
+            3,
+        );
+        for event in [&swept, &kept] {
+            projection.insert_event(event, None).await.unwrap();
+        }
+        assert_eq!(
+            projection
+                .query_operator_signals(None, None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        RetentionSweeper::new(store, &archive_only(1))
+            .with_projection_store(projection.clone())
+            .sweep_now()
+            .await
+            .unwrap();
+
+        let rows = projection
+            .query_operator_signals(None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the tick swept the notification: {rows:?}");
+        assert_eq!(rows[0].event_id, kept.envelope.event_id.to_string());
+    }
+
     #[tokio::test]
     async fn sweep_handles_empty_archive() {
         use tempfile::tempdir;
