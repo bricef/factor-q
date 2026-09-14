@@ -108,7 +108,7 @@ fn an_unchanged_document_reprices_nothing() {
     assert_eq!(outcome.report.changed, 0);
     assert_eq!(
         outcome.report.detail(),
-        "1 entries (0 new, 0 repriced, 0 refused)"
+        "1 entries (0 new, 0 repriced, 0 refused, 0 not admitted)"
     );
 }
 
@@ -318,12 +318,13 @@ fn the_outcome_line_counts_what_is_no_longer_listed() {
         added: 4,
         changed: 9,
         refused: 1,
+        not_admitted: 0,
         held: vec!["a/gone".to_string(), "b/gone".to_string()],
         fetch_failed: false,
     };
     assert_eq!(
         report.detail(),
-        "1200 entries (4 new, 9 repriced, 1 refused); \
+        "1200 entries (4 new, 9 repriced, 1 refused, 0 not admitted); \
          2 no longer listed upstream, priced until restart"
     );
 }
@@ -343,4 +344,66 @@ fn applying_the_overlay_is_idempotent() {
     overlay.apply(&mut t);
     overlay.apply(&mut t);
     assert_eq!(t.lookup("a/one").unwrap().input_per_million, 5.0);
+}
+
+/// Review D-3: the outcome line's `refused` is refused *changes*.
+///
+/// The live table lists several hundred entries the plausibility floor
+/// will not admit, so folding them into `refused` made every refresh
+/// report `336 refused` while `signals()` published none of them — an
+/// outcome line and a pane disagreeing by hundreds, on the one number a
+/// reader who is not at `debug` can see.
+#[test]
+fn a_model_that_was_not_admitted_is_not_a_refused_change() {
+    let refresh = refresh(table(&[("a/one", 1.0)]), PricingOverlay::new());
+    let outcome = refresh
+        .settle(AcceptedLoad {
+            table: table(&[("a/one", 1.0)]),
+            refusals: vec![
+                Refusal {
+                    model: "a/one".to_string(),
+                    field: PriceField::Input,
+                    old: Some(1e-6),
+                    new: 6e-6,
+                    ratio: Some(6.0),
+                    rule: RefusalRule::DriftBound,
+                    disposition: Disposition::KeptPriorPrice,
+                },
+                Refusal {
+                    model: "a/free".to_string(),
+                    field: PriceField::Input,
+                    old: None,
+                    new: 0.0,
+                    ratio: None,
+                    rule: RefusalRule::ZeroPrice,
+                    disposition: Disposition::NotAdmitted,
+                },
+                Refusal {
+                    model: "a/embed".to_string(),
+                    field: PriceField::Output,
+                    old: None,
+                    new: 0.0,
+                    ratio: None,
+                    rule: RefusalRule::ZeroPrice,
+                    disposition: Disposition::NotAdmitted,
+                },
+            ],
+            staleness: None,
+            fetch_error: None,
+        })
+        .expect("merged");
+
+    assert_eq!(outcome.report.refused, 1, "one change was refused");
+    assert_eq!(
+        outcome.report.not_admitted, 2,
+        "two models were never admitted"
+    );
+    let detail = outcome.report.detail();
+    assert!(
+        detail.contains("1 refused") && detail.contains("2 not admitted"),
+        "the line separates the two: {detail}"
+    );
+    // And the count an operator can act on matches what was published.
+    let signals: Vec<&str> = outcome.signals.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(signals, vec!["pricing.change_refused"]);
 }
