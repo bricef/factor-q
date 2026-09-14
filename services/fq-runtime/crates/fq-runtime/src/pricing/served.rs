@@ -26,6 +26,21 @@
 //!   nothing and is what makes the handle a drop-in for the `Arc` it
 //!   replaced.
 //!
+//! **There is no `price(model)` accessor, and that is deliberate.** A
+//! priced call reads two things from the table — what the model costs
+//! and which table said so — and a cost row whose figure and citation
+//! come from two snapshots is a record of a table that never priced it.
+//! Under the cost-retention principle the citation is the only thing
+//! that makes a retained figure a record, so a wrong one is worse than
+//! none. Per-field accessors made that mistake the easy one to make and
+//! three call sites made it, so the handle offers [`current`] and
+//! nothing else: a caller takes one snapshot and reads the price, the
+//! window and the version off it. The type is then what keeps the rule
+//! rather than a comment asking callers to remember it
+//! (<https://github.com/bricef/factor-q/pull/745>, review D-1).
+//!
+//! [`current`]: ServedPricing::current
+//!
 //! `std::sync::RwLock` rather than `tokio`'s: every critical section here
 //! is an `Arc` clone, so a reader never blocks on anything and an async
 //! lock would buy a scheduler round trip per price lookup. And
@@ -36,7 +51,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::events::PricingProvenance;
 
-use super::{ModelPricing, PricingTable};
+use super::PricingTable;
 
 /// A shared handle on the pricing table this daemon is serving.
 ///
@@ -70,25 +85,6 @@ impl ServedPricing {
         let next = Arc::new(next);
         let mut slot = self.0.write().expect("served pricing lock poisoned");
         std::mem::replace(&mut slot, next)
-    }
-
-    /// What a model costs, copied out of the table being served.
-    ///
-    /// Owned rather than borrowed: see the module header — a borrow
-    /// would tie the caller's lifetime to a table the next refresh wants
-    /// to drop.
-    pub fn price(&self, model: &str) -> Option<ModelPricing> {
-        self.current().lookup(model).copied()
-    }
-
-    /// The model's context window, when the source lists one.
-    pub fn context_window(&self, model: &str) -> Option<u32> {
-        self.current().context_window(model)
-    }
-
-    /// The short reference a cost row cites for the prices it used.
-    pub fn version(&self) -> Option<String> {
-        self.current().version()
     }
 
     /// The provenance of the table being served, when it has one.

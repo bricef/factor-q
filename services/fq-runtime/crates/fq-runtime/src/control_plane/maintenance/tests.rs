@@ -625,15 +625,29 @@ async fn a_scheduled_refresh_swaps_the_served_table_and_caches_what_it_accepted(
     // admitted, an implausible change kept the prior price, and the
     // model upstream dropped is still priced — the widen-only rule, on
     // the table an in-flight invocation reads through.
-    assert_eq!(served.price("a/one").unwrap().input_per_million, 2.0);
-    assert_eq!(served.price("a/new").unwrap().input_per_million, 3.0);
     assert_eq!(
-        served.price("a/six-times").unwrap().input_per_million,
+        served.current().lookup("a/one").unwrap().input_per_million,
+        2.0
+    );
+    assert_eq!(
+        served.current().lookup("a/new").unwrap().input_per_million,
+        3.0
+    );
+    assert_eq!(
+        served
+            .current()
+            .lookup("a/six-times")
+            .unwrap()
+            .input_per_million,
         1.0,
         "a 6x move keeps the prior price"
     );
     assert_eq!(
-        served.price("a/retired").unwrap().input_per_million,
+        served
+            .current()
+            .lookup("a/retired")
+            .unwrap()
+            .input_per_million,
         7.0,
         "a model upstream stopped listing stays priced until the daemon restarts"
     );

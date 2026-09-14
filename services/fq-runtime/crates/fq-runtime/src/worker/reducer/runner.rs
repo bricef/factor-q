@@ -1813,7 +1813,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // pricing/context-window table; occupancy and history from
             // the invocation-scoped tracker the model path updates.
             tokens_in_use: context.tokens_in_use,
-            context_window_size: self.config.pricing.context_window(agent.model()),
+            context_window_size: self.config.pricing.current().context_window(agent.model()),
             messages_in_history: context.messages_in_history,
             oldest_turn_at_ms: Some(context.oldest_turn_at_ms),
         };

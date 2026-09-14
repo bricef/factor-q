@@ -344,7 +344,10 @@ impl SummaryConsumer {
         // an unpriced model reports $0 with a warning rather than
         // failing — but note the startup guarantee normally prevents
         // an unpriced summariser from running at all).
-        let pricing = self.pricing.price(&self.model);
+        // One snapshot, so the summariser's row cites the table that
+        // priced it even across a refresh (review D-1).
+        let table = self.pricing.current();
+        let pricing = table.lookup(&self.model).copied();
         if pricing.is_none() {
             warn!(model = %self.model, "no pricing known for summary model; cost will be reported as $0");
         }
@@ -378,7 +381,7 @@ impl SummaryConsumer {
             origin: Default::default(),
             // The summariser's spend is traceable to its prices like
             // everyone else's (#735).
-            pricing_table: self.pricing.version(),
+            pricing_table: table.version(),
             reasoning_tokens: response.usage.reasoning_tokens,
             reported_cost: response.reported_cost_usd,
         });

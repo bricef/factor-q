@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::pricing::ModelPricing;
 
 fn priced(input: f64) -> ModelPricing {
     ModelPricing {
@@ -29,13 +30,15 @@ fn a_clone_taken_before_the_swap_reads_the_table_after_it() {
     let served = ServedPricing::new(table(&[("a/one", 1.0)]));
     let held = served.clone();
 
-    assert_eq!(held.price("a/one").unwrap().input_per_million, 1.0);
-    assert!(held.price("a/two").is_none());
+    let before = held.current();
+    assert_eq!(before.lookup("a/one").unwrap().input_per_million, 1.0);
+    assert!(before.lookup("a/two").is_none());
 
     served.swap(table(&[("a/one", 2.0), ("a/two", 3.0)]));
 
-    assert_eq!(held.price("a/one").unwrap().input_per_million, 2.0);
-    assert_eq!(held.price("a/two").unwrap().input_per_million, 3.0);
+    let after = held.current();
+    assert_eq!(after.lookup("a/one").unwrap().input_per_million, 2.0);
+    assert_eq!(after.lookup("a/two").unwrap().input_per_million, 3.0);
 }
 
 /// A snapshot is whole and stays whole. The reason the handle holds an
@@ -51,7 +54,10 @@ fn a_snapshot_survives_the_swap_that_replaces_it() {
 
     assert_eq!(snapshot.lookup("a/one").unwrap().input_per_million, 1.0);
     assert_eq!(previous.lookup("a/one").unwrap().input_per_million, 1.0);
-    assert_eq!(served.price("a/one").unwrap().input_per_million, 9.0);
+    assert_eq!(
+        served.current().lookup("a/one").unwrap().input_per_million,
+        9.0
+    );
 }
 
 /// The handle answers the same questions the `Arc<PricingTable>` it
@@ -65,9 +71,10 @@ fn the_handle_answers_for_the_table_it_holds() {
 
     assert_eq!(served.len(), 1);
     assert!(!served.is_empty());
-    assert_eq!(served.context_window("a/one"), Some(200_000));
-    assert_eq!(served.context_window("a/two"), None);
-    assert!(served.version().is_none());
+    let table = served.current();
+    assert_eq!(table.context_window("a/one"), Some(200_000));
+    assert_eq!(table.context_window("a/two"), None);
+    assert!(table.version().is_none());
     assert!(served.provenance().is_none());
 }
 
@@ -76,7 +83,10 @@ fn the_handle_answers_for_the_table_it_holds() {
 #[test]
 fn an_arc_of_a_table_converts_into_a_handle() {
     let served: ServedPricing = Arc::new(table(&[("a/one", 4.0)])).into();
-    assert_eq!(served.price("a/one").unwrap().output_per_million, 20.0);
+    assert_eq!(
+        served.current().lookup("a/one").unwrap().output_per_million,
+        20.0
+    );
 }
 
 /// Concurrent readers and one writer: every read is a table that
