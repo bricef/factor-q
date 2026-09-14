@@ -496,7 +496,12 @@ unattended:
   previous tag back, verifies that, and exits non-zero with a `⟲ rolled
   back` line — the log shows it, `notify.sh` tells you, and the instance
   is on the build it was on before. A rollback that also fails says
-  "needs a human" and stops.
+  "needs a human" and stops. A "startup refusal" is narrow on purpose:
+  a line the daemon did *not* tag `TRACE`/`DEBUG`/`INFO`/`WARN` that
+  says "registry validation failed", "panicked at", or that it refuses
+  to start — so the healthy `refused_changes=0` the pricing load reports
+  on every start is not mistaken for one, as it was for every deploy on
+  2026-09-14 ([#752](https://github.com/bricef/factor-q/issues/752)).
 - **It tells you what it did — and what landed.** A deploy, a rollback
   and a failure each go through [`notify.sh`](notify.sh) (below). The
   deploy message lists the commits between the build that was live and
