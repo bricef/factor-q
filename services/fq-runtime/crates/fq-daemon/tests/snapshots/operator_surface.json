@@ -2334,7 +2334,7 @@
           "SignalReferencesView": {
             "description": "What a signal points at, when it points at something — the wire\nshape of the payload's references.\n\nEvery field a plain string, the way every other view DTO here\nrenders an identity: a reader turns them into links, and a typed\n`AgentId` or `Uuid` on the wire would buy validation a reader\ncannot act on anyway.",
             "properties": {
-              "agent": {
+              "agent_id": {
                 "default": null,
                 "description": "The agent the signal concerns, if it concerns one.",
                 "type": [
@@ -2342,7 +2342,7 @@
                   "null"
                 ]
               },
-              "invocation": {
+              "invocation_id": {
                 "default": null,
                 "description": "The invocation the signal concerns, if it concerns one.",
                 "type": [
@@ -2417,8 +2417,8 @@
           "references": {
             "$ref": "#/$defs/SignalReferencesView",
             "default": {
-              "agent": null,
-              "invocation": null,
+              "agent_id": null,
+              "invocation_id": null,
               "url": null
             }
           },

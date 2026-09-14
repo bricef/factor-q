@@ -86,8 +86,8 @@ pub(crate) fn signal_detail() -> OperatorSignalDetailView {
             "entries": 1_412,
         }),
         references: SignalReferencesView {
-            agent: None,
-            invocation: None,
+            agent_id: None,
+            invocation_id: None,
             url: Some("https://github.com/BerriAI/litellm/commits/main".into()),
         },
         newer_from_source: None,

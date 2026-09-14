@@ -120,10 +120,10 @@ fn render_signal(signal: &OperatorSignalDetailView) -> String {
         signal.kind,
         signal.event_id,
     );
-    if let Some(agent) = &signal.references.agent {
+    if let Some(agent) = &signal.references.agent_id {
         out.push_str(&format!("agent         {agent}\n"));
     }
-    if let Some(invocation) = &signal.references.invocation {
+    if let Some(invocation) = &signal.references.invocation_id {
         out.push_str(&format!("invocation    {invocation}\n"));
     }
     if let Some(url) = &signal.references.url {

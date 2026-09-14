@@ -238,7 +238,7 @@ pub(crate) fn notification_detail(signal: &OperatorSignalDetailView, now_ms: i64
     // What the signal is *about*, when it is about something
     // addressable — links out of the pane and into the thing that
     // needs looking at, which is the whole point of a detail page.
-    if let Some(invocation) = &signal.references.invocation {
+    if let Some(invocation) = &signal.references.invocation_id {
         b.push_str(&field(
             "invocation",
             &format!(
@@ -248,7 +248,7 @@ pub(crate) fn notification_detail(signal: &OperatorSignalDetailView, now_ms: i64
             ),
         ));
     }
-    if let Some(agent) = &signal.references.agent {
+    if let Some(agent) = &signal.references.agent_id {
         b.push_str(&field(
             "agent",
             &format!(r#"<a href="/agents/{}">{}</a>"#, esc(agent), esc(agent)),

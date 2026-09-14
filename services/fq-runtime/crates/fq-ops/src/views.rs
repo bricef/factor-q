@@ -471,10 +471,10 @@ pub struct OperatorSignalView {
 pub struct SignalReferencesView {
     /// The agent the signal concerns, if it concerns one.
     #[serde(default)]
-    pub agent: Option<String>,
+    pub agent_id: Option<String>,
     /// The invocation the signal concerns, if it concerns one.
     #[serde(default)]
-    pub invocation: Option<String>,
+    pub invocation_id: Option<String>,
     /// Somewhere to look: a pull request, a CI run, a page.
     #[serde(default)]
     pub url: Option<String>,
