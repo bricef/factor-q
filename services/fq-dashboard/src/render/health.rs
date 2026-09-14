@@ -32,7 +32,19 @@ fn linked_ids(ids: &[String]) -> String {
 /// its hover: this build has no acknowledgement, so an alert stays
 /// counted once it has happened. A number that claimed to be unread and
 /// never fell would be worse than one that says what it is.
-fn counts_row(counts: &OperatorSignalCounts) -> String {
+///
+/// `None` is **unknown** — the counts call did not answer. It renders
+/// amber and says so, because the alternative is the one answer this
+/// row must never give: a green `0 open alerts` that an operator reads
+/// as "nothing needs me" when what actually happened is that the page
+/// could not ask. Amber rather than red: the daemon may be perfectly
+/// well and the dashboard's own credential short of a grant, which is
+/// a fault in the deployment rather than in the fleet.
+fn counts_row(counts: Option<&OperatorSignalCounts>) -> String {
+    let Some(counts) = counts else {
+        return r#"<tr><th>notifications</th><td class="warn"><a href="/notifications">unknown</a> — the daemon did not answer <code>operator_signal.counts</code>; this is not a count of zero</td></tr>"#
+            .to_string();
+    };
     let class = if counts.alerts > 0 { "bad" } else { "ok" };
     format!(
         r#"<tr><th>notifications</th><td class="{class}"><a href="/notifications">{} in the last 24h</a> · <a href="/notifications?severity=alert" title="every alert on record — alerts are never swept, and this build has no acknowledgement">{} open alert{}</a></td></tr>"#,
@@ -49,10 +61,12 @@ fn counts_row(counts: &OperatorSignalCounts) -> String {
 /// either report because the counts belong to their own resource — and
 /// it degrades to zeros against a daemon that has no pane, which is
 /// what keeps the whole health view rendering across a build skew.
+/// `None` is that read having failed for any other reason, which the
+/// row reports as unknown rather than as zero — see [`counts_row`].
 pub fn health(
     status: &StatusReport,
     doctor: &DoctorReport,
-    signals: &OperatorSignalCounts,
+    signals: Option<&OperatorSignalCounts>,
 ) -> String {
     let mut b = String::new();
 

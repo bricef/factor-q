@@ -404,7 +404,7 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
             render::live_page(
                 "health",
                 REFRESH_SECS,
-                &render::health(&status_report(), &doctor_report(), &signal_counts()),
+                &render::health(&status_report(), &doctor_report(), Some(&signal_counts())),
             ),
         ),
         (
