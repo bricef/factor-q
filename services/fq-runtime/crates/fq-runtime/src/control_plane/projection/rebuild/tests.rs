@@ -720,3 +720,134 @@ async fn a_detached_handle_refuses() {
         .unwrap_err();
     assert!(matches!(err, RebuildError::NoSupervisor), "{err:?}");
 }
+
+/// **An alert outlives the log, and a rebuild does not take it away.**
+///
+/// This is the durability claim the `operator_signals` table exists for
+/// and the one nothing asserted: the pane keeps an alert past the log's
+/// thirty days, so a schema bump — which drops and recreates every
+/// projection table — must carry it, and the replay must re-derive
+/// whatever the stream still holds rather than leaving a gap. Both
+/// halves are here over two rows that differ in exactly that respect:
+/// one alert whose event is on the stream, and one whose event never
+/// was, which is what an alert older than retention looks like.
+///
+/// What it guards is the carry step: `operator_signals` is in
+/// `PROJECTION_TABLES`, so the rebuild *drops* it, and the rows come
+/// back only because the transaction sets them aside first. Skip that
+/// table in the carry and both alerts are gone — verified by doing it.
+/// The sentinel keeps the other half honest: the carried row is edited
+/// behind the store's back before the bump, exactly as `age_the_file`
+/// nulls a column, so "the replay re-derived it" cannot be satisfied by
+/// the row simply having survived.
+#[tokio::test]
+async fn an_alert_survives_a_rebuild_and_the_replay_re_derives_the_pane() {
+    use crate::events::{OperatorSignalPayload, SignalKind, operator_signal::kinds};
+
+    const SENTINEL: &str = "not what the event says";
+
+    fn alert(summary: &str) -> Event {
+        Event::system(
+            Uuid::now_v7(),
+            EventPayload::OperatorSignal(OperatorSignalPayload::alert(
+                SignalKind::registered(kinds::PRICING_STALE),
+                summary,
+            )),
+        )
+    }
+    async fn summaries(store: &ProjectionStore) -> Vec<String> {
+        let mut rows: Vec<String> = store
+            .query_operator_signals(None, None, None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.summary)
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let agent = unique_agent();
+    let inv = Uuid::now_v7();
+    let response = llm_response(&agent, inv, Some(45));
+    let response_id = response.envelope.event_id.to_string();
+    bus.publish(&triggered(&agent, inv)).await.unwrap();
+    bus.publish(&response).await.unwrap();
+    let on_the_stream = alert("on the stream");
+    let on_the_stream_id = on_the_stream.envelope.event_id.to_string();
+    bus.publish(&on_the_stream).await.unwrap();
+
+    let store = Arc::new(ProjectionStore::open(&path).await.unwrap());
+    project_until(&bus, &store, |store| async move {
+        !store
+            .query_operator_signals(None, None, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+
+    // The alert whose event the log let go — projected once, years ago
+    // in the story this stands for, and re-derivable from nothing.
+    store
+        .insert_event(&alert("older than the log"), None)
+        .await
+        .unwrap();
+    drop(store);
+
+    // Behind the store's back: the carried row is made to disagree with
+    // its event, so the replay has something to put right.
+    let older = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE operator_signals SET summary = ? WHERE event_id = ?")
+        .bind(SENTINEL)
+        .bind(&on_the_stream_id)
+        .execute(&older)
+        .await
+        .unwrap();
+    older.close().await;
+    age_the_file(&path, &response_id).await;
+
+    // Immediately after the rebuild, before the replay has run: both
+    // rows are there, carried across by the rebuild transaction — the
+    // edited one with the edit still on it.
+    let store = Arc::new(ProjectionStore::open(&path).await.unwrap());
+    assert!(store.rebuild_record().await.unwrap().is_some(), "rebuilt");
+    assert_eq!(
+        summaries(&store).await,
+        [SENTINEL, "older than the log"],
+        "the rebuild carries every operator-signal row across, as it found them"
+    );
+
+    // …and the replay, run to completion, re-derives the one the stream
+    // still holds and leaves the one it cannot reach alone. An upsert on
+    // `event_id`, so a re-derivation refreshes the row rather than
+    // doubling it.
+    let bus_for_done = bus.clone();
+    project_until(&bus, &store, move |store| {
+        let bus = bus_for_done.clone();
+        async move {
+            match rebuild_status(&store, &bus).await.unwrap() {
+                Some(status) => !status.in_progress,
+                None => false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        summaries(&store).await,
+        ["older than the log", "on the stream"],
+        "the replay re-derives what the stream holds and keeps what it does not"
+    );
+    let whole = store
+        .operator_signal(&on_the_stream_id)
+        .await
+        .unwrap()
+        .expect("the re-derived signal is whole");
+    assert_eq!(whole.summary, "on the stream");
+}
