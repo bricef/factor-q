@@ -251,14 +251,20 @@ pub mod kinds {
 /// reason. So the references are payload data: present when the signal
 /// concerns a particular invocation or names a page to open, absent
 /// otherwise, and never a claim about where the event came from.
+///
+/// **The identities are spelled as the envelope spells them.** A reader
+/// joining `references.agent_id` to `envelope.agent_id` is reading one
+/// key, not two that happen to mean the same thing; `agent` and
+/// `invocation` would have been shorter and would have made the join a
+/// thing a reader has to know rather than see.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalReferences {
     /// The agent the signal concerns, if it concerns one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentId>,
+    pub agent_id: Option<AgentId>,
     /// The invocation the signal concerns, if it concerns one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invocation: Option<Uuid>,
+    pub invocation_id: Option<Uuid>,
     /// Somewhere to look: a pull request, a CI run, a dashboard page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -268,7 +274,7 @@ impl SignalReferences {
     /// Whether there is nothing to point at — the whole struct is
     /// omitted from the wire when so.
     pub fn is_empty(&self) -> bool {
-        self.agent.is_none() && self.invocation.is_none() && self.url.is_none()
+        self.agent_id.is_none() && self.invocation_id.is_none() && self.url.is_none()
     }
 }
 
@@ -351,8 +357,8 @@ impl OperatorSignalPayload {
 
     /// Say which invocation the signal concerns.
     pub fn about_invocation(mut self, agent: AgentId, invocation: Uuid) -> Self {
-        self.references.agent = Some(agent);
-        self.references.invocation = Some(invocation);
+        self.references.agent_id = Some(agent);
+        self.references.invocation_id = Some(invocation);
         self
     }
 

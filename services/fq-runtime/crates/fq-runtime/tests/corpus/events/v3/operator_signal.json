@@ -23,8 +23,8 @@
         "rule": "drift_bound"
       },
       "references": {
-        "agent": "corpus-agent",
-        "invocation": "01990000-0000-7000-8000-000000001000",
+        "agent_id": "corpus-agent",
+        "invocation_id": "01990000-0000-7000-8000-000000001000",
         "url": "https://github.com/BerriAI/litellm/commits/main"
       }
     }
