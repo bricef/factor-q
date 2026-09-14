@@ -68,6 +68,7 @@ use tracing::{info, warn};
 
 use crate::events::OperatorSignalPayload;
 
+use super::accept::Refusal;
 use super::live::{self, AcceptedLoad, LoadSettings};
 use super::served::ServedPricing;
 use super::{ModelPricing, PricingTable};
@@ -129,7 +130,22 @@ pub struct RefreshReport {
     pub changed: usize,
     /// Changes acceptance refused — one per model, each also an
     /// operator signal.
+    ///
+    /// Refused *changes* only. A model the floor would not admit in the
+    /// first place is not a refused change and is counted separately;
+    /// see [`not_admitted`](Self::not_admitted).
     pub refused: usize,
+    /// Models the plausibility floor would not admit — the live table's
+    /// several hundred free, local and embedding entries priced at zero.
+    ///
+    /// Counted apart from [`refused`](Self::refused) because they are
+    /// different news. A refused change is one model that moved
+    /// implausibly and raises a notification an operator can act on; a
+    /// not-admitted model raises nothing and is a standing property of
+    /// the source, identical on every load. Folding the ~336 of them
+    /// into `refused` made the outcome line read `336 refused` while
+    /// zero signals were published (review D-3).
+    pub not_admitted: usize,
     /// Models the served table prices that the accepted document no
     /// longer lists. They keep their price until the daemon restarts;
     /// see the module header.
@@ -149,8 +165,8 @@ impl RefreshReport {
             );
         }
         let mut detail = format!(
-            "{} entries ({} new, {} repriced, {} refused)",
-            self.entries, self.added, self.changed, self.refused
+            "{} entries ({} new, {} repriced, {} refused, {} not admitted)",
+            self.entries, self.added, self.changed, self.refused, self.not_admitted
         );
         if !self.held.is_empty() {
             detail.push_str(&format!(
@@ -263,7 +279,10 @@ impl PricingRefresh {
         let signals = load.signals();
         let current = self.served.current();
         let (next, mut report) = merge(&current, &load.table, &self.overlay);
-        report.refused = load.refusals.len();
+        let (not_admitted, refused): (Vec<&Refusal>, Vec<&Refusal>) =
+            load.refusals.iter().partition(|r| r.is_admission());
+        report.refused = refused.len();
+        report.not_admitted = not_admitted.len();
         report.fetch_failed = load.fetch_error.is_some();
 
         let unpriced: Vec<String> = current
@@ -283,6 +302,7 @@ impl PricingRefresh {
                 added = report.added,
                 repriced = report.changed,
                 refused = report.refused,
+                not_admitted = report.not_admitted,
                 "swapped in a refreshed pricing table"
             );
         } else {
@@ -353,6 +373,7 @@ fn merge(
         added,
         changed,
         refused: 0,
+        not_admitted: 0,
         held,
         fetch_failed: false,
     };

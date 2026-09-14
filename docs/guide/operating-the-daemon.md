@@ -1093,7 +1093,7 @@ What an operator sees:
 
 | What happened | Where it shows |
 | --- | --- |
-| The refresh ran | one `maintenance_run` event: `N entries (N new, N repriced, N refused)`, plus a count of models no longer listed upstream |
+| The refresh ran | one `maintenance_run` event: `N entries (N new, N repriced, N refused, N not admitted)`, plus a count of models no longer listed upstream |
 | A change was refused | one `pricing.change_refused` notification per model, exactly as at startup — model, field, old, new, ratio, rule |
 | The fetch did not land | one `pricing.fetch_failed` notification. The run still **succeeds**: serving the last accepted table is a working state, and the outcome line says `fetch failed; still serving the last accepted table` |
 | The table is past `[pricing] max_age` | the `pricing.stale` alert, raised by each refresh that fails to land a document. A refresh that lands one raises nothing, which is how the alert clears: it stops recurring |
@@ -1123,6 +1123,12 @@ file states them), the ratio, and which rule refused it:
 # What has been refused, and why
 fq events query --event-type operator_signal
 ```
+
+`refused` on the outcome line counts refused **changes** — one per
+`pricing.change_refused` notification, so the line and the pane agree.
+Models that were never admitted are counted separately as `not admitted`
+and raise nothing; on the live table that is several hundred on every
+run, which is why the two are not one number.
 
 Models refused **at admission** raise nothing, and deliberately: the
 live table lists several hundred free, local and embedding entries
