@@ -1001,7 +1001,16 @@ offered, model by model, against the last one it accepted.
    rather than letting it run and track as $0.
 3. **A new model is admitted only if every token category it reports
    carries a positive price.**
-4. **A refused model reverts whole.** Half a model's prices from one
+4. **A price of zero is never a prior.** A cached entry that would not
+   pass the floor today is not a price to measure a move against — there
+   is no ratio to a zero — so the model is judged at admission instead.
+   Still priced at zero, and it is dropped, exactly as it would have been
+   on an empty cache; carrying a real price at last, and it is admitted
+   on plausibility alone. A model that was free and starts charging
+   therefore lands at the new price rather than billing at $0 for ever.
+   **No accepted table holds a price of zero**, whichever route the model
+   took into it.
+5. **A refused model reverts whole.** Half a model's prices from one
    document and half from another is not a price list, so the refusal
    names the first field that failed and the model keeps all of its
    prior figures.
@@ -1050,6 +1059,13 @@ next load's 5× bound is measured against. Editing `pricing.json` by
 hand is not forbidden and is not hidden either: the digest stops
 matching, and the daemon serves the file while claiming nothing about
 where it came from.
+
+A daemon upgrading from a build that predates acceptance finds the *raw*
+upstream document in that file, with no sidecar beside it — several
+hundred free, local and embedding entries at $0 among the real prices.
+Rule 4 is what stops those becoming accepted prices: the first load
+judges each of them at admission and drops it, so the rewritten cache is
+an accepted table like any other. Nothing has to be deleted by hand.
 
 The same provenance rides the `system.startup` event, and every cost
 row cites the short version derived from it

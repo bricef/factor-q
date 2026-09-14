@@ -7,16 +7,22 @@
 //!
 //! 1. **Nothing moves further than the bound.** Every accepted price is
 //!    either exactly its prior price (the model was refused and
-//!    reverted) or within `max_drift_ratio` of it.
-//! 2. **Nothing that cost money becomes free.** No accepted price is
-//!    zero where the prior was positive — the failure ADR-0004's
-//!    guarantee exists to prevent, since a model tracking at $0 defeats
-//!    every budget.
+//!    reverted) or within `max_drift_ratio` of a *usable* prior — one
+//!    that passes the plausibility floor. A model whose prior does not
+//!    is judged at admission instead, where the only bound is
+//!    plausibility: there is no ratio to a zero.
+//! 2. **No accepted price is zero, full stop.** Not a change to zero,
+//!    not a new model at zero, and not a zero inherited from a prior
+//!    table — a model tracking at $0 defeats every budget, which is the
+//!    failure ADR-0004's guarantee exists to prevent.
 //! 3. **A new model is plausible or absent.** Every accepted model with
-//!    no prior carries a positive price on every category it reports.
+//!    no usable prior carries a positive price on every category it
+//!    reports.
 //! 4. **A refusal is a decision about a model, not a mutation.** Every
-//!    refused model is either at its prior price or gone, and no model
-//!    is refused twice — the notification is one per model per load.
+//!    refused model is either at its prior price or gone — reverted when
+//!    the refusal names a prior price, dropped when it does not — and no
+//!    model is refused twice: the notification is one per model per
+//!    load.
 //!
 //! Prices are drawn from a range that includes zero and spans four
 //! orders of magnitude, so both rules fire often; the generated tables
@@ -69,6 +75,15 @@ fn pricing_table() -> impl Strategy<Value = PricingTable> {
     )
 }
 
+/// The prior price a move is bounded against, when there is one: a prior
+/// entry that fails the plausibility floor is not a price, so the model
+/// is judged at admission instead. The same filter [`accept`] applies.
+fn usable_prior<'a>(prior: &'a PricingTable, model: &str) -> Option<&'a ModelPricing> {
+    prior
+        .lookup(model)
+        .filter(|pricing| judge_admission(model, pricing).is_none())
+}
+
 /// Every price a model reports, paired with its field, in the units
 /// acceptance judges in.
 fn prices(pricing: &ModelPricing) -> Vec<(PriceField, f64)> {
@@ -92,46 +107,30 @@ proptest! {
 
         for model in MODELS {
             let Some(now) = accepted.lookup(model) else { continue };
-            match prior.lookup(model) {
-                Some(before) => {
-                    let reverted = prices(now) == prices(before);
-                    for (field, new) in prices(now) {
-                        let Some(old) = field.per_million(before) else {
-                            // A category the prior did not report: judged
-                            // for plausibility only, and it must be
-                            // plausible.
-                            prop_assert!(new > 0.0, "{model} {field} was admitted at {new}");
-                            continue;
-                        };
-                        // Rule 2: nothing that cost money becomes free.
-                        prop_assert!(
-                            old <= 0.0 || new > 0.0,
-                            "{model} {field} went from {old} to {new}",
-                        );
-                        // Rule 1: nothing moves further than the bound.
-                        if old > 0.0 && new > 0.0 && !reverted {
-                            let ratio = (new / old).max(old / new);
-                            prop_assert!(
-                                ratio <= max_drift_ratio,
-                                "{model} {field} moved {ratio}x, past {max_drift_ratio}",
-                            );
-                        }
-                        if old <= 0.0 {
-                            prop_assert!(
-                                reverted || new <= 0.0,
-                                "{model} {field} moved off zero to {new} without reverting",
-                            );
-                        }
-                    }
-                }
-                None => {
-                    // Rule 3: a new model is plausible or absent.
-                    for (field, new) in prices(now) {
-                        prop_assert!(
-                            new > 0.0,
-                            "new model {model} was admitted with {field} = {new}",
-                        );
-                    }
+            // Rule 2: no accepted price is zero, whatever route the model
+            // took into the table.
+            for (field, new) in prices(now) {
+                prop_assert!(new > 0.0, "{model} {field} is accepted at {new}");
+            }
+            // A prior that fails the floor is not a prior: the model was
+            // judged at admission, where rule 2 above is the whole rule.
+            let Some(before) = usable_prior(&prior, model) else { continue };
+            let reverted = prices(now) == prices(before);
+            for (field, new) in prices(now) {
+                let Some(old) = field.per_million(before) else {
+                    // A category the prior did not report: judged for
+                    // plausibility only, which rule 2 already asserted.
+                    continue;
+                };
+                // Rule 1: nothing moves further than the bound. A usable
+                // prior is positive on every category it reports, so
+                // every accepted move has a ratio.
+                if !reverted {
+                    let ratio = (new / old).max(old / new);
+                    prop_assert!(
+                        ratio <= max_drift_ratio,
+                        "{model} {field} moved {ratio}x, past {max_drift_ratio}",
+                    );
                 }
             }
         }
@@ -145,16 +144,19 @@ proptest! {
         prop_assert_eq!(count, refused.len(), "a model was refused twice");
         for refusal in &refusals {
             prop_assert!(candidate.lookup(&refusal.model).is_some());
-            match prior.lookup(&refusal.model) {
-                Some(before) => prop_assert_eq!(
+            if refusal.is_admission() {
+                prop_assert!(
+                    accepted.lookup(&refusal.model).is_none(),
+                    "a model refused at admission must be absent",
+                );
+            } else {
+                let before = usable_prior(&prior, &refusal.model)
+                    .expect("a refused change names the prior it reverted to");
+                prop_assert_eq!(
                     prices(accepted.lookup(&refusal.model).expect("reverted, not dropped")),
                     prices(before),
                     "a refused change must revert the model whole",
-                ),
-                None => prop_assert!(
-                    accepted.lookup(&refusal.model).is_none(),
-                    "a model refused at admission must be absent",
-                ),
+                );
             }
         }
     }

@@ -178,16 +178,98 @@ fn a_negative_or_infinite_price_is_refused_as_a_zero() {
     assert_eq!(refusals[0].rule, RefusalRule::ZeroPrice);
 }
 
-/// A model that was free and now costs money has no ratio, and is
-/// refused as drift: the operator sees both numbers and decides.
+/// A model that was free and now costs money is **admitted at the new
+/// price**. A zero prior is not a price to bound a move against, so the
+/// model is judged as if it had no prior at all: plausibility alone.
+///
+/// This inverts the rule as it first shipped, which kept the $0 and
+/// re-refused the change on every load — the daemon billing a model at
+/// zero for ever after upstream said it costs money.
 #[test]
-fn a_zero_prior_price_moving_up_is_refused_without_a_ratio() {
+fn a_zero_prior_price_moving_up_is_admitted_on_plausibility_alone() {
     let prior = table(&[("m", priced(0.0, 0.0))]);
     let candidate = table(&[("m", priced(1.0, 5.0))]);
     let (accepted, refusals) = accept(&prior, candidate, AcceptanceRules::default());
-    assert_eq!(input_of(&accepted, "m"), 0.0);
-    assert_eq!(refusals[0].rule, RefusalRule::DriftBound);
-    assert_eq!(refusals[0].ratio, None);
+    assert_eq!(input_of(&accepted, "m"), 1.0);
+    assert!(
+        refusals.is_empty(),
+        "a plausible price over an implausible prior is an admission, not a refusal: {refusals:?}"
+    );
+}
+
+/// The other half: a zero prior that is still zero is refused **at
+/// admission** and dropped, exactly as it would have been on a clean
+/// cache. Without this a table cached before acceptance existed — the
+/// raw upstream document, several hundred free and embedding entries at
+/// $0 — would launder every one of them into the accepted table.
+#[test]
+fn a_zero_prior_that_is_still_zero_is_dropped_rather_than_kept() {
+    let prior = table(&[("free/model", priced(0.0, 0.0)), ("m", priced(1.0, 5.0))]);
+    let candidate = table(&[("free/model", priced(0.0, 0.0)), ("m", priced(1.0, 5.0))]);
+    let (accepted, refusals) = accept(&prior, candidate, AcceptanceRules::default());
+    assert!(
+        accepted.lookup("free/model").is_none(),
+        "a model priced at zero must be absent, not carried over at $0"
+    );
+    assert_eq!(input_of(&accepted, "m"), 1.0);
+    assert_eq!(refusals.len(), 1);
+    assert!(
+        refusals[0].is_admission(),
+        "the model is dropped, so the refusal has no prior price to name"
+    );
+    assert_eq!(refusals[0].old, None);
+    assert_eq!(refusals[0].rule, RefusalRule::ZeroPrice);
+}
+
+/// A prior that fails the floor on *any* category it reports is not a
+/// prior: the model is re-judged at admission, and the accepted document
+/// drops it rather than splicing the old entry back in.
+#[test]
+fn an_implausible_prior_is_dropped_from_the_accepted_document() {
+    let prior_doc = document(&[("free/model", entry(0.0)), ("m", entry(1e-6))]);
+    let fetched_doc = document(&[("free/model", entry(0.0)), ("m", entry(1e-6))]);
+    let prior = PricingTable::from_litellm_document(&prior_doc);
+    let candidate = PricingTable::from_litellm_document(&fetched_doc);
+
+    let (_, refusals) = accept(&prior, candidate, AcceptanceRules::default());
+    let doc = accepted_document(&prior_doc, fetched_doc, &refusals);
+    assert!(
+        !doc.contains_key("free/model"),
+        "the cache must not hold what the table refused"
+    );
+    assert!(doc.contains_key("m"));
+}
+
+/// A priced model that newly publishes a *zero* cache rate is refused
+/// and **reverts**: the refusal names a field the prior never priced, so
+/// it carries no `old`, and what happened to the model is carried rather
+/// than inferred from that absence.
+#[test]
+fn a_newly_published_zero_cache_rate_reverts_rather_than_dropping_the_model() {
+    let prior = table(&[("m", priced(1.0, 5.0))]);
+    let candidate = table(&[(
+        "m",
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: Some(0.0),
+            cache_write_per_million: None,
+        },
+    )]);
+    let (accepted, refusals) = accept(&prior, candidate, AcceptanceRules::default());
+
+    assert_eq!(input_of(&accepted, "m"), 1.0, "the model stays priced");
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].field, PriceField::CacheRead);
+    assert_eq!(refusals[0].old, None, "the prior priced no cache read");
+    assert!(
+        !refusals[0].is_admission(),
+        "a refused change reverts, whichever field failed"
+    );
+    assert_eq!(
+        refusals[0].summary(),
+        "m newly reports cache_read_input_token_cost = 0; kept the prior price"
+    );
 }
 
 /// A model reverts whole. Half a model's prices from one document and
@@ -318,6 +400,7 @@ fn the_accepted_document_takes_a_refused_model_from_the_prior_one() {
         new: 6e-6,
         ratio: Some(6.0),
         rule: RefusalRule::DriftBound,
+        disposition: Disposition::KeptPriorPrice,
     }];
 
     let accepted = accepted_document(&prior, fetched, &refusals);
@@ -336,6 +419,7 @@ fn a_model_refused_at_admission_leaves_the_document() {
         new: 0.0,
         ratio: None,
         rule: RefusalRule::ZeroPrice,
+        disposition: Disposition::NotAdmitted,
     }];
 
     let accepted = accepted_document(&prior, fetched, &refusals);

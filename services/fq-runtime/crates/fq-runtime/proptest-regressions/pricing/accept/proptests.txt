@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7e074c4fbd72de39ac4eff3d9ca28e86b97e97d97f88895a0aee63f610d00e87 # shrinks to prior = PricingTable { entries: {"b/two": ModelPricing { input_per_million: 0.0, output_per_million: 0.0, cache_read_per_million: None, cache_write_per_million: None }}, context_windows: {}, provenance: None }, candidate = PricingTable { entries: {"b/two": ModelPricing { input_per_million: 0.0, output_per_million: 0.0, cache_read_per_million: None, cache_write_per_million: None }}, context_windows: {}, provenance: None }, max_drift_ratio = 1.5
+cc 51eab8b40277f4b5962cbbaa69803c1c18e6fff0f7b44043fa47cb9aa3f78233 # shrinks to prior = PricingTable { entries: {"c/one": ModelPricing { input_per_million: 6.99, output_per_million: 7.02, cache_read_per_million: None, cache_write_per_million: None }}, context_windows: {}, provenance: None }, candidate = PricingTable { entries: {"c/one": ModelPricing { input_per_million: 0.56, output_per_million: 0.56, cache_read_per_million: Some(0.0), cache_write_per_million: None }}, context_windows: {}, provenance: None }, max_drift_ratio = 12.58666672910426
