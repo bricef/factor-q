@@ -51,13 +51,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::control_plane::agent_cap::AgentConcurrency;
+use crate::hot_swap::HotSwap;
 use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
 use crate::worker::{DeferralQueue, DrainState, DueResume, DurableStart, ExecutorError, Worker};
@@ -128,32 +129,20 @@ fn trigger_fate(
     }
 }
 
-/// Shared, hot-swappable agent registry — the manual equivalent of
-/// `ArcSwap` (which isn't a dependency in this tree). The nested
-/// `Arc`s are not a bug; each layer has a distinct job:
-///
-/// - **outer `Arc`** — shares the one `RwLock` across the tasks that
-///   hold it (the dispatcher and the reload listener); `tokio::spawn`'d
-///   tasks need owned `'static` handles.
-/// - **`RwLock`** — lets `fq reload` swap the registry while the
-///   dispatcher reads it.
-/// - **inner `Arc<AgentRegistry>`** — lets a reader snapshot the
-///   current registry with an O(1) refcount bump and drop the lock
-///   immediately (see `read().await.clone()` at the read site), rather
-///   than holding the lock across a whole (unbounded) invocation or
-///   deep-cloning the registry on every trigger.
+/// Shared, hot-swappable agent registry.
 ///
 /// The dispatcher reads through this handle on every trigger, so a
-/// hot-reload atomically swaps the inner `Arc` for a freshly-loaded one
-/// and the *next* trigger picks it up. In-flight invocations already
-/// hold their own `Agent` clone (snapshotted at trigger time), so a
-/// swap never disturbs them — matching the ADR-0020
-/// refresh-between-invocations precedent.
-pub type SharedRegistry = Arc<RwLock<Arc<AgentRegistry>>>;
+/// hot-reload ([`fq reload`](crate::control_plane)) swaps in a
+/// freshly-loaded registry and the *next* trigger picks it up. In-flight
+/// invocations already hold their own `Agent` clone (snapshotted at
+/// trigger time), so a swap never disturbs them — matching the ADR-0020
+/// refresh-between-invocations precedent, which is the property
+/// [`HotSwap`] exists to carry.
+pub type SharedRegistry = HotSwap<AgentRegistry>;
 
 /// Wrap an owned registry in a fresh [`SharedRegistry`] handle.
 pub fn shared_registry(registry: AgentRegistry) -> SharedRegistry {
-    Arc::new(RwLock::new(Arc::new(registry)))
+    HotSwap::new(registry)
 }
 
 /// NATS-triggered dispatcher. Owns references to the pieces of the
@@ -510,7 +499,7 @@ impl TriggerDispatcher {
         // stable snapshot for its whole lifetime: a concurrent reload
         // that swaps in a new Arc does not disturb an in-flight run
         // (ADR-0020 refresh-between-invocations).
-        let registry = self.registry.read().await.clone();
+        let registry = self.registry.current();
         let loaded = match registry.get_loaded(&agent_id) {
             Some(loaded) => loaded,
             None => {
@@ -2519,7 +2508,7 @@ You are a test agent."#
     async fn reload_from(dir: &std::path::Path, shared: &SharedRegistry) {
         let registry = AgentRegistry::load_from_directory(dir, None).expect("reload");
         assert!(registry.errors().is_empty(), "{:?}", registry.errors());
-        *shared.write().await = Arc::new(registry);
+        shared.swap(registry);
     }
 
     /// Holds every invocation open until the test lets it finish, and

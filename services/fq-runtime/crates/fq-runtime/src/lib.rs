@@ -36,6 +36,7 @@ pub mod dead_letter;
 pub mod event_tail;
 pub mod events;
 pub mod health;
+pub mod hot_swap;
 pub mod llm;
 pub mod mcp;
 pub mod paths;

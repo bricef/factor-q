@@ -259,7 +259,7 @@ impl TriggerDispatcher {
     /// Asked on every tick, so `fq reload` reaches a trigger that is
     /// already waiting — including the reload that takes the agent away.
     async fn declared(&self, agent: &AgentId) -> Declared {
-        match self.registry.read().await.get_loaded(agent) {
+        match self.registry.current().get_loaded(agent) {
             Some(loaded) => Declared::Cap(loaded.agent.max_concurrent()),
             None => Declared::Removed,
         }

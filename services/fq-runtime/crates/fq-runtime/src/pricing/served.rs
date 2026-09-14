@@ -9,22 +9,18 @@
 //! rebuilt, and every one of them is on the cost path of a running
 //! invocation.
 //!
-//! So the handle is an `Arc<RwLock<Arc<PricingTable>>>` and the reads are
-//! copies:
+//! So the handle is a [`HotSwap<PricingTable>`]: a swap is one pointer
+//! write, and a reader clones the inner `Arc` out and lets go of the
+//! lock, so it holds either the whole old table or the whole new one and
+//! never a table half way between — the invariant an in-place `HashMap`
+//! behind a lock could not offer, because a refresh is hundreds of
+//! inserts and a reader between two of them sees a table that never
+//! existed. Everything the price path reads off a snapshot is `Copy`
+//! ([`ModelPricing`](super::ModelPricing), a window) or a short `String`
+//! (the provenance version), which is why this costs nothing.
 //!
-//! - **The swap is one pointer write.** A reader takes the read lock long
-//!   enough to clone the inner `Arc` and lets go; a writer takes the
-//!   write lock long enough to store a new one. A reader therefore holds
-//!   either the whole old table or the whole new one and never a table
-//!   half way between — the invariant an in-place `HashMap` behind a lock
-//!   could not offer, because a refresh is hundreds of inserts and a
-//!   reader between two of them sees a table that never existed.
-//! - **The lookups return owned values**, not borrows into the table, so
-//!   no caller holds a lock — or a table — across an `await`. Everything
-//!   the price path reads is `Copy` ([`ModelPricing`], a window) or a
-//!   short `String` (the provenance version), which is why this costs
-//!   nothing and is what makes the handle a drop-in for the `Arc` it
-//!   replaced.
+//! This type is the *typed* half: a `HotSwap` says how the table is
+//! replaced, and `ServedPricing` says what it is and who may swap it.
 //!
 //! **There is no `price(model)` accessor, and that is deliberate.** A
 //! priced call reads two things from the table — what the model costs
@@ -40,16 +36,12 @@
 //! (<https://github.com/bricef/factor-q/pull/745>, review D-1).
 //!
 //! [`current`]: ServedPricing::current
-//!
-//! `std::sync::RwLock` rather than `tokio`'s: every critical section here
-//! is an `Arc` clone, so a reader never blocks on anything and an async
-//! lock would buy a scheduler round trip per price lookup. And
-//! `RwLock<Arc<_>>` rather than a third-party atomic pointer cell, to
-//! keep a dependency out of the price path for a lock this uncontended.
+//! [`HotSwap<PricingTable>`]: crate::hot_swap::HotSwap
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::events::PricingProvenance;
+use crate::hot_swap::HotSwap;
 
 use super::PricingTable;
 
@@ -59,12 +51,12 @@ use super::PricingTable;
 /// from the table the startup load produced, handed to the reducer
 /// runner and the summariser, and swapped by the pricing refresh.
 #[derive(Clone)]
-pub struct ServedPricing(Arc<RwLock<Arc<PricingTable>>>);
+pub struct ServedPricing(HotSwap<PricingTable>);
 
 impl ServedPricing {
     /// Serve `table` until something swaps it.
     pub fn new(table: PricingTable) -> Self {
-        Self::from(Arc::new(table))
+        Self(HotSwap::new(table))
     }
 
     /// The table being served right now, as an `Arc` the caller owns.
@@ -74,7 +66,7 @@ impl ServedPricing {
     /// calculation that follows it agree, even across a refresh that
     /// landed between them.
     pub fn current(&self) -> Arc<PricingTable> {
-        Arc::clone(&self.0.read().expect("served pricing lock poisoned"))
+        self.0.current()
     }
 
     /// Serve `next` from now on, and return what was being served.
@@ -82,9 +74,7 @@ impl ServedPricing {
     /// The returned handle is what a caller compares against to say what
     /// changed; readers that already took a snapshot keep theirs.
     pub fn swap(&self, next: PricingTable) -> Arc<PricingTable> {
-        let next = Arc::new(next);
-        let mut slot = self.0.write().expect("served pricing lock poisoned");
-        std::mem::replace(&mut slot, next)
+        self.0.swap(next)
     }
 
     /// The provenance of the table being served, when it has one.
@@ -105,7 +95,7 @@ impl ServedPricing {
 
 impl From<Arc<PricingTable>> for ServedPricing {
     fn from(table: Arc<PricingTable>) -> Self {
-        Self(Arc::new(RwLock::new(table)))
+        Self(HotSwap::new(table))
     }
 }
 

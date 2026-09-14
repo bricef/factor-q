@@ -21,13 +21,13 @@ async fn reload_agents_swaps_in_new_definitions() {
 
     let initial = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
     assert_eq!(initial.len(), 1);
-    let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
+    let shared: SharedRegistry = fq_runtime::shared_registry(initial);
 
     // Add a second agent on disk, then reload.
     write_agent(dir.path(), "second");
     reload_agents(&shared, dir.path(), None).await.unwrap();
 
-    let after = shared.read().await.clone();
+    let after = shared.current();
     assert_eq!(after.len(), 2, "reload should pick up the new agent");
     assert!(after.get(&AgentId::new("second").unwrap()).is_some());
 }
@@ -43,7 +43,7 @@ async fn reload_agents_keeps_current_registry_on_load_error() {
     write_agent(dir.path(), "keep");
     let initial = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
     assert_eq!(initial.len(), 1);
-    let shared: SharedRegistry = Arc::new(tokio::sync::RwLock::new(Arc::new(initial)));
+    let shared: SharedRegistry = fq_runtime::shared_registry(initial);
 
     // Point the reload at a directory that does not exist.
     let missing = dir.path().join("does-not-exist");
@@ -55,7 +55,7 @@ async fn reload_agents_keeps_current_registry_on_load_error() {
         "the refusal must say the daemon is unchanged; got: {err}"
     );
 
-    let after = shared.read().await.clone();
+    let after = shared.current();
     assert_eq!(after.len(), 1, "failed reload must keep the old registry");
     assert!(after.get(&AgentId::new("keep").unwrap()).is_some());
 }

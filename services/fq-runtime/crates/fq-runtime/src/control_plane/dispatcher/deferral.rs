@@ -63,7 +63,7 @@ impl TriggerDispatcher {
             deferred_for,
             slot,
         } = due;
-        let registry = self.registry.read().await.clone();
+        let registry = self.registry.current();
         let Some(loaded) = registry.get_loaded(&agent_id) else {
             warn!(
                 invocation_id = %invocation_id,

@@ -154,7 +154,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // nothing and buys the ordering the edge below depends on.
     let (watermark_tx, projection_watermark) = fq_runtime::watermark::channel();
     let (coord_watermark_tx, coordination_watermark) = fq_runtime::watermark::channel();
-    let shared_registry: SharedRegistry = Arc::new(tokio::sync::RwLock::new(registry));
+    let shared_registry: SharedRegistry = SharedRegistry::new(registry);
     let down_signal = DownSignal::new();
     let mut down_rx = down_signal.subscribe();
     let projection_supervisor = ProjectionSupervisor::new(bus.clone(), store.clone());

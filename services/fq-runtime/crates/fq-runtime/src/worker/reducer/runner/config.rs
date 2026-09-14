@@ -31,7 +31,7 @@ pub struct ReducerContext {
     /// `tools/list_changed`; each invocation snapshots the `Arc` at
     /// start and keeps it for its whole step loop, so in-flight
     /// invocations are never hot-swapped.
-    pub(super) tools: std::sync::RwLock<Arc<ToolRegistry>>,
+    pub(super) tools: crate::hot_swap::HotSwap<ToolRegistry>,
     /// Read-only handle over the running MCP servers, used to read
     /// the agent's `static_resources` pins at invocation start.
     /// `None` when no MCP servers are wired (e.g. most tests).
@@ -65,14 +65,14 @@ impl ReducerContext {
     /// concurrent [`install_tools`](Self::install_tools) only affects
     /// invocations that start afterwards (ADR-0020).
     pub fn tools(&self) -> Arc<ToolRegistry> {
-        self.tools.read().expect("tools lock poisoned").clone()
+        self.tools.current()
     }
 
     /// Replace the shared tool registry (the daemon's notification
     /// drain installs a rebuilt registry on `tools/list_changed`).
     /// In-flight invocations keep their snapshot.
     pub fn install_tools(&self, tools: Arc<ToolRegistry>) {
-        *self.tools.write().expect("tools lock poisoned") = tools;
+        self.tools.swap(tools);
     }
 }
 
@@ -131,7 +131,7 @@ impl ReducerContextBuilder {
     /// Finalise the context. Panics if `tools` was not set.
     pub fn build(self) -> ReducerContext {
         ReducerContext {
-            tools: std::sync::RwLock::new(
+            tools: crate::hot_swap::HotSwap::new(
                 self.tools
                     .expect("ReducerContext::builder() requires .tools(..)"),
             ),

@@ -474,7 +474,7 @@ fn register_agent_view(
                 async move {
                     // Clone the inner Arc out of the lock so the wire
                     // work never holds it — the dispatcher's discipline.
-                    let registry = agents.read().await.clone();
+                    let registry = agents.current();
                     // An id the validator rejects cannot be in the
                     // registry, so it is not found rather than invalid.
                     let loaded = fq_runtime::AgentId::new(&key.agent_id)
@@ -489,7 +489,7 @@ fn register_agent_view(
             move |_filter: AgentListFilter| {
                 let agents = agent_list.clone();
                 async move {
-                    let registry = agents.read().await.clone();
+                    let registry = agents.current();
                     Ok(fq_runtime::agent_view::agent_index(&registry))
                 }
             },
