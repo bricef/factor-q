@@ -19,9 +19,11 @@ fn every_registered_kind_parses_and_is_distinct() {
         assert!(!kind.source().is_empty(), "`{entry}` names no source");
         assert!(seen.insert(*entry), "`{entry}` is in the registry twice");
     }
-    // The two #735 emits and the one the deploy message is reserved for.
+    // The two #735 emits, the #344 one, and the one the deploy message
+    // is reserved for.
     assert!(seen.contains(&kinds::PRICING_CHANGE_REFUSED));
     assert!(seen.contains(&kinds::PRICING_STALE));
+    assert!(seen.contains(&kinds::MAINTENANCE_RUN_FAILED));
     assert!(seen.contains(&kinds::DEPLOY_SUCCEEDED));
 }
 

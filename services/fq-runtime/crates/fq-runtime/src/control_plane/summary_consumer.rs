@@ -51,7 +51,7 @@ use crate::events::{
     SummaryKind, subjects,
 };
 use crate::llm::{ChatRequest, LlmClient};
-use crate::pricing::PricingTable;
+use crate::pricing::served::ServedPricing;
 
 use super::durable_consumer::{
     DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError, run_durable_consumer,
@@ -85,7 +85,11 @@ const MAX_CONTENT_CHARS: usize = 4_000;
 pub struct SummaryConsumer {
     bus: EventBus,
     llm: Arc<dyn LlmClient>,
-    pricing: Arc<PricingTable>,
+    /// A handle on the table the daemon is serving, so the summariser's
+    /// own spend is priced by whatever the last refresh accepted
+    /// (<https://github.com/bricef/factor-q/issues/344>) rather than by
+    /// the table this consumer was constructed with.
+    pricing: ServedPricing,
     model: String,
     max_line_chars: usize,
     /// Current line per in-flight invocation — the "prior summary" a
@@ -111,14 +115,14 @@ impl SummaryConsumer {
     pub fn new(
         bus: EventBus,
         llm: Arc<dyn LlmClient>,
-        pricing: Arc<PricingTable>,
+        pricing: impl Into<ServedPricing>,
         model: String,
         max_line_chars: usize,
     ) -> Self {
         Self {
             bus,
             llm,
-            pricing,
+            pricing: pricing.into(),
             model,
             max_line_chars,
             summaries: Mutex::new(HashMap::new()),
@@ -340,7 +344,7 @@ impl SummaryConsumer {
         // an unpriced model reports $0 with a warning rather than
         // failing — but note the startup guarantee normally prevents
         // an unpriced summariser from running at all).
-        let pricing = self.pricing.lookup(&self.model);
+        let pricing = self.pricing.price(&self.model);
         if pricing.is_none() {
             warn!(model = %self.model, "no pricing known for summary model; cost will be reported as $0");
         }
@@ -453,7 +457,7 @@ mod tests {
     };
     use crate::llm::ChatResponse;
     use crate::llm::fixture::FixtureClient;
-    use crate::pricing::ModelPricing;
+    use crate::pricing::{ModelPricing, PricingTable};
     use futures::StreamExt;
     use std::collections::HashMap as StdHashMap;
     use std::time::Duration;

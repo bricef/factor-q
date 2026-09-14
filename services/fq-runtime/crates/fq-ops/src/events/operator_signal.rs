@@ -241,6 +241,16 @@ pub mod kinds {
     /// for one that stays that way too long is [`PRICING_STALE`].
     pub const PRICING_FETCH_FAILED: &str = "pricing.fetch_failed";
 
+    /// A scheduled maintenance task ran and failed
+    /// (<https://github.com/bricef/factor-q/issues/344>). A
+    /// notification: the schedule is the retry, so the daemon carries on
+    /// and the next fire tries again — but unattended work that stopped
+    /// working, with nobody watching the log, is exactly what the pane
+    /// exists for. Raised once per run and never on a redelivery; a
+    /// *refused* task (a name this build does not know) raises nothing,
+    /// because that is a `fq-cron.toml` error its own owner sees.
+    pub const MAINTENANCE_RUN_FAILED: &str = "maintenance.run_failed";
+
     /// A new build reached the dogfood instance and came up
     /// (<https://github.com/bricef/factor-q/pull/707>). A notification.
     /// Reserved: the deploy message reaches Pushover today and becomes
@@ -254,6 +264,7 @@ pub mod kinds {
         PRICING_CHANGE_REFUSED,
         PRICING_FETCH_FAILED,
         PRICING_STALE,
+        MAINTENANCE_RUN_FAILED,
         DEPLOY_SUCCEEDED,
     ];
 }

@@ -356,17 +356,22 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // coverage guarantee (ADR-0004) — fail-fast before serving any
     // trigger.
     let pricing_cache = crate::pricing::litellm_cache_path(&config.cache.directory);
-    let (accepted, pricing_signals) = crate::pricing::load_pricing_sources(&config).await?;
-    let pricing = Arc::new(build_validated_pricing(&config, &registry, accepted)?);
-    let pricing_entries = pricing.len() as u32;
+    let loaded = crate::pricing::load_pricing_sources(&config).await?;
+    let pricing_signals = loaded.signals;
+    let (table, overlay) =
+        build_validated_pricing(&config, &registry, loaded.table, loaded.overlay)?;
+    let pricing_entries = table.len() as u32;
     // What the load wants said on the log once the bus is announced
     // (#735): the table it accepted, and any refusal, failed fetch or
     // stale window it saw on the way.
     let pricing_load = crate::pricing::PricingStartup {
         entries: pricing_entries,
-        provenance: pricing.provenance().cloned(),
+        provenance: table.provenance().cloned(),
         signals: pricing_signals,
     };
+    // From here the table is held behind a handle the scheduled refresh
+    // can swap (#344); nothing downstream sees a `PricingTable` again.
+    let pricing = crate::pricing::DaemonPricing::new(&config, table, overlay)?;
     println!(
         "  pricing entries:  {} (cache: {})",
         pricing_entries,
@@ -433,7 +438,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
             Arc::new(
                 fq_runtime::RunnerConfig::builder()
                     .bus(bus.clone())
-                    .pricing(pricing.clone())
+                    .pricing(pricing.served.clone())
                     .store(worker_store.clone())
                     .worker_id(worker_id.clone())
                     .max_iterations(config.max_iterations)

@@ -34,7 +34,11 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
-use crate::events::{Event, EventPayload, MaintenanceOutcome, MaintenanceRunPayload, subjects};
+use crate::events::operator_signal::kinds;
+use crate::events::{
+    Event, EventPayload, MaintenanceOutcome, MaintenanceRunPayload, OperatorSignalPayload,
+    SignalKind, subjects,
+};
 
 use super::task::{MaintenanceContext, MaintenanceTask};
 
@@ -96,6 +100,15 @@ impl MaintenanceConsumer {
             ledger: Mutex::new(RunLedger::new(RUN_LEDGER_CAPACITY)),
             task_delay: Duration::ZERO,
         }
+    }
+
+    /// Give the tasks what they run against. The daemon calls this with
+    /// the pricing refresh it assembled; a consumer built without it
+    /// runs the tasks that need nothing and records a typed failure for
+    /// the rest.
+    pub fn with_context(mut self, ctx: MaintenanceContext) -> Self {
+        self.ctx = ctx;
+        self
     }
 
     /// Test-only isolation: a private durable name and a narrowed
@@ -193,13 +206,13 @@ impl MaintenanceConsumer {
         // there is nothing left to do but ack.
         if let Some(pending) = self.ledger_lookup(&run_id) {
             match pending {
-                Some(payload) => {
+                Some(held) => {
                     debug!(
                         consumer = %self.consumer_name,
                         run_id = %run_id,
                         "redelivered maintenance run; re-publishing the recorded outcome, not re-running"
                     );
-                    self.settle(msg, &run_id, payload, delivered).await;
+                    self.settle(msg, &run_id, held, delivered).await;
                 }
                 None => {
                     debug!(
@@ -214,13 +227,14 @@ impl MaintenanceConsumer {
         }
         self.ledger_start(&run_id);
 
-        let payload = self.resolve(&msg.subject, &run_id).await;
-        self.settle(msg, &run_id, payload, delivered).await;
+        let resolved = self.resolve(&msg.subject, &run_id).await;
+        self.settle(msg, &run_id, resolved, delivered).await;
     }
 
     /// Run whatever the subject names, or refuse it. Produces the
-    /// outcome payload; publishing it is [`Self::settle`]'s job.
-    async fn resolve(&self, subject: &str, run_id: &str) -> MaintenanceRunPayload {
+    /// outcome payload and whatever it wants an operator told;
+    /// publishing both is [`Self::settle`]'s job.
+    async fn resolve(&self, subject: &str, run_id: &str) -> Resolved {
         let token = subjects::task_from_maintenance(subject);
         // The durable filters on `fq.maintenance.>`, so the only way
         // the parse fails here is a **dotted tail** — `fq.maintenance.
@@ -234,14 +248,14 @@ impl MaintenanceConsumer {
                 run_id,
                 "maintenance message on a subject that names no task; refusing"
             );
-            return MaintenanceRunPayload {
+            return Resolved::just(MaintenanceRunPayload {
                 task: subject.to_string(),
                 run_id: run_id.to_string(),
                 outcome: MaintenanceOutcome::Refused {
                     reason: format!("{subject:?} is not a fq.maintenance.<task> subject"),
                 },
                 duration_ms: 0,
-            };
+            });
         };
         let task = match MaintenanceTask::parse(token) {
             Ok(task) => task,
@@ -253,14 +267,14 @@ impl MaintenanceConsumer {
                     error = %unknown,
                     "refusing a maintenance task this build does not know"
                 );
-                return MaintenanceRunPayload {
+                return Resolved::just(MaintenanceRunPayload {
                     task: token.to_string(),
                     run_id: run_id.to_string(),
                     outcome: MaintenanceOutcome::Refused {
                         reason: unknown.to_string(),
                     },
                     duration_ms: 0,
-                };
+                });
             }
         };
 
@@ -271,28 +285,29 @@ impl MaintenanceConsumer {
         }
         let result = task.run(&self.ctx).await;
         let duration_ms = started.elapsed().as_millis() as u64;
-        let outcome = match result {
-            Ok(detail) => {
+        let (outcome, signals) = match result {
+            Ok(run) => {
                 info!(
                     consumer = %self.consumer_name,
                     task = %task,
                     run_id,
                     duration_ms,
-                    detail = %detail,
+                    detail = %run.detail,
+                    signals = run.signals.len(),
                     "maintenance task succeeded"
                 );
-                MaintenanceOutcome::Succeeded { detail }
+                (
+                    MaintenanceOutcome::Succeeded { detail: run.detail },
+                    run.signals,
+                )
             }
             Err(err) => {
-                // SEAM (#736, and PR A's operator-signal event kind): a
-                // failed maintenance run is precisely what an operator
+                // A failed maintenance run is precisely what an operator
                 // notification is for — unattended work that stopped
-                // working, with nobody watching the log. When the
-                // operator-signal kind exists, raise one HERE and only
-                // on this arm: a succeeded run is not news, and a
+                // working, with nobody watching the log. Raised here and
+                // only on this arm: a succeeded run is not news, and a
                 // refusal is a configuration error the scheduler's own
-                // owner sees. Until then the event below is the only
-                // record.
+                // owner sees.
                 error!(
                     consumer = %self.consumer_name,
                     task = %task,
@@ -301,16 +316,19 @@ impl MaintenanceConsumer {
                     error = %err,
                     "maintenance task failed; the run is over, the next schedule is the retry"
                 );
-                MaintenanceOutcome::Failed {
-                    error: err.to_string(),
-                }
+                let error = err.to_string();
+                let signal = run_failed_signal(task, run_id, &error, duration_ms);
+                (MaintenanceOutcome::Failed { error }, vec![signal])
             }
         };
-        MaintenanceRunPayload {
-            task: task.name().to_string(),
-            run_id: run_id.to_string(),
-            outcome,
-            duration_ms,
+        Resolved {
+            payload: MaintenanceRunPayload {
+                task: task.name().to_string(),
+                run_id: run_id.to_string(),
+                outcome,
+                duration_ms,
+            },
+            signals,
         }
     }
 
@@ -323,6 +341,15 @@ impl MaintenanceConsumer {
     /// re-publishes what already happened rather than making it happen
     /// again.
     ///
+    /// **The outcome gates the signals**, which is what makes a signal
+    /// exactly-once in every path a redelivery can take: a redelivery
+    /// only ever happens when the outcome publish failed, and no signal
+    /// was published in that attempt. A signal publish that fails *after*
+    /// the outcome landed is logged and dropped rather than retried —
+    /// re-running the task to recover a notification would be a worse
+    /// trade than losing one, and the outcome event, which is the record,
+    /// is already on the log.
+    ///
     /// The NAK delay is the bus's, keyed on `delivered`, so a broker
     /// that will not take the outcome settles into one retry per
     /// `[bus] nak_max_ms` instead of a hot loop at round-trip speed —
@@ -332,20 +359,21 @@ impl MaintenanceConsumer {
         &self,
         msg: &async_nats::jetstream::Message,
         run_id: &str,
-        payload: MaintenanceRunPayload,
+        resolved: Resolved,
         delivered: u64,
     ) {
         let event = Event::system(
             self.runtime_id,
-            EventPayload::MaintenanceRun(payload.clone()),
+            EventPayload::MaintenanceRun(resolved.payload.clone()),
         );
         match self.bus.publish(&event).await {
             Ok(_) => {
+                self.publish_signals(run_id, &resolved.signals).await;
                 self.ledger_resolved(run_id);
                 self.ack(msg, run_id).await;
             }
             Err(err) => {
-                self.ledger_hold(run_id, payload);
+                self.ledger_hold(run_id, resolved);
                 error!(
                     consumer = %self.consumer_name,
                     run_id,
@@ -369,6 +397,25 @@ impl MaintenanceConsumer {
         }
     }
 
+    /// Put what the run wants an operator told on the log, in order.
+    async fn publish_signals(&self, run_id: &str, signals: &[OperatorSignalPayload]) {
+        for signal in signals {
+            let event = Event::system(
+                self.runtime_id,
+                EventPayload::OperatorSignal(signal.clone()),
+            );
+            if let Err(err) = self.bus.publish(&event).await {
+                warn!(
+                    consumer = %self.consumer_name,
+                    run_id,
+                    kind = %signal.kind,
+                    error = %err,
+                    "failed to publish a maintenance operator signal; the outcome event is on the log"
+                );
+            }
+        }
+    }
+
     async fn ack(&self, msg: &async_nats::jetstream::Message, run_id: &str) {
         if let Err(err) = msg.ack().await {
             error!(
@@ -380,7 +427,7 @@ impl MaintenanceConsumer {
         }
     }
 
-    fn ledger_lookup(&self, run_id: &str) -> Option<Option<MaintenanceRunPayload>> {
+    fn ledger_lookup(&self, run_id: &str) -> Option<Option<Resolved>> {
         self.ledger.lock().unwrap().lookup(run_id)
     }
 
@@ -392,9 +439,49 @@ impl MaintenanceConsumer {
         self.ledger.lock().unwrap().resolved(run_id);
     }
 
-    fn ledger_hold(&self, run_id: &str, payload: MaintenanceRunPayload) {
-        self.ledger.lock().unwrap().hold(run_id, payload);
+    fn ledger_hold(&self, run_id: &str, resolved: Resolved) {
+        self.ledger.lock().unwrap().hold(run_id, resolved);
     }
+}
+
+/// What one message resolved to: the outcome to record, and the signals
+/// to raise beside it.
+#[derive(Debug, Clone)]
+struct Resolved {
+    payload: MaintenanceRunPayload,
+    signals: Vec<OperatorSignalPayload>,
+}
+
+impl Resolved {
+    /// An outcome with nothing to tell an operator — every refusal, and
+    /// every run that succeeded quietly.
+    fn just(payload: MaintenanceRunPayload) -> Self {
+        Self {
+            payload,
+            signals: Vec::new(),
+        }
+    }
+}
+
+/// The notification a failed run raises. `detail` carries what the
+/// outcome event carries, so the pane needs no second lookup to say
+/// which run this was.
+fn run_failed_signal(
+    task: MaintenanceTask,
+    run_id: &str,
+    error: &str,
+    duration_ms: u64,
+) -> OperatorSignalPayload {
+    OperatorSignalPayload::notification(
+        SignalKind::registered(kinds::MAINTENANCE_RUN_FAILED),
+        format!("scheduled maintenance task `{task}` failed: {error}"),
+    )
+    .with_detail(serde_json::json!({
+        "task": task.name(),
+        "run_id": run_id,
+        "error": error,
+        "duration_ms": duration_ms,
+    }))
 }
 
 /// What makes this delivery distinguishable from a redelivery of
@@ -429,13 +516,13 @@ fn run_id(msg: &async_nats::jetstream::Message, stream_seq: Option<u64>) -> Stri
 /// The run ids this process has already answered for, oldest first.
 ///
 /// A value of `None` means "resolved and published — nothing left to
-/// do"; `Some(payload)` means the outcome is known but not yet on the
+/// do"; `Some(resolved)` means the outcome is known but not yet on the
 /// event log, so a redelivery must publish it rather than re-run the
 /// task.
 struct RunLedger {
     /// Insertion order, for eviction.
     order: std::collections::VecDeque<String>,
-    entries: HashMap<String, Option<MaintenanceRunPayload>>,
+    entries: HashMap<String, Option<Resolved>>,
     capacity: usize,
 }
 
@@ -448,7 +535,7 @@ impl RunLedger {
         }
     }
 
-    fn lookup(&self, run_id: &str) -> Option<Option<MaintenanceRunPayload>> {
+    fn lookup(&self, run_id: &str) -> Option<Option<Resolved>> {
         self.entries.get(run_id).cloned()
     }
 
@@ -473,9 +560,9 @@ impl RunLedger {
         }
     }
 
-    fn hold(&mut self, run_id: &str, payload: MaintenanceRunPayload) {
+    fn hold(&mut self, run_id: &str, resolved: Resolved) {
         if let Some(slot) = self.entries.get_mut(run_id) {
-            *slot = Some(payload);
+            *slot = Some(resolved);
         }
     }
 }

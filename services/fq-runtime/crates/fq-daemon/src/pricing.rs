@@ -16,7 +16,7 @@ use std::path::Path;
 use fq_runtime::agent::AgentRegistry;
 use fq_runtime::events::{OperatorSignalPayload, PricingProvenance};
 use fq_runtime::pricing::{live, openrouter};
-use fq_runtime::{Config, PricingTable};
+use fq_runtime::{Config, PricingOverlay, PricingRefresh, PricingTable, ServedPricing};
 
 /// The LiteLLM snapshot's file name under the cache directory.
 const LITELLM_CACHE_FILE: &str = "pricing.json";
@@ -51,13 +51,12 @@ pub(crate) struct PricingStartup {
 /// An unreadable `[pricing]` section is an error rather than a fallback:
 /// an operator who asked for a pin and got the live document has the
 /// opposite of what they configured.
-pub(crate) async fn load_pricing_sources(
-    config: &Config,
-) -> anyhow::Result<(PricingTable, Vec<OperatorSignalPayload>)> {
+pub(crate) async fn load_pricing_sources(config: &Config) -> anyhow::Result<LoadedPricing> {
     let cache_dir = &config.cache.directory;
     let settings = config.pricing.load_settings()?;
     let load = live::load_accepted(settings, &cache_dir.join(LITELLM_CACHE_FILE)).await;
     let signals = load.signals();
+    let mut overlay = PricingOverlay::new();
     let mut pricing = load.table;
     // Group by endpoint so one catalogue serves every provider on it;
     // in practice there is one OpenRouter provider, but two would be
@@ -74,9 +73,27 @@ pub(crate) async fn load_pricing_sources(
     for (base_url, models) in by_endpoint {
         let catalogue = openrouter::load(base_url, &cache_dir.join(OPENROUTER_CACHE_FILE)).await;
         let coverage = price_openrouter_models(&mut pricing, &catalogue, models);
+        coverage.record(&pricing, &mut overlay);
         coverage.report();
     }
-    Ok((pricing, signals))
+    Ok(LoadedPricing {
+        table: pricing,
+        signals,
+        overlay,
+    })
+}
+
+/// What the startup load produced, before the operator's overrides and
+/// the coverage guarantee.
+pub(crate) struct LoadedPricing {
+    /// The accepted LiteLLM table with the OpenRouter catalogue layered
+    /// over it.
+    pub(crate) table: PricingTable,
+    /// What the load wants an operator told, once the bus is announced.
+    pub(crate) signals: Vec<OperatorSignalPayload>,
+    /// Which of those prices are *not* the LiteLLM table's, so a later
+    /// refresh does not overwrite them with it (#344).
+    pub(crate) overlay: PricingOverlay,
 }
 
 /// How the models routed through OpenRouter came to be priced.
@@ -93,6 +110,24 @@ pub(crate) struct OpenRouterCoverage {
 }
 
 impl OpenRouterCoverage {
+    /// Record every routed id as a price the LiteLLM table does not get
+    /// to set (#344).
+    ///
+    /// Both halves, not just `from_catalogue`: a model priced
+    /// `from_litellm` was priced from a *differently spelled* key —
+    /// `openrouter/openai/gpt-4o-mini` for the id `openai/gpt-4o-mini` —
+    /// so a refresh of the LiteLLM table would leave the routed id
+    /// exactly where it was anyway. Recording it says so explicitly,
+    /// which is what keeps the refresh's "no longer listed upstream"
+    /// count from naming every routed model on every run.
+    fn record(&self, table: &PricingTable, overlay: &mut PricingOverlay) {
+        for model in self.from_catalogue.iter().chain(&self.from_litellm) {
+            if let Some(pricing) = table.lookup(model) {
+                overlay.set(model, *pricing);
+            }
+        }
+    }
+
     fn report(&self) {
         if !self.from_catalogue.is_empty() || !self.from_litellm.is_empty() {
             println!(
@@ -149,11 +184,16 @@ pub(crate) fn build_validated_pricing(
     config: &Config,
     registry: &AgentRegistry,
     base: PricingTable,
-) -> anyhow::Result<PricingTable> {
+    mut overlay: PricingOverlay,
+) -> anyhow::Result<(PricingTable, PricingOverlay)> {
     let mut pricing = base;
     let mut overrides = 0usize;
     for (model, ov) in config.providers.pricing_overrides() {
         pricing.insert(model.to_string(), ov.to_pricing());
+        // An override is the operator's answer to a price the source
+        // gets wrong or does not carry, so it outranks every table a
+        // refresh will ever accept (#344).
+        overlay.set(model, ov.to_pricing());
         overrides += 1;
     }
     if overrides > 0 {
@@ -180,7 +220,41 @@ pub(crate) fn build_validated_pricing(
         &agent_models,
         &pricing,
     )?;
-    Ok(pricing)
+    Ok((pricing, overlay))
+}
+
+/// The daemon's price list as the hosted tasks take it: the table they
+/// read, and the refresh that swaps it.
+///
+/// One value rather than two `Assembled` fields, because they are one
+/// fact — this daemon's prices — and the refresh already holds the
+/// handle the readers read.
+pub(crate) struct DaemonPricing {
+    /// The handle every cost path reads through.
+    pub(crate) served: ServedPricing,
+    /// The scheduled refresh, handed to the maintenance consumer.
+    pub(crate) refresh: PricingRefresh,
+}
+
+impl DaemonPricing {
+    /// Serve `table`, and prepare the refresh that will replace it:
+    /// the same `[pricing]` settings and the same cache file the
+    /// startup load used, so a refresh judges each document against the
+    /// one this daemon booted on.
+    pub(crate) fn new(
+        config: &Config,
+        table: PricingTable,
+        overlay: PricingOverlay,
+    ) -> anyhow::Result<Self> {
+        let served = ServedPricing::new(table);
+        let refresh = PricingRefresh::new(
+            config.pricing.load_settings()?,
+            litellm_cache_path(&config.cache.directory),
+            overlay,
+            served.clone(),
+        );
+        Ok(Self { served, refresh })
+    }
 }
 
 #[cfg(test)]

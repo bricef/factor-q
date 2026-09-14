@@ -3,7 +3,8 @@
 
 use std::fmt;
 
-use crate::events::subjects;
+use crate::events::{OperatorSignalPayload, subjects};
+use crate::pricing::refresh::PricingRefresh;
 
 /// Every maintenance task this build can run, as values.
 ///
@@ -36,6 +37,17 @@ pub enum MaintenanceTask {
     /// answer "is maintenance wired up on this instance?", and it is
     /// the one task whose failure can only mean the plumbing.
     Ping,
+
+    /// Fetch the live pricing document, put it through acceptance, and
+    /// swap the result into the table this daemon is serving
+    /// (<https://github.com/bricef/factor-q/issues/344>).
+    ///
+    /// Convergent, as membership here requires: it overwrites a table
+    /// with whatever the source currently says, so running it twice
+    /// leaves exactly what running it once did. It is also the reason
+    /// `[maintenance] ack_wait_ms` defaults to a minute rather than a
+    /// second — this one reaches the network.
+    PricingRefresh,
 }
 
 impl MaintenanceTask {
@@ -45,13 +57,15 @@ impl MaintenanceTask {
     /// a new variant is added here, so the test below asserts that
     /// round-tripping every name recovers every variant, which fails
     /// the moment a variant is missing.
-    pub const ALL: &'static [MaintenanceTask] = &[MaintenanceTask::Ping];
+    pub const ALL: &'static [MaintenanceTask] =
+        &[MaintenanceTask::Ping, MaintenanceTask::PricingRefresh];
 
     /// The task's name — the last token of its subject, and how it is
     /// spelled in `fq-cron.toml` and in the outcome event.
     pub fn name(self) -> &'static str {
         match self {
             Self::Ping => "ping",
+            Self::PricingRefresh => "pricing_refresh",
         }
     }
 
@@ -76,20 +90,54 @@ impl MaintenanceTask {
             })
     }
 
-    /// Run the task, returning the one-line detail the outcome event
-    /// carries.
+    /// Run the task, returning what the outcome event should say and
+    /// anything an operator should be told separately.
     ///
-    /// `ctx` is where a task's dependencies arrive. It is empty today
-    /// because [`Self::Ping`] needs nothing; it is in the signature
-    /// from the start so the first task that needs the pricing table
-    /// or a store adds a field rather than churning every call site
-    /// (the same forward-compatible-seam convention the built-in tools
-    /// follow with their `new()`).
-    pub async fn run(self, ctx: &MaintenanceContext) -> Result<String, MaintenanceFailure> {
-        let _ = ctx;
+    /// `ctx` is where a task's dependencies arrive — the seam
+    /// [`Self::PricingRefresh`] was the first to use, which is why the
+    /// argument was in the signature before there was anything to put in
+    /// it.
+    pub async fn run(self, ctx: &MaintenanceContext) -> Result<TaskOutcome, MaintenanceFailure> {
         match self {
-            Self::Ping => Ok("pong".to_string()),
+            Self::Ping => Ok(TaskOutcome::new("pong")),
+            Self::PricingRefresh => {
+                let outcome = ctx
+                    .pricing()?
+                    .run()
+                    .await
+                    .map_err(MaintenanceFailure::new)?;
+                Ok(TaskOutcome::new(outcome.report.detail()).with_signals(outcome.signals))
+            }
         }
+    }
+}
+
+/// What a task run produced: the line the outcome event carries, and
+/// whatever it wants an operator told.
+///
+/// The signals are returned rather than published, so a task never holds
+/// the bus. The consumer publishes them beside the outcome it already
+/// publishes, which is also what makes "once per run, never on a
+/// redelivery" one rule in one place rather than a rule per task.
+#[derive(Debug, Default)]
+pub struct TaskOutcome {
+    /// The one-line detail on the `maintenance_run` event.
+    pub detail: String,
+    /// Operator signals to publish with the outcome, in order.
+    pub signals: Vec<OperatorSignalPayload>,
+}
+
+impl TaskOutcome {
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            signals: Vec::new(),
+        }
+    }
+
+    pub fn with_signals(mut self, signals: Vec<OperatorSignalPayload>) -> Self {
+        self.signals = signals;
+        self
     }
 }
 
@@ -101,16 +149,38 @@ impl fmt::Display for MaintenanceTask {
 
 /// What a task needs from the daemon to run.
 ///
-/// Empty while `ping` is the only task. A task that needs the pricing
-/// table, a store handle or the bus takes a field here, and the daemon
-/// fills it in where it constructs the consumer.
+/// Every field is optional and every task that needs one says so with a
+/// typed failure rather than a panic. The reason is that a consumer is
+/// constructible without a daemon around it — the tests do it, and so
+/// would any future embedding — and a task asked to run with nothing to
+/// run against should leave a record saying exactly that, not take the
+/// process down.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct MaintenanceContext {}
+pub struct MaintenanceContext {
+    pricing: Option<PricingRefresh>,
+}
 
 impl MaintenanceContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wire the pricing refresh: the settings, the cache and the served
+    /// table the daemon booted with.
+    pub fn with_pricing(mut self, refresh: PricingRefresh) -> Self {
+        self.pricing = Some(refresh);
+        self
+    }
+
+    /// The refresh, or the failure a run records when this daemon wired
+    /// none.
+    fn pricing(&self) -> Result<&PricingRefresh, MaintenanceFailure> {
+        self.pricing.as_ref().ok_or_else(|| {
+            MaintenanceFailure::new(
+                "this daemon has no pricing refresh wired, so there is no table to refresh",
+            )
+        })
     }
 }
 

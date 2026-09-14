@@ -23,20 +23,30 @@ use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
 
-use fq_runtime::control_plane::maintenance::{MaintenanceConsumer, MaintenanceConsumerError};
-use fq_runtime::{Config, EventBus};
+use fq_runtime::control_plane::maintenance::{
+    MaintenanceConsumer, MaintenanceConsumerError, MaintenanceContext,
+};
+use fq_runtime::{Config, EventBus, PricingRefresh};
 
 /// Spawn the maintenance consumer, returning its shutdown channel and
 /// its supervised handle.
+///
+/// `pricing` is what `pricing_refresh` runs against (#344): the settings
+/// and the cache the startup load used, and the handle on the table the
+/// daemon is serving. It arrives here rather than being built here
+/// because the served table is assembled with the rest of the runtime,
+/// before any task is spawned.
 pub(crate) fn spawn(
     bus: &EventBus,
     runtime_id: Uuid,
     config: &Config,
+    pricing: PricingRefresh,
 ) -> (
     oneshot::Sender<()>,
     JoinHandle<Result<(), MaintenanceConsumerError>>,
 ) {
-    let consumer = MaintenanceConsumer::new(bus.clone(), runtime_id, config.maintenance.ack_wait());
+    let consumer = MaintenanceConsumer::new(bus.clone(), runtime_id, config.maintenance.ack_wait())
+        .with_context(MaintenanceContext::new().with_pricing(pricing));
     let enabled = config.maintenance.enabled;
     let (tx, rx) = oneshot::channel();
     (

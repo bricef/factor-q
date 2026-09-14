@@ -41,7 +41,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // than zero — `None` means "we cannot see what it billed".
         let priced = call
             .usage
-            .zip(self.config.pricing.lookup(call.model))
+            .zip(self.config.pricing.price(call.model))
             .map(|(usage, pricing)| pricing.calculate(&usage));
         let total_cost = priced.map(|(_, _, total)| total).unwrap_or(0.0);
         if call.usage.is_some() && priced.is_none() {

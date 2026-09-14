@@ -20,6 +20,7 @@ use crate::bus::EventBus;
 use crate::events::{StopReason, TokenUsage};
 use crate::llm::fixture::FixtureClient;
 use crate::pricing::ModelPricing;
+use crate::pricing::PricingTable;
 use crate::tools::ToolRegistry;
 use crate::worker::reducer::Harness;
 use crate::worker::store::DispatchStatus;

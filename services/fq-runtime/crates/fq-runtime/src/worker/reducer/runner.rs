@@ -54,7 +54,7 @@ use crate::mcp::{
     AdvertisedCapabilities, McpClientManager, McpResourceReader, McpServerConfig, ServerRequest,
     advertised_roots_from_tool_sandbox, elicitation_decline,
 };
-use crate::pricing::PricingTable;
+use crate::pricing::served::ServedPricing;
 use crate::tools::ToolRegistry;
 use crate::trigger::Trigger;
 use crate::validation::ValidatorChain;
