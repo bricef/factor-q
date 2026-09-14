@@ -38,12 +38,13 @@ use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 /// The accepted pricing table this corpus's run was priced by (#735):
-/// a fixed source, commit and digest, so the golden is a function of the
-/// serialisers and nothing else.
+/// a fixed source, commit, `ETag` and digest, so the golden is a
+/// function of the serialisers and nothing else.
 fn corpus_provenance() -> PricingProvenance {
     PricingProvenance {
         source: "litellm-main".to_string(),
         commit: Some("9c4f1b7a0e2d5836a1b0c9d8e7f6a5b4c3d2e1f0".to_string()),
+        etag: Some("6f1a2b3c4d5e6f708192a3b4c5d6e7f8a9b0c1d2".to_string()),
         digest: "3f9a1c0b2d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8".to_string(),
         accepted_at: Utc.with_ymd_and_hms(2026, 9, 13, 9, 0, 0).unwrap(),
     }

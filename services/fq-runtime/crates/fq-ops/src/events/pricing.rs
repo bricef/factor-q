@@ -4,8 +4,8 @@
 //! The cost-retention principle keeps cost information indefinitely, and
 //! a figure nobody can attach to a price list is a number, not a record.
 //! So the accepted table names itself: what source it was configured
-//! from, which upstream commit that document was read at, and a SHA256
-//! digest of the exact bytes the daemon accepted
+//! from, the upstream commit and blob `ETag` the document was read at,
+//! and a SHA256 digest of the exact bytes the daemon accepted
 //! (<https://github.com/bricef/factor-q/issues/735>, rule 4).
 //!
 //! **One value, two uses.** The whole provenance rides the
@@ -36,14 +36,33 @@ pub struct PricingProvenance {
     /// The configured source, spelled as the config spells it:
     /// `litellm-main` or `pinned:<sha>`.
     pub source: String,
-    /// The upstream commit the document was read at — the GitHub
-    /// contents API's latest commit for the file, or the raw URL's
-    /// `ETag` where the API did not answer.
+    /// The file's latest commit at fetch time, best-effort: the GitHub
+    /// contents API's newest commit touching the upstream document, or
+    /// the sha a pinned source names.
     ///
-    /// `None` when neither did. The table is still identified by its
-    /// digest; what is missing is the upstream history to look it up in.
+    /// **Not a claim about these bytes.** The document comes from
+    /// `raw.githubusercontent.com`, which is CDN-cached, and the sha is
+    /// asked for at a later instant, so a commit landing in between
+    /// leaves this one commit ahead of the bytes. What identifies the
+    /// table is the [`digest`](Self::digest); this is the upstream
+    /// history to read it against.
+    ///
+    /// `None` where the API did not answer — unauthenticated and
+    /// rate-limited is the common case — which is why the [`etag`](Self::etag)
+    /// is recorded separately rather than substituted here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// The raw URL's `ETag`: the CDN's identifier for the blob that was
+    /// actually fetched, which is what makes it worth keeping beside a
+    /// commit sha that may be newer.
+    ///
+    /// `None` where the response carried no `ETag`, or where nothing was
+    /// fetched at all. A short hex `ETag` is indistinguishable in shape
+    /// from a commit sha, which is the reason these are two fields: a
+    /// reader looking up `commit` in the upstream history must never be
+    /// handed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
     /// SHA256, lowercase hex, of the accepted table's canonical bytes —
     /// the bytes in the cache, which are what the daemon accepted rather
     /// than what the source offered. The two differ exactly when

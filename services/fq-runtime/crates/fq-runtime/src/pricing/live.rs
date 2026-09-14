@@ -13,8 +13,8 @@
 //! 3. Put the two through acceptance.
 //! 4. Write what was accepted — the fetched document with each refused
 //!    model's entry taken from the prior one — and record its
-//!    provenance: the upstream commit and a SHA256 digest of exactly
-//!    those bytes.
+//!    provenance: the upstream commit, the fetched blob's `ETag`, and a
+//!    SHA256 digest of exactly those bytes.
 //! 5. Report: one notification per model whose *change* was refused,
 //!    one for a failed fetch, and an alert when the table being served
 //!    is older than `[pricing] max_age`. A model refused at admission
@@ -258,7 +258,9 @@ pub async fn load_accepted(settings: LoadSettings, cache_path: &Path) -> Accepte
         // A pin knows its own commit; asking GitHub would only confirm
         // the sha we already fetched by.
         (Ok(_), Some(pinned)) => Some(pinned.to_string()),
-        (Ok(document), None) => upstream_commit().await.or_else(|| document.etag.clone()),
+        // Best-effort, and nothing stands in for it: the blob's `ETag`
+        // is recorded as an `ETag` rather than passed off as a commit.
+        (Ok(_), None) => upstream_commit().await,
         (Err(_), _) => None,
     };
     settle(&settings, cache_path, fetched, commit, Utc::now())
@@ -267,8 +269,10 @@ pub async fn load_accepted(settings: LoadSettings, cache_path: &Path) -> Accepte
 /// One document off the wire.
 struct FetchedDocument {
     body: String,
-    /// The raw URL's `ETag`, which identifies the blob when the contents
-    /// API did not answer.
+    /// The raw URL's `ETag`: the CDN's identifier for these exact bytes.
+    /// Recorded in the provenance beside the commit, never in place of
+    /// it — the two answer different questions, and a short hex `ETag`
+    /// is indistinguishable in shape from a sha.
     etag: Option<String>,
 }
 
@@ -315,6 +319,7 @@ fn settle(
     let provenance = Some(PricingProvenance {
         source: settings.source.to_string(),
         commit,
+        etag: fetched.etag,
         digest: digest_of(&bytes),
         accepted_at: now,
     });
@@ -520,7 +525,9 @@ async fn fetch_document(source: &TableSource) -> Result<FetchedDocument, Pricing
 }
 
 /// The commit that last touched the upstream document, from the GitHub
-/// contents API.
+/// contents API — the file's latest commit *at this instant*, which is
+/// the newest commit the fetched bytes could have come from and may be
+/// one ahead of them.
 ///
 /// Best-effort: unauthenticated, on the same short timeout as the
 /// document fetch, and `None` on anything unexpected. The table is still
@@ -536,7 +543,7 @@ async fn upstream_commit() -> Option<String> {
         .await
         .ok()?;
     if !response.status().is_success() {
-        debug!(status = %response.status(), "the commits API did not answer; falling back to the ETag");
+        debug!(status = %response.status(), "the commits API did not answer; the table is identified by its digest and ETag");
         return None;
     }
     let commits: Vec<Value> = response.json().await.ok()?;
