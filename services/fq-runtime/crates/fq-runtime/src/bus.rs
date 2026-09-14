@@ -457,21 +457,31 @@ impl EventBus {
     /// is switched off here" into "the scheduler is broken". With the
     /// stream always present, a disabled daemon simply leaves the
     /// commands to age out.
+    ///
+    /// Create-then-update, like [`Self::ensure_event_stream`] and
+    /// unlike [`Self::ensure_trigger_stream`]: `get_or_create_stream`
+    /// alone leaves an *existing* stream at whatever config the build
+    /// that first created it asked for, so a later change to
+    /// [`DEFAULT_MAINTENANCE_MAX_AGE`] or to the subject set would
+    /// reach a fresh broker and never the deployed one. That is the
+    /// class of defect this PR's own body cites for the trigger stream
+    /// (<https://github.com/bricef/factor-q/issues/187>), so the new
+    /// stream does not repeat it.
     async fn ensure_maintenance_stream(&self) -> Result<(), BusError> {
         debug!(
             stream = MAINTENANCE_STREAM_NAME,
             "ensuring JetStream maintenance stream exists"
         );
-        self.jetstream
-            .get_or_create_stream(stream::Config {
-                name: MAINTENANCE_STREAM_NAME.to_string(),
-                subjects: vec![ALL_MAINTENANCE.to_string()],
-                retention: stream::RetentionPolicy::Limits,
-                storage: stream::StorageType::File,
-                max_age: DEFAULT_MAINTENANCE_MAX_AGE,
-                ..Default::default()
-            })
-            .await?;
+        let config = stream::Config {
+            name: MAINTENANCE_STREAM_NAME.to_string(),
+            subjects: vec![ALL_MAINTENANCE.to_string()],
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: DEFAULT_MAINTENANCE_MAX_AGE,
+            ..Default::default()
+        };
+        self.jetstream.get_or_create_stream(config.clone()).await?;
+        self.jetstream.update_stream(&config).await?;
         Ok(())
     }
 

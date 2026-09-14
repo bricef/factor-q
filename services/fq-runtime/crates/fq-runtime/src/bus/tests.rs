@@ -197,3 +197,57 @@ async fn annotations_preserved_through_publish_round_trip() {
         Some(&json!(0.8))
     );
 }
+
+/// A changed maintenance-stream config reaches a broker that already
+/// has the stream (#187's class).
+///
+/// The pre-existing stream is made by connecting once — which is how
+/// every deployed broker got its — and then moving `max_age` out from
+/// under it, standing in for the build whose constant was different.
+/// The second connect must put it back: with `get_or_create_stream`
+/// alone this assertion fails, because the server keeps the config it
+/// was created with.
+#[tokio::test]
+async fn ensuring_the_maintenance_stream_applies_a_changed_config_to_an_existing_stream() {
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+
+    let first = EventBus::connect(&url).await.expect("connect to NATS");
+    let stale_max_age = Duration::from_secs(60);
+    assert_ne!(
+        stale_max_age, DEFAULT_MAINTENANCE_MAX_AGE,
+        "the stand-in config has to differ from the one under test"
+    );
+    first
+        .jetstream()
+        .update_stream(&jetstream::stream::Config {
+            name: MAINTENANCE_STREAM_NAME.to_string(),
+            subjects: vec![ALL_MAINTENANCE.to_string()],
+            retention: jetstream::stream::RetentionPolicy::Limits,
+            storage: jetstream::stream::StorageType::File,
+            max_age: stale_max_age,
+            ..Default::default()
+        })
+        .await
+        .expect("age the existing stream out of date");
+
+    let second = EventBus::connect(&url).await.expect("reconnect to NATS");
+    let info = second
+        .jetstream()
+        .get_stream(MAINTENANCE_STREAM_NAME)
+        .await
+        .expect("maintenance stream")
+        .info()
+        .await
+        .expect("stream info")
+        .clone();
+    assert_eq!(
+        info.config.max_age, DEFAULT_MAINTENANCE_MAX_AGE,
+        "connecting must apply this build's maintenance stream config to an existing stream"
+    );
+    assert_eq!(
+        info.config.subjects,
+        vec![ALL_MAINTENANCE.to_string()],
+        "the subject set is part of that config"
+    );
+}
