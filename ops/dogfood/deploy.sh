@@ -21,6 +21,10 @@
 #   deploy.sh --render-changes <from> <to> <owner/repo>
 #                             print that list for the commit subjects on stdin
 #                             and exit — the seam ops/dogfood/tests drives
+#   deploy.sh --wait-ready <container> <since> <tag>
+#                             wait for that container's daemon to log
+#                             "Runtime ready" and exit — the other seam
+#                             ops/dogfood/tests drives
 #
 # Runs from the fq-ops image (ADR-0036): `docker compose run --rm ops deploy
 # [...]` is this script, and nothing on the host runs it directly. It is
@@ -170,6 +174,64 @@ if [ "${1:-}" = "--render-changes" ]; then
     [ $# -eq 4 ] || { echo "usage: deploy.sh --render-changes <from> <to> <owner/repo>  (subjects on stdin)" >&2; exit 2; }
     render_changes "$2" "$3" "$4"
     exit 0
+fi
+
+# --- has the daemon come up? --------------------------------------------------
+# The daemon's readiness is a line in its log — "Runtime ready. Press
+# Ctrl-C to stop.", printed once everything it reports on is running
+# (fq-daemon/src/hosted.rs). The whole log since the container started is
+# re-read each second, so a line that appeared while this loop slept is
+# still there to be found.
+#
+# Matched with bash's own `case`/`[[`, NEVER by piping the log into
+# `grep -q`. Under `set -o pipefail` that pipeline is a trap: `grep -q`
+# exits the instant it matches and closes the pipe, the writer dies of
+# SIGPIPE as soon as the log outgrows the 64 KiB pipe buffer, and
+# pipefail hands the *pipeline* 141 — so the `if` takes the false branch
+# on exactly the reads that DO contain the line. A daemon that logs
+# little was found; a busy one (a projection rebuild, a backlog of
+# triggers dispatching the moment the edge opens) crossed 64 KiB within
+# seconds and could never be found again, because the window only grows.
+# That is #753: on 2026-09-14 the check reported "did not log 'Runtime
+# ready'" for 1200 s about a daemon that had logged it after 15, and
+# --auto rolled a good build back. ops/dogfood/tests/idle-check.sh names
+# the same hazard; this is the other place it lived.
+daemon_ready()   { case "$1" in *"Runtime ready"*) return 0 ;; *) return 1 ;; esac; }
+# A start that has already failed, so the loop stops instead of waiting
+# out READY_WAIT: a registry the daemon refuses, a panic. Case-insensitive
+# extended-regex match, in the shell for the same reason as above.
+daemon_failed()  {
+    local rc=0
+    shopt -s nocasematch
+    [[ "$1" =~ registry\ validation\ failed|refus(e|ing)|panicked ]] || rc=1
+    shopt -u nocasematch
+    return "$rc"
+}
+
+# The ready loop, as its own function so ops/dogfood/tests can drive it
+# against a stub daemon (`deploy.sh --wait-ready <cid> <since> <tag>`)
+# without a compose stack. Returns 0 once the daemon is ready; otherwise
+# prints the reason on its last line and returns 1.
+wait_ready() {  # $1 = container id, $2 = read logs since, $3 = tag being deployed
+    local cid="$1" started="$2" tag="$3" fresh="" tick
+    for tick in $(seq 1 "$READY_WAIT"); do
+        : "$tick"
+        fresh="$(docker logs --since "$started" "$cid" 2>&1 || true)"
+        if daemon_failed "$fresh"; then
+            echo "the daemon failed to start on $tag (docker compose logs fqd)"
+            return 1
+        fi
+        daemon_ready "$fresh" && return 0
+        sleep 1
+    done
+    echo "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd)"
+    return 1
+}
+
+if [ "${1:-}" = "--wait-ready" ]; then
+    [ $# -eq 4 ] || { echo "usage: deploy.sh --wait-ready <container> <since> <tag>" >&2; exit 2; }
+    wait_ready "$2" "$3" "$4"
+    exit $?
 fi
 
 FORCE=0
@@ -358,7 +420,7 @@ done
 # container's image. Returns non-zero with the reason on stdout's last
 # line rather than dying, so --auto can roll back.
 bring_up() {  # $1 = sha
-    local tag="$1" started cid fresh ready svc want got
+    local tag="$1" started cid reason svc want got
     if grep -q '^FQ_TAG=' .env; then
         sed -i "s/^FQ_TAG=.*/FQ_TAG=$tag/" .env
     else
@@ -372,16 +434,9 @@ bring_up() {  # $1 = sha
     log "Waiting for the daemon's 'Runtime ready' (up to ${READY_WAIT}s)"
     cid="$(docker compose ps -q fqd | head -1)"
     [ -n "$cid" ] || { echo "no fqd container after up (docker compose ps)"; return 1; }
-    ready=0
-    for _ in $(seq 1 "$READY_WAIT"); do
-        fresh="$(docker logs --since "$started" "$cid" 2>&1 || true)"
-        if printf '%s' "$fresh" | grep -qiE 'registry validation failed|refus(e|ing)|panicked'; then
-            echo "the daemon failed to start on $tag (docker compose logs fqd)"; return 1
-        fi
-        if printf '%s' "$fresh" | grep -q "Runtime ready"; then ready=1; break; fi
-        sleep 1
-    done
-    [ "$ready" = 1 ] || { echo "the daemon did not log 'Runtime ready' within ${READY_WAIT}s (docker compose logs fqd)"; return 1; }
+    if ! reason="$(wait_ready "$cid" "$started" "$tag")"; then
+        printf '%s\n' "$reason"; return 1
+    fi
     ok "daemon ready"
 
     for svc in "${IMAGE_SERVICES[@]}"; do
