@@ -793,7 +793,7 @@ One maintenance task run, as it ended (<https://github.com/bricef/factor-q/issue
 |---|---|---|
 | `succeeded` | `detail` | The task ran and reported success; `detail` is its own one-line account. |
 | `failed` | `error` | The task ran and failed. The run is over — the message is acked, and the next scheduled fire is the retry. |
-| `refused` | `reason` | Nothing ran: the subject named a task this build has no registry entry for, or was not a `fq.maintenance.<task>` subject at all. |
+| `refused` | `reason` | Nothing ran: the subject named no task this build has a registry entry for. The durable filters on `fq.maintenance.>`, so the reachable shapes are an unknown name and a dotted tail (`fq.maintenance.a.b` is not a task name with a dot in it); a subject outside the prefix cannot arrive. |
 
 **Design notes:**
 

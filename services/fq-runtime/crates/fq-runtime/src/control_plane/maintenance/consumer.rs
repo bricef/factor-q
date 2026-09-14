@@ -222,6 +222,11 @@ impl MaintenanceConsumer {
     /// outcome payload; publishing it is [`Self::settle`]'s job.
     async fn resolve(&self, subject: &str, run_id: &str) -> MaintenanceRunPayload {
         let token = subjects::task_from_maintenance(subject);
+        // The durable filters on `fq.maintenance.>`, so the only way
+        // the parse fails here is a **dotted tail** — `fq.maintenance.
+        // a.b` is not a task name with a dot in it. A subject outside
+        // the prefix cannot reach this loop; the arm covers the parse
+        // being fallible rather than a case a publisher can produce.
         let Some(token) = token else {
             warn!(
                 consumer = %self.consumer_name,

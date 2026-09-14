@@ -415,3 +415,40 @@ async fn a_restart_picks_up_a_command_published_while_the_consumer_was_stopped()
     let _ = shutdown.send(());
     let _ = handle.await;
 }
+
+/// The one subject shape that reaches the "names no task" arm: a
+/// dotted tail. `fq.maintenance.a.b` is inside the durable's filter
+/// and is *not* a task called `a.b`, so it is refused and recorded
+/// like any other refusal rather than dropped.
+#[tokio::test]
+async fn a_dotted_tail_is_refused_and_recorded() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+
+    let mut outcomes = bus
+        .subscribe(subjects::SYSTEM_MAINTENANCE.to_string())
+        .await
+        .expect("subscribe to maintenance outcomes");
+
+    let subject = format!("{}.b", subjects::maintenance("a"));
+    let (shutdown, handle, name) = spawn(
+        &bus,
+        subject.clone(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
+    await_durable(&bus, &name).await;
+    publish_command(&bus, &subject, None).await;
+
+    let event = next_outcome(&mut outcomes, Duration::from_secs(10)).await;
+    match outcome_of(&event) {
+        MaintenanceOutcome::Refused { reason } => assert!(
+            reason.contains(&subject),
+            "the refusal names the subject it could not read: {reason}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
+}

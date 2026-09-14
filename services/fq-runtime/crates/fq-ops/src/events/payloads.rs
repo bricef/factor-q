@@ -602,9 +602,16 @@ pub enum MaintenanceOutcome {
     /// maintenance task redelivered inside its own cadence would stack
     /// up behind the next fire (fq-cron D5's "fires never queue").
     Failed { error: String },
-    /// Nothing ran: the subject named a task this build has no
-    /// registry entry for, or was not a maintenance subject at all.
-    /// A typed refusal, never a silent drop.
+    /// Nothing ran: the subject named no task this build has a
+    /// registry entry for. A typed refusal, never a silent drop.
+    ///
+    /// Two shapes reach here, and only because the durable filters on
+    /// `fq.maintenance.>`: a name with no variant (`fq.maintenance.
+    /// compact-everything`), and a dotted tail, which is not a task
+    /// name with a dot in it (`fq.maintenance.a.b`). A subject outside
+    /// the prefix entirely cannot arrive — the refusal arm for it
+    /// exists because the parse is fallible, not because the case is
+    /// reachable.
     Refused { reason: String },
 }
 
