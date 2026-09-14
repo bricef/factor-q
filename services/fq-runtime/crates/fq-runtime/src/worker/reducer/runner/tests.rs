@@ -4919,3 +4919,199 @@ async fn a_rate_limit_past_the_cap_defers_the_invocation_and_a_resume_completes_
     trail.extend(resume_events);
     crate::test_support::oracle::assert_valid_trace(&trail);
 }
+
+// --- #344 / review D-1: a cost row's figure and its citation are one
+// table, whatever a refresh does in between.
+
+/// A pricing table that names itself, so a cost row's citation says
+/// which of two tables priced it.
+fn versioned_pricing(source: &str, digest_char: char, per_million: f64) -> PricingTable {
+    let mut entries = HashMap::new();
+    entries.insert(
+        "claude-haiku".to_string(),
+        ModelPricing {
+            input_per_million: per_million,
+            output_per_million: per_million,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    );
+    PricingTable::from_map(entries).with_provenance(crate::events::PricingProvenance {
+        source: source.to_string(),
+        commit: None,
+        etag: None,
+        digest: std::iter::repeat_n(digest_char, 64).collect(),
+        accepted_at: chrono::Utc::now(),
+    })
+}
+
+/// A clock that swaps the served table *inside* the window between the
+/// price lookup and the citation of the table it came from.
+///
+/// The window is narrow and real: `dispatch_llm_call` reads the price,
+/// then writes the WAL `completed` row — which takes the clock — then
+/// builds the cost row and cites the table. The clock is the only
+/// injected dependency the runner calls in that window, which is what
+/// makes it the seam that can prove the window is closed. It is armed
+/// by [`ArmingSink`] on the turn's `llm.dispatched` publish, which
+/// happens after the WAL `dispatched` write and before the price
+/// lookup, so the very next tick is the `completed` write.
+struct SwapMidCall {
+    served: ServedPricing,
+    next: std::sync::Mutex<Option<PricingTable>>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl SwapMidCall {
+    fn new(served: ServedPricing, next: PricingTable) -> Self {
+        Self {
+            served,
+            next: std::sync::Mutex::new(Some(next)),
+            armed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn tick(&self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Some(next) = self.next.lock().expect("swap table").take() {
+            self.served.swap(next);
+        }
+    }
+}
+
+impl Clock for SwapMidCall {
+    fn now_ms(&self) -> u64 {
+        self.tick();
+        super::now_ms()
+    }
+    fn unix_now_ms(&self) -> i64 {
+        self.tick();
+        super::unix_now_ms()
+    }
+    fn rand_u64(&self) -> u64 {
+        super::rand_u64()
+    }
+}
+
+/// Records like [`RecordingSink`], and arms the swapping clock when the
+/// turn's `llm.dispatched` goes out.
+struct ArmingSink {
+    inner: std::sync::Arc<crate::test_support::sim::RecordingSink>,
+    clock: std::sync::Arc<SwapMidCall>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for ArmingSink {
+    async fn publish(&self, event: &Event) -> Result<u64, crate::bus::BusError> {
+        if matches!(event.payload, EventPayload::LlmDispatched(_)) {
+            self.clock.arm();
+        }
+        self.inner.publish(event).await
+    }
+}
+
+/// Review D-1: the price and the table version a cost row cites come
+/// from one snapshot of the served table.
+///
+/// Two turns with a refresh landing in the middle of the first one. The
+/// rule is that a row's figure and its citation agree: turn 1 is priced
+/// by v1 and cites v1, turn 2 is priced by v2 and cites v2. Under the
+/// cost-retention principle the citation is the only thing that makes a
+/// retained figure a record, so a row priced by one table and citing
+/// another is worse than one citing nothing.
+///
+/// Before the fix each of `price()`, `context_window()` and `version()`
+/// took its own snapshot, and this test failed on turn 1: the row was
+/// priced at v1's 1.0/M and cited `v2@bbbbbbbbbbbb`.
+#[tokio::test]
+async fn a_refresh_mid_call_cannot_split_a_cost_row_from_its_citation() {
+    let v1 = versioned_pricing("v1", 'a', 1.0);
+    let v2 = versioned_pricing("v2", 'b', 1_000.0);
+    let v1_version = v1.version().expect("v1 names itself");
+    let v2_version = v2.version().expect("v2 names itself");
+    let served = ServedPricing::new(v1);
+
+    let recorder = std::sync::Arc::new(crate::test_support::sim::RecordingSink::new());
+    let clock = std::sync::Arc::new(SwapMidCall::new(served.clone(), v2));
+    let sink = std::sync::Arc::new(ArmingSink {
+        inner: std::sync::Arc::clone(&recorder),
+        clock: std::sync::Arc::clone(&clock),
+    });
+
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(sink as Arc<dyn EventSink>)
+                .pricing(served)
+                .store(store)
+                .clock(clock as Arc<dyn Clock>)
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+
+    let agent = Agent::builder()
+        .id(unique_agent_id("swap-mid-call"))
+        .model("claude-haiku")
+        .system_prompt("be brief")
+        .budget(100.0)
+        .build()
+        .unwrap();
+
+    let llm = FixtureClient::new();
+    llm.push_response(tool_use("self_inspect", "call_si", json!({}), (1_000, 0)));
+    llm.push_response(canned("done.", 1_000, 0));
+
+    runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await
+        .expect("invocation completes");
+
+    let events = recorder.events();
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::LlmResponse(_)))
+        .filter_map(|e| e.envelope.cost.as_ref())
+        .collect();
+    assert_eq!(rows.len(), 2, "two turns, two cost rows");
+
+    // 1000 input tokens at v1's $1/M.
+    assert_eq!(rows[0].input_cost, 0.001, "turn 1 is priced by v1");
+    assert_eq!(
+        rows[0].pricing_table.as_deref(),
+        Some(v1_version.as_str()),
+        "turn 1 cites the table that priced it, not the one that landed \
+         while it was being written"
+    );
+    // 1000 input tokens at v2's $1000/M.
+    assert_eq!(rows[1].input_cost, 1.0, "turn 2 is priced by v2");
+    assert_eq!(
+        rows[1].pricing_table.as_deref(),
+        Some(v2_version.as_str()),
+        "turn 2 cites v2"
+    );
+}

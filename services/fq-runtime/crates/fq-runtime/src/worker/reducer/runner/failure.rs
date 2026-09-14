@@ -39,9 +39,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // Priced only when the provider's usage survived *and* the
         // model has pricing. Anything else leaves cost absent rather
         // than zero — `None` means "we cannot see what it billed".
+        // One snapshot: the figure and the citation on the failure's
+        // cost row are the same table's (review D-1).
+        let table = self.config.pricing.current();
         let priced = call
             .usage
-            .zip(self.config.pricing.price(call.model))
+            .zip(table.lookup(call.model).copied())
             .map(|(usage, pricing)| pricing.calculate(&usage));
         let total_cost = priced.map(|(_, _, total)| total).unwrap_or(0.0);
         if call.usage.is_some() && priced.is_none() {
@@ -93,7 +96,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &call,
                 priced,
                 totals.total_cost,
-                self.config.pricing.version(),
+                table.version(),
             ),
         )
         .await

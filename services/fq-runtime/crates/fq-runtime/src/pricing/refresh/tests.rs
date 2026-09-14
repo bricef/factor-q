@@ -58,7 +58,11 @@ fn load(table: PricingTable) -> AcceptedLoad {
 }
 
 fn input(served: &ServedPricing, model: &str) -> f64 {
-    served.price(model).expect("priced").input_per_million
+    served
+        .current()
+        .lookup(model)
+        .expect("priced")
+        .input_per_million
 }
 
 /// The two halves of the rule, in one refresh: a price that moved lands
@@ -161,7 +165,7 @@ fn the_swapped_table_carries_the_accepted_provenance() {
     refresh.settle(load(accepted)).expect("merged");
 
     assert_eq!(
-        refresh.served().version().as_deref(),
+        refresh.served().current().version().as_deref(),
         Some("litellm-main@f00dcafe1234")
     );
 }
@@ -298,7 +302,10 @@ fn a_refresh_takes_the_windows_the_document_carries() {
 
     refresh.settle(load(accepted)).expect("merged");
 
-    assert_eq!(refresh.served().context_window("a/one"), Some(400_000));
+    assert_eq!(
+        refresh.served().current().context_window("a/one"),
+        Some(400_000)
+    );
 }
 
 /// The held models are named in the log rather than in a signal each,

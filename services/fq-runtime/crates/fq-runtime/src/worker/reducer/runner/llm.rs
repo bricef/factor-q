@@ -114,7 +114,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// fails the invocation, a sampling request declines). Unreachable
     /// when the startup pricing guarantee holds — defence in depth.
     fn unpriced_model_refusal(&self, model: &str) -> Option<crate::llm::LlmError> {
-        (self.config.enforce_pricing && self.config.pricing.price(model).is_none())
+        (self.config.enforce_pricing && self.config.pricing.current().lookup(model).is_none())
             .then(|| crate::llm::LlmError::UnpricedModel(model.to_string()))
     }
 
@@ -280,7 +280,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // caught by the slice-6 budget-across-resume property; the
         // old comment claimed the cost was "filled in below", which
         // never happened).
-        let pricing = self.config.pricing.price(&request.model);
+        // One snapshot for the whole priced call: the figure below and
+        // the table cited on the cost row must be the same table's, and
+        // a refresh can land between two reads of the handle (review
+        // D-1).
+        let table = self.config.pricing.current();
+        let pricing = table.lookup(&request.model).copied();
         if pricing.is_none() {
             warn!(
                 model = %request.model,
@@ -319,7 +324,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if let Some(tracker) = context {
             tracker.tokens_in_use = Some(response.usage.input_tokens);
             tracker.messages_in_history = Some(request.messages.len() as u32);
-            let window = self.config.pricing.context_window(&request.model);
+            let window = table.context_window(&request.model);
             if crate::worker::introspection::context_pressure(
                 Some(response.usage.input_tokens),
                 window,
@@ -353,7 +358,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             output_cost,
             total_cost,
             ctx.totals.total_cost,
-            self.config.pricing.version(),
+            table.version(),
         );
         if let Some(message) = context_warning {
             response_event = response_event.annotate(
