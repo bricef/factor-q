@@ -733,6 +733,8 @@ impl Config {
 
     /// Resolve any relative paths in the config against a given base
     /// directory. Absolute paths are left unchanged.
+    /// New path-typed config fields must be added here and to
+    /// `all_path_fields_resolve_relative_to_config_dir`.
     fn resolve_paths_relative_to(&mut self, base: &Path) {
         if base.as_os_str().is_empty() {
             return;
@@ -745,6 +747,11 @@ impl Config {
         }
         if self.state.directory.is_relative() {
             self.state.directory = base.join(&self.state.directory);
+        }
+        if let Some(path) = &mut self.workspace.path
+            && path.is_relative()
+        {
+            *path = base.join(&*path);
         }
     }
 
@@ -1612,7 +1619,7 @@ api_key_env = "{env_var}"
     }
 
     #[test]
-    fn relative_paths_in_config_file_resolve_to_config_dir() {
+    fn all_path_fields_resolve_relative_to_config_dir() {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
@@ -1621,13 +1628,22 @@ api_key_env = "{env_var}"
             &config_path,
             r#"
 [agents]
-directory = "my-agents"
+directory = "agents"
+[cache]
+directory = "cache"
+[state]
+directory = "state"
+[workspace]
+path = "work"
 "#,
         )
         .unwrap();
 
         let config = Config::from_file(&config_path).unwrap();
-        assert_eq!(config.agents.directory, dir.path().join("my-agents"));
+        assert_eq!(config.agents.directory, dir.path().join("agents"));
+        assert_eq!(config.cache.directory, dir.path().join("cache"));
+        assert_eq!(config.state.directory, dir.path().join("state"));
+        assert_eq!(config.workspace.path, Some(dir.path().join("work")));
     }
 
     /// `[state] directory` follows `[cache] directory` in every
@@ -1700,6 +1716,8 @@ directory = "sub/agents"
             r#"
 [agents]
 directory = "/var/lib/factor-q/agents"
+[workspace]
+path = "/var/lib/factor-q/workspace"
 "#,
         )
         .unwrap();
@@ -1709,6 +1727,10 @@ directory = "/var/lib/factor-q/agents"
             config.agents.directory,
             PathBuf::from("/var/lib/factor-q/agents")
         );
+        assert_eq!(
+            config.workspace.path,
+            Some(PathBuf::from("/var/lib/factor-q/workspace"))
+        );
     }
 
     #[test]
@@ -1716,9 +1738,15 @@ directory = "/var/lib/factor-q/agents"
         let toml = r#"
 [agents]
 directory = "relative-agents"
+[workspace]
+path = "relative-workspace"
 "#;
         let config = Config::from_toml_str(toml).unwrap();
         assert_eq!(config.agents.directory, PathBuf::from("relative-agents"));
+        assert_eq!(
+            config.workspace.path,
+            Some(PathBuf::from("relative-workspace"))
+        );
     }
 
     #[test]
