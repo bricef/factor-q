@@ -411,14 +411,47 @@ impl EventBus {
             compression: Some(stream::Compression::S2),
             ..Default::default()
         };
-        // Create-or-update: get_or_create creates a fresh stream
-        // but won't change the config of an existing one, so a
-        // pre-existing cluster with stale `subjects` (e.g. a
-        // pre-`fq.worker.>` deployment) would silently drop
-        // worker-scoped publishes. update_stream applies the
-        // current config to whatever the server has.
-        self.jetstream.get_or_create_stream(config.clone()).await?;
-        self.jetstream.update_stream(&config).await?;
+        self.reconcile_managed_stream_config(config).await?;
+        Ok(())
+    }
+
+    /// Create a stream when absent, or update only the fields factor-q manages.
+    async fn reconcile_managed_stream_config(
+        &self,
+        desired: stream::Config,
+    ) -> Result<(), BusError> {
+        self.jetstream.get_or_create_stream(desired.clone()).await?;
+
+        let mut existing = self
+            .jetstream
+            .get_stream(&desired.name)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let current = existing
+            .info()
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?
+            .config
+            .clone();
+        let changes = managed_stream_config_diff(&current, &desired);
+        if changes.is_empty() {
+            return Ok(());
+        }
+
+        let update = stream::Config {
+            subjects: desired.subjects,
+            retention: desired.retention,
+            storage: desired.storage,
+            max_age: desired.max_age,
+            compression: desired.compression,
+            ..current
+        };
+        self.jetstream.update_stream(&update).await?;
+        info!(
+            stream = %desired.name,
+            changes = %changes.join(", "),
+            "updated managed JetStream stream config"
+        );
         Ok(())
     }
 
@@ -497,8 +530,7 @@ impl EventBus {
             max_age: DEFAULT_MAINTENANCE_MAX_AGE,
             ..Default::default()
         };
-        self.jetstream.get_or_create_stream(config.clone()).await?;
-        self.jetstream.update_stream(&config).await?;
+        self.reconcile_managed_stream_config(config).await?;
         Ok(())
     }
 
@@ -578,6 +610,43 @@ impl EventBus {
         });
         Ok(Box::pin(stream))
     }
+}
+
+/// Compare only stream fields owned by factor-q. The rendered entries are also
+/// the operator-facing audit detail when reconciliation is required.
+fn managed_stream_config_diff(current: &stream::Config, desired: &stream::Config) -> Vec<String> {
+    let mut changes = Vec::new();
+    if current.subjects != desired.subjects {
+        changes.push(format!(
+            "subjects: {:?} -> {:?}",
+            current.subjects, desired.subjects
+        ));
+    }
+    if current.retention != desired.retention {
+        changes.push(format!(
+            "retention: {:?} -> {:?}",
+            current.retention, desired.retention
+        ));
+    }
+    if current.storage != desired.storage {
+        changes.push(format!(
+            "storage: {:?} -> {:?}",
+            current.storage, desired.storage
+        ));
+    }
+    if current.max_age != desired.max_age {
+        changes.push(format!(
+            "max_age: {:?} -> {:?}",
+            current.max_age, desired.max_age
+        ));
+    }
+    if current.compression != desired.compression {
+        changes.push(format!(
+            "compression: {:?} -> {:?}",
+            current.compression, desired.compression
+        ));
+    }
+    changes
 }
 
 #[cfg(test)]

@@ -251,3 +251,71 @@ async fn ensuring_the_maintenance_stream_applies_a_changed_config_to_an_existing
         "the subject set is part of that config"
     );
 }
+
+/// Reconciliation heals subjects owned by factor-q without resetting broker
+/// fields that operators own.
+#[tokio::test]
+async fn event_stream_reconciliation_heals_subjects_without_clobbering_unmanaged_fields() {
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+
+    let first = EventBus::connect(&url).await.expect("connect to NATS");
+    let mut stream = first
+        .jetstream()
+        .get_stream(STREAM_NAME)
+        .await
+        .expect("event stream");
+    let mut stale = stream.info().await.expect("stream info").config.clone();
+    stale.subjects = vec!["fq.agent.>".to_string(), "fq.system.>".to_string()];
+    stale.description = Some("operator-owned description".to_string());
+    first
+        .jetstream()
+        .update_stream(&stale)
+        .await
+        .expect("install stale, operator-tuned config");
+
+    let second = EventBus::connect(&url).await.expect("reconnect to NATS");
+    let mut stream = second
+        .jetstream()
+        .get_stream(STREAM_NAME)
+        .await
+        .expect("event stream");
+    let config = stream.info().await.expect("stream info").config.clone();
+    assert_eq!(
+        config.subjects,
+        EVENT_STREAM_SUBJECTS
+            .iter()
+            .map(|subject| subject.to_string())
+            .collect::<Vec<_>>(),
+        "startup must heal a subject set that predates fq.worker.>"
+    );
+    assert_eq!(
+        config.description.as_deref(),
+        Some("operator-owned description"),
+        "reconciliation must preserve fields factor-q does not manage"
+    );
+}
+
+/// The pure comparison seam makes an already-reconciled second connect a no-op,
+/// including when an unmanaged field differs from factor-q's creation template.
+#[test]
+fn managed_stream_config_diff_is_empty_when_only_unmanaged_fields_differ() {
+    let desired = stream::Config {
+        name: STREAM_NAME.to_string(),
+        subjects: EVENT_STREAM_SUBJECTS
+            .iter()
+            .map(|subject| subject.to_string())
+            .collect(),
+        retention: stream::RetentionPolicy::Limits,
+        storage: stream::StorageType::File,
+        max_age: DEFAULT_MAX_AGE,
+        compression: Some(stream::Compression::S2),
+        ..Default::default()
+    };
+    let current = stream::Config {
+        description: Some("operator-owned description".to_string()),
+        ..desired.clone()
+    };
+
+    assert!(managed_stream_config_diff(&current, &desired).is_empty());
+}
