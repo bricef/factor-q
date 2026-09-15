@@ -663,6 +663,17 @@ audit:
 check-pins:
     scripts/check-pins.sh
 
+# Verify vendored dashboard assets against their recorded upstream checksums.
+check-assets:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}/services/fq-dashboard/assets
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum --check CHECKSUMS
+    else
+        shasum -a 256 --check CHECKSUMS
+    fi
+
 # The github-watcher is a Go binary that consumes the runtime's events over
 # the wire contract, so it cannot read the runtime's Rust
 # SUPPORTED_SCHEMA_VERSIONS and keeps its own copy. This asserts the copy is
@@ -840,6 +851,7 @@ quality:
     source {{justfile_directory()}}/scripts/ci-timing.sh
     ci_timing_init
     run_phase "check-pins"   just check-pins
+    run_phase "check-assets" just check-assets
     run_phase "check-schema-versions" just check-schema-versions
     run_phase "lint-sources" just lint-sources
     run_phase "test-fq-lint" just test-fq-lint
