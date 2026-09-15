@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::{Agent, AgentId, definition::ParseError, definition::parse_agent_with_default};
+use crate::{
+    Agent, AgentId, definition::ParseError, definition::parse_agent_definition_with_default,
+};
 
 /// Result of scanning a directory for agent definitions.
 #[derive(Debug, Default)]
@@ -28,6 +30,7 @@ pub struct AgentRegistry {
 pub struct LoadedAgent {
     pub path: PathBuf,
     pub agent: Agent,
+    pub description: Option<String>,
 }
 
 impl AgentRegistry {
@@ -93,16 +96,17 @@ impl AgentRegistry {
             }
         };
 
-        let agent = match parse_agent_with_default(&content, self.default_model.as_deref()) {
-            Ok(agent) => agent,
-            Err(err) => {
-                self.errors.push(LoadError::Parse {
-                    path: path.to_path_buf(),
-                    source: err,
-                });
-                return;
-            }
-        };
+        let (agent, description) =
+            match parse_agent_definition_with_default(&content, self.default_model.as_deref()) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    self.errors.push(LoadError::Parse {
+                        path: path.to_path_buf(),
+                        source: err,
+                    });
+                    return;
+                }
+            };
 
         let id = agent.id().clone();
         if let Some(existing) = self.agents.get(&id) {
@@ -136,6 +140,7 @@ impl AgentRegistry {
             LoadedAgent {
                 path: path.to_path_buf(),
                 agent,
+                description,
             },
         );
     }

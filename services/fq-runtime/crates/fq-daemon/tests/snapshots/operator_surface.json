@@ -920,6 +920,14 @@
                   "null"
                 ]
               },
+              "description": {
+                "default": null,
+                "description": "Optional human-readable purpose from definition frontmatter.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "model": {
                 "type": "string"
               },
@@ -1017,6 +1025,14 @@
             "format": "double",
             "type": [
               "number",
+              "null"
+            ]
+          },
+          "description": {
+            "default": null,
+            "description": "Optional human-readable purpose from definition frontmatter.",
+            "type": [
+              "string",
               "null"
             ]
           },

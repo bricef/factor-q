@@ -331,10 +331,29 @@ pub(crate) async fn invocations_page(
             return unreachable_page(&state, "invocations", &err);
         }
     };
+    let agents: Vec<AgentEntryView> =
+        match call(&client, OpId::List(Domain::Agent), serde_json::json!({})).await {
+            Ok(agents) => agents,
+            Err(CallError::NotFound) => Vec::new(),
+            Err(
+                CallError::Unreachable(err)
+                | CallError::Failed(err)
+                | CallError::NotRegistered(err),
+            ) => return unreachable_page(&state, "invocations", &err),
+        };
+    let descriptions: HashMap<String, String> = agents
+        .into_iter()
+        .filter_map(|entry| match entry {
+            AgentEntryView::Agent(agent) => agent
+                .description
+                .map(|description| (agent.agent_id, description)),
+            AgentEntryView::LoadError { .. } => None,
+        })
+        .collect();
     ok_page(
         &state,
         "invocations",
-        &render::invocations_page(&active, &items, filters, now_ms()),
+        &render::invocations_page(&active, &items, filters, &descriptions, now_ms()),
     )
 }
 

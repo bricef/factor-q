@@ -53,7 +53,7 @@ fn unique_scratch() -> std::path::PathBuf {
     std::fs::write(
         dir.join("agents/probe.md"),
         format!(
-            "---\nname: probe\nmodel: {MODEL}\ntools:\n  - builtin__exec\nbudget: 0.25\n\
+            "---\nname: probe\ndescription: Checks runtime connectivity.\nmodel: {MODEL}\ntools:\n  - builtin__exec\nbudget: 0.25\n\
              effort: high\n---\n\nYou are a probe.\n"
         ),
     )
@@ -160,9 +160,11 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
     assert_eq!(rows[0]["entry"], "agent");
     assert_eq!(rows[0]["agent_id"], "probe");
     assert_eq!(rows[0]["model"], MODEL);
+    assert_eq!(rows[0]["description"], "Checks runtime connectivity.");
     assert_eq!(rows[0]["tool_count"], 1);
     assert_eq!(rows[1]["entry"], "agent");
     assert_eq!(rows[1]["agent_id"], "second");
+    assert_eq!(rows[1]["description"], serde_json::Value::Null);
     // The index row carries the file, so a listing answers "which
     // definition is this?" without a Get per row.
     assert!(
@@ -187,6 +189,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
         .output;
     assert_eq!(detail["agent_id"], "probe");
     assert_eq!(detail["model"], MODEL);
+    assert_eq!(detail["description"], "Checks runtime connectivity.");
     assert_eq!(detail["system_prompt"], "You are a probe.");
     assert_eq!(detail["tools"][0], "builtin__exec");
     assert_eq!(detail["budget"], 0.25);

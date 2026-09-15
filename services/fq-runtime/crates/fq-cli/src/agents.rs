@@ -155,6 +155,7 @@ mod tests {
     fn an_agent_row_renders_id_model_tools_and_path() {
         let row = format_agent_row_human(&AgentSummaryView {
             agent_id: "researcher".to_string(),
+            description: None,
             model: "claude-haiku-4-5".to_string(),
             budget: Some(1.0),
             trigger: None,
@@ -176,6 +177,7 @@ mod tests {
     fn a_long_id_is_never_truncated() {
         let row = format_agent_row_human(&AgentSummaryView {
             agent_id: "an-agent-with-a-very-long-identifier-indeed".to_string(),
+            description: None,
             model: "m".to_string(),
             budget: None,
             trigger: None,
