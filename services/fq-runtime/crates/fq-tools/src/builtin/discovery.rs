@@ -3,15 +3,18 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use glob::glob;
+use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use walkdir::WalkDir;
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 100;
+const WALK_BUFFER: usize = 64;
 
 #[derive(Debug, Deserialize)]
 struct ListParams {
@@ -69,27 +72,50 @@ fn validate_root(ctx: &ToolContext<'_>, root: &str) -> Result<PathBuf, ToolError
     Ok(ctx.sandbox.check_read_dir(Path::new(root))?)
 }
 
-fn files(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ToolError> {
+enum WalkItem {
+    Path(PathBuf),
+    Unreadable,
+}
+
+fn walk_files(
+    ctx: &ToolContext<'_>,
+    root: PathBuf,
+    pattern: &str,
+) -> Result<(mpsc::Receiver<WalkItem>, tokio::task::JoinHandle<()>), ToolError> {
     if Path::new(pattern).is_absolute() {
         return Err(ToolError::InvalidParameters(
             "glob must be relative to root".to_string(),
         ));
     }
-    let pattern = root.join(pattern).to_string_lossy().into_owned();
-    glob(&pattern)
-        .map_err(|err| ToolError::InvalidParameters(err.to_string()))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>()
-        .pipe(Ok)
+    let pattern = Pattern::new(&root.join(pattern).to_string_lossy())
+        .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
+    let sandbox = ctx.sandbox.clone();
+    let (sender, receiver) = mpsc::channel(WALK_BUFFER);
+    let worker = tokio::task::spawn_blocking(move || {
+        for entry in WalkDir::new(root).follow_links(false).sort_by_file_name() {
+            let item = match entry {
+                Ok(entry) if pattern.matches_path(entry.path()) => {
+                    let Ok(path) = sandbox.check_read(entry.path()) else {
+                        continue;
+                    };
+                    WalkItem::Path(path)
+                }
+                Ok(_) => continue,
+                Err(_) => WalkItem::Unreadable,
+            };
+            if sender.blocking_send(item).is_err() {
+                break;
+            }
+        }
+    });
+    Ok((receiver, worker))
 }
 
-// Keeps collection setup readable without exposing a public helper.
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
+async fn finish_walk(worker: tokio::task::JoinHandle<()>) -> Result<(), ToolError> {
+    worker
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(format!("discovery walker failed: {err}")))
 }
-impl<T> Pipe for T {}
 
 #[async_trait]
 impl Tool for FileListTool {
@@ -112,21 +138,24 @@ impl Tool for FileListTool {
             .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
         let root = validate_root(ctx, &params.root)?;
         let limit = params.limit.min(MAX_LIMIT);
-        let mut paths = Vec::new();
-        for path in files(&root, &params.glob)? {
-            // Re-check every hit so symlinks and glob traversal cannot
-            // escape the grant. Since #547 the same check also keeps
-            // non-files out of the listing — a glob like `**/*` matches
-            // directories and FIFOs, and this tool lists files.
-            if let Ok(path) = ctx.sandbox.check_read(&path) {
-                paths.push(path.display().to_string());
-                if paths.len() == limit {
+        let (mut receiver, worker) = walk_files(ctx, root, &params.glob)?;
+        let mut paths = Vec::with_capacity(limit);
+        let mut unreadable = 0;
+        let mut truncated = false;
+        while let Some(item) = receiver.recv().await {
+            match item {
+                WalkItem::Path(_) if paths.len() == limit => {
+                    truncated = true;
                     break;
                 }
+                WalkItem::Path(path) => paths.push(path.display().to_string()),
+                WalkItem::Unreadable => unreadable += 1,
             }
         }
+        drop(receiver);
+        finish_walk(worker).await?;
         Ok(ToolResult::ok(
-            json!({"paths": paths, "truncated": paths.len() == limit}).to_string(),
+            json!({"paths": paths, "truncated": truncated, "unreadable": unreadable}).to_string(),
         ))
     }
 }
@@ -160,28 +189,35 @@ impl Tool for FileSearchTool {
         let matcher =
             Regex::new(&query).map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
         let limit = params.limit.min(MAX_LIMIT);
-        let mut hits = Vec::new();
-        'files: for path in files(&root, &params.glob)? {
-            // Grant *and* shape (#547): the `read_to_string` below is
-            // the same open a FIFO would park in forever, and a glob
-            // reaches one as easily as `file_read` does.
-            let Ok(path) = ctx.sandbox.check_read(&path) else {
-                continue;
+        let (mut receiver, worker) = walk_files(ctx, root, &params.glob)?;
+        let mut hits = Vec::with_capacity(limit);
+        let mut unreadable = 0;
+        let mut truncated = false;
+        'files: while let Some(item) = receiver.recv().await {
+            let path = match item {
+                WalkItem::Path(path) => path,
+                WalkItem::Unreadable => {
+                    unreadable += 1;
+                    continue;
+                }
             };
             let Ok(contents) = tokio::fs::read_to_string(&path).await else {
                 continue;
             };
             for (index, line) in contents.lines().enumerate() {
                 if matcher.is_match(line) {
-                    hits.push(json!({"path": path.display().to_string(), "line": index + 1, "excerpt": line}));
                     if hits.len() == limit {
+                        truncated = true;
                         break 'files;
                     }
+                    hits.push(json!({"path": path.display().to_string(), "line": index + 1, "excerpt": line}));
                 }
             }
         }
+        drop(receiver);
+        finish_walk(worker).await?;
         Ok(ToolResult::ok(
-            json!({"hits": hits, "truncated": hits.len() == limit}).to_string(),
+            json!({"hits": hits, "truncated": truncated, "unreadable": unreadable}).to_string(),
         ))
     }
 }
@@ -191,6 +227,7 @@ mod tests {
     use super::*;
     use crate::sandbox::ToolSandbox;
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -233,5 +270,121 @@ mod tests {
             .unwrap();
         assert!(output.output.contains("\"line\":1"));
         assert!(output.output.contains("\"truncated\":true"));
+    }
+
+    async fn list(root: &Path, limit: usize) -> Value {
+        let sandbox = ToolSandbox::new().allow_read(root);
+        let ctx = ToolContext::new(&sandbox);
+        let output = FileListTool
+            .execute(&ctx, json!({"root": root, "limit": limit}))
+            .await
+            .unwrap();
+        serde_json::from_str(&output.output).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_loops_terminate_without_descending() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        symlink(".", dir.path().join("a")).unwrap();
+        symlink(".", dir.path().join("b")).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), list(dir.path(), 100))
+            .await
+            .expect("symlink loop must not extend the walk");
+        let paths = result["paths"].as_array().unwrap();
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.as_str().unwrap().contains("/a/"))
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.as_str().unwrap().contains("/b/"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_directory_is_not_descended() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        symlink(outside.path(), root.path().join("link")).unwrap();
+        let result = list(root.path(), 100).await;
+        assert!(result["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_file_is_still_listed() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let target = root.path().join("target.txt");
+        fs::write(&target, "target").unwrap();
+        symlink("target.txt", root.path().join("alias")).unwrap();
+        let result = list(root.path(), 100).await;
+        let paths = result["paths"].as_array().unwrap();
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.as_str() == Some(target.to_str().unwrap()))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_stops_an_adversarial_walk_promptly() {
+        let root = tempdir().unwrap();
+        for index in 0..5_000 {
+            fs::write(root.path().join(format!("{index:04}.txt")), "x").unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), list(root.path(), 1))
+            .await
+            .expect("limit must stop the producer during the walk");
+        assert_eq!(result["paths"].as_array().unwrap().len(), 1);
+        assert_eq!(result["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn truncation_reports_only_an_observed_extra_match() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("one.txt"), "one").unwrap();
+        assert_eq!(list(root.path(), 1).await["truncated"], false);
+        fs::write(root.path().join("two.txt"), "two").unwrap();
+        assert_eq!(list(root.path(), 1).await["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn sandbox_denials_are_not_unreadable_walk_entries() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("directory")).unwrap();
+        fs::write(root.path().join("directory/file.txt"), "x").unwrap();
+        assert_eq!(list(root.path(), 100).await["unreadable"], 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_directory_is_reported_when_permissions_apply() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let blocked = root.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("file.txt"), "x").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&blocked).is_ok() {
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let result = list(root.path(), 100).await;
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result["unreadable"].as_u64().unwrap() > 0);
     }
 }
