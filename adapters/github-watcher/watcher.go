@@ -80,8 +80,8 @@ type IssueSource interface {
 // separate from IssueSource so the trigger path keeps its minimal contract;
 // a Watcher without one simply skips the merged-PR → done transition.
 type ReviewSource interface {
-	// ListByLabel returns open issues carrying label.
-	ListByLabel(ctx context.Context, label string) ([]Issue, error)
+	// ListByLabelAllStates returns open and closed issues carrying label.
+	ListByLabelAllStates(ctx context.Context, label string) ([]Issue, error)
 	// HasMergedPR reports whether the issue has a merged PR linked to it
 	// (i.e. the proposed fix landed).
 	HasMergedPR(ctx context.Context, number int) (bool, error)
@@ -266,7 +266,7 @@ func (w *Watcher) sweepReview(ctx context.Context) {
 	if w.Reviewer == nil {
 		return
 	}
-	inReview, err := w.Reviewer.ListByLabel(ctx, w.Config.InReviewLabel)
+	inReview, err := w.Reviewer.ListByLabelAllStates(ctx, w.Config.InReviewLabel)
 	if err != nil {
 		w.Log.Error("list in-review issues failed; skipping review sweep this poll", "err", err)
 		return

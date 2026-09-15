@@ -15,12 +15,14 @@ import (
 
 func TestGitHubAPISource(t *testing.T) {
 	var removed, added, edited bool
+	var listedStates []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
 		}
 		switch {
 		case r.URL.Path == "/repos/o/r/issues":
+			listedStates = append(listedStates, r.URL.Query().Get("state"))
 			json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "ready"}}}})
 		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
 			removed = true
@@ -55,6 +57,15 @@ func TestGitHubAPISource(t *testing.T) {
 	issues, err := source.ListByLabel(ctx, "ready")
 	if err != nil || len(issues) != 1 || issues[0].Number != 7 || issues[0].UpdatedAt.IsZero() {
 		t.Fatalf("ListByLabel = %#v, %v", issues, err)
+	}
+	if _, err := source.ListByLabelAllStates(ctx, "in-review"); err != nil {
+		t.Fatalf("ListByLabelAllStates: %v", err)
+	}
+	if _, err := source.ListReady(ctx, "ready"); err != nil {
+		t.Fatalf("ListReady: %v", err)
+	}
+	if want := []string{"open", "all", "open"}; !slices.Equal(listedStates, want) {
+		t.Fatalf("listed states = %v, want %v", listedStates, want)
 	}
 	if err := source.Relabel(ctx, 7, "ready", "in-progress"); err != nil || !removed || !added {
 		t.Fatalf("Relabel = %v, removed=%t added=%t", err, removed, added)

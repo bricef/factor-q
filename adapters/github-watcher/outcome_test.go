@@ -35,7 +35,7 @@ func (s *labelSource) Relabel(_ context.Context, number int, remove, add string)
 	return nil
 }
 
-func (s *labelSource) ListByLabel(_ context.Context, _ string) ([]Issue, error) {
+func (s *labelSource) ListByLabelAllStates(_ context.Context, _ string) ([]Issue, error) {
 	return s.inReview, nil
 }
 
@@ -261,8 +261,10 @@ func TestReactAmbiguousEscalatesToFailed(t *testing.T) {
 
 // --- review sweep: merged PR -> done ---
 
-func TestSweepReviewMovesMergedToDone(t *testing.T) {
+func TestSweepReviewMovesClosedMergedIssueToDone(t *testing.T) {
 	src := &labelSource{
+		// The all-states listing includes both closed issues. Only the issue
+		// auto-closed by its merged PR should move; the manually closed one stays.
 		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}}, {Number: 11, Labels: []string{"in-review"}}},
 		merged:   map[int]bool{10: true, 11: false},
 	}
