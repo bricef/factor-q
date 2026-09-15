@@ -96,7 +96,10 @@ use crate::db::schema::{Compatibility, check_compatibility, read_user_version, s
 ///   stream still holds is re-derived by the replay, so a daemon that
 ///   upgrades finds its pane populated instead of empty back to the
 ///   moment of the upgrade.
-pub const PROJECTION_SCHEMA_VERSION: u32 = 3;
+/// - **v4** — index recoveries by kind and pane order so one recovery
+///   can efficiently close every earlier alert of that kind. Rebuilding
+///   is acceptable pre-alpha and derives the same rows from the stream.
+pub const PROJECTION_SCHEMA_VERSION: u32 = 4;
 
 /// The tables a rebuild drops and recreates — the projection proper.
 /// `projection_meta` is deliberately not among them: it records the
@@ -245,11 +248,11 @@ CREATE TABLE IF NOT EXISTS operator_signals (
 CREATE INDEX IF NOT EXISTS idx_operator_signals_time ON operator_signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_operator_signals_severity_time ON operator_signals(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_operator_signals_source_time ON operator_signals(source, timestamp);
--- The open-alert count and the pane's per-row "resolved by" both probe
--- this column by value, once per candidate alert. Without the index
--- each probe is a scan of the table, and the table is the one that is
--- never swept.
-CREATE INDEX IF NOT EXISTS idx_operator_signals_resolves ON operator_signals(resolves);
+-- The open-alert count and the pane's per-row "resolved by" both seek
+-- the first resolving signal of a kind in pane order. Resolves-null rows
+-- can never answer that probe, so keep them out of the index.
+CREATE INDEX IF NOT EXISTS idx_operator_signals_recoveries
+    ON operator_signals(kind, timestamp, event_id) WHERE resolves IS NOT NULL;
 "#;
 
 /// The index that makes "a dead letter is requeued at most once" a
