@@ -64,6 +64,24 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         (self.clock)()
     }
 
+    fn denied(
+        &self,
+        principal: impl std::fmt::Display,
+        verb: impl std::fmt::Display,
+        resource: impl std::fmt::Display,
+        rule: &'static str,
+        message: impl Into<String>,
+    ) -> StoreError {
+        tracing::warn!(
+            principal = %principal,
+            verb = %verb,
+            resource = %resource,
+            rule,
+            "access denied"
+        );
+        StoreError::Denied(message.into())
+    }
+
     /// Replace the expiry clock (tests only) — e.g. jump the gate's clock
     /// forward to exercise TTL expiry without sleeping.
     #[cfg(test)]
@@ -130,8 +148,20 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
     /// cover the root — so the gate refuses it for token callers.
     pub async fn list(&self, token: &str, prefix: &str) -> Result<Vec<String>> {
         if prefix.is_empty() {
-            return Err(StoreError::Denied(
-                "listing all names requires the operator; supply a namespace prefix".into(),
+            let principal = self
+                .verifier
+                .verify(token)
+                .map(|verified| {
+                    let Principal::Agent(id) = verified.principal();
+                    id.clone()
+                })
+                .unwrap_or_else(|_| "<unverified>".into());
+            return Err(self.denied(
+                principal,
+                Verb::List,
+                "<all names>",
+                "listing the root requires the operator",
+                "listing all names requires the operator; supply a namespace prefix",
             ));
         }
         let principal = self
@@ -147,9 +177,15 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
                 .any(|g| g.verbs.contains(&Verb::List) && g.scope.covers_scope(&subtree));
         if !authorized {
             let Principal::Agent(id) = &principal;
-            return Err(StoreError::Denied(format!(
-                "{id} may not list {prefix} (needs a list grant covering the namespace {prefix}.*)"
-            )));
+            return Err(self.denied(
+                id,
+                Verb::List,
+                prefix,
+                "a list grant must cover the namespace",
+                format!(
+                    "{id} may not list {prefix} (needs a list grant covering the namespace {prefix}.*)"
+                ),
+            ));
         }
         self.repo.list(prefix).await
     }
@@ -183,9 +219,15 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
             .any(|g| crate::grants::supports(&g.verbs, &g.scope, verbs, scope));
         if !authority {
             let Principal::Agent(id) = &principal;
-            return Err(StoreError::Denied(format!(
-                "{id} holds no live grant covering the delegation (grant verb, superset verbs, covering scope)"
-            )));
+            return Err(self.denied(
+                id,
+                Verb::Grant,
+                ScopeRef::from(scope),
+                "the delegator must hold a live grant covering the delegation",
+                format!(
+                    "{id} holds no live grant covering the delegation (grant verb, superset verbs, covering scope)"
+                ),
+            ));
         }
         let Principal::Agent(id) = &principal;
         self.grants
@@ -210,24 +252,40 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         }
         let Principal::Agent(id) = &principal;
         let Some((grantor, scope)) = self.grants.issued_grant(grant_id).await? else {
-            return Err(StoreError::Denied(format!(
-                "grant {grant_id} does not exist"
-            )));
+            return Err(self.denied(
+                id,
+                "revoke",
+                grant_id,
+                "the grant must exist",
+                format!("grant {grant_id} does not exist"),
+            ));
         };
         match grantor {
             Grantor::Agent(issuer) if issuer == *id => {}
             _ => {
-                return Err(StoreError::Denied(format!(
-                    "{id} did not issue grant {grant_id}; only its issuer or the operator may revoke it"
-                )));
+                return Err(self.denied(
+                    id,
+                    "revoke",
+                    grant_id,
+                    "only the grant issuer or operator may revoke it",
+                    format!(
+                        "{id} did not issue grant {grant_id}; only its issuer or the operator may revoke it"
+                    ),
+                ));
             }
         }
         if !verified.permits(Verb::Grant, (&scope).into(), self.now()) {
-            return Err(StoreError::Denied(format!(
-                "{id}'s token does not permit revoking grant {grant_id} \
-                 (expired, or attenuated away from grant on {})",
-                ScopeRef::from(&scope)
-            )));
+            return Err(self.denied(
+                id,
+                "revoke",
+                grant_id,
+                "the token must permit grant on the grant scope",
+                format!(
+                    "{id}'s token does not permit revoking grant {grant_id} \
+                     (expired, or attenuated away from grant on {})",
+                    ScopeRef::from(&scope)
+                ),
+            ));
         }
         self.grants.append_revoked(grant_id).await
     }
@@ -255,9 +313,13 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
     /// Operator revocation: root authority, revokes any grant.
     pub async fn operator_revoke(&self, grant_id: GrantId) -> Result<()> {
         if self.grants.issued_grant(grant_id).await?.is_none() {
-            return Err(StoreError::Denied(format!(
-                "grant {grant_id} does not exist"
-            )));
+            return Err(self.denied(
+                "operator",
+                "revoke",
+                grant_id,
+                "the grant must exist",
+                format!("grant {grant_id} does not exist"),
+            ));
         }
         self.grants.append_revoked(grant_id).await
     }
@@ -283,9 +345,13 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         let principal = self.identify(token, verb, ScopeRef::Name(resource)).await?;
         if !self.grants.can(&principal, verb, resource).await? {
             let Principal::Agent(id) = &principal;
-            return Err(StoreError::Denied(format!(
-                "{id} may not {verb} {resource}"
-            )));
+            return Err(self.denied(
+                id,
+                verb,
+                resource,
+                "a live grant must authorize the operation",
+                format!("{id} may not {verb} {resource}"),
+            ));
         }
         Ok(principal)
     }
@@ -304,9 +370,15 @@ impl<C: BlockStore, N: NameIndex> GatedRepository<C, N> {
         }
         if !verified.permits(verb, resource, self.now()) {
             let Principal::Agent(id) = &principal;
-            return Err(StoreError::Denied(format!(
-                "{id}'s token does not permit {verb} on {resource} (expired or attenuated)"
-            )));
+            return Err(self.denied(
+                id,
+                verb,
+                resource,
+                "the token must be current and permit the operation",
+                format!(
+                    "{id}'s token does not permit {verb} on {resource} (expired or attenuated)"
+                ),
+            ));
         }
         Ok(principal)
     }
@@ -359,6 +431,72 @@ mod tests {
 
     async fn token_for(f: &Fixture, principal: &Principal) -> String {
         f.minter.mint_for(f.gate.grants(), principal).await.unwrap()
+    }
+
+    #[test]
+    fn denial_emits_structured_warning() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for SharedBuf {
+            type Writer = SharedBuf;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let output = SharedBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+        let denied = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let f = fixture().await;
+                let token = token_for(&f, &alice()).await;
+                matches!(
+                    f.gate.get(&token, "docs.readme").await,
+                    Err(StoreError::Denied(_))
+                )
+            });
+        assert!(denied);
+
+        let line = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(line.contains("WARN"), "missing warn level: {line}");
+        assert!(line.contains("access denied"), "missing event: {line}");
+        assert!(
+            line.contains("principal=alice"),
+            "missing principal: {line}"
+        );
+        assert!(line.contains("verb=read"), "missing verb: {line}");
+        assert!(
+            line.contains("resource=docs.readme"),
+            "missing resource: {line}"
+        );
+        assert!(
+            line.contains("rule=\"a live grant must authorize the operation\""),
+            "missing rule: {line}"
+        );
     }
 
     #[tokio::test]
