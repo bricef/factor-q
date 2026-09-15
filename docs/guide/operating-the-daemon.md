@@ -1313,10 +1313,11 @@ counted inside a window at all. What bounds them is resolution.
 **An alert is open until a later signal resolves it.** A signal may name
 the one it closes — the earlier signal's event id, in the payload's
 `resolves` — and a recovery normally does, as a *notification* carrying
-the same `kind`, because the end of an alarm is not itself alarming. The
-home page's *M open alerts* is that fold: alerts with no resolver. It
-falls when the component that raised the alert says the condition has
-passed.
+the same `kind`, because the end of an alarm is not itself alarming. A
+recovery closes every open alert of its kind, including alerts raised by
+a previous daemon run. The home page's *M open alerts* is that fold:
+alerts with no later recovery of their kind. It falls when the component
+that raised the alert says the condition has passed.
 
 The pane shows both ends. A resolved alert loses its stripe, reads
 `▲ alert · resolved`, and carries a link to the signal that closed it;

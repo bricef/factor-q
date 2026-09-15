@@ -63,6 +63,16 @@ async fn backdate(store: &ProjectionStore, event: &Event) {
     }
 }
 
+/// Give an indexed signal an explicit pane-order timestamp.
+async fn set_signal_timestamp(store: &ProjectionStore, event: &Event, timestamp: &str) {
+    sqlx::query("UPDATE operator_signals SET timestamp = ? WHERE event_id = ?")
+        .bind(timestamp)
+        .bind(event.envelope.event_id.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+}
+
 fn cutoff() -> i64 {
     chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z")
         .unwrap()
@@ -380,41 +390,120 @@ async fn a_redelivery_refreshes_the_row_and_keeps_its_position() {
     assert_eq!(whole.seq, Some(11), "a redelivery must not unlocate a row");
 }
 
-/// **An alert is open until a later signal resolves it, and the count
-/// says so.**
+/// **A recovery after a restart closes every standing episode of its
+/// topic.**
 ///
-/// The rule the home page's number rests on. Both directions over rows
-/// of identical severity: an alert nothing has answered is counted, and
-/// the same alert once a recovery names it is not. Without this the
-/// count can only grow — a week of a broken upstream is twenty-eight
-/// things to act on, none of which can ever close.
+/// The first alert models the process that disappeared. The replacement
+/// process can name only its own alert, but the recovery means the shared
+/// condition ended, so every earlier alert of that kind must read closed.
 #[tokio::test]
-async fn a_resolved_alert_is_not_an_open_one() {
+async fn a_recovery_closes_same_kind_alerts_across_a_restart() {
     let (_dir, store) = store().await;
-    let standing = alert();
-    let recovered = alert();
-    store.insert_event(&standing, None).await.unwrap();
-    store.insert_event(&recovered, None).await.unwrap();
+    let before_restart = alert();
+    let after_restart = alert();
+    let recovery = recovery_of(&after_restart);
+    for (event, timestamp) in [
+        (&before_restart, "2020-01-01T00:00:00+00:00"),
+        (&after_restart, "2020-01-01T01:00:00+00:00"),
+        (&recovery, "2020-01-01T02:00:00+00:00"),
+    ] {
+        store.insert_event(event, None).await.unwrap();
+        set_signal_timestamp(&store, event, timestamp).await;
+    }
 
-    let (_, open) = store.operator_signal_counts(None).await.unwrap();
-    assert_eq!(open, 2, "nothing has resolved either of them yet");
-
-    let recovery = recovery_of(&recovered);
-    store.insert_event(&recovery, None).await.unwrap();
     let (notifications, open) = store.operator_signal_counts(None).await.unwrap();
-    assert_eq!(open, 1, "the resolved alert is no longer open");
-    assert_eq!(
-        notifications, 1,
-        "…and the recovery is itself a notification, counted as one"
-    );
+    assert_eq!(notifications, 1);
+    assert_eq!(open, 0, "one recovery closes both same-kind episodes");
 
-    // A resolution is not a deletion: the alert is still on the record,
-    // still listed, and still whole. "Closed" is a state, not a sweep.
+    let recovery_id = recovery.envelope.event_id.to_string();
+    for alert in [&before_restart, &after_restart] {
+        let id = alert.envelope.event_id.to_string();
+        let detail = store.operator_signal(&id).await.unwrap().unwrap();
+        assert_eq!(detail.resolved_by.as_deref(), Some(recovery_id.as_str()));
+    }
+
     let rows = store
         .query_operator_signals(Some("alert"), None, None, 10)
         .await
         .unwrap();
-    assert_eq!(rows.len(), 2, "both alerts are still listed");
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.resolved_by.as_deref() == Some(recovery_id.as_str()))
+    );
+
+    let before_id = before_restart.envelope.event_id.to_string();
+    let after_id = after_restart.envelope.event_id.to_string();
+    let (newer, older) = store
+        .operator_signal_neighbours("pricing", "2020-01-01T01:00:00+00:00", &after_id)
+        .await
+        .unwrap();
+    assert_eq!(newer.as_deref(), Some(recovery_id.as_str()));
+    assert_eq!(older.as_deref(), Some(before_id.as_str()));
+
+    assert_eq!(
+        store.sweep_operator_signals(cutoff()).await.unwrap(),
+        0,
+        "the resolving signal survives with the alerts it closes"
+    );
+    let (_, open_after_sweep) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open_after_sweep, 0);
+}
+
+/// A recovery is scoped to its topic even when it carries a valid
+/// `resolves` edge for some other alert.
+#[tokio::test]
+async fn a_recovery_of_another_kind_does_not_close_the_alert() {
+    let (_dir, store) = store().await;
+    let raised = alert();
+    let other_kind_recovery = signal_event(
+        OperatorSignalPayload::notification(
+            SignalKind::registered(kinds::PRICING_CHANGE_REFUSED),
+            "a different pricing condition recovered",
+        )
+        .resolving(raised.envelope.event_id),
+    );
+    for (event, timestamp) in [
+        (&raised, "2026-01-01T00:00:00+00:00"),
+        (&other_kind_recovery, "2026-01-01T01:00:00+00:00"),
+    ] {
+        store.insert_event(event, None).await.unwrap();
+        set_signal_timestamp(&store, event, timestamp).await;
+    }
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 1);
+    let detail = store
+        .operator_signal(&raised.envelope.event_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.resolved_by, None);
+}
+
+/// Pane order, not insertion order or the carried id alone, determines
+/// whether a recovery is later than an alert.
+#[tokio::test]
+async fn an_earlier_recovery_does_not_close_a_later_alert() {
+    let (_dir, store) = store().await;
+    let raised = alert();
+    let recovery = recovery_of(&raised);
+    for (event, timestamp) in [
+        (&recovery, "2026-01-01T00:00:00+00:00"),
+        (&raised, "2026-01-01T01:00:00+00:00"),
+    ] {
+        store.insert_event(event, None).await.unwrap();
+        set_signal_timestamp(&store, event, timestamp).await;
+    }
+
+    let (_, open) = store.operator_signal_counts(None).await.unwrap();
+    assert_eq!(open, 1);
+    let detail = store
+        .operator_signal(&raised.envelope.event_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.resolved_by, None);
 }
 
 /// The relation is readable from both ends, which is what the detail

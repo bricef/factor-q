@@ -40,17 +40,23 @@ const SIGNAL_COLUMNS: &str = "event_id, seq, timestamp, agent_id, invocation_id,
 /// queries.
 const SIGNAL_INDEX_COLUMNS: &str = "event_id, timestamp, severity, source, kind, summary, resolves";
 
-/// The correlated lookup that answers "which signal closed this one",
-/// as a select-list expression over an outer row aliased `s`.
+/// The relation that closes an outer alert row aliased `s`.
 ///
-/// `MIN(event_id)` rather than an `ORDER BY … LIMIT 1`: the first
-/// resolution is the one that closed it, ties are broken by identity
-/// the way every other listing here breaks them, and the aggregate form
-/// lets SQLite answer straight off `idx_operator_signals_resolves`.
-/// Nothing stops two producers both claiming to have resolved a signal;
-/// the count only asks whether *any* did.
-const RESOLVED_BY: &str =
-    "(SELECT MIN(r.event_id) FROM operator_signals r WHERE r.resolves = s.event_id)";
+/// A recovery closes every earlier alert of its kind, not only the alert
+/// whose id it happens to carry. That matters across daemon restarts: the
+/// new process can name only its own episode, while the recovery still
+/// means that the shared condition has passed. The tuple comparison is
+/// the total order used by the pane itself.
+const RESOLUTION_MATCH: &str = "r.kind = s.kind AND r.resolves IS NOT NULL \
+    AND (r.timestamp > s.timestamp \
+         OR (r.timestamp = s.timestamp AND r.event_id > s.event_id))";
+
+/// Push the select-list expression that identifies the first recovery.
+fn push_resolved_by(qb: &mut QueryBuilder<Sqlite>) {
+    qb.push("(SELECT r.event_id FROM operator_signals r WHERE ")
+        .push(RESOLUTION_MATCH)
+        .push(" ORDER BY r.timestamp ASC, r.event_id ASC LIMIT 1)");
+}
 
 /// The severity as the row stores it — the wire spelling, so the
 /// column's vocabulary and the payload's are one vocabulary rather
@@ -197,10 +203,10 @@ impl ProjectionStore {
     /// alert is closed by the *existence* of that row, not by a flag on
     /// itself ([`Self::operator_signal_counts`]). Sweeping it re-opens
     /// an alert that was answered a month ago, for ever, on the one
-    /// count the home page reads. An alert's record is the pair, so
-    /// retention keeps the pair: `resolves IS NULL` in the predicate is
-    /// the whole of it, and it costs one small index row per closed
-    /// alert.
+    /// count the home page reads. One recovery can close several earlier
+    /// alerts of its kind, so retention keeps every resolving row:
+    /// `resolves IS NULL` in the predicate is the whole exemption, and
+    /// costs one small index row per recovery.
     ///
     /// These are the **two predicate exemptions** in the sweep, and the
     /// deliberate exception to the rule stated on
@@ -256,10 +262,9 @@ impl ProjectionStore {
         event_id: &str,
     ) -> Result<Option<OperatorSignalDetailView>, StoreError> {
         let mut qb = QueryBuilder::new("SELECT ");
-        qb.push(SIGNAL_COLUMNS)
-            .push(", ")
-            .push(RESOLVED_BY)
-            .push(" FROM operator_signals s WHERE event_id = ")
+        qb.push(SIGNAL_COLUMNS).push(", ");
+        push_resolved_by(&mut qb);
+        qb.push(" FROM operator_signals s WHERE event_id = ")
             .push_bind(event_id);
         let row = qb.build().fetch_optional(&self.pool).await?;
         row.map(|row| signal_at(&row)).transpose()
@@ -284,10 +289,9 @@ impl ProjectionStore {
         limit: i64,
     ) -> Result<Vec<OperatorSignalView>, StoreError> {
         let mut qb = QueryBuilder::new("SELECT ");
-        qb.push(SIGNAL_INDEX_COLUMNS)
-            .push(", ")
-            .push(RESOLVED_BY)
-            .push(" FROM operator_signals s");
+        qb.push(SIGNAL_INDEX_COLUMNS).push(", ");
+        push_resolved_by(&mut qb);
+        qb.push(" FROM operator_signals s");
         narrow(&mut qb, severity, source, since, false);
         qb.push(" ORDER BY timestamp DESC, event_id DESC LIMIT ")
             .push_bind(limit);
@@ -370,21 +374,14 @@ impl ProjectionStore {
     /// never swept, so counting them inside one would answer a
     /// different question from the one the home line asks.
     ///
-    /// **Open is a fold, not a row count.** An alert is open until some
-    /// later signal names it in `resolves`, so the count is a
-    /// `NOT EXISTS` against the same table — index-covered by
-    /// `idx_operator_signals_resolves`, which is why the whole answer is
-    /// two indexed reads and not a scan of a table that is never swept.
-    /// Counting rows instead gives a number that can only ever grow: a
-    /// week of a broken upstream reads as twenty-eight things to act on,
-    /// none of which can close, and a count that never falls is a count
-    /// nobody reads.
-    ///
-    /// No `timestamp >` clause pairs with the `resolves` match, and it
-    /// would buy nothing: a producer holds the id because it published
-    /// the signal it is now closing, so the resolution is later by
-    /// construction. Leaving it out keeps the probe a single-column
-    /// index lookup.
+    /// **Open is a fold, not a row count.** An alert is open until a
+    /// later signal of the same kind carries `resolves`. The named id is
+    /// not required to be this alert's id: after a restart the new daemon
+    /// can name only the episode it raised, but recovery of the topic
+    /// closes every earlier episode of that topic. Kind and the pane's
+    /// `(timestamp, event_id)` order prevent an unrelated or earlier
+    /// recovery from closing it. The probe is covered by
+    /// `idx_operator_signals_recoveries`.
     pub async fn operator_signal_counts(
         &self,
         notifications_since: Option<&str>,
@@ -393,15 +390,13 @@ impl ProjectionStore {
         qb.push_bind(severity_name(SignalSeverity::Notification));
         push_filter(&mut qb, true, "timestamp >= ", notifications_since);
         let notifications: i64 = qb.build_query_scalar().fetch_one(&self.pool).await?;
-        let open_alerts: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM operator_signals s \
-             WHERE s.severity = ? \
-               AND NOT EXISTS (SELECT 1 FROM operator_signals r \
-                               WHERE r.resolves = s.event_id)",
-        )
-        .bind(severity_name(SignalSeverity::Alert))
-        .fetch_one(&self.pool)
-        .await?;
+        let mut qb =
+            QueryBuilder::new("SELECT COUNT(*) FROM operator_signals s WHERE s.severity = ");
+        qb.push_bind(severity_name(SignalSeverity::Alert))
+            .push(" AND NOT EXISTS (SELECT 1 FROM operator_signals r WHERE ")
+            .push(RESOLUTION_MATCH)
+            .push(")");
+        let open_alerts: i64 = qb.build_query_scalar().fetch_one(&self.pool).await?;
         Ok((notifications, open_alerts))
     }
 }

@@ -435,10 +435,11 @@ pub struct OperatorSignalCountsParams {
 pub struct OperatorSignalCounts {
     /// Notifications indexed at or after `notifications_since`.
     pub notifications: i64,
-    /// Alerts on the record that no later signal has resolved.
+    /// Alerts on the record that no later recovery of their kind has resolved.
     ///
-    /// The field is named for what it counts. An alert closes when a
-    /// later signal names it in `resolves` — this build has no
+    /// The field is named for what it counts. A later signal carrying
+    /// `resolves` closes every earlier alert of the same kind, including
+    /// alerts raised before a daemon restart. This build has no
     /// *acknowledgement*, which is a person marking something read, and
     /// that is a different thing from a component saying the condition
     /// it raised the alert about has passed. Counting every alert on

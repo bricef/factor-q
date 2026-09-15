@@ -2509,7 +2509,7 @@
             "type": "integer"
           },
           "open_alerts": {
-            "description": "Alerts on the record that no later signal has resolved.\n\nThe field is named for what it counts. An alert closes when a\nlater signal names it in `resolves` — this build has no\n*acknowledgement*, which is a person marking something read, and\nthat is a different thing from a component saying the condition\nit raised the alert about has passed. Counting every alert on\nrecord instead would give a number that can only grow: alerts\nare never swept, so a week of a broken upstream reads as\ntwenty-eight things to act on and the line stops being read.",
+            "description": "Alerts on the record that no later recovery of their kind has resolved.\n\nThe field is named for what it counts. A later signal carrying\n`resolves` closes every earlier alert of the same kind, including\nalerts raised before a daemon restart. This build has no\n*acknowledgement*, which is a person marking something read, and\nthat is a different thing from a component saying the condition\nit raised the alert about has passed. Counting every alert on\nrecord instead would give a number that can only grow: alerts\nare never swept, so a week of a broken upstream reads as\ntwenty-eight things to act on and the line stops being read.",
             "format": "int64",
             "type": "integer"
           }

@@ -28,13 +28,11 @@
 //! restarts while a condition holds raises it again on its startup load,
 //! which is honest: that *is* a new episode as far as anything in this
 //! process can know, and a fresh alert naming the current age is more
-//! use than silence. The cost is the other direction — an alert raised
-//! by the previous run stays open for ever, because the run that could
-//! have resolved it is gone. That is accepted rather than fixed: the
-//! alternative is persisting signal ids beside the cache and resolving
-//! an alert this process never saw, and reading that back wrongly (a
-//! restored cache directory, a copied deployment) would resolve alerts
-//! that are still true, which is the worse failure. The same value is
+//! use than silence. When this process later emits a recovery, readers
+//! treat it as closing every earlier alert of the same kind, including
+//! alerts raised by previous runs. The producer deliberately still does
+//! not persist signal ids beside the cache: restoring or copying such
+//! state could otherwise make it name an alert it never observed. The same value is
 //! shared by the startup load and the scheduled refresh, so a table
 //! found stale at boot and still stale at the next refresh is one
 //! episode, not two.
