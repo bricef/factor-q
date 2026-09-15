@@ -1573,12 +1573,52 @@ You are a test agent."#
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
+    /// Which error `FailsBeforeWalWorker` returns before the first WAL
+    /// write, exercising the dispatcher's ACK (permanent) / NAK
+    /// (transient) split (#41 / #46).
+    #[derive(Clone, Copy)]
+    enum PreWalFailure {
+        /// A retryable store outage — must NAK for redelivery.
+        TransientStore,
+        /// A permanent poison payload — must ACK.
+        PermanentInvocation,
+        /// A resume protocol verdict redelivery cannot heal — must ACK.
+        AmbiguousWalResume,
+    }
+
+    impl PreWalFailure {
+        fn label(self) -> &'static str {
+            match self {
+                Self::TransientStore => "pre-wal-transient",
+                Self::PermanentInvocation => "pre-wal-permanent",
+                Self::AmbiguousWalResume => "pre-wal-ambiguous-wal",
+            }
+        }
+
+        fn error(self) -> ExecutorError {
+            match self {
+                Self::TransientStore => {
+                    ExecutorError::WorkerStore("simulated transient store outage".to_string())
+                }
+                Self::PermanentInvocation => ExecutorError::InvocationFailed {
+                    kind: crate::events::FailureKind::RuntimeError,
+                    message: "permanent poison payload".to_string(),
+                },
+                Self::AmbiguousWalResume => {
+                    ExecutorError::Resume(crate::worker::ResumeError::AmbiguousWal {
+                        invocation_id: Uuid::nil(),
+                    })
+                }
+            }
+        }
+    }
+
     /// A worker that returns an error *before* firing `durable_start` —
-    /// models a failure before the first WAL write. `transient` picks
-    /// whether that error is retryable, exercising the dispatcher's
-    /// ACK (permanent) / NAK (transient) split (#41 / #46).
+    /// models a failure before the first WAL write. `failure` picks which
+    /// error that is, exercising the dispatcher's ACK (permanent) / NAK
+    /// (transient) split (#41 / #46).
     struct FailsBeforeWalWorker {
-        transient: bool,
+        failure: PreWalFailure,
     }
 
     #[async_trait::async_trait]
@@ -1594,17 +1634,7 @@ You are a test agent."#
             // Return without firing durable_start (i.e. before any WAL
             // write). A transient error should be NAK'd for redelivery, a
             // permanent one ACK'd.
-            if self.transient {
-                Err(ExecutorError::WorkerStore(
-                    "simulated transient store outage".to_string(),
-                ))
-            } else {
-                Err(ExecutorError::Resume(
-                    crate::worker::ResumeError::AmbiguousWal {
-                        invocation_id: Uuid::nil(),
-                    },
-                ))
-            }
+            Err(self.failure.error())
         }
 
         async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
@@ -1617,17 +1647,12 @@ You are a test agent."#
     /// Dispatch a trigger whose invocation fails before the first WAL
     /// write, and report whether the trigger was **redelivered** (NAK)
     /// rather than consumed (ACK). Requires a live broker.
-    async fn dispatched_pre_wal_failure_is_redelivered(transient: bool) -> bool {
+    async fn dispatched_pre_wal_failure_is_redelivered(failure: PreWalFailure) -> bool {
         use std::sync::Arc;
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
-        let label = if transient {
-            "pre-wal-transient"
-        } else {
-            "pre-wal-permanent"
-        };
-        let agent_id_str = unique_agent_id(label);
+        let agent_id_str = unique_agent_id(failure.label());
 
         let dir = tempfile::tempdir().unwrap();
         let agent_path = dir.path().join(format!("{agent_id_str}.md"));
@@ -1642,7 +1667,7 @@ You are a test agent."#
         registry.load_file(&agent_path);
         assert!(registry.errors().is_empty(), "{:?}", registry.errors());
 
-        let worker: Arc<dyn Worker> = Arc::new(FailsBeforeWalWorker { transient });
+        let worker: Arc<dyn Worker> = Arc::new(FailsBeforeWalWorker { failure });
         let dispatcher = Arc::new(TriggerDispatcher::new(
             bus.clone(),
             shared_registry(registry),
@@ -1697,8 +1722,19 @@ You are a test agent."#
     #[tokio::test]
     async fn transient_failure_before_first_wal_write_naks_for_redelivery() {
         assert!(
-            dispatched_pre_wal_failure_is_redelivered(true).await,
+            dispatched_pre_wal_failure_is_redelivered(PreWalFailure::TransientStore).await,
             "a transient pre-WAL failure must NAK (redeliver) the trigger"
+        );
+    }
+
+    /// #41 / #46: a *permanent* failure before the first WAL write ACKs
+    /// the trigger — retrying a poison run would loop under the unbounded
+    /// consumer, and the Failed event already recorded why.
+    #[tokio::test]
+    async fn permanent_failure_before_first_wal_write_acks() {
+        assert!(
+            !dispatched_pre_wal_failure_is_redelivered(PreWalFailure::PermanentInvocation).await,
+            "a permanent pre-WAL failure must ACK (consume) the trigger"
         );
     }
 
@@ -1707,7 +1743,7 @@ You are a test agent."#
     #[tokio::test]
     async fn ambiguous_wal_resume_verdict_acks_without_redelivery() {
         assert!(
-            !dispatched_pre_wal_failure_is_redelivered(false).await,
+            !dispatched_pre_wal_failure_is_redelivered(PreWalFailure::AmbiguousWalResume).await,
             "an ambiguous-WAL resume verdict must ACK (consume) the trigger"
         );
     }
@@ -1728,7 +1764,9 @@ You are a test agent."#
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
             shared_registry(AgentRegistry::new()),
-            Arc::new(FailsBeforeWalWorker { transient: true }) as Arc<dyn Worker>,
+            Arc::new(FailsBeforeWalWorker {
+                failure: PreWalFailure::TransientStore,
+            }) as Arc<dyn Worker>,
             Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
             1,
         );
