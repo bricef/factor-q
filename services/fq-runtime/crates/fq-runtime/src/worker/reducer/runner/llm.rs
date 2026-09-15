@@ -31,6 +31,17 @@ impl FailedLlmCall {
     }
 }
 
+impl<R: Reducer + Send + Sync> ReducerRunner<R> {
+    fn queue_context_pressure_notice(&self, invocation_id: Uuid) {
+        let body = format!(
+            "{}{}</host-notice>",
+            crate::events::HOST_NOTICE_SENTINEL,
+            crate::worker::introspection::CONTEXT_PRESSURE_WARNING
+        );
+        self.queue_host_notice(invocation_id, "context_pressure", body);
+    }
+}
+
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
@@ -333,6 +344,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 && !tracker.warning_emitted
             {
                 tracker.warning_emitted = true;
+                self.queue_context_pressure_notice(ctx.invocation_id);
                 warn!(
                     ctx.agent_id = %ctx.agent_id,
                     ctx.invocation_id = %ctx.invocation_id,
