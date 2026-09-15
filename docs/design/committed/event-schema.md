@@ -938,7 +938,7 @@ The following invariants hold across the event stream and are assumed by consume
 ## Storage and Retention
 
 - All events are published to JetStream streams with file-based persistence.
-- Retention policy is `LimitsPolicy` with a `MaxAge` of 30 days. That window is a compile-time constant (`bus::DEFAULT_MAX_AGE`), not an operator setting: changing it takes a rebuild, which [Design Principle 8](design-principles.md#8-tunable-parameters-are-configuration-not-code) says a tunable should not.
+- Retention policy is `LimitsPolicy` with a `MaxAge` of 30 days by default. Operators can change the event stream window with `[events] max_age` in `fqd.toml`; the daemon applies it to new and existing streams at startup.
 - Events are projected into SQLite for complex queries.
 - The projection store is a read-optimised view, not the source of truth. Events can be re-projected from the NATS stream at any time.
 
@@ -948,7 +948,7 @@ The event trail has no payload-bearing system of record beyond JetStream retenti
 
 | Surface | Lifetime | What survives and record status |
 |---|---|---|
-| NATS `fq-events` | 30 days, fixed in code | Complete payload-bearing event trail; deleted after retention. The trigger and advisory streams keep messages for 24 hours, likewise fixed. |
+| NATS `fq-events` | 30 days by default (`[events].max_age`) | Complete payload-bearing event trail; deleted after retention. The trigger and advisory streams keep messages for 24 hours, fixed independently. |
 | SQLite projection (`events`) | 30 days by default (`[state].retention_days`); cost-bearing rows kept indefinitely | Typed columns only, without event payloads. The daemon prunes it on the scheduled retention sweep, except rows carrying `total_cost` (`llm_response`, `llm_failure`, `invocation_summary`) — cost accounting is a primary platform concern and spend figures must survive retention. |
 | SQLite projection (`operator_signals`) | notifications on the same `[state].retention_days` window; **alerts kept indefinitely** | The whole signal — severity, source, kind, summary, structured `detail` and references — so the dashboard's notifications pane needs no hop back into the log. Alerts are the sweep's one *predicate* exemption (every other exemption is structural, a table the sweep never names): the record that the system could not recover on its own and a person had to intervene outlives the log it arrived on, and past stream retention this table is its only copy. |
 | `invocation_archive` in `control-plane.db` | 30 days by default — the same `[state].retention_days`, keyed on `archived_at` | Per-invocation final phase, final reducer-state blob and timestamps; not the event trail. Non-rebuildable while it lives, and swept on the same tick as the projection above. |

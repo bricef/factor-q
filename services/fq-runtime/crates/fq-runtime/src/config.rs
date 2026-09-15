@@ -21,6 +21,7 @@ use serde::Deserialize;
 mod bus;
 mod edge;
 mod error;
+mod events;
 mod maintenance;
 mod mcp;
 mod nats;
@@ -30,6 +31,7 @@ mod tools;
 pub use bus::BusConfig;
 pub use edge::EdgeConfig;
 pub use error::ConfigError;
+pub use events::EventsConfig;
 pub use maintenance::MaintenanceConfig;
 pub use mcp::McpConfig;
 pub use nats::NatsConfig;
@@ -41,6 +43,9 @@ pub use tools::{ExecToolConfig, ToolsConfig};
 pub struct Config {
     #[serde(default)]
     pub nats: NatsConfig,
+    /// Retention of the payload-bearing JetStream event trail.
+    #[serde(default)]
+    pub events: EventsConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
@@ -652,6 +657,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             nats: NatsConfig::default(),
+            events: EventsConfig::default(),
             agents: AgentsConfig::default(),
             workspace: WorkspaceConfig::default(),
             providers: ProvidersConfig {
@@ -709,6 +715,7 @@ impl Config {
     /// the same mistake the file can.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.nats.validate()?;
+        self.events.validate()?;
         self.tools.validate()?;
         self.mcp.validate()
     }
@@ -800,6 +807,29 @@ mod tests {
             config.providers.anthropic.unwrap().api_key_env,
             "ANTHROPIC_API_KEY"
         );
+    }
+
+    #[test]
+    fn event_retention_defaults_parses_and_rejects_nonsense() {
+        let defaults = Config::from_toml_str("").unwrap();
+        assert_eq!(
+            defaults.events.max_age().unwrap(),
+            crate::bus::DEFAULT_MAX_AGE
+        );
+
+        let configured = Config::from_toml_str("[events]\nmax_age = \"12h\"\n").unwrap();
+        assert_eq!(
+            configured.events.max_age().unwrap(),
+            Duration::from_secs(12 * 60 * 60)
+        );
+
+        for value in ["0s", "-1d"] {
+            let err = Config::from_toml_str(&format!("[events]\nmax_age = \"{value}\"\n"))
+                .expect_err("zero and negative retention must fail at config load");
+            let message = err.to_string();
+            assert!(message.contains("[events] max_age"), "{message}");
+            assert!(message.contains(value), "{message}");
+        }
     }
 
     /// #548: every `[mcp]` bound is reachable from `fqd.toml`, and the

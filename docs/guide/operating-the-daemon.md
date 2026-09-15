@@ -273,6 +273,23 @@ and the replay follows. Do **not** delete `projection.db` to force one
 — that loses the cost rows older than stream retention, which exist
 nowhere else; the verb keeps them.
 
+## Event-stream retention
+
+The payload-bearing `fq-events` JetStream stream is retained for 30 days by
+default. Set a different positive duration in `fqd.toml` when disk pressure
+requires a shorter trail or incident response requires a longer look-back:
+
+```toml
+[events]
+max_age = "30d" # also accepts hours, minutes, and seconds, such as "12h"
+```
+
+The daemon creates new streams with this value and updates an existing stream
+on restart. Zero, negative, malformed, and unitless values are rejected while
+loading configuration, before the daemon connects to the broker. This setting
+does not change the separate trigger, maintenance-command, or advisory stream
+windows, nor `[state] retention_days` for SQLite rows.
+
 ## Stale workers: nothing to do
 
 A worker that stops heartbeating for ~30s is marked `stale`. You will

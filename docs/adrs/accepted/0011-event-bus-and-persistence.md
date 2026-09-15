@@ -100,7 +100,7 @@ unbuilt. What holds as of 2026-08:
 
 | Surface | Lifetime | Record status |
 |---|---|---|
-| NATS `fq-events` | 30 days, fixed in code (`bus::DEFAULT_MAX_AGE`) | The only complete payload-bearing event trail |
+| NATS `fq-events` | 30 days by default, operator-set with `[events].max_age` | The only complete payload-bearing event trail |
 | `projection.db` (`events`) | 30 days default (`[state].retention_days`) | Derived and disposable; typed columns, no payloads. Cost-bearing rows (`llm_response`, `llm_failure`, `invocation_summary`) are exempt and kept indefinitely |
 | `invocation_archive` in `control-plane.db` | 30 days default — the same `[state].retention_days`, keyed on `archived_at` | Per-invocation final phase and state blob, not the trail. Non-rebuildable while it lives |
 

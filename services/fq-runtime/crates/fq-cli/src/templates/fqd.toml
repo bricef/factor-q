@@ -39,6 +39,12 @@ url = "nats://localhost:4222"
 # deployment that leaves this machine.
 token_env = "FQ_NATS_TOKEN"
 
+[events]
+# How long the payload-bearing JetStream event trail is retained. Default
+# 30 days; accepts days, hours, minutes or seconds (for example "12h").
+# The daemon applies a changed value to an existing stream on restart.
+# max_age = "30d"
+
 [agents]
 # Directory containing agent definition files (.md with YAML frontmatter).
 # Relative paths are resolved against this config file's directory.
