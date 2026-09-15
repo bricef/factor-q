@@ -3227,8 +3227,21 @@ async fn resume_refuses_ambiguous_invocation() {
         .await
         .expect_err("resume should refuse ambiguous");
     assert!(
-        format!("{err}").contains("ambiguous"),
-        "expected ambiguous error, got: {err}"
+        matches!(
+            &err,
+            ExecutorError::Resume(ResumeError::AmbiguousWal {
+                invocation_id: id
+            }) if *id == invocation_id
+        ),
+        "expected typed ambiguous-WAL verdict, got: {err}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "invocation {invocation_id} has ambiguous WAL state; triage with \
+             `fq invocation resume <id>` to reconcile and continue, or \
+             `fq invocation drop <id> --reason ...` to abandon it"
+        )
     );
 }
 
