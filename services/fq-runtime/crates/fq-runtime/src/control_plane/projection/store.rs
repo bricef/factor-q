@@ -331,6 +331,7 @@ impl ProjectionStore {
              FROM events",
         );
         let seeded = push_filter(&mut qb, false, "agent_id = ", filter.agent);
+        let seeded = push_filter(&mut qb, seeded, "invocation_id = ", filter.invocation_id);
         let seeded = push_filter(&mut qb, seeded, "event_type = ", filter.event_type);
         push_filter(&mut qb, seeded, "timestamp >= ", filter.since);
         qb.push(" ORDER BY timestamp DESC LIMIT ").push_bind(limit);
@@ -433,6 +434,7 @@ pub struct EventRow {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EventFilter<'a> {
     pub agent: Option<&'a str>,
+    pub invocation_id: Option<&'a str>,
     pub event_type: Option<&'a str>,
     pub since: Option<&'a str>,
 }

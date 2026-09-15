@@ -259,6 +259,7 @@ async fn summary_events_are_costed_and_upsert_the_current_line() {
         .query_events(
             &EventFilter {
                 agent: Some("summary"),
+                invocation_id: None,
                 event_type: None,
                 since: None,
             },
@@ -355,6 +356,7 @@ async fn a_date_since_selects_that_whole_day_and_nothing_before_it() {
         .query_events(
             &EventFilter {
                 agent: None,
+                invocation_id: None,
                 event_type: None,
                 since: Some(&since),
             },
@@ -1123,6 +1125,41 @@ async fn queries_filter_by_agent() {
     let rows = store.query_events(&filter, 100).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].agent_id, "alpha");
+}
+
+#[tokio::test]
+async fn queries_filter_by_invocation_beyond_the_agent_scan_depth() {
+    let (store, _dir) = open_store().await;
+    let target = Uuid::now_v7();
+    for _ in 0..2 {
+        store
+            .insert_event(&sample_triggered("busy", target), None)
+            .await
+            .unwrap();
+    }
+    for _ in 0..201 {
+        store
+            .insert_event(&sample_triggered("busy", Uuid::now_v7()), None)
+            .await
+            .unwrap();
+    }
+
+    let rows = store
+        .query_events(
+            &EventFilter {
+                invocation_id: Some(&target.to_string()),
+                ..Default::default()
+            },
+            20,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.invocation_id == target.to_string())
+    );
 }
 
 #[tokio::test]
