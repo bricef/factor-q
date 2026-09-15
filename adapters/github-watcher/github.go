@@ -72,7 +72,7 @@ func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Iss
 		for _, label := range issue.Labels {
 			labels = append(labels, label.GetName())
 		}
-		out = append(out, Issue{Number: issue.GetNumber(), Labels: labels})
+		out = append(out, Issue{Number: issue.GetNumber(), Labels: labels, UpdatedAt: issue.GetUpdatedAt().Time})
 	}
 	return out, nil
 }

@@ -119,12 +119,16 @@ func run(args []string) error {
 	// lifecycle events and drive the issue off `in-progress` on
 	// completion/failure. Runs alongside the poll loop; a subscription
 	// error ends its goroutine but does not stop polling (the review
-	// sweep is the backstop for missed events).
+	// retained-event reconcile is the backstop for missed events).
 	reactor := NewOutcomeReactor(source, cfg, log)
 	// Stamp invocation provenance on the PR the agent opened (issue
 	// #162) — same gh-backed source, optional and best-effort.
 	reactor.Stamper = source
 	outcomes := NewNatsOutcomeSource(pub.Conn(), cfg.TaskTemplate, log)
+	w.Reconciler = &InProgressReconciler{
+		Source: source, History: NewNatsInvocationHistory(pub.Conn(), outcomes),
+		Config: cfg, Log: log,
+	}
 	go func() {
 		if err := reactor.Run(ctx, outcomes); err != nil && ctx.Err() == nil {
 			log.Error("outcome observer stopped", "err", err)
@@ -155,6 +159,10 @@ func configFromArgs(args []string) (Config, string, string, error) {
 	if err != nil {
 		return Config{}, "", "", err
 	}
+	reconcileAfterDefault, err := envDurationOr("GHW_RECONCILE_AFTER", 4*time.Hour)
+	if err != nil {
+		return Config{}, "", "", err
+	}
 	repo := fs.String("repo", envOr("GHW_REPO", ""), "GitHub repo owner/name (env GHW_REPO)")
 	agent := fs.String("agent", envOr("GHW_AGENT", "m0-issue-fix"), "target factor-q agent id (env GHW_AGENT)")
 	natsURL := fs.String("nats-url", envOr("GHW_NATS_URL", "nats://127.0.0.1:4222"), "NATS URL (env GHW_NATS_URL)")
@@ -166,6 +174,7 @@ func configFromArgs(args []string) (Config, string, string, error) {
 	poll := fs.Duration("poll", pollDefault, "poll interval, >= 60s (env GHW_POLL)")
 	maxPerPoll := fs.Int("max-per-poll", maxPerPollDefault, "max triggers per poll, 0 = unbounded (env GHW_MAX_PER_POLL)")
 	maxRetries := fs.Int("max-retries", maxRetriesDefault, "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
+	reconcileAfter := fs.Duration("reconcile-after", reconcileAfterDefault, "age before an eventless in-progress issue is recovered (env GHW_RECONCILE_AFTER)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
 	healthBind := fs.String("health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 
@@ -180,6 +189,9 @@ func configFromArgs(args []string) (Config, string, string, error) {
 	}
 	if *poll < MinPollInterval {
 		return Config{}, "", "", fmt.Errorf("--poll must be >= %s to respect GitHub rate limits, got %s", MinPollInterval, *poll)
+	}
+	if *reconcileAfter <= 0 {
+		return Config{}, "", "", fmt.Errorf("--reconcile-after must be > 0, got %s", *reconcileAfter)
 	}
 	if *maxRetries < 0 {
 		return Config{}, "", "", fmt.Errorf("--max-retries must be >= 0, got %d", *maxRetries)
@@ -198,6 +210,7 @@ func configFromArgs(args []string) (Config, string, string, error) {
 		PollInterval:       *poll,
 		MaxTriggersPerPoll: *maxPerPoll,
 		MaxRetries:         *maxRetries,
+		ReconcileAfter:     *reconcileAfter,
 		TaskTemplate:       *template,
 	}, *natsURL, *healthBind, nil
 }

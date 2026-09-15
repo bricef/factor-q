@@ -241,9 +241,9 @@ func TestPollOnceSkipsWholeCycleWhileDisconnected(t *testing.T) {
 	logs := &syncBuffer{}
 	connected := false
 	w := &Watcher{
-		Source:    &fakeSource{rec: rec, issues: []Issue{{1, []string{"ready"}}}},
+		Source:    &fakeSource{rec: rec, issues: []Issue{{Number: 1, Labels: []string{"ready"}}}},
 		Publisher: &fakePublisher{rec: rec},
-		Reviewer:  &labelSource{inReview: []Issue{{2, []string{"in-review"}}}, merged: map[int]bool{2: true}},
+		Reviewer:  &labelSource{inReview: []Issue{{Number: 2, Labels: []string{"in-review"}}}, merged: map[int]bool{2: true}},
 		Config:    testConfig(),
 		Log:       slog.New(slog.NewTextHandler(logs, nil)),
 		Connected: func() bool { return connected },

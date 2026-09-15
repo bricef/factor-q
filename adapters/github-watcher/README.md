@@ -86,6 +86,8 @@ invocation to its issue via the `triggered` event's payload, and reacts:
   `sandbox_violation`) or retries exhausted → `in-progress` → `failed` for
   operator attention.
 
+Every poll also reconciles all pre-existing `in-progress` issues from durable ground truth. An open closing PR moves the issue to `in-review`; otherwise retained `fq-events` lifecycle events drive the same completed/failed retry policy. A run with neither fact stays in flight for `--reconcile-after`, then is re-queued without exceeding the historical trigger budget. This makes restarts recoverable without changing the deliberately ephemeral live subscription. Durable consumption and deploy ordering are therefore unnecessary and are not part of this change.
+
 Either way a failed invocation is moved *off* `in-progress` rather than left
 claimed with no PR and no retry.
 
@@ -94,8 +96,8 @@ issue's proposed PR has merged (via the GitHub GraphQL
 `closedByPullRequestsReferences` link), it moves `in-review` → `done`.
 
 Event observation uses core NATS (at-most-once). A missed outcome is not
-fatal: the review sweep is the backstop, and a re-queued issue is re-picked
-on the next poll.
+fatal: the durable reconciliation pass recovers the transition on a later poll,
+and a re-queued issue is re-picked on the next poll.
 
 **Schema versions.** The decoder reads envelope `schema_version` 2 and 3
 (`supportedSchemaVersions` in `events.go`) and counts anything else as a
@@ -142,6 +144,7 @@ Every flag has an environment-variable fallback.
 | `--poll` | `GHW_POLL` | `60s` | must be ≥ 60s (rate limits) |
 | `--max-per-poll` | `GHW_MAX_PER_POLL` | `3` | 0 = unbounded |
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |
+| `--reconcile-after` | `GHW_RECONCILE_AFTER` | `4h` | re-queue an eventless `in-progress` issue after twice the expected 2h maximum run |
 | `--task-template` | `GHW_TASK_TEMPLATE` | `Implement the fix described in GitHub issue #%d.` | `%d` = issue number |
 | `--health-bind` | `GHW_HEALTH_BIND` | `127.0.0.1:9473` | loopback address of `GET /healthz`; empty disables |
 | `--probe` | — | | ask the running watcher's `/healthz` and exit 0 on healthy — the container's `HEALTHCHECK`; needs no `--repo` |
