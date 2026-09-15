@@ -11,3 +11,4 @@ clippy::too_many_arguments 13
 clippy::type_complexity 2
 dead_code 1
 deprecated 1
+unused_imports 1
