@@ -141,9 +141,28 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
                 )));
             }
         };
-        // Seam: object + blocks reserved, about to commit the name binding — the
-        // point at which a bind-alias would resurrect the object (now refused by
-        // the reserve above). Zero-cost unless `failpoints`.
+        // Another writer can recreate this content-addressed object after the
+        // alias read its manifest but before this reserve. Its manifest may not
+        // be materialized yet, so revalidate while our reservation prevents GC
+        // from removing a manifest that is present. Otherwise binding here would
+        // expose a live name over the recreating writer's absent manifest.
+        match self.content.has(cid).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = self.index.release_object(cid).await;
+                self.release_reservations(&reserved).await;
+                return Err(StoreError::Conflict(format!(
+                    "cannot alias {cid}: manifest was replaced concurrently; retry or re-put"
+                )));
+            }
+            Err(e) => {
+                let _ = self.index.release_object(cid).await;
+                self.release_reservations(&reserved).await;
+                return Err(e);
+            }
+        }
+        // Seam: object + blocks reserved and manifest revalidated, about to
+        // commit the name binding. Zero-cost unless `failpoints`.
         fail::fail_point!("fq_store::repo::bind::before_commit");
         if let Err(e) = self.index.bind(name, cid, &reserved, prev_rc).await {
             let _ = self.index.release_object(cid).await;
