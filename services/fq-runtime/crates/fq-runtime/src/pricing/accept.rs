@@ -18,6 +18,10 @@
 //!    [`AcceptanceRules::max_drift_ratio`] in either direction is not
 //!    accepted *for that model*: the prior price stays, the rest of the
 //!    table lands, and the refusal is recorded.
+//!    The bound is per load and measured against the last accepted price,
+//!    so repeated in-bound moves are unbounded in aggregate. This deliberate
+//!    trade-off guards against one bad upstream change rather than limiting
+//!    where a price can eventually get to.
 //! 2. **Zero refusal.** A model priced at zero where it was not is
 //!    refused the same way. A *new* model priced at zero is refused at
 //!    admission — never entering the table at all, which leaves
