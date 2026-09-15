@@ -26,8 +26,8 @@ import (
 // invocation to its issue.
 //
 // Core NATS (at-most-once) is deliberate: a missed outcome is not fatal
-// because the poll loop is the backstop (a re-queued issue is picked up on
-// the next poll), and observing outcomes must not compete with the
+// because the poll loop queries retained events and reconciles `in-progress`
+// issues on every cycle, and observing outcomes must not compete with the
 // runtime's own durable JetStream consumers on the events stream.
 type NatsOutcomeSource struct {
 	nc                      *nats.Conn

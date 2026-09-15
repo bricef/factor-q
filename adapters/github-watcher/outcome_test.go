@@ -263,7 +263,7 @@ func TestReactAmbiguousEscalatesToFailed(t *testing.T) {
 
 func TestSweepReviewMovesMergedToDone(t *testing.T) {
 	src := &labelSource{
-		inReview: []Issue{{10, []string{"in-review"}}, {11, []string{"in-review"}}},
+		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}}, {Number: 11, Labels: []string{"in-review"}}},
 		merged:   map[int]bool{10: true, 11: false},
 	}
 	w := &Watcher{Source: src, Reviewer: src, Config: outcomeConfig(), Log: discardLogger()}
@@ -285,7 +285,7 @@ func TestSweepReviewSkippedWithoutReviewer(t *testing.T) {
 
 func TestSweepReviewMergeCheckErrorLeavesIssue(t *testing.T) {
 	src := &labelSource{
-		inReview: []Issue{{10, []string{"in-review"}}},
+		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}}},
 		mergeErr: errors.New("gh boom"),
 	}
 	w := &Watcher{Source: src, Reviewer: src, Config: outcomeConfig(), Log: discardLogger()}

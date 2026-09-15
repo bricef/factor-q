@@ -33,11 +33,11 @@ func TestPlanTriggers(t *testing.T) {
 		max    int
 		want   []int // expected issue numbers, in order
 	}{
-		{"ready only", []Issue{{1, []string{"ready"}}, {2, []string{"bug"}}}, 3, []int{1}},
-		{"skips in-progress", []Issue{{1, []string{"ready", "in-progress"}}, {2, []string{"ready"}}}, 3, []int{2}},
-		{"sorted ascending", []Issue{{4, []string{"ready"}}, {1, []string{"ready"}}}, 3, []int{1, 4}},
-		{"capped per poll", []Issue{{1, []string{"ready"}}, {2, []string{"ready"}}, {3, []string{"ready"}}}, 2, []int{1, 2}},
-		{"none ready", []Issue{{1, []string{"bug"}}}, 3, nil},
+		{"ready only", []Issue{{Number: 1, Labels: []string{"ready"}}, {Number: 2, Labels: []string{"bug"}}}, 3, []int{1}},
+		{"skips in-progress", []Issue{{Number: 1, Labels: []string{"ready", "in-progress"}}, {Number: 2, Labels: []string{"ready"}}}, 3, []int{2}},
+		{"sorted ascending", []Issue{{Number: 4, Labels: []string{"ready"}}, {Number: 1, Labels: []string{"ready"}}}, 3, []int{1, 4}},
+		{"capped per poll", []Issue{{Number: 1, Labels: []string{"ready"}}, {Number: 2, Labels: []string{"ready"}}, {Number: 3, Labels: []string{"ready"}}}, 2, []int{1, 2}},
+		{"none ready", []Issue{{Number: 1, Labels: []string{"bug"}}}, 3, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,7 +112,7 @@ func newWatcher(src IssueSource, pub TriggerPublisher) *Watcher {
 func TestPollOnceRelabelsBeforePublishing(t *testing.T) {
 	rec := &recorder{}
 	w := newWatcher(
-		&fakeSource{rec: rec, issues: []Issue{{1, []string{"ready"}}, {2, []string{"ready"}}}},
+		&fakeSource{rec: rec, issues: []Issue{{Number: 1, Labels: []string{"ready"}}, {Number: 2, Labels: []string{"ready"}}}},
 		&fakePublisher{rec: rec},
 	)
 	if err := w.pollOnce(context.Background()); err != nil {
@@ -134,7 +134,7 @@ func TestPollOnceSkipsWhenRelabelFails(t *testing.T) {
 	w := newWatcher(
 		&fakeSource{
 			rec:        rec,
-			issues:     []Issue{{1, []string{"ready"}}, {2, []string{"ready"}}},
+			issues:     []Issue{{Number: 1, Labels: []string{"ready"}}, {Number: 2, Labels: []string{"ready"}}},
 			relabelErr: map[int]error{1: errors.New("relabel boom")},
 		},
 		&fakePublisher{rec: rec},
@@ -162,7 +162,7 @@ func TestPollOnceDoesNotPublishALostClaim(t *testing.T) {
 	w := &Watcher{
 		Source: &fakeSource{
 			rec:        rec,
-			issues:     []Issue{{1, []string{"ready"}}, {2, []string{"ready"}}},
+			issues:     []Issue{{Number: 1, Labels: []string{"ready"}}, {Number: 2, Labels: []string{"ready"}}},
 			relabelErr: map[int]error{1: fmt.Errorf("remove %q from #1: %w", "ready", ErrClaimLost)},
 		},
 		Publisher: &fakePublisher{rec: rec},
@@ -191,7 +191,7 @@ func TestPollOnceRaisesAClaimStrandedWithBothLabels(t *testing.T) {
 	w := &Watcher{
 		Source: &fakeSource{
 			rec:        rec,
-			issues:     []Issue{{7, []string{"ready"}}},
+			issues:     []Issue{{Number: 7, Labels: []string{"ready"}}},
 			relabelErr: map[int]error{7: fmt.Errorf("remove %q from #7 failed and %q could not be rolled back: %w", "ready", "in-progress", ErrBothLabels)},
 		},
 		Publisher: &fakePublisher{rec: rec},
@@ -225,7 +225,7 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 		logs := &syncBuffer{}
 		// The claim succeeds and the publish fails; the revert then finds
 		// the label already gone.
-		source := &fakeSource{rec: &recorder{}, issues: []Issue{{7, []string{"ready"}}}}
+		source := &fakeSource{rec: &recorder{}, issues: []Issue{{Number: 7, Labels: []string{"ready"}}}}
 		source.relabelHook = func(_ int, remove, _ string) error {
 			if remove == testConfig().InProgressLabel {
 				return lost
@@ -270,7 +270,7 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 		w := &Watcher{
 			Source:    &labelSource{relErr: lost},
 			Publisher: &fakePublisher{rec: &recorder{}},
-			Reviewer:  &labelSource{inReview: []Issue{{7, []string{"in-review"}}}, merged: map[int]bool{7: true}},
+			Reviewer:  &labelSource{inReview: []Issue{{Number: 7, Labels: []string{"in-review"}}}, merged: map[int]bool{7: true}},
 			Config:    cfg,
 			Log:       slog.New(slog.NewTextHandler(logs, nil)),
 		}
@@ -288,7 +288,7 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 func TestPollOnceRevertsOnPublishFailure(t *testing.T) {
 	rec := &recorder{}
 	w := newWatcher(
-		&fakeSource{rec: rec, issues: []Issue{{7, []string{"ready"}}}},
+		&fakeSource{rec: rec, issues: []Issue{{Number: 7, Labels: []string{"ready"}}}},
 		&fakePublisher{rec: rec, fail: true},
 	)
 	if err := w.pollOnce(context.Background()); err != nil {
@@ -310,6 +310,9 @@ func TestConfigFromArgsValidation(t *testing.T) {
 	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--poll", "30s"}); err == nil {
 		t.Error("poll below the 60s floor should be rejected")
 	}
+	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--reconcile-after", "0s"}); err == nil {
+		t.Error("a non-positive reconciliation bound should be rejected")
+	}
 	if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo", "--task-template", "no placeholder"}); err == nil {
 		t.Error("a task template lacking the issue-number placeholder should be rejected")
 	}
@@ -323,13 +326,13 @@ func TestConfigFromArgsValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	if cfg.PollInterval != 90*time.Second || cfg.Repo != "owner/repo" {
+	if cfg.PollInterval != 90*time.Second || cfg.ReconcileAfter != 4*time.Hour || cfg.Repo != "owner/repo" {
 		t.Errorf("unexpected config: %+v", cfg)
 	}
 }
 
 func TestConfigFromArgsRejectsMalformedEnv(t *testing.T) {
-	for _, tc := range []struct{ key, value string }{{"GHW_POLL", "soon"}, {"GHW_MAX_PER_POLL", "many"}, {"GHW_MAX_RETRIES", "several"}} {
+	for _, tc := range []struct{ key, value string }{{"GHW_POLL", "soon"}, {"GHW_MAX_PER_POLL", "many"}, {"GHW_MAX_RETRIES", "several"}, {"GHW_RECONCILE_AFTER", "later"}} {
 		t.Run(tc.key, func(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
 			if _, _, _, err := configFromArgs([]string{"--repo", "owner/repo"}); err == nil || !strings.Contains(err.Error(), tc.key) {

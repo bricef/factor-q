@@ -21,7 +21,7 @@ func TestGitHubAPISource(t *testing.T) {
 		}
 		switch {
 		case r.URL.Path == "/repos/o/r/issues":
-			json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "labels": []map[string]string{{"name": "ready"}}}})
+			json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "ready"}}}})
 		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
 			removed = true
 			w.Write([]byte("[]"))
@@ -53,7 +53,7 @@ func TestGitHubAPISource(t *testing.T) {
 	source := &GhCliIssueSource{Repo: "o/r", Client: client, Token: "token", GraphQLEndpoint: server.URL + "/graphql"}
 	ctx := context.Background()
 	issues, err := source.ListByLabel(ctx, "ready")
-	if err != nil || len(issues) != 1 || issues[0].Number != 7 {
+	if err != nil || len(issues) != 1 || issues[0].Number != 7 || issues[0].UpdatedAt.IsZero() {
 		t.Fatalf("ListByLabel = %#v, %v", issues, err)
 	}
 	if err := source.Relabel(ctx, 7, "ready", "in-progress"); err != nil || !removed || !added {

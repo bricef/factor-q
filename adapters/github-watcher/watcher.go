@@ -44,8 +44,9 @@ const MinPollInterval = 60 * time.Second
 
 // Issue is the minimal GitHub issue shape the watcher needs.
 type Issue struct {
-	Number int
-	Labels []string
+	Number    int
+	Labels    []string
+	UpdatedAt time.Time // conservative age bound for in-progress reconciliation
 }
 
 // HasLabel reports whether the issue carries label.
@@ -117,6 +118,7 @@ type Config struct {
 	PollInterval       time.Duration // >= MinPollInterval
 	MaxTriggersPerPoll int           // concurrency guard: at most N triggers per poll (0 = unbounded)
 	MaxRetries         int           // bounded auto-retry budget for a transiently-failed issue
+	ReconcileAfter     time.Duration // maximum expected run before an eventless issue is re-queued
 	TaskTemplate       string        // task template; a single %d is the issue number
 }
 
@@ -169,11 +171,12 @@ func newTriggerPayload(cfg Config, issue int) TriggerPayload {
 // Reviewer is set, each poll also sweeps `in-review` issues and moves those
 // whose PR has merged to `done`.
 type Watcher struct {
-	Source    IssueSource
-	Publisher TriggerPublisher
-	Reviewer  ReviewSource // optional; nil disables the merged-PR → done sweep
-	Config    Config
-	Log       *slog.Logger
+	Source     IssueSource
+	Publisher  TriggerPublisher
+	Reviewer   ReviewSource          // optional; nil disables the merged-PR → done sweep
+	Reconciler *InProgressReconciler // optional; nil disables restart recovery
+	Config     Config
+	Log        *slog.Logger
 	// Heartbeat, if set, is called after every poll cycle, succeeded or
 	// not — the liveness signal behind /healthz (health.go).
 	Heartbeat func()
@@ -248,6 +251,9 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 			continue
 		}
 		w.Log.Info("triggered agent for issue", "issue", pt.Issue, "agent", w.Config.TargetAgent)
+	}
+	if w.Reconciler != nil {
+		w.Reconciler.Reconcile(ctx)
 	}
 	w.sweepReview(ctx)
 	return nil
