@@ -22,6 +22,8 @@
 //! clippy's job (it runs on HIR, after resolution) and clippy already runs in
 //! this repo. See the module docs in `main.rs` for where the boundary sits.
 
+use std::collections::BTreeMap;
+
 use proc_macro2::TokenTree;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -36,6 +38,8 @@ pub struct FileFacts {
     pub test_lines: usize,
     /// Every function-like item, test and production alike.
     pub functions: Vec<FnFacts>,
+    /// Production `#[allow(...)]` and `#[expect(...)]` occurrences, per lint.
+    pub allow_counts: BTreeMap<String, usize>,
     /// Names from bodyless `#[cfg(test)] mod NAME;` declarations. The file
     /// they resolve to is test code in its entirety, so the ratchet must not
     /// budget it — otherwise moving a test module out of a god-file would read
@@ -142,6 +146,7 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         total_lines: src.split('\n').count(),
         test_lines: 0,
         functions: Vec::new(),
+        allow_counts: BTreeMap::new(),
         module_refs: Vec::new(),
         test_mod_decls: Vec::new(),
         mod_decls: Vec::new(),
@@ -154,6 +159,24 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
 ///
 /// Operates on the tokenized `cfg(..)` predicate rather than on source text,
 /// so nesting (`any`, `all`) and negation (`not`) are handled structurally.
+fn record_allows(attrs: &[syn::Attribute], facts: &mut FileFacts) {
+    for attr in attrs {
+        if !(attr.path().is_ident("allow") || attr.path().is_ident("expect")) {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            // `reason = "..."` documents an exception; it is not a lint name.
+            if meta.path.is_ident("reason") && meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            } else {
+                let lint = meta.path.to_token_stream().to_string().replace(' ', "");
+                *facts.allow_counts.entry(lint).or_default() += 1;
+            }
+            Ok(())
+        });
+    }
+}
+
 fn is_test_gated(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("cfg") {
@@ -260,6 +283,9 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
             record_test_item(item, facts);
         }
         let inside = in_test || gated;
+        if !inside {
+            record_allows(item_attrs(item), facts);
+        }
 
         // Module references are gathered on the way through, at whatever depth
         // the walk already descends to, so each one is tagged with the
@@ -332,6 +358,9 @@ fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut 
         record_test_item(item, facts);
     }
     let inside = in_test || gated;
+    if !inside {
+        record_allows(impl_item_attrs(item), facts);
+    }
     if let syn::ImplItem::Fn(f) = item {
         scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
         scan_refs(f.block.to_token_stream(), inside, &mut facts.module_refs);
@@ -354,6 +383,9 @@ fn walk_trait_item(item: &syn::TraitItem, in_test: bool, scope: &str, facts: &mu
         record_test_item(item, facts);
     }
     let inside = in_test || gated;
+    if !inside {
+        record_allows(trait_item_attrs(item), facts);
+    }
     if let syn::TraitItem::Fn(f) = item {
         scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
         if let Some(block) = &f.default {
@@ -813,5 +845,37 @@ mod tests {
             "field type: {heads:?}"
         );
         assert!(heads.contains(&"bus".to_string()), "trait path: {heads:?}");
+    }
+
+    #[test]
+    fn counts_production_allow_and_expect_attributes_per_lint() {
+        let src = r#"
+#[allow(dead_code, clippy::type_complexity)]
+struct Outer {
+    field: usize,
+}
+impl Outer {
+    #[expect(clippy::too_many_arguments)]
+    fn production(&self) {}
+
+    #[cfg(test)]
+    #[allow(unused_variables)]
+    fn test_only(&self) {}
+}
+#[cfg(test)]
+mod tests {
+    #[allow(dead_code)]
+    fn nested() {}
+}
+"#;
+        let facts = analyze(src).expect("valid Rust");
+        assert_eq!(
+            facts.allow_counts,
+            BTreeMap::from([
+                ("clippy::too_many_arguments".into(), 1),
+                ("clippy::type_complexity".into(), 1),
+                ("dead_code".into(), 1),
+            ])
+        );
     }
 }
