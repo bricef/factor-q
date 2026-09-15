@@ -54,12 +54,8 @@ use crate::worker::store::{LlmDispatchRow, ToolDispatchRow, WorkerStore, WorkerS
 
 pub use crate::control_plane::projection::store::EventLocation;
 
-/// How many recent events to scan / retain when assembling an invocation
-/// detail view. Mirrors the CLI's `invocation show`: the projection has no
-/// per-invocation query, so we over-fetch by agent and filter in memory —
-/// fine for triage volumes.
-const INVOCATION_EVENT_SCAN: i64 = 200;
-const INVOCATION_EVENT_KEEP: usize = 20;
+/// How many recent events to retain when assembling an invocation detail view.
+const INVOCATION_EVENT_KEEP: i64 = 20;
 
 fn archived_agent_id(agent_id: String) -> Option<String> {
     (!matches!(
@@ -379,6 +375,7 @@ impl Views {
     ) -> Result<Vec<EventView>, ViewsError> {
         let filter = EventFilter {
             agent,
+            invocation_id: None,
             event_type,
             since,
         };
@@ -740,22 +737,19 @@ impl Views {
             Some(_) | None => None,
         };
 
-        // The projection has no per-invocation query; over-fetch by agent and
-        // filter in memory (matches `fq invocation show`).
         let recent_events = self
             .projection
             .query_events(
                 &EventFilter {
-                    agent: agent_id.as_deref(),
+                    agent: None,
+                    invocation_id: Some(invocation_id),
                     event_type: None,
                     since: None,
                 },
-                INVOCATION_EVENT_SCAN,
+                INVOCATION_EVENT_KEEP,
             )
             .await?
             .into_iter()
-            .filter(|e| e.invocation_id == invocation_id)
-            .take(INVOCATION_EVENT_KEEP)
             .map(EventView::from)
             .collect();
 

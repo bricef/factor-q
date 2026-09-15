@@ -1607,6 +1607,7 @@ impl EdgeFixture {
                         .query_events(
                             &fq_runtime::control_plane::projection::store::EventFilter {
                                 agent: None,
+                                invocation_id: None,
                                 event_type: Some("worker_orphaned"),
                                 since: None,
                             },
@@ -1640,6 +1641,7 @@ impl EdgeFixture {
                         .query_events(
                             &fq_runtime::control_plane::projection::store::EventFilter {
                                 agent: None,
+                                invocation_id: None,
                                 event_type: Some("invocation_stuck"),
                                 since: None,
                             },

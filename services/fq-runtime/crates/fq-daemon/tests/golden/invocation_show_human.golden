@@ -5,6 +5,7 @@ Invocation: 1c000000-0000-7000-8000-000000000001
   worker:   researcher
 
 Recent events:
+  2026-01-02T03:04:11  invocation_summary
   2026-01-02T03:04:10  completed
   2026-01-02T03:04:06  llm_response
   2026-01-02T03:04:05  triggered

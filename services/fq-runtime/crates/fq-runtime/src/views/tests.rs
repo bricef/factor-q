@@ -230,6 +230,56 @@ async fn open_and_query_empty_db() {
     assert!(views.worker("no-such-worker").await.unwrap().is_none());
 }
 
+/// Invocation detail queries by invocation id instead of scanning the busy
+/// agent's newest events, so old invocations retain their summary trail.
+#[tokio::test]
+async fn invocation_events_survive_more_than_200_newer_agent_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = RuntimeDbPaths::under(dir.path());
+    let target = uuid::Uuid::now_v7();
+
+    {
+        let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+        let _ws = WorkerStore::open(&paths.worker).await.unwrap();
+        let projection = ProjectionStore::open(&paths.projection).await.unwrap();
+        for _ in 0..2 {
+            projection
+                .insert_event(&costed_response("busy", target, 0.01, None), None)
+                .await
+                .unwrap();
+        }
+        for _ in 0..201 {
+            projection
+                .insert_event(
+                    &costed_response("busy", uuid::Uuid::now_v7(), 0.01, None),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let views = Views::open(&paths).await.unwrap();
+    let detail = views
+        .invocation(
+            &target.to_string(),
+            1_000,
+            30_000,
+            DEFAULT_LONG_DISPATCH_THRESHOLD_MS,
+        )
+        .await
+        .unwrap()
+        .expect("target invocation is projected");
+
+    assert_eq!(detail.recent_events.len(), 2);
+    assert!(
+        detail
+            .recent_events
+            .iter()
+            .all(|event| event.invocation_id == target.to_string())
+    );
+}
+
 /// Archive-only tombstones are written by operator recovery with a reserved
 /// agent id; they have no attributable agent on the invocation list.
 #[tokio::test]
