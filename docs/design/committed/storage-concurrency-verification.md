@@ -210,9 +210,12 @@ process is now implemented (#248): the exhaustive checker halts the writer
 reserved-but-unbound at every point and every collector interleaving and asserts
 the audit recovers a clean, at-rest store (non-vacuously — each crash really
 leaked), and the DST injects leaked object reservations across its randomized
-soak. Still deferred (#253): a second concurrent writer, the block arm, and
-per-step (graceful) error injection — bounded additions the `Proc`/step-machine
-structure extends to.
+soak. The second-writer extension (#253) now explores put/put, put/alias, and
+alias/alias races against the collector, with independent PCs and reservations;
+it also caught and fixed an alias-vs-recreating-put window by revalidating the
+manifest under the alias's object reservation. Still deferred (#253): the block
+arm and per-step (graceful) error injection — bounded additions the
+`Proc`/step-machine structure extends to.
 
 ### A standing discipline (for layer 2+)
 
