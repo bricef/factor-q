@@ -26,6 +26,7 @@ mod maintenance;
 mod mcp;
 mod nats;
 mod pricing;
+mod providers;
 mod stuck;
 mod tools;
 pub use bus::BusConfig;
@@ -36,6 +37,10 @@ pub use maintenance::MaintenanceConfig;
 pub use mcp::McpConfig;
 pub use nats::NatsConfig;
 pub use pricing::PricingConfig;
+pub use providers::{
+    AnthropicConfig, ApiShape, ModelPriceOverride, ModelRegistryError, ProviderConfig,
+    ProvidersConfig, validate_model_registry,
+};
 pub use tools::{ExecToolConfig, ToolsConfig};
 
 /// Runtime configuration for the factor-q daemon.
@@ -341,232 +346,6 @@ pub struct WorkspaceConfig {
     pub per_invocation: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ProvidersConfig {
-    pub anthropic: Option<AnthropicConfig>,
-    /// Additional named providers — `[providers.<name>]` for any name
-    /// other than `anthropic`. Each declares an API shape, endpoint,
-    /// auth env var, and the model ids it serves, so non-Anthropic
-    /// models become available by configuration (ADR-0003).
-    #[serde(flatten)]
-    pub extra: std::collections::BTreeMap<String, ProviderConfig>,
-}
-
-impl ProvidersConfig {
-    /// Every model id declared across all providers (anthropic + extra) —
-    /// the registry. An agent may only name a model in this set.
-    pub fn declared_models(&self) -> impl Iterator<Item = &str> {
-        self.anthropic
-            .iter()
-            .flat_map(|a| a.models.iter())
-            .chain(self.extra.values().flat_map(|p| p.models.iter()))
-            .map(String::as_str)
-    }
-
-    /// Every per-model price override across all providers, as
-    /// `(model_id, override)`.
-    pub fn pricing_overrides(&self) -> impl Iterator<Item = (&str, &ModelPriceOverride)> {
-        self.anthropic
-            .iter()
-            .flat_map(|a| a.pricing.iter())
-            .chain(self.extra.values().flat_map(|p| p.pricing.iter()))
-            .map(|(k, v)| (k.as_str(), v))
-    }
-
-    /// The providers routed to OpenRouter (by `base_url` host), as
-    /// `(name, config)`. Their models are priced from OpenRouter's own
-    /// catalogue at startup — see `fq_runtime::pricing::openrouter`.
-    pub fn openrouter_providers(&self) -> impl Iterator<Item = (&str, &ProviderConfig)> {
-        self.extra
-            .iter()
-            .filter(|(_, p)| p.is_openrouter())
-            .map(|(name, p)| (name.as_str(), p))
-    }
-}
-
-/// Error listing every model-registry / pricing-coverage violation found
-/// at startup. Fail-fast: the daemon refuses to run rather than let an
-/// undeclared or unpriced model silently defeat budget enforcement
-/// (ADR-0004) by tracking its cost as $0.
-#[derive(Debug, thiserror::Error)]
-#[error("model registry validation failed:\n  - {}", .problems.join("\n  - "))]
-pub struct ModelRegistryError {
-    problems: Vec<String>,
-}
-
-impl ModelRegistryError {
-    /// The individual violation messages.
-    pub fn problems(&self) -> &[String] {
-        &self.problems
-    }
-}
-
-/// Validate the model registry and pricing coverage at startup — the
-/// ADR-0004 invariant *"a model is available iff it is declared,
-/// routable, and priced."*
-///
-/// 1. every agent's resolved model is **declared** (in some provider's
-///    `models = [...]`);
-/// 2. the `default_model`, if set, is declared;
-/// 3. every declared model resolves to a **price** (the LiteLLM table or
-///    a `[providers.<name>.pricing]` override merged into `pricing`).
-///
-/// All violations are collected so the operator sees the full list at
-/// once. `agent_models` is `(agent_id, model)` for readable errors.
-pub fn validate_model_registry(
-    providers: &ProvidersConfig,
-    default_model: Option<&str>,
-    agent_models: &[(String, String)],
-    pricing: &crate::pricing::PricingTable,
-) -> Result<(), ModelRegistryError> {
-    use std::collections::BTreeSet;
-    let declared: BTreeSet<&str> = providers.declared_models().collect();
-    let mut problems = Vec::new();
-
-    if let Some(dm) = default_model
-        && !declared.contains(dm)
-    {
-        problems.push(format!(
-            "agents.default_model = \"{dm}\" is not declared under any [providers.<name>] models = [...]"
-        ));
-    }
-
-    for (id, model) in agent_models {
-        if !declared.contains(model.as_str()) {
-            problems.push(format!(
-                "agent \"{id}\" uses model \"{model}\", not declared under any [providers.<name>] models = [...]"
-            ));
-        }
-    }
-
-    for &model in &declared {
-        if pricing.lookup(model).is_none() {
-            problems.push(format!(
-                "model \"{model}\" is declared but has no pricing — add [providers.<name>.pricing.\"{model}\"] or ensure the LiteLLM table (or, for a model routed through OpenRouter, OpenRouter's catalogue) lists it"
-            ));
-        }
-    }
-
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(ModelRegistryError { problems })
-    }
-}
-
-/// API wire shape for a provider — which genai adapter format it speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ApiShape {
-    #[default]
-    Anthropic,
-    Openai,
-    Gemini,
-    Ollama,
-    OpenaiCompatible,
-}
-
-/// A configurable LLM provider: an API shape, an optional endpoint
-/// override, an auth env var, and the model ids routed to it.
-/// `[providers.<name>]` in `fqd.toml`.
-// `deny_unknown_fields` rather than the `serde_ignored` pass `Config`
-// uses, because this struct is reached through `ProvidersConfig`'s
-// `#[serde(flatten)]`: flattening buffers the table's contents, and an
-// unknown key inside a buffer is invisible from outside. It is legal
-// here only because this struct itself flattens nothing.
-//
-// Without it, `api = "openai"` — for `api_shape` — was accepted in
-// silence, which is the exact edit an operator is most likely to make.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    #[serde(default)]
-    pub api_shape: ApiShape,
-    /// Endpoint override; `None` uses genai's default for the shape.
-    #[serde(default)]
-    pub base_url: Option<String>,
-    /// Env var holding this provider's API key.
-    pub api_key_env: String,
-    /// Model ids routed to this provider's endpoint + auth. Also the
-    /// provider's slice of the model **registry**: an agent may only
-    /// name a model that some provider declares here.
-    #[serde(default)]
-    pub models: Vec<String>,
-    /// Per-model price overrides — `[providers.<name>.pricing."<model>"]`.
-    /// Merged over the LiteLLM table so models the table doesn't list
-    /// (custom endpoints, OpenRouter-namespaced ids) are still priced,
-    /// which the startup pricing guarantee requires (ADR-0004).
-    #[serde(default)]
-    pub pricing: std::collections::BTreeMap<String, ModelPriceOverride>,
-}
-
-impl ProviderConfig {
-    /// True when this provider's `base_url` is an OpenRouter endpoint,
-    /// which makes OpenRouter's catalogue the price of record for the
-    /// models it declares.
-    pub fn is_openrouter(&self) -> bool {
-        self.base_url
-            .as_deref()
-            .is_some_and(crate::pricing::openrouter::is_openrouter_base_url)
-    }
-}
-
-/// A per-model price override in USD per **million** tokens. Merged into
-/// the [`crate::pricing::PricingTable`] at startup so an operator can
-/// guarantee coverage for a model the LiteLLM table doesn't list.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-pub struct ModelPriceOverride {
-    /// Input (prompt) price, USD per million tokens.
-    pub input_per_mtok: f64,
-    /// Output (completion) price, USD per million tokens.
-    pub output_per_mtok: f64,
-    /// Cache-read price; `None` charges cache reads at the input rate.
-    #[serde(default)]
-    pub cache_read_per_mtok: Option<f64>,
-    /// Cache-write price; `None` charges cache writes at the input rate.
-    #[serde(default)]
-    pub cache_write_per_mtok: Option<f64>,
-}
-
-impl ModelPriceOverride {
-    /// Convert to a [`crate::pricing::ModelPricing`] entry. The units
-    /// already match — the pricing table is keyed in USD per million
-    /// tokens — so this is a field copy.
-    pub fn to_pricing(&self) -> crate::pricing::ModelPricing {
-        crate::pricing::ModelPricing {
-            input_per_million: self.input_per_mtok,
-            output_per_million: self.output_per_mtok,
-            cache_read_per_million: self.cache_read_per_mtok,
-            cache_write_per_million: self.cache_write_per_mtok,
-            cache_write_1h_per_million: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AnthropicConfig {
-    #[serde(default = "default_anthropic_api_key_env")]
-    pub api_key_env: String,
-    /// Optional override for the Anthropic API base URL. When `None`
-    /// the genai crate uses Anthropic's public endpoint. Set this to
-    /// point at a test mock, an internal proxy, or a future
-    /// Bedrock-compatible endpoint.
-    #[serde(default)]
-    pub base_url: Option<String>,
-    /// Anthropic's slice of the model **registry**. Routing for
-    /// `claude-*` stays native (genai resolves it), so this list is
-    /// purely the declaration that makes those models usable and
-    /// subject to the pricing guarantee — list every `claude-*` id the
-    /// fleet uses.
-    #[serde(default)]
-    pub models: Vec<String>,
-    /// Per-model price overrides — `[providers.anthropic.pricing."<model>"]`.
-    /// Rarely needed (LiteLLM lists Anthropic models), but available for
-    /// parity with other providers.
-    #[serde(default)]
-    pub pricing: std::collections::BTreeMap<String, ModelPriceOverride>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Directory where factor-q writes cache files (e.g. the LiteLLM
@@ -621,26 +400,11 @@ fn default_drain_deadline_ms() -> u64 {
     120_000
 }
 
-fn default_anthropic_api_key_env() -> String {
-    "ANTHROPIC_API_KEY".to_string()
-}
-
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             directory: default_agents_directory(),
             default_model: None,
-        }
-    }
-}
-
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self {
-            api_key_env: default_anthropic_api_key_env(),
-            base_url: None,
-            models: Vec::new(),
-            pricing: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1101,180 +865,6 @@ api_key_env = "MY_ANTHROPIC_KEY"
     }
 
     #[test]
-    fn extra_providers_parse_as_a_flattened_map() {
-        let toml = r#"
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
-
-[providers.openai]
-api_shape = "openai"
-api_key_env = "OPENAI_API_KEY"
-models = ["gpt-4o-mini"]
-
-[providers.groq]
-api_shape = "openai-compatible"
-base_url = "https://api.groq.com/openai/v1"
-api_key_env = "GROQ_API_KEY"
-models = ["llama-3.1-8b-instant"]
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        // anthropic stays on its own named field (back-compat)
-        assert!(config.providers.anthropic.is_some());
-        // the rest land in the flattened `extra` map, keyed by name
-        let extra = &config.providers.extra;
-        assert_eq!(
-            extra.len(),
-            2,
-            "keys: {:?}",
-            extra.keys().collect::<Vec<_>>()
-        );
-        let openai = extra.get("openai").expect("openai provider");
-        assert_eq!(openai.api_shape, ApiShape::Openai);
-        assert_eq!(openai.api_key_env, "OPENAI_API_KEY");
-        assert_eq!(openai.models, vec!["gpt-4o-mini".to_string()]);
-        let groq = extra.get("groq").expect("groq provider");
-        assert_eq!(groq.api_shape, ApiShape::OpenaiCompatible);
-        assert_eq!(
-            groq.base_url.as_deref(),
-            Some("https://api.groq.com/openai/v1")
-        );
-    }
-
-    fn priced(input: f64, output: f64) -> crate::pricing::ModelPricing {
-        crate::pricing::ModelPricing {
-            input_per_million: input,
-            output_per_million: output,
-            cache_read_per_million: None,
-            cache_write_per_million: None,
-            cache_write_1h_per_million: None,
-        }
-    }
-
-    #[test]
-    fn validate_model_registry_flags_undeclared_and_unpriced() {
-        let toml = r#"
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
-models = ["claude-haiku-4-5"]
-
-[providers.openrouter]
-api_shape = "openai-compatible"
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
-models = ["openai/gpt-4o-mini"]
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        // claude priced; openai/gpt-4o-mini deliberately left unpriced.
-        let mut pricing = crate::pricing::PricingTable::empty();
-        pricing.insert("claude-haiku-4-5", priced(1.0, 2.0));
-
-        let agents = vec![("triage".to_string(), "undeclared-model".to_string())];
-        let err = validate_model_registry(
-            &config.providers,
-            Some("also-undeclared"),
-            &agents,
-            &pricing,
-        )
-        .expect_err("expected registry violations");
-        let problems = err.problems();
-
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("default_model") && p.contains("also-undeclared")),
-            "missing default_model violation: {problems:?}"
-        );
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("triage") && p.contains("undeclared-model")),
-            "missing agent-model violation: {problems:?}"
-        );
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("openai/gpt-4o-mini") && p.contains("no pricing")),
-            "missing unpriced violation: {problems:?}"
-        );
-    }
-
-    #[test]
-    fn validate_model_registry_passes_when_declared_and_priced() {
-        let toml = r#"
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
-models = ["claude-haiku-4-5"]
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        let mut pricing = crate::pricing::PricingTable::empty();
-        pricing.insert("claude-haiku-4-5", priced(1.0, 2.0));
-        let agents = vec![("triage".to_string(), "claude-haiku-4-5".to_string())];
-        validate_model_registry(
-            &config.providers,
-            Some("claude-haiku-4-5"),
-            &agents,
-            &pricing,
-        )
-        .expect("declared + priced should validate");
-    }
-
-    #[test]
-    fn pricing_override_from_toml_makes_a_model_priced() {
-        // Exercises the `[providers.<name>.pricing."<model>"]` shape and
-        // the override -> table merge, then validation over it.
-        let toml = r#"
-[providers.groq]
-api_shape = "openai-compatible"
-base_url = "https://api.groq.com/openai/v1"
-api_key_env = "GROQ_API_KEY"
-models = ["llama-3.1-8b-instant"]
-[providers.groq.pricing."llama-3.1-8b-instant"]
-input_per_mtok = 0.05
-output_per_mtok = 0.08
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        let mut pricing = crate::pricing::PricingTable::empty();
-        for (model, ov) in config.providers.pricing_overrides() {
-            pricing.insert(model.to_string(), ov.to_pricing());
-        }
-        let entry = pricing
-            .lookup("llama-3.1-8b-instant")
-            .expect("override merged into the table");
-        assert_eq!(entry.input_per_million, 0.05);
-        assert_eq!(entry.output_per_million, 0.08);
-
-        let agents = vec![("t".to_string(), "llama-3.1-8b-instant".to_string())];
-        validate_model_registry(&config.providers, None, &agents, &pricing)
-            .expect("override should satisfy the pricing guarantee");
-    }
-
-    #[test]
-    fn anthropic_config_parses_base_url_from_toml() {
-        let toml = r#"
-[providers.anthropic]
-base_url = "http://127.0.0.1:12345"
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        let anthropic = config.providers.anthropic.unwrap();
-        assert_eq!(
-            anthropic.base_url.as_deref(),
-            Some("http://127.0.0.1:12345")
-        );
-        // api_key_env still defaults when only base_url is set.
-        assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
-    }
-
-    #[test]
-    fn anthropic_config_base_url_defaults_to_none() {
-        let toml = r#"
-[providers.anthropic]
-api_key_env = "SOMETHING"
-"#;
-        let config = Config::from_toml_str(toml).unwrap();
-        assert!(config.providers.anthropic.unwrap().base_url.is_none());
-    }
-
-    #[test]
     fn rejects_invalid_toml() {
         let err = Config::from_toml_str("not = valid = toml = at all").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToml(_)));
@@ -1580,45 +1170,6 @@ max_iterations = 250
             panic!("expected UnknownKeys, got: {err}");
         };
         assert_eq!(keys, &["workspace.per_invokation"]);
-    }
-
-    #[test]
-    fn a_provider_of_any_name_is_still_accepted() {
-        // `ProvidersConfig` flattens, so the strictness must not cost us
-        // the ability to name a provider anything.
-        let config = Config::from_toml_str(
-            "[providers.openrouter]\napi_shape = \"openai-compatible\"\n\
-             api_key_env = \"OPENROUTER_API_KEY\"\n\
-             base_url = \"https://openrouter.ai/api/v1\"\n\
-             models = [\"z-ai/glm-5.2\"]\n",
-        )
-        .expect("a named provider is configuration, not a typo");
-        assert!(config.providers.extra.contains_key("openrouter"));
-    }
-
-    #[test]
-    fn a_typo_inside_a_named_provider_is_rejected() {
-        // The regression this pairs with: `api` for `api_shape` was
-        // accepted in silence, because a flattened map buffers its
-        // values and an unknown key inside a buffer is invisible to the
-        // `serde_ignored` pass. `ProviderConfig` denies its own unknown
-        // fields for exactly this reason.
-        //
-        // The earlier version of the test above used `api` in its own
-        // fixture and passed, which is how the hole stayed open: the
-        // test proved a provider could be named, and quietly proved the
-        // typo was tolerated too.
-        let err = Config::from_toml_str(
-            "[providers.openrouter]\napi = \"openai\"\n\
-             api_key_env = \"OPENROUTER_API_KEY\"\n\
-             models = [\"z-ai/glm-5.2\"]\n",
-        )
-        .expect_err("`api` is not a field — `api_shape` is");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("api_shape"),
-            "the error should name the field meant, got: {msg}"
-        );
     }
 
     #[test]
