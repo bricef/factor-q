@@ -58,11 +58,20 @@ func (g *GhCliIssueSource) ListReady(ctx context.Context, readyLabel string) ([]
 // ListByLabel returns open issues carrying label (first 100 — the same
 // cap the old `gh issue list --limit 100` had).
 func (g *GhCliIssueSource) ListByLabel(ctx context.Context, label string) ([]Issue, error) {
+	return g.listByLabel(ctx, label, "open")
+}
+
+// ListByLabelAllStates returns open and closed issues carrying label.
+func (g *GhCliIssueSource) ListByLabelAllStates(ctx context.Context, label string) ([]Issue, error) {
+	return g.listByLabel(ctx, label, "all")
+}
+
+func (g *GhCliIssueSource) listByLabel(ctx context.Context, label, state string) ([]Issue, error) {
 	owner, repo, err := splitRepo(g.Repo)
 	if err != nil {
 		return nil, err
 	}
-	issues, _, err := g.Client.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{State: "open", Labels: []string{label}, ListOptions: github.ListOptions{PerPage: 100}})
+	issues, _, err := g.Client.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{State: state, Labels: []string{label}, ListOptions: github.ListOptions{PerPage: 100}})
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
 	}

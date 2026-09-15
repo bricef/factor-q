@@ -91,8 +91,8 @@ Every poll also reconciles all pre-existing `in-progress` issues from durable gr
 Either way a failed invocation is moved *off* `in-progress` rather than left
 claimed with no PR and no retry.
 
-**Merged PR → done.** Each poll also sweeps `in-review` issues; when an
-issue's proposed PR has merged (via the GitHub GraphQL
+**Merged PR → done.** Each poll also sweeps open and closed
+`in-review` issues; when an issue's proposed PR has merged (via the GitHub GraphQL
 `closedByPullRequestsReferences` link), it moves `in-review` → `done`.
 
 Event observation uses core NATS (at-most-once). A missed outcome is not
