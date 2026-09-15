@@ -2991,11 +2991,10 @@ mod soak {
 
 #[cfg(test)]
 mod host_notice_channel {
-    //! #155 phase 1: the WAL-backed host→agent notice channel, held to
-    //! the same replay-equivalence bar as the crash/drain suites. No
-    //! real producer exists yet, so tests seed the runner's queue
-    //! directly at the seam producers will use
-    //! (`ReducerRunner::queue_host_notice`).
+    //! The WAL-backed host→agent notice channel, held to the same
+    //! replay-equivalence bar as the crash/drain suites. No test may
+    //! rely on the oracle stripping notices without also proving that
+    //! the resume producer fires.
 
     use super::resume_equivalence::{
         RunResult, assert_equivalent, load_fixture, queue_tool_outputs, run_reference, script,
@@ -3041,6 +3040,131 @@ mod host_notice_channel {
             .collect()
     }
 
+    fn fresh_runner(world: &SimWorld) -> ReducerRunner {
+        let mut registry = ToolRegistry::new();
+        registry.register_fixture(Arc::clone(&world.tool) as Arc<dyn Tool>);
+        SimWorld::build_runner(
+            &world.clock,
+            &world.sink,
+            &registry,
+            &world.store,
+            Arc::new(PricingTable::empty()),
+            world.workspace.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn resumed_interruption_injects_one_coarse_notice() {
+        let turns = 2;
+        let responses = script(turns);
+        let world = SimWorld::new(75, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        world
+            .sink
+            .drain_at_publish(1 + 3 * 2, world.runner.drain_signal());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        assert!(matches!(
+            world.run(&llm).await.expect("drain"),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let inv_str = world.invocation_id().to_string();
+
+        world.clock.ms.fetch_add(180_000, Ordering::SeqCst);
+        let resumed_llm = FixtureClient::new();
+        load_fixture(&resumed_llm, &responses[1..]);
+        world
+            .resume_on_fresh_binary(&resumed_llm)
+            .await
+            .expect("resume");
+
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        let resume_rows: Vec<_> = rows.iter().filter(|row| row.kind == "resume").collect();
+        assert_eq!(resume_rows.len(), 1);
+        assert!(resume_rows[0].body.contains("Approximately 3m passed"));
+        let resume_events: Vec<_> = world
+            .sink
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                EventPayload::HostNotice(payload) if payload.kind == "resume" => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resume_events.len(), 1);
+        assert_eq!(resume_events[0].body, resume_rows[0].body);
+
+        // Crash recovery uses the same durable-state path as drain recovery.
+        let (crashed, crashed_inv, _) = crashed_world(76, turns).await;
+        crashed.clock.ms.fetch_add(180_000, Ordering::SeqCst);
+        let crash_llm = FixtureClient::new();
+        load_fixture(&crash_llm, &responses[1..]);
+        crashed.resume(&crash_llm).await.expect("crash recovery");
+        let crash_rows = crashed.store.list_host_notices(&crashed_inv).await.unwrap();
+        assert_eq!(crash_rows.len(), 1);
+        assert_eq!(crash_rows[0].kind, "resume");
+        assert_eq!(crash_rows[0].body, resume_rows[0].body);
+    }
+
+    #[tokio::test]
+    async fn double_drain_replays_first_resume_notice_verbatim() {
+        let turns = 2;
+        let responses = script(turns);
+        let world = SimWorld::new(76, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        world
+            .sink
+            .drain_at_publish(1 + 3 * 2, world.runner.drain_signal());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        assert!(matches!(
+            world.run(&llm).await.expect("first drain"),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let inv_id = world.invocation_id();
+        let inv_str = inv_id.to_string();
+
+        world.clock.ms.fetch_add(180_000, Ordering::SeqCst);
+        world.sink.clear_drain();
+        let first_resume = fresh_runner(&world);
+        first_resume.drain_signal().request();
+        let first_llm = FixtureClient::new();
+        load_fixture(&first_llm, &responses[1..]);
+        assert!(matches!(
+            first_resume
+                .resume(&world.agent, &first_llm, inv_id)
+                .await
+                .expect("second drain"),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let first_body = rows[0].body.clone();
+        assert!(first_body.contains("Approximately 3m passed"));
+
+        // A fresh render now says hours, so seeing the old minute string in
+        // the next request proves replay used the persisted bytes.
+        world.clock.ms.fetch_add(3_600_000, Ordering::SeqCst);
+        let second_resume = fresh_runner(&world);
+        let second_llm = FixtureClient::new();
+        load_fixture(&second_llm, &responses[1..]);
+        second_resume
+            .resume(&world.agent, &second_llm, inv_id)
+            .await
+            .expect("second resume");
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body, first_body);
+        assert_ne!(rows[1].body, first_body);
+        assert!(rows[1].body.contains("Approximately 1h 3m passed"));
+        assert!(second_llm.requests().iter().any(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.text().as_deref() == Some(first_body.as_str()))
+        }));
+    }
+
     /// A notice queued for a crashed invocation and drained live by the
     /// resumed run: the WAL row lands keyed to the resumed step, the
     /// `host_notice` event opens the resumed leg (and the leg still
@@ -3056,9 +3180,7 @@ mod host_notice_channel {
         let (world, inv_str, inv_id) = crashed_world(77, turns).await;
         let crash_prefix_len = world.sink.events().len();
 
-        world
-            .runner
-            .queue_host_notice(inv_id, "resume", NOTICE_BODY);
+        world.runner.queue_host_notice(inv_id, "test", NOTICE_BODY);
 
         // Span-2 crash: one model response was consumed pre-crash.
         let resume_llm = FixtureClient::new();
@@ -3069,8 +3191,12 @@ mod host_notice_channel {
         // WAL: exactly one row, seq 0, recorded verbatim.
         let rows = world.store.list_host_notices(&inv_str).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].seq, rows[0].kind.as_str()), (0, "resume"));
+        assert_eq!((rows[0].seq, rows[0].kind.as_str()), (0, "test"));
         assert_eq!(rows[0].body, NOTICE_BODY);
+        assert!(
+            rows.iter().all(|row| row.kind != "resume"),
+            "an instant restart stays below the resume-notice threshold"
+        );
 
         // Event trail: the resumed leg opens with the notice event and
         // still parses as a canonical headless resume.
@@ -3078,7 +3204,7 @@ mod host_notice_channel {
         let resumed_leg = &events[crash_prefix_len..];
         match &resumed_leg[0].payload {
             EventPayload::HostNotice(p) => {
-                assert_eq!((p.kind.as_str(), p.body.as_str()), ("resume", NOTICE_BODY));
+                assert_eq!((p.kind.as_str(), p.body.as_str()), ("test", NOTICE_BODY));
             }
             other => panic!("resumed leg must open with host_notice, got {other:?}"),
         }
@@ -3174,9 +3300,7 @@ mod host_notice_channel {
         let reference = run_reference(78, turns).await;
         let (world, inv_str, inv_id) = crashed_world(78, turns).await;
 
-        world
-            .runner
-            .queue_host_notice(inv_id, "resume", NOTICE_BODY);
+        world.runner.queue_host_notice(inv_id, "test", NOTICE_BODY);
 
         // The resumed leg's first publish is the notice event, which
         // follows the WAL insert — failing it lands the crash exactly
