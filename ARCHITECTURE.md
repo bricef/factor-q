@@ -332,7 +332,7 @@ Two crates, split along the transport line:
   subset-checks its required authority against the token's grants, so
   the declared authority model is the enforced one. `fq token
   attenuate` narrows a token offline — how `fq-dashboard` runs as a
-  second principal with six read grants and no command authority.
+  second principal with seven read grants and no command authority.
 
 ### Scheduled triggers (`adapters/fq-cron/`)
 

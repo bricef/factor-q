@@ -59,10 +59,10 @@ it is the licence to keep changing shape quickly.
   surface, spoken by the thin client `fq` (it cannot start a daemon —
   `fqd` is the daemon, and reads `fqd.toml` while the client reads
   `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
-  (including `transcript`) `/ events / costs / status / workers /
-  dead-letters / doctor / projection rebuild` (read commands take
-  `--json`; `projection rebuild` re-derives the SQLite read model from
-  the event stream, which the daemon also does by itself when the
+  (including `transcript`) `/ events / costs / notifications / status /
+  workers / dead-letters / doctor / projection rebuild` (read commands
+  take `--json`; `projection rebuild` re-derives the SQLite read model
+  from the event stream, which the daemon also does by itself when the
   projection's schema version bumps — see
   [operating the daemon](docs/guide/operating-the-daemon.md)), plus the
   authenticated-edge client verbs `fq connect` (TOFU cert pinning +
@@ -70,7 +70,7 @@ it is the licence to keep changing shape quickly.
   narrowing), plus a read-only
   web dashboard (`fq-dashboard`, which reads over the **authenticated
   edge as a second principal**: its own capability token, attenuated
-  offline to six read grants, so a compromised dashboard can read
+  offline to seven read grants, so a compromised dashboard can read
   exactly what it renders and command nothing — the
   [operator-dashboard plan](docs/plans/closed/2026-07-10-operator-dashboard.md)).
   A **per-model provider throttle** absorbs rate limits fleet-wide and is
