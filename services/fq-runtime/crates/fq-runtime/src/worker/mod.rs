@@ -145,6 +145,42 @@ pub enum InvocationOutcome {
     },
 }
 
+/// Permanent verdicts reached while resuming an invocation.
+#[derive(Debug)]
+pub enum ResumeError {
+    NoStateRow { invocation_id: Uuid },
+    AlreadyTerminal { invocation_id: Uuid },
+    AmbiguousWal { invocation_id: Uuid },
+    ReplayFailed { step_index: u32, source: String },
+}
+
+impl std::fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoStateRow { invocation_id } => {
+                write!(f, "no state row for {invocation_id}; nothing to resume")
+            }
+            Self::AlreadyTerminal { invocation_id } => {
+                write!(
+                    f,
+                    "invocation {invocation_id} is already terminal; nothing to resume"
+                )
+            }
+            Self::AmbiguousWal { invocation_id } => write!(
+                f,
+                "invocation {invocation_id} has ambiguous WAL state; triage with \
+                 `fq invocation resume <id>` to reconcile and continue, or \
+                 `fq invocation drop <id> --reason ...` to abandon it"
+            ),
+            Self::ReplayFailed { step_index, source } => {
+                write!(f, "replay step {step_index} failed: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResumeError {}
+
 /// Infrastructure errors returned by a [`Worker`].
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
@@ -156,6 +192,9 @@ pub enum ExecutorError {
 
     #[error("worker store error: {0}")]
     WorkerStore(String),
+
+    #[error("{0}")]
+    Resume(ResumeError),
 
     /// Workspace provisioning/re-association failed (parallel-workers
     /// Phase 0). On the fresh path this happens before the first WAL
@@ -192,6 +231,9 @@ impl ExecutorError {
             // Bus / store unavailability is a momentary infra condition —
             // retryable once JetStream redelivers.
             ExecutorError::Bus(_) | ExecutorError::WorkerStore(_) => true,
+            // Resume protocol verdicts cannot heal on redelivery, and #49's
+            // consumer has no max_deliver bound yet.
+            ExecutorError::Resume(_) => false,
             // Defer to the LLM client's own transient/permanent split.
             ExecutorError::Llm(err) => err.is_transient(),
             // Workspace provisioning is pure filesystem work, so no
@@ -320,5 +362,29 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
 
     fn drain_status(&self) -> DrainState {
         self.drain_signal().state()
+    }
+}
+
+#[cfg(test)]
+mod executor_error_tests {
+    use super::*;
+
+    #[test]
+    fn resume_verdicts_are_permanent_but_store_failures_are_transient() {
+        let invocation_id = Uuid::nil();
+        let verdicts = [
+            ResumeError::NoStateRow { invocation_id },
+            ResumeError::AlreadyTerminal { invocation_id },
+            ResumeError::AmbiguousWal { invocation_id },
+            ResumeError::ReplayFailed {
+                step_index: 3,
+                source: "corrupt replay".to_string(),
+            },
+        ];
+
+        for verdict in verdicts {
+            assert!(!ExecutorError::Resume(verdict).is_transient());
+        }
+        assert!(ExecutorError::WorkerStore("database unavailable".to_string()).is_transient());
     }
 }

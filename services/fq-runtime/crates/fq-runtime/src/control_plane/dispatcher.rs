@@ -755,6 +755,7 @@ impl TriggerDispatcher {
             ExecutorError::WorkerStore(msg) => {
                 error!(error = %msg, "worker store error during dispatch")
             }
+            ExecutorError::Resume(e) => error!(error = %e, "resume refused during dispatch"),
             ExecutorError::Workspace(e) => {
                 error!(error = %e, "workspace error during dispatch")
             }
@@ -1598,10 +1599,11 @@ You are a test agent."#
                     "simulated transient store outage".to_string(),
                 ))
             } else {
-                Err(ExecutorError::InvocationFailed {
-                    kind: crate::events::FailureKind::RuntimeError,
-                    message: "permanent poison payload".to_string(),
-                })
+                Err(ExecutorError::Resume(
+                    crate::worker::ResumeError::AmbiguousWal {
+                        invocation_id: Uuid::nil(),
+                    },
+                ))
             }
         }
 
@@ -1700,14 +1702,13 @@ You are a test agent."#
         );
     }
 
-    /// #41 / #46: a *permanent* failure before the first WAL write ACKs
-    /// the trigger — retrying a poison run would loop under the unbounded
-    /// consumer, and the Failed event already recorded why.
+    /// An ambiguous-WAL resume verdict ACKs the trigger: redelivery cannot
+    /// heal the protocol state and would loop under an unbounded consumer.
     #[tokio::test]
-    async fn permanent_failure_before_first_wal_write_acks() {
+    async fn ambiguous_wal_resume_verdict_acks_without_redelivery() {
         assert!(
             !dispatched_pre_wal_failure_is_redelivered(false).await,
-            "a permanent pre-WAL failure must ACK (consume) the trigger"
+            "an ambiguous-WAL resume verdict must ACK (consume) the trigger"
         );
     }
 

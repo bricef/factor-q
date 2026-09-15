@@ -62,7 +62,9 @@ use crate::worker::store::{
     DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow, WorkerStore,
 };
 use crate::worker::workspace::{WORKSPACE_TOKEN, WorkspaceError, WorkspaceProvider};
-use crate::worker::{DrainSignal, DurableStart, ExecutorError, InvocationOutcome, WorkerId};
+use crate::worker::{
+    DrainSignal, DurableStart, ExecutorError, InvocationOutcome, ResumeError, WorkerId,
+};
 
 use replay::{
     coalesce_tool_results, replay_sort_key, sort_into_replay_order, truncate_incomplete_final_batch,
@@ -207,12 +209,6 @@ pub struct ReducerRunner<R: Reducer + Send + Sync = Harness> {
     /// switch on it and resolves the invocation from it (#107).
     live: super::liveness::LiveRegistry,
 }
-
-/// Triage guidance for an ambiguous WAL. Both verbs are real — `fq-cli`'s
-/// `error_commands_gate` checks they still parse.
-const AMBIGUOUS_WAL_TRIAGE: &str = "has ambiguous WAL state; triage with \
-     `fq invocation resume <id>` to reconcile and continue, or \
-     `fq invocation drop <id> --reason ...` to abandon it";
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     pub fn new(context: Arc<ReducerContext>, config: Arc<RunnerConfig>, reducer: R) -> Self {
@@ -681,15 +677,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .get_invocation_state(&inv_str)
             .await
             .map_err(map_store_err)?
-            .ok_or_else(|| {
-                ExecutorError::WorkerStore(format!(
-                    "no state row for {invocation_id}; nothing to resume"
-                ))
-            })?;
+            .ok_or_else(|| ExecutorError::Resume(ResumeError::NoStateRow { invocation_id }))?;
         if state_row.terminal_at.is_some() {
-            return Err(ExecutorError::WorkerStore(format!(
-                "invocation {invocation_id} is already terminal; nothing to resume"
-            )));
+            return Err(ExecutorError::Resume(ResumeError::AlreadyTerminal {
+                invocation_id,
+            }));
         }
         self.queue_resume_notice(invocation_id, state_row.updated_at);
         // Re-validate the agent_id pulled from the store. It was
@@ -730,9 +722,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if tools.iter().any(|r| r.status == DispatchStatus::Dispatched)
             || llms.iter().any(|r| r.status == DispatchStatus::Dispatched)
         {
-            return Err(ExecutorError::WorkerStore(format!(
-                "invocation {invocation_id} {AMBIGUOUS_WAL_TRIAGE}"
-            )));
+            return Err(ExecutorError::Resume(ResumeError::AmbiguousWal {
+                invocation_id,
+            }));
         }
 
         // Build chronological list of completed capabilities.
@@ -886,7 +878,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     .collect(),
             };
             let output = self.reducer.step(input).map_err(|e| {
-                ExecutorError::WorkerStore(format!("replay step {step_index} failed: {e}"))
+                ExecutorError::Resume(ResumeError::ReplayFailed {
+                    step_index,
+                    source: e.to_string(),
+                })
             })?;
             state = output.state;
             last_result = Some(capability.clone());
