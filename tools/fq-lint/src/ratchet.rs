@@ -213,3 +213,129 @@ impl Ratchet<'_> {
         true
     }
 }
+
+/// A per-lint budget for accepted compiler and clippy exceptions.
+pub struct AllowRatchet {
+    pub baseline_path: &'static str,
+    pub measured: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AllowComparison {
+    grown: Vec<(String, usize, usize)>,
+    shrunk: Vec<(String, usize, usize)>,
+}
+
+fn compare_allow_counts(
+    measured: &BTreeMap<String, usize>,
+    baseline: &BTreeMap<String, usize>,
+) -> AllowComparison {
+    let grown = measured
+        .iter()
+        .filter_map(|(lint, &now)| {
+            let was = baseline.get(lint).copied().unwrap_or(0);
+            (now > was).then(|| (lint.clone(), was, now))
+        })
+        .collect();
+    let shrunk = baseline
+        .iter()
+        .filter_map(|(lint, &was)| {
+            let now = measured.get(lint).copied().unwrap_or(0);
+            (now < was).then(|| (lint.clone(), was, now))
+        })
+        .collect();
+    AllowComparison { grown, shrunk }
+}
+
+impl AllowRatchet {
+    fn read_baseline(&self, root: &Path) -> BTreeMap<String, usize> {
+        let Ok(text) = std::fs::read_to_string(root.join(self.baseline_path)) else {
+            return BTreeMap::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let (lint, count) = line.rsplit_once(' ')?;
+                Some((lint.trim().to_string(), count.parse().ok()?))
+            })
+            .collect()
+    }
+
+    pub fn check(&self, root: &Path) -> bool {
+        let comparison = compare_allow_counts(&self.measured, &self.read_baseline(root));
+        for (lint, was, now) in &comparison.shrunk {
+            println!("allow census: {lint} shrank {was} -> {now}");
+        }
+        if comparison.grown.is_empty() {
+            println!("allow census: all exception counts are within budget");
+            return true;
+        }
+        eprintln!("\nerror: accepted lint exceptions exceed the allow census baseline:");
+        for (lint, was, now) in comparison.grown {
+            if was == 0 {
+                eprintln!("  {lint}: new lint with {now} exception(s)");
+            } else {
+                eprintln!("  {lint}: {was} -> {now} (+{})", now - was);
+            }
+        }
+        eprintln!(
+            "\n  Remove the exception, or hand-edit {} so a human reviews the increase.",
+            self.baseline_path
+        );
+        false
+    }
+
+    pub fn bless(&self, root: &Path, header: &str) -> bool {
+        let baseline = self.read_baseline(root);
+        let comparison = compare_allow_counts(&self.measured, &baseline);
+        if !baseline.is_empty() && !comparison.grown.is_empty() {
+            eprintln!("refusing to bless: allow exception counts grew or a new lint appeared");
+            return false;
+        }
+        let mut out = header.to_string();
+        for (lint, count) in &self.measured {
+            if *count > 0 {
+                out.push_str(&format!("{lint} {count}\n"));
+            }
+        }
+        match std::fs::write(root.join(self.baseline_path), out) {
+            Ok(()) => {
+                println!(
+                    "blessed {} entries in {}",
+                    self.measured.len(),
+                    self.baseline_path
+                );
+                true
+            }
+            Err(error) => {
+                eprintln!("error: writing {}: {error}", self.baseline_path);
+                false
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod allow_tests {
+    use super::*;
+
+    #[test]
+    fn allow_baseline_rejects_growth_and_new_lints() {
+        let baseline = BTreeMap::from([("dead_code".into(), 1)]);
+        let over = BTreeMap::from([("dead_code".into(), 2)]);
+        assert_eq!(compare_allow_counts(&over, &baseline).grown.len(), 1);
+
+        let new_lint = BTreeMap::from([("dead_code".into(), 1), ("unused_imports".into(), 1)]);
+        assert_eq!(compare_allow_counts(&new_lint, &baseline).grown.len(), 1);
+    }
+
+    #[test]
+    fn allow_baseline_accepts_and_reports_shrinkage() {
+        let baseline = BTreeMap::from([("dead_code".into(), 2)]);
+        let measured = BTreeMap::from([("dead_code".into(), 1)]);
+        let comparison = compare_allow_counts(&measured, &baseline);
+        assert!(comparison.grown.is_empty());
+        assert_eq!(comparison.shrunk, [("dead_code".into(), 2, 1)]);
+    }
+}

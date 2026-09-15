@@ -17,7 +17,7 @@
 //! or left failing.
 //!
 //! A ratchet needs a stored, per-subject budget that can only tighten. That is
-//! the shape both gates here share, and it is why the function gate lives
+//! the shape the size gates here share, and it is why the function gate lives
 //! beside the file gate rather than in `clippy.toml`.
 //!
 //! Clippy also cannot reason about a *file* at all — its passes walk items in
@@ -31,9 +31,12 @@
 //! * **Files** may not exceed [`FILE_CAP`] production lines.
 //! * **Functions** may not exceed [`FN_CAP`] lines, measured from the `fn`
 //!   keyword so documentation is never charged against the budget.
+//! * **Allow/expect exceptions** may not exceed the per-lint census in
+//!   `.allow-baseline`; production exception counts may only shrink.
 //!
 //! Pre-existing offenders are pinned in `.file-size-baseline` and
-//! `.function-size-baseline` and may only shrink. Motivated by Part 2 of
+//! `.function-size-baseline` and may only shrink. Accepted lint exceptions are
+//! pinned in `.allow-baseline` with the same downward-only policy. Motivated by Part 2 of
 //! `docs/reviews/2026-07-25-factor-q-cleanroom-review.md`.
 
 mod analysis;
@@ -44,7 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use ratchet::Ratchet;
+use ratchet::{AllowRatchet, Ratchet};
 
 /// Files not listed in the baseline may not exceed this many production lines.
 const FILE_CAP: usize = 800;
@@ -67,6 +70,7 @@ const CREEP_RUNWAY: usize = 50;
 
 const FILE_BASELINE: &str = ".file-size-baseline";
 const FN_BASELINE: &str = ".function-size-baseline";
+const ALLOW_BASELINE: &str = ".allow-baseline";
 
 /// Test code by purpose, excluded wholesale. `tests/` and `benches/` are test
 /// targets; `test_support/` is test infrastructure. Note that fq-dashboard's
@@ -81,7 +85,7 @@ fn main() -> ExitCode {
     if flags.contains(&"--help") || flags.contains(&"-h") {
         eprintln!(
             "usage: fq-lint [--bless | --metrics | --creep | --coupling [--json]]\n\n  \
-             (no flags)  check files and functions against their baselines\n  \
+             (no flags)  check sizes and lint exceptions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
              --creep     report functions approaching the cap (never fails)\n  \
              --metrics   report structural facts (never fails)\n  \
@@ -138,22 +142,26 @@ fn main() -> ExitCode {
         }
     };
 
+    let allows = allow_ratchet(&measured);
+
     let ok = if flags.contains(&"--bless") {
         // Both, unconditionally — a partial bless leaves the tree in a state
         // where the next run fails on whichever half was skipped.
         let a = files.bless(&root, &file_header());
         let b = functions.bless(&root, &fn_header());
-        a && b
+        let c = allows.bless(&root, allow_header());
+        a && b && c
     } else {
         let a = files.check(&root);
         let b = functions.check(&root);
-        if !(a && b) {
+        let c = allows.check(&root);
+        if !(a && b && c) {
             eprintln!(
                 "\n(size ratchets — justfile: lint-sizes; rationale in tools/fq-lint and\n\
                  docs/reviews/2026-07-25-factor-q-cleanroom-review.md Part 2)"
             );
         }
-        a && b
+        a && b && c
     };
 
     if ok {
@@ -304,6 +312,19 @@ fn measure_tree(root: &Path) -> Result<BTreeMap<String, Measured>, String> {
     Ok(sizes)
 }
 
+fn allow_ratchet(measured: &BTreeMap<String, Measured>) -> AllowRatchet {
+    let mut counts = BTreeMap::new();
+    for facts in measured.values().filter_map(|m| m.facts.as_ref()) {
+        for (lint, count) in &facts.allow_counts {
+            *counts.entry(lint.clone()).or_default() += count;
+        }
+    }
+    AllowRatchet {
+        baseline_path: ALLOW_BASELINE,
+        measured: counts,
+    }
+}
+
 fn file_ratchet(measured: &BTreeMap<String, Measured>) -> Ratchet<'static> {
     Ratchet {
         subject: "file",
@@ -417,6 +438,25 @@ fn fn_header() -> String {
          # clippy::too_many_lines is the complementary threshold gate (it counts\n\
          # CODE lines, skipping comments and blanks) — tracked in #392.\n"
     )
+}
+
+fn allow_header() -> &'static str {
+    "# Per-lint production `#[allow]` / `#[expect]` exception budgets.
+\
+     #
+\
+     # Generated and maintained by `just sizes-bless`; enforced by
+\
+     # `just lint-sizes` (tools/fq-lint) in the Code quality CI job.
+\
+     #
+\
+     # Counts come from the syn AST. Test-gated items and out-of-scope test
+\
+     # trees are excluded. Counts may only go DOWN; a new lint or an increase
+\
+     # requires hand-editing this file so a human sees it in the diff.
+"
 }
 
 /// Advisory: functions approaching the [`FN_CAP`] ratchet, by code lines.
