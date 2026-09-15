@@ -95,6 +95,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
+walkdir = "2"
 
 # Workspace-wide lint policy. Every member opts in via
 # `[lints] workspace = true` in its Cargo.toml. The intent: a

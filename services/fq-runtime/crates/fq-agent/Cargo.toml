@@ -33,7 +33,7 @@ thiserror = { workspace = true }
 # The registry walks a directory of definitions, and says so out loud
 # when one declares a boundary nothing enforces (#35).
 tracing = { workspace = true }
-walkdir = "2"
+walkdir = { workspace = true }
 
 [dev-dependencies]
 # The view projections are wire shapes; their tests assert the tagged
