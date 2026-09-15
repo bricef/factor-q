@@ -65,6 +65,7 @@ directory = "agents"
 # itself is the binding, shared by every invocation; with
 # `per_invocation = true` it is the root under which each invocation
 # gets a fresh empty directory named by its invocation id.
+# Relative paths are resolved against this config file's directory.
 # path = "/path/to/workspace"
 #
 # Provision a fresh empty directory per invocation (#14/#70). Default
