@@ -547,8 +547,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // binding is stable across resume (workspace_ref
         // re-association).
         // The preamble timestamp is the invocation's *start* time
-        // (`started_at_ms`), not a fresh clock read: it must be stable
-        // across the fresh and resumed/drained execution paths or it
+        // (`started_at_ms`), not a fresh clock read: it must be stable or it
         // breaks observational equivalence (the resumed run would stamp
         // a different time into the replayed step-0 message). `started_at`
         // is persisted and re-used verbatim on resume, so both paths
@@ -576,6 +575,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 sampling,
                 durable_start,
                 &mut cursor,
+                false,
                 // Fresh invocation: no previous incarnation, nothing
                 // recorded for the first step.
                 Vec::new(),
@@ -983,14 +983,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // when `step_index == 0`, so there is no double-inject.
                 step0_static_context,
                 // No inbound server channel on resume: the per-invocation
-                // server connection died with the crash, so a resumed run
-                // cannot service (or replay) sampling (ADR-0018 §5). Any
+                // server connection died, so a resumed run cannot service
+                // (or replay) sampling (ADR-0018 §5). Any
                 // in-flight sampling is surfaced via `fq invocation list`.
                 None,
-                // Resume acks nothing — the trigger was acked on the
-                // original attempt (issue #41).
+                // The original attempt already acked the trigger (issue #41).
                 DurableStart::noop(),
                 &mut cursor,
+                host_notices.iter().any(|n| n.kind == "context_pressure"),
                 // Rows recorded for the step the crash interrupted (WAL
                 // write landed, the step never ran). The live re-run must
                 // carry them or its conversation silently diverges from
@@ -1033,14 +1033,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut sampling: Option<SamplingChannel>,
         mut durable_start: DurableStart,
         cursor: &mut Option<Uuid>,
+        context_warning_emitted: bool,
         mut resumed_step_notices: Vec<(u32, String, String)>,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        // Invocation-scoped context-pressure tracking (issue #76). The
-        // oldest turn is the invocation start — the first messages are
-        // seeded there. Threaded through the model and self_inspect
-        // paths below.
+        // Context-pressure tracking (#76), threaded through the
+        // model and self_inspect paths below.
         let mut context = ContextTracker {
             oldest_turn_at_ms: started_at_ms,
+            warning_emitted: context_warning_emitted,
             ..ContextTracker::default()
         };
         for step_index in step_index_start..HOST_STEP_BUDGET {

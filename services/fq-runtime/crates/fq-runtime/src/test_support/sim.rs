@@ -3229,6 +3229,66 @@ mod host_notice_channel {
         };
         assert_equivalent(&reference, &resumed, "notice across a double crash");
     }
+
+    /// A delivered context-pressure notice seeds the one-shot latch on
+    /// resume, so subsequent over-threshold turns cannot produce a second
+    /// row or event for the invocation.
+    #[tokio::test]
+    async fn context_pressure_notice_stays_one_shot_across_resume() {
+        let turns = 2;
+        let mut pricing = PricingTable::empty();
+        pricing.insert_context_window(SIM_MODEL, 100);
+        let world = SimWorld::with_pricing(159, 5.0, Arc::new(pricing)).await;
+        queue_tool_outputs(&world, turns);
+
+        // The scripted response reports 100 input tokens and queues the
+        // warning. Its next boundary persists and publishes the notice;
+        // crash on the following llm.request publication.
+        world.sink.fail_publish_at(1 + 3 * 2 + 1);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &script(turns));
+        world
+            .run(&llm)
+            .await
+            .expect_err("crash after notice delivery");
+
+        let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+        assert_eq!(in_flight.len(), 1);
+        let inv_str = in_flight[0].invocation_id.clone();
+        let inv_id: uuid::Uuid = inv_str.parse().unwrap();
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1, "pressure notice was delivered before crash");
+        assert_eq!(rows[0].kind, "context_pressure");
+
+        let resume_llm = FixtureClient::new();
+        load_fixture(&resume_llm, &script(turns)[1..]);
+        world.resume(&resume_llm).await.expect("resume completes");
+
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 1, "WAL-derived latch prevents a second row");
+        let notice_events = world
+            .sink
+            .events()
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::HostNotice(_)))
+            .count();
+        assert_eq!(notice_events, 1, "exactly one pressure event is published");
+
+        let expected = format!(
+            "{}{}</host-notice>",
+            crate::events::HOST_NOTICE_SENTINEL,
+            crate::worker::introspection::CONTEXT_PRESSURE_WARNING
+        );
+        for request in resume_llm.requests() {
+            let occurrences = request
+                .messages
+                .iter()
+                .filter(|message| message.text().as_deref() == Some(expected.as_str()))
+                .count();
+            assert_eq!(occurrences, 1, "replayed notice occurs once per request");
+        }
+        let _ = inv_id;
+    }
 }
 
 mod drain_equivalence {

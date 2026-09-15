@@ -3348,12 +3348,18 @@ async fn context_pressure_warning_injected_once_into_event_trail() {
         .build()
         .unwrap();
 
-    // Two end-turn-shaped turns are not needed: a single response
-    // that is over threshold and ends the turn is enough. 90/100 in.
+    // Cross the threshold on a non-terminal turn so the queued notice
+    // drains into the next request rather than only the final step.
     let llm = FixtureClient::new();
+    llm.push_response(tool_use(
+        "builtin__self_inspect",
+        "inspect-pressure",
+        json!({}),
+        (90, 5),
+    ));
     llm.push_response(canned("done.", 90, 5));
 
-    runner
+    let outcome = runner
         .run(
             &agent,
             &llm,
@@ -3363,6 +3369,10 @@ async fn context_pressure_warning_injected_once_into_event_trail() {
         )
         .await
         .expect("invocation completes");
+    let invocation_id = match outcome {
+        InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
+        other => panic!("expected completed invocation, got {other:?}"),
+    };
 
     let events = sink.events();
     let warned: Vec<_> = events
@@ -3389,6 +3399,52 @@ async fn context_pressure_warning_injected_once_into_event_trail() {
         warned[0].annotations.0[crate::events::annotation_keys::FLAGS]["context_pressure"],
         json!(crate::worker::introspection::CONTEXT_PRESSURE_WARNING)
     );
+
+    let expected = format!(
+        "{}{}</host-notice>",
+        crate::events::HOST_NOTICE_SENTINEL,
+        crate::worker::introspection::CONTEXT_PRESSURE_WARNING
+    );
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        serde_json::to_string(&requests[0])
+            .unwrap()
+            .matches(&expected)
+            .count(),
+        0,
+        "the crossing request must not contain the future notice"
+    );
+    assert_eq!(
+        serde_json::to_string(&requests[1])
+            .unwrap()
+            .matches(&expected)
+            .count(),
+        1,
+        "the first request after crossing receives the notice exactly once"
+    );
+
+    let notices: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::HostNotice(payload) => Some(payload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "one host-notice event is emitted");
+    assert_eq!(notices[0].kind, "context_pressure");
+    assert_eq!(notices[0].body, expected);
+
+    let store = WorkerStore::open(&dir.path().join("events.db"))
+        .await
+        .expect("reopen worker store");
+    let rows = store
+        .list_host_notices(&invocation_id.to_string())
+        .await
+        .expect("list host notices");
+    assert_eq!(rows.len(), 1, "one host-notice WAL row is persisted");
+    assert_eq!(rows[0].kind, "context_pressure");
+    assert_eq!(rows[0].body, expected);
 }
 
 /// Below the threshold, no warning is injected (issue #76).
@@ -3410,7 +3466,7 @@ async fn context_pressure_warning_absent_below_threshold() {
     let llm = FixtureClient::new();
     llm.push_response(canned("done.", 10, 5));
 
-    runner
+    let outcome = runner
         .run(
             &agent,
             &llm,
@@ -3420,8 +3476,13 @@ async fn context_pressure_warning_absent_below_threshold() {
         )
         .await
         .expect("invocation completes");
+    let invocation_id = match outcome {
+        InvocationOutcome::Completed { invocation_id, .. } => invocation_id,
+        other => panic!("expected completed invocation, got {other:?}"),
+    };
 
-    let any_warning = sink.events().iter().any(|e| {
+    let events = sink.events();
+    let any_warning = events.iter().any(|e| {
         e.annotations
             .0
             .get(crate::events::annotation_keys::FLAGS)
@@ -3429,6 +3490,23 @@ async fn context_pressure_warning_absent_below_threshold() {
             .is_some()
     });
     assert!(!any_warning, "no warning below the threshold");
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.payload, EventPayload::HostNotice(_))),
+        "no host-notice event below the threshold"
+    );
+    let store = WorkerStore::open(&dir.path().join("events.db"))
+        .await
+        .expect("reopen worker store");
+    assert!(
+        store
+            .list_host_notices(&invocation_id.to_string())
+            .await
+            .expect("list host notices")
+            .is_empty(),
+        "no host-notice WAL row below the threshold"
+    );
 }
 
 fn sampling_world() -> (
