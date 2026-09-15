@@ -34,6 +34,7 @@ impl From<&LoadedAgent> for AgentSummaryView {
     fn from(loaded: &LoadedAgent) -> Self {
         AgentSummaryView {
             agent_id: loaded.agent.id().as_str().to_string(),
+            description: loaded.description.clone(),
             model: loaded.agent.model().to_string(),
             budget: loaded.agent.budget(),
             trigger: loaded.agent.trigger().map(String::from),
@@ -66,6 +67,7 @@ impl From<&LoadedAgent> for AgentDetailView {
         let agent = &loaded.agent;
         AgentDetailView {
             agent_id: agent.id().as_str().to_string(),
+            description: loaded.description.clone(),
             model: agent.model().to_string(),
             system_prompt: agent.system_prompt().to_string(),
             tools: agent.tools().to_vec(),

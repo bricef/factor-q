@@ -1,5 +1,7 @@
 //! Invocation list and active-work HTML renderers.
 
+use std::collections::HashMap;
+
 use fq_ops::views::{ActiveInvocationView, InvocationSummaryView};
 
 use super::{age, agent_link, display_cap, esc, inv_link, liveness_badge, short, status_span};
@@ -7,10 +9,13 @@ use super::{age, agent_link, display_cap, esc, inv_link, liveness_badge, short, 
 /// The one-line invocation summary cell (#216): escaped, with a muted
 /// em-dash when the summariser has not produced a line (disabled, or
 /// the invocation just started).
-fn summary_cell(summary: Option<&str>) -> String {
-    match summary {
-        Some(line) => format!(r#"<span class="muted">{}</span>"#, esc(line)),
-        None => r#"<span class="muted">—</span>"#.to_string(),
+fn summary_cell(summary: Option<&str>, description: Option<&str>) -> String {
+    match (summary, description) {
+        (Some(line), _) => format!(r#"<span class="muted">{}</span>"#, esc(line)),
+        (None, Some(description)) => {
+            format!(r#"<em class="muted">{}</em>"#, esc(description))
+        }
+        (None, None) => r#"<span class="muted">—</span>"#.to_string(),
     }
 }
 
@@ -18,7 +23,11 @@ fn summary_cell(summary: Option<&str>) -> String {
 /// the worker WAL. Renders to NOTHING when nothing is in flight — the
 /// page contract is that the section only exists when there is live
 /// work to show.
-pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
+pub fn active(
+    items: &[ActiveInvocationView],
+    descriptions: &HashMap<String, String>,
+    now_ms: i64,
+) -> String {
     if items.is_empty() {
         return String::new();
     }
@@ -50,7 +59,7 @@ pub fn active(items: &[ActiveInvocationView], now_ms: i64) -> String {
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             agent_link(&i.agent_id),
-            summary_cell(i.summary.as_deref()),
+            summary_cell(i.summary.as_deref(), descriptions.get(&i.agent_id).map(String::as_str)),
             esc(&i.phase),
             liveness_badge(i.liveness),
             i.step_index,
@@ -132,10 +141,11 @@ pub fn invocations_page(
     active_rows: &[ActiveInvocationView],
     items: &[InvocationSummaryView],
     filters: InvocationFilters,
+    descriptions: &HashMap<String, String>,
     now_ms: i64,
 ) -> String {
-    let active_html = active(active_rows, now_ms);
-    let list_html = invocations(items, filters, now_ms);
+    let active_html = active(active_rows, descriptions, now_ms);
+    let list_html = invocations(items, filters, descriptions, now_ms);
     if active_html.is_empty() {
         list_html
     } else {
@@ -150,6 +160,7 @@ pub fn invocations_page(
 pub fn invocations(
     items: &[InvocationSummaryView],
     filters: InvocationFilters,
+    descriptions: &HashMap<String, String>,
     now_ms: i64,
 ) -> String {
     let mut b = String::new();
@@ -192,7 +203,13 @@ pub fn invocations(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             status_span(&i.status),
-            summary_cell(i.summary.as_deref()),
+            summary_cell(
+                i.summary.as_deref(),
+                i.agent_id
+                    .as_ref()
+                    .and_then(|agent| descriptions.get(agent))
+                    .map(String::as_str),
+            ),
             esc(&age(i.started_at_ms, now_ms)),
             match i.agent_id.as_deref() {
                 Some(agent) => agent_link(agent),

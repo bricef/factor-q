@@ -63,13 +63,13 @@ expected, and gives the line and column:
 
 ```text
 agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
-expected one of `name`, `model`, `tools`, `sandbox`, `budget`,
-`max_iterations`, `max_concurrent`, `effort`, `trigger`, `mcp`,
+expected one of `name`, `description`, `model`, `tools`, `sandbox`,
+`budget`, `max_iterations`, `max_concurrent`, `effort`, `trigger`, `mcp`,
 `static_resources`, `sampling_budget`, `elicitation_budget` at line 3
 column 1
 ```
 
-That list is the whole recognised set — thirteen keys, and the error
+That list is the whole recognised set — fourteen keys, and the error
 prints them in the order the runtime declares them.
 
 Strictness is deliberate: a dropped key is silent, and silence here is
@@ -125,6 +125,20 @@ one of `redact_secrets`, `reject_sensitive_fields`, `input_validation`,
 A grant that is neither a bool nor a table (`sampling: 42`) is refused
 the same way, with an error that says what a grant may be. The
 recognised keys are listed under [Capability grants](#capability-grants).
+
+## Describing the agent
+
+An optional `description` gives operators a short, human-readable statement of
+what the agent does:
+
+```yaml
+description: Reviews queued documentation issues and opens focused fixes.
+```
+
+The dashboard shows this text in italics in an invocation's summary column
+until that invocation produces its own summary line. If the field is omitted,
+the dashboard keeps showing an em-dash while no summary is available. Keep the
+description concise; it is roster metadata, not part of the system prompt.
 
 ## Choosing the model
 

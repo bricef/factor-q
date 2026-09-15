@@ -31,8 +31,17 @@ pub fn parse_agent_with_default(
     content: &str,
     default_model: Option<&str>,
 ) -> Result<Agent, ParseError> {
+    parse_agent_definition_with_default(content, default_model).map(|(agent, _)| agent)
+}
+
+/// Parse the runtime agent together with definition metadata retained by the registry.
+pub(crate) fn parse_agent_definition_with_default(
+    content: &str,
+    default_model: Option<&str>,
+) -> Result<(Agent, Option<String>), ParseError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
     let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str)?;
+    let description = frontmatter.description.clone();
 
     let mut sandbox = Sandbox::new();
     for path in frontmatter.sandbox.fs_read {
@@ -180,7 +189,7 @@ pub fn parse_agent_with_default(
         builder = builder.elicitation_validation(elicitation_validation);
     }
 
-    Ok(builder.build()?)
+    Ok((builder.build()?, description))
 }
 
 /// Merge `from` into `into` (union): any redaction flag set wins, and
@@ -280,6 +289,8 @@ impl<'de> serde::de::Visitor<'de> for GrantVisitor {
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
     name: String,
+    /// Optional human-readable purpose shown by operator surfaces.
+    description: Option<String>,
     /// Optional: falls back to `agents.default_model` when omitted. A
     /// definition with neither fails to load.
     #[serde(default)]
@@ -666,6 +677,26 @@ Prompt body.
         assert_eq!(agent.id().as_str(), "minimal");
         assert!(agent.tools().is_empty());
         assert!(agent.budget().is_none());
+    }
+
+    #[test]
+    fn parses_optional_description_from_frontmatter() {
+        let (_, description) = parse_agent_definition_with_default(
+            "---\nname: test\nmodel: test-model\ndescription: Reviews queued issues safely.\n---\nprompt",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            description.as_deref(),
+            Some("Reviews queued issues safely.")
+        );
+
+        let (_, description) = parse_agent_definition_with_default(
+            "---\nname: test\nmodel: test-model\n---\nprompt",
+            None,
+        )
+        .unwrap();
+        assert_eq!(description, None);
     }
 
     #[test]

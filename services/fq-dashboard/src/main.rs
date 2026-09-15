@@ -458,6 +458,7 @@ mod tests {
     fn probe_summary() -> AgentSummaryView {
         AgentSummaryView {
             agent_id: "probe".to_string(),
+            description: None,
             model: "claude-haiku-4-5".to_string(),
             budget: None,
             trigger: None,
@@ -470,6 +471,7 @@ mod tests {
     fn probe_detail() -> AgentDetailView {
         AgentDetailView {
             agent_id: "probe".to_string(),
+            description: None,
             model: "claude-haiku-4-5".to_string(),
             system_prompt: "You are a probe.".to_string(),
             tools: vec!["exec".to_string()],

@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct AgentSummaryView {
     pub agent_id: String,
+    /// Optional human-readable purpose from definition frontmatter.
+    #[serde(default)]
+    pub description: Option<String>,
     pub model: String,
     pub budget: Option<f64>,
     /// The NATS trigger suffix the agent listens on, if any.
@@ -71,6 +74,9 @@ pub struct AgentsView {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 pub struct AgentDetailView {
     pub agent_id: String,
+    /// Optional human-readable purpose from definition frontmatter.
+    #[serde(default)]
+    pub description: Option<String>,
     pub model: String,
     pub system_prompt: String,
     pub tools: Vec<String>,

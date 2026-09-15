@@ -385,14 +385,28 @@ fn summary_column_renders_escaped_with_fallback() {
         archived: false,
         summary: Some("Fixing #7: <script>alert(1)</script>".into()),
     }];
-    let html = invocations(&items, InvocationFilters::default(), 1_000);
+    let descriptions = std::collections::HashMap::from([(
+        "m0-issue-fix".to_string(),
+        "Fixes <unsafe> & queued issues".to_string(),
+    )]);
+    let html = invocations(&items, InvocationFilters::default(), &descriptions, 1_000);
     assert!(html.contains("<th>summary</th>"), "got: {html}");
     assert!(
         html.contains("Fixing #7: &lt;script&gt;alert(1)&lt;/script&gt;"),
         "summary escaped: {html}"
     );
     items[0].summary = None;
-    let html = invocations(&items, InvocationFilters::default(), 1_000);
+    let html = invocations(&items, InvocationFilters::default(), &descriptions, 1_000);
+    assert!(
+        html.contains(r#"<em class="muted">Fixes &lt;unsafe&gt; &amp; queued issues</em>"#),
+        "escaped description fallback: {html}"
+    );
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_000,
+    );
     assert!(html.contains("—"), "fallback dash: {html}");
 
     let active_rows = [fq_ops::views::ActiveInvocationView {
@@ -407,8 +421,15 @@ fn summary_column_renders_escaped_with_fallback() {
         open_llms: vec![],
         summary: Some("Editing widget.rs".into()),
     }];
-    let html = active(&active_rows, 1_000);
+    let html = active(&active_rows, &descriptions, 1_000);
     assert!(html.contains("Editing widget.rs"), "got: {html}");
+    let mut active_rows = active_rows;
+    active_rows[0].summary = None;
+    let html = active(&active_rows, &descriptions, 1_000);
+    assert!(
+        html.contains("Fixes &lt;unsafe&gt; &amp; queued issues"),
+        "got: {html}"
+    );
 }
 
 /// The one-line summary (#216) renders on the invocation detail
@@ -508,11 +529,22 @@ fn active_table_omitted_when_nothing_in_flight() {
         archived: false,
         summary: None,
     }];
-    assert_eq!(active(&[], 1_000), "");
+    assert_eq!(active(&[], &Default::default(), 1_000), "");
     // With no active rows the page is byte-identical to the plain list.
     assert_eq!(
-        invocations_page(&[], &items, InvocationFilters::default(), 1_000),
-        invocations(&items, InvocationFilters::default(), 1_000)
+        invocations_page(
+            &[],
+            &items,
+            InvocationFilters::default(),
+            &Default::default(),
+            1_000
+        ),
+        invocations(
+            &items,
+            InvocationFilters::default(),
+            &Default::default(),
+            1_000
+        )
     );
 }
 
@@ -533,7 +565,13 @@ fn active_table_shows_live_work_above_the_list() {
         open_llms: vec![],
         summary: None,
     }];
-    let html = invocations_page(&active_rows, &[], InvocationFilters::default(), 600_000);
+    let html = invocations_page(
+        &active_rows,
+        &[],
+        InvocationFilters::default(),
+        &Default::default(),
+        600_000,
+    );
     assert!(html.contains("Active now"), "got: {html}");
     assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
     assert!(
@@ -921,6 +959,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
         agents: vec![
             AgentSummaryView {
                 agent_id: "m0-issue-fix".to_string(),
+                description: None,
                 model: "claude-opus-4-8".to_string(),
                 budget: Some(12.0),
                 trigger: Some("m0-issue-fix".to_string()),
@@ -930,6 +969,7 @@ fn agents_list_links_definitions_and_surfaces_load_errors() {
             },
             AgentSummaryView {
                 agent_id: "doc-drift".to_string(),
+                description: None,
                 model: "claude-sonnet-4-5".to_string(),
                 budget: None,
                 trigger: None,
@@ -969,6 +1009,7 @@ fn agent_detail_collapses_and_escapes_the_prompt() {
     use fq_ops::agent_view::AgentDetailView;
     let d = AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
+        description: None,
         model: "claude-opus-4-8".to_string(),
         system_prompt: "Fix issues end-to-end. Never claim <b>unpersisted</b> work.".to_string(),
         tools: vec!["exec".to_string(), "file_read".to_string()],
@@ -1032,7 +1073,12 @@ fn invocation_surfaces_link_agent_names() {
             summary: None,
         },
     ];
-    let html = invocations(&items, InvocationFilters::default(), 1_000);
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_000,
+    );
     assert!(
         html.contains(r#"<a href="/agents/m0-loop">m0-loop</a>"#),
         "got: {html}"
@@ -1054,7 +1100,7 @@ fn invocation_surfaces_link_agent_names() {
         open_llms: vec![],
         summary: None,
     }];
-    let html = active(&active_rows, 1_000);
+    let html = active(&active_rows, &Default::default(), 1_000);
     assert!(
         html.contains(r#"<a href="/agents/m0-issue-fix">m0-issue-fix</a>"#),
         "got: {html}"
@@ -1084,7 +1130,12 @@ fn invocation_filters_hide_terminal_rows_and_compose_links() {
     ];
 
     // Default: everything visible, both toggles say "hide".
-    let html = invocations(&items, InvocationFilters::default(), 1_000);
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_000,
+    );
     for id in ["inv-live", "inv-done", "inv-boom"] {
         assert!(html.contains(id), "default shows {id}: {html}");
     }
@@ -1103,7 +1154,7 @@ fn invocation_filters_hide_terminal_rows_and_compose_links() {
         show_completed: false,
         ..Default::default()
     };
-    let html = invocations(&items, filters, 1_000);
+    let html = invocations(&items, filters, &Default::default(), 1_000);
     assert!(!html.contains("inv-done"), "got: {html}");
     assert!(
         html.contains("inv-live") && html.contains("inv-boom"),
@@ -1128,7 +1179,7 @@ fn invocation_filters_hide_terminal_rows_and_compose_links() {
         show_failed: false,
         ..Default::default()
     };
-    let html = invocations(&items[1..], filters, 1_000);
+    let html = invocations(&items[1..], filters, &Default::default(), 1_000);
     assert!(
         html.contains("no invocations match the filters"),
         "got: {html}"
@@ -1206,17 +1257,17 @@ fn liveness_and_status_carry_the_health_palette() {
         open_llms: vec![],
         summary: None,
     };
-    let html = active(&[mk(Liveness::Working)], 1_000);
+    let html = active(&[mk(Liveness::Working)], &Default::default(), 1_000);
     assert!(
         html.contains(r#"<span class="ok">✓ working</span>"#),
         "got: {html}"
     );
-    let html = active(&[mk(Liveness::Stuck)], 1_000);
+    let html = active(&[mk(Liveness::Stuck)], &Default::default(), 1_000);
     assert!(
         html.contains(r#"<span class="bad">✗ stuck</span>"#),
         "got: {html}"
     );
-    let html = active(&[mk(Liveness::Advancing)], 1_000);
+    let html = active(&[mk(Liveness::Advancing)], &Default::default(), 1_000);
     assert!(
         html.contains(r#"<span class="muted">advancing</span>"#),
         "got: {html}"
@@ -1301,7 +1352,12 @@ fn invocation_rows_escape_link_and_show_start() {
         archived: false,
         summary: None,
     }];
-    let html = invocations(&items, InvocationFilters::default(), 1_200_000);
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_200_000,
+    );
     assert!(html.contains(r#"<a href="/invocations/0123456789abcdef">01234567</a>"#));
     assert!(html.contains("&lt;agent&gt;"));
     assert!(!html.contains("<agent>"));

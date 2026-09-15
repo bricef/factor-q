@@ -326,6 +326,8 @@ fn agents_view() -> fq_ops::agent_view::AgentsView {
     let mk = |id: &str, model: &str, budget: Option<f64>, trigger: Option<&str>, tools, prompt| {
         AgentSummaryView {
             agent_id: id.to_string(),
+            description: (id == "m0-loop")
+                .then(|| "Watches the queue and dispatches bounded maintenance work.".to_string()),
             model: model.to_string(),
             budget,
             trigger: trigger.map(String::from),
@@ -374,6 +376,7 @@ fn agents_view() -> fq_ops::agent_view::AgentsView {
 fn agent_detail_view() -> fq_ops::agent_view::AgentDetailView {
     fq_ops::agent_view::AgentDetailView {
         agent_id: "m0-issue-fix".to_string(),
+        description: Some("Fixes one scoped GitHub issue and opens a reviewable PR.".to_string()),
         model: "claude-opus-4-8".to_string(),
         system_prompt: "You are m0-issue-fix. Fix the referenced issue end-to-end: clone the \
                         repo, branch, make the minimal change, validate with `just ci`, open \
@@ -419,6 +422,10 @@ pub fn write_all(out: &Path) -> std::io::Result<Vec<String>> {
                         include_archived: true,
                         ..Default::default()
                     },
+                    &std::collections::HashMap::from([(
+                        "m0-loop".to_string(),
+                        "Watches the queue and dispatches bounded maintenance work.".to_string(),
+                    )]),
                     NOW_MS,
                 ),
             ),
