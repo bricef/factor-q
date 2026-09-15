@@ -1,0 +1,9 @@
+# SHA256 checksum for the vendored Datastar client asset. This records its
+# provenance and makes accidental or malicious changes to the served bytes fail CI.
+# Upstream: https://raw.githubusercontent.com/starfederation/datastar/v1.0.0/bundles/datastar.js
+# Version: v1.0.0
+# License: MIT (https://github.com/starfederation/datastar/blob/v1.0.0/LICENSE.md)
+# Regenerate on version bump (update the metadata above too):
+#   curl -sfL https://raw.githubusercontent.com/starfederation/datastar/v1.0.0/bundles/datastar.js | sha256sum
+
+e7d6ad0e83980b37706f4494a36db3c58b5dc6cd5a9e5bd5166dbffa6b56a06a  datastar.js
