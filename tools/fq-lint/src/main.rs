@@ -17,7 +17,7 @@
 //! or left failing.
 //!
 //! A ratchet needs a stored, per-subject budget that can only tighten. That is
-//! the shape both gates here share, and it is why the function gate lives
+//! the shape the size gates here share, and it is why the function gate lives
 //! beside the file gate rather than in `clippy.toml`.
 //!
 //! Clippy also cannot reason about a *file* at all — its passes walk items in
@@ -31,9 +31,12 @@
 //! * **Files** may not exceed [`FILE_CAP`] production lines.
 //! * **Functions** may not exceed [`FN_CAP`] lines, measured from the `fn`
 //!   keyword so documentation is never charged against the budget.
+//! * **Allow/expect exceptions** may not exceed the per-lint census in
+//!   `.allow-baseline`; production exception counts may only shrink.
 //!
 //! Pre-existing offenders are pinned in `.file-size-baseline` and
-//! `.function-size-baseline` and may only shrink. Motivated by Part 2 of
+//! `.function-size-baseline` and may only shrink. Accepted lint exceptions are
+//! pinned in `.allow-baseline` with the same downward-only policy. Motivated by Part 2 of
 //! `docs/reviews/2026-07-25-factor-q-cleanroom-review.md`.
 
 mod analysis;
@@ -82,7 +85,7 @@ fn main() -> ExitCode {
     if flags.contains(&"--help") || flags.contains(&"-h") {
         eprintln!(
             "usage: fq-lint [--bless | --metrics | --creep | --coupling [--json]]\n\n  \
-             (no flags)  check files and functions against their baselines\n  \
+             (no flags)  check sizes and lint exceptions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
              --creep     report functions approaching the cap (never fails)\n  \
              --metrics   report structural facts (never fails)\n  \

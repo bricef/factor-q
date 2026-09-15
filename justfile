@@ -741,7 +741,7 @@ lint-sources:
 # Budgets may only go down (`just sizes-bless`). Raising one, or admitting a
 # new entry, means hand-editing the baseline — it shows in the diff and needs
 # a human at the merge gate.
-# Enforce the file and function size ratchets.
+# Enforce the file/function size and allow-census ratchets.
 lint-sizes:
     cargo run -q -p fq-lint
 
@@ -799,7 +799,7 @@ lint-creep:
 
 # Refuses to raise any budget or admit a new entry — the ratchets only ever
 # tighten, so a budget can be lowered automatically but never relaxed.
-# Lower the file and function size budgets to match reality.
+# Lower size and allow-census budgets to match reality.
 sizes-bless:
     cargo run -q -p fq-lint -- --bless
 
