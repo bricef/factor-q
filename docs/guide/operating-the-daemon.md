@@ -1051,6 +1051,15 @@ offered, model by model, against the last one it accepted.
    nonsense detector, not a change detector: model prices move a lot
    and quickly, and 5× is the margin that separates a repricing from a
    mistake.
+
+   This bound applies to each load and is measured against the last
+   **accepted** price. A sequence of accepted, in-bound moves is therefore
+   unbounded in aggregate: four accepted 4.9× moves compound to about 576×,
+   which the six-hour refresh cadence can reach within a day. This is a
+   [deliberate acceptance](https://github.com/bricef/factor-q/issues/746):
+   the bound guards against a single bad upstream change, not how far a price
+   can eventually move. The mitigation is the `pricing.change_refused`
+   notification trail and an operator reading it.
 2. **A model priced at zero where it was not is refused the same way.**
    A *new* model priced at zero is refused at admission: it never
    enters the table, so ADR-0004's at-use backstop refuses the dispatch
