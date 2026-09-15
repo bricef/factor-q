@@ -23,6 +23,11 @@ pub enum ConfigError {
     #[error("invalid TOML in config file: {0}")]
     InvalidToml(String),
 
+    #[error(
+        "[events] max_age must be greater than zero and use a duration such as `30d`, `36h` or `90m`, not `{0}`"
+    )]
+    InvalidEventMaxAge(String),
+
     #[error("provider '{0}' is not configured")]
     ProviderNotConfigured(&'static str),
 

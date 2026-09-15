@@ -256,6 +256,8 @@ pub struct EventBus {
     /// discovered through a runtime protocol violation (Design
     /// Principle 7; issue #4).
     max_payload: usize,
+    /// Retention stamped onto the payload-bearing event stream at connect.
+    event_max_age: Duration,
     /// How every durable this bus creates paces redelivery, and how
     /// long the server waits for an ack before redelivering on its own.
     /// Held here because the bus is what *creates* the durables: the
@@ -306,7 +308,12 @@ impl EventBus {
     /// Connect anonymously — a private test broker or an unauthenticated
     /// deployment. See [`Self::connect_with_token`].
     pub async fn connect(url: &str) -> Result<Self, BusError> {
-        Self::connect_with_token(url, None).await
+        Self::connect_with_token_and_max_age(url, None, DEFAULT_MAX_AGE).await
+    }
+
+    /// Connect anonymously and apply an explicit event-stream retention.
+    pub async fn connect_with_max_age(url: &str, max_age: Duration) -> Result<Self, BusError> {
+        Self::connect_with_token_and_max_age(url, None, max_age).await
     }
 
     /// Connect to a NATS server, presenting `token` when the broker
@@ -314,6 +321,15 @@ impl EventBus {
     /// exist. The URL is logged as given: it carries no credential by
     /// construction (see `connect_options`).
     pub async fn connect_with_token(url: &str, token: Option<&str>) -> Result<Self, BusError> {
+        Self::connect_with_token_and_max_age(url, token, DEFAULT_MAX_AGE).await
+    }
+
+    /// Connect with optional token auth and an explicit event-stream retention.
+    pub async fn connect_with_token_and_max_age(
+        url: &str,
+        token: Option<&str>,
+        event_max_age: Duration,
+    ) -> Result<Self, BusError> {
         info!(
             nats_url = url,
             token_auth = token.is_some(),
@@ -328,6 +344,7 @@ impl EventBus {
             client,
             jetstream,
             max_payload,
+            event_max_age,
             redelivery: ConsumerRedeliveryPolicy::default(),
             ledger: ConsumerLedger::default(),
         };
@@ -390,7 +407,7 @@ impl EventBus {
                 .collect(),
             retention: stream::RetentionPolicy::Limits,
             storage: stream::StorageType::File,
-            max_age: DEFAULT_MAX_AGE,
+            max_age: self.event_max_age,
             compression: Some(stream::Compression::S2),
             ..Default::default()
         };

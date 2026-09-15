@@ -25,6 +25,63 @@ fn unique_scratch() -> std::path::PathBuf {
 }
 
 #[test]
+fn configured_event_retention_reaches_new_and_existing_brokers() {
+    let server = fq_test_support::NatsServer::start();
+    let scratch = unique_scratch();
+    let config_path = scratch.join("fq.toml");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    for (index, value) in ["2h", "3h"].into_iter().enumerate() {
+        std::fs::write(
+            &config_path,
+            format!("[edge]\nbind = \"127.0.0.1:0\"\n\n[events]\nmax_age = \"{value}\"\n"),
+        )
+        .unwrap();
+        let mut child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
+            .env("FQ_DAEMON_CONFIG", &config_path)
+            .env("FQ_NATS_URL", server.url())
+            .env("FQ_CACHE_DIR", scratch.join("cache"))
+            .env("FQ_STATE_DIR", scratch.join("state"))
+            .env("FQ_AGENTS_DIR", scratch.join("agents"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        let expected = if index == 0 {
+            Duration::from_secs(2 * 60 * 60)
+        } else {
+            Duration::from_secs(3 * 60 * 60)
+        };
+        runtime.block_on(async {
+            let client = async_nats::connect(server.url())
+                .await
+                .expect("connect inspector");
+            let jetstream = async_nats::jetstream::new(client);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Ok(mut stream) = jetstream.get_stream(fq_runtime::bus::STREAM_NAME).await
+                    && let Ok(info) = stream.info().await
+                    && info.config.max_age == expected
+                {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "event stream never reached configured max_age {expected:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
+        child
+            .wait_timeout(Duration::from_secs(15))
+            .expect("fqd did not stop");
+    }
+    let _ = std::fs::remove_dir_all(scratch);
+}
+
+#[test]
 fn fqd_reaches_steady_state_and_drains_on_sigterm() {
     let server = fq_test_support::NatsServer::start();
     let scratch = unique_scratch();

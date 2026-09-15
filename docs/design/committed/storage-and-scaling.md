@@ -407,10 +407,9 @@ retention state. Watch for:
 Default retention is 30 days (`max_age`) with S2 compression. To
 adjust:
 
-- **Shorter retention** — update `DEFAULT_MAX_AGE` in `bus.rs` or
-  surface a config field. The stream setting applies on creation;
-  existing streams need explicit update via the NATS API.
-- **Longer retention** — same, plus bump `max_file_store` in
+- **Shorter retention** — set `[events] max_age` in `fqd.toml`. The daemon
+  applies the value to new streams and updates existing streams on restart.
+- **Longer retention** — set the same key, plus bump `max_file_store` in
   `nats.conf` to match the expected size.
 - **Cold tier** — set up a mirror stream with longer retention on a
   separate, cheaper backing store.
