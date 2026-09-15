@@ -188,12 +188,17 @@ fmt:
 # harness = false, so cargo would run a benchmark as part of the gate.
 
 # NATS-backed tests spawn their own broker (#233) from the pinned nats-server,
-# provisioned by the `install-nats` dependency; the MCP integration tests need
-# Node/npx.
+# provisioned by the `install-nats` dependency. Node 20+ (including npx) is
+# required so missing local tooling cannot silently skip MCP integration tests
+# while leaving this gate green.
 # Run the runtime Rust gate (doc, build, test). fmt/clippy: `just quality`.
 runtime-ci: install-nats
     #!/usr/bin/env bash
     set -uo pipefail
+    if ! command -v npx >/dev/null 2>&1; then
+        echo "runtime-ci requires Node 20+ (including npx); install it from https://nodejs.org/." >&2
+        exit 1
+    fi
     # Anchor the phase log on the justfile's own directory, not the caller's
     # cwd. An inherited value wins: nested under the root gate, append to its
     # log rather than start our own (#223).
