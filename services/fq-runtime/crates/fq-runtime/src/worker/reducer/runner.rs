@@ -691,7 +691,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 "invocation {invocation_id} is already terminal; nothing to resume"
             )));
         }
-
+        self.queue_resume_notice(invocation_id, state_row.updated_at);
         // Re-validate the agent_id pulled from the store. It was
         // validated on insert (the runtime only writes through
         // AgentId), so a failure here means the database row was
@@ -2525,8 +2525,8 @@ mod failure;
 mod llm;
 mod mcp;
 mod replay;
+mod resume_notice;
 mod server_request;
-
 use mcp::{GrantServers, triggered_event};
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};

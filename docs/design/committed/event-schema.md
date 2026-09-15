@@ -502,7 +502,7 @@ Published by the runner when a queued host notice is drained into the conversati
 
 - **The WAL row is the source of truth, not this event.** `queue_host_notice` persists the notice into `worker.db`'s `host_notice` table before the `StepInput` that carries it is built, and resume replays that row verbatim. A notice recorded by an incarnation that then crashed is *not* re-emitted on resume — the event is observability, the row is the channel.
 - **`body` arrives fully rendered**, `<host-notice>` sentinel included. Producers render once; replay never re-renders, so the exact string is what the model saw.
-- **Production kinds:** `context_pressure` warns the agent when its model context crosses the soft threshold. The simulation harness also exercises the channel directly.
+- **Production kinds:** `context_pressure` warns the agent when its model context crosses the soft threshold. `resume` tells an agent that an interrupted invocation restarted after a meaningful gap, including a coarse elapsed duration so it can re-verify volatile state. The simulation harness also exercises the channel directly.
 
 ### `invocation.ambiguous`
 
