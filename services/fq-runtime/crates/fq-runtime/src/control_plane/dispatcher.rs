@@ -1290,6 +1290,9 @@ You are a test agent."#
         struct BlockingWorker {
             started: Arc<AtomicUsize>,
             release: Arc<Notify>,
+            /// The invocation id this worker's first WAL write carries,
+            /// fixed so the test can read it back off the claim row.
+            wal_invocation: Uuid,
         }
         #[async_trait::async_trait]
         impl Worker for BlockingWorker {
@@ -1305,7 +1308,7 @@ You are a test agent."#
                 // Simulate the first WAL write landing: this is what lets
                 // the dispatcher ack while the invocation is still
                 // in-flight (issue #41).
-                durable_start.fire(uuid::Uuid::now_v7());
+                durable_start.fire(self.wal_invocation);
                 self.release.notified().await;
                 Ok(crate::worker::InvocationOutcome::Completed {
                     invocation_id: Uuid::now_v7(),
@@ -1340,9 +1343,11 @@ You are a test agent."#
 
         let started = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
+        let durable_invocation_id = Uuid::now_v7();
         let worker: Arc<dyn Worker> = Arc::new(BlockingWorker {
             started: started.clone(),
             release: release.clone(),
+            wal_invocation: durable_invocation_id,
         });
         let claim_dir = tempfile::tempdir().unwrap();
         let claim_store = Arc::new(
@@ -1360,7 +1365,7 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
                 2,
             )
-            .with_trigger_claims(claim_store, "worker-a"),
+            .with_trigger_claims(claim_store.clone(), "worker-a"),
         );
 
         let mut consumer = bus
@@ -1388,6 +1393,7 @@ You are a test agent."#
         };
 
         let duplicate = msg.clone();
+        let duplicate_seq = duplicate.info().unwrap().stream_sequence;
         let d = dispatcher.clone();
         let permit = a_permit(&d).await;
         let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
@@ -1427,12 +1433,38 @@ You are a test agent."#
         // Feed the same stream message through `handle` again, modelling
         // the incident's attempt-2 copy after the WAL write. The durable
         // claim must ack it without starting a second invocation.
+        //
+        // Under a timeout because the failure this pins has two faces: a
+        // duplicate that runs, and a duplicate that *waits* — skip
+        // `mark_trigger_started` and the row still reads `claimed`, so
+        // this copy takes the same-worker `Held` arm and, driven from the
+        // run loop, parks. Timed out here, that reads as a failure of
+        // this test rather than as a suite that hangs for a minute.
         let permit = a_permit(&dispatcher).await;
-        dispatcher.handle(&duplicate, permit).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatcher.handle(&duplicate, permit),
+        )
+        .await
+        .expect("the duplicate is answered rather than held");
         assert_eq!(
             started.load(Ordering::SeqCst),
             1,
             "duplicate was refused before invocation"
+        );
+        // The row is what made that answer: `durably_started` is written
+        // before the first copy's ack, and reading it back is how a
+        // missing `mark_trigger_started` fails an assertion here instead
+        // of turning into a hang somewhere else.
+        assert_eq!(
+            claim_store
+                .claim_trigger(test_key(&bus, duplicate_seq), "worker-a", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Started {
+                invocation_id: durable_invocation_id.to_string()
+            },
+            "the claim must record the durable start, with the WAL's invocation id"
         );
         assert_eq!(
             bus.consumer_ledger()
