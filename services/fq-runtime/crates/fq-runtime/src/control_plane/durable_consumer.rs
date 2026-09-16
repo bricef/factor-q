@@ -1,14 +1,14 @@
 //! The shared durable-consumer loop for control-plane event
 //! consumers (#192).
 //!
-//! Every control-plane consumer of the factor-q event stream has
-//! the same lifecycle: create (or re-attach to) a durable
-//! JetStream consumer, loop on `select!` with biased shutdown,
-//! deserialise each message into an [`Event`], dispatch to a
-//! handler, and ACK or NAK by error class. Before this module
-//! that loop was copy-pasted per consumer and the copies drifted
-//! in small ways; now the loop — and with it the ack policy —
-//! lives in exactly one place.
+//! Every control-plane consumer has the same lifecycle: create
+//! (or re-attach to) a durable JetStream consumer, loop on
+//! `select!` with biased shutdown, admit each message as a value
+//! the handler can take, dispatch to that handler, and ACK or NAK
+//! by error class. Before this module that loop was copy-pasted
+//! per consumer and the copies drifted in small ways; now the
+//! loop — and with it the ack policy — lives in exactly one
+//! place.
 //!
 //! **This is the way to add a control-plane consumer.** Give it
 //! a durable name, a subject filter, and a handler; do not
@@ -45,10 +45,10 @@
 //!   retry a message this build can never parse. The version is read
 //!   before the shape ([`Event::from_wire`]), so an older envelope
 //!   whose body happens to parse against the current types halts the
-//!   loop too. Every consumer on this loop halts, not only the
-//!   projector: the version is a fact about the stream, and every
-//!   reader of it is behind the same binary. [`admit`] is that
-//!   decision as a value.
+//!   loop too. Every *event-stream* consumer on this loop halts,
+//!   not only the projector: the version is a fact about the
+//!   stream, and every reader of it is behind the same binary.
+//!   [`admit`] is that decision as a value.
 //! - **Handler `Ok`** → ACK'd.
 //! - **[`HandlerError::Transient`]** → NAK'd with an escalating
 //!   delay, and logged at a bounded rate. The delay comes from the
@@ -66,6 +66,24 @@
 //!   purpose); redelivery would only repeat the failure.
 //! - **Stream read error** → logged; the loop continues.
 //! - **Stream end** → logged; the loop exits.
+//!
+//! That table is the *whole* policy, but the first two rows of it
+//! are reachable only through an admission that can produce them.
+//! The loop is generic over an admission —
+//! `Fn(&Message) -> Admission<T>` — which turns a delivery into
+//! whatever the handler takes. [`admit`] is the event-stream
+//! admission: it reads the envelope version, deserialises an
+//! [`Event`], and is the only admission that yields `Halt` or
+//! `AckMalformed`. The maintenance consumer
+//! ([`crate::control_plane::maintenance`]) rides the same loop
+//! from the `fq-maintenance` stream with an identity admission
+//! that yields only `Accept` — its messages are opaque scheduler
+//! bodies with no envelope to read — so that consumer can never
+//! halt and never counts a malformed message, by construction
+//! rather than by convention
+//! (<https://github.com/bricef/factor-q/issues/669> is unaffected).
+//! The handler-verdict rows — `Ok`, `Transient`, `Permanent` —
+//! apply to every consumer alike.
 //!
 //! Delivery is at-least-once, so handlers MUST be idempotent
 //! under redelivery. Every current handler is: upserts by

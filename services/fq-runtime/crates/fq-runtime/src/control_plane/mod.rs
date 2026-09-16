@@ -44,9 +44,10 @@
 //!   stale-worker one (#37).
 //! - [`maintenance`] — the maintenance consumer (#257): runs the
 //!   named housekeeping task an external scheduler (fq-cron) asks
-//!   for on `fq.maintenance.<task>`, and records the outcome. Not on
-//!   the shared durable loop, because its messages are scheduler
-//!   payloads rather than events — see the module doc.
+//!   for on `fq.maintenance.<task>`, and records the outcome. On
+//!   the shared durable loop with an identity admission, because
+//!   its messages are scheduler payloads rather than events — see
+//!   the module doc.
 //! - [`advisory_watch`] — drains the captured JetStream
 //!   MAX_DELIVERIES advisories for the trigger stream and emits
 //!   the dead-letter events the dispatcher's inline path cannot
