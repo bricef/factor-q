@@ -71,13 +71,16 @@ remote (or, later, production) instance — useful for debugging and backups:
 
 ```sh
 fq-cas serve --bind 127.0.0.1:9000           # run the server (one terminal)
-fq-cas --server 127.0.0.1:9000 put file      # client: every command works remotely
+fq-cas --server 127.0.0.1:9000 put file      # client: use the six safe CAS verbs remotely
 fq-cas --server 127.0.0.1:9000 metrics
 ```
 
 > This CID-level `serve` is **unauthenticated** — the M2 access-control gate
 > sits at the named `Repository` layer, not on this endpoint. Keep it on
-> localhost; token-gated remote exposure of the named service is M5's charter.
+> localhost. Its RPC surface is limited to `put`, `get`, `get_range`, `has`,
+> `size`, and `stats`; object/block removal and block inspection remain
+> in-process collector operations until M5 authentication. Token-gated remote
+> exposure of the named service is M5's charter.
 
 ## Library
 
@@ -85,7 +88,9 @@ fq-cas --server 127.0.0.1:9000 metrics
 seven required methods (`put` / `get` / `get_range` / `has` / `size` /
 `stats` / `remove`) plus provided ones a backend may override — with a
 BLAKE3 + FastCDC filesystem backend (`fs::FilesystemStore`) and a `tarpc`
-network client (`service::RemoteStore`, behind the `service` feature).
+network client (`service::RemoteStore`, behind the `service` feature). The
+remote client supports the six safe RPC verbs above and reports GC-only
+operations as unsupported.
 
 Every backend is held to one bar: the shared, property-based **conformance
 suite**. See

@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use fq_store::ContentStore;
 use fq_store::conformance;
 use fq_store::fs::{ChunkParams, FilesystemStore};
-use fq_store::service::{self, RemoteStore};
+use fq_store::service::{self, CAS_SERVICE_V2_METHODS, RemoteStore};
+use fq_store::{Cid, ContentStore, StoreError};
 
 /// Start a CAS server on an ephemeral localhost port; return its address.
 async fn start_server() -> String {
@@ -60,15 +60,33 @@ async fn remote_store_passes_conformance_over_the_wire() {
         .unwrap();
 }
 
-/// `remove` over the wire — an isolated store, since deletion leaves orphan
-/// blocks (reclaimed by the collector, slice 5) that would trip the shared
-/// store's `stats_consistent` check.
+#[test]
+fn wire_service_exposes_exactly_the_six_client_verbs() {
+    assert_eq!(
+        CAS_SERVICE_V2_METHODS,
+        ["put", "get", "get_range", "has", "size", "stats"]
+    );
+}
+
 #[tokio::test]
-async fn remote_store_supports_deletion_over_the_wire() {
+async fn remote_store_rejects_gc_operations() {
     let addr = start_server().await;
     let store = RemoteStore::connect(&addr).await.unwrap();
-    let big = vec![4u8; 40_000];
-    for content in [&b""[..], &b"a deletable object"[..], big.as_slice()] {
-        conformance::removal(&store, content).await.unwrap();
+    let cid = Cid::of(b"not sent over the wire");
+
+    for (operation, result) in [
+        ("remove", store.remove(&cid).await),
+        ("has_block", store.has_block(&cid, 0).await.map(|_| ())),
+        ("remove_block", store.remove_block(&cid, 0).await),
+    ] {
+        let StoreError::Unsupported(message) = result.unwrap_err() else {
+            panic!("{operation} did not return Unsupported");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "{operation} is not exposed over the wire until M5 authentication; run the collector in-process"
+            )
+        );
     }
 }

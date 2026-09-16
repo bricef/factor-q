@@ -22,7 +22,9 @@ one-line caveats.
   expose the port beyond the host, and replace the token for any non-local
   deployment.
 - **`fq-cas serve`:** the content-store service is localhost-only and
-  unauthenticated until M5.
+  unauthenticated until M5. Its RPC surface is restricted to `put`, `get`,
+  `get_range`, `has`, `size`, and `stats`; GC-only removal and block-inspection
+  operations run in-process and are not exposed over the wire.
 - **Agent identity:** agent GitHub actions currently use the owner's
   `GH_TOKEN`; per-agent identity and attestation are still
   [design work](docs/design/aspirational/agent-identity-and-attestation.md).
