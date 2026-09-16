@@ -152,8 +152,8 @@ fn main() -> ExitCode {
     let allows = allow_ratchet(&measured);
 
     let ok = if flags.contains(&"--bless") {
-        // Both, unconditionally — a partial bless leaves the tree in a state
-        // where the next run fails on whichever half was skipped.
+        // All, unconditionally — a partial bless leaves the tree in a state
+        // where the next run fails on whichever ratchet was skipped.
         let a = files.bless(&root, &file_header());
         let b = functions.bless(&root, &fn_header());
         let c = arities.bless(&root, arity_header());

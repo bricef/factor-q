@@ -742,7 +742,7 @@ lint-sources:
 # Budgets may only go down (`just sizes-bless`). Raising one, or admitting a
 # new entry, means hand-editing the baseline — it shows in the diff and needs
 # a human at the merge gate.
-# Enforce the file/function size and allow-census ratchets.
+# Enforce the file/function size, function-arity, and allow-census ratchets.
 lint-sizes:
     cargo run -q -p fq-lint
 
@@ -772,7 +772,7 @@ lint-clippy:
     run_phase "test-support" cargo clippy -p fq-test-support --all-targets -- -D warnings
     run_phase "fq-lint"      cargo clippy -p fq-lint --all-targets -- -D warnings
 
-# The measurement rule both ratchets depend on. Runs inside `just quality` so
+# The AST measurement rules the ratchets depend on. Runs inside `just quality` so
 # the linter proves itself before it gates anything else.
 # Run fq-lint's own unit tests.
 test-fq-lint:
@@ -800,7 +800,7 @@ lint-creep:
 
 # Refuses to raise any budget or admit a new entry — the ratchets only ever
 # tighten, so a budget can be lowered automatically but never relaxed.
-# Lower size and allow-census budgets to match reality.
+# Lower size, arity, and allow-census budgets to match reality.
 sizes-bless:
     cargo run -q -p fq-lint -- --bless
 
