@@ -2,6 +2,7 @@
 //! file that ships is the file you read (#390); `super::*` keeps the
 //! same access it had inline.
 
+use super::invocations::{active, invocations};
 use super::*;
 
 /// The health page links working and stuck invocation ids (#130) —
