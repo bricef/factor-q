@@ -1,0 +1,14 @@
+# Per-lint production `#[allow]` / `#[expect]` exception budgets.
+#
+# Generated and maintained by `just sizes-bless`; enforced by
+# `just lint-sizes` (tools/fq-lint) in the Code quality CI job.
+#
+# Counts come from the syn AST. Test-gated items and out-of-scope test
+# trees are excluded. Counts may only go DOWN; a new lint or an increase
+# requires hand-editing this file so a human sees it in the diff.
+clippy::large_enum_variant 1
+clippy::too_many_arguments 13
+clippy::type_complexity 2
+dead_code 1
+deprecated 1
+unused_imports 1
