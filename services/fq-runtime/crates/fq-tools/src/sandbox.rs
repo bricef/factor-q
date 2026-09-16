@@ -447,7 +447,26 @@ fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
             source: err,
         },
     })?;
-    Ok(canonical_parent.join(filename))
+    let candidate = canonical_parent.join(filename);
+    // The `NotFound` arm above is reached by two different shapes: a
+    // genuinely absent final component, and a *dangling symlink named
+    // with a trailing `/` or `/.`* — `symlink_metadata` resolves the
+    // link in that case (a trailing slash asserts "directory") and so
+    // reports `ENOENT` for a link that plainly exists. Joining the file
+    // name onto the canonical parent silently strips the slash and
+    // hands back the link itself, which `check_within` then approves.
+    // Re-checking the joined candidate closes that hole, and is robust
+    // to any other resolver mismatch that lands here.
+    if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(SandboxError::PermissionDenied {
+            target: target.to_path_buf(),
+            reason: format!(
+                "write through dangling or unresolvable symlink {} denied",
+                candidate.display()
+            ),
+        });
+    }
+    Ok(candidate)
 }
 
 /// Errors from sandbox checks.
@@ -845,6 +864,43 @@ mod tests {
         let sb = make_sandbox(&[], &[allowed.path()]);
         let err = sb.check_write(&link).unwrap_err();
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    /// A trailing slash makes `symlink_metadata` resolve the final link,
+    /// so a dangling one reports `ENOENT` and used to fall through to
+    /// the lexical parent-join, which approved the link itself.
+    #[test]
+    fn write_dangling_symlink_with_trailing_slash_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let outside = other.path().join("victim.txt");
+        let link = allowed.path().join("notes.txt");
+        symlink(&outside, &link).unwrap();
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let with_slash = PathBuf::from(format!("{}/", link.display()));
+        let err = sb.check_write(&with_slash).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PermissionDenied { .. }),
+            "expected PermissionDenied, got {err:?}"
+        );
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn write_dangling_symlink_with_trailing_slash_dot_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let outside = other.path().join("victim.txt");
+        let link = allowed.path().join("notes.txt");
+        symlink(&outside, &link).unwrap();
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let with_slash_dot = PathBuf::from(format!("{}/.", link.display()));
+        let err = sb.check_write(&with_slash_dot).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PermissionDenied { .. }),
+            "expected PermissionDenied, got {err:?}"
+        );
+        assert!(!outside.exists());
     }
 
     #[test]
