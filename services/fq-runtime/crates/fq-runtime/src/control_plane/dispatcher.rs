@@ -1705,8 +1705,9 @@ You are a test agent."#
 
         // A NAK redelivers the trigger; an ACK consumes it. Re-poll the
         // same stream: a redelivered message means it was NAK'd. The
-        // window covers the first-retry backoff (1s) with margin.
-        match tokio::time::timeout(Duration::from_secs(4), stream.next()).await {
+        // window covers the configured first-retry backoff with margin.
+        let redelivery_timeout = crate::bus::TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(3);
+        match tokio::time::timeout(redelivery_timeout, stream.next()).await {
             Ok(Some(Ok(redelivered))) => {
                 // Ack the redelivery so it doesn't churn after the test.
                 let _ = redelivered.ack().await;
@@ -2255,10 +2256,10 @@ You are a test agent."#
     /// #278 admission: a trigger for a paused model is not started while
     /// the pause holds, is started once it lifts, and is still the first
     /// delivery when it does. The pause is longer than the trigger
-    /// durable's one-second ack window and the dispatcher has a second
-    /// permit open, so this is also the proof that the hold keeps the
-    /// delivery alive: without the in-progress acks JetStream redelivers
-    /// at one second into that open pull and the worker sees a second
+    /// durable's ack window and the dispatcher has a second permit open,
+    /// so this is also the proof that the hold keeps the delivery alive:
+    /// without the in-progress acks JetStream redelivers when that window
+    /// expires during the open pull and the worker sees a second
     /// start (`a held trigger is started exactly once: left: 2`).
     #[tokio::test]
     async fn a_paused_models_trigger_is_held_and_started_once_after_the_pause() {
@@ -2266,7 +2267,7 @@ You are a test agent."#
         let bus = EventBus::connect(server.url()).await.expect("connect NATS");
         let agent_id_str = unique_agent_id("held-trigger");
         let (_dir, registry) = registry_with(&agent_id_str);
-        let pause = Duration::from_millis(1500);
+        let pause = crate::bus::TRIGGER_RETRY_BACKOFF[0] + Duration::from_millis(500);
         assert!(
             pause > crate::bus::TRIGGER_RETRY_BACKOFF[0],
             "the hold must outlast the ack window for this test to prove anything"
@@ -2297,7 +2298,7 @@ You are a test agent."#
         .await
         .expect("publish trigger");
 
-        wait_for_starts(&worker, 1, Duration::from_secs(8)).await;
+        wait_for_starts(&worker, 1, pause + Duration::from_secs(8)).await;
         let (started_at, attempt) = worker.starts.lock().unwrap()[0];
         assert!(
             started_at >= paused_at + pause - Duration::from_millis(50),
@@ -2311,7 +2312,7 @@ You are a test agent."#
         );
 
         // Past another ack window: a redelivered copy would start now.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(crate::bus::TRIGGER_RETRY_BACKOFF[0] + Duration::from_millis(500)).await;
         assert_eq!(
             worker.starts.lock().unwrap().len(),
             1,
@@ -2753,7 +2754,7 @@ You are a test agent."#
     /// worker cap is 8, and the third trigger waits and then starts *as
     /// its first delivery*.
     ///
-    /// The wait is longer than the trigger durable's one-second ack
+    /// The wait is longer than the trigger durable's 30-second ack
     /// window with seven further permits open, so this is also the proof
     /// that the hold keeps the delivery alive and consumes no
     /// redelivery: without the in-progress acks JetStream would redeliver
@@ -2780,9 +2781,10 @@ You are a test agent."#
         worker.wait_for_starts(1, Duration::from_secs(10)).await;
 
         // Past the ack window, with the other two triggers held.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let hold = crate::bus::TRIGGER_RETRY_BACKOFF[0] + Duration::from_millis(500);
+        tokio::time::sleep(hold).await;
         assert!(
-            crate::bus::TRIGGER_RETRY_BACKOFF[0] < Duration::from_millis(1500),
+            crate::bus::TRIGGER_RETRY_BACKOFF[0] < hold,
             "the hold must outlast the ack window for this test to prove anything"
         );
         assert_eq!(
@@ -2793,7 +2795,7 @@ You are a test agent."#
         assert!(
             worker.attempts().iter().all(|a| a == &Some(1)),
             "a held trigger must not be redelivered, got {:?}. A `Some(2)` here is a \
-             keepalive tick that slipped past the durable's one-second first-delivery \
+             keepalive tick that slipped past the durable's 30-second first-delivery \
              window — the duplicate-invocation class #327 owns — and not the cap failing",
             worker.attempts()
         );

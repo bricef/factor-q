@@ -157,14 +157,15 @@ pub fn trigger_max_deliveries_advisory_subject() -> String {
 /// **The first entry is also the trigger durable's real first-delivery
 /// deadline.** JetStream *replaces* a consumer's `ack_wait` with
 /// `backoff[0]` wherever a schedule is set, so the trigger consumer's
-/// ack window is one second — not `[bus] ack_wait_ms` — and a
-/// dispatcher that takes longer than that to reach its first WAL write
-/// has its trigger redelivered underneath it. That is the duplicate
-/// -invocation storm of <https://github.com/bricef/factor-q/issues/327>,
-/// which owns its own design; moving this number belongs there and not
-/// to whoever is next reading this line.
+/// ack window is 30 seconds — not `[bus] ack_wait_ms` — giving the
+/// 250 ms hold keepalive about 120 ticks to reach its first WAL write
+/// without the trigger being redelivered underneath it. The tradeoff is
+/// that a dispatcher crash before durable start is recovered after 30
+/// seconds instead of one. This is a stopgap for the duplicate-invocation
+/// storm of <https://github.com/bricef/factor-q/issues/327>, which owns
+/// the durable design.
 pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
-    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(30),
     std::time::Duration::from_secs(5),
     std::time::Duration::from_secs(30),
     std::time::Duration::from_secs(120),
