@@ -44,6 +44,7 @@
 
 mod admission;
 mod agent_cap;
+mod claim;
 mod dead_letter;
 mod deferral;
 
@@ -186,6 +187,8 @@ pub struct TriggerDispatcher {
     /// Set once the loop has seen its shutdown signal, so a trigger held
     /// for a paused model lets go rather than blocking the stop.
     stopping: AtomicBool,
+    /// Durable stream-sequence arbiter, installed by the daemon.
+    claim_store: Option<claim::ClaimStore>,
 }
 
 impl TriggerDispatcher {
@@ -210,6 +213,7 @@ impl TriggerDispatcher {
             due: std::sync::Mutex::new(Some(due)),
             agent_caps: AgentConcurrency::new(),
             stopping: AtomicBool::new(false),
+            claim_store: None,
         }
     }
 
@@ -259,6 +263,7 @@ impl TriggerDispatcher {
             max_concurrent = self.max_concurrent,
             "trigger dispatcher starting"
         );
+        self.bus.consumer_ledger().start(consumer_name);
         // Ack-window sizing: with the one-message pull batch below,
         // unacked genuinely stays around the in-dispatch window
         // (ack-on-durable-start fires seconds into a run). The window is
@@ -477,6 +482,16 @@ impl TriggerDispatcher {
     /// agent's cap and re-taken before the invocation runs, so it is
     /// returned here rather than by the caller.
     async fn handle(&self, msg: &async_nats::jetstream::Message, permit: OwnedSemaphorePermit) {
+        // First operation by design: no drain, routing, parsing, or trigger-id
+        // minting happens until this broker identity has been arbitrated.
+        let claim::Admission::Proceed {
+            stream_seq,
+            delivered: delivery_attempt,
+        } = self.claim_delivery(msg).await
+        else {
+            return;
+        };
+
         // A drain requested after this trigger was pulled but before it
         // was dispatched: leave it un-acked so it redelivers to the next
         // binary rather than starting an invocation that would only
@@ -615,7 +630,7 @@ impl TriggerDispatcher {
         // before firing it (a permanent error before any WAL write, or a
         // worker that never signals), we ack on return — retrying a
         // permanent error would not help, and the run already happened.
-        let delivery_attempt = msg.info().map(|info| info.delivered as u32).unwrap_or(1);
+        let delivery_attempt = u32::try_from(delivery_attempt).unwrap_or(1);
         let (durable_start, mut durably_started) = DurableStart::channel();
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
             &loaded.agent,
@@ -626,6 +641,7 @@ impl TriggerDispatcher {
         ));
 
         let mut acked = false;
+        let mut durable_start_observed = false;
         let result = loop {
             tokio::select! {
                 biased;
@@ -635,9 +651,11 @@ impl TriggerDispatcher {
                     // returned before its first WAL write). Either way,
                     // stop waiting on this branch; the ack below (on
                     // return) covers the drop case.
-                    if signal.is_ok() {
-                        self.ack(msg, Some(trigger_id), "durably started").await;
-                        acked = true;
+                    if let Ok(invocation_id) = signal {
+                        durable_start_observed = true;
+                        acked = self
+                            .mark_durable_started(msg, stream_seq, trigger_id, invocation_id)
+                            .await;
                     }
                 }
                 outcome = &mut invocation => break outcome,
@@ -657,7 +675,7 @@ impl TriggerDispatcher {
         //   poison trigger would loop under the consumer's unbounded
         //   redelivery.
         //
-        if !acked {
+        if !acked && !durable_start_observed {
             match (trigger_fate(&result, delivery_attempt), &result) {
                 (TriggerFate::DeadLetter, Err(err)) => {
                     self.dead_letter_exhausted(
@@ -694,58 +712,6 @@ impl TriggerDispatcher {
         }
 
         self.conclude(agent_id, result, agent_slot);
-    }
-
-    async fn ack(
-        &self,
-        msg: &async_nats::jetstream::Message,
-        trigger_id: Option<uuid::Uuid>,
-        context: &str,
-    ) {
-        if let Err(err) = msg.ack().await {
-            error!(
-                error = %err,
-                context,
-                subject = %msg.subject,
-                trigger_id = %trigger_name(trigger_id),
-                "failed to ack trigger message"
-            );
-        }
-    }
-
-    /// NAK a trigger so JetStream redelivers it — used when an
-    /// invocation fails *before its first WAL write* with a transient
-    /// error, so the otherwise-lost run is retried. The delay escalates
-    /// with the delivery attempt ([`trigger_retry_backoff`]); a bare
-    /// `Nak(None)` would redeliver immediately and burn the bounded
-    /// retries in a tight loop.
-    async fn nak(
-        &self,
-        msg: &async_nats::jetstream::Message,
-        trigger_id: uuid::Uuid,
-        delay: std::time::Duration,
-        context: &str,
-    ) {
-        if let Err(err) = msg
-            .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
-            .await
-        {
-            error!(
-                error = %err,
-                context,
-                subject = %msg.subject,
-                trigger_id = %trigger_id,
-                "failed to NAK trigger message"
-            );
-        } else {
-            warn!(
-                context,
-                subject = %msg.subject,
-                trigger_id = %trigger_id,
-                retry_in_ms = delay.as_millis() as u64,
-                "NAK'd trigger for redelivery"
-            );
-        }
     }
 
     fn log_executor_error(&self, err: &ExecutorError) {
@@ -791,6 +757,7 @@ pub enum DispatcherError {
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
+    use crate::bus::TRIGGER_STREAM_NAME;
     use crate::events::{EventPayload, FailureKind, StopReason, TokenUsage};
     use crate::llm::ChatResponse;
     use crate::llm::fixture::FixtureClient;
@@ -1300,7 +1267,7 @@ You are a test agent."#
     /// ack-on-completion behaviour this times out (the message stays
     /// unacked while the invocation runs).
     #[tokio::test]
-    async fn trigger_is_acked_before_the_invocation_finishes() {
+    async fn started_claim_acks_duplicate_without_second_invocation() {
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
         use std::sync::Arc;
@@ -1325,7 +1292,7 @@ You are a test agent."#
                 // Simulate the first WAL write landing: this is what lets
                 // the dispatcher ack while the invocation is still
                 // in-flight (issue #41).
-                durable_start.fire();
+                durable_start.fire(uuid::Uuid::now_v7());
                 self.release.notified().await;
                 Ok(crate::worker::InvocationOutcome::Completed {
                     invocation_id: Uuid::now_v7(),
@@ -1364,13 +1331,24 @@ You are a test agent."#
             started: started.clone(),
             release: release.clone(),
         });
-        let dispatcher = Arc::new(TriggerDispatcher::new(
-            bus.clone(),
-            shared_registry(registry),
-            worker,
-            Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
-            1,
-        ));
+        let claim_dir = tempfile::tempdir().unwrap();
+        let claim_store = Arc::new(
+            crate::control_plane::ControlPlaneStore::open(
+                &claim_dir.path().join("control-plane.db"),
+            )
+            .await
+            .unwrap(),
+        );
+        let dispatcher = Arc::new(
+            TriggerDispatcher::new(
+                bus.clone(),
+                shared_registry(registry),
+                worker,
+                Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
+                2,
+            )
+            .with_trigger_claims(claim_store, "worker-a"),
+        );
 
         let mut consumer = bus
             .trigger_consumer_with_filter(
@@ -1396,6 +1374,7 @@ You are a test agent."#
                 .expect("message ok")
         };
 
+        let duplicate = msg.clone();
         let d = dispatcher.clone();
         let permit = a_permit(&d).await;
         let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
@@ -1431,6 +1410,24 @@ You are a test agent."#
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+
+        // Feed the same stream message through `handle` again, modelling
+        // the incident's attempt-2 copy after the WAL write. The durable
+        // claim must ack it without starting a second invocation.
+        let permit = a_permit(&dispatcher).await;
+        dispatcher.handle(&duplicate, permit).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "duplicate was refused before invocation"
+        );
+        assert_eq!(
+            bus.consumer_ledger()
+                .record(CONSUMER_NAME)
+                .duplicate_dropped,
+            1,
+            "duplicate drop is exposed in the consumer ledger"
+        );
 
         release.notify_one();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
@@ -2016,7 +2013,7 @@ You are a test agent."#
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            durable_start.fire();
+            durable_start.fire(uuid::Uuid::now_v7());
             self.gate.acquire().await.expect("gate open").forget();
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
@@ -2221,7 +2218,7 @@ You are a test agent."#
                 .lock()
                 .unwrap()
                 .push((std::time::Instant::now(), delivery_attempt));
-            durable_start.fire();
+            durable_start.fire(uuid::Uuid::now_v7());
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
                 response: canned_response(),
@@ -2251,6 +2248,152 @@ You are a test agent."#
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn held_claims_stop_same_worker_and_are_adopted_from_another_worker() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("claim-arbitration");
+        let (_agents, registry) = registry_with(&agent_id_str);
+        let worker = Arc::new(RecordingWorker::default());
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::control_plane::ControlPlaneStore::open(&store_dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let dispatcher = Arc::new(
+            TriggerDispatcher::new(
+                bus.clone(),
+                registry,
+                worker.clone(),
+                Arc::new(FixtureClient::new()),
+                1,
+            )
+            .with_trigger_claims(store.clone(), "worker-a"),
+        );
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::events::subjects::trigger(&agent_id_str),
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .unwrap();
+
+        let agent = AgentId::new(&agent_id_str).unwrap();
+        bus.publish_trigger(&agent, &json!({"input": "same worker"}))
+            .await
+            .unwrap();
+        let msg = {
+            let mut messages = consumer.messages().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        let seq = msg.info().unwrap().stream_sequence;
+        assert_eq!(
+            store
+                .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Won
+        );
+        dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
+        assert!(worker.starts.lock().unwrap().is_empty());
+        assert_eq!(consumer.info().await.unwrap().num_ack_pending, 1);
+
+        // Once the original owner gives the unfinished claim back, that
+        // same delivery remains runnable and starts exactly once.
+        store
+            .release_trigger_claim(TRIGGER_STREAM_NAME, seq)
+            .await
+            .unwrap();
+        dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
+        assert_eq!(worker.starts.lock().unwrap().len(), 1);
+
+        bus.publish_trigger(&agent, &json!({"input": "restart"}))
+            .await
+            .unwrap();
+        let restart_msg = {
+            let mut messages = consumer.messages().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        let restart_seq = restart_msg.info().unwrap().stream_sequence;
+        store
+            .claim_trigger(TRIGGER_STREAM_NAME, restart_seq, "dead-worker", 0)
+            .await
+            .unwrap();
+        dispatcher
+            .handle(&restart_msg, a_permit(&dispatcher).await)
+            .await;
+        assert_eq!(
+            worker.starts.lock().unwrap().len(),
+            2,
+            "dead worker's claim is adopted"
+        );
+    }
+
+    #[tokio::test]
+    async fn requeue_held_releases_old_stream_sequence_claim() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.unwrap();
+        let agent_id_str = unique_agent_id("claim-requeue");
+        let (_agents, registry) = registry_with(&agent_id_str);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::control_plane::ControlPlaneStore::open(&store_dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let dispatcher = TriggerDispatcher::new(
+            bus.clone(),
+            registry,
+            Arc::new(RecordingWorker::default()),
+            Arc::new(FixtureClient::new()),
+            1,
+        )
+        .with_trigger_claims(store.clone(), "worker-a");
+        let agent = AgentId::new(&agent_id_str).unwrap();
+        let consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::events::subjects::trigger(&agent_id_str),
+                1,
+            )
+            .await
+            .unwrap();
+        let payload = json!({"input": "requeue"});
+        bus.publish_trigger(&agent, &payload).await.unwrap();
+        let msg = {
+            let mut messages = consumer.messages().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        let seq = msg.info().unwrap().stream_sequence;
+        store
+            .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 0)
+            .await
+            .unwrap();
+        dispatcher.requeue_held(&msg, &agent, None, &payload).await;
+        assert_eq!(
+            store
+                .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 1)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Won,
+            "requeue ACK releases the old sequence claim"
+        );
     }
 
     /// #278 admission: a trigger for a paused model is not started while
@@ -2411,7 +2554,7 @@ You are a test agent."#
             _delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
-            durable_start.fire();
+            durable_start.fire(uuid::Uuid::now_v7());
             *self.deferred_at.lock().unwrap() = Some(std::time::Instant::now());
             Ok(crate::worker::InvocationOutcome::Deferred {
                 invocation_id: self.invocation_id,
@@ -2647,7 +2790,7 @@ You are a test agent."#
             ));
             let open = self.open.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(open, SeqCst);
-            durable_start.fire();
+            durable_start.fire(uuid::Uuid::now_v7());
             self.finish.acquire().await.expect("gate open").forget();
             self.open.fetch_sub(1, SeqCst);
             if self.fail.load(SeqCst) {
