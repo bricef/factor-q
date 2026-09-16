@@ -260,7 +260,8 @@ budget: 0.20
 ---
 
 You can read files anywhere under /data/project and write output
-files to /data/project/output.
+files to /data/project/output. Writes through symlinks are refused unless
+the link resolves inside the allowed `fs_write` prefix.
 ```
 
 ### Command runner
