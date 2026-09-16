@@ -209,7 +209,10 @@ impl TriggerDispatcher {
     /// `None` back is a drain or shutdown during the wait — the same
     /// answer [`Admission::Interrupted`] gives, and it earns the same
     /// treatment: the caller returns without acking, leaving the
-    /// delivery for the next binary.
+    /// delivery for the next binary. **Both** arms answer it, because a
+    /// drain is also how a permit comes free: suspending runners release
+    /// theirs, so a waiter can be handed one by the very drain that
+    /// should have stopped it.
     ///
     /// **One waiter, registered once.** The acquire future is created
     /// before the loop and polled through the whole wait, so the trigger
@@ -231,13 +234,31 @@ impl TriggerDispatcher {
             tokio::select! {
                 biased;
                 permit = &mut acquire => {
+                    let permit = permit.expect("dispatcher semaphore is never closed");
+                    // The drain frees permits too. Every runner releases
+                    // its own as it suspends, and that release wakes the
+                    // head of this FIFO — whose first-polled arm, under
+                    // `biased`, is this one. Without the check a trigger
+                    // would be started *into a draining worker* by the
+                    // very drain that was meant to stop it. Dropping the
+                    // permit here hands it back to a semaphore nothing
+                    // will take from again: the exit is process-terminal.
+                    if self.stopping() {
+                        drop(permit);
+                        debug!(
+                            trigger_id = %trigger_name(trigger_id),
+                            "a worker permit freed during a drain or shutdown; \
+                             nothing is started"
+                        );
+                        return None;
+                    }
                     if waited {
                         debug!(
                             trigger_id = %trigger_name(trigger_id),
                             "a worker permit freed; starting the waiting trigger"
                         );
                     }
-                    return Some(permit.expect("dispatcher semaphore is never closed"));
+                    return Some(permit);
                 }
                 _ = tokio::time::sleep(HOLD_KEEPALIVE) => {
                     if self.stopping() {
