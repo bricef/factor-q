@@ -685,16 +685,158 @@ mod tests {
                 total_duration_ms: 10,
             }),
         );
+        // Built independently of the folded turn: the timestamp comes
+        // from the *event*, which is what the fold is claimed to carry
+        // through, not from the turn the fold produced. Compared against
+        // the folded turn's own `timestamp_ms` this assertion could only
+        // ever fail on `phase`.
+        let event_ms = outcome_event.envelope.timestamp.timestamp_millis();
         let outcome = TurnFold::new().apply(8, &outcome_event).unwrap();
-        let folded = serde_json::to_vec(&outcome.transcript_entry()).unwrap();
-        let wal = serde_json::to_vec(&TranscriptEntry::Outcome {
-            timestamp_ms: outcome.timestamp_ms,
-            phase: "completed".into(),
-        })
-        .unwrap();
         assert_eq!(
-            folded, wal,
-            "the folded outcome is byte-identical to the WAL transcript outcome"
+            serde_json::to_vec(&outcome.transcript_entry()).unwrap(),
+            serde_json::to_vec(&TranscriptEntry::Outcome {
+                timestamp_ms: event_ms,
+                phase: "completed".into(),
+            })
+            .unwrap(),
+            "the bridge carries the terminal event's own timestamp and phase"
+        );
+    }
+
+    /// The equivalence that matters, stated against the **real** WAL
+    /// producer rather than a literal rebuilt from the fold's own
+    /// output: one run, closed once, read both ways.
+    ///
+    /// `Views::transcript` synthesises its Outcome from the invocation
+    /// row's `terminal_at` (`views/transcript.rs`), stamped by the
+    /// runner before the state upsert; the fold takes the terminal
+    /// event's envelope timestamp, stamped when `Event::new` builds it
+    /// afterwards. So the honest contract is: every field equal but the
+    /// timestamp, and the two timestamps near — the same terminal
+    /// instant read twice off one clock, never the same number. Both
+    /// readings here come from that one clock, moments apart, exactly
+    /// as production takes them.
+    #[tokio::test]
+    async fn folded_outcome_matches_the_wal_outcome() {
+        use crate::control_plane::projection::ProjectionStore;
+        use crate::control_plane::store::ControlPlaneStore;
+        use crate::db::RuntimeDbPaths;
+        use crate::views::Views;
+        use crate::worker::store::{InvocationStateRow, WorkerStore};
+
+        /// The gap the two clock reads can open in a test process. Wide
+        /// enough that a loaded CI box cannot flake it, narrow enough
+        /// that a timestamp taken from somewhere other than this run's
+        /// terminal instant fails.
+        const NEAR_MS: i64 = 60_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimeDbPaths::under(dir.path());
+        let invocation = Uuid::now_v7();
+        let inv = invocation.to_string();
+
+        // The WAL side: one completed dispatch so the transcript exists
+        // at all, and the terminal row the Outcome is synthesised from.
+        let terminal_at = chrono::Utc::now().timestamp_millis();
+        {
+            let ws = WorkerStore::open(&paths.worker).await.unwrap();
+            ws.write_llm_intent(&inv, "req-1", "claude-haiku", "{}", terminal_at - 3)
+                .await
+                .unwrap();
+            ws.write_llm_dispatched(&inv, "req-1", terminal_at - 2)
+                .await
+                .unwrap();
+            ws.write_llm_completed(
+                &inv,
+                "req-1",
+                r#"{"content":"done"}"#,
+                false,
+                0.01,
+                terminal_at - 1,
+            )
+            .await
+            .unwrap();
+            ws.upsert_invocation_state(&InvocationStateRow {
+                invocation_id: inv.clone(),
+                agent_id: "fold-probe".into(),
+                schema_version: 1,
+                phase: "completed".into(),
+                state_blob: vec![],
+                step_index: 1,
+                started_at: terminal_at - 10,
+                updated_at: terminal_at,
+                terminal_at: Some(terminal_at),
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+            })
+            .await
+            .unwrap();
+            let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
+            let _proj = ProjectionStore::open(&paths.projection).await.unwrap();
+        }
+
+        // The turn side: the terminal event the same run publishes,
+        // stamped by `Event::new` from the same clock a moment later.
+        let folded = TurnFold::new()
+            .apply(
+                8,
+                &Event::new(
+                    AgentId::new("fold-probe").unwrap(),
+                    invocation,
+                    EventPayload::Completed(crate::events::CompletedPayload {
+                        task_status: crate::events::TaskStatus::Success,
+                        result_summary: Some("done".into()),
+                        total_llm_calls: 1,
+                        total_tool_calls: 0,
+                        total_cost: 0.01,
+                        total_duration_ms: 10,
+                    }),
+                ),
+            )
+            .expect("a terminal event is a turn")
+            .transcript_entry();
+
+        let views = Views::open(&paths).await.unwrap();
+        let wal = views
+            .transcript(&inv)
+            .await
+            .unwrap()
+            .expect("the run has dispatch rows")
+            .pop()
+            .expect("the WAL transcript closes with its outcome");
+        assert!(
+            matches!(wal, TranscriptEntry::Outcome { .. }),
+            "the WAL transcript must close with an Outcome, got {wal:?}"
+        );
+
+        // Compared as JSON so a field added to `TranscriptEntry::Outcome`
+        // later is covered without touching this test.
+        let mut wal_json = serde_json::to_value(&wal).unwrap();
+        let mut folded_json = serde_json::to_value(&folded).unwrap();
+        let wal_ms = wal_json
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp_ms")
+            .and_then(|v| v.as_i64())
+            .expect("wal timestamp");
+        let folded_ms = folded_json
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp_ms")
+            .and_then(|v| v.as_i64())
+            .expect("folded timestamp");
+
+        assert_eq!(
+            wal_json, folded_json,
+            "every Outcome field but the timestamp must agree with the WAL producer"
+        );
+        assert!(
+            (wal_ms - folded_ms).abs() <= NEAR_MS,
+            "the two producers read one terminal instant: WAL {wal_ms} vs folded {folded_ms}"
         );
     }
 }
