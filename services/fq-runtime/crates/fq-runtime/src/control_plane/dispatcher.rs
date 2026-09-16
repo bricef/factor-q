@@ -337,14 +337,12 @@ impl TriggerDispatcher {
                 break 'consume;
             }
 
-            // **The loop holds no worker permit** (#733). A permit is
-            // taken in `handle`, after both admission rules, by a
-            // trigger that is ready to run — never here, and never by
-            // anything that is only waiting. What bounds how much is
-            // pulled is the consumer's `max_ack_pending`, not the worker
-            // cap. Why taking one before the pull ("capacity before
-            // consumption") is no longer needed, and what it cost, is in
-            // `admission`'s module doc.
+            // **The loop holds no worker permit** (#733). Both arms
+            // below spawn a task that takes its own, at the one moment
+            // its work is ready to run; what bounds how much is pulled
+            // here is the consumer's `max_ack_pending`, not the worker
+            // cap. `admission`'s module doc is the why, and owns both
+            // spawned bodies.
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
@@ -352,24 +350,12 @@ impl TriggerDispatcher {
                     break 'consume;
                 }
                 Some(resume) = due.recv() => {
-                    let dispatcher = Arc::clone(&this);
-                    in_flight.spawn(async move {
-                        // A resume queues for its permit like everything
-                        // else, with no delivery to keep alive: its
-                        // trigger was acked at the first WAL write.
-                        let Some(_permit) = dispatcher.acquire_run_permit(None, None).await else {
-                            return;
-                        };
-                        dispatcher.resume_deferred(resume).await;
-                    });
+                    in_flight.spawn(Arc::clone(&this).resume_when_permitted(resume));
                 }
                 msg = messages.next() => {
                     match msg {
                         Some(Ok(msg)) => {
-                            let dispatcher = Arc::clone(&this);
-                            in_flight.spawn(async move {
-                                dispatcher.handle(&msg).await;
-                            });
+                            in_flight.spawn(Arc::clone(&this).dispatch_pulled(msg));
                         }
                         Some(Err(err)) => {
                             // Warn-and-continue (pre-fan-out behavior),
@@ -542,30 +528,11 @@ impl TriggerDispatcher {
             return;
         }
 
-        // Parse the payload as JSON. Empty body becomes null. Before the
-        // per-agent cap below, so a poison payload is refused now rather
-        // than after occupying a hold for however long the agent stays
-        // full.
-        let payload: serde_json::Value = if msg.payload.is_empty() {
-            serde_json::Value::Null
-        } else {
-            match serde_json::from_slice(&msg.payload) {
-                Ok(v) => v,
-                Err(err) => {
-                    warn!(
-                        agent_id = %agent_id,
-                        error = %err,
-                        "trigger payload is not valid JSON, dropping"
-                    );
-                    self.ack(
-                        msg,
-                        crate::trigger::trigger_id_in(msg.headers.as_ref()),
-                        "invalid payload",
-                    )
-                    .await;
-                    return;
-                }
-            }
+        // Before the per-agent cap below, so a poison payload is refused
+        // now rather than after occupying a hold for however long the
+        // agent stays full.
+        let Some(payload) = self.parse_payload(msg, &agent_id).await else {
+            return;
         };
 
         // Admission, second rule (#718): an agent already running

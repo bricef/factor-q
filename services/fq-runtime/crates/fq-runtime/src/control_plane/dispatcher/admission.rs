@@ -65,7 +65,8 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
 use super::{TriggerDispatcher, trigger_name};
-use crate::worker::DrainState;
+use crate::agent::AgentId;
+use crate::worker::{DrainState, DueResume};
 
 /// How often a held delivery is kept alive — and, because the check
 /// follows the ack, how often the hold asks whether it can stop.
@@ -103,6 +104,68 @@ pub(super) enum Admission {
 }
 
 impl TriggerDispatcher {
+    /// The whole task the consume loop spawns for a **pulled trigger**.
+    ///
+    /// Owned rather than borrowed, and `Arc<Self>` rather than `&self`,
+    /// because `JoinSet::spawn` needs a `'static` future. That is the
+    /// only reason it exists as a method: it keeps the loop's arm a
+    /// single line and puts the spawned body next to the admission
+    /// rules it runs.
+    pub(super) async fn dispatch_pulled(self: Arc<Self>, msg: async_nats::jetstream::Message) {
+        self.handle(&msg).await;
+    }
+
+    /// The whole task the consume loop spawns for a **due resume**
+    /// (#278): queue for a worker permit, then resume under it.
+    ///
+    /// A resume queues like everything else, with no delivery to keep
+    /// alive — its trigger was acked at the first WAL write — so it can
+    /// neither jump the triggers already waiting nor be jumped by them.
+    pub(super) async fn resume_when_permitted(self: Arc<Self>, resume: DueResume) {
+        let Some(_permit) = self.acquire_run_permit(None, None).await else {
+            return;
+        };
+        self.resume_deferred(resume).await;
+    }
+
+    /// The trigger's body as JSON, or `None` for one that will never
+    /// parse — acked and dropped, because a redelivery would only fail
+    /// the same way.
+    ///
+    /// An empty body is `null` rather than an error: a trigger with
+    /// nothing to say is a legitimate trigger.
+    ///
+    /// This is admission's business even though it is not a hold: it is
+    /// a refusal on the trigger's own merits, and it is deliberately
+    /// asked *before* the cap hold so a poison payload does not occupy
+    /// a slot for however long the agent stays full.
+    pub(super) async fn parse_payload(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        agent: &AgentId,
+    ) -> Option<serde_json::Value> {
+        if msg.payload.is_empty() {
+            return Some(serde_json::Value::Null);
+        }
+        match serde_json::from_slice(&msg.payload) {
+            Ok(payload) => Some(payload),
+            Err(err) => {
+                warn!(
+                    agent_id = %agent,
+                    error = %err,
+                    "trigger payload is not valid JSON, dropping"
+                );
+                self.ack(
+                    msg,
+                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    "invalid payload",
+                )
+                .await;
+                None
+            }
+        }
+    }
+
     /// One pass of a hold: `false` once this dispatcher is on its way
     /// out and the trigger must not be started, `true` when the caller
     /// should ask its own question again.
