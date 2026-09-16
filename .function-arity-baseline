@@ -1,0 +1,22 @@
+# Per-function parameter budgets — the function-arity ratchet.
+#
+# Generated and maintained by `just sizes-bless`; enforced by
+# `just lint-sizes` (tools/fq-lint) in the Code quality CI job.
+#
+# Keys are `path::scope::name`; cfg-gated alternatives sharing a key use
+# the larger arity. Test functions are out of scope. A `self` receiver is
+# excluded, matching clippy's argument count.
+#
+# The cap of 7 matches clippy::too_many_arguments. Entries may only shrink.
+# `#[allow(clippy::too_many_arguments)]` is still counted by the allow
+# census (#419), so removing an allow and lowering this entry together is
+# the way down. Raising or admitting an entry requires a visible hand edit.
+services/fq-runtime/crates/fq-daemon/src/recovery.rs::spawn_resume_tasks 8
+services/fq-runtime/crates/fq-daemon/src/resume.rs::ResumeControl::new 8
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/emit.rs::llm_response_event 12
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/emit.rs::tool_result_event 8
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_loop_inner 21
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_self_inspect_with_wal 9
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner.rs::ReducerRunner::run_tool 13
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/deadline.rs::ReducerRunner::await_tool_under_deadline 12
+services/fq-runtime/crates/fq-runtime/src/worker/reducer/runner/llm.rs::ReducerRunner::run_structured_completion 8
