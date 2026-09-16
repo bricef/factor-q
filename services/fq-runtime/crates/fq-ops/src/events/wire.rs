@@ -160,3 +160,7 @@ pub fn declared_schema_version(bytes: &[u8]) -> Option<u32> {
         .flatten()
         .map(|(version, _)| version)
 }
+
+#[cfg(test)]
+#[path = "wire/proptests.rs"]
+mod proptests;

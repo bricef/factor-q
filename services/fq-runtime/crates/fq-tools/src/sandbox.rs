@@ -1184,3 +1184,7 @@ mod tests {
         assert!(matches!(err, SandboxError::NotFound(_)), "got: {err}");
     }
 }
+
+#[cfg(test)]
+#[path = "sandbox/proptests.rs"]
+mod proptests;

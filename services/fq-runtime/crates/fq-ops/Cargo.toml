@@ -34,3 +34,4 @@ workspace = true
 # serde_json and tokio alone, so it cannot pull `genai` — and therefore
 # `serde_json/preserve_order` — into fq-ops' own test build.
 fq-test-support = { workspace = true }
+proptest = { workspace = true }
