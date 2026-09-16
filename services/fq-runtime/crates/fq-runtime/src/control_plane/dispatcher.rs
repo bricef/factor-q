@@ -3852,7 +3852,7 @@ You are a test agent."#
         assert_eq!(
             worker.started_for(&capped),
             3,
-            "every held trigger of the capped agent re-acquired a permit and ran"
+            "every held trigger of the capped agent took a worker permit and ran"
         );
         assert_eq!(worker.started_for(&other), 1);
 
