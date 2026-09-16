@@ -133,6 +133,21 @@ impl TriggerDispatcher {
             TriggerClaim::Held { claimant } if claimant == *worker_id => {
                 // The original task still owns this message. An ack or NAK from
                 // the duplicate would resolve its delivery underneath that task.
+                //
+                // **This arm assumes the first copy is still alive, and in one
+                // case it is not.** Most paths that leave a `claimed`-by-self
+                // row with the message unacked are process-terminal — the drain
+                // check, the pause hold's `Interrupted`, a failed `requeue_held`
+                // publish — so the next delivery arrives at a new worker id and
+                // the arm below adopts it. But a store error or a panic between
+                // the claim and the durable start leaves this *live* process
+                // holding a row for a run that will never start: every
+                // redelivery then lands here and is dropped, until `max_deliver`
+                // is reached and the trigger is dead-lettered as
+                // `trigger_exhausted` — a verdict that would be false, since
+                // nothing ever ran. Adopting a claim older than some multiple of
+                // the longest legitimate hold is the follow-up that closes it;
+                // ADR-0032's liveness-and-CAS protocol is where it belongs.
                 Admission::Stop
             }
             TriggerClaim::Held { claimant } => {
