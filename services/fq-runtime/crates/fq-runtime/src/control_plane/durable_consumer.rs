@@ -358,7 +358,13 @@ pub enum ConsumerSource {
     },
 }
 
-/// Run an event-stream durable consumer until `shutdown` fires.
+/// Run a durable consumer loop until `shutdown` fires.
+///
+/// `handler` is called once per delivered message with the
+/// [`Delivery`] (the deserialised [`Event`] plus its stream
+/// position); its result decides the ack (see the module doc's
+/// policy table). Handlers must be idempotent — delivery is
+/// at-least-once.
 pub async fn run_durable_consumer<H, HFut>(
     bus: &EventBus,
     config: DurableConsumerConfig,
@@ -384,7 +390,11 @@ where
     .await
 }
 
-/// Like [`run_durable_consumer`], with serial periodic housekeeping.
+/// Like [`run_durable_consumer`], with a periodic housekeeping
+/// tick multiplexed into the same task. The tick and the
+/// handler are serialised — they never run concurrently — and,
+/// per `tokio::time::interval` semantics, the first tick fires
+/// as soon as the loop starts.
 pub async fn run_durable_consumer_with_tick<H, HFut, Tick, TFut>(
     bus: &EventBus,
     config: DurableConsumerConfig,
@@ -458,8 +468,9 @@ where
     let mut tick_timer = tick
         .as_ref()
         .map(|(every, _)| tokio::time::interval(*every));
-    // The policy and bounded log limiter live here for every stream riding
-    // this loop, so no consumer can accidentally create a hot retry loop.
+    // The redelivery policy is the bus's, so a consumer cannot retry on
+    // terms its durable was not created with. The log limiter is this
+    // loop's own: two consumers failing at once each still say so.
     let policy = bus.redelivery_policy();
     let mut redelivery_log = RedeliveryLog::new(policy);
     // Start a fresh parse-boundary record for this invocation. Identity
@@ -505,8 +516,12 @@ where
     Ok(())
 }
 
-/// Record an unsupported event where `fq doctor` reads it, then park until
-/// shutdown without acknowledging or fetching past that event.
+/// The halt: said once, at error level, with everything an operator
+/// needs to find the message; recorded where `fq doctor` reads; and
+/// then the task waits for shutdown. It must not return — the daemon
+/// supervises every consumer task and reads any exit, clean or not, as
+/// a task failure that takes the whole daemon down, which is exactly
+/// the state in which nothing could report why.
 async fn park_halted(
     name: &str,
     on: UnsupportedEvent,
@@ -528,6 +543,7 @@ async fn park_halted(
     info!(consumer = name, "halted consumer received shutdown signal");
 }
 
+/// Whether the loop goes on after a message.
 enum Next {
     Continue,
     Halt(UnsupportedEvent),
@@ -618,7 +634,10 @@ where
         }
         Admission::Halt(on) => return Next::Halt(on),
     };
-    // Missing metadata takes the shortest retry delay, never the longest.
+    // JetStream counts the first delivery as 1. A message whose
+    // metadata could not be read is treated as a first delivery, which
+    // costs the shortest delay rather than the longest — the wrong way
+    // to be wrong here would be to stall a healthy retry.
     let delivered = info
         .as_ref()
         .and_then(|info| u64::try_from(info.delivered).ok())
@@ -644,6 +663,10 @@ where
         }
         Err(HandlerError::Transient(err)) => {
             let delay = policy.nak_delay(delivered);
+            // One line per escalation step, then one per interval. A
+            // handler that fails forever is worth saying so about; it
+            // is not worth a line per broker round-trip, which is what
+            // buried the signal when the NAK had no delay at all.
             if redelivery_log.admit(delivered, std::time::Instant::now()) {
                 error!(
                     consumer = name,

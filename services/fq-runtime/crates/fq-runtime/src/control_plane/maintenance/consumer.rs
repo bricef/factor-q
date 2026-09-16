@@ -163,6 +163,10 @@ impl MaintenanceConsumer {
     async fn handle(&self, delivery: Delivery<RawMessage>) -> Result<(), HandlerError> {
         let raw = delivery.event;
         let run_id = run_id(&raw, delivery.stream_seq);
+        // A run id already in the ledger is a redelivery, not a second
+        // run. Either the outcome still needs publishing (the previous
+        // attempt NAK'd on the publish) or it is already on the log and
+        // there is nothing left to do but ack.
         if let Some(pending) = self.ledger_lookup(&run_id) {
             return match pending {
                 Some(held) => {
@@ -289,11 +293,27 @@ impl MaintenanceConsumer {
         }
     }
 
-    /// Publish the outcome or hold it for redelivery.
+    /// Publish the outcome, or keep it for the redelivery the shared
+    /// loop's NAK earns.
     ///
     /// A failed task is acked: task failure is represented by a successfully
     /// published outcome, and the schedule is the retry. Only failure to
     /// publish that outcome is transient and asks the shared loop to NAK.
+    ///
+    /// The order matters: the event is the record, so it goes on the
+    /// log before the message is consumed. A publish that fails leaves
+    /// the payload in the ledger, so the redelivery this NAK earns
+    /// re-publishes what already happened rather than making it happen
+    /// again.
+    ///
+    /// **The outcome gates the signals**, which is what makes a signal
+    /// exactly-once in every path a redelivery can take: a redelivery
+    /// only ever happens when the outcome publish failed, and no signal
+    /// was published in that attempt. A signal publish that fails *after*
+    /// the outcome landed is logged and dropped rather than retried —
+    /// re-running the task to recover a notification would be a worse
+    /// trade than losing one, and the outcome event, which is the record,
+    /// is already on the log.
     async fn settle(&self, run_id: &str, resolved: Resolved) -> Result<(), HandlerError> {
         let event = Event::system(
             self.runtime_id,
