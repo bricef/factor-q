@@ -285,6 +285,14 @@ fn control_status() -> OpId {
     OpId::Report(ReportId::Control(ControlReport::Status))
 }
 
+/// Every durable a daemon on this fixture runs, in the order both
+/// reports list them: five core consumers plus `fq-maintenance`, which
+/// is on by default. No summariser — this fixture configures none, so
+/// its absence is the expectation rather than a gap.
+///
+/// One constant for the readiness wait *and* both exact assertions, so
+/// a roster change lands in one place and "what we waited for" cannot
+/// drift from "what we assert" (#549).
 const EXPECTED_DURABLES: [&str; 6] = [
     "fq-projector",
     "fq-coordination",
@@ -294,6 +302,16 @@ const EXPECTED_DURABLES: [&str; 6] = [
     "fq-maintenance",
 ];
 
+/// Whether this consumer array is the expected roster, settled: every
+/// durable present, each one `active` rather than missing, unreadable
+/// or halted, and each carrying a name to be asserted about.
+///
+/// The array is taken rather than the whole report because the two
+/// reports carry it differently — `control.doctor` flat, `control.status`
+/// under each stream — and the readiness question is the same one.
+/// Order is not part of it, so the comparison sorts; the order the
+/// reports list durables in is the tests' assertion, not this
+/// predicate's.
 fn durables_ready(consumers: &[serde_json::Value], expected: &[&str]) -> bool {
     let mut names = Vec::with_capacity(consumers.len());
     for consumer in consumers {
@@ -343,9 +361,10 @@ fn status_consumers(report: &serde_json::Value) -> Vec<serde_json::Value> {
 /// serving, so a report taken the instant the daemon is connectable can
 /// legitimately catch one that does not exist yet and report it
 /// `Missing` — which is the probe telling the truth, and the two tests
-/// below asserting about a moment rather than about the daemon.
-/// Polling until the exact roster is active keeps the assertions exact
-/// instead of loosening them to accept an absence.
+/// below asserting about a moment rather than about the daemon
+/// (<https://github.com/bricef/factor-q/issues/670>). Polling until the
+/// exact roster is active keeps the assertions exact instead of
+/// loosening them to accept an absence.
 ///
 /// Returning the satisfying report is the other half: the caller
 /// asserts about the state it actually observed, so a transient probe
