@@ -484,7 +484,7 @@ impl TriggerDispatcher {
     async fn handle(&self, msg: &async_nats::jetstream::Message, permit: OwnedSemaphorePermit) {
         // First operation by design: no drain, routing, parsing, or trigger-id
         // minting happens until this broker identity has been arbitrated.
-        let claim::Admission::Proceed {
+        let claim::ClaimVerdict::Proceed {
             stream_seq,
             delivered: delivery_attempt,
         } = self.claim_delivery(msg).await
