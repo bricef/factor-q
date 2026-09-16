@@ -1,7 +1,7 @@
 //! Which pricing conditions this daemon has already reported, so a
 //! standing condition is raised once and closed once.
 //!
-//! Two of the pricing signals describe a *condition* rather than
+//! Pricing signals that describe a *condition* rather than
 //! something that happened: `pricing.fetch_failed` is true for as long
 //! as the source will not answer, and `pricing.stale` for as long as the
 //! table the daemon is serving is past `[pricing] max_age`. The load
@@ -37,13 +37,17 @@
 //! found stale at boot and still stale at the next refresh is one
 //! episode, not two.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 use uuid::Uuid;
 
 use crate::events::operator_signal::kinds;
 use crate::events::{OperatorSignalPayload, PendingSignal, SignalKind};
 
+use super::accept::PriceField;
 use super::live::AcceptedLoad;
 
 /// The pricing conditions this daemon has raised and not yet resolved.
@@ -60,6 +64,7 @@ pub struct PricingEpisodes(Arc<Mutex<OpenEpisodes>>);
 struct OpenEpisodes {
     stale: Option<Uuid>,
     fetch_failed: Option<Uuid>,
+    refused: BTreeMap<(String, PriceField), Uuid>,
 }
 
 /// A pricing signal that describes a condition rather than an event.
@@ -72,9 +77,8 @@ enum Episode {
 }
 
 impl Episode {
-    /// Which condition a signal reports, or `None` for a signal that
-    /// reports something that happened (a refused change) and is
-    /// therefore news every time.
+    /// Which fixed condition a signal reports. Refused changes are
+    /// keyed conditions and are handled separately below.
     fn of(kind: &SignalKind) -> Option<Self> {
         match kind.as_str() {
             kinds::PRICING_STALE => Some(Self::Stale),
@@ -145,6 +149,14 @@ impl PricingEpisodes {
     pub fn edges(&self, load: &AcceptedLoad, signals: Vec<PendingSignal>) -> Vec<PendingSignal> {
         let mut open = self.0.lock().expect("pricing episodes lock poisoned");
         let mut published = Vec::with_capacity(signals.len());
+        let refusal_keys: Vec<_> = load
+            .refusals
+            .iter()
+            .filter(|refusal| !refusal.is_admission())
+            .map(|refusal| (refusal.model.clone(), refusal.field))
+            .collect();
+        let active_refusals: BTreeSet<_> = refusal_keys.iter().cloned().collect();
+        let mut refusal_keys = refusal_keys.into_iter();
         for signal in signals {
             match Episode::of(signal.kind()) {
                 // Already reported and still true: the condition has not
@@ -152,6 +164,14 @@ impl PricingEpisodes {
                 Some(episode) if open.get(episode).is_some() => continue,
                 Some(episode) => {
                     open.set(episode, Some(signal.event_id));
+                    published.push(signal);
+                }
+                None if signal.kind().as_str() == kinds::PRICING_CHANGE_REFUSED => {
+                    let key = refusal_keys.next().expect("refusal signal has a refusal");
+                    if open.refused.contains_key(&key) {
+                        continue;
+                    }
+                    open.refused.insert(key, signal.event_id);
                     published.push(signal);
                 }
                 None => published.push(signal),
@@ -169,6 +189,26 @@ impl PricingEpisodes {
                 OperatorSignalPayload::notification(
                     SignalKind::registered(episode.kind()),
                     episode.recovery(),
+                )
+                .resolving(raised),
+            ));
+        }
+        let ended_refusals: Vec<_> = open
+            .refused
+            .iter()
+            .filter(|(key, _)| !active_refusals.contains(*key))
+            .map(|(key, raised)| (key.clone(), *raised))
+            .collect();
+        for ((model, field), raised) in ended_refusals {
+            open.refused.remove(&(model.clone(), field));
+            published.push(PendingSignal::new(
+                OperatorSignalPayload::notification(
+                    SignalKind::registered(kinds::PRICING_CHANGE_REFUSED),
+                    format!(
+                        "the refused change for {}.{} is no longer proposed by upstream, or the operator overrode it",
+                        model,
+                        field.as_str()
+                    ),
                 )
                 .resolving(raised),
             ));
