@@ -37,6 +37,28 @@ pub struct TurnState {
 }
 
 /// What happened: the turn's content, full payload by default.
+// Adding a variant here is additive for the *schema* and a breaking
+// change for *old readers*. This is an internally tagged enum with no
+// `#[serde(other)]` fallback, so a binary built before a variant existed
+// does not skip the turn carrying it — it fails the whole decode with
+// `unknown variant`, and its `turn.list` / `turn.stream` read answers
+// with nothing at all.
+//
+// `Outcome` (#688) is the first variant to land after consumers
+// shipped, and it appears on every *finished* run: an `fq` CLI or
+// dashboard built before it gets an error, not a transcript, from a
+// newer daemon. Compose pins one `FQ_TAG` for the dashboard and the
+// daemon together, so that skew lasts only as long as a deploy; an
+// operator's own `fq` binary is not pinned to anything and has to be
+// rebuilt. Pre-alpha, so this is disclosed rather than defended
+// against — but the next variant added here inherits the same break,
+// and `#[serde(other)]` onto a catch-all `Unknown` (the treatment
+// `EventPayload` already gets, and for exactly this reason) is the fix
+// when it stops being acceptable.
+//
+// Kept off the doc comment on purpose: that string is published as the
+// wire schema's `description`, and this is a note to us, not to the
+// schema's readers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnAction {
