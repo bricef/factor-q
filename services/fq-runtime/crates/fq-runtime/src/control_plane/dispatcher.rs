@@ -2224,6 +2224,25 @@ You are a test agent."#
         (dir, shared_registry(registry))
     }
 
+    /// A registry holding two agents, each on the model it is named
+    /// with, so one can be paused while the other is not.
+    fn registry_with_two_models(
+        first: (&str, &str),
+        second: (&str, &str),
+    ) -> (tempfile::TempDir, SharedRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, model) in [first, second] {
+            std::fs::write(
+                dir.path().join(format!("{name}.md")),
+                format!("---\nname: {name}\nmodel: {model}\nbudget: 1.0\n---\n\nTest agent."),
+            )
+            .unwrap();
+        }
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).expect("load");
+        assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+        (dir, shared_registry(registry))
+    }
+
     /// A throttle whose `claude-haiku` is paused for `pause` from now.
     async fn throttle_paused_for(pause: Duration) -> Arc<crate::llm::ModelThrottle> {
         use crate::llm::{CallVerdict, ModelThrottle, ThrottleBounds, ThrottleConfig};
@@ -2813,6 +2832,92 @@ You are a test agent."#
             "the trigger is still the broker's to deliver: {info:?}"
         );
         drop(shutdown_tx);
+    }
+
+    /// The wedge PR #807's review found, as a test: at the **default**
+    /// `max_concurrent_invocations = 1`, a trigger held for a paused
+    /// model must start when the pause ends, and must not stop an
+    /// unrelated agent from running while it waits.
+    ///
+    /// Both halves fail the moment the consume loop owns a permit while
+    /// it is idle. It takes the only permit to pull the paused trigger,
+    /// then blocks on `acquire_owned` before the next pull, so the
+    /// unpaused agent's trigger is never even pulled (`expected 1
+    /// start(s) of …` is what that reads as) — and if the hold gives its
+    /// permit back, the loop, already queued on the fair semaphore,
+    /// takes it and the held trigger waits forever: no start, no
+    /// redelivery, just `ack pending 1` until a drain.
+    ///
+    /// Nothing here is special to a pause: it is the smallest shape that
+    /// shows a permit held by something that is not running.
+    #[tokio::test]
+    async fn a_pause_held_trigger_starts_after_the_pause_with_one_worker_permit() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let paused = unique_agent_id("pause-wedge-held");
+        let other = unique_agent_id("pause-wedge-runs");
+        let (_dir, registry) =
+            registry_with_two_models((&paused, "claude-haiku"), (&other, "unpaused-model"));
+        let pause = Duration::from_secs(3);
+        let throttle = throttle_paused_for(pause).await;
+        let paused_at = std::time::Instant::now();
+
+        let worker = CappedWorker::new();
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        // Worker cap 1 — the default (`config.rs`, `[worker]
+        // max_concurrent_invocations`). One permit for the whole daemon.
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 1)
+            .with_throttle(throttle);
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, None, shutdown_rx)
+                .await
+        });
+
+        // Pulled and parked on the pause, owning nothing.
+        publish_triggers(&bus, &paused, 1).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Head-of-line: an unrelated agent's trigger is pulled and run
+        // while the paused one waits.
+        publish_triggers(&bus, &other, 1).await;
+        worker
+            .wait_for_agent_starts(&other, 1, Duration::from_secs(3))
+            .await;
+        assert_eq!(
+            worker.started_for(&paused),
+            0,
+            "the paused model's trigger is still held while the unpaused agent runs"
+        );
+
+        // That invocation ends, so the one permit is free again by the
+        // time the pause lifts — and the held trigger must take it.
+        worker.let_finish(10);
+        worker
+            .wait_for_agent_starts(&paused, 1, pause + Duration::from_secs(8))
+            .await;
+        let started_at = worker
+            .starts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.2 == paused)
+            .expect("the held trigger started")
+            .0;
+        assert!(
+            started_at >= paused_at + pause - Duration::from_millis(100),
+            "the held trigger started {:?} after the pause was set; the pause was {pause:?}",
+            started_at - paused_at
+        );
+        assert!(
+            worker.attempts().iter().all(|a| a == &Some(1)),
+            "held, not redelivered: still the first delivery, got {:?}",
+            worker.attempts()
+        );
+
+        stop(shutdown_tx, run).await;
     }
 
     /// Defers on its first start; records every resume; defers once
