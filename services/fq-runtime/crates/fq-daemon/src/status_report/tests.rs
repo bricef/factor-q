@@ -99,6 +99,7 @@ fn the_report_roundtrips_through_its_declared_shape() {
                     redeliveries: 0,
                     stuck: false,
                     malformed_acked: 0,
+                    duplicate_dropped: 0,
                 }],
             },
         ],

@@ -13,6 +13,7 @@ fn active(stuck: bool, ack_pending: u64, num_pending: u64, delivered: u64) -> Co
         redeliveries: 0,
         stuck,
         malformed_acked: 0,
+        duplicate_dropped: 0,
     }
 }
 

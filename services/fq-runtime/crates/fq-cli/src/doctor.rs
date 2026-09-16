@@ -164,12 +164,14 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
                 redeliveries,
                 stuck: true,
                 malformed_acked,
+                duplicate_dropped,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}\n",
-                    malformed_suffix(*malformed_acked)
+                     pending {num_pending}{}{}\n",
+                    malformed_suffix(*malformed_acked),
+                    duplicate_suffix(*duplicate_dropped)
                 ));
                 out.push_str(&format!(
                     "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
@@ -180,11 +182,13 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
                 name,
                 num_pending,
                 malformed_acked,
+                duplicate_dropped,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{})\n",
-                    malformed_suffix(*malformed_acked)
+                    "  {name}: ok (pending {num_pending}{}{})\n",
+                    malformed_suffix(*malformed_acked),
+                    duplicate_suffix(*duplicate_dropped)
                 ));
             }
             // The halt is the other outcome of the parse boundary, and
@@ -242,6 +246,22 @@ fn malformed_suffix(malformed_acked: u64) -> String {
         String::new()
     } else {
         format!(", {malformed_acked} malformed acked")
+    }
+}
+
+/// `, N duplicate deliveries dropped` when any were, else nothing.
+///
+/// A redelivery of a trigger whose invocation is already durably
+/// running is acked and dropped by the dispatcher's claim (#809), so it
+/// starts nothing and mints no id — and therefore leaves no trace
+/// anywhere else. Shown beside the consumer because a figure that
+/// climbs says the broker is redelivering held triggers, which is the
+/// #327 incident being arbitrated rather than duplicated.
+fn duplicate_suffix(duplicate_dropped: u64) -> String {
+    if duplicate_dropped == 0 {
+        String::new()
+    } else {
+        format!(", {duplicate_dropped} duplicate deliveries dropped")
     }
 }
 

@@ -111,6 +111,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             redeliveries: 0,
             stuck: false,
             malformed_acked: 0,
+            duplicate_dropped: 0,
         }],
     }];
     let html = health(

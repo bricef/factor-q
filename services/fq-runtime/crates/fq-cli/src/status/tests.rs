@@ -41,6 +41,7 @@ fn report() -> StatusReport {
                 redeliveries: 0,
                 stuck: false,
                 malformed_acked: 0,
+                duplicate_dropped: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -263,6 +264,7 @@ fn active(num_pending: u64) -> StreamHealth {
             redeliveries: 0,
             stuck: false,
             malformed_acked: 0,
+            duplicate_dropped: 0,
         }],
     }
 }
@@ -388,6 +390,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             redeliveries: 0,
             stuck: false,
             malformed_acked: 0,
+            duplicate_dropped: 0,
         }],
     });
     assert!(
@@ -397,6 +400,39 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
     assert!(
         !out.contains("lagging"),
         "the distance to a head it is not subscribed to is not a backlog: {out}"
+    );
+}
+
+/// The dispatcher's duplicate drops (#809) reach `fq status` too: the
+/// refused redelivery starts no invocation and mints no id, so a
+/// counter beside the consumer is the only place an operator can see
+/// that the broker is redelivering held triggers (#327).
+#[test]
+fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-triggers".to_string(),
+        messages: 258,
+        bytes: 4096,
+        first_seq: 1,
+        last_seq: 258,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-dispatcher".to_string(),
+            delivered: 258,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 5,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 5,
+        }],
+    });
+    assert!(
+        out.contains(
+            "duplicate dropped: 5 (redelivered after the invocation had durably started; \
+             refused, not re-run)"
+        ),
+        "got:\n{out}"
     );
 }
 
@@ -444,6 +480,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             redeliveries: 0,
             stuck: false,
             malformed_acked: 0,
+            duplicate_dropped: 0,
         }],
     });
     assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");

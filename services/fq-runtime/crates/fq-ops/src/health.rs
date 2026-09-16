@@ -115,6 +115,17 @@ pub enum ConsumerHealth {
         /// because "unparseable" and "a version this build cannot
         /// read" are different facts calling for opposite responses.
         malformed_acked: u64,
+        /// Redeliveries this consumer acked and dropped because the
+        /// invocation they would have started is already running: the
+        /// durable claim on that delivery's stream sequence had
+        /// recorded its start. Zero on a consumer that was never
+        /// offered a message it had already begun. A climbing figure
+        /// says the broker is redelivering triggers the dispatcher is
+        /// holding — and that the second copy was refused rather than
+        /// run a second time. Reported because it is the only trace
+        /// such a delivery leaves: no invocation is created for it, so
+        /// nothing downstream records it.
+        duplicate_dropped: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is

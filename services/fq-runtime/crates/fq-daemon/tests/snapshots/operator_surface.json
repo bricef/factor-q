@@ -2665,6 +2665,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "duplicate_dropped": {
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started is already running: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Zero on a consumer that was never\noffered a message it had already begun. A climbing figure\nsays the broker is redelivering triggers the dispatcher is\nholding — and that the second copy was refused rather than\nrun a second time. Reported because it is the only trace\nsuch a delivery leaves: no invocation is created for it, so\nnothing downstream records it.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "malformed_acked": {
                         "description": "Messages this consumer acked because they were not an event\nin any version — bytes that do not parse and never will —\nsince the consumer started. Poison, not history: skipping\none loses nothing readable. Reported apart from a halt\nbecause \"unparseable\" and \"a version this build cannot\nread\" are different facts calling for opposite responses.",
                         "format": "uint64",
@@ -2705,7 +2711,8 @@
                       "num_redelivered",
                       "redeliveries",
                       "stuck",
-                      "malformed_acked"
+                      "malformed_acked",
+                      "duplicate_dropped"
                     ],
                     "type": "object"
                   }
@@ -3207,6 +3214,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "duplicate_dropped": {
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started is already running: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Zero on a consumer that was never\noffered a message it had already begun. A climbing figure\nsays the broker is redelivering triggers the dispatcher is\nholding — and that the second copy was refused rather than\nrun a second time. Reported because it is the only trace\nsuch a delivery leaves: no invocation is created for it, so\nnothing downstream records it.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "malformed_acked": {
                         "description": "Messages this consumer acked because they were not an event\nin any version — bytes that do not parse and never will —\nsince the consumer started. Poison, not history: skipping\none loses nothing readable. Reported apart from a halt\nbecause \"unparseable\" and \"a version this build cannot\nread\" are different facts calling for opposite responses.",
                         "format": "uint64",
@@ -3247,7 +3260,8 @@
                       "num_redelivered",
                       "redeliveries",
                       "stuck",
-                      "malformed_acked"
+                      "malformed_acked",
+                      "duplicate_dropped"
                     ],
                     "type": "object"
                   }
