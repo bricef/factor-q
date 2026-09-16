@@ -783,7 +783,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // dropping the un-run calls.
         let resumed_partial_batch = truncate_incomplete_final_batch(&mut completed);
         let replay = coalesce_tool_results(completed);
-
         // Re-associate the invocation with its persisted workspace
         // (plan §3): a suspended invocation's workspace survives the
         // restart, and the state row's `workspace_ref` is the binding.
@@ -799,7 +798,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             (Some(provider), None) => Some(provider.provision(invocation_id).await?),
             (None, _) => None,
         };
-
         // Set up agent context (mirrors run()). One registry snapshot
         // serves both the schemas and the loop (ADR-0020 consistency).
         // Ambient identity env re-attaches on resume exactly as on the
@@ -816,6 +814,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         warn_on_deprecated_bare_grants(&agent_id, agent.tools());
         let allowed_tool_names = effective_tool_names(agent.tools());
         let tool_schemas = base_tools.build_schemas(&allowed_tool_names);
+        self.queue_tools_changed_notice(invocation_id, &tool_schemas)
+            .await?;
         let (agent_config, step0_static_context) = self
             .build_invocation_setup(
                 agent,
@@ -833,7 +833,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // (found by the slice-4 resume-equivalence property). Rows
         // written before v5 lack the columns; warn and degrade.
         let trigger = trigger_from_state_row(&state_row);
-
         // Rebuild the *same* step-0 static context the fresh path
         // injected (the invocation preamble + static-resource pins).
         // Replay reconstructs the conversation from an empty state, so
@@ -2522,6 +2521,7 @@ mod mcp;
 mod replay;
 mod resume_notice;
 mod server_request;
+mod tools_changed_notice;
 use mcp::{GrantServers, triggered_event};
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};

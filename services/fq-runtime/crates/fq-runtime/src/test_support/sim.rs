@@ -3053,6 +3053,131 @@ mod host_notice_channel {
         )
     }
 
+    fn fresh_runner_and_agent_for_tool(world: &SimWorld, name: &str) -> (ReducerRunner, Agent) {
+        let replacement = Arc::new(ScriptedTool::new(name));
+        let mut registry = ToolRegistry::new();
+        registry.register_fixture(replacement as Arc<dyn Tool>);
+        let runner = SimWorld::build_runner(
+            &world.clock,
+            &world.sink,
+            &registry,
+            &world.store,
+            Arc::new(PricingTable::empty()),
+            world.workspace.clone(),
+        );
+        let agent = Agent::builder()
+            .id("sim-agent")
+            .model("claude-sim")
+            .system_prompt("You are the sim agent.")
+            .tools([name])
+            .budget(5.0)
+            .build()
+            .unwrap();
+        (runner, agent)
+    }
+
+    #[tokio::test]
+    async fn changed_tools_inject_one_ordered_notice_from_the_persisted_request() {
+        let responses = script(2);
+        let world = SimWorld::new(157, 5.0).await;
+        queue_tool_outputs(&world, 2);
+        world
+            .sink
+            .drain_at_publish(1 + 3 * 2, world.runner.drain_signal());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        assert!(matches!(
+            world.run(&llm).await.expect("drain"),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let inv_id = world.invocation_id();
+        let inv_str = inv_id.to_string();
+
+        world.clock.ms.fetch_add(180_000, Ordering::SeqCst);
+        let (runner, agent) = fresh_runner_and_agent_for_tool(&world, "replacement_tool");
+        let resumed_llm = FixtureClient::new();
+        resumed_llm.push_response(responses.last().unwrap().clone());
+        runner.resume(&agent, &resumed_llm, inv_id).await.unwrap();
+
+        let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].kind.as_str(), rows[0].seq), ("resume", 0));
+        assert_eq!((rows[1].kind.as_str(), rows[1].seq), ("tools_changed", 1));
+        assert!(rows[1].body.contains("Added: replacement_tool."));
+        assert!(rows[1].body.contains("Removed: sim_tool."));
+        assert!(world.sink.events().iter().any(|event| matches!(
+            &event.payload,
+            EventPayload::HostNotice(payload)
+                if payload.kind == "tools_changed" && payload.body == rows[1].body
+        )));
+    }
+
+    #[tokio::test]
+    async fn double_drain_replays_first_tools_changed_notice_verbatim() {
+        let responses = script(2);
+        let world = SimWorld::new(158, 5.0).await;
+        queue_tool_outputs(&world, 2);
+        world
+            .sink
+            .drain_at_publish(1 + 3 * 2, world.runner.drain_signal());
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &responses);
+        assert!(matches!(
+            world.run(&llm).await.unwrap(),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let inv_id = world.invocation_id();
+        let inv_str = inv_id.to_string();
+
+        world.sink.clear_drain();
+        let (first_runner, first_agent) =
+            fresh_runner_and_agent_for_tool(&world, "replacement_tool");
+        first_runner.drain_signal().request();
+        let first_llm = FixtureClient::new();
+        first_llm.push_response(responses.last().unwrap().clone());
+        assert!(matches!(
+            first_runner
+                .resume(&first_agent, &first_llm, inv_id)
+                .await
+                .unwrap(),
+            InvocationOutcome::Suspended { .. }
+        ));
+        let first_body = world
+            .store
+            .list_host_notices(&inv_str)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.kind == "tools_changed")
+            .unwrap()
+            .body;
+
+        let (second_runner, second_agent) = fresh_runner_and_agent_for_tool(&world, "third_tool");
+        let second_llm = FixtureClient::new();
+        second_llm.push_response(responses.last().unwrap().clone());
+        second_runner
+            .resume(&second_agent, &second_llm, inv_id)
+            .await
+            .unwrap();
+        assert!(second_llm.requests().iter().any(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.text().as_deref() == Some(first_body.as_str()))
+        }));
+        let tool_rows: Vec<_> = world
+            .store
+            .list_host_notices(&inv_str)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.kind == "tools_changed")
+            .collect();
+        assert_eq!(tool_rows.len(), 2);
+        assert_eq!(tool_rows[0].body, first_body);
+        assert!(tool_rows[1].body.contains("Added: third_tool."));
+    }
+
     #[tokio::test]
     async fn resumed_interruption_injects_one_coarse_notice() {
         let turns = 2;
@@ -3079,6 +3204,7 @@ mod host_notice_channel {
             .expect("resume");
 
         let rows = world.store.list_host_notices(&inv_str).await.unwrap();
+        assert!(!rows.iter().any(|row| row.kind == "tools_changed"));
         let resume_rows: Vec<_> = rows.iter().filter(|row| row.kind == "resume").collect();
         assert_eq!(resume_rows.len(), 1);
         assert!(resume_rows[0].body.contains("Approximately 3m passed"));
