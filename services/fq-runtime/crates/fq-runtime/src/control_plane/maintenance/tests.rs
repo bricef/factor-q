@@ -901,6 +901,56 @@ async fn a_redelivered_failure_does_not_notify_twice() {
     let _ = handle.await;
 }
 
+/// A task failure is a completed run: once its outcome is published the
+/// command is acked, because the schedule — not broker redelivery — is retry.
+#[tokio::test]
+async fn a_failed_task_is_acked_without_redelivery() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let mut outcomes = bus
+        .subscribe(subjects::SYSTEM_MAINTENANCE.to_string())
+        .await
+        .expect("subscribe to maintenance outcomes");
+    let subject = MaintenanceTask::PricingRefresh.subject();
+    let (shutdown, handle, name) = spawn(
+        &bus,
+        subject.clone(),
+        Duration::from_secs(1),
+        Duration::ZERO,
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    publish_command(&bus, &subject, Some("fq-cron/pricing-refresh@ack-policy")).await;
+
+    let event = next_outcome(&mut outcomes, Duration::from_secs(10)).await;
+    assert!(matches!(
+        outcome_of(&event),
+        MaintenanceOutcome::Failed { .. }
+    ));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let stream = bus
+        .jetstream()
+        .get_stream(crate::bus::MAINTENANCE_STREAM_NAME)
+        .await
+        .expect("maintenance stream");
+    let mut durable = stream
+        .get_consumer::<async_nats::jetstream::consumer::pull::Config>(&name)
+        .await
+        .expect("the test durable");
+    let info = durable.info().await.expect("consumer info");
+    assert_eq!(
+        info.delivered.consumer_sequence, 1,
+        "a failed task must be acked rather than redelivered"
+    );
+    assert_eq!(
+        info.num_ack_pending, 0,
+        "the failed run's command was acked"
+    );
+
+    let _ = shutdown.send(());
+    let _ = handle.await;
+}
+
 /// A refusal raises nothing: a task name this build does not know is a
 /// `fq-cron.toml` error, and its owner reads the refusal on the log.
 #[tokio::test]
