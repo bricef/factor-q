@@ -254,7 +254,23 @@ async fn the_turn_atom_lives_end_to_end() {
         .publish(&tool_result(&agent, invocation, "tc-1"))
         .await
         .expect("publish result");
+    let o_seq = bus
+        .publish(&fq_runtime::events::Event::new(
+            agent.clone(),
+            invocation,
+            fq_runtime::events::EventPayload::Completed(fq_runtime::events::CompletedPayload {
+                task_status: fq_runtime::events::TaskStatus::Success,
+                result_summary: Some("stream complete".into()),
+                total_llm_calls: 1,
+                total_tool_calls: 1,
+                total_cost: 0.0,
+                total_duration_ms: 10,
+            }),
+        ))
+        .await
+        .expect("publish outcome");
 
+    let started = tokio::time::Instant::now();
     let batch = client
         .rpc
         .next_batch(
@@ -270,10 +286,20 @@ async fn the_turn_atom_lives_end_to_end() {
         .await
         .expect("rpc")
         .expect("stream batch");
-    assert_eq!(batch.items.len(), 2, "both turns arrive: {batch:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the outcome must end the tail promptly, not after max_wait_ms"
+    );
+    assert_eq!(
+        batch.items.len(),
+        3,
+        "all turns and the outcome arrive: {batch:?}"
+    );
     assert_eq!(batch.items[0].seq, a_seq);
     assert_eq!(batch.items[1].seq, r_seq);
-    assert!(batch.next_from_seq > r_seq);
+    assert_eq!(batch.items[2].seq, o_seq);
+    assert_eq!(batch.items[2].item["action"]["kind"], "outcome");
+    assert!(batch.next_from_seq > o_seq);
     let result_turn = &batch.items[1].item;
     assert_eq!(result_turn["round"], 1);
     assert_eq!(result_turn["initiating_turn"], a_seq);
@@ -320,8 +346,8 @@ async fn the_turn_atom_lives_end_to_end() {
     let listed = listed.output.as_array().unwrap().clone();
     assert_eq!(
         listed.len(),
-        2,
-        "the listing scanned across the wire break and answered (#673)"
+        3,
+        "the listing scanned across the wire break and included the outcome (#673)"
     );
     assert_eq!(listed[0]["invocation_id"], invocation.to_string());
     assert!(listed[0]["action"]["content"].is_string(), "full payloads");
