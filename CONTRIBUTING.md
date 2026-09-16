@@ -164,7 +164,7 @@ daemon; after changing the Dockerfile, build them and run
   just quality          # all of the below, fail-fast, timed
   just lint-sources     # the include! ban (see AGENTS.md)
   just test-fq-lint     # unit tests for the linter itself
-  just lint-sizes       # file + function size ratchets
+  just lint-sizes       # file, function + allow-census ratchets
   just lint-fmt         # cargo fmt --check, workspace-wide
   just lint-clippy      # clippy per crate, with each crate's features
   just lint-creep       # functions approaching the 250-line cap (advisory)
@@ -183,16 +183,20 @@ daemon; after changing the Dockerfile, build them and run
   will read — never by a blanket allow. Dependabot opens the weekly
   update PRs (`.github/dependabot.yml`).
 
-- **Size budgets are ratcheted, not advisory.** No file may exceed
-  800 production lines and no function may exceed 250 lines;
-  pre-existing offenders are pinned in `.file-size-baseline` and
-  `.function-size-baseline` and may only ever shrink. `just
-  sizes-bless` lowers a budget to match reality but refuses to raise
-  one or admit a new entry, so relaxing a budget is always a
-  hand-edit a reviewer sees. If a change trips a gate, extract into a
-  new module or helper rather than raising the budget. `just
-  lint-metrics` reports the underlying numbers. Rationale and the
-  measurement rule live in `tools/fq-lint`.
+- **Size and exception budgets are ratcheted, not advisory.** No file
+  may exceed 800 production lines and no function may exceed 250
+  lines; pre-existing offenders are pinned in `.file-size-baseline`
+  and `.function-size-baseline` and may only ever shrink. The same
+  mechanism covers production `#[allow]` / `#[expect]` exceptions:
+  `just lint-sizes` counts them per lint against the census in
+  `.allow-baseline`, and those counts may only shrink too — so
+  silencing a lint at a new site is a gate failure, not a shortcut.
+  `just sizes-bless` lowers a budget to match reality but refuses to
+  raise one or admit a new entry (a new lint included), so relaxing a
+  budget is always a hand-edit a reviewer sees. If a change trips a
+  gate, extract into a new module or helper — or fix the lint — rather
+  than raising the budget. `just lint-metrics` reports the underlying
+  numbers. Rationale and the measurement rule live in `tools/fq-lint`.
 - **No comments explaining what** — only why. Well-named
   identifiers speak for themselves.
 - **Module-level doc comments** (`//!`) on every `.rs` file
