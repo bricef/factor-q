@@ -462,7 +462,12 @@ impl Config {
     /// and gives the full dotted path rather than just the leaf.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         let mut ignored = Vec::new();
-        let config: Self = serde_ignored::deserialize(toml::Deserializer::new(s), |path| {
+        // toml 1.x splits parsing from deserializing: `Deserializer::parse`
+        // returns the syntax error up front where 0.8's `new` deferred it to
+        // the `deserialize` call. Both still land in `InvalidToml`.
+        let deserializer = toml::Deserializer::parse(s)
+            .map_err(|err| ConfigError::InvalidToml(err.to_string()))?;
+        let config: Self = serde_ignored::deserialize(deserializer, |path| {
             ignored.push(path.to_string());
         })
         .map_err(|err| ConfigError::InvalidToml(err.to_string()))?;
