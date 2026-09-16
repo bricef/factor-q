@@ -181,7 +181,7 @@ async fn first_run_provisions_and_restart_reuses_the_identity() {
     let described = describe_via(&addr1, fingerprint, &token).await;
     let entries = described.as_array().expect("describe is a list");
     assert!(
-        entries.iter().any(|e| e.get("view").is_some()),
+        entries.iter().any(|e| !e["view"].is_null()),
         "describe carries the Invocation view: {described}"
     );
     terminate(child);
