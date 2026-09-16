@@ -237,6 +237,8 @@ impl ToolSandbox {
     /// canonical form is compared to the allowed write prefixes; if
     /// it does not, the parent directory is canonicalised and the
     /// filename appended, giving the would-be path of the new file.
+    /// Dangling symlinks are refused, even when their destination would
+    /// be inside an allowed prefix.
     pub fn check_write(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         self.check_write_impl(target)
             .map_err(|err| flag_mangled(target, err))
@@ -389,16 +391,36 @@ fn canonicalise_existing(target: &Path) -> std::io::Result<PathBuf> {
 
 /// Canonicalise a path that may not yet exist. Used for write checks.
 ///
-/// If the target exists, canonicalise it directly. Otherwise
-/// canonicalise the parent directory and join the filename. The
-/// parent must already exist — we don't speculatively create
-/// directories during sandbox checks.
+/// If the target entry exists and is not a symlink, canonicalise it
+/// directly. A symlink must resolve before it can be checked; dangling
+/// symlinks are refused, even when their destination would be inside an
+/// allowed prefix. Only a genuinely absent final component uses the
+/// canonical-parent path. The parent must already exist — we don't
+/// speculatively create directories during sandbox checks.
 fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
-    if target.exists() {
-        return std::fs::canonicalize(target).map_err(|err| SandboxError::Io {
-            path: target.to_path_buf(),
-            source: err,
-        });
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return std::fs::canonicalize(target).map_err(|err| SandboxError::PermissionDenied {
+                target: target.to_path_buf(),
+                reason: format!(
+                    "write through dangling or unresolvable symlink {} denied: {err}",
+                    target.display()
+                ),
+            });
+        }
+        Ok(_) => {
+            return std::fs::canonicalize(target).map_err(|err| SandboxError::Io {
+                path: target.to_path_buf(),
+                source: err,
+            });
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(SandboxError::Io {
+                path: target.to_path_buf(),
+                source: err,
+            });
+        }
     }
     let parent = target.parent().ok_or_else(|| SandboxError::InvalidPath {
         target: target.to_path_buf(),

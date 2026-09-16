@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -70,9 +71,7 @@ impl Tool for FileWriteTool {
 
         let canonical = ctx.sandbox.check_write(&target)?;
 
-        tokio::fs::write(&canonical, &params.content)
-            .await
-            .map_err(|err| ToolError::Io(format!("{}: {err}", canonical.display())))?;
+        write_no_follow(&canonical, params.content.as_bytes()).await?;
 
         Ok(ToolResult::ok(format!(
             "Wrote {} bytes to {}",
@@ -80,6 +79,32 @@ impl Tool for FileWriteTool {
             canonical.display()
         )))
     }
+}
+
+async fn write_no_follow(path: &std::path::Path, content: &[u8]) -> Result<(), ToolError> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let mut file = options.open(path).await.map_err(|err| {
+        #[cfg(unix)]
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            return ToolError::PermissionDenied(format!(
+                "write through symlink {} denied",
+                path.display()
+            ));
+        }
+        ToolError::Io(format!("{}: {err}", path.display()))
+    })?;
+    file.write_all(content)
+        .await
+        .map_err(|err| ToolError::Io(format!("{}: {err}", path.display())))?;
+    file.flush()
+        .await
+        .map_err(|err| ToolError::Io(format!("{}: {err}", path.display())))
 }
 
 #[cfg(test)]
@@ -251,6 +276,85 @@ mod tests {
             "old",
             "target file should be unchanged"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_dangling_symlink_pointing_outside_is_denied() {
+        use std::os::unix::fs::symlink;
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let target = other.path().join("new.txt");
+        let link = allowed.path().join("escape");
+        symlink(&target, &link).unwrap();
+
+        let sandbox = ToolSandbox::new().allow_write(allowed.path());
+        let err = FileWriteTool::new()
+            .execute(
+                &make_tool_ctx(&sandbox),
+                json!({"path": link.to_string_lossy(), "content": "hacked"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(!target.exists(), "outside target must not be created");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_dangling_symlink_pointing_inside() {
+        use std::os::unix::fs::symlink;
+        let allowed = tempdir().unwrap();
+        let target = allowed.path().join("new.txt");
+        let link = allowed.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let sandbox = ToolSandbox::new().allow_write(allowed.path());
+        let err = FileWriteTool::new()
+            .execute(
+                &make_tool_ctx(&sandbox),
+                json!({"path": link.to_string_lossy(), "content": "blocked"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(!target.exists(), "dangling target must not be created");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writes_through_resolved_symlink_inside_sandbox() {
+        use std::os::unix::fs::symlink;
+        let allowed = tempdir().unwrap();
+        let target = allowed.path().join("existing.txt");
+        fs::write(&target, "old").unwrap();
+        let link = allowed.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let sandbox = ToolSandbox::new().allow_write(allowed.path());
+        FileWriteTool::new()
+            .execute(
+                &make_tool_ctx(&sandbox),
+                json!({"path": link.to_string_lossy(), "content": "new"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_follow_open_rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("link");
+        symlink(dir.path().join("missing"), &link).unwrap();
+
+        let err = write_no_follow(&link, b"blocked").await.unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
     }
 
     #[tokio::test]
