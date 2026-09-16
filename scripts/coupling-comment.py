@@ -29,7 +29,7 @@ def load(path):
             # its membership, not by the order Tarjan happened to pop it.
             "cycles": {frozenset(g) for g in c.get("cycles", [])},
         }
-    return crates
+    return crates, doc.get("overhang", {})
 
 
 def num(n):
@@ -133,7 +133,7 @@ def main():
     if len(sys.argv) != 5:
         sys.exit(__doc__)
     base_path, head_path, head_sha, repo = sys.argv[1:5]
-    base, head = load(base_path), load(head_path)
+    (base, base_overhang), (head, head_overhang) = load(base_path), load(head_path)
 
     new_cycles, fixed_cycles = [], []
     for crate, data in head.items():
@@ -146,6 +146,18 @@ def main():
                 fixed_cycles.append((crate, sorted(group)))
 
     body = [MARKER, "### Module coupling", ""]
+
+    if head_overhang:
+        body += ["#### Size overhang", ""]
+        for key, label in (("files", "Files"), ("functions", "Functions")):
+            before = base_overhang.get(key, {})
+            after = head_overhang.get(key, {})
+            body.append(
+                f"- **{label}:** {delta(before.get('entries'), after['entries'])} over cap; "
+                f"{delta(before.get('total_over_cap'), after['total_over_cap'])} lines over "
+                f"the {num(after['cap'])}-line cap"
+            )
+        body += ["", "Advisory only — size overhang does not gate.", ""]
 
     detail = []
     for crate, data in sorted(head.items()):

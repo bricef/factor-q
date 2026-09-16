@@ -111,28 +111,6 @@ fn main() -> ExitCode {
         }
     };
 
-    if flags.contains(&"--coupling") {
-        let graphs = coupling::build(
-            measured
-                .iter()
-                .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), m.production, f))),
-        );
-        if flags.contains(&"--json") {
-            coupling::report_json(&graphs);
-        } else {
-            coupling::report(&graphs);
-        }
-        return ExitCode::SUCCESS;
-    }
-    if flags.contains(&"--metrics") {
-        report_metrics(&measured);
-        return ExitCode::SUCCESS;
-    }
-    if flags.contains(&"--creep") {
-        report_creep(&measured);
-        return ExitCode::SUCCESS;
-    }
-
     let files = file_ratchet(&measured);
     let functions = match function_ratchet(&measured) {
         Ok(r) => r,
@@ -141,6 +119,29 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if flags.contains(&"--coupling") {
+        let graphs = coupling::build(
+            measured
+                .iter()
+                .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), m.production, f))),
+        );
+        if flags.contains(&"--json") {
+            coupling::report_json(&graphs, &files, &functions);
+        } else {
+            coupling::report(&graphs);
+        }
+        return ExitCode::SUCCESS;
+    }
+    if flags.contains(&"--metrics") {
+        report_overhang(&files, &functions);
+        report_metrics(&measured);
+        return ExitCode::SUCCESS;
+    }
+    if flags.contains(&"--creep") {
+        report_creep(&measured);
+        return ExitCode::SUCCESS;
+    }
 
     let allows = allow_ratchet(&measured);
 
@@ -155,6 +156,9 @@ fn main() -> ExitCode {
         let a = files.check(&root);
         let b = functions.check(&root);
         let c = allows.check(&root);
+        if a && b && c {
+            report_overhang(&files, &functions);
+        }
         if !(a && b && c) {
             eprintln!(
                 "\n(size ratchets — justfile: lint-sizes; rationale in tools/fq-lint and\n\
@@ -169,6 +173,42 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn report_overhang(files: &Ratchet<'_>, functions: &Ratchet<'_>) {
+    fn part(ratchet: &Ratchet<'_>) -> String {
+        let overhang = ratchet.overhang();
+        let subject = format!(
+            "{}{}",
+            ratchet.subject,
+            if overhang.entries == 1 { "" } else { "s" }
+        );
+        let mut result = format!(
+            "{} {}, {} lines over the {} cap",
+            overhang.entries,
+            subject,
+            comma(overhang.total_over_cap),
+            comma(ratchet.cap)
+        );
+        if let Some((name, amount)) = overhang.worst {
+            result.push_str(&format!(" (worst: {name} +{})", comma(amount)));
+        }
+        result
+    }
+
+    println!("size overhang: {}; {}", part(files), part(functions));
+}
+
+fn comma(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn repo_root() -> Result<PathBuf, String> {
