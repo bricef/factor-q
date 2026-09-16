@@ -959,6 +959,39 @@ mod tests {
             drop(got);
         }
 
+        // Both verdicts end in an ACK, and the only way to see that is
+        // to outlast the ack window: an un-acked malformed message
+        // would be redelivered after `ack_wait` and admitted again.
+        // Counting up to (1, 1) and stopping there would have looked
+        // the same either way.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            (
+                seen.lock().unwrap().len(),
+                bus.consumer_ledger().record(&name).malformed_acked
+            ),
+            (1, 1),
+            "nothing was redelivered after the ack window"
+        );
+        let mut durable = bus
+            .jetstream()
+            .get_stream(crate::bus::MAINTENANCE_STREAM_NAME)
+            .await
+            .expect("maintenance stream")
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(&name)
+            .await
+            .expect("the test durable");
+        let info = durable.info().await.expect("consumer info");
+        assert_eq!(
+            info.num_ack_pending, 0,
+            "the accepted and the malformed message were both acked"
+        );
+        assert_eq!(
+            info.delivered.consumer_sequence, 2,
+            "two messages, one delivery each: {:?}",
+            info.delivered
+        );
+
         let _ = shutdown_tx.send(());
         handle.await.expect("join loop").expect("run loop");
     }
