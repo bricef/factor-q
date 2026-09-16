@@ -260,8 +260,7 @@ budget: 0.20
 ---
 
 You can read files anywhere under /data/project and write output
-files to /data/project/output. Writes through symlinks are refused unless
-the link resolves inside the allowed `fs_write` prefix.
+files to /data/project/output.
 ```
 
 ### Command runner
@@ -391,7 +390,10 @@ clear error message that the LLM sees and can adapt to.
 ### Path handling
 
 - Paths are canonicalised (resolved to their real location) before
-  comparison, so `..` traversal and symlink escapes are defeated.
+  comparison, so `..` traversal and symlink escapes are defeated. Writes
+  through a symlink are refused unless the link resolves to an existing
+  path inside an allowed `fs_write` prefix; a dangling link is refused
+  even if its target would be inside.
 - **Prefer absolute paths** (`/data/project`). A relative path is
   accepted, but it is stored verbatim and canonicalised at the moment of
   each tool call — so it resolves against the **daemon's working
