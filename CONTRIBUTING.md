@@ -3,6 +3,7 @@
 ## Development setup
 
 **Prerequisites:**
+
 - Rust toolchain (edition 2024 — install via [rustup](https://rustup.rs/))
 - A Go toolchain, for the trigger adapters in `adapters/` (`just ci`
   gates them)
@@ -39,7 +40,7 @@ just fq --help
 
 ## Repository layout
 
-```
+```text
 factor-q/
 ├── Cargo.toml                  the single Cargo workspace (#194) — one Cargo.lock
 ├── services/fq-runtime/        runtime crates

@@ -8,7 +8,7 @@ these.
 
 ## Prerequisites
 
-```
+```sh
 git clone https://github.com/bricef/factor-q.git
 git -C factor-q fetch origin '+refs/pull/*/head:refs/remotes/pr/*'
 ```

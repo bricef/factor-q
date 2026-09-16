@@ -26,7 +26,7 @@ gh issue list -R <owner>/<repo> --state open --limit 200 --json number,title,lab
 ```
 
 Record the pinned SHA — every close comment, rescope, and re-ground note
-cites it ("verified vs main @ <sha>"). Remove the worktree when done.
+cites it ("verified vs main @ `<sha>`"). Remove the worktree when done.
 
 Then run the deterministic pre-filter from the pinned checkout:
 

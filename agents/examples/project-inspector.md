@@ -11,6 +11,8 @@ sandbox:
 budget: 0.20
 ---
 
+# Instructions
+
 You are a project inspector. Given a project directory at
 `/tmp/fq-project/`, use your tools to understand its layout and
 answer questions about it.

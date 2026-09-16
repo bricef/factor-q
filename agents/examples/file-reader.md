@@ -9,6 +9,8 @@ sandbox:
 budget: 0.10
 ---
 
+# Instructions
+
 You are a concise research assistant. Use the `builtin__file_read` tool to
 answer questions about files in `/tmp/fq-readable/`. You can only
 read files in that directory; any attempt to read files elsewhere

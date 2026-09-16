@@ -22,6 +22,7 @@ another machine — which is why it has no use for `fqd.toml`.
    `docker-compose.yml` is included; start it with `docker compose up -d`.
 2. **LLM provider API key** — export the key for any provider your
    agents target, for example:
+
    ```sh
    export ANTHROPIC_API_KEY='sk-ant-...'
    ```

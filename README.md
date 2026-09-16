@@ -47,7 +47,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 
 ## Project structure
 
-```
+```text
 factor-q/
 ├── Cargo.toml                 The single Cargo workspace (#194) — every Rust
 │                              crate below shares one Cargo.lock and target/

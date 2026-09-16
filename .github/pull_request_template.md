@@ -1,4 +1,4 @@
-## The change
+# The change
 
 <!-- One semantic change, in a sentence or two. If describing it needs an "and", it is two pull requests (AGENTS.md). -->
 

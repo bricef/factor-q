@@ -25,7 +25,7 @@ those contracts, and the seed of a trigger-source SDK.
 
 The watcher drives an issue through a label state machine:
 
-```
+```text
 ready ──trigger──▶ in-progress ──completed (task success/partial)──▶ in-review ──PR merged──▶ done
                         │
                         ├──completed (task failed/blocked, retries left)──▶ ready   (bounded retry)
@@ -122,7 +122,7 @@ declares a version this list omits.
 
 ## Run
 
-```
+```console
 github-watcher --repo bricef/factor-q --agent m0-issue-fix \
   --nats-url nats://127.0.0.1:4223 --poll 60s
 ```
@@ -187,7 +187,7 @@ the former task-string payload while in-flight legacy invocations finish.
 
 ## Development
 
-```
+```console
 go test ./...   # pure planner, poll-loop dedup, outcome reactor, review sweep — all against in-memory fakes (no network)
 go vet ./...
 go build .
