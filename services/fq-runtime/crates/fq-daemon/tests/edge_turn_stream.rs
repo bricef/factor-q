@@ -199,6 +199,33 @@ async fn the_turn_atom_lives_end_to_end() {
         ))
         .await
         .expect("publish triggered");
+    // The failure twin's invocation, established here for the same
+    // reason and at the same time: its turns are published after the
+    // wire break below, but the invocation→agent lookup has to resolve,
+    // and after the break nothing can wait on a watermark.
+    let failed_invocation = uuid::Uuid::now_v7();
+    let ft_seq = bus
+        .publish(&fq_runtime::events::Event::new(
+            agent.clone(),
+            failed_invocation,
+            fq_runtime::events::EventPayload::Triggered(fq_runtime::events::TriggeredPayload {
+                trigger_id: None,
+                trigger_source: fq_runtime::events::TriggerSource::Manual,
+                trigger_subject: None,
+                trigger_payload: json!({}),
+                config_snapshot: fq_runtime::events::ConfigSnapshot {
+                    name: "turn-probe".into(),
+                    model: "claude-haiku-4-5".into(),
+                    system_prompt: "probe".into(),
+                    tools: vec![],
+                    sandbox: fq_runtime::events::SandboxSnapshot::default(),
+                    budget: None,
+                    ..Default::default()
+                },
+            }),
+        ))
+        .await
+        .expect("publish triggered for the failed run");
     // Gate on the fold including the Triggered event before touching
     // the turn surface — the 3a/3c composition doing its day job.
     client
@@ -209,7 +236,7 @@ async fn the_turn_atom_lives_end_to_end() {
                 op: OpId::Get(Domain::Invocation),
                 version: 1,
                 input: json!({"invocation_id": invocation.to_string()}),
-                min_seq: Some(t_seq),
+                min_seq: Some(t_seq.max(ft_seq)),
             },
         )
         .await
@@ -234,6 +261,25 @@ async fn the_turn_atom_lives_end_to_end() {
         .expect("tail seek");
     assert!(seek.items.is_empty());
     assert!(seek.next_from_seq < u64::MAX, "a concrete resume cursor");
+
+    // The failure twin's seam, pinned here for the same reason.
+    let failed_filter = json!({"invocation_id": failed_invocation.to_string()});
+    let failed_seek = client
+        .rpc
+        .next_batch(
+            tarpc::context::current(),
+            fq_edge::NextBatchRequest {
+                op: stream_op.clone(),
+                version: 1,
+                filter: failed_filter.clone(),
+                from_seq: u64::MAX,
+                max_wait_ms: 0,
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("tail seek for the failed run");
+    assert!(failed_seek.items.is_empty());
 
     // #673: the wire break goes in HERE — after the seam the stream
     // resumes from, before the turns. So List (which scans the agent's
@@ -351,6 +397,69 @@ async fn the_turn_atom_lives_end_to_end() {
     );
     assert_eq!(listed[0]["invocation_id"], invocation.to_string());
     assert!(listed[0]["action"]["content"].is_string(), "full payloads");
+
+    // The failure twin of the same path, on its own invocation. Until
+    // now nothing made the `Failed` fold arm carry its weight across the
+    // wire — mutating it failed a unit test and nothing else. A run that
+    // ends in `Failed` must fold to a `failed` outcome, carry the error
+    // message as its summary, and end the tail exactly as a completed
+    // one does.
+    let fa_seq = bus
+        .publish(&assistant_with_call(&agent, failed_invocation, "tc-2"))
+        .await
+        .expect("publish assistant");
+    let ff_seq = bus
+        .publish(&fq_runtime::events::Event::new(
+            agent.clone(),
+            failed_invocation,
+            fq_runtime::events::EventPayload::Failed(fq_runtime::events::FailedPayload {
+                error_kind: fq_runtime::events::FailureKind::RuntimeError,
+                error_message: "reducer stopped".into(),
+                phase: fq_runtime::events::FailurePhase::Reducer,
+                partial_totals: fq_runtime::events::InvocationTotals {
+                    total_llm_calls: 1,
+                    ..Default::default()
+                },
+            }),
+        ))
+        .await
+        .expect("publish failure");
+
+    let started = tokio::time::Instant::now();
+    let failed_batch = client
+        .rpc
+        .next_batch(
+            tarpc::context::current(),
+            fq_edge::NextBatchRequest {
+                op: stream_op.clone(),
+                version: 1,
+                filter: failed_filter,
+                from_seq: failed_seek.next_from_seq,
+                max_wait_ms: 10_000,
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("stream batch for the failed run");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a failed run's outcome must end the tail too, not after max_wait_ms"
+    );
+    assert_eq!(
+        failed_batch.items.len(),
+        2,
+        "the turn and its failure outcome arrive: {failed_batch:?}"
+    );
+    assert_eq!(failed_batch.items[0].seq, fa_seq);
+    let outcome = &failed_batch.items[1];
+    assert_eq!(outcome.seq, ff_seq);
+    assert_eq!(outcome.item["action"]["kind"], "outcome");
+    assert_eq!(outcome.item["action"]["phase"], "failed");
+    assert_eq!(outcome.item["action"]["is_error"], true);
+    assert_eq!(
+        outcome.item["action"]["summary"], "reducer stopped",
+        "the failure message is the outcome's summary"
+    );
 
     // An idle long poll times out with progress, not a hang.
     let idle = client
