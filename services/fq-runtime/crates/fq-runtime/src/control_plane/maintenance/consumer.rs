@@ -144,7 +144,6 @@ impl MaintenanceConsumer {
             |msg| {
                 Admission::Accept(RawMessage {
                     subject: msg.subject.to_string(),
-                    payload: msg.payload.to_vec(),
                     message_id: msg.headers.as_ref().and_then(|headers| {
                         headers
                             .get(async_nats::header::NATS_MESSAGE_ID)
@@ -370,10 +369,13 @@ impl MaintenanceConsumer {
 }
 
 /// Opaque maintenance command admitted without event-envelope parsing.
+///
+/// The body is not carried: a maintenance command is named by its
+/// subject and identified by `Nats-Msg-Id`, and nothing here reads the
+/// bytes. Keeping them would copy every payload out of the delivery for
+/// no reader.
 struct RawMessage {
     subject: String,
-    #[allow(dead_code)]
-    payload: Vec<u8>,
     message_id: Option<String>,
 }
 
