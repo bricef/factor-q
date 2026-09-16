@@ -314,6 +314,7 @@ ops-ci:
     bash ops/dogfood/tests/fq-ops.sh
     bash ops/dogfood/tests/idle-check.sh
     bash ops/dogfood/tests/ops-crontab.sh
+    bash ops/dogfood/tests/volume-content.sh
     bash ops/dogfood/tests/compose-config.sh
 
 # Run all quality checks — docs lint + link check + dependency audit + both

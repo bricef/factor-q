@@ -3,10 +3,8 @@
 # the broker's JetStream store, from the two tarballs backup.sh writes.
 # The restore drill (README) is this script on a freshly bootstrapped host.
 #
-#   restore.sh <backup-dir>        refuse if either volume already has content
-#   restore.sh <backup-dir> --yes  overwrite existing volume content — and the
-#                                  first restore on a freshly bootstrapped host,
-#                                  whose image-seeded layout reads as content (#671)
+#   restore.sh <backup-dir>        refuse if either volume has instance content
+#   restore.sh <backup-dir> --yes  overwrite existing instance content
 #
 # The stack is taken down first (containers removed, volumes kept), the
 # tarballs are checked against SHA256SUMS, the volumes are created if
@@ -49,8 +47,19 @@ docker compose down >/dev/null 2>&1 || true
 docker volume create "${PROJECT}_fq-data" >/dev/null
 docker volume create "${PROJECT}_nats-data" >/dev/null
 
-# Refuse to overwrite a live instance unless told to.
-occupied() { docker compose run --rm --no-deps --user root -v "$1:/probe:ro" --entrypoint sh fqd -c 'ls -A /probe | grep -vxE "lost\+found|agents|state|cache|workspace|build|home" | head -1; for d in state cache; do [ -d /probe/$d ] && [ -n "$(ls -A /probe/$d)" ] && echo "$d"; done' 2>/dev/null | head -1; }
+# Empty directories shipped by the image are layout, not instance content. Any
+# regular file outside lost+found, or any unknown top-level entry, is content.
+volume_content() {
+    root="$1"
+    find "$root" -mindepth 1 -type f ! -path "$root/lost+found/*" -print | head -1
+    find "$root" -mindepth 1 -maxdepth 1 ! -name lost+found ! -name agents \
+        ! -name state ! -name cache ! -name workspace ! -name build ! -name home -print | head -1
+}
+occupied() {
+    probe="$(declare -f volume_content)"
+    docker compose run --rm --no-deps --user root -v "$1:/probe:ro" --entrypoint sh fqd \
+        -c "$probe; volume_content /probe" 2>/dev/null | head -1
+}
 if [ "$YES" != 1 ]; then
     for v in "${PROJECT}_fq-data" "${PROJECT}_nats-data"; do
         [ -z "$(occupied "$v")" ] || die "$v already has content — restore.sh $SET --yes to overwrite it"

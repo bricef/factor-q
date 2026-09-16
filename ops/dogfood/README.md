@@ -127,9 +127,9 @@ before ADR-0036. It ends by printing what only a human can do:
    `DASH_INTERNAL_ADDR` and the override from "An internal host".
    `docker login ghcr.io` as `fq` if the packages are private.
 2. Seed the instance volume (below), or
-   `docker compose run --rm ops restore <set> --yes` to bring an
-   existing instance across (a freshly bootstrapped host reads as
-   occupied — see "Backups and the restore drill").
+   `docker compose run --rm ops restore <set>` to bring an existing instance
+   across. A freshly bootstrapped host is not occupied; use `--yes` only to
+   overwrite instance content.
 3. The first deploy — `docker compose run --rm ops deploy` — then pair
    and mint the dashboard token (below).
 
@@ -642,11 +642,9 @@ daemon that started.
 
 **The drill**, once, and again after anything touches the layout: on a
 scratch VM, `bootstrap.sh`, copy a backup set over, `docker compose run
---rm ops restore <set> --yes`, then `docker compose exec fqd fq status` and `fq invocation
-list` show the instance as it was. The `--yes` is not impatience: the
-image seeds the volume's layout on first mount, so a freshly
-bootstrapped host reads as occupied and the refusal is spurious
-([#671](https://github.com/bricef/factor-q/issues/671)).
+--rm ops restore <set>`, then `docker compose exec fqd fq status` and `fq invocation
+list` show the instance as it was. A freshly bootstrapped host restores without
+`--yes`; empty image-seeded layout directories are not instance content.
 Clone-and-restore is cheap on a dedicated VM; the ADR's acceptance asks
 for it and so does the production-readiness review's Phase 3. The drill
 has been run for real twice — the dogfood instance's rehearsal and its
@@ -697,11 +695,9 @@ one ever needs packaging again.
    `DASH_INTERNAL_ADDR` and `compose.override.yml` two-liner from "An
    internal host" now, before anything starts.
 
-4. **`docker compose run --rm ops restore <set> --yes`.** The flag is right here, not a
-   workaround: the image seeds the volume's layout on first mount, so a
-   freshly bootstrapped host reads as occupied and the refusal is
-   spurious ([#671](https://github.com/bricef/factor-q/issues/671)). The
-   broker volume has to arrive **with** its durable consumer state — a
+4. **`docker compose run --rm ops restore <set>`.** A freshly bootstrapped host
+   restores without `--yes`; reserve that flag for overwriting instance content.
+   The broker volume has to arrive **with** its durable consumer state — a
    daemon attaching to a stream with no existing durable halts
    `fq-coordination` and `fq-projector` at sequence 1 and still logs
    `Runtime ready` ([#684](https://github.com/bricef/factor-q/issues/684)).
