@@ -20,6 +20,13 @@ use std::path::Path;
 /// How far a budget may drift above reality before CI demands it be lowered.
 pub const STALENESS_SLACK: usize = 100;
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Overhang {
+    pub entries: usize,
+    pub total_over_cap: usize,
+    pub worst: Option<(String, usize)>,
+}
+
 pub struct Ratchet<'a> {
     /// Human label for the subject, e.g. "file" or "function".
     pub subject: &'a str,
@@ -42,6 +49,19 @@ impl Ratchet<'_> {
             .filter(|&(_, &n)| n > self.cap)
             .map(|(k, &n)| (k.as_str(), n))
             .collect()
+    }
+
+    /// Aggregate debt above the cap. This is advisory and never gates.
+    pub fn overhang(&self) -> Overhang {
+        let over = self.over_cap();
+        Overhang {
+            entries: over.len(),
+            total_over_cap: over.values().map(|n| n - self.cap).sum(),
+            worst: over
+                .into_iter()
+                .max_by_key(|(_, n)| *n)
+                .map(|(name, n)| (name.to_string(), n - self.cap)),
+        }
     }
 
     pub fn read_baseline(&self, root: &Path) -> BTreeMap<String, usize> {
@@ -313,6 +333,53 @@ impl AllowRatchet {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ratchet(measured: BTreeMap<String, usize>) -> Ratchet<'static> {
+        Ratchet {
+            subject: "item",
+            unit: "lines",
+            cap: 10,
+            baseline_path: "unused",
+            measured,
+            guidance_new: "",
+            guidance_grown: "",
+        }
+    }
+
+    #[test]
+    fn overhang_summarizes_only_entries_above_cap() {
+        let measured = BTreeMap::from([
+            ("below".into(), 9),
+            ("at".into(), 10),
+            ("above".into(), 13),
+            ("worst".into(), 18),
+        ]);
+        assert_eq!(
+            ratchet(measured).overhang(),
+            Overhang {
+                entries: 2,
+                total_over_cap: 11,
+                worst: Some(("worst".into(), 8)),
+            }
+        );
+    }
+
+    #[test]
+    fn overhang_is_zero_for_empty_measurements() {
+        assert_eq!(
+            ratchet(BTreeMap::new()).overhang(),
+            Overhang {
+                entries: 0,
+                total_over_cap: 0,
+                worst: None,
+            }
+        );
     }
 }
 

@@ -357,7 +357,11 @@ pub fn report(graphs: &[CrateGraph]) {
 ///
 /// Stability matters more than shape here: the PR comment compares two runs of
 /// this output, so a field rename silently changes every delta.
-pub fn report_json(graphs: &[CrateGraph]) {
+pub fn report_json(
+    graphs: &[CrateGraph],
+    files: &crate::ratchet::Ratchet<'_>,
+    functions: &crate::ratchet::Ratchet<'_>,
+) {
     let crates: Vec<serde_json::Value> = graphs
         .iter()
         .filter(|g| worth_reporting(g))
@@ -384,7 +388,25 @@ pub fn report_json(graphs: &[CrateGraph]) {
             })
         })
         .collect();
-    let doc = serde_json::json!({ "crates": crates });
+    fn overhang_json(ratchet: &crate::ratchet::Ratchet<'_>) -> serde_json::Value {
+        let overhang = ratchet.overhang();
+        serde_json::json!({
+            "entries": overhang.entries,
+            "total_over_cap": overhang.total_over_cap,
+            "cap": ratchet.cap,
+            "worst": overhang.worst.map(|(name, over_cap)| serde_json::json!({
+                "name": name,
+                "over_cap": over_cap,
+            })),
+        })
+    }
+    let doc = serde_json::json!({
+        "crates": crates,
+        "overhang": {
+            "files": overhang_json(files),
+            "functions": overhang_json(functions),
+        },
+    });
     println!(
         "{}",
         serde_json::to_string_pretty(&doc).expect("plain data")
