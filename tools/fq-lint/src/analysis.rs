@@ -544,7 +544,13 @@ fn fn_facts(
         first_line,
         last_line,
         code_lines: code.len(),
-        params: sig.inputs.len(),
+        // Match clippy::too_many_arguments: a method receiver is not an
+        // argument supplied by its caller.
+        params: sig
+            .inputs
+            .iter()
+            .filter(|arg| !matches!(arg, syn::FnArg::Receiver(_)))
+            .count(),
         is_test,
     }
 }
@@ -681,6 +687,17 @@ mod tests {
         assert_eq!(f.params, 2);
         assert_eq!(f.lines(), 3);
         assert!(!f.is_test);
+    }
+
+    #[test]
+    fn arity_excludes_self_and_counts_free_function_parameters() {
+        let src = "impl S { fn method(&self, x: u8, y: u8) {} }\n\
+                   fn many(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8, i: u8) {}\n";
+        let facts = analyze(src).expect("valid Rust");
+        let method = facts.functions.iter().find(|f| f.name == "method").unwrap();
+        let many = facts.functions.iter().find(|f| f.name == "many").unwrap();
+        assert_eq!(method.params, 2, "self receiver is not a parameter");
+        assert_eq!(many.params, 9, "all free-function parameters count");
     }
 
     #[test]
