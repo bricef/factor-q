@@ -13,6 +13,8 @@
 //! travelled into the dashboard once already. Same tripwire as
 //! `fq-ops`' gate of the same name.
 
+use fq_test_support::manifest_dependencies::manifest_dependency_names;
+
 /// Crates that must never be direct dependencies of fq-agent. The
 /// store, the broker, and the two clients the runtime uses to reach a
 /// model — parsing Markdown needs none of them.
@@ -31,22 +33,11 @@ fn forbidden_dependencies_stay_out() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
     )
     .expect("read fq-agent Cargo.toml");
+    let dependencies = manifest_dependency_names(&manifest).expect("parse fq-agent Cargo.toml");
 
-    // Scan only the `[dependencies]` table: dev-dependencies never
-    // reach the client binary.
-    let mut in_dependencies = false;
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_dependencies = line == "[dependencies]";
-            continue;
-        }
-        if !in_dependencies || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let dep = line.split(['=', ' ', '.']).next().unwrap_or_default();
+    for dep in FORBIDDEN {
         assert!(
-            !FORBIDDEN.contains(&dep),
+            !dependencies.contains(*dep),
             "`{dep}` must not be a dependency of fq-agent — the operator client links \
              this crate to validate a definition offline (#264), so a store, a broker \
              or a model client added here ships in `fq`. It belongs in fq-runtime."

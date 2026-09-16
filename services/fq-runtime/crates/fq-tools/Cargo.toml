@@ -28,6 +28,7 @@ walkdir = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+fq-test-support = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 

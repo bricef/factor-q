@@ -1,12 +1,12 @@
 //! Source-level gate: forbidden dependencies stay out of fq-ops.
 //!
 //! ADR-0031's thin `fq` client links this crate alone, so any runtime
-//! dependency added here ships in the client binary. This gate fails
-//! the moment a forbidden crate appears in `[dependencies]` — the
-//! same tripwire idea as fq-cli's `store_open_gate.rs`. It reads the
-//! manifest textually (no cargo metadata dependency), which catches
-//! direct additions; transitive leakage is caught by the Phase 5
-//! build-fact gate on `fq`'s own manifest.
+//! dependency added here ships in the client binary. This gate parses every
+//! normal and build dependency table, including target-specific tables and
+//! renamed packages. Transitive leakage is caught by the Phase 5 build-fact
+//! gate on `fq`'s own manifest.
+
+use fq_test_support::manifest_dependencies::manifest_dependency_names;
 
 /// Crates that must never be direct dependencies of fq-ops. sqlx and
 /// async-nats are the ADR-0031 headline exclusions; tokio/tarpc/axum
@@ -20,22 +20,11 @@ fn forbidden_dependencies_stay_out() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
     )
     .expect("read fq-ops Cargo.toml");
+    let dependencies = manifest_dependency_names(&manifest).expect("parse fq-ops Cargo.toml");
 
-    // Scan only the `[dependencies]` table: dev-dependencies never
-    // reach the client binary.
-    let mut in_dependencies = false;
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_dependencies = line == "[dependencies]";
-            continue;
-        }
-        if !in_dependencies || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let dep = line.split(['=', ' ', '.']).next().unwrap_or_default();
+    for dep in FORBIDDEN {
         assert!(
-            !FORBIDDEN.contains(&dep),
+            !dependencies.contains(*dep),
             "`{dep}` must not be a dependency of fq-ops — this crate is the thin \
              client's entire dependency tree (ADR-0031); put runtime machinery in \
              fq-runtime instead"
