@@ -375,19 +375,102 @@ async fn wait_for_durables(
     }
 }
 
+/// The predicate, against the shapes the daemon actually emits.
+///
+/// `ConsumerHealth` is externally tagged, so every entry is a one-key
+/// object naming its state — `{"active": {…}}`, `{"missing": {…}}` —
+/// and the cases here are serialised from the enum itself rather than
+/// hand-written. A rename or a re-tagging in `fq-ops` then fails this
+/// test, instead of silently leaving a predicate that recognises a
+/// wire format nobody speaks any more.
 #[test]
 fn durable_wait_requires_the_complete_active_roster() {
-    fn active(name: &&str) -> serde_json::Value {
-        json!({ "active": { "name": name } })
+    use fq_ops::health::{ConsumerHealth, UnsupportedEvent};
+
+    fn wire(consumer: ConsumerHealth) -> serde_json::Value {
+        serde_json::to_value(consumer).expect("a consumer health serialises")
     }
-    let mut consumers: Vec<_> = EXPECTED_DURABLES.iter().map(active).collect();
-    assert!(durables_ready(&consumers, &EXPECTED_DURABLES));
+    fn active(name: &str) -> serde_json::Value {
+        wire(ConsumerHealth::Active {
+            name: name.to_string(),
+            delivered: 0,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+        })
+    }
+    let roster = |consumers: &[serde_json::Value]| durables_ready(consumers, &EXPECTED_DURABLES);
+    let mut consumers: Vec<_> = EXPECTED_DURABLES.iter().map(|n| active(n)).collect();
+    assert!(roster(&consumers), "the settled roster is ready");
 
-    consumers[0]["active"] = serde_json::Value::Null;
-    assert!(!durables_ready(&consumers, &EXPECTED_DURABLES));
+    // The startup shape this wait exists for: `probe_core_consumers`
+    // walks the expected roster and emits `Missing` for a durable no
+    // daemon has created yet, so an incomplete startup is a full-length
+    // list with a `missing` entry in it, never a short one.
+    let mut with_missing = consumers.clone();
+    with_missing[0] = wire(ConsumerHealth::Missing {
+        name: EXPECTED_DURABLES[0].to_string(),
+    });
+    assert!(!roster(&with_missing), "a missing durable is not ready");
 
-    let missing: Vec<_> = EXPECTED_DURABLES[..5].iter().map(active).collect();
-    assert!(!durables_ready(&missing, &EXPECTED_DURABLES));
+    // The probe read the consumer and JetStream refused: named, but
+    // nothing is known about its progress.
+    let mut with_error = consumers.clone();
+    with_error[1] = wire(ConsumerHealth::Error {
+        name: EXPECTED_DURABLES[1].to_string(),
+        error: "consumer info: timeout".to_string(),
+    });
+    assert!(!roster(&with_error), "an unreadable durable is not ready");
+
+    // Halted: it exists and is named, but it is parked on an event it
+    // cannot read and is making no progress — not a daemon to assert
+    // a healthy roster about.
+    let mut with_halted = consumers.clone();
+    with_halted[2] = wire(ConsumerHealth::Halted {
+        name: EXPECTED_DURABLES[2].to_string(),
+        halted_on: UnsupportedEvent {
+            schema_version: 99,
+            supported: vec![1],
+            event_id: None,
+            subject: "fq.events.v99".to_string(),
+            stream_seq: Some(7),
+        },
+        malformed_acked: 0,
+    });
+    assert!(!roster(&with_halted), "a halted durable is not ready");
+
+    // A seventh durable is as wrong as a missing one: the roster is
+    // compared, not contained, so a consumer this fixture does not
+    // configure fails the wait rather than passing it early.
+    let mut superset = consumers.clone();
+    superset.push(active("fq-summariser"));
+    assert!(
+        !roster(&superset),
+        "an unexpected durable is not the roster"
+    );
+
+    // A named surface that names nothing: `expect("a named consumer")`
+    // downstream would take an empty string, so the wait refuses it
+    // here.
+    let mut unnamed = consumers.clone();
+    unnamed[3] = active("");
+    assert!(!roster(&unnamed), "an empty name is not a name");
+
+    // Defensive only: `ConsumerHealth` is externally tagged, so a JSON
+    // null under `active` is a shape the daemon cannot emit. Kept
+    // because the predicate indexes into `active` and the cost of the
+    // guard is one branch — if the encoding ever becomes internally
+    // tagged or optional, this is the case that notices.
+    let mut null_active = consumers.clone();
+    null_active[0]["active"] = serde_json::Value::Null;
+    assert!(!roster(&null_active), "a null active block is not ready");
+
+    // A short list: whatever produced it, it is not the roster.
+    consumers.truncate(5);
+    assert!(!roster(&consumers), "five of six is not the roster");
 }
 
 /// Close enough for money: the figures cross a JSON wire as f64, so
