@@ -87,9 +87,11 @@
 //! **A drain or shutdown during a hold requeues the trigger** rather
 //! than leaving the delivery un-acked, because a cap hold can outlast a
 //! deploy and an un-acked hold is charged a delivery on the way back —
-//! see [`TriggerDispatcher::requeue_held`]. The pause hold in
-//! [`super::admission`] still leaves its delivery un-acked; a pause is
-//! tens of seconds, so it does not reach the same arithmetic.
+//! see [`TriggerDispatcher::requeue_held`], which the wait for a worker
+//! permit shares for the same reason (#733): it too is bounded by the
+//! invocation ahead of it. The pause hold in [`super::admission`] still
+//! leaves its delivery un-acked; a pause is tens of seconds, so it does
+//! not reach the same arithmetic.
 
 use tracing::{debug, info, warn};
 
@@ -213,10 +215,10 @@ impl TriggerDispatcher {
                 debug!(
                     agent_id = %agent,
                     trigger_id = %id,
-                    "drain or shutdown during a cap hold; requeued the trigger \
+                    "drain or shutdown while the trigger waited; requeued it \
                      for the next binary as its first delivery"
                 );
-                self.ack(msg, Some(id), "requeued from a cap hold").await;
+                self.ack(msg, Some(id), "requeued from a hold").await;
             }
             Err(err) => warn!(
                 agent_id = %agent,
