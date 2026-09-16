@@ -103,6 +103,8 @@ use futures::StreamExt;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
+use uuid::Uuid;
+
 use crate::bus::{BusError, ConsumerLedger, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog};
 use crate::events::{Event, EventParseError};
 
@@ -340,13 +342,31 @@ pub struct Delivery<T = Event> {
 pub trait DeliveryIdent {
     /// Event id for event-stream items; non-event streams return `None` and
     /// are identified by the subject and stream sequence already on the log.
-    fn delivery_ident(&self) -> Option<String>;
+    /// A [`Uuid`] rather than a `String`: this is read once per delivery and
+    /// only ever rendered on a log line that may not be emitted.
+    fn delivery_ident(&self) -> Option<Uuid>;
 }
 
 impl DeliveryIdent for Event {
-    fn delivery_ident(&self) -> Option<String> {
-        Some(self.envelope.event_id.to_string())
+    fn delivery_ident(&self) -> Option<Uuid> {
+        Some(self.envelope.event_id)
     }
+}
+
+/// How a delivery is named on a log line: the event id where the stream has
+/// one, and `-` where it does not — there the subject and stream sequence
+/// beside it are the identifier.
+fn ident_field(id: Option<Uuid>) -> impl std::fmt::Display {
+    struct Ident(Option<Uuid>);
+    impl std::fmt::Display for Ident {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                Some(id) => write!(f, "{id}"),
+                None => f.write_str("-"),
+            }
+        }
+    }
+    Ident(id)
 }
 
 /// Where the shared loop gets its pull consumer.
@@ -668,7 +688,7 @@ where
                 error!(
                     consumer = name,
                     error = %err,
-                    event_id = event_id.as_deref().unwrap_or("-"),
+                    event_id = %ident_field(event_id),
                     subject,
                     "failed to ack handled message"
                 );
@@ -678,7 +698,7 @@ where
             warn!(
                 consumer = name,
                 error = %err,
-                event_id = event_id.as_deref().unwrap_or("-"),
+                event_id = %ident_field(event_id),
                 subject,
                 "handler rejected message permanently; acking (no retry)"
             );
@@ -686,7 +706,7 @@ where
                 error!(
                     consumer = name,
                     error = %ack_err,
-                    event_id = event_id.as_deref().unwrap_or("-"),
+                    event_id = %ident_field(event_id),
                     subject,
                     "failed to ack permanently rejected message"
                 );
@@ -702,7 +722,7 @@ where
                 error!(
                     consumer = name,
                     error = %err,
-                    event_id = event_id.as_deref().unwrap_or("-"),
+                    event_id = %ident_field(event_id),
                     subject,
                     stream_seq = stream_seq.unwrap_or(0),
                     delivered,
@@ -717,7 +737,7 @@ where
                 error!(
                     consumer = name,
                     error = %nak_err,
-                    event_id = event_id.as_deref().unwrap_or("-"),
+                    event_id = %ident_field(event_id),
                     subject,
                     "failed to NAK message"
                 );
@@ -905,8 +925,9 @@ mod tests {
     struct FakeItem(String);
 
     impl DeliveryIdent for FakeItem {
-        fn delivery_ident(&self) -> Option<String> {
-            Some(self.0.clone())
+        /// A non-event stream names nothing: the subject and sequence do.
+        fn delivery_ident(&self) -> Option<Uuid> {
+            None
         }
     }
 

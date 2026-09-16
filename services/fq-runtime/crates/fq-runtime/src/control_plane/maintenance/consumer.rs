@@ -390,7 +390,7 @@ struct RawMessage {
 }
 
 impl DeliveryIdent for RawMessage {
-    fn delivery_ident(&self) -> Option<String> {
+    fn delivery_ident(&self) -> Option<Uuid> {
         None
     }
 }
