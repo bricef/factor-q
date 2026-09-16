@@ -213,6 +213,27 @@ impl TurnFold {
                     },
                 ))
             }
+            // The terminal turn's `round` is a sentinel past the end,
+            // not a Round anyone ran, and it is *not* the ledger's next
+            // round: `RoundLedger` lives in the reducer runner, one
+            // in-memory counter per driven invocation, and this fold
+            // runs in the daemon's read path over the event log, where
+            // no ledger exists and the terminal payload carries no
+            // round of its own.
+            //
+            // So it is derived from what the payload does carry, and
+            // the two counts do not agree: `total_llm_calls` counts
+            // calls that produced an outcome (`runner/llm.rs` skips the
+            // increment on a failure or an empty 200), while a failed
+            // call still consumes a Round (`RoundLedger::seed_from_wal`
+            // says so in as many words). On a run with retries this
+            // number therefore reads *lower* than the last Assistant
+            // turn's round, and nothing should sort on it — `seq` is
+            // the order, here as everywhere in this atom.
+            //
+            // Deriving it from the fold's window instead would make the
+            // answer depend on where the reader joined, which is the one
+            // property this fold refuses (see `is_opening_request`).
             EventPayload::Completed(p) => Some(base(
                 u64::from(p.total_llm_calls) + 1,
                 None,

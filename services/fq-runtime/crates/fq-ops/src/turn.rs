@@ -25,6 +25,12 @@ pub struct TurnState {
     /// `max_iterations` gates). 0 on the opening prompt, which
     /// precedes every Round, and on turns derived from events
     /// predating the field.
+    ///
+    /// On a [`TurnAction::Outcome`] turn it is a sentinel past the
+    /// end, not a Round anyone ran: one past the terminal payload's
+    /// `total_llm_calls`, which counts *successful* calls, so on a run
+    /// with retries it reads lower than the last Assistant turn's
+    /// round. Sort on `seq`, never on this.
     pub round: u64,
     pub timestamp_ms: i64,
     /// For a tool-result turn: the sequence of the assistant turn
