@@ -1,6 +1,7 @@
 //! The dispatcher's half of a deferral (#278): a resume the deferral
-//! queue says is due runs here, under the same permit a trigger runs
-//! under, and a resume that is deferred again goes back on the queue.
+//! queue says is due runs here, under a worker permit its task waited
+//! for like any trigger, and a resume that is deferred again goes back
+//! on the queue.
 
 use tracing::{debug, info, warn};
 
