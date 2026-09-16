@@ -267,6 +267,7 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         redeliveries,
         stuck,
         malformed_acked: 0,
+        duplicate_dropped: 0,
     }
 }
 
@@ -389,6 +390,57 @@ fn malformed_acks_are_counted_beside_the_halt_and_are_not_an_issue_alone() {
     );
 }
 
+/// A redelivery refused by the durable claim (#809) starts nothing and
+/// mints no invocation id, so this line is the only trace it leaves.
+/// Like the malformed count it rides the consumer's line and is not on
+/// its own a fault: dropping a duplicate is the guard working, and the
+/// #327 incident is what happens when nothing counts them.
+#[test]
+fn duplicate_deliveries_dropped_are_counted_beside_the_consumer() {
+    let mut counted = active("fq-dispatcher", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        duplicate_dropped, ..
+    } = &mut counted
+    {
+        *duplicate_dropped = 5;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "a duplicate refused before it could start anything is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("fq-dispatcher: ok (pending 0, 5 duplicate deliveries dropped)"),
+        "got:\n{out}"
+    );
+}
+
+/// Nothing dropped, nothing said: a line that always reported zero
+/// would be noise on every healthy consumer.
+#[test]
+fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![active("fq-dispatcher", false, 0)],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(!out.contains("duplicate"), "got:\n{out}");
+}
+
 /// Every consumer is named, healthy ones included: an operator reading
 /// this during an incident needs to know which durables were *checked*,
 /// not only which complained.
@@ -476,6 +528,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         redeliveries: 0,
         stuck: false,
         malformed_acked: 0,
+        duplicate_dropped: 0,
     };
     let report = build_doctor_report(
         &[],

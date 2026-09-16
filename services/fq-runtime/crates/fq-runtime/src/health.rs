@@ -177,6 +177,7 @@ async fn probe_consumer(
 
     let ConsumerRecord {
         malformed_acked,
+        duplicate_dropped,
         halted_on,
         ..
     } = record;
@@ -205,6 +206,7 @@ async fn probe_consumer(
         redeliveries,
         stuck: is_stuck(ack_pending, num_redelivered, redeliveries, policy),
         malformed_acked,
+        duplicate_dropped,
     }
 }
 

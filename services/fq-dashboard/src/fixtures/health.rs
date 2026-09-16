@@ -67,6 +67,7 @@ pub(crate) fn status_report() -> StatusReport {
                         redeliveries: 0,
                         stuck: false,
                         malformed_acked: 0,
+                        duplicate_dropped: 0,
                     },
                     ConsumerHealth::Active {
                         name: "fq-coordination".to_string(),
@@ -77,6 +78,7 @@ pub(crate) fn status_report() -> StatusReport {
                         redeliveries: 0,
                         stuck: false,
                         malformed_acked: 0,
+                        duplicate_dropped: 0,
                     },
                     // The wedge finding B4 describes, so the fixture
                     // exercises the red path the dashboard has to
@@ -90,6 +92,7 @@ pub(crate) fn status_report() -> StatusReport {
                         redeliveries: 37,
                         stuck: true,
                         malformed_acked: 0,
+                        duplicate_dropped: 0,
                     },
                 ],
             },
@@ -108,6 +111,7 @@ pub(crate) fn status_report() -> StatusReport {
                     redeliveries: 3,
                     stuck: false,
                     malformed_acked: 0,
+                    duplicate_dropped: 0,
                 }],
             },
         ],
@@ -177,6 +181,7 @@ pub(crate) fn doctor_report() -> DoctorReport {
                 redeliveries: 0,
                 stuck: false,
                 malformed_acked: 0,
+                duplicate_dropped: 0,
             },
             ConsumerHealth::Active {
                 name: "fq-heartbeat".to_string(),
@@ -187,6 +192,7 @@ pub(crate) fn doctor_report() -> DoctorReport {
                 redeliveries: 37,
                 stuck: true,
                 malformed_acked: 0,
+                duplicate_dropped: 0,
             },
             ConsumerHealth::Missing {
                 name: "fq-advisory-watch".to_string(),

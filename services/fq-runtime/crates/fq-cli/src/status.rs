@@ -389,6 +389,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             redeliveries,
             stuck,
             malformed_acked,
+            duplicate_dropped,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -420,6 +421,16 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                 out.push_str(&format!(
                     "    malformed acked: {malformed_acked} (not an event in any version; \
                      skipped)\n"
+                ));
+            }
+            // A redelivery of a trigger whose invocation is already
+            // durably running is acked and dropped by the claim (#809):
+            // it starts nothing and mints no id, so this line is the
+            // only trace it leaves.
+            if *duplicate_dropped > 0 {
+                out.push_str(&format!(
+                    "    duplicate dropped: {duplicate_dropped} (redelivered after the \
+                     invocation had durably started; refused, not re-run)\n"
                 ));
             }
             out
