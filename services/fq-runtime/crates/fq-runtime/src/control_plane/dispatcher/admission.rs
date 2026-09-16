@@ -125,6 +125,16 @@ impl TriggerDispatcher {
     /// neither jump the triggers already waiting nor be jumped by them.
     pub(super) async fn resume_when_permitted(self: Arc<Self>, resume: DueResume) {
         let Some(_permit) = self.acquire_run_permit(None, None).await else {
+            // Named at `info`, because this is the one abandoned wait
+            // with no trigger to name in its place: there is no delivery
+            // to requeue and nothing on the broker to point at, only a
+            // WAL row that the next start's recovery picks up. Without
+            // this the invocation just stops appearing in the log.
+            info!(
+                invocation_id = %resume.invocation_id,
+                "drain or shutdown before a due resume took a worker permit; \
+                 deferred resume left for the next binary"
+            );
             return;
         };
         self.resume_deferred(resume).await;
