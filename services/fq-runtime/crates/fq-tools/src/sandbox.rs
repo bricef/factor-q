@@ -24,11 +24,21 @@
 //! # Known limitations
 //!
 //! - **TOCTOU**: nothing stops the filesystem from mutating between
-//!   the check and the open. An attacker with concurrent write access
-//!   to the allowed directories could swap in a symlink after the
-//!   check. Process-level protection is inherently racy; full
-//!   isolation requires OS primitives (namespaces, seccomp) or
-//!   container-level sandboxing (see ADR-0010).
+//!   the check and the open, and only half of that window is closed.
+//!   `file_write` opens with `O_NOFOLLOW`, so a swap of the **final
+//!   component** for a symlink after the check is refused by the
+//!   kernel; a swap of an **intermediate directory** is not — rename
+//!   `allowed/sub` aside, put a symlink to somewhere outside in its
+//!   place, and an open of `allowed/sub/deep.txt` lands outside.
+//!   Process-level protection is inherently racy; closing the rest
+//!   needs `openat` on a parent handle, or OS primitives (namespaces,
+//!   seccomp) or container-level sandboxing (see ADR-0010).
+//! - **Hard links** are invisible to a path-based sandbox: a link
+//!   inside an allowed prefix is the same inode as its twin outside,
+//!   and no amount of path checking can tell them apart. This grants
+//!   no privilege the agent lacks, because the host sets
+//!   `fs.protected_hardlinks=1` and linking still requires read access
+//!   to the target.
 //! - The sandbox does not mount or chroot — tools run in the parent
 //!   process and rely on their own enforcement. Treat the sandbox as
 //!   a first-line defence, not a last line.
@@ -238,7 +248,17 @@ impl ToolSandbox {
     /// it does not, the parent directory is canonicalised and the
     /// filename appended, giving the would-be path of the new file.
     /// Dangling symlinks are refused, even when their destination would
-    /// be inside an allowed prefix.
+    /// be inside an allowed prefix. A path written with a trailing `/`
+    /// or `/.` that names a file is `InvalidPath`, not a silent
+    /// normalisation.
+    ///
+    /// The verdict is a fact about the filesystem at the moment of the
+    /// check, so the caller still races whatever opens the path. Half
+    /// that race is closed downstream: `file_write` opens with
+    /// `O_NOFOLLOW`, so swapping the **final component** for a symlink
+    /// between this check and that open is refused. Swapping an
+    /// **intermediate directory** for one is not — see the module's
+    /// "Known limitations".
     pub fn check_write(&self, target: &Path) -> Result<PathBuf, SandboxError> {
         self.check_write_impl(target)
             .map_err(|err| flag_mangled(target, err))
