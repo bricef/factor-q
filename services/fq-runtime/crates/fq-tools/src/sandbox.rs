@@ -866,6 +866,44 @@ mod tests {
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
     }
 
+    /// The issue's PoC at the check layer: the tool-level tests all pass
+    /// with the `canonicalise_for_write` fix reverted, because the
+    /// `O_NOFOLLOW` open catches them. Only a probe calling
+    /// `check_write` directly pins the check layer's own contract.
+    #[test]
+    fn write_dangling_symlink_pointing_outside_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let outside = other.path().join("authorized_keys");
+        let link = allowed.path().join("notes.txt");
+        symlink(&outside, &link).unwrap();
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let err = sb.check_write(&link).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PermissionDenied { .. }),
+            "expected PermissionDenied, got {err:?}"
+        );
+        assert!(!outside.exists());
+    }
+
+    /// A dangling link is refused even when its destination would be
+    /// inside the prefix — the simplest rule, and the one the doc
+    /// comment states.
+    #[test]
+    fn write_dangling_symlink_pointing_inside_is_denied() {
+        let allowed = tempdir().unwrap();
+        let inside = allowed.path().join("target.txt");
+        let link = allowed.path().join("notes.txt");
+        symlink(&inside, &link).unwrap();
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let err = sb.check_write(&link).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PermissionDenied { .. }),
+            "expected PermissionDenied, got {err:?}"
+        );
+        assert!(!inside.exists());
+    }
+
     /// A trailing slash makes `symlink_metadata` resolve the final link,
     /// so a dangling one reports `ENOENT` and used to fall through to
     /// the lexical parent-join, which approved the link itself.
