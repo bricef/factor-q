@@ -231,6 +231,42 @@ impl TurnFold {
                     is_error: true,
                 },
             )),
+            // The third way a run ends. `fq invocation drop` publishes
+            // exactly one `invocation.operator_recovered` and **no**
+            // competing terminal event — the reducer's drop path returns
+            // `Suspended` and emits nothing (`reducer/runner.rs`), while
+            // the coordination consumer marks the WAL row terminal from
+            // this event alone. So the WAL-backed transcript closes a
+            // dropped run and, without this arm, the Turn-backed one
+            // never would: its dashboard page would tail forever.
+            //
+            // `phase` is carried verbatim, as the WAL row carries it:
+            // the vocabulary lives in the reducer harness, not here, and
+            // `mark_invocation_operator_terminal` writes the same string
+            // into `invocation_state.phase` that `views::transcript`
+            // then reads back into its Outcome. v1 always says "failed";
+            // a future `resume` action may say "completed", which is why
+            // `is_error` is derived rather than hardcoded — the same
+            // "anything that is not completed failed" reading the
+            // coordination consumer uses for ownership status.
+            //
+            // `round: 0` — the drop event carries no call count, and
+            // inventing one from the fold's window would make the number
+            // depend on where the reader joined. 0 is this atom's
+            // existing "no Round to claim" reading (the opening prompt
+            // uses it).
+            EventPayload::InvocationOperatorRecovered(p) => Some(base(
+                0,
+                None,
+                TurnAction::Outcome {
+                    phase: p.final_phase.clone(),
+                    // The operator's own words, the only summary a
+                    // dropped run has. Audit-only text: shown, never
+                    // parsed.
+                    summary: p.reason.clone(),
+                    is_error: p.final_phase != "completed",
+                },
+            )),
             _ => None,
         }
     }
@@ -641,6 +677,69 @@ mod tests {
             &failed_turn.action,
             TurnAction::Outcome { phase, summary, is_error: true }
                 if phase == "failed" && summary.as_deref() == Some("runner stopped")
+        ));
+    }
+
+    /// An operator drop is the third terminal event, and the only one
+    /// that arrives alone: `fq invocation drop` publishes
+    /// `invocation.operator_recovered` and nothing else — no `Failed`
+    /// follows it. The WAL transcript closes such a run from the row the
+    /// coordination consumer marks terminal, so the Turn-backed one must
+    /// close it too, or a dropped run's page tails forever.
+    #[test]
+    fn an_operator_drop_is_a_terminal_outcome_turn() {
+        let dropped = |final_phase: &str, reason: Option<&str>| {
+            Event::new(
+                AgentId::new("fold-probe").unwrap(),
+                Uuid::now_v7(),
+                EventPayload::InvocationOperatorRecovered(
+                    crate::events::InvocationOperatorRecoveredPayload {
+                        action: "drop".into(),
+                        final_phase: final_phase.into(),
+                        reason: reason.map(str::to_string),
+                    },
+                ),
+            )
+        };
+
+        let turn = TurnFold::new()
+            .apply(31, &dropped("failed", Some("stuck on a dead broker")))
+            .expect("a drop ends the invocation");
+        assert_eq!(turn.seq, 31);
+        assert_eq!(turn.round, 0);
+        assert_eq!(turn.initiating_turn, None);
+        assert!(
+            matches!(
+                &turn.action,
+                TurnAction::Outcome { phase, summary, is_error: true }
+                    if phase == "failed" && summary.as_deref() == Some("stuck on a dead broker")
+            ),
+            "got {:?}",
+            turn.action
+        );
+        // The phase the WAL row would carry, rendered the same way.
+        assert!(matches!(
+            turn.transcript_entry(),
+            TranscriptEntry::Outcome { phase, .. } if phase == "failed"
+        ));
+
+        // A drop with no reason has no summary to show — absent, not
+        // an empty string.
+        let bare = TurnFold::new().apply(32, &dropped("failed", None)).unwrap();
+        assert!(matches!(
+            &bare.action,
+            TurnAction::Outcome { summary: None, .. }
+        ));
+
+        // `is_error` is derived from the phase, not hardcoded: the
+        // payload's vocabulary is the harness's and a future `resume`
+        // action may close a run as completed.
+        let recovered = TurnFold::new()
+            .apply(33, &dropped("completed", None))
+            .unwrap();
+        assert!(matches!(
+            &recovered.action,
+            TurnAction::Outcome { phase, is_error: false, .. } if phase == "completed"
         ));
     }
 
