@@ -7,7 +7,7 @@
 //! the first attempt it still is.
 //!
 //! Why hold rather than NAK with a delay: the trigger durable's ack
-//! window is one second (`TRIGGER_RETRY_BACKOFF[0]`, see `bus.rs`), and
+//! window is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`, see `bus.rs`), and
 //! every redelivery counts toward `TRIGGER_MAX_DELIVER`. A NAK per pause
 //! would dead-letter a trigger after four pauses of a persistently
 //! throttled model — a `failed` event the watcher counts, the outcome
@@ -54,11 +54,11 @@ use crate::worker::DrainState;
 /// follows the ack, how often the hold asks whether it can stop.
 ///
 /// **One constant for both holds.** The trigger durable's real
-/// first-delivery deadline is one second (`TRIGGER_RETRY_BACKOFF[0]`;
+/// first-delivery deadline is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`;
 /// JetStream replaces `ack_wait` with `backoff[0]` wherever a schedule
 /// is set), and one slipped tick means a redelivery, a second `handle`
 /// for the same trigger, `attempt: 2` and a duplicate invocation. 250 ms
-/// leaves 750 ms of slack per tick.
+/// gives each window about 120 keepalive ticks.
 ///
 /// The cap hold is what argued the number down from 400 ms: a pause hold
 /// is bounded by the pause, tens of ticks, while a cap hold is bounded
@@ -67,8 +67,9 @@ use crate::worker::DrainState;
 /// has to land on a machine that is busy compiling. Nothing in that
 /// argument is special to the cap, so both holds take the wider margin.
 ///
-/// It is slack against a one-second window and not a fix for it. The
-/// window itself belongs to
+/// It is slack against a 30-second window and not a durable fix. The
+/// tradeoff is that a crash before durable start is recovered after 30
+/// seconds instead of one. The window itself belongs to
 /// <https://github.com/bricef/factor-q/issues/327>, which owns the
 /// duplicate-invocation class this guards against.
 pub(super) const HOLD_KEEPALIVE: Duration = Duration::from_millis(250);
