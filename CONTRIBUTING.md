@@ -185,9 +185,11 @@ daemon; after changing the Dockerfile, build them and run
   update PRs (`.github/dependabot.yml`).
 
 - **Size and exception budgets are ratcheted, not advisory.** No file
-  may exceed 800 production lines and no function may exceed 250
-  lines; pre-existing offenders are pinned in `.file-size-baseline`
-  and `.function-size-baseline` and may only ever shrink. The same
+  may exceed 800 production lines, no function may exceed 250
+  lines, and no function may have more than 7 parameters excluding
+  `self`; pre-existing offenders are pinned in `.file-size-baseline`,
+  `.function-size-baseline`, and `.function-arity-baseline` and may
+  only ever shrink. The same
   mechanism covers production `#[allow]` / `#[expect]` exceptions:
   `just lint-sizes` counts them per lint against the census in
   `.allow-baseline`, and those counts may only shrink too — so
