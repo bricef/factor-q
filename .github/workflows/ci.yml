@@ -214,6 +214,50 @@ jobs:
           tool: ${{ steps.versions.outputs.tools }}
       - run: just audit
 
+  # The advisory companion to the gate above (#594): the same two tools, but
+  # rendered as one upserted PR comment — findings plus the reviewed
+  # `deny.toml` dispositions, so the table lives in one place. It never gates;
+  # `audit` stays the only enforcement, per the maintainer's "comment first,
+  # thresholds later". Unfiltered for the same reason `audit` is: a docs-only
+  # PR can be the first to meet a new RUSTSEC id, and that is worth saying.
+  audit-comment:
+    name: Dependency audit comment
+    needs: audit
+    runs-on: ubuntu-latest
+    # PR context only — the comment needs somewhere to go. Fork PRs get a
+    # read-only token, so the upsert would fail; the script exits 0 either
+    # way, but there is no point spending the build. `always()`: the report is
+    # most useful precisely when the gate above went red.
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Elevated for this job only: upsert the PR comment. The workflow default
+    # stays read-only.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      # Keep in lockstep with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - id: versions
+        run: >-
+          echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
+          >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: ${{ steps.versions.outputs.tools }}
+      # The renderer is stdlib Python 3 (tomllib, 3.11+) and ubuntu-latest's
+      # python3 is newer, so there is no setup-python step. GITHUB_REPOSITORY,
+      # which the script reads, is a default Actions variable.
+      - run: >-
+          bash scripts/audit-pr-comment.sh
+          "${{ github.event.pull_request.number }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   runtime-ci:
     name: Runtime CI
     needs: changes
