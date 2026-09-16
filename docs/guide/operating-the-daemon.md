@@ -458,29 +458,28 @@ binary as the first delivery it still is. Nothing is lost if the requeue
 itself fails; the delivery is simply left un-acked, which is the old
 behaviour.
 
-**The two holds differ in exactly one thing: the worker permit.** A
-trigger held at its agent's cap **occupies no worker permit** — it gives
-the permit it was pulled under back for the length of the wait and takes
-a fresh one before it runs, so `max_concurrent_invocations` is sized for
-*running* work and nothing else: an agent waiting on its own cap never
-stops another agent from starting, and a worker cap raised for the
-LLM-bound agents stays available to them while a build-bound agent is
-full.
+**A waiting trigger occupies no worker permit.** A trigger for a paused
+model or for an agent at its cap is pulled and parked, and it takes a
+`max_concurrent_invocations` permit only once it is ready to run — after
+the pause has lifted and its agent has a slot free. Nothing else takes
+one: the dispatch loop itself never holds a permit while it waits for
+work. So the worker cap is sized for *running* invocations and nothing
+else: waiting work for one agent or one model never stops another agent
+from starting, and a worker cap raised for the LLM-bound agents stays
+available to them while a build-bound agent is full.
 
-A trigger held for a **paused model keeps its permit**. That is
-head-of-line blocking, and it is worth knowing before you size the
-worker cap: with every permit taken by triggers for one paused model,
-agents on other models do not run until the pause lifts. It is not a
-decision, it is where the work stopped —
-[#733](https://github.com/bricef/factor-q/issues/733) gives the pause
-hold the cap hold's treatment.
+If every permit is busy when a parked trigger becomes ready, it waits
+for one the same way it waited for the pause — kept alive, still its
+first delivery — and the permits are handed out in the order the
+triggers began waiting.
 
 What bounds the waiting triggers instead is the consumer's ack-pending
-window: the loop keeps pulling while a permit is free and a cap hold
-releases its permit, so triggers for a full agent are pulled and parked
-until `max_ack_pending` (twice the worker cap, or the NATS default of
-**1000**, whichever is larger) is reached. Each parked hold is one task
-and one in-progress ack per keepalive tick.
+window: the loop pulls without asking for a permit at all, so triggers
+for a paused model or a full agent are pulled and parked until
+`max_ack_pending` (twice the worker cap, or the NATS default of
+**1000**, whichever is larger) is reached, after which the broker stops
+delivering until acks arrive. Each parked trigger is one task and one
+in-progress ack per keepalive tick.
 
 ## When a tool hangs
 
