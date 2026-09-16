@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -168,8 +168,8 @@ pub struct TriggerDispatcher {
     /// daemon's.
     throttle: Arc<ModelThrottle>,
     /// Where a deferred invocation is put down and picked up again
-    /// (#278): `handle` defers into it, the consume loop drains it under
-    /// the same permit triggers run on.
+    /// (#278): `handle` defers into it, and the consume loop drains it
+    /// into a task that takes a worker permit of its own to resume.
     deferrals: DeferralQueue,
     /// The queue's drain end, taken by the loop when it starts.
     due: std::sync::Mutex<Option<mpsc::Receiver<DueResume>>>,
@@ -179,10 +179,11 @@ pub struct TriggerDispatcher {
     /// resume paths, which count without being gated.
     agent_caps: Arc<AgentConcurrency>,
     /// The worker-cap permits (#70). Owned here rather than created by
-    /// the consume loop because a trigger held at its agent's cap gives
-    /// its permit back for the length of the hold and takes a fresh one
-    /// to run (#718): the worker cap bounds running invocations, and
-    /// waiting is free.
+    /// the consume loop because the loop is not the one that takes them
+    /// (#733): a permit is taken in `handle`, after both admission
+    /// rules, by a trigger that is ready to run, and by a due resume.
+    /// The worker cap bounds *running* invocations; waiting — on a
+    /// pause, on an agent's cap, on a permit itself — is free.
     permits: Arc<Semaphore>,
     /// Set once the loop has seen its shutdown signal, so a trigger held
     /// for a paused model lets go rather than blocking the stop.
@@ -286,14 +287,13 @@ impl TriggerDispatcher {
         };
         // One message per pull: without this, async-nats prefetches up
         // to a 200-message batch into the client buffer, where triggers
-        // sit delivered-and-unacked with the ack_wait ticking while the
-        // loop waits on a permit — a saturated dispatcher would then see
-        // every buffered trigger redelivered and run twice (the
+        // sit delivered-and-unacked with the ack_wait ticking behind
+        // whatever the loop is doing — a saturated dispatcher would then
+        // see every buffered trigger redelivered and run twice (the
         // one-trigger-to-N-invocations storm the ack-on-durable-start
-        // fix exists to prevent). With batch = 1, a pull is issued only
-        // when a permit is already held, so excess triggers truly stay
-        // *queued on the server* — and immediately reach the next binary
-        // on drain rather than after ack_wait expiry. The extra
+        // fix exists to prevent). With batch = 1 nothing is prefetched:
+        // excess triggers stay *queued on the server* and reach the next
+        // binary on drain rather than after ack_wait expiry. The extra
         // round-trip per trigger is noise against minutes-long
         // invocations.
         let mut messages = consumer
@@ -304,19 +304,15 @@ impl TriggerDispatcher {
             .map_err(|err| DispatcherError::Stream(err.to_string()))?;
 
         // In-executor fan-out (#70): up to `max_concurrent` invocations
-        // run at once, each on its own spawned task. A permit is
-        // acquired *before* pulling the next trigger, so excess triggers
-        // stay queued on the durable consumer (and survive a drain for
-        // the next binary). The JoinSet makes in-flight invocations
-        // explicit so drain and shutdown wait for them — before fan-out
-        // the single inline `handle().await` was covered implicitly by
-        // awaiting `run` itself, and spawning without tracking would
-        // silently regress that drain coverage.
+        // run at once, each on its own spawned task. The JoinSet makes
+        // in-flight invocations explicit so drain and shutdown wait for
+        // them — before fan-out the single inline `handle().await` was
+        // covered implicitly by awaiting `run` itself, and spawning
+        // without tracking would silently regress that drain coverage.
         let this = Arc::new(self);
-        let semaphore = Arc::clone(&this.permits);
         let mut in_flight: JoinSet<()> = JoinSet::new();
-        // Deferred invocations come back through here (#278), under the
-        // same permit a trigger takes.
+        // Deferred invocations come back through here (#278), and take a
+        // worker permit of their own before they resume.
         let mut due = this
             .due
             .lock()
@@ -341,26 +337,13 @@ impl TriggerDispatcher {
                 break 'consume;
             }
 
-            // Capacity before consumption: never pull a trigger there is
-            // no slot to run. With `max_concurrent = 1` this reproduces
-            // the old serial loop — the next trigger is pulled only
-            // after the previous invocation finished.
-            let permit = tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!("trigger dispatcher received shutdown signal");
-                    break 'consume;
-                }
-                permit = Arc::clone(&semaphore).acquire_owned() => {
-                    permit.expect("dispatcher semaphore is never closed")
-                }
-            };
-
-            // A drain may have landed while waiting for capacity.
-            if this.draining("after capacity wait") {
-                break 'consume;
-            }
-
+            // **The loop holds no worker permit** (#733). A permit is
+            // taken in `handle`, after both admission rules, by a
+            // trigger that is ready to run — never here, and never by
+            // anything that is only waiting. What bounds how much is
+            // pulled is the consumer's `max_ack_pending`, not the worker
+            // cap: past it the broker stops delivering until acks
+            // arrive.
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
@@ -370,8 +353,14 @@ impl TriggerDispatcher {
                 Some(resume) = due.recv() => {
                     let dispatcher = Arc::clone(&this);
                     in_flight.spawn(async move {
+                        // A resume queues for its permit like everything
+                        // else, and has no delivery to keep alive: its
+                        // trigger was acked at the first WAL write.
+                        let _permit = Arc::clone(&dispatcher.permits)
+                            .acquire_owned()
+                            .await
+                            .expect("dispatcher semaphore is never closed");
                         dispatcher.resume_deferred(resume).await;
-                        drop(permit);
                     });
                 }
                 msg = messages.next() => {
@@ -379,14 +368,14 @@ impl TriggerDispatcher {
                         Some(Ok(msg)) => {
                             let dispatcher = Arc::clone(&this);
                             in_flight.spawn(async move {
-                                dispatcher.handle(&msg, permit).await;
+                                dispatcher.handle(&msg).await;
                             });
                         }
                         Some(Err(err)) => {
                             // Warn-and-continue (pre-fan-out behavior),
-                            // but with a pause: permits are instant when
-                            // slots are free, so a persistently erroring
-                            // consumer would otherwise hot-spin the loop.
+                            // but with a pause: nothing else in this
+                            // iteration blocks, so a persistently
+                            // erroring consumer would hot-spin the loop.
                             warn!(error = %err, "error reading next JetStream trigger");
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
@@ -396,6 +385,16 @@ impl TriggerDispatcher {
                         }
                     }
                 }
+                // Nothing arrived: go round, so the drain check at the
+                // top runs. A drain is a flag the worker sets, not a
+                // signal this can await (`Worker::drain_status`), and
+                // every other wait in the dispatcher polls it on this
+                // cadence. The loop used to notice one only when an
+                // interrupted hold released the permit it was waiting
+                // for, which left an idle dispatcher parked on
+                // `messages.next()` until shutdown; this is the
+                // ADR-0027 exit for that case.
+                () = tokio::time::sleep(admission::HOLD_KEEPALIVE) => {}
             }
         }
 
@@ -419,9 +418,9 @@ impl TriggerDispatcher {
     }
 
     /// Drain check with a call-site label, so the log line says *where*
-    /// in the loop the drain was observed (at loop top vs. after
-    /// waiting for capacity) instead of emitting one indistinguishable
-    /// message from two places.
+    /// the drain was observed. The loop asks once, at its top; `handle`
+    /// asks again for the trigger it has just been handed, which is the
+    /// drain that landed between the two.
     fn draining(&self, at: &str) -> bool {
         if self.worker.drain_status() == DrainState::Draining {
             info!(
@@ -477,11 +476,11 @@ impl TriggerDispatcher {
         }
     }
 
-    /// Dispatch one trigger. `permit` is the worker-cap permit it was
-    /// pulled under; it is given back for the length of any hold at the
-    /// agent's cap and re-taken before the invocation runs, so it is
-    /// returned here rather than by the caller.
-    async fn handle(&self, msg: &async_nats::jetstream::Message, permit: OwnedSemaphorePermit) {
+    /// Dispatch one trigger. It arrives owning nothing: the worker-cap
+    /// permit is taken at the *end* of the admission sequence, once the
+    /// trigger is ready to run and the only thing it can still be
+    /// waiting for is a free worker, and dropped when this returns.
+    async fn handle(&self, msg: &async_nats::jetstream::Message) {
         // First operation by design: no drain, routing, parsing, or trigger-id
         // minting happens until this broker identity has been arbitrated.
         let claim::ClaimVerdict::Proceed {
@@ -533,9 +532,9 @@ impl TriggerDispatcher {
         };
 
         // Admission (#278): a paused model starts no invocation. The
-        // trigger is held here, un-acked and un-started, until the
-        // pause ends; a drain or shutdown meanwhile leaves it for the
-        // next binary.
+        // trigger is held here, un-acked, un-started and owning no
+        // worker permit, until the pause ends; a drain or shutdown
+        // meanwhile leaves it for the next binary.
         let header_id = crate::trigger::trigger_id_in(msg.headers.as_ref());
         if self.admit(msg, loaded.agent.model(), header_id).await
             == admission::Admission::Interrupted
@@ -546,7 +545,7 @@ impl TriggerDispatcher {
         // Parse the payload as JSON. Empty body becomes null. Before the
         // per-agent cap below, so a poison payload is refused now rather
         // than after occupying a hold for however long the agent stays
-        // full. (The pause hold above is #278's and is left as it was.)
+        // full.
         let payload: serde_json::Value = if msg.payload.is_empty() {
             serde_json::Value::Null
         } else {
@@ -570,15 +569,25 @@ impl TriggerDispatcher {
         };
 
         // Admission, second rule (#718): an agent already running
-        // `max_concurrent` invocations starts no more. Slot and permit
-        // ride the rest of `handle` and come back through `Drop` —
-        // except on a deferral, where `conclude` hands the slot on.
-        let Some((agent_slot, _permit)) = self
-            .admit_agent_slot(msg, &agent_id, header_id, &payload, permit)
+        // `max_concurrent` invocations starts no more. The slot rides
+        // the rest of `handle` and comes back through `Drop` — except on
+        // a deferral, where `conclude` hands it on.
+        let Some(agent_slot) = self
+            .admit_agent_slot(msg, &agent_id, header_id, &payload)
             .await
         else {
             return;
         };
+
+        // Last (#733): the worker permit. Both admission rules have
+        // passed and the agent's slot is taken, so the only thing left
+        // to wait for is a free worker. Waiters are a FIFO on the fair
+        // semaphore, so the longest-parked trigger runs first. The
+        // permit is released when this returns.
+        let _permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("dispatcher semaphore is never closed");
 
         // The trigger's *first handling*: the message becomes a named
         // Trigger here and nowhere else on this path. A publisher's own
@@ -770,6 +779,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+    use tokio::sync::OwnedSemaphorePermit;
     use uuid::Uuid;
 
     fn test_pricing() -> Arc<PricingTable> {
@@ -831,9 +841,9 @@ mod tests {
     }
 
     /// A worker-cap permit off the dispatcher's own semaphore, for the
-    /// tests that drive `handle` directly instead of through the consume
-    /// loop. `handle` owns the permit now: it gives it back for the
-    /// length of a cap hold and takes a fresh one to run (#718).
+    /// tests that need the worker cap to be *occupied* — nothing else
+    /// takes one until a trigger is ready to run (#733), so this is how
+    /// a test puts a dispatcher at its cap without running anything.
     async fn a_permit(d: &TriggerDispatcher) -> OwnedSemaphorePermit {
         Arc::clone(&d.permits)
             .acquire_owned()
@@ -1395,8 +1405,7 @@ You are a test agent."#
         let duplicate = msg.clone();
         let duplicate_seq = duplicate.info().unwrap().stream_sequence;
         let d = dispatcher.clone();
-        let permit = a_permit(&d).await;
-        let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
 
         // Wait until the invocation has actually entered (and blocked).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1440,13 +1449,9 @@ You are a test agent."#
         // this copy takes the same-worker `Held` arm and, driven from the
         // run loop, parks. Timed out here, that reads as a failure of
         // this test rather than as a suite that hangs for a minute.
-        let permit = a_permit(&dispatcher).await;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            dispatcher.handle(&duplicate, permit),
-        )
-        .await
-        .expect("the duplicate is answered rather than held");
+        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&duplicate))
+            .await
+            .expect("the duplicate is answered rather than held");
         assert_eq!(
             started.load(Ordering::SeqCst),
             1,
@@ -1583,8 +1588,7 @@ You are a test agent."#
         };
 
         let d = dispatcher.clone();
-        let permit = a_permit(&d).await;
-        let handle = tokio::spawn(async move { d.handle(&msg, permit).await });
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
 
         // Wait until the invocation is in-flight (and blocked).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1742,8 +1746,7 @@ You are a test agent."#
 
         // The worker returns its error before any WAL write; `handle`
         // classifies it and ACKs (permanent) or NAKs (transient).
-        let permit = a_permit(&dispatcher).await;
-        dispatcher.handle(&msg, permit).await;
+        dispatcher.handle(&msg).await;
 
         // A NAK redelivers the trigger; an ACK consumes it. Re-poll the
         // same stream: a redelivered message means it was NAK'd. The
@@ -2224,14 +2227,12 @@ You are a test agent."#
         (dir, shared_registry(registry))
     }
 
-    /// A registry holding two agents, each on the model it is named
-    /// with, so one can be paused while the other is not.
-    fn registry_with_two_models(
-        first: (&str, &str),
-        second: (&str, &str),
-    ) -> (tempfile::TempDir, SharedRegistry) {
+    /// A registry holding one agent per `(name, model)` pair, so a test
+    /// can pause one model and leave another alone, or tell several
+    /// otherwise identical triggers apart by the agent they start.
+    fn registry_with_models(agents: &[(&str, &str)]) -> (tempfile::TempDir, SharedRegistry) {
         let dir = tempfile::tempdir().unwrap();
-        for (name, model) in [first, second] {
+        for (name, model) in agents {
             std::fs::write(
                 dir.path().join(format!("{name}.md")),
                 format!("---\nname: {name}\nmodel: {model}\nbudget: 1.0\n---\n\nTest agent."),
@@ -2366,7 +2367,7 @@ You are a test agent."#
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won
         );
-        dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
+        dispatcher.handle(&msg).await;
         assert!(worker.starts.lock().unwrap().is_empty());
         // Held across the ack round trip, not merely at the instant
         // `handle` returned: an ack sent from the duplicate is in flight
@@ -2379,7 +2380,7 @@ You are a test agent."#
             .release_trigger_claim(test_key(&bus, seq))
             .await
             .unwrap();
-        dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
+        dispatcher.handle(&msg).await;
         assert_eq!(worker.starts.lock().unwrap().len(), 1);
 
         bus.publish_trigger(&agent, &json!({"input": "restart"}))
@@ -2398,9 +2399,7 @@ You are a test agent."#
             .claim_trigger(test_key(&bus, restart_seq), "dead-worker", 0)
             .await
             .unwrap();
-        dispatcher
-            .handle(&restart_msg, a_permit(&dispatcher).await)
-            .await;
+        dispatcher.handle(&restart_msg).await;
         assert_eq!(
             worker.starts.lock().unwrap().len(),
             2,
@@ -2544,17 +2543,15 @@ You are a test agent."#
         // T1 takes the agent's only slot and blocks there.
         let running = tokio::spawn({
             let d = dispatcher.clone();
-            let permit = a_permit(&dispatcher).await;
-            async move { d.handle(&first, permit).await }
+            async move { d.handle(&first).await }
         });
         worker.wait_for_starts(1, Duration::from_secs(10)).await;
 
         // T2 is pulled under the cap: claimed, then parked un-started.
         let holding = tokio::spawn({
             let d = dispatcher.clone();
-            let permit = a_permit(&dispatcher).await;
             let held = held.clone();
-            async move { d.handle(&held, permit).await }
+            async move { d.handle(&held).await }
         });
         wait_for_cap_hold(&caps, &agent_id_str, Duration::from_secs(10)).await;
 
@@ -2584,13 +2581,9 @@ You are a test agent."#
         // Handling it must return promptly — the duplicate is refused
         // before the drain check, the registry, or the cap, so it never
         // parks — and must start nothing.
-        let permit = a_permit(&dispatcher).await;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            dispatcher.handle(&duplicate, permit),
-        )
-        .await
-        .expect("the duplicate is refused rather than held");
+        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&duplicate))
+            .await
+            .expect("the duplicate is refused rather than held");
         assert_eq!(
             worker.started(),
             1,
@@ -2857,7 +2850,7 @@ You are a test agent."#
         let paused = unique_agent_id("pause-wedge-held");
         let other = unique_agent_id("pause-wedge-runs");
         let (_dir, registry) =
-            registry_with_two_models((&paused, "claude-haiku"), (&other, "unpaused-model"));
+            registry_with_models(&[(&paused, "claude-haiku"), (&other, "unpaused-model")]);
         let pause = Duration::from_secs(3);
         let throttle = throttle_paused_for(pause).await;
         let paused_at = std::time::Instant::now();
@@ -2918,6 +2911,77 @@ You are a test agent."#
         );
 
         stop(shutdown_tx, run).await;
+    }
+
+    /// A pause that ends while the worker cap is full: the trigger goes
+    /// straight from one wait into the other, starts exactly once when a
+    /// permit frees, and leaks nothing.
+    ///
+    /// Driven through `handle` directly, so the permit the invocation
+    /// runs under can only be the one this test releases.
+    #[tokio::test]
+    async fn a_trigger_whose_pause_ended_waits_for_a_permit_and_starts_once() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let paused = unique_agent_id("paused-then-waiting");
+        let (_dir, registry) = registry_with(&paused);
+        let throttle = throttle_paused_for(Duration::from_millis(800)).await;
+        let worker = CappedWorker::new();
+        let dispatcher = Arc::new(
+            TriggerDispatcher::new(
+                bus.clone(),
+                registry,
+                worker.clone(),
+                Arc::new(FixtureClient::new()) as Arc<dyn LlmClient>,
+                1,
+            )
+            .with_throttle(throttle),
+        );
+        let permits = Arc::clone(&dispatcher.permits);
+        let filter = crate::events::subjects::trigger(&paused);
+        let consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &filter,
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .expect("consumer");
+        publish_triggers(&bus, &paused, 1).await;
+        let msg = {
+            let mut stream = consumer.messages().await.expect("messages");
+            tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("a message within 5s")
+                .expect("stream open")
+                .expect("message ok")
+        };
+
+        // The only permit, taken before the pause ends.
+        let occupied = tokio::time::timeout(Duration::from_secs(5), a_permit(&dispatcher))
+            .await
+            .expect("the loop holds no permit, so this one is free");
+        let d = Arc::clone(&dispatcher);
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            worker.started(),
+            0,
+            "the pause is over, but there is no worker to run it on yet"
+        );
+
+        drop(occupied);
+        worker
+            .wait_for_agent_starts(&paused, 1, Duration::from_secs(3))
+            .await;
+        worker.let_finish(1);
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("handle finishes")
+            .expect("task joins");
+        assert_eq!(worker.started(), 1, "started exactly once");
+        assert_eq!(permits.available_permits(), 1, "no worker permit leaked");
     }
 
     /// Defers on its first start; records every resume; defers once
@@ -3361,19 +3425,18 @@ You are a test agent."#
     /// The blocker the review found, as a test: **a held trigger must
     /// not occupy a worker permit.**
     ///
-    /// The consume loop takes a permit before it pulls, and the permit
-    /// rides into the spawned task. If a cap hold parked there, a capped
-    /// agent's backlog would eat the worker cap and the *rest of the
-    /// fleet would stop* — the inverse of what #718 is for, and silent,
-    /// because every held trigger would look healthy.
+    /// If a cap hold owned a permit, a capped agent's backlog would eat
+    /// the worker cap and the *rest of the fleet would stop* — the
+    /// inverse of what #718 is for, and silent, because every held
+    /// trigger would look healthy.
     ///
     /// Worker cap 2, agent A at `max_concurrent: 1`, three A triggers
     /// ahead of one B trigger on the queue. A runs one; A's other two
-    /// park; B must still start. Holding the permits, the loop stalls
-    /// with both taken and B is never even pulled — `expected 1 start(s)
-    /// of B` is what that failure reads as.
+    /// park; B must still start. With the permits held by the waiting
+    /// work, both are taken and B never runs — `expected 1 start(s) of
+    /// B` is what that failure reads as.
     #[tokio::test]
-    async fn a_held_trigger_gives_its_worker_permit_back_so_other_agents_run() {
+    async fn a_held_trigger_occupies_no_worker_permit_so_other_agents_run() {
         let server = crate::test_support::nats::test_nats();
         let bus = EventBus::connect(server.url()).await.expect("connect NATS");
         let capped = unique_agent_id("capped-blocks");
@@ -3569,20 +3632,20 @@ You are a test agent."#
         stop(shutdown_tx, run).await;
     }
 
-    /// Review finding P2: the **permit re-acquire** path, which no test
-    /// reached.
+    /// Review finding P2: the path where a held trigger has to **wait
+    /// for a permit** on its way out, which no other test reaches.
     ///
-    /// `a_held_trigger_gives_its_worker_permit_back_so_other_agents_run`
+    /// `a_held_trigger_occupies_no_worker_permit_so_other_agents_run`
     /// runs at worker cap 2, where the capped agent's own cap already
     /// limits it to one — so its `peak() == 2` holds whether or not a
-    /// held trigger ever takes a fresh permit. At worker cap **1** the
+    /// held trigger can get a permit at all. At worker cap **1** the
     /// only permit is the one the running invocation holds, so every
-    /// held trigger must re-acquire on its way out or nothing after the
-    /// first ever runs. It is also the only place the `Err(_) =>
-    /// drop(slot)` back-off is exercised: the consume loop and three
-    /// parked holds compete for one permit as each invocation ends.
+    /// released trigger has to queue for it and be handed it as the
+    /// invocation ahead ends, or nothing after the first ever runs: four
+    /// starts through one permit, with three parked holds and the
+    /// consume loop all in play.
     #[tokio::test]
-    async fn a_held_trigger_takes_a_fresh_worker_permit_to_run() {
+    async fn a_held_trigger_waits_for_a_worker_permit_to_run() {
         let server = crate::test_support::nats::test_nats();
         let bus = EventBus::connect(server.url()).await.expect("connect NATS");
         let capped = unique_agent_id("capped-repermit");

@@ -12,37 +12,32 @@
 //! after four refusals, and stamp `attempt: N` into the transcript
 //! preamble; an in-progress ack resets the ack window without counting
 //! as a delivery. `admission`'s doc is the reference for that trade.
-//! What this module owns is the *cap*: what the hold waits on, what it
-//! does with the worker permit, and what an interrupted delivery gets.
+//! What this module owns is the *cap*: what the hold waits on, and what
+//! an interrupted delivery gets.
 //!
 //! # A hold occupies no worker permit
 //!
-//! This is the one place the two holds do *not* behave alike, and it
-//! decides whether the feature does what the issue asks or the exact
-//! inverse of it. (The pause hold keeps its permit and has the same
-//! problem for the same reason —
-//! <https://github.com/bricef/factor-q/issues/733>.)
+//! Nothing here takes, drops or re-takes a
+//! `[worker] max_concurrent_invocations` permit, because a held trigger
+//! has none: the permit is taken after this hold, once a slot is in hand
+//! and the trigger is ready to run
+//! ([`TriggerDispatcher::acquire_run_permit`](super::admission), #733).
 //!
-//! The consume loop takes a `[worker] max_concurrent_invocations` permit
-//! *before* pulling a trigger, and the permit rides into the spawned
-//! task. If a cap hold simply parked there, the hold would **be** a
-//! permit: at a worker cap of 30 with `m0-issue-fix` at
-//! `max_concurrent: 2`, thirty `status:ready` issues would leave two
-//! builds running, twenty-eight parked, and *no permits left* — so the
-//! loop would stop pulling and `doc-drift` and `m0-issue-triage` would
-//! not run at all until the builds drained, for hours. The per-agent cap
+//! That the hold occupies no permit is still the property this module
+//! depends on, and it decides whether the feature does what #718 asks or
+//! the exact inverse of it. At a worker cap of 30 with `m0-issue-fix` at
+//! `max_concurrent: 2`, thirty `status:ready` issues leave two builds
+//! running and twenty-eight parked; if parking took a permit there would
+//! be *no permits left*, and `doc-drift` and `m0-issue-triage` would not
+//! run at all until the builds drained, for hours. The per-agent cap
 //! would have made the fleet quieter than no cap at all, and `fq doctor`
 //! would have reported nothing to fix.
 //!
-//! So the permit is given back for the length of the hold and a fresh
-//! one is taken on the way out. The worker cap bounds *running*
-//! invocations; waiting is free.
-//!
 //! What bounds the parked holds instead is the consumer's ack-pending
 //! window, and it is worth stating as the number it is rather than as
-//! "what is queued": the loop pulls whenever a permit is free and a hold
-//! releases its permit, so triggers for a full agent are pulled and
-//! parked until `max_ack_pending` — `max(2 × worker cap,
+//! "what is queued": the loop pulls without asking for a permit at all,
+//! so triggers for a full agent are pulled and parked until
+//! `max_ack_pending` — `max(2 × worker cap,
 //! NATS_DEFAULT_MAX_ACK_PENDING)`, so **1000** on any ordinary
 //! deployment. Each parked hold is one task, one un-acked message, one
 //! registry read-lock and one in-progress ack per
@@ -51,17 +46,18 @@
 //! thing that would notice, and an event-driven wake off `AgentSlot`'s
 //! `Drop` is the shape that would fix it if it ever does.
 //!
-//! **The order on the way out is agent slot first, then worker permit.**
-//! A slot held while waiting for a permit is fine and cannot cycle:
-//! permits are released by invocations finishing, and a finishing
-//! invocation never waits on a slot. The reverse order is the one that
-//! re-creates the bug.
+//! **The slot is kept while the trigger waits for a permit.** A slot is
+//! intent to run, so the agent's other triggers must not jump the one
+//! that has it; and it cannot cycle, because permits are released by
+//! invocations finishing and a finishing invocation never waits on a
+//! slot.
 //!
 //! **A hold is a race, not a queue.** A freed slot is taken by whichever
 //! parked hold polls first, or by a trigger the loop pulls in the same
 //! instant; nothing is ordered and nothing is promised. Every parked
 //! hold retries on every tick, so none waits long, but a trigger that
-//! arrived later can start earlier.
+//! arrived later can start earlier. (The wait for a *permit* after this
+//! one is a queue — a FIFO on the semaphore.)
 //!
 //! # What else is different
 //!
@@ -95,9 +91,6 @@
 //! [`super::admission`] still leaves its delivery un-acked; a pause is
 //! tens of seconds, so it does not reach the same arithmetic.
 
-use std::sync::Arc;
-
-use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
 use super::{TriggerDispatcher, trigger_name};
@@ -117,29 +110,23 @@ impl TriggerDispatcher {
     /// agent with no `max_concurrent` and for one with a slot free,
     /// which is every trigger on a quiet fleet.
     ///
-    /// `permit` is the worker-cap permit the trigger was pulled under.
-    /// On the fast path it is handed straight back; on a hold it is
-    /// dropped for the length of the wait and a fresh one is taken
-    /// before the invocation starts.
-    ///
-    /// `Some((slot, permit))` is the agent's claim on its own cap and
-    /// its claim on the worker cap, both for as long as the invocation
-    /// runs; `None` means a drain or shutdown landed during the hold and
-    /// the trigger has been requeued for the next binary
-    /// ([`Self::requeue_held`]).
+    /// `Some(slot)` is the agent's claim on its own cap, for as long as
+    /// the invocation runs — including the wait for a worker permit that
+    /// follows, because a slot is intent to run. `None` means a drain or
+    /// shutdown landed during the hold and the trigger has been requeued
+    /// for the next binary ([`Self::requeue_held`]).
     pub(super) async fn admit_agent_slot(
         &self,
         msg: &async_nats::jetstream::Message,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
         payload: &serde_json::Value,
-        permit: OwnedSemaphorePermit,
-    ) -> Option<(AgentSlot, OwnedSemaphorePermit)> {
+    ) -> Option<AgentSlot> {
         let Declared::Cap(cap) = self.declared(agent).await else {
             return self.refuse_removed(msg, agent, trigger_id).await;
         };
         if let Some(slot) = self.agent_caps.try_enter(agent, cap) {
-            return Some((slot, permit));
+            return Some(slot);
         }
         // Counted from here so `fq doctor` can say how many are waiting;
         // dropped on every exit below, including the interrupted one.
@@ -151,9 +138,6 @@ impl TriggerDispatcher {
             max_concurrent = cap.unwrap_or(0),
             "agent is at its concurrency cap; holding the trigger un-started until a slot frees"
         );
-        // The blocker this module's doc is about: waiting is free, so
-        // the loop can go on pulling and other agents go on running.
-        drop(permit);
         loop {
             if !self.hold_tick(msg, trigger_id).await {
                 self.requeue_held(msg, agent, trigger_id, payload).await;
@@ -167,22 +151,12 @@ impl TriggerDispatcher {
             let Some(slot) = self.agent_caps.try_enter(agent, cap) else {
                 continue;
             };
-            // Slot first, permit second. A permit is almost always free
-            // the instant a slot is — the invocation that just ended
-            // released both — but if the loop pulled with it first, give
-            // the slot back rather than block a runnable agent behind a
-            // waiter, and ask again next tick.
-            match Arc::clone(&self.permits).try_acquire_owned() {
-                Ok(permit) => {
-                    debug!(
-                        agent_id = %agent,
-                        trigger_id = %trigger_name(trigger_id),
-                        "a slot freed; starting the held trigger"
-                    );
-                    return Some((slot, permit));
-                }
-                Err(_) => drop(slot),
-            }
+            debug!(
+                agent_id = %agent,
+                trigger_id = %trigger_name(trigger_id),
+                "a slot freed; the held trigger may run"
+            );
+            return Some(slot);
         }
     }
 
@@ -285,7 +259,7 @@ impl TriggerDispatcher {
         msg: &async_nats::jetstream::Message,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
-    ) -> Option<(AgentSlot, OwnedSemaphorePermit)> {
+    ) -> Option<AgentSlot> {
         warn!(
             agent_id = %agent,
             trigger_id = %trigger_name(trigger_id),
