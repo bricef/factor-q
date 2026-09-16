@@ -30,21 +30,38 @@
 //! sites, because it is genuinely different in each:
 //!
 //! - **what the hold waits on** — a pause ending, or a slot freeing;
-//! - **the worker permit.** A cap hold gives its permit back for the
-//!   length of the wait and takes a fresh one to run; a pause hold
-//!   **keeps** its permit, so a pause on one model can hold the whole
-//!   worker cap and stop agents on other models. That asymmetry is not
-//!   a decision, it is where the work stopped —
-//!   <https://github.com/bricef/factor-q/issues/733> gives the pause
-//!   hold the same treatment, with the test that proves it;
 //! - **what an interrupted delivery deserves.** A pause hold leaves it
 //!   un-acked for the next binary; a cap hold, which can outlast a
 //!   deploy, requeues it so the restart costs it no delivery.
+//!
+//! # Neither hold owns a worker permit
+//!
+//! A hold takes no `[worker] max_concurrent_invocations` permit and
+//! gives none back, because it never had one: the permit is taken
+//! *after* both holds, by [`TriggerDispatcher::acquire_run_permit`], at
+//! the one moment a trigger is otherwise ready to run. The consume loop
+//! does not hold one either — it pulls, and what bounds how much it
+//! pulls is `max_ack_pending`, not the worker cap.
+//!
+//! That is the whole of <https://github.com/bricef/factor-q/issues/733>.
+//! Before it, the loop took a permit before every pull and each hold
+//! decided for itself what to do with the one it inherited, which at the
+//! default worker cap of 1 meant a held trigger either blocked the fleet
+//! (keeping it) or wedged forever (releasing it: the loop, queued first
+//! on the fair semaphore, took every permit a hold gave back). Now there
+//! is one rule, one place, and one thing a permit means — a worker is
+//! running this.
+//!
+//! The permit wait itself is the third user of [`HOLD_KEEPALIVE`]: a
+//! trigger waiting for a permit is held exactly as one waiting on a
+//! pause is, and lets go on the same `stopping` flag.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
+use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
 use super::{TriggerDispatcher, trigger_name};
@@ -53,7 +70,8 @@ use crate::worker::DrainState;
 /// How often a held delivery is kept alive — and, because the check
 /// follows the ack, how often the hold asks whether it can stop.
 ///
-/// **One constant for both holds.** The trigger durable's real
+/// **One constant for every wait** — both holds and the wait for a
+/// worker permit. The trigger durable's real
 /// first-delivery deadline is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`;
 /// JetStream replaces `ack_wait` with `backoff[0]` wherever a schedule
 /// is set), and one slipped tick means a redelivery, a second `handle`
@@ -143,11 +161,11 @@ impl TriggerDispatcher {
     /// Hold `msg` while `model` is paused. Returns at once for an
     /// unpaused model, which is every trigger on a healthy day.
     ///
-    /// The permit the trigger was pulled under is **kept** for the
-    /// length of the hold — this call does not take it, so the caller's
-    /// permit simply stays taken. That is head-of-line blocking, and
-    /// <https://github.com/bricef/factor-q/issues/733> is where it gets
-    /// the cap hold's treatment.
+    /// No worker permit is involved, in either direction: a held trigger
+    /// has none to give back and takes none to leave with. It asks for
+    /// one only once it is ready to run
+    /// ([`Self::acquire_run_permit`]), so a paused model's backlog
+    /// cannot stop agents on other models (#733).
     pub(super) async fn admit(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -178,9 +196,80 @@ impl TriggerDispatcher {
         }
     }
 
+    /// Wait for the worker-cap permit a trigger runs under, keeping its
+    /// delivery alive meanwhile (#733). The last gate in `handle`, and
+    /// the only place a permit is taken.
+    ///
+    /// `msg` is the delivery to keep alive, and `None` is the one caller
+    /// that has nothing to keep alive: a **due resume**, whose trigger
+    /// was acked at its first WAL write and whose row is the WAL's. It
+    /// queues for a permit like everything else, so a resume cannot jump
+    /// the triggers already waiting, nor they it.
+    ///
+    /// `None` back is a drain or shutdown during the wait — the same
+    /// answer [`Admission::Interrupted`] gives, and it earns the same
+    /// treatment: the caller returns without acking, leaving the
+    /// delivery for the next binary.
+    ///
+    /// **One waiter, registered once.** The acquire future is created
+    /// before the loop and polled through the whole wait, so the trigger
+    /// keeps its place in the semaphore's FIFO and the longest-parked
+    /// one runs first; re-creating it each tick — which is what a naive
+    /// `select!` in a loop does — would send it to the back of the queue
+    /// every [`HOLD_KEEPALIVE`]. `biased` puts the permit first, so the
+    /// fast path (a permit already free) takes it on the first poll and
+    /// never arms the timer, never logs and never acks.
+    pub(super) async fn acquire_run_permit(
+        &self,
+        msg: Option<&async_nats::jetstream::Message>,
+        trigger_id: Option<uuid::Uuid>,
+    ) -> Option<OwnedSemaphorePermit> {
+        let acquire = Arc::clone(&self.permits).acquire_owned();
+        tokio::pin!(acquire);
+        let mut waited = false;
+        loop {
+            tokio::select! {
+                biased;
+                permit = &mut acquire => {
+                    if waited {
+                        debug!(
+                            trigger_id = %trigger_name(trigger_id),
+                            "a worker permit freed; starting the waiting trigger"
+                        );
+                    }
+                    return Some(permit.expect("dispatcher semaphore is never closed"));
+                }
+                _ = tokio::time::sleep(HOLD_KEEPALIVE) => {
+                    if self.stopping() {
+                        debug!(
+                            trigger_id = %trigger_name(trigger_id),
+                            "drain or shutdown while waiting for a worker permit; \
+                             nothing is started"
+                        );
+                        return None;
+                    }
+                    if !waited {
+                        waited = true;
+                        info!(
+                            trigger_id = %trigger_name(trigger_id),
+                            available_permits = self.permits.available_permits(),
+                            in_flight = self.max_concurrent
+                                - self.permits.available_permits(),
+                            "worker permits exhausted; holding the trigger un-started"
+                        );
+                    }
+                    if let Some(msg) = msg {
+                        self.keep_alive(msg, trigger_id).await;
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether this dispatcher is on its way out: the worker is draining
-    /// or the loop has seen its shutdown signal. Both holds — a paused
-    /// model's and a full agent's (#718) — let go on it.
+    /// or the loop has seen its shutdown signal. Every wait — a paused
+    /// model's hold, a full agent's (#718), and the wait for a worker
+    /// permit (#733) — lets go on it.
     pub(super) fn stopping(&self) -> bool {
         self.worker.drain_status() == DrainState::Draining || self.stopping.load(Ordering::SeqCst)
     }
