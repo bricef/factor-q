@@ -1,9 +1,9 @@
 //! The Turn atom: one action in an invocation's conversation — the
-//! opening prompt, an assistant output, or a tool result — as an
+//! opening prompt, an assistant output, a tool result, or the terminal outcome — as an
 //! immutable, event-log-backed fact
 //! (`docs/design/committed/operator-surface-domain-model.md`). The
-//! transcript is a *rendering* composed over turns (plus the
-//! invocation's outcome); the dependency runs that way, never the
+//! transcript is a *rendering* composed over turns, including the
+//! invocation's outcome; the dependency runs that way, never the
 //! reverse.
 
 use std::collections::{HashMap, HashSet};
@@ -213,6 +213,24 @@ impl TurnFold {
                     },
                 ))
             }
+            EventPayload::Completed(p) => Some(base(
+                u64::from(p.total_llm_calls) + 1,
+                None,
+                TurnAction::Outcome {
+                    phase: "completed".into(),
+                    summary: p.result_summary.clone(),
+                    is_error: false,
+                },
+            )),
+            EventPayload::Failed(p) => Some(base(
+                u64::from(p.partial_totals.total_llm_calls) + 1,
+                None,
+                TurnAction::Outcome {
+                    phase: "failed".into(),
+                    summary: Some(p.error_message.clone()),
+                    is_error: true,
+                },
+            )),
             _ => None,
         }
     }
@@ -579,6 +597,59 @@ mod tests {
         assert!(rendered.contains("[error]"), "got:\n{rendered}");
     }
 
+    #[test]
+    fn terminal_events_become_final_outcome_turns() {
+        let completed = Event::new(
+            AgentId::new("fold-probe").unwrap(),
+            Uuid::now_v7(),
+            EventPayload::Completed(crate::events::CompletedPayload {
+                task_status: crate::events::TaskStatus::Success,
+                result_summary: Some("shipped it".into()),
+                total_llm_calls: 3,
+                total_tool_calls: 1,
+                total_cost: 0.2,
+                total_duration_ms: 50,
+            }),
+        );
+        let completed_turn = TurnFold::new().apply(20, &completed).unwrap();
+        assert_eq!(completed_turn.seq, 20);
+        assert_eq!(completed_turn.round, 4);
+        assert_eq!(completed_turn.initiating_turn, None);
+        assert!(matches!(
+            &completed_turn.action,
+            TurnAction::Outcome { phase, summary, is_error: false }
+                if phase == "completed" && summary.as_deref() == Some("shipped it")
+        ));
+
+        let failed = Event::new(
+            AgentId::new("fold-probe").unwrap(),
+            Uuid::now_v7(),
+            EventPayload::Failed(crate::events::FailedPayload {
+                error_kind: crate::events::FailureKind::RuntimeError,
+                error_message: "runner stopped".into(),
+                phase: crate::events::FailurePhase::Reducer,
+                partial_totals: crate::events::InvocationTotals {
+                    total_llm_calls: 2,
+                    ..Default::default()
+                },
+            }),
+        );
+        let failed_turn = TurnFold::new().apply(21, &failed).unwrap();
+        assert_eq!(failed_turn.round, 3);
+        assert_eq!(failed_turn.initiating_turn, None);
+        assert!(matches!(
+            &failed_turn.action,
+            TurnAction::Outcome { phase, summary, is_error: true }
+                if phase == "failed" && summary.as_deref() == Some("runner stopped")
+        ));
+    }
+
+    #[test]
+    fn no_terminal_event_means_no_outcome_turn() {
+        let turn = TurnFold::new().apply(7, &assistant_event(1, None)).unwrap();
+        assert!(!matches!(turn.action, TurnAction::Outcome { .. }));
+    }
+
     /// The rendering bridge maps turns onto the exact transcript
     /// entries the WAL path produces — the flip's byte contract.
     #[test]
@@ -601,5 +672,29 @@ mod tests {
             }
             other => panic!("expected an assistant entry, got {other:?}"),
         }
+
+        let outcome_event = Event::new(
+            AgentId::new("fold-probe").unwrap(),
+            Uuid::now_v7(),
+            EventPayload::Completed(crate::events::CompletedPayload {
+                task_status: crate::events::TaskStatus::Success,
+                result_summary: Some("done".into()),
+                total_llm_calls: 1,
+                total_tool_calls: 0,
+                total_cost: 0.01,
+                total_duration_ms: 10,
+            }),
+        );
+        let outcome = TurnFold::new().apply(8, &outcome_event).unwrap();
+        let folded = serde_json::to_vec(&outcome.transcript_entry()).unwrap();
+        let wal = serde_json::to_vec(&TranscriptEntry::Outcome {
+            timestamp_ms: outcome.timestamp_ms,
+            phase: "completed".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            folded, wal,
+            "the folded outcome is byte-identical to the WAL transcript outcome"
+        );
     }
 }

@@ -302,7 +302,7 @@ pub fn operator_registry(
 
     let decl = fq_ops::Atom::new::<TurnKey, fq_runtime::turn::TurnState, TurnFilter>(
         fq_ops::Domain::Turn,
-        "One action within a Round: an assistant output or a tool result.",
+        "One event-log-backed action: a prompt, assistant output, tool result, or terminal outcome.",
         fq_ops::Stability::Experimental,
     )
     .description(
@@ -718,12 +718,15 @@ async fn stream_turns(
         if event.envelope.invocation_id.to_string() == invocation_id
             && let Some(turn) = turn
         {
+            let terminal = matches!(turn.action, fq_ops::turn::TurnAction::Outcome { .. });
             let item =
                 serde_json::to_value(&turn).map_err(|e| fq_edge::wire::WireError::Internal {
                     message: e.to_string(),
                 })?;
             items.push(fq_edge::wire::StreamItem { seq, item });
-            if items.len() >= TURN_BATCH_CAP {
+            // An outcome is the invocation's final turn. Return this batch
+            // immediately so clients finish from the fact, not a timeout.
+            if terminal || items.len() >= TURN_BATCH_CAP {
                 break;
             }
         }

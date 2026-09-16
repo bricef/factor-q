@@ -753,55 +753,15 @@ async fn check_transcript(at: &str, invocation: &str) {
         resp.body
     );
 
-    // The seam the page pinned for its own tail, read back off the
-    // page rather than recomputed — asserting on the URL a browser
-    // would actually open is the only version of this worth making.
-    let marker = "/transcript/stream?after=";
-    let seam: u64 = resp
-        .body
-        .split_once(marker)
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split(['&', '\'']).next())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            panic!(
-                "GET {path} carried no live-tail seam.\n--- body ---\n{}",
-                resp.body
-            )
-        });
-
-    // That URL, exactly as the page pins it: one past the highest
-    // sequence it rendered, so it long-polls for turns that have not
-    // happened yet. What it proves is that the route is served and the
-    // response is SSE — content would mean waiting out a poll for a
-    // turn this finished run will never produce.
-    let live = format!("/invocations/{invocation}/transcript/stream?after={seam}&full=0");
-    let resp = get(at, &live, Duration::from_secs(5)).await;
-    assert_eq!(resp.status, 200, "GET {live}");
+    // This invocation is terminal: its folded Outcome makes the page
+    // self-contained. It must neither load the live client nor pin an SSE
+    // seam, and its status must come from that outcome.
+    assert_contains(&path, &resp, "run completed");
     assert!(
-        resp.header_contains("content-type", "text/event-stream"),
-        "GET {live} should be SSE.\n--- headers ---\n{}",
-        resp.headers
+        !resp.body.contains("/transcript/stream?after=") && !resp.body.contains("datastar.js"),
+        "GET {path} rendered a live tail for a completed run.\n--- body ---\n{}",
+        resp.body
     );
-
-    // And the same handler opened from the bottom of the log, where
-    // the turns already are: this is the one that proves the tail
-    // renders turns rather than merely holding a socket open.
-    // Timeboxed either way — the stream never closes on its own.
-    let replay = format!("/invocations/{invocation}/transcript/stream?after=1&full=0");
-    let resp = get(at, &replay, Duration::from_secs(5)).await;
-    assert_eq!(resp.status, 200, "GET {replay}");
-    assert!(
-        resp.header_contains("content-type", "text/event-stream"),
-        "GET {replay} should be SSE.\n--- headers ---\n{}",
-        resp.headers
-    );
-    assert_contains(&replay, &resp, "datastar-patch-elements");
-    // `#turns` is the prepend target for a real turn. The stream's
-    // error path also emits a patch, at `#status`, so asserting the
-    // event name alone would pass on a stream that only reported a
-    // failure.
-    assert_contains(&replay, &resp, "selector #turns");
 }
 
 /// The datastar content negotiation: the same URL, two representations.

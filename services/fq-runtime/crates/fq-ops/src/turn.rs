@@ -1,5 +1,5 @@
 //! The Turn atom: one action in an invocation's conversation — the
-//! opening prompt, an assistant output, or a tool result — as an
+//! opening prompt, an assistant output, a tool result, or the terminal outcome — as an
 //! immutable, event-log-backed fact.
 //!
 //! The atom and its rendering bridge. Folding events into turns needs
@@ -70,6 +70,14 @@ pub enum TurnAction {
         output: Option<String>,
         is_error: Option<bool>,
     },
+    /// The invocation's terminal fact. `summary` preserves the runtime's
+    /// completion summary or failure message for turn consumers; the
+    /// transcript bridge maps the fields its Outcome model carries.
+    Outcome {
+        phase: String,
+        summary: Option<String>,
+        is_error: bool,
+    },
 }
 
 impl TurnState {
@@ -113,6 +121,10 @@ impl TurnState {
                 parameters: parameters.clone(),
                 output: output.clone(),
                 is_error: *is_error,
+            },
+            TurnAction::Outcome { phase, .. } => TranscriptEntry::Outcome {
+                timestamp_ms: self.timestamp_ms,
+                phase: phase.clone(),
             },
         }
     }
