@@ -2341,6 +2341,228 @@ You are a test agent."#
         );
     }
 
+    /// `num_ack_pending` must *stay* at `expected` for `window`.
+    ///
+    /// A single read taken the instant `handle` returns proves nothing
+    /// about an ack it should not have sent: `msg.ack()` is
+    /// fire-and-forget, so the count it would move is still 1 when the
+    /// read leaves. Holding the assertion open across the round trip is
+    /// what makes "the duplicate does not ack" bite (#817, review 1
+    /// finding 2).
+    async fn ack_pending_stays(
+        consumer: &mut async_nats::jetstream::consumer::PullConsumer,
+        expected: usize,
+        window: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + window;
+        while std::time::Instant::now() < deadline {
+            let pending = consumer.info().await.expect("consumer info").num_ack_pending;
+            assert_eq!(
+                pending, expected,
+                "num_ack_pending moved to {pending}; the delivery was resolved \
+                 by something that must not resolve it"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Wait until `agent` has a trigger parked at its concurrency cap.
+    ///
+    /// The hold is entered *after* the claim, so this is also the
+    /// evidence that the first copy owns the stream sequence — which is
+    /// what makes the redelivery below deterministic rather than a race
+    /// between the two copies for the claim.
+    async fn wait_for_cap_hold(
+        caps: &crate::control_plane::agent_cap::AgentConcurrency,
+        agent: &str,
+        within: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if caps
+                .snapshot()
+                .iter()
+                .any(|a| a.agent == agent && a.held > 0)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no trigger was held at {agent}'s cap within {within:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// **The incident of 2026-09-16 (#327), end to end on the broker.**
+    ///
+    /// Eight triggers produced thirteen invocations: every trigger that
+    /// was *held* behind the per-agent cap across a stalled keepalive
+    /// tick was redelivered, and the second copy walked into `handle`
+    /// with no idempotency check and started a second invocation. The
+    /// other claim tests seed the `trigger_claim` row by hand or re-enter
+    /// `handle` after a durable start; neither reproduces this, because
+    /// neither has JetStream redeliver a message whose first copy is
+    /// still parked at the cap.
+    ///
+    /// So this one does exactly that: T1 takes the agent's only slot, T2
+    /// is held behind it, a NAK on a clone of T2's message forces the
+    /// redelivery the slipped keepalive caused, and the second copy is
+    /// handled while the first is still holding. The second copy must
+    /// return without starting anything and *without resolving the
+    /// delivery its own first copy is still holding* — and when the slot
+    /// frees, that first copy must start T2 once, as its own first
+    /// delivery (`delivery_attempt == Some(1)`: the `attempt: 2`
+    /// preamble is the incident's fingerprint), and settle the message.
+    #[tokio::test]
+    async fn redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("redelivered-hold");
+        let (_agents, registry) = registry_with_cap(&agent_id_str, 1);
+        let worker = CappedWorker::new();
+        let caps = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::control_plane::ControlPlaneStore::open(&store_dir.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let dispatcher = Arc::new(
+            TriggerDispatcher::new(
+                bus.clone(),
+                registry,
+                worker.clone(),
+                Arc::new(FixtureClient::new()),
+                4,
+            )
+            .with_caps_and_claims(caps.clone(), store, "worker-a"),
+        );
+
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::events::subjects::trigger(&agent_id_str),
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .unwrap();
+        let agent = AgentId::new(&agent_id_str).unwrap();
+        bus.publish_trigger(&agent, &json!({"input": "t1"}))
+            .await
+            .unwrap();
+        bus.publish_trigger(&agent, &json!({"input": "t2"}))
+            .await
+            .unwrap();
+        let (first, held) = {
+            let mut messages = consumer.messages().await.unwrap();
+            let a = tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .expect("the first trigger within 5s")
+                .expect("stream open")
+                .expect("message ok");
+            let b = tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .expect("the second trigger within 5s")
+                .expect("stream open")
+                .expect("message ok");
+            (a, b)
+        };
+        let held_seq = held.info().unwrap().stream_sequence;
+
+        // T1 takes the agent's only slot and blocks there.
+        let running = tokio::spawn({
+            let d = dispatcher.clone();
+            let permit = a_permit(&dispatcher).await;
+            async move { d.handle(&first, permit).await }
+        });
+        worker.wait_for_starts(1, Duration::from_secs(10)).await;
+
+        // T2 is pulled under the cap: claimed, then parked un-started.
+        let holding = tokio::spawn({
+            let d = dispatcher.clone();
+            let permit = a_permit(&dispatcher).await;
+            let held = held.clone();
+            async move { d.handle(&held, permit).await }
+        });
+        wait_for_cap_hold(&caps, &agent_id_str, Duration::from_secs(10)).await;
+
+        // The slipped keepalive: JetStream redelivers the held message.
+        held.clone()
+            .ack_with(async_nats::jetstream::AckKind::Nak(None))
+            .await
+            .expect("nak the held delivery");
+        let duplicate = {
+            let mut messages = consumer.messages().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(20), messages.next())
+                .await
+                .expect("the redelivery within 20s")
+                .expect("stream open")
+                .expect("message ok")
+        };
+        let info = duplicate.info().unwrap();
+        assert_eq!(
+            info.stream_sequence, held_seq,
+            "the redelivery must be the held trigger, not a third one"
+        );
+        assert_eq!(
+            info.delivered, 2,
+            "the incident's second copy is delivery 2 of the same stream message"
+        );
+
+        // Handling it must return promptly — the duplicate is refused
+        // before the drain check, the registry, or the cap, so it never
+        // parks — and must start nothing.
+        let permit = a_permit(&dispatcher).await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatcher.handle(&duplicate, permit),
+        )
+        .await
+        .expect("the duplicate is refused rather than held");
+        assert_eq!(
+            worker.started(),
+            1,
+            "the redelivered copy started a second invocation — the #327 incident"
+        );
+        // ...and must leave the delivery its first copy is still holding
+        // exactly as it found it: neither acked nor NAK'd.
+        ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
+
+        // Free T1's slot: the *original* copy starts T2, once.
+        worker.let_finish(1);
+        worker.wait_for_starts(2, Duration::from_secs(20)).await;
+        assert_eq!(
+            worker.attempts(),
+            vec![Some(1), Some(1)],
+            "the held trigger runs as its own first delivery; `attempt: 2` in a \
+             preamble is the incident's fingerprint"
+        );
+
+        // The durable start of that one invocation settles the message.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pending = consumer.info().await.expect("consumer info").num_ack_pending;
+            if pending == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the held trigger's durable start never acked it (num_ack_pending={pending})"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(worker.started(), 2, "exactly one invocation per trigger");
+
+        worker.let_finish(1);
+        for task in [running, holding] {
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .expect("handle returns")
+                .expect("task joins");
+        }
+    }
+
     #[tokio::test]
     async fn requeue_held_releases_old_stream_sequence_claim() {
         let server = crate::test_support::nats::test_nats();
