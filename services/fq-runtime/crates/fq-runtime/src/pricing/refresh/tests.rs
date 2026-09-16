@@ -411,6 +411,36 @@ fn a_model_that_was_not_admitted_is_not_a_refused_change() {
     assert_eq!(signals, vec!["pricing.change_refused"]);
 }
 
+#[test]
+fn an_unchanged_refusal_is_published_on_only_one_refresh_tick() {
+    let refresh = refresh(table(&[("a/one", 1.0)]), PricingOverlay::new());
+    let refused = || AcceptedLoad {
+        table: table(&[("a/one", 1.0)]),
+        refusals: vec![Refusal {
+            model: "a/one".to_string(),
+            field: PriceField::Input,
+            old: Some(1e-6),
+            new: 6e-6,
+            ratio: Some(6.0),
+            rule: RefusalRule::DriftBound,
+            disposition: Disposition::KeptPriorPrice,
+        }],
+        staleness: None,
+        fetch_error: None,
+    };
+
+    let first = refresh.settle(refused()).expect("first refresh");
+    let second = refresh.settle(refused()).expect("second refresh");
+    let refusal_count = first
+        .signals
+        .iter()
+        .chain(&second.signals)
+        .filter(|signal| signal.kind().as_str() == "pricing.change_refused")
+        .count();
+
+    assert_eq!(refusal_count, 1);
+}
+
 /// Review C-5/E-7, through the refresh rather than the episode value:
 /// the standing conditions are raised on the edge, so a broken upstream
 /// is one alert however long it lasts, and the refresh that fixes it

@@ -1052,6 +1052,10 @@ offered, model by model, against the last one it accepted.
    and quickly, and 5× is the margin that separates a repricing from a
    mistake.
 
+   A repeated refusal is one notification until that refused change stops.
+   To accept the change, set a per-model `[pricing]` override, as decided in
+   [#757](https://github.com/bricef/factor-q/issues/757).
+
    This bound applies to each load and is measured against the last
    **accepted** price. A sequence of accepted, in-bound moves is therefore
    unbounded in aggregate: four accepted 4.9× moves compound to about 576×,

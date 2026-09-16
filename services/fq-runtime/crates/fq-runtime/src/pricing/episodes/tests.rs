@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::*;
 use crate::events::SignalSeverity;
 use crate::pricing::PricingTable;
+use crate::pricing::accept::{Disposition, PriceField, Refusal, RefusalRule};
 use crate::pricing::live::Staleness;
 
 /// A load that could not fetch, with a table `days` past its window.
@@ -30,8 +31,72 @@ fn accepted_load() -> AcceptedLoad {
     }
 }
 
+fn refused_load(refusals: &[(&str, PriceField)]) -> AcceptedLoad {
+    AcceptedLoad {
+        table: PricingTable::empty(),
+        refusals: refusals
+            .iter()
+            .map(|(model, field)| Refusal {
+                model: (*model).to_string(),
+                field: *field,
+                old: Some(1e-6),
+                new: 6e-6,
+                ratio: Some(6.0),
+                rule: RefusalRule::DriftBound,
+                disposition: Disposition::KeptPriorPrice,
+            })
+            .collect(),
+        staleness: None,
+        fetch_error: None,
+    }
+}
+
 fn kinds_of(signals: &[PendingSignal]) -> Vec<&str> {
     signals.iter().map(|s| s.kind().as_str()).collect()
+}
+
+#[test]
+fn a_repeated_refusal_is_raised_once_then_resolved() {
+    let episodes = PricingEpisodes::new();
+    let refused = refused_load(&[("a/one", PriceField::Input)]);
+    let raised = episodes.edges(&refused, refused.signals());
+    assert_eq!(kinds_of(&raised), vec!["pricing.change_refused"]);
+
+    let repeated = refused_load(&[("a/one", PriceField::Input)]);
+    assert!(episodes.edges(&repeated, repeated.signals()).is_empty());
+
+    let recovered = episodes.edges(&accepted_load(), accepted_load().signals());
+    assert_eq!(kinds_of(&recovered), vec!["pricing.change_refused"]);
+    assert_eq!(recovered[0].payload.resolves, Some(raised[0].event_id));
+    assert!(
+        recovered[0]
+            .payload
+            .summary
+            .contains("a/one.input_cost_per_token")
+    );
+}
+
+#[test]
+fn different_refusal_keys_raise_independently() {
+    let episodes = PricingEpisodes::new();
+    let refused = refused_load(&[("a/one", PriceField::Input), ("a/one", PriceField::Output)]);
+    let raised = episodes.edges(&refused, refused.signals());
+    assert_eq!(kinds_of(&raised), vec!["pricing.change_refused"; 2]);
+    assert_ne!(raised[0].event_id, raised[1].event_id);
+}
+
+#[test]
+fn a_refusal_that_reappears_gets_a_new_id() {
+    let episodes = PricingEpisodes::new();
+    let refused = refused_load(&[("a/one", PriceField::Input)]);
+    let first = episodes.edges(&refused, refused.signals());
+    let resolved = episodes.edges(&accepted_load(), accepted_load().signals());
+    let refused_again = refused_load(&[("a/one", PriceField::Input)]);
+    let second = episodes.edges(&refused_again, refused_again.signals());
+
+    assert_eq!(resolved[0].payload.resolves, Some(first[0].event_id));
+    assert_ne!(first[0].event_id, second[0].event_id);
+    assert!(second[0].payload.resolves.is_none());
 }
 
 /// Three refreshes while the condition holds produce one alert. Without

@@ -80,7 +80,7 @@ impl Default for AcceptanceRules {
 /// Which of a model's prices a refusal is about, spelled as the source
 /// spells it — the operator reading the notification is going to open
 /// the upstream file and look for this key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PriceField {
     Input,
     Output,
