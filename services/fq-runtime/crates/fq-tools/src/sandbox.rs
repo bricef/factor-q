@@ -389,6 +389,14 @@ fn canonicalise_existing(target: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(target)
 }
 
+/// Whether the path as written ends in a directory assertion — a
+/// trailing `/` or `/.`. `Path` keeps the raw spelling, and the kernel
+/// reads that suffix as "the final component must be a directory".
+fn has_dir_suffix(target: &Path) -> bool {
+    let bytes = target.as_os_str().as_encoded_bytes();
+    bytes.ends_with(b"/") || bytes.ends_with(b"/.")
+}
+
 /// Canonicalise a path that may not yet exist. Used for write checks.
 ///
 /// If the target entry exists and is not a symlink, canonicalise it
@@ -415,6 +423,17 @@ fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
             });
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotADirectory && has_dir_suffix(target) => {
+            // A trailing `/` or `/.` asserts "the final component is a
+            // directory", so the kernel answers `ENOTDIR` for a path
+            // that names a file. That is a caller mistake with an
+            // obvious repair, not host trouble — say which, because
+            // `Io` is the least actionable kind for a model to read.
+            return Err(SandboxError::InvalidPath {
+                target: target.to_path_buf(),
+                reason: "trailing slash on a file path".to_string(),
+            });
+        }
         Err(err) => {
             return Err(SandboxError::Io {
                 path: target.to_path_buf(),
@@ -939,6 +958,23 @@ mod tests {
             "expected PermissionDenied, got {err:?}"
         );
         assert!(!outside.exists());
+    }
+
+    /// A trailing slash on a file path is a caller mistake with an
+    /// obvious repair, so it is `InvalidPath` and not the raw `Io`
+    /// (`Not a directory`) the kernel hands back.
+    #[test]
+    fn write_trailing_slash_on_existing_file_is_invalid_path() {
+        let allowed = tempdir().unwrap();
+        let file = write_file(allowed.path(), "existing.txt", "hi");
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let with_slash = PathBuf::from(format!("{}/", file.display()));
+        let err = sb.check_write(&with_slash).unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::InvalidPath { reason, .. }
+                if reason == "trailing slash on a file path"),
+            "expected InvalidPath, got {err:?}"
+        );
     }
 
     #[test]
