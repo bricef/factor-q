@@ -55,6 +55,10 @@ const FILE_CAP: usize = 800;
 /// Functions not listed in the baseline may not exceed this many lines.
 const FN_CAP: usize = 250;
 
+/// Match clippy's default `too_many_arguments` threshold so the threshold
+/// and shrinking-budget gate use one definition of excessive arity.
+const ARITY_CAP: usize = 7;
+
 /// Advisory threshold for `--creep`, in CODE lines. Below [`FN_CAP`] on
 /// purpose: the two count different things — the cap is physical span from
 /// the `fn` keyword, this skips comments and blanks — and the ratio on this
@@ -70,6 +74,7 @@ const CREEP_RUNWAY: usize = 50;
 
 const FILE_BASELINE: &str = ".file-size-baseline";
 const FN_BASELINE: &str = ".function-size-baseline";
+const ARITY_BASELINE: &str = ".function-arity-baseline";
 const ALLOW_BASELINE: &str = ".allow-baseline";
 
 /// Test code by purpose, excluded wholesale. `tests/` and `benches/` are test
@@ -119,6 +124,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let arities = arity_ratchet(&measured);
 
     if flags.contains(&"--coupling") {
         let graphs = coupling::build(
@@ -134,7 +140,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if flags.contains(&"--metrics") {
-        report_overhang(&files, &functions);
+        report_overhang(&files, &functions, &arities);
         report_metrics(&measured);
         return ExitCode::SUCCESS;
     }
@@ -150,22 +156,24 @@ fn main() -> ExitCode {
         // where the next run fails on whichever half was skipped.
         let a = files.bless(&root, &file_header());
         let b = functions.bless(&root, &fn_header());
-        let c = allows.bless(&root, allow_header());
-        a && b && c
+        let c = arities.bless(&root, arity_header());
+        let d = allows.bless(&root, allow_header());
+        a && b && c && d
     } else {
         let a = files.check(&root);
         let b = functions.check(&root);
-        let c = allows.check(&root);
-        if a && b && c {
-            report_overhang(&files, &functions);
+        let c = arities.check(&root);
+        let d = allows.check(&root);
+        if a && b && c && d {
+            report_overhang(&files, &functions, &arities);
         }
-        if !(a && b && c) {
+        if !(a && b && c && d) {
             eprintln!(
-                "\n(size ratchets — justfile: lint-sizes; rationale in tools/fq-lint and\n\
+                "\n(quality ratchets — justfile: lint-sizes; rationale in tools/fq-lint and\n\
                  docs/reviews/2026-07-25-factor-q-cleanroom-review.md Part 2)"
             );
         }
-        a && b && c
+        a && b && c && d
     };
 
     if ok {
@@ -175,7 +183,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn report_overhang(files: &Ratchet<'_>, functions: &Ratchet<'_>) {
+fn report_overhang(files: &Ratchet<'_>, functions: &Ratchet<'_>, arities: &Ratchet<'_>) {
     fn part(ratchet: &Ratchet<'_>) -> String {
         let overhang = ratchet.overhang();
         let subject = format!(
@@ -184,10 +192,11 @@ fn report_overhang(files: &Ratchet<'_>, functions: &Ratchet<'_>) {
             if overhang.entries == 1 { "" } else { "s" }
         );
         let mut result = format!(
-            "{} {}, {} lines over the {} cap",
+            "{} {}, {} {} over the {} cap",
             overhang.entries,
             subject,
             comma(overhang.total_over_cap),
+            ratchet.unit,
             comma(ratchet.cap)
         );
         if let Some((name, amount)) = overhang.worst {
@@ -196,7 +205,12 @@ fn report_overhang(files: &Ratchet<'_>, functions: &Ratchet<'_>) {
         result
     }
 
-    println!("size overhang: {}; {}", part(files), part(functions));
+    println!(
+        "quality overhang: {}; {}; {}",
+        part(files),
+        part(functions),
+        part(arities)
+    );
 }
 
 fn comma(n: usize) -> String {
@@ -385,15 +399,13 @@ fn file_ratchet(measured: &BTreeMap<String, Measured>) -> Ratchet<'static> {
     }
 }
 
-/// Test functions are out of scope, matching the file gate's exclusion of test
-/// code: a long table-driven test is not the debt this is aimed at.
-fn function_ratchet(measured: &BTreeMap<String, Measured>) -> Result<Ratchet<'static>, String> {
-    // Keys can legitimately collide: platform-gated alternatives share a name
-    // and scope (`#[cfg(unix)]` / `#[cfg(not(unix))]` `write_secret` in
-    // fq-edge's auth.rs). Collapsing them to the larger is harmless while both
-    // sit under the cap — but a collision among *budgeted* functions would
-    // mean two functions sharing one budget, which is ambiguous, so that fails
-    // loudly and asks for a more specific key.
+/// Collect production functions under the stable key shared by all function
+/// ratchets. Cfg-gated alternatives can share a key; their maximum measurement
+/// wins and the count lets ratchets reject ambiguous budgets where necessary.
+fn production_functions_by_key(
+    measured: &BTreeMap<String, Measured>,
+    value: impl Fn(&analysis::FnFacts) -> usize,
+) -> BTreeMap<String, (usize, usize)> {
     let mut seen: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for (path, m) in measured {
         let Some(facts) = &m.facts else { continue };
@@ -402,13 +414,23 @@ fn function_ratchet(measured: &BTreeMap<String, Measured>) -> Result<Ratchet<'st
                 continue;
             }
             let entry = seen.entry(f.key(path)).or_insert((0, 0));
-            entry.0 = entry.0.max(f.lines());
+            entry.0 = entry.0.max(value(f));
             entry.1 += 1;
         }
     }
+    seen
+}
 
+/// Test functions are out of scope, matching the file gate's exclusion of test code.
+fn function_ratchet(measured: &BTreeMap<String, Measured>) -> Result<Ratchet<'static>, String> {
+    // Keys can legitimately collide: platform-gated alternatives share a name
+    // and scope (`#[cfg(unix)]` / `#[cfg(not(unix))]` `write_secret` in
+    // fq-edge's auth.rs). Collapsing them to the larger is harmless while both
+    // sit under the cap — but a collision among *budgeted* functions would
+    // mean two functions sharing one budget, which is ambiguous, so that fails
+    // loudly and asks for a more specific key.
     let mut fns: BTreeMap<String, usize> = BTreeMap::new();
-    for (key, (lines, count)) in seen {
+    for (key, (lines, count)) in production_functions_by_key(measured, |f| f.lines()) {
         if count > 1 && lines > FN_CAP {
             return Err(format!(
                 "{count} functions share the key {key} and one is {lines} lines, over the \
@@ -431,6 +453,23 @@ fn function_ratchet(measured: &BTreeMap<String, Measured>) -> Result<Ratchet<'st
                          helper instead of growing a function that is already too long,\n  \
                          or say on the PR why it has to grow and let a human decide.",
     })
+}
+
+fn arity_ratchet(measured: &BTreeMap<String, Measured>) -> Ratchet<'static> {
+    Ratchet {
+        subject: "function",
+        unit: "parameters",
+        cap: ARITY_CAP,
+        baseline_path: ARITY_BASELINE,
+        measured: production_functions_by_key(measured, |f| f.params)
+            .into_iter()
+            .map(|(key, (params, _))| (key, params))
+            .collect(),
+        guidance_new: "  A new function crossed clippy's arity cap. Group related state or\n  \
+                       split responsibilities — do not add a budget entry.",
+        guidance_grown: "  STOP — do not raise the arity budget. Remove the new dependency,\n  \
+                         group cohesive state, or let a human decide.",
+    }
 }
 
 fn file_header() -> String {
@@ -478,6 +517,22 @@ fn fn_header() -> String {
          # clippy::too_many_lines is the complementary threshold gate (it counts\n\
          # CODE lines, skipping comments and blanks) — tracked in #392.\n"
     )
+}
+
+fn arity_header() -> &'static str {
+    "# Per-function parameter budgets — the function-arity ratchet.\n\
+     #\n\
+     # Generated and maintained by `just sizes-bless`; enforced by\n\
+     # `just lint-sizes` (tools/fq-lint) in the Code quality CI job.\n\
+     #\n\
+     # Keys are `path::scope::name`; cfg-gated alternatives sharing a key use\n\
+     # the larger arity. Test functions are out of scope. A `self` receiver is\n\
+     # excluded, matching clippy's argument count.\n\
+     #\n\
+     # The cap of 7 matches clippy::too_many_arguments. Entries may only shrink.\n\
+     # `#[allow(clippy::too_many_arguments)]` is still counted by the allow\n\
+     # census (#419), so removing an allow and lowering this entry together is\n\
+     # the way down. Raising or admitting an entry requires a visible hand edit.\n"
 }
 
 fn allow_header() -> &'static str {
@@ -683,6 +738,23 @@ mod tests {
         let mut keys: Vec<_> = r.measured.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["a.rs::Foo as Bar::run", "a.rs::Foo::run"]);
+    }
+
+    #[test]
+    fn arity_ratchet_uses_max_for_cfg_alternatives() {
+        let src = "#[cfg(unix)] fn send(a:u8,b:u8,c:u8,d:u8,e:u8,f:u8,g:u8,h:u8) {}\n\
+                   #[cfg(not(unix))] fn send(a:u8,b:u8,c:u8,d:u8,e:u8,f:u8,g:u8,h:u8,i:u8) {}\n";
+        let r = arity_ratchet(&measured_from("a.rs", src));
+        assert_eq!(r.measured["a.rs::send"], 9, "largest cfg alternative wins");
+    }
+
+    #[test]
+    fn arity_ratchet_skips_test_functions() {
+        let r = arity_ratchet(&measured_from(
+            "a.rs",
+            "#[cfg(test)] fn t(a:u8,b:u8,c:u8,d:u8,e:u8,f:u8,g:u8,h:u8) {}",
+        ));
+        assert!(r.measured.is_empty());
     }
 
     #[test]

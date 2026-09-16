@@ -381,6 +381,35 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn arity_style_ratchet_rejects_growth_and_new_offenders_but_accepts_shrinkage() {
+        let root = std::env::temp_dir().join(format!(
+            "fq-lint-ratchet-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("arity-baseline"), "budgeted 9\n").unwrap();
+
+        let make = |measured| Ratchet {
+            subject: "function",
+            unit: "parameters",
+            cap: 7,
+            baseline_path: "arity-baseline",
+            measured,
+            guidance_new: "",
+            guidance_grown: "",
+        };
+        assert!(!make(BTreeMap::from([("budgeted".into(), 10)])).check(&root));
+        assert!(make(BTreeMap::from([("budgeted".into(), 8)])).check(&root));
+        assert!(!make(BTreeMap::from([("budgeted".into(), 9), ("new".into(), 8),])).check(&root));
+
+        let shrunk = make(BTreeMap::from([("budgeted".into(), 8)]));
+        assert!(shrunk.bless(&root, "# test\n"));
+        assert_eq!(shrunk.read_baseline(&root)["budgeted"], 8);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
