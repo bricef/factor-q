@@ -133,7 +133,9 @@ impl ProjectionConsumer {
     /// leapfrogged. Advancement is monotonic, so redeliveries of
     /// already-applied sequences never regress it.
     async fn handle_event(&self, delivery: Delivery) -> Result<(), HandlerError> {
-        let Delivery { event, stream_seq } = delivery;
+        let Delivery {
+            event, stream_seq, ..
+        } = delivery;
         debug!(
             event_id = %event.envelope.event_id,
             agent_id = %event.envelope.agent_id,
@@ -289,7 +291,9 @@ mod tests {
                 &bus_for_loop,
                 config,
                 shutdown_rx,
-                |Delivery { event, stream_seq }| {
+                |Delivery {
+                     event, stream_seq, ..
+                 }| {
                     let store = store_for_loop.clone();
                     async move {
                         store

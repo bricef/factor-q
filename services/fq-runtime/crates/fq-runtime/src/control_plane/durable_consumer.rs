@@ -303,23 +303,44 @@ pub enum DurableConsumerError {
     Stream(String),
 }
 
-/// One delivered message: the deserialised event plus its position
-/// in the event log. The position is what watermarks are made of —
-/// handlers that don't track progress simply ignore it.
-pub struct Delivery {
-    pub event: Event,
-    /// The `fq-events` stream sequence of this message. Absent only
-    /// when JetStream metadata could not be read off the delivery.
+/// One delivered message plus the JetStream metadata shared handlers need.
+///
+/// The field remains named `event` so existing event-stream handlers keep their
+/// source-compatible `delivery.event` access while the loop can also carry an
+/// opaque non-event value.
+pub struct Delivery<T = Event> {
+    pub event: T,
+    /// The source stream sequence. Absent only when metadata was unavailable.
     pub stream_seq: Option<u64>,
+    /// JetStream's delivery count (the first delivery is one).
+    pub delivered: u64,
+    /// The subject the message was delivered on.
+    pub subject: String,
 }
 
-/// Run a durable consumer loop until `shutdown` fires.
-///
-/// `handler` is called once per delivered message with the
-/// [`Delivery`] (the deserialised [`Event`] plus its stream
-/// position); its result decides the ack (see the module doc's
-/// policy table). Handlers must be idempotent — delivery is
-/// at-least-once.
+/// A stable value used to identify a generic delivery in handler log lines.
+pub trait DeliveryIdent {
+    /// Event id for event-stream items; non-event streams return `None` and
+    /// are identified by the subject and stream sequence already on the log.
+    fn delivery_ident(&self) -> Option<String>;
+}
+
+impl DeliveryIdent for Event {
+    fn delivery_ident(&self) -> Option<String> {
+        Some(self.envelope.event_id.to_string())
+    }
+}
+
+/// Where the shared loop gets its pull consumer.
+pub enum ConsumerSource {
+    EventStream(DurableConsumerConfig),
+    Prebuilt {
+        name: String,
+        consumer: Box<async_nats::jetstream::consumer::PullConsumer>,
+    },
+}
+
+/// Run an event-stream durable consumer until `shutdown` fires.
 pub async fn run_durable_consumer<H, HFut>(
     bus: &EventBus,
     config: DurableConsumerConfig,
@@ -330,73 +351,101 @@ where
     H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
 {
-    run_loop(bus, config, shutdown, handler, NO_TICK).await
+    run_loop(
+        bus,
+        ConsumerSource::EventStream(config),
+        shutdown,
+        handler,
+        NO_TICK,
+        |msg| match admit(&msg.payload, &msg.subject, message_stream_seq(msg)) {
+            Admission::Accept(event) => Admission::Accept(*event),
+            Admission::AckMalformed(err) => Admission::AckMalformed(err),
+            Admission::Halt(on) => Admission::Halt(on),
+        },
+    )
+    .await
 }
 
-/// Like [`run_durable_consumer`], with a periodic housekeeping
-/// tick multiplexed into the same task. The tick and the
-/// handler are serialised — they never run concurrently — and,
-/// per `tokio::time::interval` semantics, the first tick fires
-/// as soon as the loop starts.
-pub async fn run_durable_consumer_with_tick<H, HFut, T, TFut>(
+/// Like [`run_durable_consumer`], with serial periodic housekeeping.
+pub async fn run_durable_consumer_with_tick<H, HFut, Tick, TFut>(
     bus: &EventBus,
     config: DurableConsumerConfig,
     shutdown: oneshot::Receiver<()>,
     handler: H,
     tick_every: Duration,
-    tick: T,
+    tick: Tick,
 ) -> Result<(), DurableConsumerError>
 where
     H: Fn(Delivery) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
-    T: Fn() -> TFut,
+    Tick: Fn() -> TFut,
     TFut: Future<Output = ()>,
 {
-    run_loop(bus, config, shutdown, handler, Some((tick_every, tick))).await
+    run_loop(
+        bus,
+        ConsumerSource::EventStream(config),
+        shutdown,
+        handler,
+        Some((tick_every, tick)),
+        |msg| match admit(&msg.payload, &msg.subject, message_stream_seq(msg)) {
+            Admission::Accept(event) => Admission::Accept(*event),
+            Admission::AckMalformed(err) => Admission::AckMalformed(err),
+            Admission::Halt(on) => Admission::Halt(on),
+        },
+    )
+    .await
 }
 
-/// The tick type instantiated when a consumer has no tick arm.
 type NoTickFn = fn() -> std::future::Ready<()>;
 const NO_TICK: Option<(Duration, NoTickFn)> = None;
 
-async fn run_loop<H, HFut, T, TFut>(
+/// The one durable-consumer loop used by event and maintenance consumers.
+pub(crate) async fn run_loop<Item, H, HFut, Tick, TFut, A>(
     bus: &EventBus,
-    config: DurableConsumerConfig,
+    source: ConsumerSource,
     mut shutdown: oneshot::Receiver<()>,
     handler: H,
-    tick: Option<(Duration, T)>,
+    tick: Option<(Duration, Tick)>,
+    admission: A,
 ) -> Result<(), DurableConsumerError>
 where
-    H: Fn(Delivery) -> HFut,
+    Item: DeliveryIdent,
+    H: Fn(Delivery<Item>) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
-    T: Fn() -> TFut,
+    Tick: Fn() -> TFut,
     TFut: Future<Output = ()>,
+    A: Fn(&async_nats::jetstream::Message) -> Admission<Item>,
 {
-    let name = config.durable_name.clone();
-    info!(
-        consumer = %name,
-        filters = ?config.filter_subjects,
-        deliver_from = ?config.deliver_from,
-        "durable consumer starting"
-    );
-    let consumer = config.create(bus).await?;
+    let (name, consumer) = match source {
+        ConsumerSource::EventStream(config) => {
+            let name = config.durable_name.clone();
+            info!(
+                consumer = %name,
+                filters = ?config.filter_subjects,
+                deliver_from = ?config.deliver_from,
+                "durable consumer starting"
+            );
+            let consumer = Box::new(config.create(bus).await?);
+            (name, consumer)
+        }
+        ConsumerSource::Prebuilt { name, consumer } => {
+            info!(consumer = %name, "durable consumer starting");
+            (name, consumer)
+        }
+    };
     let mut messages = consumer
         .messages()
         .await
         .map_err(|err| DurableConsumerError::Stream(err.to_string()))?;
-
     let mut tick_timer = tick
         .as_ref()
         .map(|(every, _)| tokio::time::interval(*every));
-
-    // The redelivery policy is the bus's, so a consumer cannot retry on
-    // terms its durable was not created with. The log limiter is this
-    // loop's own: two consumers failing at once each still say so.
+    // The policy and bounded log limiter live here for every stream riding
+    // this loop, so no consumer can accidentally create a hot retry loop.
     let policy = bus.redelivery_policy();
     let mut redelivery_log = RedeliveryLog::new(policy);
-    // The parse-boundary record this loop reports to. It starts empty,
-    // so the figures describe this loop and not an earlier one on the
-    // same durable.
+    // Start a fresh parse-boundary record for this invocation. Identity
+    // admissions never increment it, but still appear beside other durables.
     let ledger = bus.consumer_ledger().clone();
     ledger.start(&name);
 
@@ -411,16 +460,12 @@ where
                 match msg {
                     Some(Ok(msg)) => {
                         let next = handle_message(
-                            &name, &handler, &msg, policy, &mut redelivery_log, &ledger,
-                        )
-                        .await;
-                        if let Next::Halt(on) = next {
-                            break Some(on);
-                        }
+                            &name, &handler, &admission, &msg, policy,
+                            &mut redelivery_log, &ledger,
+                        ).await;
+                        if let Next::Halt(on) = next { break Some(on); }
                     }
-                    Some(Err(err)) => {
-                        warn!(consumer = %name, error = %err, "error reading next JetStream message");
-                    }
+                    Some(Err(err)) => warn!(consumer = %name, error = %err, "error reading next JetStream message"),
                     None => {
                         warn!(consumer = %name, "JetStream message stream ended unexpectedly");
                         break None;
@@ -428,30 +473,22 @@ where
                 }
             }
             _ = maybe_tick(tick_timer.as_mut()) => {
-                if let Some((_, tick_fn)) = &tick {
-                    tick_fn().await;
-                }
+                if let Some((_, tick_fn)) = &tick { tick_fn().await; }
             }
         }
     };
-    // Release the pull before parking or returning: a halted loop must
-    // not keep fetching messages it will never resolve.
+    // A halted event consumer must release the pull before parking so it does
+    // not fetch messages it cannot resolve.
     drop(messages);
-
     if let Some(on) = halted {
         park_halted(&name, on, &ledger, shutdown).await;
     }
-
     info!(consumer = %name, "durable consumer stopped");
     Ok(())
 }
 
-/// The halt: said once, at error level, with everything an operator
-/// needs to find the message; recorded where `fq doctor` reads; and
-/// then the task waits for shutdown. It must not return — the daemon
-/// supervises every consumer task and reads any exit, clean or not, as
-/// a task failure that takes the whole daemon down, which is exactly
-/// the state in which nothing could report why.
+/// Record an unsupported event where `fq doctor` reads it, then park until
+/// shutdown without acknowledging or fetching past that event.
 async fn park_halted(
     name: &str,
     on: UnsupportedEvent,
@@ -473,34 +510,25 @@ async fn park_halted(
     info!(consumer = name, "halted consumer received shutdown signal");
 }
 
-/// Whether the loop goes on after a message.
 enum Next {
     Continue,
     Halt(UnsupportedEvent),
 }
 
-/// What the loop does with a delivered message before any handler sees
-/// it — the parse half of the ack policy, as a value, so the event
-/// corpus can be replayed through it without a broker and the loop and
-/// that test cannot disagree about what a version means.
+/// The parse/admission decision made before a generic handler runs.
 #[derive(Debug)]
-pub enum Admission {
-    /// An event this build reads: it goes to the handler. Boxed
-    /// because an event is most of a kilobyte and the other two
-    /// outcomes are not, and the value is moved once.
-    Event(Box<Event>),
-    /// Not an event in any version: acked, counted, skipped.
-    AckMalformed(serde_json::Error),
-    /// Well-formed history in a version this build does not read:
-    /// left unacked, and the loop halts.
+pub enum Admission<T> {
+    Accept(T),
+    AckMalformed(String),
     Halt(UnsupportedEvent),
 }
 
-/// Decide a message's admission from its bytes and where it sat.
-pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admission {
+/// Event-stream admission: decode current events, ack poison, halt on versions
+/// this build cannot read.
+pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admission<Box<Event>> {
     match Event::from_wire(payload) {
-        Ok(event) => Admission::Event(Box::new(event)),
-        Err(EventParseError::Malformed(err)) => Admission::AckMalformed(err),
+        Ok(event) => Admission::Accept(Box::new(event)),
+        Err(EventParseError::Malformed(err)) => Admission::AckMalformed(err.to_string()),
         Err(EventParseError::UnsupportedSchemaVersion {
             found,
             supported,
@@ -513,6 +541,10 @@ pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admissio
             stream_seq,
         }),
     }
+}
+
+fn message_stream_seq(msg: &async_nats::jetstream::Message) -> Option<u64> {
+    msg.info().ok().map(|info| info.stream_sequence)
 }
 
 /// Await the next tick, or forever when the consumer has no
@@ -532,30 +564,33 @@ async fn maybe_tick(timer: Option<&mut tokio::time::Interval>) {
 /// kill the loop. The one thing it can say besides "go on" is that
 /// the loop must halt, which is not a failure of this message but a
 /// fact about the stream.
-async fn handle_message<H, HFut>(
+async fn handle_message<Item, H, HFut, A>(
     name: &str,
     handler: &H,
+    admission: &A,
     msg: &async_nats::jetstream::Message,
     policy: ConsumerRedeliveryPolicy,
     redelivery_log: &mut RedeliveryLog,
     ledger: &ConsumerLedger,
 ) -> Next
 where
-    H: Fn(Delivery) -> HFut,
+    Item: DeliveryIdent,
+    H: Fn(Delivery<Item>) -> HFut,
     HFut: Future<Output = Result<(), HandlerError>>,
+    A: Fn(&async_nats::jetstream::Message) -> Admission<Item>,
 {
     let info = msg.info().ok();
     let stream_seq = info.as_ref().map(|info| info.stream_sequence);
-    let subject: &str = &msg.subject;
-    let event = match admit(&msg.payload, subject, stream_seq) {
-        Admission::Event(event) => *event,
+    let subject = msg.subject.to_string();
+    let item = match admission(msg) {
+        Admission::Accept(item) => item,
         Admission::AckMalformed(err) => {
             warn!(
                 consumer = name,
                 error = %err,
                 subject,
                 stream_seq = stream_seq.unwrap_or(0),
-                "message is not an event in any version; acking to avoid a redelivery loop"
+                "message was refused as malformed; acking to avoid a redelivery loop"
             );
             ledger.note_malformed(name);
             if let Err(ack_err) = msg.ack().await {
@@ -565,54 +600,38 @@ where
         }
         Admission::Halt(on) => return Next::Halt(on),
     };
-
-    // JetStream counts the first delivery as 1. A message whose
-    // metadata could not be read is treated as a first delivery, which
-    // costs the shortest delay rather than the longest — the wrong way
-    // to be wrong here would be to stall a healthy retry.
+    // Missing metadata takes the shortest retry delay, never the longest.
     let delivered = info
         .as_ref()
         .and_then(|info| u64::try_from(info.delivered).ok())
         .unwrap_or(1);
-    let event_id = event.envelope.event_id;
-    match handler(Delivery { event, stream_seq }).await {
+    let event_id = item.delivery_ident();
+    let delivery = Delivery {
+        event: item,
+        stream_seq,
+        delivered,
+        subject: subject.clone(),
+    };
+    match handler(delivery).await {
         Ok(()) => {
             if let Err(err) = msg.ack().await {
-                error!(
-                    consumer = name,
-                    error = %err,
-                    event_id = %event_id,
-                    "failed to ack handled event"
-                );
+                error!(consumer = name, error = %err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to ack handled message");
             }
         }
         Err(HandlerError::Permanent(err)) => {
-            warn!(
-                consumer = name,
-                error = %err,
-                event_id = %event_id,
-                "handler rejected event permanently; acking (no retry)"
-            );
+            warn!(consumer = name, error = %err, event_id = event_id.as_deref().unwrap_or("-"), subject, "handler rejected message permanently; acking (no retry)");
             if let Err(ack_err) = msg.ack().await {
-                error!(
-                    consumer = name,
-                    error = %ack_err,
-                    event_id = %event_id,
-                    "failed to ack permanently rejected event"
-                );
+                error!(consumer = name, error = %ack_err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to ack permanently rejected message");
             }
         }
         Err(HandlerError::Transient(err)) => {
             let delay = policy.nak_delay(delivered);
-            // One line per escalation step, then one per interval. A
-            // handler that fails forever is worth saying so about; it
-            // is not worth a line per broker round-trip, which is what
-            // buried the signal when the NAK had no delay at all.
             if redelivery_log.admit(delivered, std::time::Instant::now()) {
                 error!(
                     consumer = name,
                     error = %err,
-                    event_id = %event_id,
+                    event_id = event_id.as_deref().unwrap_or("-"),
+                    subject,
                     stream_seq = stream_seq.unwrap_or(0),
                     delivered,
                     retry_in_ms = delay.as_millis() as u64,
@@ -623,12 +642,7 @@ where
                 .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
                 .await
             {
-                error!(
-                    consumer = name,
-                    error = %nak_err,
-                    event_id = %event_id,
-                    "failed to NAK message"
-                );
+                error!(consumer = name, error = %nak_err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to NAK message");
             }
         }
     }
@@ -809,6 +823,104 @@ mod tests {
         let _ = handle.await;
     }
 
+    #[derive(Debug)]
+    struct FakeItem(String);
+
+    impl DeliveryIdent for FakeItem {
+        fn delivery_ident(&self) -> Option<String> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// A non-event admission rides the same loop and receives all metadata;
+    /// malformed admission is counted and acked without reaching the handler.
+    #[tokio::test]
+    async fn generic_admission_populates_delivery_and_acks_malformed() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let tag = Uuid::now_v7().simple().to_string();
+        let name = format!("fq-generic-loop-{tag}");
+        let subject = format!("fq.maintenance.generic-{tag}");
+        let consumer = bus
+            .maintenance_consumer(&name, &subject, Some(Duration::from_millis(200)))
+            .await
+            .expect("create consumer");
+        for payload in ["accepted", "malformed"] {
+            bus.jetstream()
+                .publish(subject.clone(), payload.into())
+                .await
+                .expect("publish")
+                .await
+                .expect("publish ack");
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_loop = Arc::clone(&seen);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let bus_for_loop = bus.clone();
+        let name_for_loop = name.clone();
+        let handle = tokio::spawn(async move {
+            run_loop(
+                &bus_for_loop,
+                ConsumerSource::Prebuilt {
+                    name: name_for_loop,
+                    consumer: Box::new(consumer),
+                },
+                shutdown_rx,
+                move |delivery: Delivery<FakeItem>| {
+                    let seen = Arc::clone(&seen_for_loop);
+                    async move {
+                        seen.lock().unwrap().push((
+                            delivery.event.0,
+                            delivery.delivered,
+                            delivery.subject,
+                            delivery.stream_seq,
+                        ));
+                        Ok(())
+                    }
+                },
+                None::<(Duration, fn() -> std::future::Ready<()>)>,
+                |msg| {
+                    if msg.payload.as_ref() == b"malformed" {
+                        Admission::AckMalformed("fake malformed message".to_string())
+                    } else {
+                        Admission::Accept(FakeItem("accepted".to_string()))
+                    }
+                },
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while (
+            seen.lock().unwrap().len(),
+            bus.consumer_ledger().record(&name).malformed_acked,
+        ) != (1, 1)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "generic deliveries timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        {
+            let got = seen.lock().unwrap();
+            assert_eq!(
+                got.len(),
+                1,
+                "malformed admission must not call the handler"
+            );
+            assert_eq!(got[0].0, "accepted");
+            assert_eq!(got[0].1, 1);
+            assert_eq!(got[0].2, subject);
+            assert!(got[0].3.is_some());
+            drop(got);
+        }
+
+        let _ = shutdown_tx.send(());
+        handle.await.expect("join loop").expect("run loop");
+    }
+
     /// Sequence 0 names no message, so a floor of 0 is the beginning;
     /// any other floor is the position itself.
     #[test]
@@ -862,7 +974,9 @@ mod tests {
                 &bus_for_loop,
                 config,
                 shutdown_rx,
-                move |Delivery { event, stream_seq }| {
+                move |Delivery {
+                          event, stream_seq, ..
+                      }| {
                     let seen = seen_for_loop.clone();
                     async move {
                         if let EventPayload::WorkerHeartbeat(p) = &event.payload {

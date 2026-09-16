@@ -1,39 +1,23 @@
-//! The durable loop over `fq.maintenance.>`: resolve a task, run it,
-//! record the outcome.
+//! The durable loop over `fq.maintenance.>`: resolve a task, run it, and
+//! record the outcome. Identity admission carries opaque scheduler payloads
+//! through the shared durable-consumer loop without event-envelope parsing.
 //!
-//! It does not ride [`crate::control_plane::durable_consumer`], and
-//! the reason is the payload. That loop's first act is
-//! [`crate::control_plane::durable_consumer::admit`], which reads an
-//! envelope version and deserialises an [`Event`] — the right thing
-//! for a consumer of the event log, and the wrong thing here, where
-//! every message is an opaque body a scheduler wrote. Running these
-//! through it would ack every command as malformed and count it on the
-//! parse ledger. The ack policy is the same in spirit; what differs is
-//! what a message *is*.
-//!
-//! **So the `select!`/ack plumbing below is hand-rolled deliberately,
-//! and it is still debt** — the fourth copy of a shape #192 exists to
-//! keep in one place. The seam that would close it is a `run_loop`
-//! generic over its admission (`Fn(&Message) -> Admission<T>`), with
-//! this consumer passing an identity admission; that refactor touches
-//! every control-plane consumer, so it is filed rather than done here:
-//! <https://github.com/bricef/factor-q/issues/748>. Read that before
-//! re-deriving why this module does not call
-//! [`crate::control_plane::durable_consumer::run_durable_consumer`] —
-//! and note the one policy difference it must preserve: a failed task
-//! is **acked**, never NAK'd (the schedule is the retry); only a
-//! failure to publish the outcome NAKs.
+//! A failed task is acked, never NAK'd (the schedule is the retry); only a
+//! failure to publish the outcome NAKs and re-publishes the held result.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
+use crate::control_plane::durable_consumer::{
+    Admission, ConsumerSource, Delivery, DeliveryIdent, DurableConsumerError, HandlerError,
+    run_loop,
+};
 use crate::events::operator_signal::kinds;
 use crate::events::{
     Event, EventPayload, MaintenanceOutcome, MaintenanceRunPayload, OperatorSignalPayload,
@@ -64,8 +48,8 @@ pub enum MaintenanceConsumerError {
     #[error("bus error: {0}")]
     Bus(#[from] BusError),
 
-    #[error("jetstream message stream error: {0}")]
-    Stream(String),
+    #[error("durable consumer error: {0}")]
+    Durable(#[from] DurableConsumerError),
 }
 
 /// The daemon's maintenance consumer. Construct, then [`Self::run`].
@@ -129,17 +113,11 @@ impl MaintenanceConsumer {
         self
     }
 
-    /// Consume until `shutdown` fires.
+    /// Consume until `shutdown` fires, riding the shared ack/select loop.
     pub async fn run(
         self,
-        mut shutdown: oneshot::Receiver<()>,
+        shutdown: oneshot::Receiver<()>,
     ) -> Result<(), MaintenanceConsumerError> {
-        info!(
-            consumer = %self.consumer_name,
-            filter = %self.filter_subject,
-            ack_wait_ms = self.ack_wait.as_millis() as u64,
-            "maintenance consumer starting"
-        );
         let consumer = self
             .bus
             .maintenance_consumer(
@@ -148,71 +126,52 @@ impl MaintenanceConsumer {
                 Some(self.ack_wait),
             )
             .await?;
-        let mut messages = consumer
-            .messages()
-            .await
-            .map_err(|err| MaintenanceConsumerError::Stream(err.to_string()))?;
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!(consumer = %self.consumer_name, "maintenance consumer received shutdown signal");
-                    break;
-                }
-                msg = messages.next() => {
-                    match msg {
-                        Some(Ok(msg)) => self.handle(&msg).await,
-                        Some(Err(err)) => {
-                            warn!(
-                                consumer = %self.consumer_name,
-                                error = %err,
-                                "error reading next maintenance message"
-                            );
-                        }
-                        None => {
-                            warn!(
-                                consumer = %self.consumer_name,
-                                "maintenance message stream ended unexpectedly"
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        info!(consumer = %self.consumer_name, "maintenance consumer stopped");
+        let bus = self.bus.clone();
+        let name = self.consumer_name.clone();
+        let this = Arc::new(self);
+        run_loop(
+            &bus,
+            ConsumerSource::Prebuilt {
+                name,
+                consumer: Box::new(consumer),
+            },
+            shutdown,
+            move |delivery| {
+                let this = Arc::clone(&this);
+                async move { this.handle(delivery).await }
+            },
+            None::<(Duration, fn() -> std::future::Ready<()>)>,
+            |msg| {
+                Admission::Accept(RawMessage {
+                    subject: msg.subject.to_string(),
+                    payload: msg.payload.to_vec(),
+                    message_id: msg.headers.as_ref().and_then(|headers| {
+                        headers
+                            .get(async_nats::header::NATS_MESSAGE_ID)
+                            .map(ToString::to_string)
+                    }),
+                })
+            },
+        )
+        .await?;
         Ok(())
     }
 
-    /// Resolve one message. Never returns an error: everything a
-    /// message can do wrong is an outcome, and the loop must survive
-    /// all of them.
-    async fn handle(&self, msg: &async_nats::jetstream::Message) {
-        let info = msg.info().ok();
-        let run_id = run_id(msg, info.as_ref().map(|i| i.stream_sequence));
-        // JetStream counts the first delivery as 1; a message whose
-        // metadata could not be read is treated as a first delivery, so
-        // a healthy retry pays the shortest delay rather than the
-        // longest (the shared durable loop makes the same call).
-        let delivered = info
-            .as_ref()
-            .and_then(|info| u64::try_from(info.delivered).ok())
-            .unwrap_or(1);
-
-        // A run id already in the ledger is a redelivery, not a second
-        // run. Either the outcome still needs publishing (the previous
-        // attempt NAK'd on the publish) or it is already on the log and
-        // there is nothing left to do but ack.
+    /// Resolve and publish one run through the shared handler contract.
+    /// A failed task is acked (the schedule is the retry); only failure to
+    /// publish its outcome returns a transient error and therefore NAKs.
+    async fn handle(&self, delivery: Delivery<RawMessage>) -> Result<(), HandlerError> {
+        let raw = delivery.event;
+        let run_id = run_id(&raw, delivery.stream_seq);
         if let Some(pending) = self.ledger_lookup(&run_id) {
-            match pending {
+            return match pending {
                 Some(held) => {
                     debug!(
                         consumer = %self.consumer_name,
                         run_id = %run_id,
                         "redelivered maintenance run; re-publishing the recorded outcome, not re-running"
                     );
-                    self.settle(msg, &run_id, held, delivered).await;
+                    self.settle(&run_id, held).await
                 }
                 None => {
                     debug!(
@@ -220,15 +179,13 @@ impl MaintenanceConsumer {
                         run_id = %run_id,
                         "maintenance run already resolved; acking the redelivery"
                     );
-                    self.ack(msg, &run_id).await;
+                    Ok(())
                 }
-            }
-            return;
+            };
         }
         self.ledger_start(&run_id);
-
-        let resolved = self.resolve(&msg.subject, &run_id).await;
-        self.settle(msg, &run_id, resolved, delivered).await;
+        let resolved = self.resolve(&raw.subject, &run_id).await;
+        self.settle(&run_id, resolved).await
     }
 
     /// Run whatever the subject names, or refuse it. Produces the
@@ -332,36 +289,12 @@ impl MaintenanceConsumer {
         }
     }
 
-    /// Publish the outcome and ack, or keep the outcome for the
-    /// redelivery and NAK.
+    /// Publish the outcome or hold it for redelivery.
     ///
-    /// The order matters: the event is the record, so it goes on the
-    /// log before the message is consumed. A publish that fails leaves
-    /// the payload in the ledger, so the redelivery this NAK earns
-    /// re-publishes what already happened rather than making it happen
-    /// again.
-    ///
-    /// **The outcome gates the signals**, which is what makes a signal
-    /// exactly-once in every path a redelivery can take: a redelivery
-    /// only ever happens when the outcome publish failed, and no signal
-    /// was published in that attempt. A signal publish that fails *after*
-    /// the outcome landed is logged and dropped rather than retried —
-    /// re-running the task to recover a notification would be a worse
-    /// trade than losing one, and the outcome event, which is the record,
-    /// is already on the log.
-    ///
-    /// The NAK delay is the bus's, keyed on `delivered`, so a broker
-    /// that will not take the outcome settles into one retry per
-    /// `[bus] nak_max_ms` instead of a hot loop at round-trip speed —
-    /// the escalation the shared durable loop applies, for the same
-    /// reason.
-    async fn settle(
-        &self,
-        msg: &async_nats::jetstream::Message,
-        run_id: &str,
-        resolved: Resolved,
-        delivered: u64,
-    ) {
+    /// A failed task is acked: task failure is represented by a successfully
+    /// published outcome, and the schedule is the retry. Only failure to
+    /// publish that outcome is transient and asks the shared loop to NAK.
+    async fn settle(&self, run_id: &str, resolved: Resolved) -> Result<(), HandlerError> {
         let event = Event::system(
             self.runtime_id,
             EventPayload::MaintenanceRun(resolved.payload.clone()),
@@ -370,29 +303,13 @@ impl MaintenanceConsumer {
             Ok(_) => {
                 self.publish_signals(run_id, &resolved.signals).await;
                 self.ledger_resolved(run_id);
-                self.ack(msg, run_id).await;
+                Ok(())
             }
             Err(err) => {
                 self.ledger_hold(run_id, resolved);
-                error!(
-                    consumer = %self.consumer_name,
-                    run_id,
-                    error = %err,
-                    "failed to publish the maintenance outcome; NAK to re-publish it on redelivery"
-                );
-                if let Err(nak_err) = msg
-                    .ack_with(async_nats::jetstream::AckKind::Nak(Some(
-                        self.bus.redelivery_policy().nak_delay(delivered),
-                    )))
-                    .await
-                {
-                    error!(
-                        consumer = %self.consumer_name,
-                        run_id,
-                        error = %nak_err,
-                        "failed to NAK a maintenance message"
-                    );
-                }
+                Err(HandlerError::transient(std::io::Error::other(format!(
+                    "failed to publish maintenance outcome for run {run_id}: {err}"
+                ))))
             }
         }
     }
@@ -415,17 +332,6 @@ impl MaintenanceConsumer {
         }
     }
 
-    async fn ack(&self, msg: &async_nats::jetstream::Message, run_id: &str) {
-        if let Err(err) = msg.ack().await {
-            error!(
-                consumer = %self.consumer_name,
-                run_id,
-                error = %err,
-                "failed to ack a maintenance message"
-            );
-        }
-    }
-
     fn ledger_lookup(&self, run_id: &str) -> Option<Option<Resolved>> {
         self.ledger.lock().unwrap().lookup(run_id)
     }
@@ -440,6 +346,20 @@ impl MaintenanceConsumer {
 
     fn ledger_hold(&self, run_id: &str, resolved: Resolved) {
         self.ledger.lock().unwrap().hold(run_id, resolved);
+    }
+}
+
+/// Opaque maintenance command admitted without event-envelope parsing.
+struct RawMessage {
+    subject: String,
+    #[allow(dead_code)]
+    payload: Vec<u8>,
+    message_id: Option<String>,
+}
+
+impl DeliveryIdent for RawMessage {
+    fn delivery_ident(&self) -> Option<String> {
+        None
     }
 }
 
@@ -498,13 +418,9 @@ fn run_failed_signal(
 /// A message with neither (no JetStream metadata at all) gets a fresh
 /// id, so it runs. The wrong way to be wrong here is to invent a
 /// collision and silently skip a scheduled sweep.
-fn run_id(msg: &async_nats::jetstream::Message, stream_seq: Option<u64>) -> String {
-    if let Some(id) = msg
-        .headers
-        .as_ref()
-        .and_then(|headers| headers.get(async_nats::header::NATS_MESSAGE_ID))
-    {
-        return id.to_string();
+fn run_id(msg: &RawMessage, stream_seq: Option<u64>) -> String {
+    if let Some(id) = &msg.message_id {
+        return id.clone();
     }
     match stream_seq {
         Some(seq) => format!("seq:{seq}"),

@@ -628,7 +628,7 @@ async fn every_current_event_type_has_a_file_that_projects() {
         let path = dir.join(name);
         let bytes = std::fs::read(&path).unwrap();
         let event = match admit(&bytes, &exemplar.subject(), Some(seq)) {
-            Admission::Event(event) => *event,
+            Admission::Accept(event) => *event,
             other => {
                 panic!("{path:?} must be admitted by the consumer's parse boundary, got {other:?}")
             }
@@ -691,7 +691,7 @@ fn every_older_version_is_refused_for_its_version_and_never_admitted() {
                     "{path:?}: a v{expected} event took the poison path ({err}); acking it \
                      is the silent loss the boundary exists to stop"
                 ),
-                Admission::Event(event) => panic!(
+                Admission::Accept(event) => panic!(
                     "{path:?}: a v{expected} event was admitted as `{}`; projecting it as \
                      current history is the silent loss the boundary exists to stop",
                     event.payload.event_type()
