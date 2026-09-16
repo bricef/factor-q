@@ -393,7 +393,8 @@ clear error message that the LLM sees and can adapt to.
   comparison, so `..` traversal and symlink escapes are defeated. Writes
   through a symlink are refused unless the link resolves to an existing
   path inside an allowed `fs_write` prefix; a dangling link is refused
-  even if its target would be inside.
+  even if its target would be inside. Write targets are refused unless
+  they are absent (and can be created) or resolve to a regular file.
 - **Prefer absolute paths** (`/data/project`). A relative path is
   accepted, but it is stored verbatim and canonicalised at the moment of
   each tool call — so it resolves against the **daemon's working

@@ -86,19 +86,40 @@ async fn write_no_follow(path: &std::path::Path, content: &[u8]) -> Result<(), T
     options.create(true).write(true).truncate(true);
     #[cfg(unix)]
     {
-        options.custom_flags(libc::O_NOFOLLOW);
+        // O_NONBLOCK prevents a check-then-open swap to a FIFO from
+        // parking a tokio blocking thread while it waits for a reader.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
     let mut file = options.open(path).await.map_err(|err| {
         #[cfg(unix)]
-        if err.raw_os_error() == Some(libc::ELOOP) {
-            return ToolError::PermissionDenied(format!(
-                "write through symlink {} denied",
-                path.display()
-            ));
+        match err.raw_os_error() {
+            Some(libc::ELOOP) => {
+                return ToolError::PermissionDenied(format!(
+                    "write through symlink {} denied",
+                    path.display()
+                ));
+            }
+            Some(libc::EISDIR) | Some(libc::ENXIO) => {
+                return ToolError::PermissionDenied(format!(
+                    "write target {} is not a regular file",
+                    path.display()
+                ));
+            }
+            _ => {}
         }
         ToolError::Io(format!("{}: {err}", path.display()))
     })?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|err| ToolError::Io(format!("{}: {err}", path.display())))?;
+    if !metadata.is_file() {
+        return Err(ToolError::PermissionDenied(format!(
+            "write target {} is not a regular file",
+            path.display()
+        )));
+    }
     file.write_all(content)
         .await
         .map_err(|err| ToolError::Io(format!("{}: {err}", path.display())))?;
@@ -355,6 +376,52 @@ mod tests {
 
         let err = write_no_follow(&link, b"blocked").await.unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+    }
+
+    #[cfg(unix)]
+    fn make_fifo(path: &std::path::Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo(1) is available");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_write_refuses_fifo_without_parking() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        make_fifo(&fifo);
+        let sandbox = ToolSandbox::new().allow_write(dir.path());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            FileWriteTool::new().execute(
+                &make_tool_ctx(&sandbox),
+                json!({"path": fifo.to_string_lossy(), "content": "blocked"}),
+            ),
+        )
+        .await
+        .expect("file_write must not park on a FIFO");
+        assert!(matches!(
+            result,
+            Err(ToolError::PermissionDenied(_) | ToolError::InvalidParameters(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_follow_open_refuses_fifo_without_parking() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        make_fifo(&fifo);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            write_no_follow(&fifo, b"blocked"),
+        )
+        .await
+        .expect("open-layer check must not park on a FIFO");
+        assert!(matches!(result, Err(ToolError::PermissionDenied(_))));
     }
 
     #[tokio::test]
