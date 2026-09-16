@@ -27,6 +27,8 @@
 //! every other process a test starts — `fqd` above all. See
 //! [`child`](mod@child) for the incident that made it necessary (#630).
 
+pub mod forbidden_dependencies;
+
 #[cfg(unix)]
 pub mod child;
 

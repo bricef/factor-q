@@ -1376,6 +1376,7 @@ name = "fq-agent"
 version = "0.1.0"
 dependencies = [
  "fq-ops",
+ "fq-test-support",
  "fq-tools",
  "serde",
  "serde_json",
@@ -1584,6 +1585,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1591,6 +1593,7 @@ name = "fq-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fq-test-support",
  "glob",
  "libc",
  "regex",
