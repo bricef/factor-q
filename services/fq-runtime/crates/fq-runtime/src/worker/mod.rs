@@ -79,13 +79,13 @@ use crate::trigger::Trigger;
 /// that ack nothing. Firing a noop signal is a no-op.
 #[derive(Debug, Default)]
 pub struct DurableStart {
-    tx: Option<oneshot::Sender<()>>,
+    tx: Option<oneshot::Sender<uuid::Uuid>>,
 }
 
 impl DurableStart {
     /// A signal whose fire notifies `rx`. Returns the signal to hand
     /// to the worker and the receiver the caller awaits.
-    pub fn channel() -> (Self, oneshot::Receiver<()>) {
+    pub fn channel() -> (Self, oneshot::Receiver<uuid::Uuid>) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx)
     }
@@ -100,9 +100,9 @@ impl DurableStart {
     /// first call notifies the waiter; later calls (and a `noop`) are
     /// no-ops. A dropped receiver (the dispatcher already acked and
     /// moved on) is ignored.
-    pub fn fire(&mut self) {
+    pub fn fire(&mut self, invocation_id: uuid::Uuid) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(());
+            let _ = tx.send(invocation_id);
         }
     }
 }

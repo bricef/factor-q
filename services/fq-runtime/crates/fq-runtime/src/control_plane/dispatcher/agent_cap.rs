@@ -223,7 +223,7 @@ impl TriggerDispatcher {
     /// reaches the next binary as `attempt: 2` after all, and the
     /// requeue buys a round trip and nothing else. That ordering is
     /// load-bearing, and the test below is what would catch it moving.
-    async fn requeue_held(
+    pub(super) async fn requeue_held(
         &self,
         msg: &async_nats::jetstream::Message,
         agent: &AgentId,

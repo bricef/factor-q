@@ -152,6 +152,7 @@ async fn open_creates_tables_and_records_version() {
         "pending_wait",
         "schedule_entry",
         "invocation_archive",
+        "trigger_claim",
     ] {
         let row = sqlx::query("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
             .bind(table)
@@ -516,4 +517,95 @@ async fn per_file_bootstrap_isolates_schema_meta() {
             .unwrap();
         assert_eq!(classes, vec![class.to_string()]);
     }
+}
+
+#[tokio::test]
+async fn trigger_claim_state_machine_round_trip() {
+    let (store, _dir) = open_fresh().await;
+    assert_eq!(
+        store
+            .claim_trigger("fq-triggers", 42, "worker-a", 100)
+            .await
+            .unwrap(),
+        TriggerClaim::Won
+    );
+    assert_eq!(
+        store
+            .claim_trigger("fq-triggers", 42, "worker-a", 101)
+            .await
+            .unwrap(),
+        TriggerClaim::Held {
+            claimant: "worker-a".to_string()
+        }
+    );
+    assert!(
+        store
+            .take_over_trigger_claim("fq-triggers", 42, "worker-a", "worker-b", 102)
+            .await
+            .unwrap()
+    );
+    store
+        .mark_trigger_started("fq-triggers", 42, "inv-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_trigger("fq-triggers", 42, "worker-b", 103)
+            .await
+            .unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-1".to_string()
+        }
+    );
+    // Started claims survive the release used by ordinary ACK paths.
+    store
+        .release_trigger_claim("fq-triggers", 42)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .claim_trigger("fq-triggers", 42, "worker-b", 104)
+            .await
+            .unwrap(),
+        TriggerClaim::Started { .. }
+    ));
+
+    store
+        .claim_trigger("fq-triggers", 43, "worker-a", 100)
+        .await
+        .unwrap();
+    store
+        .release_trigger_claim("fq-triggers", 43)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_trigger("fq-triggers", 43, "worker-a", 101)
+            .await
+            .unwrap(),
+        TriggerClaim::Won
+    );
+}
+
+#[tokio::test]
+async fn schema_v1_upgrades_to_trigger_claim_v2() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let store = ControlPlaneStore::open(&path).await.unwrap();
+    sqlx::query("DROP TABLE trigger_claim")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store.write_schema_version(1).await.unwrap();
+    drop(store);
+
+    let upgraded = ControlPlaneStore::open(&path).await.unwrap();
+    assert_eq!(upgraded.read_schema_version().await.unwrap(), Some(2));
+    assert_eq!(
+        upgraded
+            .claim_trigger("fq-triggers", 1, "worker", 0)
+            .await
+            .unwrap(),
+        TriggerClaim::Won
+    );
 }

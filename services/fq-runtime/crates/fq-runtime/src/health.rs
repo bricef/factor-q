@@ -178,6 +178,7 @@ async fn probe_consumer(
     let ConsumerRecord {
         malformed_acked,
         halted_on,
+        ..
     } = record;
     // The loop's own account wins over the broker's figures: a halted
     // consumer has one message delivered and unacked and a backlog

@@ -1214,7 +1214,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // the run is now recoverable from the WAL, so the trigger
             // dispatcher may ack (issue #41). Idempotent — only the
             // first step fires; every later call is a no-op.
-            durable_start.fire();
+            durable_start.fire(invocation_id);
 
             match output.next_action {
                 NextAction::Complete { text, task_status } => {

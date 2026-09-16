@@ -27,6 +27,8 @@ pub struct ConsumerRecord {
     /// Messages acked because they were not an event in any version,
     /// since the loop started.
     pub malformed_acked: u64,
+    /// Trigger redeliveries dropped after their invocation durably started.
+    pub duplicate_dropped: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
 }
@@ -52,6 +54,14 @@ impl ConsumerLedger {
             .entry(consumer.to_string())
             .or_default()
             .malformed_acked += 1;
+    }
+
+    /// The dispatcher dropped a delivery already owned by the WAL.
+    pub fn note_duplicate_drop(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .duplicate_dropped += 1;
     }
 
     /// The loop halted on an event it cannot read.

@@ -401,7 +401,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         config.worker.max_concurrent_invocations,
     )
     .with_throttle(throttle)
-    .with_agent_caps(agent_caps.clone())
+    .with_caps_and_claims(agent_caps.clone(), cp_store.clone(), worker_id.as_str())
     .with_deferrals(deferrals, due_resumes);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
     // Set by the select's own dispatcher arm, which consumes the handle.
