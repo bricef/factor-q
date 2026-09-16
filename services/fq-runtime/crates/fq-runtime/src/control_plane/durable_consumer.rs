@@ -494,12 +494,22 @@ where
                 match msg {
                     Some(Ok(msg)) => {
                         let next = handle_message(
-                            &name, &handler, &admission, &msg, policy,
-                            &mut redelivery_log, &ledger,
-                        ).await;
-                        if let Next::Halt(on) = next { break Some(on); }
+                            &name,
+                            &handler,
+                            &admission,
+                            &msg,
+                            policy,
+                            &mut redelivery_log,
+                            &ledger,
+                        )
+                        .await;
+                        if let Next::Halt(on) = next {
+                            break Some(on);
+                        }
                     }
-                    Some(Err(err)) => warn!(consumer = %name, error = %err, "error reading next JetStream message"),
+                    Some(Err(err)) => {
+                        warn!(consumer = %name, error = %err, "error reading next JetStream message");
+                    }
                     None => {
                         warn!(consumer = %name, "JetStream message stream ended unexpectedly");
                         break None;
@@ -507,7 +517,9 @@ where
                 }
             }
             _ = maybe_tick(tick_timer.as_mut()) => {
-                if let Some((_, tick_fn)) = &tick { tick_fn().await; }
+                if let Some((_, tick_fn)) = &tick {
+                    tick_fn().await;
+                }
             }
         }
     };
@@ -653,13 +665,31 @@ where
     match handler(delivery).await {
         Ok(()) => {
             if let Err(err) = msg.ack().await {
-                error!(consumer = name, error = %err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to ack handled message");
+                error!(
+                    consumer = name,
+                    error = %err,
+                    event_id = event_id.as_deref().unwrap_or("-"),
+                    subject,
+                    "failed to ack handled message"
+                );
             }
         }
         Err(HandlerError::Permanent(err)) => {
-            warn!(consumer = name, error = %err, event_id = event_id.as_deref().unwrap_or("-"), subject, "handler rejected message permanently; acking (no retry)");
+            warn!(
+                consumer = name,
+                error = %err,
+                event_id = event_id.as_deref().unwrap_or("-"),
+                subject,
+                "handler rejected message permanently; acking (no retry)"
+            );
             if let Err(ack_err) = msg.ack().await {
-                error!(consumer = name, error = %ack_err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to ack permanently rejected message");
+                error!(
+                    consumer = name,
+                    error = %ack_err,
+                    event_id = event_id.as_deref().unwrap_or("-"),
+                    subject,
+                    "failed to ack permanently rejected message"
+                );
             }
         }
         Err(HandlerError::Transient(err)) => {
@@ -684,7 +714,13 @@ where
                 .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
                 .await
             {
-                error!(consumer = name, error = %nak_err, event_id = event_id.as_deref().unwrap_or("-"), subject, "failed to NAK message");
+                error!(
+                    consumer = name,
+                    error = %nak_err,
+                    event_id = event_id.as_deref().unwrap_or("-"),
+                    subject,
+                    "failed to NAK message"
+                );
             }
         }
     }
