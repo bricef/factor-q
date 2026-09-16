@@ -60,16 +60,21 @@ fn read_fqd_template() -> String {
 /// deserialiser had no field for.
 fn load(template: &str) -> (Config, Vec<String>) {
     let mut ignored = Vec::new();
-    let config = serde_ignored::deserialize(toml::Deserializer::new(template), |path| {
-        ignored.push(path.to_string())
-    })
-    .unwrap_or_else(|e| {
+    let deserializer = toml::Deserializer::parse(template).unwrap_or_else(|e| {
         panic!(
-            "{} does not parse as fq_runtime::Config — `fq init` would scaffold a project \
+            "{} is not valid TOML — `fq init` would scaffold a project \
              whose daemon refuses to start:\n{e}",
             fqd_template_path().display()
         )
     });
+    let config = serde_ignored::deserialize(deserializer, |path| ignored.push(path.to_string()))
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} does not parse as fq_runtime::Config — `fq init` would scaffold a project \
+             whose daemon refuses to start:\n{e}",
+                fqd_template_path().display()
+            )
+        });
     (config, ignored)
 }
 
