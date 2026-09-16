@@ -102,6 +102,22 @@ pub struct CrateGraph {
     /// crate cycles but permits module cycles silently, so nothing else in
     /// the toolchain reports these.
     pub cycles: Vec<Vec<String>>,
+    /// Unrestricted production `pub` items declared by this crate.
+    pub pub_items: usize,
+    /// Unrestricted public items with exactly one same-crate consumer and no
+    /// workspace-external consumer.
+    pub single_consumer_candidates: Vec<PubSurfaceCandidate>,
+}
+
+type ItemPath<'a> = (&'a str, Vec<String>);
+type ItemLocation = (usize, usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubSurfaceCandidate {
+    pub module: String,
+    pub name: String,
+    pub scope: String,
+    pub consumer: String,
 }
 
 /// Where a source file sits: its crate, and its module path below `src/`.
@@ -149,9 +165,6 @@ fn resolve(supers: usize, head: &str, depth: usize) -> Option<&str> {
 pub fn build<'a>(
     files: impl IntoIterator<Item = (&'a str, usize, &'a FileFacts)>,
 ) -> Vec<CrateGraph> {
-    // Placement first, for every file, because edges cannot be resolved until
-    // the full set of module names in a crate is known — a `crate::Foo` that
-    // matches no module is a root item, not a node.
     let mut placed: Vec<(&str, Vec<String>, usize, &FileFacts)> = Vec::new();
     for (path, prod_lines, facts) in files {
         if let Some((dir, parts)) = placement(path) {
@@ -162,6 +175,72 @@ pub fn build<'a>(
     let mut by_crate: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, (dir, ..)) in placed.iter().enumerate() {
         by_crate.entry(dir).or_default().push(i);
+    }
+    let crate_roots: BTreeMap<String, &str> = by_crate
+        .keys()
+        .map(|dir| {
+            let name = dir.rsplit('/').next().unwrap_or(dir).replace('-', "_");
+            (name, *dir)
+        })
+        .collect();
+
+    // Index exact syntactic item paths across the workspace. Multiple entries
+    // are possible for cfg alternatives; each receives the same consumers.
+    let mut item_paths: BTreeMap<ItemPath<'_>, Vec<ItemLocation>> = BTreeMap::new();
+    for (file_index, (dir, parts, _, facts)) in placed.iter().enumerate() {
+        for (item_index, item) in facts.pub_items.iter().enumerate() {
+            if item.is_test {
+                continue;
+            }
+            let mut path = parts.clone();
+            path.extend(
+                item.scope
+                    .split("::")
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
+            );
+            path.push(item.name.clone());
+            item_paths
+                .entry((*dir, path))
+                .or_default()
+                .push((file_index, item_index));
+        }
+    }
+    let mut consumers: BTreeMap<(usize, usize), BTreeSet<(&str, String)>> = BTreeMap::new();
+    for (source_index, (source_dir, source_parts, _, facts)) in placed.iter().enumerate() {
+        let source_module = if source_parts.is_empty() {
+            ROOT.to_string()
+        } else {
+            source_parts.join("::")
+        };
+        for reference in facts.module_refs.iter().filter(|r| !r.is_test) {
+            for concrete_path in &reference.paths {
+                let (target_dir, target_path) = if let Some(external) = &reference.external_crate {
+                    let Some(dir) = crate_roots.get(external) else {
+                        continue;
+                    };
+                    (*dir, concrete_path.clone())
+                } else if reference.supers == 0 {
+                    (*source_dir, concrete_path.clone())
+                } else if reference.supers <= source_parts.len() {
+                    let mut path = source_parts[..source_parts.len() - reference.supers].to_vec();
+                    path.extend(concrete_path.clone());
+                    (*source_dir, path)
+                } else {
+                    continue;
+                };
+                if let Some(items) = item_paths.get(&(target_dir, target_path)) {
+                    for &(file_index, item_index) in items {
+                        if file_index != source_index {
+                            consumers
+                                .entry((file_index, item_index))
+                                .or_default()
+                                .insert((*source_dir, source_module.clone()));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut graphs = Vec::new();
@@ -174,43 +253,78 @@ pub fn build<'a>(
             m.prod_lines += prod_lines;
             m.files += 1;
         }
-
         for &i in &indices {
             let (_, parts, _, facts) = &placed[i];
             let source = parts.first().map_or(ROOT, String::as_str).to_string();
             for r in &facts.module_refs {
-                if r.is_test {
+                if r.is_test || r.external_crate.is_some() {
                     continue;
                 }
                 let Some(target) = resolve(r.supers, &r.head, parts.len()) else {
                     continue;
                 };
-                // Not a module: a type or function re-exported at the crate
-                // root. Counting it would invent a node that no file backs.
                 if target == source || !modules.contains_key(target) {
                     continue;
                 }
                 let target = target.to_string();
                 *modules
                     .get_mut(&source)
-                    .expect("source module registered in the first pass")
+                    .expect("source registered")
                     .depends_on
                     .entry(target.clone())
                     .or_insert(0) += 1;
                 modules
                     .get_mut(&target)
-                    .expect("target checked present above")
+                    .expect("target present")
                     .dependents
                     .insert(source.clone());
             }
         }
 
+        let mut pub_items = 0;
+        let mut candidates = Vec::new();
+        for &file_index in &indices {
+            let (_, parts, _, facts) = &placed[file_index];
+            for (item_index, item) in facts.pub_items.iter().enumerate() {
+                if item.is_test || item.is_pub_crate {
+                    continue;
+                }
+                pub_items += 1;
+                let uses = consumers.get(&(file_index, item_index));
+                let same: Vec<_> = uses
+                    .into_iter()
+                    .flatten()
+                    .filter(|(consumer_dir, _)| *consumer_dir == dir)
+                    .collect();
+                let cross_crate = uses
+                    .into_iter()
+                    .flatten()
+                    .any(|(consumer_dir, _)| *consumer_dir != dir);
+                if same.len() == 1 && !cross_crate {
+                    let module = if parts.is_empty() {
+                        ROOT.to_string()
+                    } else {
+                        parts.join("::")
+                    };
+                    candidates.push(PubSurfaceCandidate {
+                        module,
+                        name: item.name.clone(),
+                        scope: item.scope.clone(),
+                        consumer: same[0].1.clone(),
+                    });
+                }
+            }
+        }
+        candidates
+            .sort_by(|a, b| (&a.module, &a.name, &a.scope).cmp(&(&b.module, &b.name, &b.scope)));
         let cycles = cycles(&modules);
         graphs.push(CrateGraph {
             name: dir.rsplit('/').next().unwrap_or(dir).to_string(),
             dir: dir.to_string(),
             modules,
             cycles,
+            pub_items,
+            single_consumer_candidates: candidates,
         });
     }
     graphs
@@ -353,6 +467,35 @@ pub fn report(graphs: &[CrateGraph]) {
     println!("edges come from `crate::`/`super::` paths, so re-exports undercount.");
 }
 
+/// Report unrestricted public items that currently have one internal consumer.
+pub fn report_pub_surface(graphs: &[CrateGraph]) {
+    println!(
+        "`fq-lint` resolves paths syntactically, not semantically. A re-export or a trait-method call reaches an item without naming it, so a \"single consumer\" finding is a **candidate**, not a proof."
+    );
+    for graph in graphs {
+        if graph.single_consumer_candidates.is_empty() {
+            continue;
+        }
+        println!("\n{}:", graph.name);
+        for item in &graph.single_consumer_candidates {
+            let name = if item.scope.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{}::{}", item.scope, item.name)
+            };
+            println!("  {}::{name}  ->  {}", item.module, item.consumer);
+        }
+    }
+    let pub_items: usize = graphs.iter().map(|g| g.pub_items).sum();
+    let candidates: usize = graphs
+        .iter()
+        .map(|g| g.single_consumer_candidates.len())
+        .sum();
+    println!(
+        "\npub surface totals: {pub_items} pub items, {candidates} single-consumer candidates"
+    );
+}
+
 /// Machine-readable report, for the base-vs-head diff behind the PR comment.
 ///
 /// Stability matters more than shape here: the PR comment compares two runs of
@@ -385,6 +528,8 @@ pub fn report_json(
                 "dir": g.dir,
                 "modules": modules,
                 "cycles": g.cycles,
+                "pub_items": g.pub_items,
+                "single_consumer_candidates": g.single_consumer_candidates.len(),
             })
         })
         .collect();
@@ -532,6 +677,57 @@ mod tests {
             ("k/src/b.rs", "pub struct T;\n"),
         ]);
         assert_eq!(g.modules["a"].fan_out(), 0);
+    }
+
+    fn workspace(files: &[(&str, &str)]) -> Vec<CrateGraph> {
+        let facts: Vec<(String, FileFacts)> = files
+            .iter()
+            .map(|(path, src)| ((*path).to_string(), analyze(src).expect("valid Rust")))
+            .collect();
+        build(
+            facts
+                .iter()
+                .map(|(path, facts)| (path.as_str(), facts.production_lines(), facts)),
+        )
+    }
+
+    #[test]
+    fn one_consumer_is_a_pub_surface_candidate() {
+        let graphs = workspace(&[
+            ("k/src/a.rs", "pub struct T;\n"),
+            ("k/src/b.rs", "use crate::a::T;\n"),
+        ]);
+        assert_eq!(graphs[0].single_consumer_candidates.len(), 1);
+        let item = &graphs[0].single_consumer_candidates[0];
+        assert_eq!(
+            (&*item.module, &*item.name, &*item.consumer),
+            ("a", "T", "b")
+        );
+    }
+
+    #[test]
+    fn two_consumers_and_restricted_visibility_are_not_candidates() {
+        let graphs = workspace(&[
+            ("k/src/a.rs", "pub struct T; pub(crate) struct C;\n"),
+            ("k/src/b.rs", "use crate::a::{T, C};\n"),
+            ("k/src/c.rs", "use crate::a::T;\n"),
+        ]);
+        assert!(graphs[0].single_consumer_candidates.is_empty());
+        assert_eq!(
+            graphs[0].pub_items, 1,
+            "restricted items are not public surface"
+        );
+    }
+
+    #[test]
+    fn cross_crate_reference_disqualifies_a_candidate() {
+        let graphs = workspace(&[
+            ("one/src/a.rs", "pub struct T;\n"),
+            ("one/src/b.rs", "use crate::a::T;\n"),
+            ("two/src/lib.rs", "use one::a::T;\n"),
+        ]);
+        let one = graphs.iter().find(|graph| graph.name == "one").unwrap();
+        assert!(one.single_consumer_candidates.is_empty());
     }
 
     #[test]

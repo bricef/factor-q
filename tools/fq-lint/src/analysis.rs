@@ -53,6 +53,8 @@ pub struct FileFacts {
     /// source order. Resolving these to modules needs the file's own position
     /// in the tree, which this layer does not know — see `coupling.rs`.
     pub module_refs: Vec<ModuleRef>,
+    /// Public and crate-visible API items declared in this file.
+    pub pub_items: Vec<PubItem>,
 }
 
 /// One same-crate path reference, as written, before resolution.
@@ -63,14 +65,45 @@ pub struct FileFacts {
 /// only invite a finer-grained metric than the graph can support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleRef {
+    /// External crate root, or `None` for `crate`/`super` paths.
+    pub external_crate: Option<String>,
     /// Leading `super::` hops. Zero for a `crate::`-rooted path.
     pub supers: usize,
     /// First named segment after the root prefix — `worker` in
     /// `crate::worker::Handle`.
     pub head: String,
+    /// Every concrete path represented by a grouped import. Keeping them on
+    /// one module reference preserves module-edge weighting while allowing
+    /// item-level attribution of each leaf.
+    pub paths: Vec<Vec<String>>,
     /// Whether this reference sits under a `#[cfg(test)]` item. Test-only
     /// coupling is real but is not the debt the metric is aimed at, so
     /// callers filter on it.
+    pub is_test: bool,
+}
+
+/// A public API declaration that can be named by another module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubItemKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Const,
+    Static,
+    TypeAlias,
+    Mod,
+}
+
+/// One public or crate-visible item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubItem {
+    pub kind: PubItemKind,
+    pub name: String,
+    pub scope: String,
+    /// `true` for restricted visibility (`pub(crate)`/`pub(super)`), `false`
+    /// for unrestricted `pub`.
+    pub is_pub_crate: bool,
     pub is_test: bool,
 }
 
@@ -148,6 +181,7 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         functions: Vec::new(),
         allow_counts: BTreeMap::new(),
         module_refs: Vec::new(),
+        pub_items: Vec::new(),
         test_mod_decls: Vec::new(),
         mod_decls: Vec::new(),
     };
@@ -274,7 +308,42 @@ fn impl_scope(i: &syn::ItemImpl) -> String {
     }
 }
 
+fn pub_visibility(vis: &syn::Visibility) -> Option<bool> {
+    match vis {
+        syn::Visibility::Public(_) => Some(false),
+        syn::Visibility::Restricted(_) => Some(true),
+        syn::Visibility::Inherited => None,
+    }
+}
+
+fn record_pub_item(
+    vis: &syn::Visibility,
+    kind: PubItemKind,
+    name: &syn::Ident,
+    scope: &str,
+    is_test: bool,
+    facts: &mut FileFacts,
+) {
+    if let Some(is_pub_crate) = pub_visibility(vis) {
+        facts.pub_items.push(PubItem {
+            kind,
+            name: name.to_string(),
+            scope: scope.to_string(),
+            is_pub_crate,
+            is_test,
+        });
+    }
+}
+
 fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileFacts) {
+    let public_types: std::collections::BTreeSet<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(i) if pub_visibility(&i.vis).is_some() => Some(i.ident.to_string()),
+            syn::Item::Enum(i) if pub_visibility(&i.vis).is_some() => Some(i.ident.to_string()),
+            _ => None,
+        })
+        .collect();
     for item in items {
         let gated = is_test_gated(item_attrs(item));
         // A test item's whole subtree is test code; count it once and do not
@@ -285,6 +354,39 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
         let inside = in_test || gated;
         if !inside {
             record_allows(item_attrs(item), facts);
+        }
+
+        match item {
+            syn::Item::Fn(i) => {
+                record_pub_item(&i.vis, PubItemKind::Fn, &i.sig.ident, scope, inside, facts)
+            }
+            syn::Item::Struct(i) => {
+                record_pub_item(&i.vis, PubItemKind::Struct, &i.ident, scope, inside, facts)
+            }
+            syn::Item::Enum(i) => {
+                record_pub_item(&i.vis, PubItemKind::Enum, &i.ident, scope, inside, facts)
+            }
+            syn::Item::Trait(i) => {
+                record_pub_item(&i.vis, PubItemKind::Trait, &i.ident, scope, inside, facts)
+            }
+            syn::Item::Const(i) => {
+                record_pub_item(&i.vis, PubItemKind::Const, &i.ident, scope, inside, facts)
+            }
+            syn::Item::Static(i) => {
+                record_pub_item(&i.vis, PubItemKind::Static, &i.ident, scope, inside, facts)
+            }
+            syn::Item::Type(i) => record_pub_item(
+                &i.vis,
+                PubItemKind::TypeAlias,
+                &i.ident,
+                scope,
+                inside,
+                facts,
+            ),
+            syn::Item::Mod(i) => {
+                record_pub_item(&i.vis, PubItemKind::Mod, &i.ident, scope, inside, facts)
+            }
+            _ => {}
         }
 
         // Module references are gathered on the way through, at whatever depth
@@ -329,9 +431,14 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
                 if let Some((path, _)) = &i.trait_ {
                     scan_refs(path.to_token_stream(), inside, &mut facts.module_refs);
                 }
+                let type_name = type_head(&i.self_ty);
+                let public_type = i.trait_.is_none()
+                    && type_name
+                        .as_ref()
+                        .is_some_and(|name| public_types.contains(name));
                 let inner_scope = nest(scope, &impl_scope(i));
                 for impl_item in &i.items {
-                    walk_impl_item(impl_item, inside, &inner_scope, facts);
+                    walk_impl_item(impl_item, inside, &inner_scope, public_type, facts);
                 }
             }
             syn::Item::Trait(t) => {
@@ -352,7 +459,13 @@ fn walk_items(items: &[syn::Item], in_test: bool, scope: &str, facts: &mut FileF
     }
 }
 
-fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut FileFacts) {
+fn walk_impl_item(
+    item: &syn::ImplItem,
+    in_test: bool,
+    scope: &str,
+    public_type: bool,
+    facts: &mut FileFacts,
+) {
     let gated = is_test_gated(impl_item_attrs(item));
     if gated && !in_test {
         record_test_item(item, facts);
@@ -362,6 +475,9 @@ fn walk_impl_item(item: &syn::ImplItem, in_test: bool, scope: &str, facts: &mut 
         record_allows(impl_item_attrs(item), facts);
     }
     if let syn::ImplItem::Fn(f) = item {
+        if public_type {
+            record_pub_item(&f.vis, PubItemKind::Fn, &f.sig.ident, scope, inside, facts);
+        }
         scan_refs(f.sig.to_token_stream(), inside, &mut facts.module_refs);
         scan_refs(f.block.to_token_stream(), inside, &mut facts.module_refs);
         facts.functions.push(fn_facts(
@@ -414,44 +530,6 @@ fn is_colon2(trees: &[TokenTree], i: usize) -> bool {
     }
 }
 
-/// The module name(s) a path continues into after its root prefix.
-///
-/// One ident is the common case (`crate::worker::…`). A brace group is a
-/// grouped import (`use crate::{worker, events}`), which is several edges
-/// written as one statement — each element's leading ident is its own head.
-/// Anything else (a glob, `crate::*`) names no module and yields nothing.
-fn heads_at(tree: Option<&TokenTree>) -> Vec<String> {
-    match tree {
-        Some(TokenTree::Ident(id)) => match id.to_string() {
-            // `crate::{self, …}` re-exports the root, naming no child module.
-            s if s == "self" => Vec::new(),
-            s => vec![s],
-        },
-        Some(TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Brace => {
-            let mut heads = Vec::new();
-            // Only the first ident of each comma-separated element is a head:
-            // in `{worker::Handle, events}` the `Handle` belongs to `worker`
-            // and must not be mistaken for a module of its own.
-            let mut at_element_start = true;
-            for tree in g.stream() {
-                match tree {
-                    TokenTree::Punct(p) if p.as_char() == ',' => at_element_start = true,
-                    TokenTree::Ident(id) if at_element_start => {
-                        let name = id.to_string();
-                        if name != "self" {
-                            heads.push(name);
-                        }
-                        at_element_start = false;
-                    }
-                    _ => at_element_start = false,
-                }
-            }
-            heads
-        }
-        _ => Vec::new(),
-    }
-}
-
 /// Collect `crate::`- and `super::`-rooted references from a token stream.
 ///
 /// Token-level rather than AST-level, deliberately. A same-crate path can be
@@ -463,16 +541,83 @@ fn heads_at(tree: Option<&TokenTree>) -> Vec<String> {
 ///
 /// The bare ident `crate` in `pub(crate)`, and `extern crate foo`, are not
 /// followed by `::` and so are correctly not references.
+fn path_variants(trees: &[TokenTree], at: usize) -> Vec<Vec<String>> {
+    if let Some(TokenTree::Group(group)) = trees.get(at) {
+        if group.delimiter() != proc_macro2::Delimiter::Brace {
+            return Vec::new();
+        }
+        let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+        let mut out = Vec::new();
+        let mut start = 0;
+        for i in 0..=inner.len() {
+            if i == inner.len()
+                || matches!(inner.get(i), Some(TokenTree::Punct(p)) if p.as_char() == ',')
+            {
+                out.extend(path_variants(&inner[start..i], 0));
+                start = i + 1;
+            }
+        }
+        return out;
+    }
+    let Some(TokenTree::Ident(first)) = trees.get(at) else {
+        return Vec::new();
+    };
+    let mut prefix = vec![first.to_string()];
+    let mut cursor = at + 1;
+    while is_colon2(trees, cursor) {
+        match trees.get(cursor + 2) {
+            Some(TokenTree::Ident(id)) => {
+                prefix.push(id.to_string());
+                cursor += 3;
+            }
+            Some(TokenTree::Group(group)) if group.delimiter() == proc_macro2::Delimiter::Brace => {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                let mut out = Vec::new();
+                let mut element = Vec::new();
+                for tree in inner.into_iter().chain(std::iter::once(TokenTree::Punct(
+                    proc_macro2::Punct::new(',', proc_macro2::Spacing::Alone),
+                ))) {
+                    if matches!(&tree, TokenTree::Punct(p) if p.as_char() == ',') {
+                        if let Some(TokenTree::Ident(id)) = element.first() {
+                            let mut path = prefix.clone();
+                            path.push(id.to_string());
+                            let mut i = 1;
+                            while is_colon2(&element, i) {
+                                if let Some(TokenTree::Ident(next)) = element.get(i + 2) {
+                                    path.push(next.to_string());
+                                    i += 3;
+                                } else {
+                                    break;
+                                }
+                            }
+                            out.push(path);
+                        }
+                        element.clear();
+                    } else {
+                        element.push(tree);
+                    }
+                }
+                return out;
+            }
+            _ => break,
+        }
+    }
+    vec![prefix]
+}
+
+/// Collect rooted syntactic paths. External roots are retained so the
+/// workspace pass can reject public items used from another crate.
 fn scan_refs(tokens: proc_macro2::TokenStream, is_test: bool, out: &mut Vec<ModuleRef>) {
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     let mut i = 0;
     while i < trees.len() {
         if let TokenTree::Ident(id) = &trees[i] {
-            let root = id.to_string();
-            if (root == "crate" || root == "super") && is_colon2(&trees, i + 1) {
+            // A segment already preceded by `::` belongs to the path whose
+            // root was handled earlier; it is not another external root.
+            if (i < 2 || !is_colon2(&trees, i - 2)) && is_colon2(&trees, i + 1) {
+                let root = id.to_string();
                 let mut supers = usize::from(root == "super");
                 let mut at = i + 3;
-                // `super::super::…` — each further hop is another level up.
                 while supers > 0 {
                     match trees.get(at) {
                         Some(TokenTree::Ident(next))
@@ -484,16 +629,31 @@ fn scan_refs(tokens: proc_macro2::TokenStream, is_test: bool, out: &mut Vec<Modu
                         _ => break,
                     }
                 }
-                for head in heads_at(trees.get(at)) {
+                let external_crate = if root == "crate" || root == "super" {
+                    None
+                } else {
+                    Some(root)
+                };
+                let mut by_head: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+                for path in path_variants(&trees, at) {
+                    if let Some(head) = path.first() {
+                        if let Some((_, paths)) = by_head.iter_mut().find(|(seen, _)| seen == head)
+                        {
+                            paths.push(path);
+                        } else {
+                            by_head.push((head.clone(), vec![path]));
+                        }
+                    }
+                }
+                for (head, paths) in by_head {
                     out.push(ModuleRef {
+                        external_crate: external_crate.clone(),
                         supers,
                         head,
+                        paths,
                         is_test,
                     });
                 }
-                // Resume at the head position rather than past it: if it is a
-                // brace group its elements still need scanning for nested
-                // roots, and re-reading a plain ident is harmless.
                 i = at;
                 continue;
             }
@@ -862,6 +1022,72 @@ mod tests {
             "field type: {heads:?}"
         );
         assert!(heads.contains(&"bus".to_string()), "trait path: {heads:?}");
+    }
+
+    #[test]
+    fn records_public_item_kinds_visibility_tests_and_public_type_methods() {
+        let src = r#"
+pub fn f() {}
+pub struct S;
+pub enum E { V }
+pub trait Tr {}
+pub const C: usize = 1;
+pub static ST: usize = 1;
+pub type Alias = S;
+pub mod nested { pub struct N; }
+pub(crate) struct CrateOnly;
+pub(super) const ParentOnly: usize = 0;
+struct Private;
+impl S { pub fn method() {} }
+impl Private { pub fn hidden_method() {} }
+#[cfg(test)] pub struct TestOnly;
+"#;
+        let facts = analyze(src).expect("valid Rust");
+        let prod: Vec<_> = facts
+            .pub_items
+            .iter()
+            .filter(|item| !item.is_test)
+            .collect();
+        for kind in [
+            PubItemKind::Fn,
+            PubItemKind::Struct,
+            PubItemKind::Enum,
+            PubItemKind::Trait,
+            PubItemKind::Const,
+            PubItemKind::Static,
+            PubItemKind::TypeAlias,
+            PubItemKind::Mod,
+        ] {
+            assert!(
+                prod.iter().any(|item| item.kind == kind),
+                "missing {kind:?}"
+            );
+        }
+        assert!(
+            prod.iter()
+                .find(|item| item.name == "CrateOnly")
+                .unwrap()
+                .is_pub_crate
+        );
+        assert!(
+            prod.iter()
+                .find(|item| item.name == "ParentOnly")
+                .unwrap()
+                .is_pub_crate
+        );
+        assert!(
+            prod.iter()
+                .any(|item| item.name == "method" && item.scope == "S")
+        );
+        assert!(!prod.iter().any(|item| item.name == "hidden_method"));
+        assert!(
+            facts
+                .pub_items
+                .iter()
+                .find(|item| item.name == "TestOnly")
+                .unwrap()
+                .is_test
+        );
     }
 
     #[test]
