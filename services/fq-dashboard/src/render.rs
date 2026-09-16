@@ -3,25 +3,25 @@
 //! zero template engine, `<meta refresh>` for liveness. Every dynamic
 //! string goes through [`esc`]. Pure functions so the pages are
 //! unit-testable without HTTP or a runtime.
-
 // Documented by its own `//!` header — no outer doc here, so that
 // rustdoc resolves its links in its own scope (db59f35).
 mod agents;
 mod consumers;
+mod edge_error;
 mod health;
 mod invocations;
 mod style;
 mod transcript;
-pub use health::health;
-pub use invocations::{InvocationFilters, invocations_page};
-pub use transcript::{
-    transcript_entry_html, transcript_error, transcript_outcome, transcript_status_html,
-};
-
+pub use edge_error::edge_error;
 use fq_ops::transcript::TranscriptEntry;
 use fq_ops::views::{
     AgentCostDetailView, CostBucketView, CostReport, CostView, EventView, InvocationDetailView,
     Liveness, ModelCostView, sum_reported,
+};
+pub use health::health;
+pub use invocations::{InvocationFilters, invocations_page};
+pub use transcript::{
+    transcript_entry_html, transcript_error, transcript_outcome, transcript_status_html,
 };
 
 // The two pages keep the paths they have always had: main.rs routes to

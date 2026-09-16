@@ -769,6 +769,77 @@ mod tests {
         })
     }
 
+    /// Assert the contract shared by every ordinary dashboard page: an edge
+    /// refusal is rendered inline as 502, while no transport answer is 503.
+    async fn assert_edge_error_mapping(path: &str, omitted_grant: &str) {
+        let grants: Vec<&str> = REQUIRED_GRANTS
+            .iter()
+            .copied()
+            .filter(|grant| *grant != omitted_grant)
+            .collect();
+        let edge = spawn_edge_with(&format!("0.1.0+{OWN_SHA}"), &grants).await;
+        let resp = app(state_for(&edge))
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{path}");
+        let html = body_string(resp).await;
+        assert!(
+            html.contains("denied"),
+            "edge words missing for {path}: {html}"
+        );
+        assert!(
+            !html.contains("runtime unreachable"),
+            "edge answer misdiagnosed for {path}: {html}"
+        );
+
+        let unreachable = TestEdge {
+            addr: dead_addr(),
+            fingerprint: edge.fingerprint,
+            token: edge.token,
+        };
+        let resp = app(state_for(&unreachable))
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let html = body_string(resp).await;
+        assert!(
+            html.contains("runtime unreachable"),
+            "transport failure banner missing for {path}: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_distinguishes_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/", "read:control").await;
+    }
+
+    #[tokio::test]
+    async fn invocations_distinguish_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/invocations", "read:invocation").await;
+    }
+
+    #[tokio::test]
+    async fn invocation_distinguishes_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/invocations/probe", "read:invocation").await;
+    }
+
+    #[tokio::test]
+    async fn events_distinguish_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/events", "read:event").await;
+    }
+
+    #[tokio::test]
+    async fn costs_distinguish_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/costs", "read:cost").await;
+    }
+
+    #[tokio::test]
+    async fn notifications_distinguish_edge_errors_from_transport_failures() {
+        assert_edge_error_mapping("/notifications", "read:operator_signal").await;
+    }
+
     /// `/healthz` is liveness only: it answers with no edge behind it
     /// and no token in play, and the `probe` subcommand's raw request
     /// reads it the same way a supervisor would.
@@ -1129,9 +1200,13 @@ mod tests {
             .oneshot(Request::get("/costs").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         let html = body_string(resp).await;
         assert!(html.contains("denied"), "the refusal is shown: {html}");
+        assert!(
+            html.contains("cost.summary"),
+            "the operation guarded by read:cost is named: {html}"
+        );
 
         // …and the grants it does hold still work, so this is a
         // per-operation check rather than a broken connection.
@@ -1188,13 +1263,13 @@ mod tests {
         );
         assert!(html.contains("2 in-flight (1 working"), "got: {html}");
 
-        // The list page's own arm: a refusal is the unreachable page,
+        // The list page's own arm: a refusal is an inline edge error,
         // never the "nothing has asked for a person" empty state.
         let resp = app
             .oneshot(Request::get("/notifications").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         let html = body_string(resp).await;
         assert!(html.contains("denied"), "the refusal is shown: {html}");
         assert!(
