@@ -392,7 +392,7 @@ pub(crate) async fn invocation_transcript(
     println!("── following turn.stream (invocation {id}); Ctrl-C to exit ──");
 
     let mut seen = snapshot_keys(&entries);
-    loop {
+    'follow: loop {
         let batch = next_turn_batch(&client, id, cursor, 30_000)
             .await?
             .map_err(|e| anyhow::anyhow!("turn.stream: {e}"))?;
@@ -400,15 +400,32 @@ pub(crate) async fn invocation_transcript(
         for item in batch.items {
             let turn: fq_ops::turn::TurnState = serde_json::from_value(item.item)?;
             let entry = turn.transcript_entry();
+            // The outcome is the invocation's last turn, so this is
+            // where the tail ends — the CLI twin of the dashboard
+            // client's `s.done`. Read *before* the dedup check, not
+            // after: the outcome keys on a constant, so on a run that
+            // was already finished when `--follow` started, the stream
+            // redelivers an outcome the snapshot printed, dedup skips
+            // the print, and a `break` behind that check would never
+            // fire. Without it the loop keeps issuing 30 s polls from a
+            // cursor past the end of a log that will never grow.
+            let terminal = matches!(entry, fq_ops::transcript::TranscriptEntry::Outcome { .. });
             if let Some(key) = dedup_key(&entry)
                 && !seen.insert(key)
             {
+                if terminal {
+                    break 'follow;
+                }
                 continue;
             }
             print!("{}", render_pretty(std::slice::from_ref(&entry), render));
+            if terminal {
+                break 'follow;
+            }
         }
     }
-    // The tail loop runs until Ctrl-C or a transport error (`?`).
+    Ok(())
+    // Otherwise the tail loop runs until Ctrl-C or a transport error (`?`).
 }
 
 #[cfg(test)]
