@@ -85,6 +85,17 @@ impl TurnState {
     /// displays as. `render_pretty` over mapped turns is
     /// byte-identical to the WAL-backed transcript for the same
     /// actions — the flip's contract.
+    ///
+    /// The terminal outcome is the one entry where that contract holds
+    /// for *shape and phase* but not for the number. The WAL producer
+    /// (`fq_runtime::views::transcript`) stamps `timestamp_ms` from the
+    /// invocation row's `terminal_at`, read off the runner's clock
+    /// before the state upsert; the fold takes the terminal event's
+    /// envelope timestamp, stamped when that event is built afterwards.
+    /// Two readings of one clock, milliseconds apart — near, never
+    /// equal. `fq_runtime::turn::tests::folded_outcome_matches_the_wal_outcome`
+    /// states exactly that: every field but the timestamp equal, the
+    /// timestamps within a bound.
     pub fn transcript_entry(&self) -> TranscriptEntry {
         match &self.action {
             TurnAction::Prompt { system, user } => TranscriptEntry::Prompt {
