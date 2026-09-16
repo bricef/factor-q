@@ -294,10 +294,7 @@ const EXPECTED_DURABLES: [&str; 6] = [
     "fq-maintenance",
 ];
 
-fn durables_ready(report: &serde_json::Value, expected: &[&str]) -> bool {
-    let Some(consumers) = report["consumers"].as_array() else {
-        return false;
-    };
+fn durables_ready(consumers: &[serde_json::Value], expected: &[&str]) -> bool {
     let mut names = Vec::with_capacity(consumers.len());
     for consumer in consumers {
         let active = &consumer["active"];
@@ -316,21 +313,59 @@ fn durables_ready(report: &serde_json::Value, expected: &[&str]) -> bool {
     names == expected
 }
 
-/// Wait until every durable this daemon expects has been created and is readable.
+/// `control.doctor` reports the durables as one flat array, whatever
+/// stream each of them reads.
+fn doctor_consumers(report: &serde_json::Value) -> Vec<serde_json::Value> {
+    report["consumers"].as_array().cloned().unwrap_or_default()
+}
+
+/// `control.status` reports them per stream, inside the stream's
+/// `available` block — a stream the probe could not read carries none,
+/// which is an incomplete roster and so not yet ready.
+fn status_consumers(report: &serde_json::Value) -> Vec<serde_json::Value> {
+    report["streams"]
+        .as_array()
+        .map(|streams| {
+            streams
+                .iter()
+                .filter_map(|stream| stream["available"]["consumers"].as_array())
+                .flatten()
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Wait until every durable this daemon expects has been created and is
+/// readable, and hand back **the report that proved it**.
 ///
 /// The consumers are made by the hosted tasks *after* the edge starts
 /// serving, so a report taken the instant the daemon is connectable can
-/// legitimately catch one that does not exist yet or whose JetStream
-/// information is not readable yet. Polling until the exact roster is active
-/// keeps the assertions exact instead of loosening them to accept an absence.
-async fn wait_for_durables(client: &fq_edge::EdgeClient, expected: &[&str]) {
+/// legitimately catch one that does not exist yet and report it
+/// `Missing` — which is the probe telling the truth, and the two tests
+/// below asserting about a moment rather than about the daemon.
+/// Polling until the exact roster is active keeps the assertions exact
+/// instead of loosening them to accept an absence.
+///
+/// Returning the satisfying report is the other half: the caller
+/// asserts about the state it actually observed, so a transient probe
+/// failure in the gap between the poll and a second, fresh call cannot
+/// put the consumer assertions back on a report nobody checked.
+///
+/// `op` and `consumers` let both report shapes share this loop — each
+/// test waits on the very report it goes on to assert about, rather
+/// than on a sibling that merely starts at the same time.
+async fn wait_for_durables(
+    client: &fq_edge::EdgeClient,
+    op: fn() -> OpId,
+    expected: &[&str],
+    consumers: fn(&serde_json::Value) -> Vec<serde_json::Value>,
+) -> serde_json::Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let report = invoke(client, control_doctor(), json!({}))
-            .await
-            .expect("report");
-        if durables_ready(&report, expected) {
-            return;
+        let report = invoke(client, op(), json!({})).await.expect("report");
+        if durables_ready(&consumers(&report), expected) {
+            return report;
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -346,22 +381,13 @@ fn durable_wait_requires_the_complete_active_roster() {
         json!({ "active": { "name": name } })
     }
     let mut consumers: Vec<_> = EXPECTED_DURABLES.iter().map(active).collect();
-    assert!(durables_ready(
-        &json!({ "consumers": consumers }),
-        &EXPECTED_DURABLES
-    ));
+    assert!(durables_ready(&consumers, &EXPECTED_DURABLES));
 
     consumers[0]["active"] = serde_json::Value::Null;
-    assert!(!durables_ready(
-        &json!({ "consumers": consumers }),
-        &EXPECTED_DURABLES
-    ));
+    assert!(!durables_ready(&consumers, &EXPECTED_DURABLES));
 
     let missing: Vec<_> = EXPECTED_DURABLES[..5].iter().map(active).collect();
-    assert!(!durables_ready(
-        &json!({ "consumers": missing }),
-        &EXPECTED_DURABLES
-    ));
+    assert!(!durables_ready(&missing, &EXPECTED_DURABLES));
 }
 
 /// Close enough for money: the figures cross a JSON wire as f64, so
@@ -526,10 +552,19 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
             .await
             .expect("connect edge");
 
-    wait_for_durables(&client, &EXPECTED_DURABLES).await;
-    let report = invoke(&client, control_doctor(), json!({}))
-        .await
-        .expect("report");
+    // Everything below asserts about *this* report — the one whose
+    // roster satisfied the wait. Taking a fresh one instead would leave
+    // a window in which a transient `consumer.info()` failure turns an
+    // entry into `{"error": …}`, which carries no `active` key and
+    // would fail the consumer assertion on a daemon that is in fact
+    // healthy.
+    let report = wait_for_durables(
+        &client,
+        control_doctor,
+        &EXPECTED_DURABLES,
+        doctor_consumers,
+    )
+    .await;
 
     assert!(
         report["workers"]["alive"].as_i64().expect("alive count") >= 1,
@@ -583,10 +618,17 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
             .await
             .expect("connect edge");
 
-    wait_for_durables(&client, &EXPECTED_DURABLES).await;
-    let report = invoke(&client, control_status(), json!({}))
-        .await
-        .expect("report");
+    // Waiting on `control.doctor` here would prove a different report
+    // ready than the one asserted about; this polls `control.status`
+    // itself, over the same roster predicate, and asserts about the
+    // report that satisfied it.
+    let report = wait_for_durables(
+        &client,
+        control_status,
+        &EXPECTED_DURABLES,
+        status_consumers,
+    )
+    .await;
 
     for section in [
         "version",
