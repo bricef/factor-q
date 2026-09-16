@@ -189,6 +189,32 @@ pub(crate) fn unreachable_page(state: &AppState, title: &str, error: &str) -> Pa
     )
 }
 
+/// Render an error answer from a reachable edge in the page's own frame.
+pub(crate) fn edge_error_page(state: &AppState, title: &str, error: &str) -> Page {
+    // The daemon answered, so this is also the most recent successful
+    // contact for any later genuinely-unreachable page.
+    state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
+    let (frame_title, panel) = match title.strip_prefix("transcript ") {
+        Some(invocation_id) => (
+            format!(
+                "transcript {}",
+                invocation_id.chars().take(8).collect::<String>()
+            ),
+            render::transcript_error(invocation_id, error),
+        ),
+        None => (title.to_string(), render::edge_error(title, error)),
+    };
+    let body = format!(
+        "{}{}",
+        with_skew_banner(state, &panel),
+        updated_line(now_ms()),
+    );
+    (
+        StatusCode::BAD_GATEWAY,
+        Html(render::page(&frame_title, state.refresh_secs, &body)),
+    )
+}
+
 pub(crate) fn ok_page(state: &AppState, title: &str, body: &str) -> Page {
     state.last_seen_ms.store(now_ms(), Ordering::Relaxed);
     let body = format!(
@@ -229,10 +255,11 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.status is not registered");
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "health", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "health", &err);
         }
     };
     // Recorded before the second call, so a doctor failure still
@@ -250,10 +277,11 @@ pub(crate) async fn health_page(State(state): State<Arc<AppState>>) -> Page {
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "health", "control.doctor is not registered");
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "health", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "health", &err);
         }
     };
     // Third read, and the cheapest of the three: two indexed counts.
@@ -301,10 +329,11 @@ pub(crate) async fn invocations_page(
     {
         Ok(active) => active,
         Err(CallError::NotFound) => Vec::new(),
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "invocations", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "invocations", &err);
         }
     };
     let items: Vec<InvocationSummaryView> = match call(
@@ -325,21 +354,23 @@ pub(crate) async fn invocations_page(
     {
         Ok(items) => items,
         Err(CallError::NotFound) => Vec::new(),
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "invocations", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "invocations", &err);
         }
     };
     let agents: Vec<AgentEntryView> =
         match call(&client, OpId::List(Domain::Agent), serde_json::json!({})).await {
             Ok(agents) => agents,
             Err(CallError::NotFound) => Vec::new(),
-            Err(
-                CallError::Unreachable(err)
-                | CallError::Failed(err)
-                | CallError::NotRegistered(err),
-            ) => return unreachable_page(&state, "invocations", &err),
+            Err(CallError::Unreachable(err)) => {
+                return unreachable_page(&state, "invocations", &err);
+            }
+            Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+                return edge_error_page(&state, "invocations", &err);
+            }
         };
     let descriptions: HashMap<String, String> = agents
         .into_iter()
@@ -393,10 +424,11 @@ pub(crate) async fn invocation_page(
                 )),
             );
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "invocation", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "invocation", &err);
         }
     };
     ok_page(
@@ -436,10 +468,11 @@ pub(crate) async fn events_page(
     let rows: Vec<EventView> = match call(&client, OpId::List(Domain::Event), filter).await {
         Ok(rows) => rows,
         Err(CallError::NotFound) => Vec::new(),
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "events", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "events", &err);
         }
     };
     ok_page(&state, "events", &render::events(&rows))
@@ -489,10 +522,11 @@ pub(crate) async fn costs_page(
         Err(CallError::NotFound) => {
             return unreachable_page(&state, "costs", "cost.summary is not registered");
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "costs", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "costs", &err);
         }
     };
     // The last-24h column always reads from a day-bounded report; when
@@ -520,12 +554,11 @@ pub(crate) async fn costs_page(
             Err(CallError::NotFound) => {
                 return unreachable_page(&state, "costs", "cost.summary is not registered");
             }
-            Err(
-                CallError::Unreachable(err)
-                | CallError::Failed(err)
-                | CallError::NotRegistered(err),
-            ) => {
+            Err(CallError::Unreachable(err)) => {
                 return unreachable_page(&state, "costs", &err);
+            }
+            Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+                return edge_error_page(&state, "costs", &err);
             }
         }
     };
@@ -579,10 +612,11 @@ pub(crate) async fn agent_costs_page(
                 )),
             );
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "costs", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "costs", &err);
         }
     };
     ok_page(
@@ -621,10 +655,11 @@ pub(crate) async fn agents_page(State(state): State<Arc<AppState>>) -> Page {
     {
         Ok(entries) => entries,
         Err(CallError::NotFound) => Vec::new(),
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "agents", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "agents", &err);
         }
     };
     ok_page(&state, "agents", &render::agents(&agents_view(entries)))
@@ -658,10 +693,11 @@ pub(crate) async fn agent_page(State(state): State<Arc<AppState>>, Path(id): Pat
                 )),
             );
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "agent", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "agent", &err);
         }
     };
     ok_page(

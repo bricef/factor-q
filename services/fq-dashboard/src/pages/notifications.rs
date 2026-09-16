@@ -25,7 +25,8 @@ use fq_ops::views::{OperatorSignalDetailView, OperatorSignalView};
 use fq_ops::{Domain, OpId, OperatorSignalReport, ReportId};
 
 use crate::pages::{
-    CallError, Page, call, edge_or_unreachable, now_ms, ok_page, unreachable_page, updated_line,
+    CallError, Page, call, edge_error_page, edge_or_unreachable, now_ms, ok_page, unreachable_page,
+    updated_line,
 };
 use crate::{AppState, render};
 
@@ -85,8 +86,11 @@ pub(crate) async fn notifications_page(
         match call(&client, OpId::List(Domain::OperatorSignal), filter).await {
             Ok(rows) => rows,
             Err(CallError::NotFound | CallError::NotRegistered(_)) => Vec::new(),
-            Err(CallError::Unreachable(err) | CallError::Failed(err)) => {
+            Err(CallError::Unreachable(err)) => {
                 return unreachable_page(&state, "notifications", &err);
+            }
+            Err(CallError::Failed(err)) => {
+                return edge_error_page(&state, "notifications", &err);
             }
         };
     ok_page(
@@ -128,10 +132,11 @@ pub(crate) async fn notification_page(
                 )),
             );
         }
-        Err(
-            CallError::Unreachable(err) | CallError::Failed(err) | CallError::NotRegistered(err),
-        ) => {
+        Err(CallError::Unreachable(err)) => {
             return unreachable_page(&state, "notification", &err);
+        }
+        Err(CallError::Failed(err) | CallError::NotRegistered(err)) => {
+            return edge_error_page(&state, "notification", &err);
         }
     };
     ok_page(
