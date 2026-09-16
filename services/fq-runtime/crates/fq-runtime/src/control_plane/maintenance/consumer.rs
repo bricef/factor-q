@@ -118,6 +118,16 @@ impl MaintenanceConsumer {
         self,
         shutdown: oneshot::Receiver<()>,
     ) -> Result<(), MaintenanceConsumerError> {
+        // The shared loop's own start line names a prebuilt consumer and
+        // nothing else — it cannot see a filter or an ack window it did
+        // not create. Say them here, so a maintenance durable is as
+        // findable in the log as an event one.
+        info!(
+            consumer = %self.consumer_name,
+            filter = %self.filter_subject,
+            ack_wait_ms = self.ack_wait.as_millis() as u64,
+            "maintenance consumer starting"
+        );
         let consumer = self
             .bus
             .maintenance_consumer(
