@@ -36,6 +36,7 @@ tracing = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+fq-test-support = { workspace = true }
 # The view projections are wire shapes; their tests assert the tagged
 # encoding a reader deserialises.
 serde_json = { workspace = true }
