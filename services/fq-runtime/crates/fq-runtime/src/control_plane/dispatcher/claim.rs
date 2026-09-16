@@ -9,8 +9,16 @@ use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
 
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
-pub(super) enum Admission {
+/// What the durable claim says about one delivery.
+///
+/// Named apart from [`super::admission::Admission`], which decides
+/// something else entirely a few lines further down `handle` — whether
+/// the agent's *model* is accepting work. Two sibling enums called
+/// `Admission` in one function is a reading hazard, not a symmetry.
+pub(super) enum ClaimVerdict {
+    /// This worker owns the delivery: dispatch it.
     Proceed { stream_seq: u64, delivered: i64 },
+    /// Someone else owns it, or it has already run: leave it alone.
     Stop,
 }
 
@@ -81,12 +89,15 @@ impl TriggerDispatcher {
     }
 
     /// Claim the stable broker identity before drain, routing, or parsing.
-    pub(super) async fn claim_delivery(&self, msg: &async_nats::jetstream::Message) -> Admission {
+    pub(super) async fn claim_delivery(
+        &self,
+        msg: &async_nats::jetstream::Message,
+    ) -> ClaimVerdict {
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
             // Unit-level dispatcher tests that do not host a control plane keep
             // their old isolated setup; the daemon always installs the store.
             let info = msg.info().ok();
-            return Admission::Proceed {
+            return ClaimVerdict::Proceed {
                 stream_seq: info.as_ref().map_or(0, |i| i.stream_sequence),
                 delivered: info.as_ref().map_or(1, |i| i.delivered),
             };
@@ -95,7 +106,7 @@ impl TriggerDispatcher {
             Ok(info) => info,
             Err(err) => {
                 error!(error = %err, "cannot identify trigger delivery; leaving it unacked");
-                return Admission::Stop;
+                return ClaimVerdict::Stop;
             }
         };
         let seq = info.stream_sequence;
@@ -108,11 +119,11 @@ impl TriggerDispatcher {
             Ok(result) => result,
             Err(err) => {
                 error!(error = %err, stream_seq = seq, "cannot claim trigger; leaving it unacked");
-                return Admission::Stop;
+                return ClaimVerdict::Stop;
             }
         };
         match result {
-            TriggerClaim::Won => Admission::Proceed {
+            TriggerClaim::Won => ClaimVerdict::Proceed {
                 stream_seq: seq,
                 delivered,
             },
@@ -128,7 +139,7 @@ impl TriggerDispatcher {
                 if let Err(err) = msg.ack().await {
                     error!(error = %err, stream_seq = seq, "failed to ack duplicate trigger");
                 }
-                Admission::Stop
+                ClaimVerdict::Stop
             }
             TriggerClaim::Held { claimant } if claimant == *worker_id => {
                 // The original task still owns this message. An ack or NAK from
@@ -148,7 +159,7 @@ impl TriggerDispatcher {
                 // nothing ever ran. Adopting a claim older than some multiple of
                 // the longest legitimate hold is the follow-up that closes it;
                 // ADR-0032's liveness-and-CAS protocol is where it belongs.
-                Admission::Stop
+                ClaimVerdict::Stop
             }
             TriggerClaim::Held { claimant } => {
                 // One worker is deployed today. A different id therefore names
@@ -157,14 +168,14 @@ impl TriggerDispatcher {
                     .take_over_trigger_claim(self.trigger_key(seq), &claimant, worker_id, now)
                     .await
                 {
-                    Ok(true) => Admission::Proceed {
+                    Ok(true) => ClaimVerdict::Proceed {
                         stream_seq: seq,
                         delivered,
                     },
-                    Ok(false) => Admission::Stop,
+                    Ok(false) => ClaimVerdict::Stop,
                     Err(err) => {
                         error!(error = %err, stream_seq = seq, "cannot adopt trigger claim");
-                        Admission::Stop
+                        ClaimVerdict::Stop
                     }
                 }
             }
