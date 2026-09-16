@@ -25,9 +25,10 @@
 //!
 //! - **TOCTOU**: nothing stops the filesystem from mutating between
 //!   the check and the open, and only half of that window is closed.
-//!   `file_write` opens with `O_NOFOLLOW`, so a swap of the **final
-//!   component** for a symlink after the check is refused by the
-//!   kernel; a swap of an **intermediate directory** is not — rename
+//!   `file_write` opens with `O_NOFOLLOW | O_NONBLOCK` and verifies the
+//!   opened handle is a regular file, so a swap of the **final
+//!   component** for a symlink or FIFO after the check is refused; a
+//!   swap of an **intermediate directory** is not — rename
 //!   `allowed/sub` aside, put a symlink to somewhere outside in its
 //!   place, and an open of `allowed/sub/deep.txt` lands outside.
 //!   Process-level protection is inherently racy; closing the rest
@@ -275,8 +276,14 @@ impl ToolSandbox {
             });
         }
 
-        let canonical = canonicalise_for_write(target)?;
-        self.check_within(&canonical, &self.fs_write, "fs_write", target)
+        let (canonical, exists) = canonicalise_for_write(target)?;
+        // As on the read side, check the grant before shape so a path
+        // outside it does not disclose what kind of object exists there.
+        let canonical = self.check_within(&canonical, &self.fs_write, "fs_write", target)?;
+        if exists {
+            FileShape::Regular.check(&canonical, target)?;
+        }
+        Ok(canonical)
     }
 
     fn check_within(
@@ -425,22 +432,26 @@ fn has_dir_suffix(target: &Path) -> bool {
 /// allowed prefix. Only a genuinely absent final component uses the
 /// canonical-parent path. The parent must already exist — we don't
 /// speculatively create directories during sandbox checks.
-fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
+fn canonicalise_for_write(target: &Path) -> Result<(PathBuf, bool), SandboxError> {
     match std::fs::symlink_metadata(target) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            return std::fs::canonicalize(target).map_err(|err| SandboxError::PermissionDenied {
-                target: target.to_path_buf(),
-                reason: format!(
-                    "write through dangling or unresolvable symlink {} denied: {err}",
-                    target.display()
-                ),
-            });
+            return std::fs::canonicalize(target)
+                .map(|path| (path, true))
+                .map_err(|err| SandboxError::PermissionDenied {
+                    target: target.to_path_buf(),
+                    reason: format!(
+                        "write through dangling or unresolvable symlink {} denied: {err}",
+                        target.display()
+                    ),
+                });
         }
         Ok(_) => {
-            return std::fs::canonicalize(target).map_err(|err| SandboxError::Io {
-                path: target.to_path_buf(),
-                source: err,
-            });
+            return std::fs::canonicalize(target)
+                .map(|path| (path, true))
+                .map_err(|err| SandboxError::Io {
+                    path: target.to_path_buf(),
+                    source: err,
+                });
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotADirectory && has_dir_suffix(target) => {
@@ -505,7 +516,7 @@ fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
             ),
         });
     }
-    Ok(candidate)
+    Ok((candidate, false))
 }
 
 /// Errors from sandbox checks.
@@ -868,6 +879,53 @@ mod tests {
         let sb = make_sandbox(&[], &[allowed.path()]);
         let err = sb.check_write(&file).unwrap_err();
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn write_fifo_is_refused_and_names_it() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        make_fifo(&fifo);
+        let sb = make_sandbox(&[], &[dir.path()]);
+        let err = sb.check_write(&fifo).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("FIFO"), "{err}");
+    }
+
+    #[test]
+    fn write_directory_is_refused() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("subdir");
+        fs::create_dir(&target).unwrap();
+        let sb = make_sandbox(&[], &[dir.path()]);
+        let err = sb.check_write(&target).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("directory"), "{err}");
+    }
+
+    #[test]
+    fn write_symlink_to_directory_inside_is_refused() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("subdir");
+        let link = dir.path().join("link");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+        let sb = make_sandbox(&[], &[dir.path()]);
+        let err = sb.check_write(&link).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("directory"), "{err}");
+    }
+
+    #[test]
+    fn write_socket_is_refused_and_names_it() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("socket");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let sb = make_sandbox(&[], &[dir.path()]);
+        let err = sb.check_write(&socket).unwrap_err();
+        assert!(matches!(err, SandboxError::NotRegularFile { .. }), "{err}");
+        assert!(err.to_string().contains("socket"), "{err}");
     }
 
     #[test]
