@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracing::{error, warn};
 
 use crate::bus::TRIGGER_STREAM_NAME;
-use crate::control_plane::{ControlPlaneStore, TriggerClaim};
+use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
 
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
@@ -37,6 +37,16 @@ impl TriggerDispatcher {
         self
     }
 
+    /// This delivery's stable identity: the trigger stream, the
+    /// incarnation of it this bus connected to, and the sequence.
+    fn trigger_key(&self, stream_seq: u64) -> TriggerKey<'static> {
+        TriggerKey {
+            stream: TRIGGER_STREAM_NAME,
+            stream_epoch: self.bus.trigger_stream_epoch(),
+            stream_seq,
+        }
+    }
+
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -46,7 +56,7 @@ impl TriggerDispatcher {
     ) -> bool {
         if let Some((store, _)) = self.claim_store.as_ref()
             && let Err(err) = store
-                .mark_trigger_started(TRIGGER_STREAM_NAME, stream_seq, &invocation_id.to_string())
+                .mark_trigger_started(self.trigger_key(stream_seq), &invocation_id.to_string())
                 .await
         {
             error!(error = %err, stream_seq, %invocation_id,
@@ -62,7 +72,7 @@ impl TriggerDispatcher {
             return;
         };
         if let Err(err) = store
-            .release_trigger_claim(TRIGGER_STREAM_NAME, info.stream_sequence)
+            .release_trigger_claim(self.trigger_key(info.stream_sequence))
             .await
         {
             error!(error = %err, stream_seq = info.stream_sequence,
@@ -92,7 +102,7 @@ impl TriggerDispatcher {
         let delivered = info.delivered;
         let now = chrono::Utc::now().timestamp_millis();
         let result = match store
-            .claim_trigger(TRIGGER_STREAM_NAME, seq, worker_id, now)
+            .claim_trigger(self.trigger_key(seq), worker_id, now)
             .await
         {
             Ok(result) => result,
@@ -129,7 +139,7 @@ impl TriggerDispatcher {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 match store
-                    .take_over_trigger_claim(TRIGGER_STREAM_NAME, seq, &claimant, worker_id, now)
+                    .take_over_trigger_claim(self.trigger_key(seq), &claimant, worker_id, now)
                     .await
                 {
                     Ok(true) => Admission::Proceed {

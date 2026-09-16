@@ -841,6 +841,19 @@ mod tests {
             .expect("dispatcher semaphore is never closed")
     }
 
+    /// The claim key a dispatcher on `bus` would use for `stream_seq`:
+    /// the trigger stream, the incarnation this broker created, and the
+    /// sequence. A test that seeds a claim by hand has to agree with the
+    /// dispatcher about the epoch or it would be seeding a row for a
+    /// different stream.
+    fn test_key(bus: &EventBus, stream_seq: u64) -> crate::control_plane::TriggerKey<'static> {
+        crate::control_plane::TriggerKey {
+            stream: TRIGGER_STREAM_NAME,
+            stream_epoch: bus.trigger_stream_epoch(),
+            stream_seq,
+        }
+    }
+
     fn unique_consumer_name() -> String {
         format!("fq-dispatcher-test-{}", Uuid::now_v7().simple())
     }
@@ -2297,7 +2310,7 @@ You are a test agent."#
         let seq = msg.info().unwrap().stream_sequence;
         assert_eq!(
             store
-                .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 0)
+                .claim_trigger(test_key(&bus, seq), "worker-a", 0)
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won
@@ -2312,7 +2325,7 @@ You are a test agent."#
         // Once the original owner gives the unfinished claim back, that
         // same delivery remains runnable and starts exactly once.
         store
-            .release_trigger_claim(TRIGGER_STREAM_NAME, seq)
+            .release_trigger_claim(test_key(&bus, seq))
             .await
             .unwrap();
         dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
@@ -2331,7 +2344,7 @@ You are a test agent."#
         };
         let restart_seq = restart_msg.info().unwrap().stream_sequence;
         store
-            .claim_trigger(TRIGGER_STREAM_NAME, restart_seq, "dead-worker", 0)
+            .claim_trigger(test_key(&bus, restart_seq), "dead-worker", 0)
             .await
             .unwrap();
         dispatcher
@@ -2615,13 +2628,13 @@ You are a test agent."#
         };
         let seq = msg.info().unwrap().stream_sequence;
         store
-            .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 0)
+            .claim_trigger(test_key(&bus, seq), "worker-a", 0)
             .await
             .unwrap();
         dispatcher.requeue_held(&msg, &agent, None, &payload).await;
         assert_eq!(
             store
-                .claim_trigger(TRIGGER_STREAM_NAME, seq, "worker-a", 1)
+                .claim_trigger(test_key(&bus, seq), "worker-a", 1)
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won,

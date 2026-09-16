@@ -275,6 +275,17 @@ pub struct EventBus {
     /// loop's account of itself can reach `fq doctor` without new
     /// wiring. Shared by every clone.
     ledger: ConsumerLedger,
+    /// When *this incarnation* of the trigger stream was created, in
+    /// nanoseconds since the Unix epoch, read from stream info at
+    /// connect (zero before [`Self::ensure_trigger_stream`] has run).
+    ///
+    /// The dispatcher's durable claim keys on it
+    /// ([`crate::control_plane::TriggerKey`]): stream sequences restart
+    /// at 1 when a stream is recreated, so without the epoch a rebuilt
+    /// `fq-triggers` would meet the claim rows of the old one and have
+    /// its first triggers dropped as already-started duplicates. One
+    /// field read once at connect is the whole cost of ruling that out.
+    trigger_stream_epoch: i64,
 }
 
 /// Connect options for the broker: token auth when a token is given,
@@ -341,16 +352,18 @@ impl EventBus {
         info!(max_payload, "NATS server max_payload");
         let jetstream = jetstream::new(client.clone());
 
-        let bus = Self {
+        let mut bus = Self {
             client,
             jetstream,
             max_payload,
             event_max_age,
             redelivery: ConsumerRedeliveryPolicy::default(),
             ledger: ConsumerLedger::default(),
+            trigger_stream_epoch: 0,
         };
         bus.ensure_event_stream().await?;
-        bus.ensure_trigger_stream().await?;
+        let trigger_stream_epoch = bus.ensure_trigger_stream().await?;
+        bus.trigger_stream_epoch = trigger_stream_epoch;
         bus.ensure_advisory_stream().await?;
         bus.ensure_maintenance_stream().await?;
         Ok(bus)
@@ -479,12 +492,20 @@ impl EventBus {
     /// Unlike the event stream, the trigger stream is not compressed
     /// — messages are short-lived and small, so the CPU cost of
     /// compression is not justified.
-    async fn ensure_trigger_stream(&self) -> Result<(), BusError> {
+    ///
+    /// Returns the stream's creation time in nanoseconds since the Unix
+    /// epoch — the identity of this *incarnation* of the stream, which
+    /// the dispatcher's durable claim keys on so that sequences from a
+    /// recreated stream cannot collide with the old one's rows. It costs
+    /// nothing extra: the create/get call already answers with the
+    /// stream's info.
+    async fn ensure_trigger_stream(&self) -> Result<i64, BusError> {
         debug!(
             stream = TRIGGER_STREAM_NAME,
             "ensuring JetStream trigger stream exists"
         );
-        self.jetstream
+        let stream = self
+            .jetstream
             .get_or_create_stream(stream::Config {
                 name: TRIGGER_STREAM_NAME.to_string(),
                 subjects: vec![ALL_TRIGGERS.to_string()],
@@ -494,7 +515,25 @@ impl EventBus {
                 ..Default::default()
             })
             .await?;
-        Ok(())
+        let epoch = stream.cached_info().created.unix_timestamp_nanos() as i64;
+        debug!(
+            stream = TRIGGER_STREAM_NAME,
+            trigger_stream_epoch = epoch,
+            "trigger stream epoch"
+        );
+        Ok(epoch)
+    }
+
+    /// When this incarnation of the trigger stream was created, in
+    /// nanoseconds since the Unix epoch, as read at connect.
+    ///
+    /// The dispatcher's durable claim
+    /// ([`crate::control_plane::TriggerKey`]) keys on it so a stream
+    /// recreate starts a fresh claim space instead of meeting the old
+    /// stream's `durably_started` rows at the same sequences. Zero on a
+    /// handle whose trigger stream was never ensured.
+    pub fn trigger_stream_epoch(&self) -> i64 {
+        self.trigger_stream_epoch
     }
 
     /// Ensure the maintenance command stream exists (#257).

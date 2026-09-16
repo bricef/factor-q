@@ -106,12 +106,13 @@ CREATE INDEX IF NOT EXISTS idx_archive_archived_at ON invocation_archive(archive
 const TRIGGER_CLAIM_TABLE_V2_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS trigger_claim (
     stream          TEXT NOT NULL,
+    stream_epoch    INTEGER NOT NULL,
     stream_seq      INTEGER NOT NULL,
     claimant        TEXT NOT NULL,
     state           TEXT NOT NULL CHECK (state IN ('claimed', 'durably_started')),
     invocation_id   TEXT,
     claimed_at      INTEGER NOT NULL,
-    PRIMARY KEY (stream, stream_seq)
+    PRIMARY KEY (stream, stream_epoch, stream_seq)
 );
 "#;
 
@@ -1036,7 +1037,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 }
 
 mod trigger_claim;
-pub use trigger_claim::TriggerClaim;
+pub use trigger_claim::{TriggerClaim, TriggerKey};
 
 #[cfg(test)]
 mod tests;

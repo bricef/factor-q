@@ -519,71 +519,93 @@ async fn per_file_bootstrap_isolates_schema_meta() {
     }
 }
 
+/// One delivery's key on the live trigger stream, at the epoch every
+/// claim in this test shares.
+fn key(stream_seq: u64) -> TriggerKey<'static> {
+    TriggerKey {
+        stream: "fq-triggers",
+        stream_epoch: 1_700_000_000_000_000_000,
+        stream_seq,
+    }
+}
+
 #[tokio::test]
 async fn trigger_claim_state_machine_round_trip() {
     let (store, _dir) = open_fresh().await;
     assert_eq!(
-        store
-            .claim_trigger("fq-triggers", 42, "worker-a", 100)
-            .await
-            .unwrap(),
+        store.claim_trigger(key(42), "worker-a", 100).await.unwrap(),
         TriggerClaim::Won
     );
     assert_eq!(
-        store
-            .claim_trigger("fq-triggers", 42, "worker-a", 101)
-            .await
-            .unwrap(),
+        store.claim_trigger(key(42), "worker-a", 101).await.unwrap(),
         TriggerClaim::Held {
             claimant: "worker-a".to_string()
         }
     );
     assert!(
         store
-            .take_over_trigger_claim("fq-triggers", 42, "worker-a", "worker-b", 102)
+            .take_over_trigger_claim(key(42), "worker-a", "worker-b", 102)
             .await
             .unwrap()
     );
-    store
-        .mark_trigger_started("fq-triggers", 42, "inv-1")
-        .await
-        .unwrap();
+    store.mark_trigger_started(key(42), "inv-1").await.unwrap();
     assert_eq!(
-        store
-            .claim_trigger("fq-triggers", 42, "worker-b", 103)
-            .await
-            .unwrap(),
+        store.claim_trigger(key(42), "worker-b", 103).await.unwrap(),
         TriggerClaim::Started {
             invocation_id: "inv-1".to_string()
         }
     );
     // Started claims survive the release used by ordinary ACK paths.
-    store
-        .release_trigger_claim("fq-triggers", 42)
-        .await
-        .unwrap();
+    store.release_trigger_claim(key(42)).await.unwrap();
     assert!(matches!(
-        store
-            .claim_trigger("fq-triggers", 42, "worker-b", 104)
-            .await
-            .unwrap(),
+        store.claim_trigger(key(42), "worker-b", 104).await.unwrap(),
         TriggerClaim::Started { .. }
     ));
 
-    store
-        .claim_trigger("fq-triggers", 43, "worker-a", 100)
-        .await
-        .unwrap();
-    store
-        .release_trigger_claim("fq-triggers", 43)
-        .await
-        .unwrap();
+    store.claim_trigger(key(43), "worker-a", 100).await.unwrap();
+    store.release_trigger_claim(key(43)).await.unwrap();
     assert_eq!(
-        store
-            .claim_trigger("fq-triggers", 43, "worker-a", 101)
-            .await
-            .unwrap(),
+        store.claim_trigger(key(43), "worker-a", 101).await.unwrap(),
         TriggerClaim::Won
+    );
+}
+
+/// **A recreated stream starts a new claim space.** JetStream restarts
+/// sequences at 1 when a stream is rebuilt, so a claim table keyed on
+/// the name and sequence alone would answer `Started` to the first N
+/// triggers of the new stream and drop them — silently, because a
+/// dropped duplicate starts nothing by design. Keyed on the stream's
+/// creation time as well, the old incarnation's rows are inert and the
+/// fresh delivery wins its claim, with no operator asked to remember to
+/// clear a table.
+#[tokio::test]
+async fn a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delivery() {
+    let (store, _dir) = open_fresh().await;
+    let old = TriggerKey {
+        stream: "fq-triggers",
+        stream_epoch: 1_700_000_000_000_000_000,
+        stream_seq: 1,
+    };
+    let recreated = TriggerKey {
+        stream_epoch: old.stream_epoch + 1,
+        ..old
+    };
+    assert_eq!(
+        store.claim_trigger(old, "worker-a", 0).await.unwrap(),
+        TriggerClaim::Won
+    );
+    store.mark_trigger_started(old, "inv-old").await.unwrap();
+    assert_eq!(
+        store.claim_trigger(recreated, "worker-a", 1).await.unwrap(),
+        TriggerClaim::Won,
+        "sequence 1 of a rebuilt stream is not the sequence 1 that already ran"
+    );
+    assert_eq!(
+        store.claim_trigger(old, "worker-a", 2).await.unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-old".to_string()
+        },
+        "the old incarnation's record is kept, not overwritten"
     );
 }
 
@@ -602,10 +624,7 @@ async fn schema_v1_upgrades_to_trigger_claim_v2() {
     let upgraded = ControlPlaneStore::open(&path).await.unwrap();
     assert_eq!(upgraded.read_schema_version().await.unwrap(), Some(2));
     assert_eq!(
-        upgraded
-            .claim_trigger("fq-triggers", 1, "worker", 0)
-            .await
-            .unwrap(),
+        upgraded.claim_trigger(key(1), "worker", 0).await.unwrap(),
         TriggerClaim::Won
     );
 }
