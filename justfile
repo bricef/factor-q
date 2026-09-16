@@ -829,6 +829,11 @@ lint-metrics:
 lint-coupling:
     cargo run -q -p fq-lint -- --coupling
 
+# Report unrestricted public items with exactly one internal consumer.
+# Advisory only: syntactic resolution produces cleanup candidates, not proofs.
+lint-pub-surface:
+    cargo run -q -p fq-lint -- --pub-surface
+
 # One command for every quality gate that is not a test, mirrored exactly by
 # the "Code quality" CI job. Before this, the structural gates lived in the
 # source-policy job while formatting and clippy were scattered across the four
@@ -866,6 +871,7 @@ quality:
     run_phase "lint-clippy"  just lint-clippy
     run_phase "lint-creep"   just lint-creep
     run_phase "lint-coupling" just lint-coupling
+    run_phase "lint-pub-surface" just lint-pub-surface
 
 # === Release ===
 

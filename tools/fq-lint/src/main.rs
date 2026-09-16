@@ -89,7 +89,7 @@ fn main() -> ExitCode {
 
     if flags.contains(&"--help") || flags.contains(&"-h") {
         eprintln!(
-            "usage: fq-lint [--bless | --metrics | --creep | --coupling [--json]]\n\n  \
+            "usage: fq-lint [--bless | --metrics | --creep | --coupling [--json] | --pub-surface]\n\n  \
              (no flags)  check sizes and lint exceptions against their baselines\n  \
              --bless     lower budgets to match reality (never raises)\n  \
              --creep     report functions approaching the cap (never fails)\n  \
@@ -126,6 +126,15 @@ fn main() -> ExitCode {
     };
     let arities = arity_ratchet(&measured);
 
+    if flags.contains(&"--pub-surface") {
+        let graphs = coupling::build(
+            measured
+                .iter()
+                .filter_map(|(p, m)| m.facts.as_ref().map(|f| (p.as_str(), m.production, f))),
+        );
+        coupling::report_pub_surface(&graphs);
+        return ExitCode::SUCCESS;
+    }
     if flags.contains(&"--coupling") {
         let graphs = coupling::build(
             measured
