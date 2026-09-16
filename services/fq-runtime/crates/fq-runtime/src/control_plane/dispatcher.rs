@@ -2923,6 +2923,12 @@ You are a test agent."#
     /// window, a missing keepalive shows as the trigger arriving a
     /// second time on this very stream, which is one trigger becoming
     /// two invocations.
+    ///
+    /// The drain then frees that permit *while the waiter is parked on
+    /// it*, which is what a real drain does — suspending runners hand
+    /// their permits back. Being offered one must not override the
+    /// drain: the check the acquire arm makes before returning a permit
+    /// is what this last `started() == 0` is for.
     #[tokio::test]
     async fn a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain() {
         let server = crate::test_support::nats::test_nats();
@@ -2981,12 +2987,23 @@ You are a test agent."#
                 crate::worker::DrainReason::Deploy,
             ))
             .await;
+        // Freed *after* the drain is requested, which is the order a
+        // real drain produces: every runner releases its permit as it
+        // suspends, and that release wakes this waiter. The permit it is
+        // offered must not start it.
+        drop(occupied);
         tokio::time::timeout(Duration::from_secs(3), handle)
             .await
-            .expect("a permit wait lets go within a keepalive tick of a drain")
+            .expect(
+                "a permit wait lets go within a keepalive tick of a drain — a hang here is \
+                 the waiter having taken the permit the drain freed and run the invocation",
+            )
             .expect("task joins");
-        assert_eq!(worker.started(), 0, "a drained trigger does not start");
-        drop(occupied);
+        assert_eq!(
+            worker.started(),
+            0,
+            "a drained trigger does not start — not even on a permit the drain itself freed"
+        );
 
         let mut consumer = bus
             .trigger_consumer_with_filter(&consumer_name, &filter, 1000)
