@@ -342,8 +342,9 @@ impl TriggerDispatcher {
             // trigger that is ready to run — never here, and never by
             // anything that is only waiting. What bounds how much is
             // pulled is the consumer's `max_ack_pending`, not the worker
-            // cap: past it the broker stops delivering until acks
-            // arrive.
+            // cap. Why taking one before the pull ("capacity before
+            // consumption") is no longer needed, and what it cost, is in
+            // `admission`'s module doc.
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
@@ -354,12 +355,11 @@ impl TriggerDispatcher {
                     let dispatcher = Arc::clone(&this);
                     in_flight.spawn(async move {
                         // A resume queues for its permit like everything
-                        // else, and has no delivery to keep alive: its
+                        // else, with no delivery to keep alive: its
                         // trigger was acked at the first WAL write.
-                        let _permit = Arc::clone(&dispatcher.permits)
-                            .acquire_owned()
-                            .await
-                            .expect("dispatcher semaphore is never closed");
+                        let Some(_permit) = dispatcher.acquire_run_permit(None, None).await else {
+                            return;
+                        };
                         dispatcher.resume_deferred(resume).await;
                     });
                 }
@@ -581,13 +581,13 @@ impl TriggerDispatcher {
 
         // Last (#733): the worker permit. Both admission rules have
         // passed and the agent's slot is taken, so the only thing left
-        // to wait for is a free worker. Waiters are a FIFO on the fair
-        // semaphore, so the longest-parked trigger runs first. The
-        // permit is released when this returns.
-        let _permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .expect("dispatcher semaphore is never closed");
+        // to wait for is a free worker. The wait keeps the delivery
+        // alive on the same cadence a hold does, and an interrupted one
+        // leaves it un-acked for the next binary, exactly as a pause
+        // hold does. The permit is released when this returns.
+        let Some(_permit) = self.acquire_run_permit(Some(msg), header_id).await else {
+            return;
+        };
 
         // The trigger's *first handling*: the message becomes a named
         // Trigger here and nowhere else on this path. A publisher's own
@@ -2910,6 +2910,166 @@ You are a test agent."#
             worker.attempts()
         );
 
+        stop(shutdown_tx, run).await;
+    }
+
+    /// The permit wait is a hold like the other two: it keeps the
+    /// delivery alive for as long as it lasts, and lets go of it
+    /// un-acked on a drain.
+    ///
+    /// The one permit is taken by the test, so nothing is running and
+    /// nothing will free it — the trigger is admitted by both rules and
+    /// then waits. Past the durable's whole 30-second first-delivery
+    /// window, a missing keepalive shows as the trigger arriving a
+    /// second time on this very stream, which is one trigger becoming
+    /// two invocations.
+    #[tokio::test]
+    async fn a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("permit-wait");
+        let (_dir, registry) = registry_with(&agent_id_str);
+        let worker = CappedWorker::new();
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let dispatcher = Arc::new(TriggerDispatcher::new(
+            bus.clone(),
+            registry,
+            worker.clone(),
+            llm,
+            1,
+        ));
+        // The worker cap, occupied with nothing running.
+        let occupied = a_permit(&dispatcher).await;
+
+        let consumer_name = unique_consumer_name();
+        let filter = crate::events::subjects::trigger(&agent_id_str);
+        let consumer = bus
+            .trigger_consumer_with_filter(
+                &consumer_name,
+                &filter,
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .expect("consumer");
+        publish_triggers(&bus, &agent_id_str, 1).await;
+        let mut stream = consumer.messages().await.expect("messages");
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("a message within 5s")
+            .expect("stream open")
+            .expect("message ok");
+
+        let d = Arc::clone(&dispatcher);
+        let handle = tokio::spawn(async move { d.handle(&msg).await });
+
+        let window = crate::bus::TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(3);
+        assert!(
+            tokio::time::timeout(window, stream.next()).await.is_err(),
+            "a trigger waiting for a worker permit must be kept alive, not redelivered \
+             — a copy here is one trigger turning into two invocations"
+        );
+        assert_eq!(
+            worker.started(),
+            0,
+            "and it has not started: the only permit is still taken"
+        );
+
+        // A drain during the wait ends it, and the delivery is left
+        // where it is for the next binary.
+        worker
+            .request_drain(crate::worker::DrainRequest::new(
+                crate::worker::DrainReason::Deploy,
+            ))
+            .await;
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("a permit wait lets go within a keepalive tick of a drain")
+            .expect("task joins");
+        assert_eq!(worker.started(), 0, "a drained trigger does not start");
+        drop(occupied);
+
+        let mut consumer = bus
+            .trigger_consumer_with_filter(&consumer_name, &filter, 1000)
+            .await
+            .expect("the durable still exists");
+        let info = consumer.info().await.expect("consumer info");
+        assert_eq!(
+            info.num_ack_pending as u64 + info.num_pending,
+            1,
+            "the trigger is still the broker's to deliver: {info:?}"
+        );
+    }
+
+    /// Waiting for a worker permit is a **queue**, not a race: the
+    /// longest-parked trigger runs first.
+    ///
+    /// Three agents so the starts can be told apart, one permit, and the
+    /// second and third triggers published in order while the first
+    /// invocation holds it. Each waiter registers once and keeps its
+    /// place; a wait that re-registered every keepalive tick would let
+    /// whichever polled first at the moment of release overtake.
+    #[tokio::test]
+    async fn triggers_waiting_for_a_worker_permit_start_in_arrival_order() {
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let first = unique_agent_id("permit-queue-first");
+        let second = unique_agent_id("permit-queue-second");
+        let third = unique_agent_id("permit-queue-third");
+        let (_dir, registry) = registry_with_models(&[
+            (&first, "claude-haiku"),
+            (&second, "claude-haiku"),
+            (&third, "claude-haiku"),
+        ]);
+        let worker = CappedWorker::new();
+        let llm: Arc<dyn LlmClient> = Arc::new(FixtureClient::new());
+        let consumer_name = unique_consumer_name();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let dispatcher = TriggerDispatcher::new(bus.clone(), registry, worker.clone(), llm, 1);
+        let run = tokio::spawn(async move {
+            dispatcher
+                .run_on_consumer(&consumer_name, None, shutdown_rx)
+                .await
+        });
+
+        publish_triggers(&bus, &first, 1).await;
+        worker
+            .wait_for_agent_starts(&first, 1, Duration::from_secs(10))
+            .await;
+        publish_triggers(&bus, &second, 1).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        publish_triggers(&bus, &third, 1).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            worker.started(),
+            1,
+            "both later triggers are pulled and waiting on the one permit"
+        );
+
+        worker.let_finish(1);
+        worker
+            .wait_for_agent_starts(&second, 1, Duration::from_secs(5))
+            .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            worker.started_for(&third),
+            0,
+            "the trigger that arrived later waits its turn"
+        );
+
+        worker.let_finish(1);
+        worker
+            .wait_for_agent_starts(&third, 1, Duration::from_secs(5))
+            .await;
+        let order: Vec<String> = worker
+            .starts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.2.clone())
+            .collect();
+        assert_eq!(order, vec![first, second, third], "arrival order");
+
+        worker.let_finish(10);
         stop(shutdown_tx, run).await;
     }
 
