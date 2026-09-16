@@ -32,6 +32,10 @@ pub enum StoreError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The selected backend deliberately does not expose this operation.
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
+
     /// A remote store failed — either a transport error reaching it, or an
     /// error it reported that has no typed variant here. Distinct from
     /// [`Corrupt`](Self::Corrupt): the fault is at or beyond the remote

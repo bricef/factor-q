@@ -3,8 +3,8 @@
 //!
 //! This proves ADR-0023's core claim — the same `ContentStore` contract runs
 //! in-process and distributed — on the M1a CAS. Because `RemoteStore`
-//! implements `ContentStore`, the conformance suite runs against it over the
-//! wire.
+//! implements `ContentStore`, the retained, non-destructive conformance cases
+//! run against it over the wire.
 //!
 //! This CID-level server is **unauthenticated** — the M2 access-control gate
 //! sits at the named `Repository` layer, not here. Keep the bind address on
@@ -56,19 +56,22 @@ impl From<WireError> for StoreError {
     }
 }
 
-/// The RPC surface, mirroring [`ContentStore`].
+/// Version 2 of the RPC surface: the six client-safe [`ContentStore`] verbs.
+///
+/// The versioned service name makes the removal of the three GC-only verbs an
+/// explicit protocol break for clients compiled against the former surface.
 #[tarpc::service]
-pub trait CasService {
+pub trait CasServiceV2 {
     async fn put(content: Vec<u8>) -> std::result::Result<Cid, WireError>;
     async fn get(cid: Cid) -> std::result::Result<Vec<u8>, WireError>;
     async fn get_range(cid: Cid, offset: u64, len: u64) -> std::result::Result<Vec<u8>, WireError>;
     async fn has(cid: Cid) -> std::result::Result<bool, WireError>;
     async fn size(cid: Cid) -> std::result::Result<u64, WireError>;
     async fn stats() -> std::result::Result<Stats, WireError>;
-    async fn remove(cid: Cid) -> std::result::Result<(), WireError>;
-    async fn has_block(block: Cid, generation: u32) -> std::result::Result<bool, WireError>;
-    async fn remove_block(block: Cid, generation: u32) -> std::result::Result<(), WireError>;
 }
+
+/// The complete method vocabulary of [`CasServiceV2`].
+pub const CAS_SERVICE_V2_METHODS: [&str; 6] = ["put", "get", "get_range", "has", "size", "stats"];
 
 /// Server handler: forwards each RPC to a backing [`ContentStore`].
 #[derive(Clone)]
@@ -76,7 +79,7 @@ struct CasServer {
     store: Arc<dyn ContentStore>,
 }
 
-impl CasService for CasServer {
+impl CasServiceV2 for CasServer {
     async fn put(
         self,
         _: context::Context,
@@ -112,34 +115,6 @@ impl CasService for CasServer {
 
     async fn stats(self, _: context::Context) -> std::result::Result<Stats, WireError> {
         self.store.stats().await.map_err(WireError::from)
-    }
-
-    async fn remove(self, _: context::Context, cid: Cid) -> std::result::Result<(), WireError> {
-        self.store.remove(&cid).await.map_err(WireError::from)
-    }
-
-    async fn has_block(
-        self,
-        _: context::Context,
-        block: Cid,
-        generation: u32,
-    ) -> std::result::Result<bool, WireError> {
-        self.store
-            .has_block(&block, generation)
-            .await
-            .map_err(WireError::from)
-    }
-
-    async fn remove_block(
-        self,
-        _: context::Context,
-        block: Cid,
-        generation: u32,
-    ) -> std::result::Result<(), WireError> {
-        self.store
-            .remove_block(&block, generation)
-            .await
-            .map_err(WireError::from)
     }
 }
 
@@ -183,17 +158,17 @@ pub async fn serve(addr: &str, store: Arc<dyn ContentStore>) -> std::io::Result<
     Ok(())
 }
 
-/// A [`ContentStore`] that forwards every call to a remote CAS server over
-/// `tarpc` — the same contract, over the wire.
+/// A [`ContentStore`] that forwards the six client-safe calls to a remote CAS
+/// server over `tarpc`. GC-only calls return [`StoreError::Unsupported`].
 pub struct RemoteStore {
-    client: CasServiceClient,
+    client: CasServiceV2Client,
 }
 
 impl RemoteStore {
     /// Connect to a CAS server at `addr` (e.g. "127.0.0.1:9000").
     pub async fn connect(addr: &str) -> std::io::Result<Self> {
         let transport = tarpc::serde_transport::tcp::connect(addr, Bincode::default).await?;
-        let client = CasServiceClient::new(client::Config::default(), transport).spawn();
+        let client = CasServiceV2Client::new(client::Config::default(), transport).spawn();
         Ok(Self { client })
     }
 }
@@ -248,29 +223,24 @@ impl ContentStore for RemoteStore {
             .map_err(StoreError::from)
     }
 
-    async fn remove(&self, cid: &Cid) -> Result<()> {
-        self.client
-            .remove(context::current(), *cid)
-            .await
-            .map_err(rpc_err)?
-            .map_err(StoreError::from)
+    // If more callers need this fallback, split the client-safe and GC traits.
+    async fn remove(&self, _cid: &Cid) -> Result<()> {
+        Err(unsupported("remove"))
     }
 
-    async fn has_block(&self, block: &Cid, generation: u32) -> Result<bool> {
-        self.client
-            .has_block(context::current(), *block, generation)
-            .await
-            .map_err(rpc_err)?
-            .map_err(StoreError::from)
+    async fn has_block(&self, _block: &Cid, _generation: u32) -> Result<bool> {
+        Err(unsupported("has_block"))
     }
 
-    async fn remove_block(&self, block: &Cid, generation: u32) -> Result<()> {
-        self.client
-            .remove_block(context::current(), *block, generation)
-            .await
-            .map_err(rpc_err)?
-            .map_err(StoreError::from)
+    async fn remove_block(&self, _block: &Cid, _generation: u32) -> Result<()> {
+        Err(unsupported("remove_block"))
     }
+}
+
+fn unsupported(operation: &str) -> StoreError {
+    StoreError::Unsupported(format!(
+        "{operation} is not exposed over the wire until M5 authentication; run the collector in-process"
+    ))
 }
 
 fn rpc_err(e: tarpc::client::RpcError) -> StoreError {
