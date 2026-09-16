@@ -389,16 +389,33 @@ fn canonicalise_existing(target: &Path) -> std::io::Result<PathBuf> {
 
 /// Canonicalise a path that may not yet exist. Used for write checks.
 ///
-/// If the target exists, canonicalise it directly. Otherwise
-/// canonicalise the parent directory and join the filename. The
-/// parent must already exist — we don't speculatively create
-/// directories during sandbox checks.
+/// If the target exists, canonicalise it directly. Symlinks are only
+/// accepted when they resolve; dangling symlinks are refused even when
+/// their destination would be inside the allowed prefix. Otherwise,
+/// canonicalise the parent directory and join the filename. The parent
+/// must already exist — we don't speculatively create directories during
+/// sandbox checks.
 fn canonicalise_for_write(target: &Path) -> Result<PathBuf, SandboxError> {
-    if target.exists() {
-        return std::fs::canonicalize(target).map_err(|err| SandboxError::Io {
-            path: target.to_path_buf(),
-            source: err,
-        });
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return std::fs::canonicalize(target).map_err(|_| SandboxError::PermissionDenied {
+                target: target.to_path_buf(),
+                reason: "write target is a dangling or unresolvable symlink".to_string(),
+            });
+        }
+        Ok(_) => {
+            return std::fs::canonicalize(target).map_err(|err| SandboxError::Io {
+                path: target.to_path_buf(),
+                source: err,
+            });
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(SandboxError::Io {
+                path: target.to_path_buf(),
+                source: err,
+            });
+        }
     }
     let parent = target.parent().ok_or_else(|| SandboxError::InvalidPath {
         target: target.to_path_buf(),
@@ -823,6 +840,19 @@ mod tests {
         let sb = make_sandbox(&[], &[allowed.path()]);
         let err = sb.check_write(&link).unwrap_err();
         assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn write_dangling_symlink_pointing_outside_is_denied() {
+        let allowed = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let outside = other.path().join("not-created.txt");
+        let link = allowed.path().join("escape");
+        symlink(&outside, &link).unwrap();
+        let sb = make_sandbox(&[], &[allowed.path()]);
+        let err = sb.check_write(&link).unwrap_err();
+        assert!(matches!(err, SandboxError::PermissionDenied { .. }));
+        assert!(!outside.exists());
     }
 
     #[test]

@@ -295,6 +295,8 @@ the command as an argv array, e.g. `["ls", "-la"]`.
 Note that `exec_cwd` is a **separate sandbox dimension** from
 `fs_read` and `fs_write`. An agent with read access does not
 automatically get exec access, and vice versa.
+Writes through symlinks are refused unless the link resolves to a target
+inside an allowed `fs_write` prefix.
 
 ### Combined
 
