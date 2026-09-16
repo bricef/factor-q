@@ -13,8 +13,7 @@ mod invocations;
 mod style;
 mod transcript;
 pub use health::health;
-#[allow(unused_imports)]
-pub use invocations::{InvocationFilters, active, invocations, invocations_page};
+pub use invocations::{InvocationFilters, invocations_page};
 pub use transcript::{
     transcript_entry_html, transcript_error, transcript_outcome, transcript_status_html,
 };
