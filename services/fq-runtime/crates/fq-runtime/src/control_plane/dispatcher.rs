@@ -2304,7 +2304,10 @@ You are a test agent."#
         );
         dispatcher.handle(&msg, a_permit(&dispatcher).await).await;
         assert!(worker.starts.lock().unwrap().is_empty());
-        assert_eq!(consumer.info().await.unwrap().num_ack_pending, 1);
+        // Held across the ack round trip, not merely at the instant
+        // `handle` returned: an ack sent from the duplicate is in flight
+        // then, and a single read would pass with it on the wire.
+        ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
 
         // Once the original owner gives the unfinished claim back, that
         // same delivery remains runnable and starts exactly once.
@@ -2356,7 +2359,11 @@ You are a test agent."#
     ) {
         let deadline = std::time::Instant::now() + window;
         while std::time::Instant::now() < deadline {
-            let pending = consumer.info().await.expect("consumer info").num_ack_pending;
+            let pending = consumer
+                .info()
+                .await
+                .expect("consumer info")
+                .num_ack_pending;
             assert_eq!(
                 pending, expected,
                 "num_ack_pending moved to {pending}; the delivery was resolved \
@@ -2542,7 +2549,11 @@ You are a test agent."#
         // The durable start of that one invocation settles the message.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let pending = consumer.info().await.expect("consumer info").num_ack_pending;
+            let pending = consumer
+                .info()
+                .await
+                .expect("consumer info")
+                .num_ack_pending;
             if pending == 0 {
                 break;
             }
