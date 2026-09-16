@@ -32,7 +32,9 @@
 //! - **what the hold waits on** — a pause ending, or a slot freeing;
 //! - **what an interrupted delivery deserves.** A pause hold leaves it
 //!   un-acked for the next binary; a cap hold, which can outlast a
-//!   deploy, requeues it so the restart costs it no delivery.
+//!   deploy, requeues it so the restart costs it no delivery — and so
+//!   does the permit wait below, which is bounded by the same thing a
+//!   cap hold is.
 //!
 //! # Neither hold owns a worker permit
 //!
@@ -269,10 +271,12 @@ impl TriggerDispatcher {
     /// queues for a permit like everything else, so a resume cannot jump
     /// the triggers already waiting, nor they it.
     ///
-    /// `None` back is a drain or shutdown during the wait — the same
-    /// answer [`Admission::Interrupted`] gives, and it earns the same
-    /// treatment: the caller returns without acking, leaving the
-    /// delivery for the next binary. **Both** arms answer it, because a
+    /// `None` back is a drain or shutdown during the wait. The trigger
+    /// caller answers it the way the *cap* hold does — with
+    /// [`TriggerDispatcher::requeue_held`](super::TriggerDispatcher),
+    /// not by returning un-acked — because this wait is bounded by the
+    /// invocation ahead of it and so reaches the same arithmetic (#718,
+    /// #733). **Both** arms answer it, because a
     /// drain is also how a permit comes free: suspending runners release
     /// theirs, so a waiter can be handed one by the very drain that
     /// should have stopped it.

@@ -549,10 +549,22 @@ impl TriggerDispatcher {
         // Last (#733): the worker permit. Both admission rules have
         // passed and the agent's slot is taken, so the only thing left
         // to wait for is a free worker. The wait keeps the delivery
-        // alive on the same cadence a hold does, and an interrupted one
-        // leaves it un-acked for the next binary, exactly as a pause
-        // hold does. The permit is released when this returns.
+        // alive on the same cadence a hold does. The permit is released
+        // when this returns.
+        //
+        // An interrupted wait **requeues**, as the cap hold does (#718),
+        // and for the same arithmetic: this wait is bounded by the
+        // invocation ahead of it — at the default cap of 1 a single
+        // build-bound agent parks it for a `just ci` pass — while the
+        // dogfood instance deploys hourly. Returning un-acked would
+        // charge the trigger one delivery per deploy landing mid-wait:
+        // `attempt: 2` in the transcript preamble, and a
+        // `trigger_exhausted` dead letter after four. On `main` this
+        // trigger was never pulled at all and reached the next binary
+        // as the first attempt it still is; requeueing is how it keeps
+        // doing so.
         let Some(_permit) = self.acquire_run_permit(Some(msg), header_id).await else {
+            self.requeue_held(msg, &agent_id, header_id, &payload).await;
             return;
         };
 
@@ -2881,8 +2893,10 @@ You are a test agent."#
     }
 
     /// The permit wait is a hold like the other two: it keeps the
-    /// delivery alive for as long as it lasts, and lets go of it
-    /// un-acked on a drain.
+    /// delivery alive for as long as it lasts, and on a drain gives it
+    /// back to the stream the way a cap hold does (#718) — republished
+    /// under the same name, the original acked — so the restart costs
+    /// the trigger no delivery.
     ///
     /// The one permit is taken by the test, so nothing is running and
     /// nothing will free it — the trigger is admitted by both rules and
@@ -2931,6 +2945,10 @@ You are a test agent."#
             .expect("a message within 5s")
             .expect("stream open")
             .expect("message ok");
+        // Kept so the requeue can be told from an un-acked return at the
+        // end: this delivery's own sequence, which the durable's ack
+        // floor has to reach.
+        let original_seq = msg.info().expect("message info").stream_sequence;
 
         let d = Arc::clone(&dispatcher);
         let handle = tokio::spawn(async move { d.handle(&msg).await });
@@ -2947,8 +2965,8 @@ You are a test agent."#
             "and it has not started: the only permit is still taken"
         );
 
-        // A drain during the wait ends it, and the delivery is left
-        // where it is for the next binary.
+        // A drain during the wait ends it, and the trigger is requeued
+        // for the next binary.
         worker
             .request_drain(crate::worker::DrainRequest::new(
                 crate::worker::DrainReason::Deploy,
@@ -2980,7 +2998,15 @@ You are a test agent."#
         assert_eq!(
             info.num_ack_pending as u64 + info.num_pending,
             1,
-            "the trigger is still the broker's to deliver: {info:?}"
+            "the trigger is still the broker's to deliver, as exactly one copy — the requeued \
+             republish, the original having been acked in its place: {info:?}"
+        );
+        assert!(
+            info.ack_floor.stream_sequence >= original_seq,
+            "the interrupted wait requeued: the original delivery was acked, so the durable's \
+             ack floor has passed {original_seq}. A floor still below it is the un-acked \
+             return this replaced, which charges the trigger `attempt: 2` on the way back \
+             — {info:?}"
         );
     }
 
