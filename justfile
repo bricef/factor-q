@@ -558,9 +558,10 @@ dashboard-icon:
 
 # Uses markdownlint-cli2 (pinned) via npx; rules in .markdownlint.jsonc.
 # Auto-fix the mechanical rules with `just lint-docs --fix`.
-# Lint every markdown file under docs/ — zero errors, per AGENTS.md.
+# Exclude research/ (third-party reading notes), node_modules/ (dependencies),
+# target/ (build output), .claude/ (agent scratch), and .git/ (VCS metadata).
 lint-docs *args:
-    npx --yes markdownlint-cli2@0.22.1 {{args}} "docs/**/*.md"
+    npx --yes markdownlint-cli2@0.22.1 "**/*.md" "!research/**" "!**/node_modules/**" "!**/target/**" "!.claude/**" "!.git/**" {{args}}
 
 # Links pointing outside the repo (sibling checkouts) are reported but not
 # failed.

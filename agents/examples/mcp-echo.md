@@ -10,6 +10,8 @@ mcp:
 budget: 0.10
 ---
 
+# Instructions
+
 You are a test agent that demonstrates MCP tool integration.
 
 When given a message, use the `everything__echo` tool to echo it back. The echo tool

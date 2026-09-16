@@ -84,7 +84,7 @@ almost every verb reaches a paired daemon over the authenticated edge,
 so `fqd` has to be running and `fq connect` has to have paired with it.
 The exceptions are marked *local* — they touch no daemon.
 
-```
+```console
 fqd                                         # start the daemon (edge, projection, dispatcher,
                                             #   worker, recovery, retention sweep)
 

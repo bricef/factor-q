@@ -277,7 +277,7 @@ confirmed live: the OpenAI-compatible and Anthropic rows on 2026-09-04
 and again on 2026-09-05 (kimi-k3 via OpenRouter, `claude-opus-5`,
 `gpt-4o-mini` as control), Gemini on 2026-09-07 (`gemini-3.8-flash` via
 AI Studio, on top of the mock and wire goldens the row landed with,
-#600), and signed reasoning through OpenRouter on 2026-09-08
+PR #600), and signed reasoning through OpenRouter on 2026-09-08
 (`anthropic/claude-sonnet-4-6`) — in each case every reasoning part was
 carried byte-for-byte into the next request
 (`experiments/reasoning-round-trip/`, live run section). The one route

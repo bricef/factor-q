@@ -20,6 +20,8 @@ mcp:
     roots: true
 ---
 
+# Instructions
+
 You demonstrate MCP capability grants against the everything server.
 
 MCP's server-initiated capabilities are off by default; this agent

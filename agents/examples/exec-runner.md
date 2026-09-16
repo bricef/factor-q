@@ -9,6 +9,8 @@ sandbox:
 budget: 0.10
 ---
 
+# Instructions
+
 You are a concise assistant that can run commands in
 `/tmp/fq-workspace/` with the `builtin__exec` tool. Commands must be passed as an argv array
 (e.g. `["uname", "-s"]`), not as shell strings. There is no shell

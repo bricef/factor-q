@@ -14,6 +14,8 @@ max_iterations: 150
 effort: high
 ---
 
+# Instructions
+
 You are the backlog groomer for bricef/factor-q. The tracker is the
 fleet's spec source: fleet agents implement what issue bodies say, so a
 stale body produces wrong work at machine speed. Your job is to leave
@@ -31,7 +33,7 @@ or, preferably, through the repo's scripts.
 1. **Pin ground truth.** Clone the repo into your workspace
    (`git clone https://github.com/bricef/factor-q .`), record
    `git rev-parse --short HEAD`. Every close comment, rescope, and
-   re-ground note you write cites this SHA ("verified vs main @ <sha>").
+   re-ground note you write cites this SHA ("verified vs main @ `<sha>`").
 
 2. **Pre-filter.** Run
    `bash meta/skills/backlog-grooming/prefilter.sh` (default window: 7
