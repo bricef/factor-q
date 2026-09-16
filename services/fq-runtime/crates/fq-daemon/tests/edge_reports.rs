@@ -285,24 +285,51 @@ fn control_status() -> OpId {
     OpId::Report(ReportId::Control(ControlReport::Status))
 }
 
-/// Wait until every durable this daemon expects has been created.
+const EXPECTED_DURABLES: [&str; 6] = [
+    "fq-projector",
+    "fq-coordination",
+    "fq-heartbeat",
+    "fq-dispatcher",
+    "fq-advisory-watch",
+    "fq-maintenance",
+];
+
+fn durables_ready(report: &serde_json::Value, expected: &[&str]) -> bool {
+    let Some(consumers) = report["consumers"].as_array() else {
+        return false;
+    };
+    let mut names = Vec::with_capacity(consumers.len());
+    for consumer in consumers {
+        let active = &consumer["active"];
+        if active.is_null() {
+            return false;
+        }
+        let Some(name) = active["name"].as_str().filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        names.push(name);
+    }
+    names.sort_unstable();
+
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    names == expected
+}
+
+/// Wait until every durable this daemon expects has been created and is readable.
 ///
 /// The consumers are made by the hosted tasks *after* the edge starts
 /// serving, so a report taken the instant the daemon is connectable can
-/// legitimately catch one that does not exist yet and report it
-/// `Missing` — which is the probe telling the truth, and the two tests
-/// below asserting about a moment rather than about the daemon
-/// (<https://github.com/bricef/factor-q/issues/670>). Polling until the
-/// roster settles keeps the assertions exact instead of loosening them
-/// to accept an absence.
-async fn wait_for_durables(client: &fq_edge::EdgeClient) {
+/// legitimately catch one that does not exist yet or whose JetStream
+/// information is not readable yet. Polling until the exact roster is active
+/// keeps the assertions exact instead of loosening them to accept an absence.
+async fn wait_for_durables(client: &fq_edge::EdgeClient, expected: &[&str]) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         let report = invoke(client, control_doctor(), json!({}))
             .await
             .expect("report");
-        let consumers = report["consumers"].as_array().expect("consumers").clone();
-        if !consumers.is_empty() && consumers.iter().all(|c| c.get("active").is_some()) {
+        if durables_ready(&report, expected) {
             return;
         }
         assert!(
@@ -311,6 +338,30 @@ async fn wait_for_durables(client: &fq_edge::EdgeClient) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+#[test]
+fn durable_wait_requires_the_complete_active_roster() {
+    fn active(name: &&str) -> serde_json::Value {
+        json!({ "active": { "name": name } })
+    }
+    let mut consumers: Vec<_> = EXPECTED_DURABLES.iter().map(active).collect();
+    assert!(durables_ready(
+        &json!({ "consumers": consumers }),
+        &EXPECTED_DURABLES
+    ));
+
+    consumers[0]["active"] = serde_json::Value::Null;
+    assert!(!durables_ready(
+        &json!({ "consumers": consumers }),
+        &EXPECTED_DURABLES
+    ));
+
+    let missing: Vec<_> = EXPECTED_DURABLES[..5].iter().map(active).collect();
+    assert!(!durables_ready(
+        &json!({ "consumers": missing }),
+        &EXPECTED_DURABLES
+    ));
 }
 
 /// Close enough for money: the figures cross a JSON wire as f64, so
@@ -475,7 +526,7 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
             .await
             .expect("connect edge");
 
-    wait_for_durables(&client).await;
+    wait_for_durables(&client, &EXPECTED_DURABLES).await;
     let report = invoke(&client, control_doctor(), json!({}))
         .await
         .expect("report");
@@ -507,15 +558,7 @@ async fn control_doctor_answers_about_the_daemon_that_serves_it() {
         .map(|c| c["active"]["name"].as_str().expect("a named consumer"))
         .collect();
     assert_eq!(
-        consumers,
-        vec![
-            "fq-projector",
-            "fq-coordination",
-            "fq-heartbeat",
-            "fq-dispatcher",
-            "fq-advisory-watch",
-            "fq-maintenance",
-        ],
+        consumers, EXPECTED_DURABLES,
         "every durable this daemon runs is reported: {report}"
     );
     assert_eq!(report["dead_letters"]["exhausted_triggers"], 0);
@@ -540,7 +583,7 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
             .await
             .expect("connect edge");
 
-    wait_for_durables(&client).await;
+    wait_for_durables(&client, &EXPECTED_DURABLES).await;
     let report = invoke(&client, control_status(), json!({}))
         .await
         .expect("report");
@@ -584,15 +627,7 @@ async fn control_status_answers_with_what_only_a_running_daemon_has() {
         .map(|c| c["active"]["name"].as_str().expect("a named consumer"))
         .collect();
     assert_eq!(
-        consumers,
-        vec![
-            "fq-projector",
-            "fq-coordination",
-            "fq-heartbeat",
-            "fq-dispatcher",
-            "fq-advisory-watch",
-            "fq-maintenance",
-        ],
+        consumers, EXPECTED_DURABLES,
         "this fixture configures no summariser, so it is not expected; \
          maintenance is on by default, so it is: {report}"
     );
