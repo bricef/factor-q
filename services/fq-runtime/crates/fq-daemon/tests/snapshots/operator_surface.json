@@ -4129,7 +4129,7 @@
             "type": "string"
           },
           "round": {
-            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.",
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.\n\nOn a [`TurnAction::Outcome`] turn it is a sentinel past the\nend, not a Round anyone ran: one past the terminal payload's\n`total_llm_calls`, which counts *successful* calls, so on a run\nwith retries it reads lower than the last Assistant turn's\nround. Sort on `seq`, never on this.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -4377,7 +4377,7 @@
             "type": "string"
           },
           "round": {
-            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.",
+            "description": "The Round grouping key: one Round is an assistant action plus\nthe tool results it initiated (the model-turn count\n`max_iterations` gates). 0 on the opening prompt, which\nprecedes every Round, and on turns derived from events\npredating the field.\n\nOn a [`TurnAction::Outcome`] turn it is a sentinel past the\nend, not a Round anyone ran: one past the terminal payload's\n`total_llm_calls`, which counts *successful* calls, so on a run\nwith retries it reads lower than the last Assistant turn's\nround. Sort on `seq`, never on this.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
