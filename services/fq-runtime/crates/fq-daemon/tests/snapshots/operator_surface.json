@@ -4059,6 +4059,33 @@
                   "parameters"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "The invocation's terminal fact. `summary` preserves the runtime's\ncompletion summary or failure message for turn consumers; the\ntranscript bridge maps the fields its Outcome model carries.",
+                "properties": {
+                  "is_error": {
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "const": "outcome",
+                    "type": "string"
+                  },
+                  "phase": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "phase",
+                  "is_error"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -4280,6 +4307,33 @@
                   "parameters"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "The invocation's terminal fact. `summary` preserves the runtime's\ncompletion summary or failure message for turn consumers; the\ntranscript bridge maps the fields its Outcome model carries.",
+                "properties": {
+                  "is_error": {
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "const": "outcome",
+                    "type": "string"
+                  },
+                  "phase": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "phase",
+                  "is_error"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -4349,7 +4403,7 @@
         "title": "TurnState",
         "type": "object"
       },
-      "summary": "One action within a Round: an assistant output or a tool result.",
+      "summary": "One event-log-backed action: a prompt, assistant output, tool result, or terminal outcome.",
       "version": 1
     }
   }
