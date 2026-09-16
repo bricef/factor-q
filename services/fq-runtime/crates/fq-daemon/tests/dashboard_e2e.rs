@@ -325,6 +325,12 @@ struct HttpResponse {
     status: u16,
     headers: String,
     body: String,
+    /// Whether the server closed the connection, as opposed to the read
+    /// budget running out with the socket still open. For an ordinary
+    /// page this is always true (`Connection: close`); for an SSE
+    /// response it is the whole question — a stream that ends is a
+    /// stream that said everything it had to say.
+    completed: bool,
 }
 
 impl HttpResponse {
@@ -364,6 +370,7 @@ async fn try_get(
 
     let deadline = tokio::time::Instant::now() + budget;
     let mut raw = Vec::new();
+    let mut completed = false;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -371,7 +378,13 @@ async fn try_get(
         }
         let mut chunk = [0u8; 8192];
         match tokio::time::timeout(remaining, stream.read(&mut chunk)).await {
-            Ok(Ok(0)) | Err(_) => break,
+            // EOF: the server finished the response and closed.
+            Ok(Ok(0)) => {
+                completed = true;
+                break;
+            }
+            // The budget ran out with the socket still open.
+            Err(_) => break,
             Ok(Ok(n)) => raw.extend_from_slice(&chunk[..n]),
             Ok(Err(err)) => panic!("GET {path}: read failed: {err}"),
         }
@@ -390,6 +403,7 @@ async fn try_get(
         status,
         headers: lines.collect::<Vec<_>>().join("\n"),
         body: body.to_string(),
+        completed,
     })
 }
 
@@ -760,6 +774,42 @@ async fn check_transcript(at: &str, invocation: &str) {
     assert!(
         !resp.body.contains("/transcript/stream?after=") && !resp.body.contains("datastar.js"),
         "GET {path} rendered a live tail for a completed run.\n--- body ---\n{}",
+        resp.body
+    );
+
+    // The page no longer opens the SSE route, but the route is still
+    // served and is still the only thing a *running* invocation's page
+    // has — so it keeps its own coverage here, stated positively.
+    //
+    // Opened from the bottom of the log (`after=1`), where this finished
+    // run's turns already are. Three facts in one request: the turns are
+    // rendered (not merely a socket held open), the outcome patches
+    // `#status`, and the response *ends* — the stream returns its batch
+    // on the outcome instead of waiting out `TURN_POLL_WAIT_MS`. The
+    // budget is the failure bound, not the expected duration: a stream
+    // that did not terminate would burn all of it and fail on
+    // `completed`.
+    let replay = format!("/invocations/{invocation}/transcript/stream?after=1&full=0");
+    let resp = get(at, &replay, Duration::from_secs(10)).await;
+    assert_eq!(resp.status, 200, "GET {replay}");
+    assert!(
+        resp.header_contains("content-type", "text/event-stream"),
+        "GET {replay} should be SSE.\n--- headers ---\n{}",
+        resp.headers
+    );
+    assert_contains(&replay, &resp, "datastar-patch-elements");
+    // `#turns` is the prepend target for a real turn. The stream's
+    // error path also emits a patch, at `#status`, so asserting the
+    // event name alone would pass on a stream that only reported a
+    // failure.
+    assert_contains(&replay, &resp, "selector #turns");
+    // The outcome turn, rendered as the status patch the client reads
+    // `s.done` from. This is the assertion the whole issue is about.
+    assert_contains(&replay, &resp, "run completed");
+    assert!(
+        resp.completed,
+        "GET {replay} never ended — a terminal run's tail must close on its \
+         outcome, not hold the socket for the full poll.\n--- body ---\n{}",
         resp.body
     );
 }
