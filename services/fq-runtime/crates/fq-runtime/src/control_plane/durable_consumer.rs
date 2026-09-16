@@ -381,11 +381,7 @@ where
         shutdown,
         handler,
         NO_TICK,
-        |msg| match admit(&msg.payload, &msg.subject, message_stream_seq(msg)) {
-            Admission::Accept(event) => Admission::Accept(*event),
-            Admission::AckMalformed(err) => Admission::AckMalformed(err),
-            Admission::Halt(on) => Admission::Halt(on),
-        },
+        admit_event,
     )
     .await
 }
@@ -415,13 +411,22 @@ where
         shutdown,
         handler,
         Some((tick_every, tick)),
-        |msg| match admit(&msg.payload, &msg.subject, message_stream_seq(msg)) {
-            Admission::Accept(event) => Admission::Accept(*event),
-            Admission::AckMalformed(err) => Admission::AckMalformed(err),
-            Admission::Halt(on) => Admission::Halt(on),
-        },
+        admit_event,
     )
     .await
+}
+
+/// The event-stream admission as the loop takes it: [`admit`] against the
+/// delivery's bytes, subject and position, unboxed for the handler. Both
+/// event entry points pass this and nothing else, so "event consumer"
+/// means exactly "this admission".
+fn admit_event(msg: &async_nats::jetstream::Message) -> Admission<Event> {
+    let stream_seq = msg.info().ok().map(|info| info.stream_sequence);
+    match admit(&msg.payload, &msg.subject, stream_seq) {
+        Admission::Accept(event) => Admission::Accept(*event),
+        Admission::AckMalformed(err) => Admission::AckMalformed(err),
+        Admission::Halt(on) => Admission::Halt(on),
+    }
 }
 
 type NoTickFn = fn() -> std::future::Ready<()>;
@@ -575,10 +580,6 @@ pub fn admit(payload: &[u8], subject: &str, stream_seq: Option<u64>) -> Admissio
             stream_seq,
         }),
     }
-}
-
-fn message_stream_seq(msg: &async_nats::jetstream::Message) -> Option<u64> {
-    msg.info().ok().map(|info| info.stream_sequence)
 }
 
 /// Await the next tick, or forever when the consumer has no
