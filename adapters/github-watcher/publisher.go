@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+const (
+	triggerIDHeader = "Fq-Trigger-Id"
+	messageIDHeader = "Nats-Msg-Id"
 )
 
 // NatsTriggerPublisher publishes triggers to the `fq-triggers` JetStream
@@ -38,19 +44,31 @@ func NewNatsTriggerPublisher(url string, log *slog.Logger, extra ...nats.Option)
 
 // Publish publishes a trigger for agentID with the given payload, per the
 // wire contract: subject `fq.trigger.<agentID>`, a JSON-value body (here a
-// JSON object), awaiting the JetStream ack for durability.
-func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID string, payload TriggerPayload) error {
+// JSON object), awaiting the JetStream ack for durability. It returns the
+// trigger id stamped on the message.
+func (p *NatsTriggerPublisher) Publish(ctx context.Context, agentID string, payload TriggerPayload) (string, error) {
 	subject := triggerSubject(agentID)
 	// The contract's body is a JSON value; the convention payload is an
 	// object. json.Marshal produces exactly that.
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+		return "", fmt.Errorf("marshal payload: %w", err)
 	}
-	if _, err := p.js.Publish(ctx, subject, body); err != nil {
-		return fmt.Errorf("publish to %s: %w", subject, err)
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", fmt.Errorf("create trigger id: %w", err)
 	}
-	return nil
+	triggerID := id.String()
+	msg := nats.NewMsg(subject)
+	msg.Data = body
+	msg.Header.Set(triggerIDHeader, triggerID)
+	// Include the issue and unique trigger id: retries after a failed run are
+	// legitimate new triggers and must not be collapsed by JetStream's window.
+	msg.Header.Set(messageIDHeader, fmt.Sprintf("github-watcher/issue-%d@%s", payload.GitHub.Issue, triggerID))
+	if _, err := p.js.PublishMsg(ctx, msg); err != nil {
+		return "", fmt.Errorf("publish to %s: %w", subject, err)
+	}
+	return triggerID, nil
 }
 
 // Conn returns the underlying NATS connection so the outcome observer can

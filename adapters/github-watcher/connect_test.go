@@ -188,7 +188,7 @@ func TestPublishWhileDisconnectedFailsInsteadOfBuffering(t *testing.T) {
 	defer pub.Close()
 
 	started := time.Now()
-	err = pub.Publish(context.Background(), "m0-issue-fix", TriggerPayload{Task: "issue #1"})
+	_, err = pub.Publish(context.Background(), "m0-issue-fix", TriggerPayload{Task: "issue #1"})
 	if err == nil {
 		t.Fatal("a publish on a disconnected connection must fail, not be buffered for later delivery")
 	}

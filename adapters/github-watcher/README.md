@@ -185,6 +185,13 @@ object with the repository and issue number. The `<agent>` interprets it. The
 `github.issue` field binds an outcome back to its issue; the watcher also accepts
 the former task-string payload while in-flight legacy invocations finish.
 
+Every published trigger also carries two tracing headers. `Fq-Trigger-Id` is a
+UUIDv7 that the runtime preserves across redelivery, and `Nats-Msg-Id` is
+`github-watcher/issue-<N>@<uuid>`. Including the unique trigger UUID means
+JetStream deduplicates a repeated publish of that trigger without collapsing a
+legitimate later re-trigger of the same issue. The success log records the same
+UUID as `trigger_id`, linking the issue to runtime invocations.
+
 ## Development
 
 ```console
