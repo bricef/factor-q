@@ -1393,6 +1393,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             tools_available: tool_schemas,
             allowed_tool_names,
             max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
+            max_tokens: agent.max_tokens().unwrap_or(self.config.max_tokens),
             effort: agent.effort(),
         };
         let context = merge_step0_context(
@@ -2443,9 +2444,7 @@ fn unix_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Convert a worker-store error into the runner's executor
-/// error. The store's `Backend` variant is opaque, so we just
-/// preserve the message.
+/// Convert an opaque worker-store error into the runner's executor error, preserving its message.
 fn map_store_err(err: crate::worker::WorkerStoreError) -> ExecutorError {
     ExecutorError::WorkerStore(err.to_string())
 }
@@ -2454,6 +2453,7 @@ fn harness_error_to_failure_kind(err: &HarnessError) -> FailureKind {
     use super::types::HarnessErrorKind::*;
     match err.kind {
         MaxIterations => FailureKind::MaxIterations,
+        OutputTruncated => FailureKind::RuntimeError,
         InternalError => FailureKind::RuntimeError,
     }
 }

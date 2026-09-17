@@ -106,6 +106,9 @@ pub struct ConfigSnapshot {
     pub tools: Vec<String>,
     pub sandbox: SandboxSnapshot,
     pub budget: Option<f64>,
+    /// Per-agent output-token override, absent on older snapshots.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     /// MCP capability grants (ADR-0017) captured for audit. Absent for
     /// snapshots written before Step 8 / for agents that grant nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

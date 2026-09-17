@@ -47,6 +47,8 @@ pub struct AgentConfig {
     /// producer site rather than relying on a sentinel here. See
     /// `worker::reducer::harness::DEFAULT_MAX_ITERATIONS`.
     pub max_iterations: u32,
+    /// Maximum output tokens requested for each model turn.
+    pub max_tokens: u32,
     /// Optional per-agent reasoning effort; `None` uses the provider default.
     pub effort: Option<Effort>,
 }
@@ -254,6 +256,8 @@ pub enum HarnessErrorKind {
     /// `MAX_ITERATIONS` exceeded before the LLM declared a final
     /// answer.
     MaxIterations,
+    /// The model repeatedly exhausted its configured output-token cap.
+    OutputTruncated,
     /// Invariant violation inside the reducer (state corruption,
     /// unexpected variant). Should be impossible if the host
     /// honours the protocol; surfaced for debugging.

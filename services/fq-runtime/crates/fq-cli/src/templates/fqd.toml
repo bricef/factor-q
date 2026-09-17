@@ -20,6 +20,11 @@
 # turns; lower it to fail runaway agents sooner.
 # max_iterations = 100
 
+# Daemon default output-token cap for every model turn. Agent definitions
+# may override this with top-level `max_tokens:` frontmatter. A truncated
+# turn receives a corrective notice; three consecutive truncations fail.
+# max_tokens = 4096
+
 [nats]
 # URL of the NATS server, host and port only. JetStream must be enabled
 # on the server.

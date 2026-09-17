@@ -466,6 +466,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
                     .store(worker_store.clone())
                     .worker_id(worker_id.clone())
                     .max_iterations(config.max_iterations)
+                    .max_tokens(config.max_tokens)
                     .enforce_pricing(true)
                     .workspace(workspace.clone())
                     .mcp_server_root(config.state.directory.join("mcp"))

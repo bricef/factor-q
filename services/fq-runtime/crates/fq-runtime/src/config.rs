@@ -71,6 +71,9 @@ pub struct Config {
     /// configuration, not code).
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// Daemon default output-token cap per model turn.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
     /// How long `fq down` (ADR-0027) waits for in-flight invocations to
     /// suspend at a step boundary before hard-stopping the stragglers and
     /// letting the next binary's recovery resume them. A bounded wait,
@@ -393,6 +396,10 @@ fn default_max_iterations() -> u32 {
     crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
 }
 
+fn default_max_tokens() -> u32 {
+    crate::worker::reducer::harness::DEFAULT_MAX_TOKENS
+}
+
 /// Default graceful-drain deadline: 120s. Long enough for a typical
 /// model/tool step to finish so the invocation suspends at the next
 /// boundary; past it, `fq down` hard-stops and recovery takes over.
@@ -434,6 +441,7 @@ impl Default for Config {
             summary: SummaryConfig::default(),
             maintenance: MaintenanceConfig::default(),
             max_iterations: default_max_iterations(),
+            max_tokens: default_max_tokens(),
             drain_deadline_ms: default_drain_deadline_ms(),
             edge: EdgeConfig::default(),
             tools: ToolsConfig::default(),
@@ -1153,6 +1161,21 @@ max_timeout_secs = 900
             config.max_iterations,
             crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS
         );
+    }
+
+    #[test]
+    fn max_tokens_defaults_when_absent() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.max_tokens,
+            crate::worker::reducer::harness::DEFAULT_MAX_TOKENS
+        );
+    }
+
+    #[test]
+    fn max_tokens_parses_override() {
+        let config: Config = toml::from_str("max_tokens = 8192").unwrap();
+        assert_eq!(config.max_tokens, 8192);
     }
 
     #[test]
