@@ -2425,8 +2425,8 @@ mod budget_properties {
         /// Random usages × random budget: cost accounting is exact
         /// (the outcome's total equals the independent recomputation
         /// from the pricing table), `Completed` never exceeds the
-        /// budget, and `BudgetExceeded` exceeds it by at most the
-        /// crossing call.
+        /// budget, and `BudgetExceeded` reaches or exceeds it by at
+        /// most the crossing call.
         #[test]
         fn ceiling_and_accounting_invariants(
             seed: u64,
@@ -2455,6 +2455,14 @@ mod budget_properties {
                 let events = world.sink.events();
                 let k = llm_request_count(&events);
                 let spent: f64 = usages[..k].iter().map(cost_of).sum();
+                for dispatched in 0..k {
+                    let before: f64 = usages[..dispatched].iter().map(cost_of).sum();
+                    assert!(
+                        before < budget,
+                        "call {dispatched} dispatched after the budget was reached: \
+                         {before} >= {budget}"
+                    );
+                }
 
                 match outcome {
                     InvocationOutcome::Completed { .. } => {
@@ -2463,7 +2471,7 @@ mod budget_properties {
                     }
                     InvocationOutcome::BudgetExceeded { cost, .. } => {
                         assert_eq!(cost, spent, "outcome total must equal the recomputation");
-                        assert!(cost > budget, "trip without crossing: {cost} <= {budget}");
+                        assert!(cost >= budget, "trip below the budget: {cost} < {budget}");
                         let before: f64 = usages[..k - 1].iter().map(cost_of).sum();
                         assert!(
                             before <= budget,
