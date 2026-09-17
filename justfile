@@ -984,3 +984,15 @@ clean:
     for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && go clean && rm -rf target); done
     rm -rf dist
     rm -rf docs/design/states docs/design/committed/states
+
+# The measurement instrument's two human-entered inputs (metrics/README.md,
+# plan docs/plans/active/2026-09-17-measurement-instrument.md). Interventions
+# and touch minutes cannot be reconstructed from history, so they are logged
+# as they happen; the script validates the vocabulary and stamps UTC time.
+# Log an intervention against an issue: `just touch 838 15 fix "closed a duplicate PR"`.
+touch issue minutes type *note:
+    python3 scripts/metrics-log.py touch {{issue}} {{minutes}} {{type}} {{note}}
+
+# Tag an accepted change with its baseline-equivalent size: `just tag 837 M --issue 798`.
+tag pr size *note:
+    python3 scripts/metrics-log.py tag {{pr}} {{size}} {{note}}
