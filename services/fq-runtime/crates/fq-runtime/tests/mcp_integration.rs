@@ -8,10 +8,19 @@
 //! Every start of that server goes through [`start_with_retry`], which
 //! absorbs the reference server's known startup flake and nothing else
 //! — see the comment above it for what that means and why.
+//!
+//! The package is installed **once per test binary**, before any test
+//! spawns it ([`require_npx`] does this). Concurrent `npx -y` runs of a
+//! package that is not yet in the npx cache race each other inside one
+//! install directory and leave it half-written (#798), which is what
+//! every "connection closed: initialize response" in CI turned out to
+//! be. After the one install, every concurrent start finds the package
+//! present and never touches the cache.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Once, OnceLock};
+use std::time::{Duration, Instant};
 
 use fq_runtime::mcp::{
     AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpError, McpServerConfig,
@@ -21,9 +30,16 @@ use fq_tools::{Tool, ToolContext, ToolSandbox};
 use rmcp::model::{CreateMessageResult, LoggingLevel, Root, SamplingMessage};
 use tokio::sync::mpsc;
 
-/// Skip the test if `npx` is not available.
+/// Skip the test if `npx` is not available. When it is, make sure the
+/// pinned server is installed and runnable before this test spawns it —
+/// once per test binary, whichever test gets here first (#798).
+///
+/// Every test that starts the server calls this first, so the install
+/// is always ahead of the first concurrent `npx -y`. If the install
+/// fails, every server-dependent test fails here with npx's own stderr
+/// rather than racing a broken cache and reporting `connection closed`.
 fn require_npx() -> bool {
-    match std::process::Command::new("npx")
+    let present = match std::process::Command::new("npx")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -31,12 +47,127 @@ fn require_npx() -> bool {
     {
         Ok(status) => status.success(),
         Err(_) => false,
+    };
+    if present {
+        forward_server_stderr_into_test_output();
+        if let Err(why) = EVERYTHING_INSTALL.get_or_init(install_everything_server) {
+            panic!("{why}");
+        }
     }
+    present
 }
 
 /// Pinned so the TDD oracle is stable and runs from the local npx
 /// cache without hitting the npm registry. Bump deliberately.
 const EVERYTHING_SERVER: &str = "@modelcontextprotocol/server-everything@2026.1.26";
+
+/// The one install per test binary: `Ok` once the pinned server has
+/// started and exited cleanly on this machine, `Err` with the reason.
+static EVERYTHING_INSTALL: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// How long the one install may take. A cold `npx -y` of the pinned
+/// package measured 10–30 s on a loaded 8-core box and about 9 s on a
+/// GitHub runner; the registry being slow is the only thing that
+/// should get near this.
+const EVERYTHING_INSTALL_DEADLINE: Duration = Duration::from_secs(180);
+
+/// Install the pinned everything server into the npx cache by running
+/// it once in `stdio` mode with a closed stdin: npx fetches and unpacks
+/// the package if it is missing, node loads the whole server (so a
+/// half-written cache entry fails here, legibly), and the server exits
+/// on stdin's EOF.
+///
+/// Runs with the environment `mcp::stdio` gives a child — cleared, PATH
+/// only — so npm resolves the same cache the runtime's children will.
+fn install_everything_server() -> Result<(), String> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    let started = Instant::now();
+    let mut child = Command::new("npx")
+        .args(["-y", EVERYTHING_SERVER, "stdio"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("could not run `npx -y {EVERYTHING_SERVER} stdio`: {err}"))?;
+    // Drain stderr on its own thread so a chatty install cannot fill the
+    // pipe and stall while this thread polls for exit.
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let drain = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < EVERYTHING_INSTALL_DEADLINE => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "gave up after {}s",
+                    EVERYTHING_INSTALL_DEADLINE.as_secs()
+                ));
+            }
+            Err(err) => break Err(format!("wait failed: {err}")),
+        }
+    };
+    let stderr = drain.join().unwrap_or_default();
+    let elapsed = started.elapsed();
+    match status {
+        Ok(status) if status.success() => {
+            eprintln!("{EVERYTHING_SERVER}: installed and started once in {elapsed:.1?}");
+            Ok(())
+        }
+        Ok(status) => Err(install_failure(
+            &format!("exited with {status}"),
+            elapsed,
+            &stderr,
+        )),
+        Err(why) => Err(install_failure(&why, elapsed, &stderr)),
+    }
+}
+
+fn install_failure(what: &str, elapsed: Duration, stderr: &str) -> String {
+    format!(
+        "{EVERYTHING_SERVER} did not start on this machine ({what} after {elapsed:.1?}); \
+         every test that needs it fails here rather than racing npx (#798).\n\
+         --- npx stderr ---\n{}\n--- end npx stderr ---\n\
+         If the error names a module missing under an `_npx/` directory, that npx cache \
+         entry was left half-written by an earlier concurrent install: delete that \
+         directory and run again.",
+        stderr.trim_end()
+    )
+}
+
+/// Route the runtime's `mcp.server.stderr` log lines — what a spawned
+/// server writes to its stderr — into libtest's per-test capture, so a
+/// failing test's output shows what the server said before it died.
+///
+/// One global subscriber, installed once; nothing else in this binary
+/// sets one. `with_test_writer` is what scopes the lines to the test
+/// that spawned the server: each `#[tokio::test]` runs its own
+/// current-thread runtime, so the forwarder task writes on that test's
+/// thread.
+fn forward_server_stderr_into_test_output() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "off,mcp.server.stderr=info",
+            ))
+            .with_test_writer()
+            .with_ansi(false)
+            .without_time()
+            .try_init();
+    });
+}
 
 /// Ensures panic and early-return paths kill the complete npx process tree.
 #[cfg(unix)]
@@ -90,6 +221,22 @@ fn everything_config() -> McpServerConfig {
 //     "connection closed: initialize response" }`, on three runs across
 //     two unrelated PRs (#597 runs 33973344760 / 33974578135, #604 run
 //     33987350130).
+//
+// The second signature was root-caused on 2026-09-17 (#798): it was not
+// the server flaking but `npx` itself. On a runner whose npx cache is
+// cold, this binary's tests each run `npx -y <package>` within seconds
+// of each other; every one that starts while the first install is still
+// unpacking either races the same install directory (`ENOTEMPTY` on a
+// dependency's `test/` dir) or sees the package "present" and runs it
+// before its dependencies exist (`sh: mcp-server-everything: not found`,
+// or `ERR_MODULE_NOT_FOUND` inside the SDK). The child exits before
+// answering `initialize`, which the client reports as `connection
+// closed: initialize response`; in `streamableHttp` mode it never binds
+// its port. A half-written entry stays broken for every later run until
+// it is deleted. `require_npx` now installs the package once per test
+// binary, before any test spawns it, which removes the race; the retry
+// below stays for the first signature and for whatever the server does
+// next.
 //
 // Both are startup, and only startup. So `start_with_retry` retries
 // exactly one thing: [`McpError::ServerStart`], which the shared start
@@ -205,8 +352,6 @@ async fn start_everything_with_requests(
 /// (reaped as a group on drop) and the `/mcp` url to dial.
 #[cfg(unix)]
 async fn spawn_http_everything_server() -> (GroupedChild, String) {
-    use std::time::Duration;
-
     // Allocate a free loopback port (drop the listener so the child can
     // bind it), then start the everything server in streamable-HTTP mode.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -214,15 +359,25 @@ async fn spawn_http_everything_server() -> (GroupedChild, String) {
         .local_addr()
         .expect("local addr")
         .port();
+    // The child's stderr goes to an unlinked temp file, read back only if
+    // it never comes up: the failure then says what npx or the server
+    // said instead of just "never listened" (#798).
+    let mut stderr = tempfile::tempfile().expect("stderr capture file");
     let mut command = tokio::process::Command::new("npx");
     command
         .args(["-y", EVERYTHING_SERVER, "streamableHttp"])
+        // Same environment as `mcp::stdio` gives a child (cleared, PATH
+        // only), so npx resolves the cache `require_npx` installed into.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("PORT", port.to_string())
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::from(
+            stderr.try_clone().expect("dup stderr capture file"),
+        ));
     fq_test_support::spawn_grouped(&mut command);
-    let child = GroupedChild(
+    let mut child = GroupedChild(
         command
             .spawn()
             .expect("spawn streamable-http everything server"),
@@ -230,8 +385,10 @@ async fn spawn_http_everything_server() -> (GroupedChild, String) {
 
     // Wait until the server is listening (bounded), then give express a
     // beat to mount the `/mcp` route after the socket binds.
+    const LISTEN_DEADLINE: Duration = Duration::from_secs(10);
+    let started = Instant::now();
     let mut listening = false;
-    for _ in 0..100 {
+    while started.elapsed() < LISTEN_DEADLINE {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
@@ -241,7 +398,23 @@ async fn spawn_http_everything_server() -> (GroupedChild, String) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(listening, "everything server never listened on port {port}");
+    if !listening {
+        use std::io::{Read as _, Seek as _};
+        let child_state = match child.try_wait() {
+            Ok(Some(status)) => format!("child exited with {status}"),
+            Ok(None) => "child still running".to_string(),
+            Err(err) => format!("child state unknown: {err}"),
+        };
+        let mut said = String::new();
+        let _ = stderr.seek(std::io::SeekFrom::Start(0));
+        let _ = stderr.read_to_string(&mut said);
+        panic!(
+            "everything server never listened on port {port} within {}s ({child_state})\n\
+             --- child stderr ---\n{}\n--- end child stderr ---",
+            LISTEN_DEADLINE.as_secs(),
+            said.trim_end()
+        );
+    }
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     (child, format!("http://127.0.0.1:{port}/mcp"))
