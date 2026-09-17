@@ -130,14 +130,22 @@ def main(argv: list[str]) -> int:
     tag = sub.add_parser("tag", help="tag an accepted change with its baseline-equivalent size")
     tag.add_argument("pr")
     tag.add_argument("size")
-    tag.add_argument("--issue", default=None, help="the issue the PR closed, if known")
     tag.add_argument("note", nargs="*")
     tag.set_defaults(run=cmd_tag)
 
-    # Intermixed: `tag 837 M --issue 798 a note` puts the option after the
-    # positionals, which plain parse_args refuses once `note` (nargs="*") has
-    # matched nothing.
-    args = parser.parse_intermixed_args(argv)
+    # `--issue N` may appear anywhere after the positionals (`just tag 837 M
+    # --issue 798 a note`); argparse cannot intermix options with a trailing
+    # nargs="*" positional under a subcommand, so lift it out by hand.
+    argv = list(argv)
+    issue = None
+    if "--issue" in argv:
+        at = argv.index("--issue")
+        if at + 1 >= len(argv):
+            raise SystemExit("--issue needs a value")
+        issue = argv[at + 1]
+        del argv[at : at + 2]
+    args = parser.parse_args(argv)
+    args.issue = getattr(args, "issue", None) or issue
     print(args.run(args))
     return 0
 
