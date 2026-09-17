@@ -316,6 +316,7 @@ ops-ci:
     bash ops/dogfood/tests/ops-crontab.sh
     bash ops/dogfood/tests/volume-content.sh
     bash ops/dogfood/tests/compose-config.sh
+    bash ops/dogfood/tests/refresh-tracked.sh
 
 # Run all quality checks — docs lint + link check + dependency audit + both
 # Rust gates + the Go adapters (the full local gate) — and print a per-phase

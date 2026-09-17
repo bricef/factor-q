@@ -39,11 +39,11 @@ the previous, launcher-based shape was
 
 ```text
 fq-dogfood/
-├── compose.yml              # the stack — copied from ops/dogfood/
-├── compose.override.yml     # host-authored, bootstrap never touches it — the internal Caddyfile, a rehearsal's profiles
-├── .env                     # FQ_TAG (the deploy owns it), image repo, limits, the four host facts the ops service needs — from .env.example
-├── infra/nats.conf          # broker config; infra/Caddyfile and infra/Caddyfile.internal the proxy's — copied from ops/dogfood/infra/
-├── .secrets/env             # provider keys, GH_TOKEN, the broker token, the adapters' URLs (env.example)
+├── compose.yml              # the stack, and its configuration as values — laid out by bootstrap, refreshed by every deploy from the build it deploys
+├── compose.override.yml     # host-authored, nothing touches it — the internal Caddyfile, a rehearsal's profiles
+├── .env                     # FQ_TAG (the deploy owns it), image repo, the four host facts the ops service needs, the ops scripts' knobs — from .env.example. Not the stack's configuration
+├── infra/nats.conf          # broker config; infra/Caddyfile and infra/Caddyfile.internal the proxy's — refreshed with compose.yml
+├── .secrets/env             # provider keys, GH_TOKEN, the broker token, the adapters' URLs — secrets only (env.example)
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
 ├── .secrets/nats-auth.conf  # authorization { token: "…" }
 ├── .secrets/caddy.env       # DASH_USER / DASH_HASH / DASH_COOKIE / DASH_INTERNAL_ADDR on an internal host
@@ -59,9 +59,18 @@ docker volume fq-dogfood_nats-data   → the event log
 docker volume fq-dogfood_caddy-data, fq-dogfood_caddy-config → certificates; regenerable
 ```
 
-Everything tracked is copied in by `bootstrap.sh` and refreshed by
-running it again; the secrets and `.env` are written once by hand and
-never overwritten. Secrets are `chmod 600` and never committed
+The tracked files — `compose.yml` and `infra/` — are laid out by
+`bootstrap.sh` and, from the first deploy on, refreshed by every deploy
+from the build it deploys: the `fq-ops` image carries the commit's copies
+(`fq-ops stack`), the deploy lays them over the instance's before `up`,
+and a rollback puts the previous build's back. **The stack's
+configuration is declared in `compose.yml`, in git** — the daemon's
+limits, a service's settings, the grace period are values there, and a
+change is a merge that lands with the hourly deploy. The secrets, `.env`
+and the override are written by hand and never overwritten; `.env` holds
+the tag, the host's facts and the ops scripts' knobs, and `.secrets/env`
+holds secrets only. A non-secret setting written into `.secrets/env` is
+outranked by `compose.yml`'s `environment:` and does nothing. Secrets are `chmod 600` and never committed
 (`ops/dogfood/.secrets/` is git-ignored so a local `docker compose
 config` can create them).
 
@@ -85,12 +94,13 @@ The live instance's own definitions are not here: they live in the
 until #257 lands — which declares `model: claude-fable-5`; add that to
 the registry before installing it.
 
-## Bootstrap (one-time per host, and again when the tracked files change)
+## Bootstrap (one-time per host)
 
 A dedicated Debian or Ubuntu host, and root. [bootstrap.sh](bootstrap.sh)
-does the host-side work and is idempotent — run it again after any change
-to `compose.yml`, `infra/` or the scripts, and it refreshes those while
-never touching a secret, `.env`, or a volume:
+does the host-side work and is idempotent, never touching a secret,
+`.env`, or a volume. A change to `compose.yml`, `infra/` or the scripts
+does not need it: those land with the deploy, from the build's own
+`fq-ops` image. Re-run it on a host whose last deploy predates that:
 
 ```sh
 # from a checkout on the host
@@ -243,7 +253,7 @@ tail -f logs/deploy.log                          # what the hourly deploy --auto
 cd ~/fq-dogfood && docker compose ps            # every service, its state and health (each image probes itself)
 docker compose logs -f fqd                      # the daemon's log (rotated by the driver: 5 × 50 MB)
 docker compose exec fqd fq status               # ask the daemon; fq doctor, fq workers list likewise
-docker compose stop fqd                         # a drain (SIGTERM), within FQ_STOP_GRACE
+docker compose stop fqd                         # a drain (SIGTERM), within the 150 s grace period compose.yml declares
 docker images ghcr.io/bricef/fq-dogfood         # local deploy history
 ```
 
@@ -266,6 +276,21 @@ removes retired definitions and runs `fq reload` — `--restart` for
 `fqd.toml`, whose model registry is read only at startup. `fq-cron.toml`
 hot-reloads by itself. The commands below are for reading the volume and
 for one-off repair: anything left in it by hand is gone at the next sync.
+
+**The stack's configuration is declared in `compose.yml`, not on the
+host.** The daemon's CPU and memory limits, its stop grace period, the
+watcher's repository, agent and poll interval, the build-cache bounds
+the agents see — every one is a value in `compose.yml`, under the
+service's `environment:` or `deploy:` block, in git. Changing one is an
+edit and a merge: CI publishes the build, and the hourly deploy lays
+that build's `compose.yml` over the instance's and recreates what
+changed, with the same idle check and rollback as any other build.
+Nothing about it is typed on the host. The host keeps three things of
+its own: `.secrets/` (secrets only — a non-secret written there under a
+name `compose.yml` declares is outranked and inert), `.env` (the tag,
+the host's facts, the ops scripts' knobs) and `compose.override.yml`.
+When the guest's size changes (infra-ctl, `guests/fq-dogfood.yml`), the
+limits in `compose.yml` change with it, in the same breath.
 
 **A new `fq.maintenance.*` job goes in after the daemon, never before.**
 The daemon's maintenance consumer is what creates the `fq-maintenance`
@@ -466,7 +491,8 @@ The `ops` service runs `deploy --auto` hourly from the image's crontab
 ([`ops.crontab`](ops.crontab)), as a one-shot sibling container that
 the deploy's own `compose up` cannot kill. It is the same deploy as by
 hand — pull `main-latest`, resolve it to a commit, prove every image
-reports it, drain, up, verify — with three differences for running
+reports it, lay the build's `compose.yml` and `infra/` over the
+instance's, drain, up, verify — with three differences for running
 unattended:
 
 - **Quiet when there is nothing to do.** One timestamped line in
@@ -530,9 +556,10 @@ two share a lock.
 The stack schedules its own maintenance
 ([ADR-0036](../../docs/adrs/accepted/0036-ops-image-and-scheduler-service.md)).
 The `ops` service runs the commit's `fq-ops` image — the five scripts,
-their schedule (`ops.crontab`) under supercronic, and the docker CLI and
-compose plugin they drive the stack with — as the deploy user with the
-docker group. It mounts two things: the runtime's socket, the one
+their schedule (`ops.crontab`) under supercronic, the stack definition
+(`compose.yml` and `infra/`, which `fq-ops stack` streams and the deploy
+lays over the instance's), and the docker CLI and compose plugin they
+drive the stack with — as the deploy user with the docker group. It mounts two things: the runtime's socket, the one
 container that holds it (the daemon's never does; agents run there), and
 this directory at the same path it has on the host, so `docker compose`
 inside reads the same `compose.yml`, `.env`, override and secrets, and

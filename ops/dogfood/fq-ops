@@ -8,19 +8,28 @@
 #   fq-ops probe                  exit 0 while the scheduler is alive
 #                                 (the image's HEALTHCHECK)
 #   fq-ops check                  prove the image: the crontab parses, the
-#                                 toolset answers, the scripts are present
+#                                 toolset answers, the scripts and the
+#                                 stack definition are present
 #                                 (`just docker-check`)
+#   fq-ops stack                  the stack definition this build carries
+#                                 — compose.yml and infra/ — as a tar on
+#                                 stdout, for deploy.sh to lay over the
+#                                 instance's
 #   fq-ops <verb> [args...]       deploy | hygiene | backup | restore |
 #                                 notify — that script, from the image
 #
 # The scripts are ops/dogfood/'s, copied into the image unchanged; they
-# find the instance directory through FQ_DOGFOOD as they always did.
+# find the instance directory through FQ_DOGFOOD as they always did. So
+# is the stack definition: a limit or a service's setting is a value in
+# compose.yml, versioned with the binaries, and a deploy lays the build's
+# copy over the instance's — a rollback the previous build's.
 # FQ_OPS_LIB and FQ_OPS_ETC relocate the image's paths for the tests.
 set -euo pipefail
 
 LIB="${FQ_OPS_LIB:-/usr/local/lib/fq-ops}"
 ETC="${FQ_OPS_ETC:-/etc/fq-ops}"
 SCRIPTS=(deploy hygiene backup restore notify)
+STACK=(compose.yml infra/nats.conf infra/Caddyfile infra/Caddyfile.internal)
 
 usage() { awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; }
 version() { tr -d '[:space:]' < "$ETC/version"; }
@@ -52,7 +61,16 @@ case "$verb" in
             [ -x "$LIB/$s.sh" ] || { echo "fq-ops: missing $LIB/$s.sh" >&2; exit 1; }
             bash -n "$LIB/$s.sh"
         done
-        printf 'fq-ops %s: crontab parses, toolset answers, %s scripts present\n' "$(version)" "${#SCRIPTS[@]}" ;;
+        for f in "${STACK[@]}"; do
+            [ -f "$ETC/stack/$f" ] || { echo "fq-ops: missing $ETC/stack/$f" >&2; exit 1; }
+        done
+        printf 'fq-ops %s: crontab parses, toolset answers, %s scripts and the stack definition present\n' "$(version)" "${#SCRIPTS[@]}" ;;
+    stack)
+        # A build from before the image carried one answers with an
+        # unknown verb below (exit 2); deploy.sh treats either as "this
+        # build ships no stack definition" and leaves the instance's alone.
+        [ -d "$ETC/stack" ] || { echo "fq-ops: this image carries no stack definition" >&2; exit 1; }
+        exec tar -C "$ETC/stack" -cf - "${STACK[@]}" ;;
     deploy|hygiene|backup|restore|notify)
         exec "$LIB/$verb.sh" "$@" ;;
     -h|--help|help)

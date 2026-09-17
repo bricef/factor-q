@@ -9,12 +9,27 @@
 #
 # Layout on the host (`~/fq-dogfood`, the same tree as before):
 #
-#   compose.yml            this file (copied from ops/dogfood/)
-#   .env                   FQ_TAG and the knobs below (see .env.example)
-#   infra/nats.conf        broker config; infra/Caddyfile the proxy's
-#   .secrets/env           provider keys, GH_TOKEN, the broker token and
-#                          the adapters' URLs — a plain KEY=VALUE file
-#                          under compose, NOT a shell fragment
+#   compose.yml            this file — laid out by bootstrap.sh, then
+#                          refreshed by every deploy from the build it
+#                          deploys (the fq-ops image carries it)
+#   .env                   FQ_TAG (the deploy owns it), the four host
+#                          facts the ops service needs, and the ops
+#                          scripts' own knobs (see .env.example). NOT
+#                          the services' configuration: that is declared
+#                          in this file, as values
+#   infra/nats.conf        broker config; infra/Caddyfile the proxy's —
+#                          refreshed with this file
+#   .secrets/env           the provider keys, GH_TOKEN, the broker token
+#                          and the adapters' URLs — secrets ONLY, a plain
+#                          KEY=VALUE file under compose, NOT a shell
+#                          fragment. A non-secret setting does not go
+#                          here: it goes in a service's `environment:`
+#                          below, which outranks an env_file
+#
+# Configuration is declared here and nowhere else. A limit, a service's
+# setting, a grace period: a value in this file, in git, delivered by
+# the deploy. Nothing that reaches a service is edited on the host; the
+# host holds secrets, the tag, and facts about itself.
 #   .secrets/dashboard.env the dashboard's three edge settings, and only
 #                          those (#545: the web-facing process never
 #                          holds a provider key)
@@ -87,6 +102,14 @@ services:
     # a tiny init reaps the orphans a killed agent leaves behind, which the
     # daemon would otherwise accumulate as zombies.
     init: true
+    # The build-cache knobs the fleet's build agents allowlist through
+    # their `sandbox.env`: a bounded sccache, and no incremental artefacts
+    # a one-shot invocation never reuses. Declared here so the value is in
+    # git; anything left in .secrets/env under the same name is outranked.
+    environment:
+      SCCACHE_CACHE_SIZE: 30G
+      CARGO_INCREMENTAL: "0"
+    # Secrets only: the provider keys, GH_TOKEN, the broker token.
     env_file:
       - ./.secrets/env
     volumes:
@@ -103,7 +126,7 @@ services:
     # boundary, bounded by [worker] drain_deadline_ms (120 s by default).
     # The grace period must exceed that deadline plus teardown, or every
     # deploy is a kill. Change the two together.
-    stop_grace_period: ${FQ_STOP_GRACE:-150s}
+    stop_grace_period: 150s
     # The image's HEALTHCHECK is `fq status` over the edge; it needs the
     # one-time pairing described in the README, and reports unhealthy
     # until then. The start period covers recovery at boot.
@@ -114,8 +137,12 @@ services:
         limits:
           # The job cap of #292: agents compile the repo inside this
           # container, and an unbounded cargo takes the whole host.
-          cpus: "${FQ_CPUS:-6}"
-          memory: ${FQ_MEMORY:-24g}
+          # Sized to the instance's guest — fq-dogfood on nest is 8 cores
+          # and 16 GiB (infra-ctl, guests/fq-dogfood.yml) — leaving the
+          # broker, the adapters, the dashboard, the proxy and the OS
+          # the rest. Change the guest and this together.
+          cpus: "6"
+          memory: 12g
     logging: *logging
 
   github-watcher:
@@ -124,11 +151,18 @@ services:
     depends_on:
       nats:
         condition: service_healthy
-    # Everything the watcher reads is GHW_* in the environment (repo,
-    # agent, poll, labels, and GHW_NATS_URL with the token as userinfo —
-    # nats://<token>@nats:4222 in this shape) plus GH_TOKEN; no flags.
-    # Health is the image's own HEALTHCHECK (`github-watcher --probe`
-    # against its loopback /healthz): attached to the broker and polling.
+    # Everything the watcher reads is GHW_* in the environment; no flags.
+    # The settings are declared here — the repository it follows, the
+    # agent it dispatches, how often it polls; the lifecycle labels are
+    # the binary's own `status:` defaults. GHW_NATS_URL (the broker token
+    # as userinfo, nats://<token>@nats:4222) and GH_TOKEN are secrets and
+    # come from the env_file. Health is the image's own HEALTHCHECK
+    # (`github-watcher --probe` against its loopback /healthz): attached
+    # to the broker and polling.
+    environment:
+      GHW_REPO: bricef/factor-q
+      GHW_AGENT: m0-issue-fix
+      GHW_POLL: 60s
     env_file:
       - ./.secrets/env
     logging: *logging

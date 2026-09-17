@@ -39,4 +39,19 @@ expect "restarting unless stopped, under an init" '.services.ops.restart == "unl
 expect "no other service mounts the socket (ADR-0036 clause 5)" '[.services | to_entries[] | select(.key != "ops") | .value.volumes // [] | .[] | select(.source == "/var/run/docker.sock")] | length == 0'
 expect "the daemon's container mounts only its volume" '[.services.fqd.volumes[] | .source] == ["fq-data"]'
 
+# The stack's configuration is declared in the file, as values, and
+# delivered by the deploy — not interpolated from a .env on the host.
+# The stub .env above sets none of the old knobs, so a value that still
+# came from one would be the compose default, not the declaration.
+expect "the daemon's memory limit is declared: 12g" '(.services.fqd.deploy.resources.limits.memory | tostring) == "12884901888"'
+expect "and its cpu limit: 6" '(.services.fqd.deploy.resources.limits.cpus | tostring | ltrimstr("\"") | rtrimstr("\"")) == "6"'
+expect "and its stop grace period: 150 s" '(.services.fqd.stop_grace_period | tostring) == "2m30s"'
+expect "the watcher's repository, agent and poll are declared" '.services["github-watcher"].environment | .GHW_REPO == "bricef/factor-q" and .GHW_AGENT == "m0-issue-fix" and .GHW_POLL == "60s"'
+expect "the agents' build-cache bounds are declared on the daemon" '.services.fqd.environment | .SCCACHE_CACHE_SIZE == "30G" and .CARGO_INCREMENTAL == "0"'
+if grep -qE '\$\{FQ_(MEMORY|CPUS|STOP_GRACE)' "$here/../compose.yml"; then
+    printf '  FAIL compose.yml still interpolates a limit from .env\n'; failed=1
+else
+    printf '  ok   no limit is interpolated from .env\n'
+fi
+
 [ "$failed" = 0 ] && echo "compose-config: all cases pass" || { echo "compose-config: FAILED" >&2; exit 1; }

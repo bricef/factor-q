@@ -108,23 +108,26 @@ if [ "${#got}" -le 900 ]; then printf '  ok   the body stops at 900 characters (
 
 if bash "$deploy" --render-changes a b >/dev/null 2>&1; then printf '  FAIL --render-changes with too few arguments exited 0\n'; failed=1; else printf '  ok   --render-changes wants exactly three arguments\n'; fi
 
-# The repository the list is asked for is the watcher's, and it lives in
-# the watcher's file: env.example requires GHW_REPO in .secrets/env and
-# .env.example never carried it, so a lookup in .env finds nothing on a
-# host built from the templates — which is what happened, and the
-# message said "commit list unavailable" on every deploy. Judged on the
-# code alone, as idle-check.sh does; the comments may name the old form.
+# The repository the list is asked for is the watcher's, read from where
+# the watcher reads it: the resolved stack, where compose.yml declares
+# GHW_REPO under the watcher's `environment:`. It was once looked for in
+# .env (which never carried it — "commit list unavailable" on every
+# deploy), then in .secrets/env, which it has since left for compose.yml;
+# a lookup in either file finds nothing on a host built from the
+# templates. Judged on the code alone, as idle-check.sh does; the
+# comments may name the old forms.
 code="$(mktemp)"
 grep -v '^[[:space:]]*#' "$deploy" > "$code"
-want="GHW_REPO=\\(.*\\)\$/\\1/p' .secrets/env"
-stale="GHW_REPO=\\(.*\\)\$/\\1/p' .env"
-if grep -qF "$want" "$code"; then
-    printf "  ok   the repository is read from .secrets/env, the watcher's file\n"
+want='.services["github-watcher"].environment.GHW_REPO'
+if grep -qF "$want" "$code" && grep -q 'docker compose config' "$code"; then
+    printf "  ok   the repository is read from the resolved stack, where compose.yml declares it\n"
 else
-    printf '  FAIL deploy.sh does not read GHW_REPO from .secrets/env (env.example puts it there; .env.example never did)\n'; failed=1
+    printf '  FAIL deploy.sh does not read GHW_REPO from the resolved stack (compose.yml declares it there)\n'; failed=1
 fi
-if grep -qF "$stale" "$code"; then
-    printf '  FAIL deploy.sh still looks for GHW_REPO in .env, where no template writes it\n'; failed=1
-fi
+for stale in "GHW_REPO=\\(.*\\)\$/\\1/p' .env" "GHW_REPO=\\(.*\\)\$/\\1/p' .secrets/env"; do
+    if grep -qF "$stale" "$code"; then
+        printf '  FAIL deploy.sh still looks for GHW_REPO in a host file, where no template writes it\n'; failed=1
+    fi
+done
 rm -f "$code"
 [ "$failed" = 0 ] && echo "render-changes: all cases pass" || { echo "render-changes: FAILED" >&2; exit 1; }
