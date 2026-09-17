@@ -271,6 +271,93 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
     }
 }
 
+#[test]
+fn stuck_dispatcher_with_held_triggers_explains_duplicate_dispatch() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![active("fq-dispatcher", true, 8)],
+        Vec::new(),
+    )
+    .with_agents_at_cap(vec![fq_ops::health::AgentAtCap {
+        agent: "m0-issue-fix".to_string(),
+        in_flight: 2,
+        cap: 2,
+        held: 1,
+    }]);
+
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("fq-dispatcher: ✗ stuck — up to 8 redeliveries past its acked floor"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice"),
+        "got:\n{out}"
+    );
+    assert!(out.contains("transcripts' attempt: field"), "got:\n{out}");
+}
+
+#[test]
+fn stuck_dispatcher_with_dropped_duplicates_explains_duplicate_dispatch() {
+    let mut dispatcher = active("fq-dispatcher", true, 5);
+    if let fq_ops::health::ConsumerHealth::Active {
+        duplicate_dropped, ..
+    } = &mut dispatcher
+    {
+        *duplicate_dropped = 2;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![dispatcher],
+        Vec::new(),
+    );
+
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("2 duplicate deliveries dropped"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice"),
+        "got:\n{out}"
+    );
+}
+
+#[test]
+fn stuck_non_dispatcher_keeps_handler_failure_remediation() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![active("fq-projector", true, 3)],
+        Vec::new(),
+    );
+
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("fq-projector: ✗ stuck — up to 3 redeliveries past its acked floor"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("its handler keeps failing; check the daemon log for `consumer=fq-projector`"),
+        "got:\n{out}"
+    );
+    assert!(
+        !out.contains("redeliveries on the trigger consumer"),
+        "got:\n{out}"
+    );
+}
+
 /// A consumer that stopped on a v2 event, with `malformed_acked`
 /// malformed messages acked before it did.
 fn halted(name: &str, malformed_acked: u64) -> fq_ops::health::ConsumerHealth {
