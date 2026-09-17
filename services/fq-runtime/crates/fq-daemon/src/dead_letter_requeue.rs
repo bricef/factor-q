@@ -124,7 +124,11 @@ fn requeue_declaration() -> fq_ops::Command {
         "The payload is the dead letter's own record of the trigger, verbatim. \
          `trigger_seq` selects which dead letter by the original's trigger-\
          stream position (what `dead_letter.list` prints); absent takes the \
-         agent's most recent.",
+         agent's most recent. If the broker times out before acknowledging the \
+         publish, its outcome is unknown: the requeue remains claimed because \
+         the trigger may have been stored. Check it with `trigger.get` and wait \
+         for the dispatcher before retrying; broker deduplication makes a retry \
+         within two minutes safe.",
     ))
 }
 
@@ -182,6 +186,9 @@ async fn requeue(
         .publish_trigger_named(&agent, requeued.id, &requeued.payload)
         .await
     {
+        if matches!(err, fq_runtime::bus::BusError::PublishTimedOut) {
+            return Err(publish_failed(err, &original, &requeued));
+        }
         // The claim was for a publish that never happened; give it
         // back so the operator can try again. Best-effort by nature —
         // a crash here leaves a reservation that blocks a re-attempt,
@@ -190,7 +197,7 @@ async fn requeue(
             .release_requeue(requeued.id, original.id)
             .await
             .inspect_err(|e| tracing::warn!(error = %e, "releasing a failed requeue claim"));
-        return Err(publish_failed(err, &original));
+        return Err(publish_failed(err, &original, &requeued));
     }
     tracing::info!(
         agent_id = %agent,
@@ -309,12 +316,11 @@ async fn already_requeued(projection: &ProjectionStore, original: &Trigger) -> W
         Ok(Some(existing)) => WireError::Conflict {
             op: OP.into(),
             message: format!(
-                "trigger `{}` has already been requeued, as trigger `{existing}` — nothing was \
-                 published. Read it back with `trigger.get {{\"trigger_id\": \"{existing}\"}}`; \
-                 its `requeued_from` names this one. A dead letter is requeued at most once on \
-                 purpose: the second call is usually a caller unsure whether the first landed, \
-                 and the answer to that is the name of what it made. To run the work again \
-                 anyway, publish it as new work with `trigger.publish`.",
+                "a requeue of trigger `{}` is in flight or landed as trigger `{existing}` — \
+                 nothing was published by this attempt. Check it with `fq trigger get \
+                 {existing}` (`trigger.get`) and wait for the dispatcher before retrying. A dead letter is \
+                 requeued at most once on purpose. To run the work again anyway, publish it as \
+                 new work with `trigger.publish`.",
                 original.id
             ),
         },
@@ -329,9 +335,20 @@ async fn already_requeued(projection: &ProjectionStore, original: &Trigger) -> W
     }
 }
 
-/// The failure of the publish itself, after the claim was released.
-fn publish_failed(err: fq_runtime::bus::BusError, original: &Trigger) -> WireError {
+/// The failure or unknown outcome of the publish itself.
+fn publish_failed(
+    err: fq_runtime::bus::BusError,
+    original: &Trigger,
+    requeued: &Trigger,
+) -> WireError {
     match err {
+        fq_runtime::bus::BusError::PublishTimedOut => internal(format!(
+            "the broker timed out acknowledging requeued trigger `{}`; the trigger may have been \
+             stored, so the requeue remains claimed. Check `fq trigger get {}` and wait for the \
+             dispatcher before retrying. A retry within two minutes is safe because the broker \
+             deduplicates it",
+            requeued.id, requeued.id
+        )),
         // The payload is the dead letter's, not the caller's, so the
         // message says whose it is: a trigger accepted before the limit
         // existed can be too large to republish under it, and no edit
@@ -377,6 +394,10 @@ mod tests {
             // The refusal a caller cannot otherwise anticipate.
             "Unlocatable",
             "trigger.publish",
+            // A timed-out acknowledgement is not proof the publish failed.
+            "outcome is unknown",
+            "trigger.get",
+            "within two minutes safe",
         ] {
             assert!(
                 decl.description.contains(claim),
@@ -395,6 +416,29 @@ mod tests {
             }
         );
         assert_eq!(decl.op().to_string(), OP);
+    }
+
+    #[test]
+    fn a_timed_out_publish_reports_its_unknown_outcome() {
+        let trigger = Trigger::named(
+            uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000826").unwrap(),
+            fq_runtime::events::TriggerSource::Subject,
+            Some("fq.trigger.test-agent".into()),
+            serde_json::json!({"work": "once"}),
+        );
+
+        let err = publish_failed(
+            fq_runtime::bus::BusError::PublishTimedOut,
+            &trigger,
+            &trigger,
+        )
+        .to_string();
+
+        assert!(err.contains("may have been stored"), "{err}");
+        assert!(err.contains(&trigger.id.to_string()), "{err}");
+        assert!(err.contains("fq trigger get"), "{err}");
+        assert!(err.contains("wait for the dispatcher"), "{err}");
+        assert!(err.contains("retry within two minutes is safe"), "{err}");
     }
 
     /// **The receipt's key is the key `trigger.get` takes.** The whole

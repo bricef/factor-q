@@ -189,6 +189,9 @@ pub enum BusError {
     #[error("failed to publish event: {0}")]
     Publish(String),
 
+    #[error("timed out waiting for the broker to acknowledge the publish")]
+    PublishTimedOut,
+
     #[error("failed to subscribe: {0}")]
     Subscribe(String),
 
@@ -235,7 +238,10 @@ impl From<async_nats::jetstream::context::CreateStreamError> for BusError {
 
 impl From<async_nats::jetstream::context::PublishError> for BusError {
     fn from(err: async_nats::jetstream::context::PublishError) -> Self {
-        BusError::Publish(err.to_string())
+        match err.kind() {
+            async_nats::jetstream::context::PublishErrorKind::TimedOut => BusError::PublishTimedOut,
+            _ => BusError::Publish(err.to_string()),
+        }
     }
 }
 

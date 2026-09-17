@@ -2775,7 +2775,7 @@ fn requeueing_twice_is_refused_and_names_the_first_trigger() {
         "the refusal must name the trigger the first call made ({minted}); got:\n{stderr}"
     );
     assert!(
-        stderr.contains("already been requeued"),
+        stderr.contains("in flight or landed"),
         "and say why it refused; got:\n{stderr}"
     );
 }
