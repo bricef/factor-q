@@ -210,7 +210,11 @@ impl TriggerDispatcher {
         // mints one, and it never got that far — so name it here and
         // requeue it under that, rather than sending an anonymous copy.
         let id = trigger_id.unwrap_or_else(uuid::Uuid::now_v7);
-        match self.bus.publish_trigger_named(agent, id, payload).await {
+        match self
+            .bus
+            .publish_trigger_copy_named(agent, id, payload)
+            .await
+        {
             Ok(_) => {
                 debug!(
                     agent_id = %agent,

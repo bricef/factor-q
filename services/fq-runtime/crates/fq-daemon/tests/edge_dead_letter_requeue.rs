@@ -303,6 +303,15 @@ async fn the_receipt_names_a_trigger_that_can_be_walked_to() {
         "the published message carries the identity the receipt named"
     );
     assert_eq!(
+        raw.headers
+            .get(async_nats::header::NATS_MESSAGE_ID)
+            .map(|value| value.as_str()),
+        raw.headers
+            .get(fq_ops::trigger::TRIGGER_ID_HEADER)
+            .map(|value| value.as_str()),
+        "broker dedup and trigger identity use the same id"
+    );
+    assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&raw.payload).expect("json body"),
         payload
     );

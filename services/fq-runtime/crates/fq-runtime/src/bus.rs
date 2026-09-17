@@ -429,6 +429,7 @@ impl EventBus {
             storage: stream::StorageType::File,
             max_age: self.event_max_age,
             compression: Some(stream::Compression::S2),
+            duplicate_window: Duration::from_secs(120),
             ..Default::default()
         };
         self.reconcile_managed_stream_config(config).await?;
@@ -464,6 +465,7 @@ impl EventBus {
             storage: desired.storage,
             max_age: desired.max_age,
             compression: desired.compression,
+            duplicate_window: desired.duplicate_window,
             ..current
         };
         self.jetstream.update_stream(&update).await?;
@@ -510,17 +512,21 @@ impl EventBus {
             stream = TRIGGER_STREAM_NAME,
             "ensuring JetStream trigger stream exists"
         );
+        let config = stream::Config {
+            name: TRIGGER_STREAM_NAME.to_string(),
+            subjects: vec![ALL_TRIGGERS.to_string()],
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: DEFAULT_TRIGGER_MAX_AGE,
+            duplicate_window: Duration::from_secs(120),
+            ..Default::default()
+        };
+        self.reconcile_managed_stream_config(config).await?;
         let stream = self
             .jetstream
-            .get_or_create_stream(stream::Config {
-                name: TRIGGER_STREAM_NAME.to_string(),
-                subjects: vec![ALL_TRIGGERS.to_string()],
-                retention: stream::RetentionPolicy::Limits,
-                storage: stream::StorageType::File,
-                max_age: DEFAULT_TRIGGER_MAX_AGE,
-                ..Default::default()
-            })
-            .await?;
+            .get_stream(TRIGGER_STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
         let epoch = stream.cached_info().created.unix_timestamp_nanos() as i64;
         debug!(
             stream = TRIGGER_STREAM_NAME,
@@ -574,6 +580,7 @@ impl EventBus {
             retention: stream::RetentionPolicy::Limits,
             storage: stream::StorageType::File,
             max_age: DEFAULT_MAINTENANCE_MAX_AGE,
+            duplicate_window: Duration::from_secs(120),
             ..Default::default()
         };
         self.reconcile_managed_stream_config(config).await?;
@@ -588,16 +595,16 @@ impl EventBus {
             stream = ADVISORY_STREAM_NAME,
             "ensuring JetStream advisory capture stream exists"
         );
-        self.jetstream
-            .get_or_create_stream(stream::Config {
-                name: ADVISORY_STREAM_NAME.to_string(),
-                subjects: vec![trigger_max_deliveries_advisory_subject()],
-                retention: stream::RetentionPolicy::Limits,
-                storage: stream::StorageType::File,
-                max_age: DEFAULT_TRIGGER_MAX_AGE,
-                ..Default::default()
-            })
-            .await?;
+        let config = stream::Config {
+            name: ADVISORY_STREAM_NAME.to_string(),
+            subjects: vec![trigger_max_deliveries_advisory_subject()],
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: DEFAULT_TRIGGER_MAX_AGE,
+            duplicate_window: Duration::from_secs(120),
+            ..Default::default()
+        };
+        self.reconcile_managed_stream_config(config).await?;
         Ok(())
     }
 
@@ -624,9 +631,14 @@ impl EventBus {
         // poisons the retry loop.
         check_payload_size(payload.len(), self.max_payload)?;
 
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            async_nats::header::NATS_MESSAGE_ID,
+            event.envelope.event_id.to_string(),
+        );
         let ack = self
             .jetstream
-            .publish(subject, Bytes::from(payload))
+            .publish_with_headers(subject, headers, Bytes::from(payload))
             .await?
             .await?;
         Ok(ack.sequence)
@@ -690,6 +702,12 @@ fn managed_stream_config_diff(current: &stream::Config, desired: &stream::Config
         changes.push(format!(
             "compression: {:?} -> {:?}",
             current.compression, desired.compression
+        ));
+    }
+    if current.duplicate_window != desired.duplicate_window {
+        changes.push(format!(
+            "duplicate_window: {:?} -> {:?}",
+            current.duplicate_window, desired.duplicate_window
         ));
     }
     changes

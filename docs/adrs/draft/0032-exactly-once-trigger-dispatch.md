@@ -120,8 +120,9 @@ No timing parameter appears in the correctness argument.**
   argument. Rejected (retained only as redelivery pacing for pre-claim
   crashes).
 - **JetStream publish-side dedup / double-acks:** `Nats-Msg-Id` covers
-  publish duplication (already in place, 120s window); nothing consumer-side
-  offers exactly-once processing. Rejected as insufficient.
+  publish duplication (added in [#825](https://github.com/bricef/factor-q/issues/825),
+  with a 120s window); nothing consumer-side offers exactly-once processing.
+  Rejected as insufficient: consumer-side exactly-once remains this ADR's job.
 - **Fix the client:** the async-nats standing-pull behaviour deserves an
   upstream report, but a client's internals are not a correctness
   foundation. Rejected as the safety story.

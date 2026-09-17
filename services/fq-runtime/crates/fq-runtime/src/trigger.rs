@@ -265,11 +265,38 @@ impl EventBus {
         id: Uuid,
         payload: &Value,
     ) -> Result<PublishedTrigger, BusError> {
+        self.publish_trigger_with_message_id(agent, id, id, payload)
+            .await
+    }
+
+    /// Publish an intentional new stream copy of an existing trigger.
+    ///
+    /// Unlike retrying a publish, the dispatcher's drain handoff must create a
+    /// new entry before acknowledging the held one, while retaining the
+    /// trigger's logical identity. Give that new entry its own broker identity.
+    pub(crate) async fn publish_trigger_copy_named(
+        &self,
+        agent: &AgentId,
+        id: Uuid,
+        payload: &Value,
+    ) -> Result<PublishedTrigger, BusError> {
+        self.publish_trigger_with_message_id(agent, id, Uuid::now_v7(), payload)
+            .await
+    }
+
+    async fn publish_trigger_with_message_id(
+        &self,
+        agent: &AgentId,
+        id: Uuid,
+        message_id: Uuid,
+        payload: &Value,
+    ) -> Result<PublishedTrigger, BusError> {
         let subject = subject(agent);
         let body = serde_json::to_vec(payload)?;
         check_payload_size(body.len())?;
         let mut headers = async_nats::HeaderMap::new();
         headers.insert(TRIGGER_ID_HEADER, id.to_string());
+        headers.insert(async_nats::header::NATS_MESSAGE_ID, message_id.to_string());
         debug!(subject = %subject, trigger_id = %id, "publishing trigger");
         let ack = self
             .jetstream()
