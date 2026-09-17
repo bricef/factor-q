@@ -8,9 +8,12 @@ one-line caveats.
 
 - **Sandbox:** built-in tools are denied by default, and filesystem and
   command working-directory path allowlists are enforced. Agent definitions
-  may also declare `sandbox.env` and `sandbox.network`, but those declarations
-  are not yet enforced. Until they are, treat every agent as
-  network-unrestricted regardless of its definition. Enforcement is tracked
+  may also declare `sandbox.env` and `sandbox.network`; the environment
+  allowlist limits child inheritance and Linux makes direct reads of
+  `/proc/<fqd-pid>/environ` root-only, but arbitrary exec can still reach
+  secrets by other means, while network declarations are not yet enforced.
+  Treat every agent as network-unrestricted regardless of its definition.
+  Enforcement is tracked
   by [#208](https://github.com/bricef/factor-q/issues/208) (a CONNECT-filtering
   forward proxy) and [#209](https://github.com/bricef/factor-q/issues/209)
   (containerised isolation, ADR-0010); the issues that first identified the

@@ -79,26 +79,48 @@ fn scratch_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// True while `pid` is a live process still running `exe`.
+/// The parts of `/proc/<pid>/stat` that pin a PID to one process lifetime.
+/// Start time makes PID reuse distinguishable without reading
+/// `/proc/<pid>/exe`, which is intentionally inaccessible after fqd clears
+/// `PR_SET_DUMPABLE` (#400).
+#[derive(Clone)]
+struct ProcessIdentity {
+    comm: String,
+    start_time: String,
+}
+
+fn process_state(pid: u32) -> Option<(ProcessIdentity, String)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The `comm` field is parenthesised and may itself contain spaces and
+    // parentheses, so its end is the last ')'. After it, starttime is field
+    // 22: index 19 when the state (field 3) is index zero.
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = stat.get(open + 1..close)?.to_string();
+    let fields: Vec<_> = stat.get(close + 1..)?.split_whitespace().collect();
+    Some((
+        ProcessIdentity {
+            comm,
+            start_time: fields.get(19)?.to_string(),
+        },
+        fields.first()?.to_string(),
+    ))
+}
+
+/// True while `pid` is the same live process represented by `expected`.
 ///
 /// Two questions in one, and both are load-bearing. `kill(pid, 0)`
 /// answers neither: it succeeds for a **zombie**, and it succeeds for
 /// whatever unrelated process the kernel has since given that PID to.
-/// `/proc/<pid>/exe` settles the identity, and the state field of
-/// `/proc/<pid>/stat` settles the liveness.
-fn running_as(pid: u32, exe: &Path) -> bool {
-    if !std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|link| link == exe) {
-        return false;
-    }
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+/// The process start time settles identity across PID reuse, and the state
+/// field settles liveness.
+fn running_as(pid: u32, expected: &ProcessIdentity) -> bool {
+    let Some((actual, state)) = process_state(pid) else {
         return false;
     };
-    // The `comm` field is parenthesised and may itself contain spaces and
-    // parentheses, so the state is the first field after the *last* ')'.
-    let Some((_, after_comm)) = stat.rsplit_once(')') else {
-        return false;
-    };
-    !matches!(after_comm.split_whitespace().next(), Some("Z") | Some("X"))
+    actual.comm == expected.comm
+        && actual.start_time == expected.start_time
+        && !matches!(state.as_str(), "Z" | "X")
 }
 
 #[test]
@@ -152,8 +174,14 @@ fn a_hard_killed_test_binary_takes_its_daemon_with_it() {
         std::thread::sleep(Duration::from_millis(50));
     };
 
+    let (identity, _) = process_state(daemon_pid).expect("the helper's daemon has proc state");
+    assert_eq!(
+        Some(identity.comm.as_str()),
+        fqd.file_name().and_then(std::ffi::OsStr::to_str),
+        "the helper-reported process must be fqd"
+    );
     assert!(
-        running_as(daemon_pid, fqd),
+        running_as(daemon_pid, &identity),
         "pid {daemon_pid} should be the helper's live daemon before we kill anything"
     );
 
@@ -163,7 +191,7 @@ fn a_hard_killed_test_binary_takes_its_daemon_with_it() {
     let _ = helper.wait();
 
     let reap_by = Instant::now() + REAP_WINDOW;
-    while running_as(daemon_pid, fqd) {
+    while running_as(daemon_pid, &identity) {
         assert!(
             Instant::now() < reap_by,
             "fqd {daemon_pid} outlived the hard-killed process that started it — \

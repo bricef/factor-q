@@ -24,6 +24,50 @@ fn unique_scratch() -> std::path::PathBuf {
     dir
 }
 
+#[cfg(target_os = "linux")]
+fn proc_environ_read_errno(target_pid: u32) -> i32 {
+    // Re-exec this test binary as a plain same-uid child, matching an exec-tool
+    // child without coupling the regression to tool routing.
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "proc_environ_probe_subprocess"])
+        .env("FQ_PROC_ENVIRON_PROBE_PID", target_pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn proc environ probe")
+        .code()
+        .expect("probe terminated by signal")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_environ_probe_subprocess() {
+    let Ok(target_pid) = std::env::var("FQ_PROC_ENVIRON_PROBE_PID") else {
+        return;
+    };
+    let code = match std::fs::read(format!("/proc/{target_pid}/environ")) {
+        Ok(_) => 0,
+        Err(err) => err.raw_os_error().unwrap_or(255),
+    };
+    // SAFETY: this dedicated subprocess has completed its one probe and must
+    // preserve the errno as its exit code rather than let the harness map it.
+    unsafe { libc::_exit(code) };
+}
+
+#[cfg(target_os = "linux")]
+fn assert_daemon_environment_is_protected(daemon_pid: u32) {
+    assert_eq!(
+        proc_environ_read_errno(std::process::id()),
+        0,
+        "control read of an uncleared process must succeed"
+    );
+    assert_eq!(
+        proc_environ_read_errno(daemon_pid),
+        libc::EACCES,
+        "same-uid child must receive EACCES reading the protected daemon environment"
+    );
+}
+
 #[test]
 fn configured_event_retention_reaches_new_and_existing_brokers() {
     let server = fq_test_support::NatsServer::start();
@@ -116,6 +160,9 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(ready, "fqd never reached 'Runtime ready' within 30s");
+
+    #[cfg(target_os = "linux")]
+    assert_daemon_environment_is_protected(child.id());
 
     child.signal(libc::SIGTERM).expect("kill(SIGTERM) failed");
 
