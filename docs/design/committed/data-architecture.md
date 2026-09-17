@@ -723,11 +723,11 @@ but a consumer reading the stream cannot assume it saw every event
 a worker committed.
 
 The "idempotent on `event_id`" the original design leaned on is
-also not what it sounds like. Nothing sets `Nats-Msg-Id`, so
-JetStream performs no deduplication: a republished event would be
-stored twice on the stream. What dedups is the **projection**, whose
-`events` table has `event_id` as its primary key and inserts with
-`INSERT OR IGNORE`. That is enough for the projection and for any
+now enforced at publish time: daemon event publishes set `Nats-Msg-Id`
+to the envelope's `event_id`, so JetStream deduplicates a republish within
+its configured 120-second window. Beyond that window the **projection**
+still deduplicates: its `events` table has `event_id` as its primary key
+and inserts with `INSERT OR IGNORE`. That is enough for the projection and for any
 consumer that folds through it, and not enough for one reading the
 stream directly.
 

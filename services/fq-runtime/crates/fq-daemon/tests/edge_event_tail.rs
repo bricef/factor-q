@@ -319,8 +319,12 @@ impl Tail {
     ) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            rt.block_on(bus.publish(&warmup()))
-                .expect("publish warm-up");
+            // A readiness retry is a new event, not a retry of one publish:
+            // publish-side dedup keys on event_id and would correctly suppress
+            // an identical fixture before a late subscription could see it.
+            let mut event = warmup();
+            event.envelope.event_id = Uuid::now_v7();
+            rt.block_on(bus.publish(&event)).expect("publish warm-up");
             while let Some(line) = self.next_line(Duration::from_millis(250)) {
                 if line.contains(WARMUP_MARK) {
                     return;

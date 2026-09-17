@@ -109,6 +109,86 @@ async fn publish_and_subscribe_round_trip() {
     assert_eq!(received.envelope.agent_id.as_str(), agent_id);
 }
 
+/// Repeating an event publish is acknowledged as a duplicate and leaves one
+/// stream entry because the envelope identity is the JetStream message id.
+#[tokio::test]
+async fn publishing_the_same_event_twice_is_deduplicated() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let event = sample_event(&format!("dedup-{}", Uuid::now_v7().simple()));
+
+    let first = bus.publish(&event).await.expect("first publish");
+    let second = bus.publish(&event).await.expect("duplicate publish");
+    assert_eq!(second, first, "a duplicate ack names the original sequence");
+
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert(
+        async_nats::header::NATS_MESSAGE_ID,
+        event.envelope.event_id.to_string(),
+    );
+    let ack = bus
+        .jetstream()
+        .publish_with_headers(
+            event.subject(),
+            headers,
+            Bytes::from(serde_json::to_vec(&event).expect("serialise event")),
+        )
+        .await
+        .expect("publish duplicate")
+        .await
+        .expect("duplicate ack");
+    assert!(
+        ack.duplicate,
+        "JetStream must report the repeated id as duplicate"
+    );
+
+    let info = bus
+        .jetstream()
+        .get_stream(STREAM_NAME)
+        .await
+        .expect("event stream")
+        .info()
+        .await
+        .expect("stream info")
+        .clone();
+    assert_eq!(info.state.messages, 1, "only the original is stored");
+}
+
+/// Repeating a named trigger publish uses the trigger id as the deduplication
+/// key, so only the original trigger occupies the stream.
+#[tokio::test]
+async fn publishing_the_same_named_trigger_twice_is_deduplicated() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let id = Uuid::now_v7();
+    let agent = aid("dedup-trigger");
+
+    let first = bus
+        .publish_trigger_named(&agent, id, &json!({"work": 1}))
+        .await
+        .expect("first trigger");
+    let second = bus
+        .publish_trigger_named(&agent, id, &json!({"work": 1}))
+        .await
+        .expect("duplicate trigger");
+    assert_eq!(second.stream_seq, first.stream_seq);
+
+    let info = bus
+        .jetstream()
+        .get_stream(TRIGGER_STREAM_NAME)
+        .await
+        .expect("trigger stream")
+        .info()
+        .await
+        .expect("stream info")
+        .clone();
+    assert_eq!(info.state.messages, 1, "only the original is stored");
+}
+
 /// The pre-flight guard (issue #4) rejects a payload larger than
 /// the server's advertised `max_payload` with a clear, attributable
 /// error, and never reaches NATS. Exercised against the pure seam
@@ -267,6 +347,7 @@ async fn event_stream_reconciliation_heals_subjects_without_clobbering_unmanaged
         .expect("event stream");
     let mut stale = stream.info().await.expect("stream info").config.clone();
     stale.subjects = vec!["fq.agent.>".to_string(), "fq.system.>".to_string()];
+    stale.duplicate_window = Duration::from_secs(60);
     stale.description = Some("operator-owned description".to_string());
     first
         .jetstream()
@@ -288,6 +369,11 @@ async fn event_stream_reconciliation_heals_subjects_without_clobbering_unmanaged
             .map(|subject| subject.to_string())
             .collect::<Vec<_>>(),
         "startup must heal a subject set that predates fq.worker.>"
+    );
+    assert_eq!(
+        config.duplicate_window,
+        Duration::from_secs(120),
+        "startup must restore the managed duplicate window"
     );
     assert_eq!(
         config.description.as_deref(),
@@ -318,4 +404,17 @@ fn managed_stream_config_diff_is_empty_when_only_unmanaged_fields_differ() {
     };
 
     assert!(managed_stream_config_diff(&current, &desired).is_empty());
+}
+
+#[test]
+fn managed_stream_config_diff_names_the_duplicate_window() {
+    let current = stream::Config::default();
+    let desired = stream::Config {
+        duplicate_window: Duration::from_secs(120),
+        ..Default::default()
+    };
+
+    let changes = managed_stream_config_diff(&current, &desired);
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].starts_with("duplicate_window:"), "{changes:?}");
 }
