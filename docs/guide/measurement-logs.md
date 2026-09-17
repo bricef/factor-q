@@ -1,18 +1,32 @@
 # Measurement logs
 
 The two human-entered inputs of the measurement instrument
-([plan](../docs/plans/active/2026-09-17-measurement-instrument.md), issue
+([plan](../plans/active/2026-09-17-measurement-instrument.md), issue
 [#840](https://github.com/bricef/factor-q/issues/840)). Everything else the
 instrument reads (attempts, outcomes, corrective commits, cost) is extracted
 from the event log, GitHub and git by
-[#838](https://github.com/bricef/factor-q/issues/838); these two files exist
+[#838](https://github.com/bricef/factor-q/issues/838); these two logs exist
 because interventions and touch minutes cannot be reconstructed from
 history, so they are kept from the day the instrument was decided.
 
-Both files are append-only CSV with a header row. Entries go through
-`scripts/metrics-log.py`, which validates the vocabulary and stamps UTC time;
-do not edit rows by hand except to correct a typo, and then in a commit that
-says so.
+## Where the data lives
+
+On the **orphan branch `metrics`**, never merged into `main`, as
+`metrics/interventions.csv` and `metrics/accepted.csv` (append-only CSV with
+a header row). The branch shares no history with `main`, so a logged row
+never triggers `main`'s CI or the hourly deploy, and there is nothing to
+merge or rebase. Read it without a checkout:
+
+```text
+git fetch origin metrics
+git show origin/metrics:metrics/interventions.csv
+```
+
+Entries go through `scripts/metrics-log.py`, which keeps a worktree of the
+branch at `.metrics-data/` in the repository root (gitignored), fast-forwards
+it, validates the vocabulary, stamps UTC time, appends the row, commits it
+with a fixed message form (`log: fix #838 15m`) and pushes. Do not edit rows
+by hand except to correct a typo, and then in a commit that says so.
 
 ## `interventions.csv`
 
@@ -34,8 +48,8 @@ just touch <issue> <minutes> <type> [note...]
 | `source` | `human` (default) or `agent` (a coordinating agent logging on the maintainer's behalf, `--source agent`) |
 
 Types, in one line each; the worked examples and the rules a human holds
-are in the plan's §4 until the rubric lands as
-`docs/guide/measurement-rubric.md`:
+are in the plan's §4 until the rubric lands as `measurement-rubric.md`
+beside this file:
 
 - `unblock` — the run could not proceed without a human act: a rebase, a
   re-run of a flaky job, a dependency the agent could not install.
@@ -72,3 +86,11 @@ just tag <pr> <S|M|L|XL> [--issue N] [note...]
 | `source` | `human` or `agent` |
 
 Tag at merge, by the maintainer.
+
+## Flags
+
+`--no-push` commits to the local worktree only; `--no-commit` appends to the
+file without touching git (a dry run); `--data-dir` points at a different
+worktree. A push rejected because someone else appended first is rebased and
+retried once; if that fails the row is committed locally and the script says
+to run again.

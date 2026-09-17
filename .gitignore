@@ -52,3 +52,7 @@ __pycache__/
 # The dogfood instance's secrets never live in the repo; a local
 # validation of ops/dogfood/compose.yml may create them here.
 ops/dogfood/.secrets/
+
+# Worktree of the orphan `metrics` data branch, created by scripts/metrics-log.py
+# (`just touch` / `just tag`). Data lives on that branch, never on main.
+.metrics-data/
