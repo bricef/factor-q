@@ -90,7 +90,7 @@ type ReviewSource interface {
 // TriggerPublisher publishes a trigger to a factor-q agent per the trigger
 // wire contract. payload follows the trigger-payload convention.
 type TriggerPublisher interface {
-	Publish(ctx context.Context, agentID string, payload TriggerPayload) error
+	Publish(ctx context.Context, agentID string, payload TriggerPayload) (string, error)
 }
 
 // TriggerPayload is the recommended semantic payload for task-oriented
@@ -233,7 +233,8 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 			continue
 		}
 		// Step 2: publish the trigger.
-		if err := w.Publisher.Publish(ctx, w.Config.TargetAgent, pt.Payload); err != nil {
+		triggerID, err := w.Publisher.Publish(ctx, w.Config.TargetAgent, pt.Payload)
+		if err != nil {
 			w.Log.Error("trigger publish failed after relabel; reverting to ready so it retries",
 				"issue", pt.Issue, "agent", w.Config.TargetAgent, "err", err)
 			if rerr := w.Source.Relabel(ctx, pt.Issue, w.Config.InProgressLabel, w.Config.ReadyLabel); rerr != nil {
@@ -250,7 +251,7 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 			}
 			continue
 		}
-		w.Log.Info("triggered agent for issue", "issue", pt.Issue, "agent", w.Config.TargetAgent)
+		w.Log.Info("triggered agent for issue", "issue", pt.Issue, "agent", w.Config.TargetAgent, "trigger_id", triggerID)
 	}
 	if w.Reconciler != nil {
 		w.Reconciler.Reconcile(ctx)

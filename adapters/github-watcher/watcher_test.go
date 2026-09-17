@@ -95,12 +95,12 @@ type fakePublisher struct {
 	fail bool
 }
 
-func (f *fakePublisher) Publish(_ context.Context, agentID string, payload TriggerPayload) error {
+func (f *fakePublisher) Publish(_ context.Context, agentID string, payload TriggerPayload) (string, error) {
 	if f.fail {
-		return errors.New("publish boom")
+		return "", errors.New("publish boom")
 	}
 	f.rec.ops = append(f.rec.ops, fmt.Sprintf("publish %s %q", agentID, payload.Task))
-	return nil
+	return "test-trigger-id", nil
 }
 
 func newWatcher(src IssueSource, pub TriggerPublisher) *Watcher {
