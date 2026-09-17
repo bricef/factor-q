@@ -784,6 +784,7 @@ async fn reducer_suspend_resume_yields_same_completion() {
         tools_available: vec![],
         allowed_tool_names: vec![],
         max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+        max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
         effort: None,
     };
     let trig = TriggerPayload {
@@ -1145,6 +1146,7 @@ async fn reducer_suspends_and_resumes_across_tool_dispatch() {
         tools_available: vec![],
         allowed_tool_names: vec!["builtin__self_inspect".to_string()],
         max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+        max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
         effort: None,
     };
     let trig = TriggerPayload {
@@ -2440,6 +2442,7 @@ async fn resume_safe_replay_continues_to_completion() {
         tools_available: vec![],
         allowed_tool_names: vec![],
         max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+        max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
         effort: None,
     };
     let trigger = TriggerPayload {
@@ -2584,6 +2587,7 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
                 tools_available: vec![],
                 allowed_tool_names: vec![],
                 max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+                max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
                 effort: None,
             },
             trigger: TriggerPayload {
@@ -2797,6 +2801,7 @@ async fn resume_with_same_ms_interleave(
                 tools_available: vec![],
                 allowed_tool_names: vec![],
                 max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+                max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
                 effort: None,
             },
             trigger: TriggerPayload {
@@ -3001,6 +3006,7 @@ async fn resume_enforces_lifetime_budget() {
         tools_available: vec![],
         allowed_tool_names: vec![],
         max_iterations: crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS,
+        max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
         effort: None,
     };
     let trigger = TriggerPayload {

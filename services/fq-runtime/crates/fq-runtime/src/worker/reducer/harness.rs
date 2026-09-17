@@ -34,6 +34,10 @@ use crate::events::{AssistantPart, Message, RequestParams, TaskStatus, ToolCallI
 /// bounded in the large by the dollar budget and the host step budget.
 pub const DEFAULT_MAX_ITERATIONS: u32 = 100;
 
+/// Built-in fallback output-token cap for each model turn.
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+const MAX_CONSECUTIVE_TRUNCATIONS: u32 = 3;
+
 /// Native, synchronous, stateless reducer. All state lives in
 /// the opaque blob carried in [`StepInput::state`]; this struct
 /// holds nothing.
@@ -75,6 +79,9 @@ struct HarnessState {
     /// LLM-turn counter. Bounded by [`AgentConfig::max_iterations`].
     #[serde(default)]
     iteration: u32,
+    /// Consecutive model turns cut off by the output-token cap.
+    #[serde(default)]
+    consecutive_truncations: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, strum::EnumCount)]
@@ -328,13 +335,38 @@ fn model_response_step(
         parts: response.parts.clone(),
     });
 
-    // Bare text is not a stop signal. Persist a host notice in the
-    // transcript so replay produces the same corrective follow-up.
-    if response.tool_calls().next().is_none() {
+    // Name output truncation distinctly so the next turn can correct it.
+    // Persisting the notice in the transcript keeps resume deterministic.
+    if response.stop_reason == crate::events::StopReason::MaxTokens {
+        state.consecutive_truncations = state.consecutive_truncations.saturating_add(1);
+        if state.consecutive_truncations >= MAX_CONSECUTIVE_TRUNCATIONS {
+            return terminal(
+                state,
+                NextAction::Failed(HarnessError {
+                    kind: HarnessErrorKind::OutputTruncated,
+                    message: format!(
+                        "model output was cut off at max_tokens for {} consecutive turns",
+                        state.consecutive_truncations
+                    ),
+                }),
+            );
+        }
         append_host_notices(
             state,
-            &["No tool calls were made and the run is not over — continue working, or end it by calling `report_outcome` with success, failed, blocked, or partial.".to_string()],
+            &[format!(
+                "Your last turn was cut off at max_tokens ({}). Continue from where you stopped; split large tool arguments across calls.",
+                input.config.max_tokens
+            )],
         );
+    } else {
+        state.consecutive_truncations = 0;
+        // Bare text is not a stop signal. Persist a generic corrective notice.
+        if response.tool_calls().next().is_none() {
+            append_host_notices(
+                state,
+                &["No tool calls were made and the run is not over — continue working, or end it by calling `report_outcome` with success, failed, blocked, or partial.".to_string()],
+            );
+        }
     }
 
     // `max_iterations` is literal. Zero is a valid stop signal —
@@ -534,7 +566,7 @@ fn build_model_request(config: &AgentConfig, messages: &[Message]) -> ModelReque
         params: RequestParams {
             effort: config.effort,
             temperature: None,
-            max_tokens: Some(4096),
+            max_tokens: Some(config.max_tokens),
         },
     }
 }
@@ -630,6 +662,7 @@ mod tests {
             }],
             allowed_tool_names: vec!["echo".to_string()],
             max_iterations: 3,
+            max_tokens: DEFAULT_MAX_TOKENS,
             effort: None,
         }
     }
@@ -668,6 +701,81 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }
+    }
+
+    fn truncated_response(text: &str) -> ModelResponse {
+        ModelResponse {
+            parts: vec![AssistantPart::Text {
+                text: text.to_string(),
+            }],
+            stop_reason: StopReason::MaxTokens,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    #[test]
+    fn configured_max_tokens_reaches_model_request() {
+        let mut input = step_input(Vec::new(), None, 0);
+        input.config.max_tokens = 8192;
+        let output = Harness::new().step(input).unwrap();
+        let NextAction::CallModel(request) = output.next_action else {
+            panic!("expected model request");
+        };
+        assert_eq!(request.params.max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn max_tokens_uses_distinct_persisted_notice() {
+        let h = Harness::new();
+        let first = h.step(step_input(Vec::new(), None, 0)).unwrap();
+        let second = h
+            .step(step_input(
+                first.state,
+                Some(CapabilityResult::ModelResult(truncated_response("partial"))),
+                1,
+            ))
+            .unwrap();
+        let NextAction::CallModel(request) = second.next_action else {
+            panic!("expected retry after one truncation");
+        };
+        let notices: Vec<&str> = request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|text| text.contains("cut off at max_tokens (4096)"))
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|text| text.contains("No tool calls were made"))
+        );
+    }
+
+    #[test]
+    fn three_consecutive_max_tokens_turns_fail_with_count() {
+        let h = Harness::new();
+        let mut output = h.step(step_input(Vec::new(), None, 0)).unwrap();
+        for step in 1..=3 {
+            output = h
+                .step(step_input(
+                    output.state,
+                    Some(CapabilityResult::ModelResult(truncated_response("partial"))),
+                    step,
+                ))
+                .unwrap();
+        }
+        let NextAction::Failed(error) = output.next_action else {
+            panic!("third consecutive truncation must fail");
+        };
+        assert_eq!(error.kind, HarnessErrorKind::OutputTruncated);
+        assert!(error.message.contains("3 consecutive turns"));
     }
 
     /// **The acceptance test for #437.** A reasoning-first model carries
@@ -1645,6 +1753,7 @@ mod tests {
             phase: Phase::DispatchingTools,
             messages: vec![],
             iteration: 0,
+            consecutive_truncations: 0,
         };
         let err = state.save().expect_err("must reject on save");
         assert_eq!(err.kind, HarnessErrorKind::InternalError);

@@ -33,7 +33,8 @@
           "env": [],
           "exec_cwd": []
         },
-        "budget": 1.0
+        "budget": 1.0,
+        "max_tokens": null
       }
     }
   },

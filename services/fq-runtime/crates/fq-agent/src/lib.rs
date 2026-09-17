@@ -135,6 +135,8 @@ pub struct Agent {
     /// fallback) applies. Overriding here means `fq reload` picks up a
     /// change with no restart (Design Principle 8 / backlog §1.5.1.1).
     max_iterations: Option<u32>,
+    /// Optional per-agent override for the model output-token cap.
+    max_tokens: Option<u32>,
     /// Optional per-agent bound on how many of this agent's invocations
     /// the daemon runs at once (#718). `None` means unlimited within
     /// `[worker] max_concurrent_invocations` — the behaviour before the
@@ -189,6 +191,11 @@ impl Agent {
     /// default" — `max_iterations` in the runtime's `Config`.
     pub fn max_iterations(&self) -> Option<u32> {
         self.max_iterations
+    }
+
+    /// The agent's per-turn output-token override.
+    pub fn max_tokens(&self) -> Option<u32> {
+        self.max_tokens
     }
 
     /// The agent's concurrency cap, if the definition sets one. `None`
@@ -264,8 +271,8 @@ impl Agent {
     /// agent definition is later modified, the event log still shows the
     /// captured configuration rather than today's.
     ///
-    /// **It is not the whole configuration.** [`Agent`] carries 16
-    /// fields and `ConfigSnapshot` 11: `max_iterations`, `effort`,
+    /// **It is not the whole configuration.** [`Agent`] carries 17
+    /// fields and `ConfigSnapshot` 12: `max_iterations`, `effort`,
     /// `trigger`, `mcp_servers` and `static_resources` are dropped, and
     /// each of them changes what actually ran. Read a snapshot as "the
     /// prompt, tools, sandbox, budget and grants at trigger time", not
@@ -279,6 +286,7 @@ impl Agent {
             tools: self.tools.clone(),
             sandbox: self.sandbox.to_snapshot(),
             budget: self.budget,
+            max_tokens: self.max_tokens,
             sampling: self.sampling.clone(),
             roots: self.roots.clone(),
             elicitation: self.elicitation.clone(),
@@ -460,6 +468,7 @@ pub struct AgentBuilder {
     sandbox: Sandbox,
     budget: Option<f64>,
     max_iterations: Option<u32>,
+    max_tokens: Option<u32>,
     max_concurrent: Option<u32>,
     effort: Option<Effort>,
     trigger: Option<String>,
@@ -521,6 +530,12 @@ impl AgentBuilder {
     /// fallback) applies.
     pub fn max_iterations(mut self, max_iterations: u32) -> Self {
         self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Override the output-token cap for each model turn.
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
         self
     }
 
@@ -613,6 +628,9 @@ impl AgentBuilder {
         // #514 closed at this same boundary. (`max_iterations: 0` is
         // legal for the opposite reason: it *has* a meaning — fall back
         // to the daemon default.)
+        if self.max_tokens == Some(0) {
+            return Err(BuildError::ZeroMaxTokens);
+        }
         if self.max_concurrent == Some(0) {
             return Err(BuildError::ZeroMaxConcurrent);
         }
@@ -625,6 +643,7 @@ impl AgentBuilder {
             sandbox: self.sandbox,
             budget: self.budget,
             max_iterations: self.max_iterations,
+            max_tokens: self.max_tokens,
             max_concurrent: self.max_concurrent,
             effort: self.effort,
             trigger: self.trigger,
@@ -663,6 +682,9 @@ pub enum BuildError {
          omit the field for no per-agent limit"
     )]
     ZeroMaxConcurrent,
+
+    #[error("invalid max_tokens: must be at least 1")]
+    ZeroMaxTokens,
 
     #[error("invalid static_resources entry: {0}")]
     InvalidStaticResource(String),

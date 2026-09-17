@@ -64,7 +64,7 @@ expected, and gives the line and column:
 ```text
 agents/greeter.md is invalid: invalid YAML: unknown field `budgett`,
 expected one of `name`, `description`, `model`, `tools`, `sandbox`,
-`budget`, `max_iterations`, `max_concurrent`, `effort`, `trigger`, `mcp`,
+`budget`, `max_iterations`, `max_tokens`, `max_concurrent`, `effort`, `trigger`, `mcp`,
 `static_resources`, `sampling_budget`, `elicitation_budget` at line 3
 column 1
 ```
@@ -508,12 +508,13 @@ budget: 0.50   # half a dollar per invocation
 Omit `budget` to run without a ceiling. This is not recommended
 for unattended agents.
 
-## Iteration cap, concurrency cap and reasoning effort
+## Iteration cap, output cap, concurrency cap and reasoning effort
 
-Three further optional fields tune what the agent costs to run.
+Four further optional fields tune what the agent costs to run.
 
 ```yaml
 max_iterations: 40      # per-agent cap on LLM turns
+max_tokens: 8192         # output-token cap for each model turn
 max_concurrent: 2       # how many of this agent run at once
 effort: high            # reasoning effort for each request
 ```
@@ -523,6 +524,7 @@ effort: high            # reasoning effort for each request
   literal, including `0`: an agent with `max_iterations: 0` stops before
   its first model turn. Hitting the cap is a failure, not a completion —
   it is the exit an agent takes when it never called `report_outcome`.
+- **`max_tokens`** overrides the daemon default output-token cap for each model request. Omit it to inherit `fqd.toml`'s value (4096 by default). `0` is refused. If a turn reaches the cap, the harness names the truncation and asks the agent to continue with smaller tool arguments; three consecutive truncated turns fail the invocation.
 - **`max_concurrent`** bounds how many invocations of *this* agent the
   daemon runs at once. It is the agent's own limit, beside its budget and
   its iteration cap, and it exists because `[worker]
@@ -558,7 +560,7 @@ effort: high            # reasoning effort for each request
   routes carry it back on the next turn, and which do not yet — is in
   [Reasoning models](reasoning-models.md).
 
-All three are top-level keys, so a typo in any of them is refused at load
+All four are top-level keys, so a typo in any of them is refused at load
 rather than ignored — see
 [The frontmatter is strict](#the-frontmatter-is-strict).
 
@@ -809,7 +811,7 @@ code blocks — anything that helps the LLM understand its task.
 
 ```sh
 # Check that the definition parses correctly (offline, no daemon needed).
-# `budget`, `max_iterations` and `max_concurrent` print whether or not
+# `budget`, `max_iterations`, `max_tokens` and `max_concurrent` print whether or not
 # they are set — `budget: not set (no cap)` rather than an omitted line,
 # so an absence is something you can read rather than something you have
 # to notice.

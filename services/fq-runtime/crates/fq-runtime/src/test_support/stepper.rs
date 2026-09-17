@@ -148,6 +148,7 @@ mod tests {
             }],
             allowed_tool_names: vec!["echo".to_string()],
             max_iterations: 5,
+            max_tokens: crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
             effort: None,
         }
     }

@@ -178,6 +178,8 @@ pub struct RunnerConfig {
     /// not code). Defaults to
     /// [`crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS`].
     pub(super) max_iterations: u32,
+    /// Daemon default output-token cap when the agent has no override.
+    pub(super) max_tokens: u32,
     /// When true, refuse to dispatch a model with no pricing entry
     /// (ADR-0004 at-use backstop) instead of tracking its cost as $0.
     /// The daemon sets this after its startup pricing guarantee has
@@ -250,6 +252,7 @@ pub struct RunnerConfigBuilder {
     worker_id: Option<WorkerId>,
     clock: Option<Arc<dyn Clock>>,
     max_iterations: Option<u32>,
+    max_tokens: Option<u32>,
     enforce_pricing: Option<bool>,
     workspace: Option<Arc<dyn WorkspaceProvider>>,
     mcp_server_root: Option<PathBuf>,
@@ -307,6 +310,11 @@ impl RunnerConfigBuilder {
     /// precedence over this value.
     pub fn max_iterations(mut self, max_iterations: u32) -> Self {
         self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
         self
     }
 
@@ -379,6 +387,9 @@ impl RunnerConfigBuilder {
                 .worker_id
                 .expect("RunnerConfig::builder() requires .worker_id(..)"),
             clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
+            max_tokens: self
+                .max_tokens
+                .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_TOKENS),
             max_iterations: self
                 .max_iterations
                 .unwrap_or(crate::worker::reducer::harness::DEFAULT_MAX_ITERATIONS),

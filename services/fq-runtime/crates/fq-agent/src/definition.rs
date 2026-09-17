@@ -156,6 +156,9 @@ pub(crate) fn parse_agent_definition_with_default(
     if let Some(max_iterations) = frontmatter.max_iterations {
         builder = builder.max_iterations(max_iterations);
     }
+    if let Some(max_tokens) = frontmatter.max_tokens {
+        builder = builder.max_tokens(max_tokens);
+    }
     if let Some(max_concurrent) = frontmatter.max_concurrent {
         builder = builder.max_concurrent(max_concurrent);
     }
@@ -303,6 +306,8 @@ struct Frontmatter {
     /// Optional per-agent override for the per-invocation LLM-turn cap.
     /// Absent = fall back to the daemon config default.
     max_iterations: Option<u32>,
+    /// Optional per-turn output-token cap; zero is refused.
+    max_tokens: Option<u32>,
     /// Optional bound on how many of this agent's invocations run at
     /// once (#718). Absent = unlimited within `[worker]
     /// max_concurrent_invocations`. `0` is refused rather than read as
@@ -757,6 +762,27 @@ Prompt body.
 "#;
         let agent = parse_agent(content).unwrap();
         assert_eq!(agent.max_iterations(), Some(250));
+    }
+
+    #[test]
+    fn parses_max_tokens_override_from_frontmatter() {
+        let agent =
+            parse_agent("---\nname: test\nmodel: test-model\nmax_tokens: 8192\n---\nprompt")
+                .unwrap();
+        assert_eq!(agent.max_tokens(), Some(8192));
+    }
+
+    #[test]
+    fn max_tokens_absent_falls_back_to_none() {
+        let agent = parse_agent("---\nname: test\nmodel: test-model\n---\nprompt").unwrap();
+        assert_eq!(agent.max_tokens(), None);
+    }
+
+    #[test]
+    fn max_tokens_zero_is_rejected() {
+        let err = parse_agent("---\nname: test\nmodel: test-model\nmax_tokens: 0\n---\nprompt")
+            .expect_err("zero output tokens is meaningless");
+        assert!(err.to_string().contains("invalid max_tokens"));
     }
 
     #[test]
