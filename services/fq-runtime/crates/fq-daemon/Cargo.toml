@@ -44,6 +44,7 @@ schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
+libc = { workspace = true }
 toml = { workspace = true }
 tarpc = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -62,7 +63,6 @@ fq-runtime = { workspace = true, features = ["test-support"] }
 # The shared private-broker guard, for the daemon_shutdown integration
 # tests (#233).
 fq-test-support = { workspace = true }
-libc = { workspace = true }
 # The `fq init` template gate asks which keys `Config` ignored, which
 # is the difference between a template that parses and one the daemon
 # actually reads.

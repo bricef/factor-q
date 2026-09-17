@@ -16,6 +16,24 @@ use crate::cli::GlobalArgs;
 use crate::pricing::build_validated_pricing;
 use crate::version::FQ_VERSION;
 
+#[cfg(target_os = "linux")]
+fn protect_daemon_environment() {
+    // SAFETY: PR_SET_DUMPABLE only changes a process-local kernel flag; the
+    // constant argument is the documented value for disabling dumpability.
+    let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) };
+    if rc == 0 {
+        tracing::info!("daemon dumpability disabled; /proc environment is protected");
+    } else {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "failed to disable daemon dumpability; /proc environment may remain readable"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protect_daemon_environment() {}
+
 /// Dial the broker. The token comes from the environment variable
 /// `[nats] token_env` names and reaches the bus as its own argument;
 /// `config.nats.url` was refused at validation if it carried userinfo,
@@ -47,6 +65,7 @@ async fn connect_bus(config: &fq_runtime::Config) -> anyhow::Result<EventBus> {
 /// immediate shutdown of the rest and a non-zero process exit, rather
 /// than silently limping along with a broken dispatcher or projector.
 pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
+    protect_daemon_environment();
     let runtime_id = Uuid::now_v7();
     // Includes the commit (FQ_VERSION = semver+sha), so the running
     // daemon's startup event/banner identifies its exact build.

@@ -88,6 +88,11 @@
 //!   memory, and open files up to the process-level limits.
 //! - **No syscall filtering (seccomp)**. Anything the binary can do,
 //!   it can do.
+//! - **Credential exfiltration is not fully prevented**. On Linux the
+//!   daemon clears `PR_SET_DUMPABLE`, making `/proc/<fqd-pid>/environ`
+//!   root-only and stopping that direct read. A child with arbitrary exec
+//!   can still reach secrets by other means until agent isolation lands
+//!   (#209).
 //!
 //! Container-level isolation (ADR-0010) is the path to closing these.
 //! Until then, the exec tool should be granted only to agents you
