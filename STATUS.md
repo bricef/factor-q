@@ -215,12 +215,22 @@ met M0 (see the closed
 [M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
 that track: exactly-once trigger dispatch
 ([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md)),
-whose core is **not yet built** — the ADR-0032 claim registry that
-would make dispatch exactly-once by construction has not started, so a
-trigger redelivered before its invocation's first WAL write can still
-start a second run. The dispatcher's ack-after-durable-start (#41)
-bounds the older failure — a long invocation outliving the ack
-deadline and being re-run — but not this one; and the M0 plan's proxy
+whose **duplicate-start gap closed on 2026-09-16**
+([#809](https://github.com/bricef/factor-q/issues/809); the
+originating incident
+[#327](https://github.com/bricef/factor-q/issues/327) is closed): the
+dispatcher now arbitrates every delivery against a durable claim row
+in the control-plane store — keyed on the trigger stream, the epoch of
+the stream incarnation it connected to, and the sequence — before it
+drains, routes, or parses anything, so a redelivery another worker
+holds, or one whose invocation already started, is acked and dropped
+instead of starting a second run (`fq status` and `fq doctor` count
+the drops). The claim is not yet ADR-0032's `fq-trigger-claims` KV
+inbox, and `DurableStart` — the #41 ack-after-durable-start that
+bounds the older failure, a long invocation outliving its ack deadline
+and being re-run — still starts the work, so the plan's PR-3 through
+PR-7 (inbox dispatch, multi-worker recovery, pull discipline, the
+backoff/`ack_wait` reconcile, the watcher alarm) remain open; and the M0 plan's proxy
 instrumentation (read relative to an expert+frontier baseline) to make
 **M1 (Q1)** decidable. Open strategic questions
 (security sequencing) are in the

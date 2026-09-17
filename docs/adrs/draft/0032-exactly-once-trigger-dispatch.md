@@ -7,17 +7,22 @@ incident (#327: one trigger for issue #189 → three invocations → three PRs,
 numbers 322/323/324). Execution plan:
 [exactly-once trigger dispatch](../../plans/active/2026-07-18-exactly-once-trigger-dispatch.md).
 
-Implementation: pending — nothing is built. There is no trigger claim
-registry: `TriggerClaim`, `trigger_claim` and `fq-trigger-claims` return
-nothing under `services/`, and the machinery Decision 8 says is "removed" is
-fully intact — `DurableStart` is still constructed and threaded through the
-dispatcher.
+Implementation: partial since 2026-09-16 (#809), and not in this ADR's
+shape. A durable claim registry does now exist — `TriggerClaim`/`TriggerKey`
+in `control_plane/store/trigger_claim.rs`, arbitrated by
+`control_plane/dispatcher/claim.rs` before drain, routing, or parsing — but
+it lives in the control-plane store, keyed on stream + stream-incarnation
+epoch + sequence, rather than in the `fq-trigger-claims` NATS KV bucket this
+ADR specifies, which still returns nothing under `services/`. The machinery
+Decision 8 says is "removed" is also still intact — `DurableStart` is
+constructed and threaded through the dispatcher.
 
 What a reader cannot otherwise tell from a `Draft` label is where the
-decision *stands*, so: the originating incident **#327 is still open**, and
-the execution plan above still calls this the "highest-priority correctness
-fix". The draft has sat five weeks. It is unstarted rather than withdrawn,
-and promoting it is a decision nobody has taken either way.
+decision *stands*, so: the originating incident **#327 is now closed** by
+the 2026-09-16 fix above, and the execution plan is still active for the
+work that fix did not do. This ADR's own decision — the KV trigger inbox —
+is neither taken nor withdrawn; what promoting it now buys is the end state,
+not the duplicate-start gap.
 
 ## Context
 
