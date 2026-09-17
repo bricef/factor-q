@@ -2357,6 +2357,47 @@ async fn provider_error_publishes_a_failure_with_no_cost() {
     assert_eq!(p.call_id, req.call_id);
 }
 
+/// The exported ceiling is the last model-turn limit that terminates through
+/// the configured harness outcome rather than the host-step backstop.
+#[tokio::test]
+async fn maximum_supported_iterations_ends_as_max_iterations() {
+    let server = crate::test_support::nats::test_nats();
+    let url = server.url().to_string();
+    let agent = Agent::builder()
+        .id(unique_agent_id("maximum-supported-iterations"))
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(50.0)
+        .max_iterations(MAX_SUPPORTED_ITERATIONS)
+        .build()
+        .unwrap();
+    let responses = (0..=MAX_SUPPORTED_ITERATIONS)
+        .map(|_| ChatResponse {
+            parts: vec![crate::events::AssistantPart::Text {
+                text: "continue".into(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            reported_cost_usd: None,
+        })
+        .collect();
+    let (_, _, outcome) = run_with_wal_capturing_outcome(&url, agent, responses, 1, None).await;
+    match outcome {
+        Err(ExecutorError::InvocationFailed { kind, .. }) => {
+            assert!(matches!(kind, FailureKind::MaxIterations), "got {kind:?}");
+        }
+        other => panic!("expected InvocationFailed(MaxIterations), got {other:?}"),
+    }
+}
+
 /// #301: a model that only ever produces bare text — never a tool
 /// call, never `report_outcome` — terminates via the iteration
 /// ceiling as a failure. Text is not a stop signal; the ceiling is.

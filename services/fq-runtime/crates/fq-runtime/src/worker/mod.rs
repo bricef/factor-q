@@ -46,8 +46,8 @@ pub use recovery::{
     CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
 };
 pub use reducer::{
-    Harness, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner, RunnerConfig,
-    RunnerConfigBuilder, SamplingChannel,
+    Harness, MAX_SUPPORTED_ITERATIONS, Reducer, ReducerContext, ReducerContextBuilder,
+    ReducerRunner, RunnerConfig, RunnerConfigBuilder, SamplingChannel,
 };
 pub use store::{
     Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,

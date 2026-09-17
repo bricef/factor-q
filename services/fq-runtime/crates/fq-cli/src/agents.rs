@@ -95,6 +95,7 @@ pub(crate) fn validate_agent(path: &Path) -> anyhow::Result<()> {
 
     match parse_agent(&content) {
         Ok(agent) => {
+            fq_agent::validate_runtime_limits(&agent).map_err(anyhow::Error::msg)?;
             println!("✓ {} is valid", path.display());
             println!("  id:      {}", agent.id().as_str());
             println!("  model:   {}", agent.model());
@@ -147,6 +148,22 @@ pub(crate) fn validate_agent(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_refuses_an_unreachable_iteration_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("too-many.md");
+        std::fs::write(
+            &path,
+            "---\nname: too-many\nmodel: claude-haiku\nmax_iterations: 800\n---\nDo work.\n",
+        )
+        .unwrap();
+        let err = validate_agent(&path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "`max_iterations` = 800 exceeds the runtime's supported maximum of 500 (host step budget 1000, two steps per turn)"
+        );
+    }
 
     /// The row rendering is the part of verb 9's output that the flip
     /// had to preserve byte-for-byte: id padded to 30, then the three

@@ -24,6 +24,15 @@ pub enum ConfigError {
     InvalidToml(String),
 
     #[error(
+        "`max_iterations` = {value} exceeds the runtime's supported maximum of {maximum} (host step budget {host_step_budget}, two steps per turn)"
+    )]
+    MaxIterationsExceedsRuntime {
+        value: u32,
+        maximum: u32,
+        host_step_budget: u32,
+    },
+
+    #[error(
         "[events] max_age must be greater than zero and use a duration such as `30d`, `36h` or `90m`, not `{0}`"
     )]
     InvalidEventMaxAge(String),

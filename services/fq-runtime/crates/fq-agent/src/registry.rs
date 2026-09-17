@@ -13,6 +13,23 @@ use walkdir::WalkDir;
 use crate::{
     Agent, AgentId, definition::ParseError, definition::parse_agent_definition_with_default,
 };
+use fq_ops::agent::{ITERATION_HOST_STEP_BUDGET, MAX_SUPPORTED_ITERATIONS};
+
+/// Validate the runtime ceiling carried by an agent definition.
+///
+/// This is deliberately a load-time check rather than an `AgentBuilder`
+/// invariant: programmatic agents remain a definition-domain concern, while
+/// this bound belongs to the host that executes loaded definitions.
+pub fn validate_runtime_limits(agent: &Agent) -> Result<(), String> {
+    if let Some(iterations) = agent.max_iterations()
+        && iterations > MAX_SUPPORTED_ITERATIONS
+    {
+        return Err(format!(
+            "`max_iterations` = {iterations} exceeds the runtime's supported maximum of {MAX_SUPPORTED_ITERATIONS} (host step budget {ITERATION_HOST_STEP_BUDGET}, two steps per turn)"
+        ));
+    }
+    Ok(())
+}
 
 /// Result of scanning a directory for agent definitions.
 #[derive(Debug, Default)]
@@ -108,6 +125,14 @@ impl AgentRegistry {
                 }
             };
 
+        if let Err(message) = validate_runtime_limits(&agent) {
+            self.errors.push(LoadError::RuntimeLimit {
+                path: path.to_path_buf(),
+                message,
+            });
+            return;
+        }
+
         let id = agent.id().clone();
         if let Some(existing) = self.agents.get(&id) {
             self.errors.push(LoadError::DuplicateId {
@@ -194,6 +219,9 @@ pub enum LoadError {
         source: ParseError,
     },
 
+    #[error("failed to validate {path}: {message}")]
+    RuntimeLimit { path: PathBuf, message: String },
+
     #[error("duplicate agent id '{id}' defined in {first} and {second}")]
     DuplicateId {
         id: String,
@@ -241,6 +269,38 @@ model: claude-haiku
 You are an agent.
 "#
         )
+    }
+
+    #[test]
+    fn rejects_max_iterations_above_runtime_limit() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "too-many.md",
+            &minimal_agent("too-many").replace(
+                "model: claude-haiku",
+                "model: claude-haiku\nmax_iterations: 800",
+            ),
+        );
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
+        assert!(registry.is_empty());
+        let message = registry.errors()[0].to_string();
+        assert!(message.contains("`max_iterations` = 800 exceeds the runtime's supported maximum of 500 (host step budget 1000, two steps per turn)"), "{message}");
+    }
+
+    #[test]
+    fn accepts_max_iterations_at_runtime_limit() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "supported.md",
+            &minimal_agent("supported").replace(
+                "model: claude-haiku",
+                "model: claude-haiku\nmax_iterations: 500",
+            ),
+        );
+        let registry = AgentRegistry::load_from_directory(dir.path(), None).unwrap();
+        assert_eq!(registry.len(), 1, "{:?}", registry.errors());
     }
 
     #[test]

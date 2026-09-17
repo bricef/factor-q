@@ -39,7 +39,7 @@ pub mod definition;
 pub mod registry;
 pub mod view;
 
-pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError};
+pub use registry::{AgentRegistry, LoadError, LoadedAgent, RegistryError, validate_runtime_limits};
 
 // The identifier and the capability grants ride the wire — an
 // [`AgentId`] on every envelope, the grants inside a `triggered`

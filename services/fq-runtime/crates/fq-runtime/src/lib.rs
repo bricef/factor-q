@@ -108,7 +108,7 @@ pub use trigger::{PublishedTrigger, TRIGGER_ID_HEADER, Trigger};
 pub use views::Views;
 pub use worker::{
     ArchiveAckConsumer, ArchiveAckError, ArchiveRetryError, ArchiveRetrySweeper, ExecutorError,
-    Harness, InvocationOutcome, Reducer, ReducerContext, ReducerContextBuilder, ReducerRunner,
-    RunnerConfig, RunnerConfigBuilder, SamplingChannel, WORKER_SCHEMA_VERSION, Worker, WorkerStore,
-    WorkerStoreError,
+    Harness, InvocationOutcome, MAX_SUPPORTED_ITERATIONS, Reducer, ReducerContext,
+    ReducerContextBuilder, ReducerRunner, RunnerConfig, RunnerConfigBuilder, SamplingChannel,
+    WORKER_SCHEMA_VERSION, Worker, WorkerStore, WorkerStoreError,
 };
