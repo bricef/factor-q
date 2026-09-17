@@ -1838,6 +1838,84 @@ async fn budget_exceeded_emits_failed_event_on_reducer_path() {
     );
 }
 
+#[tokio::test]
+async fn budget_met_exactly_refuses_the_next_turn_before_dispatch() {
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(Arc::clone(&sink) as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+    let agent = Agent::builder()
+        .id(unique_agent_id("exact-budget"))
+        .model("claude-haiku")
+        .system_prompt("inspect once")
+        .budget(1.0)
+        .build()
+        .unwrap();
+    let llm = FixtureClient::new();
+    // At $1/M input tokens, the first turn lands exactly on the budget
+    // and asks for a tool, which would ordinarily require another turn.
+    llm.push_response(tool_use(
+        "builtin__self_inspect",
+        "inspect-at-budget",
+        json!({}),
+        (1_000_000, 0),
+    ));
+    llm.push_response(canned("must not be dispatched", 1, 0));
+
+    let outcome = runner
+        .run(
+            &agent,
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({"input": "go"}),
+        )
+        .await
+        .expect("budget refusal is a clean outcome");
+    assert!(matches!(outcome, InvocationOutcome::BudgetExceeded { cost, .. } if cost == 1.0));
+    assert_eq!(llm.requests().len(), 1, "the next turn must not dispatch");
+
+    let events = sink.events();
+    let failed_index = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::Failed(_)))
+        .expect("failed event");
+    let EventPayload::Failed(failed) = &events[failed_index].payload else {
+        unreachable!()
+    };
+    assert!(matches!(failed.error_kind, FailureKind::BudgetExceeded));
+    assert!(matches!(failed.phase, FailurePhase::LlmRequest));
+    assert_eq!(
+        failed.error_message,
+        "cost $1.000000 reached budget $1.00 before the turn"
+    );
+    assert!(
+        events[failed_index + 1..]
+            .iter()
+            .all(|event| !matches!(event.payload, EventPayload::LlmRequest(_))),
+        "no llm.request may follow the budget refusal"
+    );
+}
+
 // -----------------------------------------------------------
 // Step 5: per-step state persistence.
 //

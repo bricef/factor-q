@@ -45,9 +45,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 /// Internal: factor out the LLM dispatch path so the loop body
 /// stays readable.
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
-    /// Agent-turn LLM path: dispatch through the shared core, then
-    /// apply agent-turn failure semantics — an LLM error fails the
-    /// invocation, and exceeding the budget terminates it.
+    /// Agent-turn LLM path: refuse before dispatch when the budget has
+    /// already been met (`>=`, matching the sampling gate), then apply
+    /// agent-turn failure semantics. The post-call `>` check still catches
+    /// the call that crosses the budget.
     pub(super) async fn run_model_with_llm(
         &self,
         ctx: &mut InvocationCtx<'_>,
@@ -57,6 +58,26 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         start: Instant,
         context: &mut ContextTracker,
     ) -> Result<ModelOutcome, ExecutorError> {
+        if let Some(budget) = budget
+            && ctx.totals.total_cost >= budget
+        {
+            ctx.totals.total_duration_ms = start.elapsed().as_millis() as u64;
+            self.emit_failed(
+                ctx.agent_id,
+                ctx.invocation_id,
+                FailureKind::BudgetExceeded,
+                format!(
+                    "cost ${:.6} reached budget ${budget:.2} before the turn",
+                    ctx.totals.total_cost
+                ),
+                FailurePhase::LlmRequest,
+                *ctx.totals,
+                ctx.cursor,
+            )
+            .await?;
+            return Ok(ModelOutcome::BudgetExceeded(ctx.totals.total_cost));
+        }
+
         let response = match self
             .dispatch_llm(ctx, request, origin, Some(context))
             .await?
