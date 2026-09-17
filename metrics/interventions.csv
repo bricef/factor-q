@@ -1,1 +1,2 @@
 at,issue,type,minutes,note,source
+2026-09-17T19:33:32+00:00,813,fix,40,"review findings on PR 813 implemented by an Opus agent, six commits, re-gated",agent
