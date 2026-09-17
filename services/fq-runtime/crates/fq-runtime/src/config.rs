@@ -483,6 +483,13 @@ impl Config {
     /// environment overrides are merged, since `FQ_NATS_URL` can carry
     /// the same mistake the file can.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_iterations > crate::MAX_SUPPORTED_ITERATIONS {
+            return Err(ConfigError::MaxIterationsExceedsRuntime {
+                value: self.max_iterations,
+                maximum: crate::MAX_SUPPORTED_ITERATIONS,
+                host_step_budget: fq_ops::agent::ITERATION_HOST_STEP_BUDGET,
+            });
+        }
         self.nats.validate()?;
         self.events.validate()?;
         self.tools.validate()?;
@@ -1155,6 +1162,20 @@ max_iterations = 250
 "#;
         let config = Config::from_toml_str(toml).unwrap();
         assert_eq!(config.max_iterations, 250);
+    }
+
+    #[test]
+    fn max_iterations_above_runtime_limit_is_rejected() {
+        let err = Config::from_toml_str("max_iterations = 501\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "`max_iterations` = 501 exceeds the runtime's supported maximum of 500 (host step budget 1000, two steps per turn)"
+        );
+    }
+
+    #[test]
+    fn max_iterations_at_runtime_limit_is_accepted() {
+        assert!(Config::from_toml_str("max_iterations = 500\n").is_ok());
     }
 
     #[test]

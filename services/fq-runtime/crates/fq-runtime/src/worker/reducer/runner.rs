@@ -101,11 +101,13 @@ impl Clock for SystemClock {
     }
 }
 
-/// Soft cap on the number of `step()` calls per invocation.
-/// Independent of the reducer's own `max_iterations` so a buggy
-/// reducer (e.g. one that perpetually returns CallModel without
-/// progress) cannot wedge the host indefinitely.
+/// Soft cap on host `step()` calls, independent of `max_iterations`, so a
+/// buggy reducer cannot wedge the host indefinitely.
 const HOST_STEP_BUDGET: u32 = 1_000;
+/// Largest model-turn ceiling the host can honour: a normal turn takes two
+/// host steps (`CallModel`, then consuming its response).
+pub const MAX_SUPPORTED_ITERATIONS: u32 = HOST_STEP_BUDGET / 2;
+const _: () = assert!(MAX_SUPPORTED_ITERATIONS == fq_ops::agent::MAX_SUPPORTED_ITERATIONS);
 
 /// A per-invocation inbound channel from one grant-bearing MCP
 /// server: the server's name (for grant checks and cost

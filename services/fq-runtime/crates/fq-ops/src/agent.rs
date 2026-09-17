@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::events::subjects::{SubjectTokenError, validate_token};
 
+/// Largest model-turn ceiling the runtime can honour before its independent
+/// host-step backstop fires. Kept in the leaf contract crate so both the
+/// definition loader used by `fqd` and the thin `fq agent validate` client
+/// enforce the same runtime limit without linking the runtime into the CLI.
+pub const MAX_SUPPORTED_ITERATIONS: u32 = 500;
+
+/// Host-step budget underlying [`MAX_SUPPORTED_ITERATIONS`]. A normal model
+/// turn consumes one model step and one follow-up step.
+pub const ITERATION_HOST_STEP_BUDGET: u32 = MAX_SUPPORTED_ITERATIONS * 2;
+
 /// Declarative grant for MCP **sampling** (`sampling/createMessage`),
 /// the one server-initiated primitive that spends the agent's model
 /// budget on a server's behalf (ADR-0017 / ADR-0018). Nothing by
