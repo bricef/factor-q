@@ -670,7 +670,7 @@ name, and says which of them is stuck. The line to look for is
 ```text
 Consumers: 5 checked, 1 unhealthy
   fq-projector: ok (pending 0)
-  fq-coordination: ✗ stuck — 37 redeliveries past its acked floor, pending 724
+  fq-coordination: ✗ stuck — up to 37 redeliveries past its acked floor, pending 724
   -> its handler keeps failing; check the daemon log for
      `consumer=fq-coordination` and free whatever it is blocked on
      (disk, store, broker)

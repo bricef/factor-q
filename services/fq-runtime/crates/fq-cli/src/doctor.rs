@@ -100,7 +100,10 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // so the healthy ones are listed too — an operator reading this
     // during an incident needs to know which consumers were *checked*,
     // not only which ones complained.
-    out.push_str(&render_consumers(&report.consumers));
+    out.push_str(&render_consumers(
+        &report.consumers,
+        report.agents_at_cap.iter().any(|agent| agent.held > 0),
+    ));
 
     // MCP servers (#548): every shared server the daemon declares.
     // Boot no longer stops for one that will not start, so this line is
@@ -145,7 +148,10 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
 /// redelivery means the event is not lost, the escalating NAK delay
 /// means the daemon is not spinning, and this line is the part that
 /// makes it something an operator can find.
-fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
+fn render_consumers(
+    consumers: &[fq_ops::health::ConsumerHealth],
+    dispatcher_has_held_triggers: bool,
+) -> String {
     use fq_ops::health::ConsumerHealth;
 
     if consumers.is_empty() {
@@ -168,15 +174,21 @@ fn render_consumers(consumers: &[fq_ops::health::ConsumerHealth]) -> String {
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ✗ stuck — {redeliveries} redeliveries past its acked floor, \
+                    "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
                      pending {num_pending}{}{}\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped)
                 ));
-                out.push_str(&format!(
-                    "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
-                     and free whatever it is blocked on (disk, store, broker)\n"
-                ));
+                if name == "fq-dispatcher"
+                    && (dispatcher_has_held_triggers || *duplicate_dropped > 0)
+                {
+                    out.push_str("  -> redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice; the durable claim drops the duplicate (see the \"duplicate deliveries dropped\" count) — check fq invocation list and the transcripts' attempt: field if the count is 0\n");
+                } else {
+                    out.push_str(&format!(
+                        "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
+                         and free whatever it is blocked on (disk, store, broker)\n"
+                    ));
+                }
             }
             ConsumerHealth::Active {
                 name,
