@@ -1,28 +1,35 @@
 # Exactly-once trigger dispatch — execution plan
 
-> **Rescoped 2026-08-26 — still active, and the core has not landed.**
-> Verified against `main`:
+> **Rescoped 2026-08-26; updated 2026-09-16 — still active. The
+> duplicate-start gap this plan is named for is closed by durable
+> claims (#809); the trigger-inbox end state is not built.**
+> Verified against `main` on 2026-08-26, except where a row says
+> otherwise:
 >
 > | Slice | State |
 > |---|---|
 > | PR-0 (this plan + ADR-0032) | **Done** — ADR-0032 is in `docs/adrs/draft/` |
 > | PR-1 identity plumbing | **Partial** — the delivery attempt reaches `run_invocation` (`dispatcher.rs:473`) and the transcript preamble; `trigger_stream_seq` is persisted on dead-letter annotations, not on `invocation_state` |
-> | PR-2 claim registry | **Not started** — no `TriggerClaims` seam, no `fq-trigger-claims` bucket anywhere in the tree |
+> | PR-2 claim registry | **Landed in a different shape (2026-09-16, #809)** — durable claims live in the control-plane store (`control_plane/store/trigger_claim.rs`, arbitrated by `control_plane/dispatcher/claim.rs`), keyed on stream + stream-incarnation epoch + sequence; there is still no `fq-trigger-claims` KV bucket |
 > | PR-3 inbox dispatch | **Not started** — `DurableStart` is still the mechanism (`dispatcher.rs:474`), and PR-3 is what would delete it |
 > | PR-4 multi-worker recovery | **Not started** |
 > | PR-5 pull discipline | **Not started** |
 > | PR-6 backoff + `ack_wait` reconcile | **Not started** — `TRIGGER_RETRY_BACKOFF` is still `[1s, 5s, 30s, 2m]`, not the approved `[30s, 2m, 10m, 30m]`, and the consumer drift-update (`bus.rs:497`) reconciles `max_deliver` and `backoff` but not `ack_wait` |
 > | PR-7 watcher alarm + `fq doctor` checks | **Not started** |
 >
-> **What protects the system today is not this plan.** The dispatcher
-> acks on durable start — the invocation's first WAL write — rather
-> than on dispatch or on completion. That is the pre-existing #41
-> mechanism, which bounds the 2026-07-06 storm (an invocation
-> outliving the ack deadline being re-run). It does **not** deliver
-> the property this plan is named for: a redelivery *before* the first
-> WAL write still starts a second invocation, which is exactly the
-> 2026-07-18 incident in §1. §5.3 keeps that mechanism's invariants as
-> a preservation map precisely because PR-3 replaces it.
+> **Two mechanisms protect the system today, and neither is this
+> plan's end state.** The dispatcher still acks on durable start — the
+> invocation's first WAL write — rather than on dispatch or on
+> completion: the pre-existing #41 mechanism, which bounds the
+> 2026-07-06 storm (an invocation outliving the ack deadline being
+> re-run). Since 2026-09-16 (#809) a durable claim in the
+> control-plane store also arbitrates each delivery before drain,
+> routing, or parsing, so a redelivery *before* the first WAL write —
+> the 2026-07-18 incident in §1 — is acked and dropped rather than
+> starting a second invocation. What is still missing is the inbox end
+> state: the KV claim, PR-3's deletion of `DurableStart`, and
+> PR-4–PR-7. §5.3 keeps the #41 mechanism's invariants as a
+> preservation map precisely because PR-3 replaces it.
 >
 > **§9's checkboxes are staler than they look** — two of the four are
 > done and were never ticked:
@@ -44,10 +51,12 @@
 >   exempts those rows.
 >
 > **So the real remaining work is the code, not the remediation.** The
-> next action is PR-1/PR-2, and the open question worth putting to the
-> maintainer first is whether the ADR-0032 claim registry is still the
-> shape wanted five weeks on, given that the single-daemon dogfood has
-> run since 2026-07-19 on the #41 mechanism without a recurrence.
+> next action is PR-3 onward, and the open question worth putting to
+> the maintainer first is whether the ADR-0032 KV trigger inbox is
+> still the shape wanted now that #809's control-plane claim has
+> closed the duplicate-start gap, given that the single-daemon
+> dogfood ran from 2026-07-19 to that fix on the #41 mechanism
+> without a recurrence.
 
 **Status:** active (2026-07-19). Highest-priority correctness fix. Written up
 from the 2026-07-18 duplicate-PR incident (issue #189 → PRs #322/#323/#324,
