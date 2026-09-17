@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ops/dogfood/bootstrap.sh — provision a fresh, dedicated Debian or Ubuntu
-# host for the dogfood stack (ADR-0035). Run as root, and run it again
-# whenever the tracked files it lays out change: it is idempotent and
-# never overwrites a secret, an .env, or a volume.
+# host for the dogfood stack (ADR-0035). Run as root. Idempotent, and it
+# never overwrites a secret, an .env, or a volume; the stack definition
+# it lays out is kept current by every deploy after the first, so a
+# re-run is for a host that predates that, not for a change.
 #
 #   sudo ops/dogfood/bootstrap.sh                 # from a checkout
 #   curl -fsSL https://raw.githubusercontent.com/bricef/factor-q/main/ops/dogfood/bootstrap.sh | sudo bash
@@ -108,12 +109,15 @@ DOGFOOD="$HOME_DIR/fq-dogfood"
 log "Laying out $DOGFOOD"
 install -d -o "$FQ_USER" -g "$FQ_USER" -m 755 "$DOGFOOD" "$DOGFOOD/infra" "$DOGFOOD/logs" "$DOGFOOD/backups"
 install -d -o "$FQ_USER" -g "$FQ_USER" -m 700 "$DOGFOOD/.secrets"
-# Tracked files: always refreshed — this is how a change to the stack or
-# a script reaches the host.
+# The stack definition, laid out so the first deploy has one to run.
+# From then on every deploy lays the build's copies over these
+# (deploy.sh, bring_up: the fq-ops image carries them), so a change to
+# the stack reaches the host as a merge; this refresh only matters on a
+# host whose last deploy predates that.
 for f in compose.yml infra/nats.conf infra/Caddyfile infra/Caddyfile.internal; do
     install -o "$FQ_USER" -g "$FQ_USER" -m 644 "$SRC/$f" "$DOGFOOD/$f"
 done
-ok "compose.yml, infra/ (both Caddyfiles) refreshed"
+ok "compose.yml, infra/ (both Caddyfiles) laid out — the deploy keeps them current from here"
 # The scripts live in the fq-ops image now (ADR-0036) and run as
 # `docker compose run --rm ops <verb>`; a copy left here from before is
 # a stale one somebody might run.

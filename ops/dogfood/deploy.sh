@@ -25,6 +25,17 @@
 #                             wait for that container's daemon to log
 #                             "Runtime ready" and exit — the other seam
 #                             ops/dogfood/tests drives
+#   deploy.sh --refresh-tracked <build stack dir> <instance dir>
+#                             lay a build's compose.yml and infra/ over an
+#                             instance's and exit — the third seam
+#
+# A build carries its stack definition, not only its binaries: the fq-ops
+# image holds ops/dogfood/compose.yml and infra/ (`fq-ops stack`), and a
+# deploy lays the target build's copies over the instance's before `up`,
+# so a limit, a service's setting or a broker config is a value in git
+# that lands with the hourly deploy — and a rollback puts the previous
+# build's back with its binaries. The host holds secrets, the tag and
+# facts about itself; nothing that reaches a service is edited there.
 #
 # Runs from the fq-ops image (ADR-0036): `docker compose run --rm ops deploy
 # [...]` is this script, and nothing on the host runs it directly. It is
@@ -302,6 +313,39 @@ if [ "${1:-}" = "--wait-ready" ]; then
     exit $?
 fi
 
+# --- the stack definition a build carries ---------------------------------
+# compose.yml and the configs it mounts, versioned with the build. bring_up
+# lays the target build's copies over the instance's before `up`. The
+# host-authored files — .env, compose.override.yml, .secrets/ — are not in
+# this list and are never touched.
+TRACKED=(compose.yml infra/nats.conf infra/Caddyfile infra/Caddyfile.internal)
+
+refresh_tracked() {  # $1 = a build's stack dir, $2 = the instance dir → one line per file
+    local f n=0
+    for f in "${TRACKED[@]}"; do
+        if [ ! -f "$1/$f" ]; then printf '    %s: not in this build, left as is\n' "$f"; continue; fi
+        if [ -f "$2/$f" ] && cmp -s "$1/$f" "$2/$f"; then continue; fi
+        mkdir -p "$2/$(dirname "$f")"
+        # The whole file or nothing: compose reads it the moment `up` runs.
+        cp "$1/$f" "$2/$f.new" && mv -f "$2/$f.new" "$2/$f"
+        printf '    %s: refreshed\n' "$f"; n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || echo "    compose.yml and infra/ already match the build"
+}
+
+# A build's stack directory, unpacked into $2. Fails for a build from
+# before the image carried one: `stack` is then an unknown verb (exit 2),
+# and the instance's files are left as they are.
+stack_of_build() {  # $1 = sha, $2 = dir
+    docker run --rm "$REPO/fq-ops:$1" stack 2>/dev/null | tar -C "$2" -xf - 2>/dev/null
+}
+
+if [ "${1:-}" = "--refresh-tracked" ]; then
+    [ $# -eq 3 ] || { echo "usage: deploy.sh --refresh-tracked <build stack dir> <instance dir>" >&2; exit 2; }
+    refresh_tracked "$2" "$3"
+    exit $?
+fi
+
 FORCE=0
 WANT="latest"
 for arg in "$@"; do
@@ -488,7 +532,18 @@ done
 # container's image. Returns non-zero with the reason on stdout's last
 # line rather than dying, so --auto can roll back.
 bring_up() {  # $1 = sha
-    local tag="$1" started cid reason svc want got
+    local tag="$1" started cid reason svc want got stack
+    # The build's stack definition first, then its tag: `up` reads both.
+    # Reported on stderr so it reaches the terminal and, unattended, the
+    # deploy log — this function's stdout is the failure reason.
+    stack="$(mktemp -d)"
+    if stack_of_build "$tag" "$stack"; then
+        log "Laying out $tag's compose.yml and infra/" >&2
+        refresh_tracked "$stack" "$DOGFOOD" >&2
+    else
+        printf '    %s ships no stack definition (a build from before the image carried one) — compose.yml and infra/ left as they are\n' "$tag" >&2
+    fi
+    rm -rf "$stack"
     if grep -q '^FQ_TAG=' .env; then
         sed -i "s/^FQ_TAG=.*/FQ_TAG=$tag/" .env
     else
@@ -572,15 +627,16 @@ done
 # --- done ------------------------------------------------------------------------
 # What landed, for the message and the terminal alike. GHW_REPO is the
 # repository the watcher already follows — the one these builds come
-# from — read from where the watcher reads it: .secrets/env, the file
-# env.example requires it in. (.env never carried it, so the lookup that
-# used to look there found nothing on every host and the list was never
-# rendered; the guest's first deploy from the ops service showed it.)
-GHW_REPO="$(sed -n 's/^GHW_REPO=\(.*\)$/\1/p' .secrets/env | tail -1)"
+# from — read from where the watcher reads it: the resolved stack, where
+# compose.yml declares it under the watcher's `environment:`. (It was
+# once looked for in .env, which never carried it, so the list was never
+# rendered; then in .secrets/env, which it has since left.)
+GHW_REPO="$(docker compose config --format json 2>/dev/null \
+    | jq -r '.services["github-watcher"].environment.GHW_REPO // empty' 2>/dev/null || true)"
 if [ -z "$CURRENT" ] || [ "$CURRENT" = "$SHA" ]; then
     changes="first deploy of $SHA on this host, or a redeploy — nothing to compare"
 elif [ -z "$GHW_REPO" ]; then
-    changes="commit list unavailable: GHW_REPO not set in .secrets/env"
+    changes="commit list unavailable: compose.yml declares no GHW_REPO for the watcher"
 elif subjects="$(changes_since "$CURRENT" "$SHA" "$GHW_REPO")"; then
     changes="$(printf '%s\n' "$subjects" | render_changes "$CURRENT" "$SHA" "$GHW_REPO")"
 else

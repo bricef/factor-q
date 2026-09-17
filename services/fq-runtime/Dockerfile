@@ -379,6 +379,15 @@ RUN install -d -m 755 /usr/local/lib/fq-ops /etc/fq-ops
 COPY --chmod=755 ops/dogfood/deploy.sh ops/dogfood/hygiene.sh ops/dogfood/backup.sh \
                  ops/dogfood/restore.sh ops/dogfood/notify.sh /usr/local/lib/fq-ops/
 COPY --chmod=644 ops/dogfood/ops.crontab /etc/fq-ops/crontab
+# The stack definition and the configs it mounts, so a deploy lays the
+# build's copies over the instance's before `up` (deploy.sh, bring_up)
+# and a rollback puts the previous build's back: a limit or a service's
+# setting is a value in compose.yml, versioned with the binaries, never
+# edited on the host. `fq-ops stack` streams this directory.
+RUN install -d -m 755 /etc/fq-ops/stack /etc/fq-ops/stack/infra
+COPY --chmod=644 ops/dogfood/compose.yml /etc/fq-ops/stack/compose.yml
+COPY --chmod=644 ops/dogfood/infra/nats.conf ops/dogfood/infra/Caddyfile \
+                 ops/dogfood/infra/Caddyfile.internal /etc/fq-ops/stack/infra/
 COPY --chmod=755 ops/dogfood/fq-ops /usr/local/bin/fq-ops
 RUN printf '%s\n' "$FQ_OPS_SHA" > /etc/fq-ops/version && chmod 644 /etc/fq-ops/version
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
