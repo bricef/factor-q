@@ -203,18 +203,34 @@ def main(argv: list[str]) -> int:
     tag.add_argument("note", nargs="*")
     tag.set_defaults(run=cmd_tag)
 
-    # `--issue N` may appear anywhere after the positionals (`just tag 837 M
-    # --issue 798 a note`); argparse cannot intermix options with a trailing
-    # nargs="*" positional under a subcommand, so lift it out by hand.
+    # The `just` recipes append every extra word after the positionals, so
+    # `--source agent`, `--no-push`, `--data-dir X` and `--issue N` all arrive
+    # *after* the subcommand and its trailing nargs="*" note. argparse cannot
+    # intermix options there, so lift the known ones out by hand and hand the
+    # global ones back to the parser in front of the subcommand.
     argv = list(argv)
+    lifted_front: list[str] = []
     issue = None
-    if "--issue" in argv:
-        at = argv.index("--issue")
-        if at + 1 >= len(argv):
-            raise SystemExit("--issue needs a value")
-        issue = argv[at + 1]
-        del argv[at : at + 2]
-    args = parser.parse_args(argv)
+    valued = {"--source", "--data-dir", "--issue"}
+    flags = {"--no-push", "--no-commit"}
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in valued:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{tok} needs a value")
+            if tok == "--issue":
+                issue = argv[i + 1]
+            else:
+                lifted_front += [tok, argv[i + 1]]
+            del argv[i : i + 2]
+            continue
+        if tok in flags:
+            lifted_front.append(tok)
+            del argv[i]
+            continue
+        i += 1
+    args = parser.parse_args(lifted_front + argv)
     args.issue = getattr(args, "issue", None) or issue
     print(args.run(args))
     return 0
