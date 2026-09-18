@@ -25,7 +25,7 @@ git show origin/metrics:metrics/interventions.csv
 Entries go through `scripts/metrics-log.py`, which keeps a worktree of the
 branch at `.metrics-data/` in the repository root (gitignored), fast-forwards
 it, validates the vocabulary, stamps UTC time, appends the row, commits it
-with a fixed message form (`log: fix #838 15m`) and pushes. Do not edit rows
+with a fixed message form (`log: fix #NNN 15m`) and pushes. Do not edit rows
 by hand except to correct a typo, and then in a commit that says so.
 
 ## `interventions.csv`
