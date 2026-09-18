@@ -225,6 +225,18 @@ daemon; after changing the Dockerfile, build them and run
   goldens — separately, so a reviewer reads the change closely and
   skims the fan-out; the template asks for both. `AGENTS.md` has the
   reasoning and the origin.
+- **Closing keywords are a command, not prose.** GitHub closes issue
+  `N` when a PR body or a commit reaching `main` contains
+  `close`/`closes`/`closed`/`fix`/`fixes`/`fixed`/`resolve`/`resolves`/
+  `resolved` immediately before `#N`, whatever the surrounding words:
+  "does not close #840" closed #840, and a commit message quoting the
+  example `log: fix #838 15m` closed #838 (both on 2026-09-17). Write
+  `Closes #N` only for the issue the PR finishes, under the template's
+  "Issues" heading. Mention every other issue as `#N`, `see #N`,
+  `part of #N` or `leaves #N open`, and quote example commit messages
+  with a placeholder (`#NNN`), never a live number. The same rule
+  applies to commit messages, review comments that end up in a squash
+  message, and stamps pasted into issue bodies.
 
 ## Design sessions
 
