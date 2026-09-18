@@ -230,9 +230,24 @@ inbox, and `DurableStart` — the #41 ack-after-durable-start that
 bounds the older failure, a long invocation outliving its ack deadline
 and being re-run — still starts the work, so the plan's PR-3 through
 PR-7 (inbox dispatch, multi-worker recovery, pull discipline, the
-backoff/`ack_wait` reconcile, the watcher alarm) remain open; and the M0 plan's proxy
-instrumentation (read relative to an expert+frontier baseline) to make
-**M1 (Q1)** decidable. Open strategic questions
+backoff/`ack_wait` reconcile, the watcher alarm) remain open. The M0
+plan's deferred proxy instrumentation (read relative to an
+expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
+track: the
+[measurement instrument plan](docs/plans/active/2026-09-17-measurement-instrument.md)
+(opened 2026-09-17 for
+[#340](https://github.com/bricef/factor-q/issues/340) and the capability
+ladder's §6,
+[#413](https://github.com/bricef/factor-q/issues/413)) sequences five
+deliverables — the attempt ledger, the objective diagrams and measures,
+the human-entered primitives, the trajectory plot and the weekly
+report. Its first slice is on `main` as of 2026-09-17: `just touch` and
+`just tag` append typed interventions, touch minutes and
+baseline-equivalent size tags to logs kept on the orphan `metrics`
+branch, never merged into `main` (see
+[measurement logs](docs/guide/measurement-logs.md)); the ledger, the
+diagrams and the report are not built yet, so M1 is still
+undecidable. Open strategic questions
 (security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
