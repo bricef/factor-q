@@ -1,0 +1,78 @@
+# Attempt ledger extractor
+
+`fq-metrics extract` builds or incrementally updates `attempt_ledger.sqlite`,
+the objective input to factor-q's measurement instrument. The extractor uses
+only Python's standard library and SQLite; GitHub access is through the `gh`
+executable already used by repository automation.
+
+From the repository root:
+
+```console
+just metrics-extract
+```
+
+Useful options can be passed after `--`:
+
+```console
+just metrics-extract -- --since 2026-09-15T00:00:00Z
+just metrics-extract -- --events /path/to/event-export --output /tmp/ledger.sqlite
+```
+
+Without `--events`, the command asks the edge for the triggered-event index
+with `fq events query`, then retrieves each record with `fq events get`.
+`--events` recursively reads JSON files from an export instead, which makes
+historical extraction and offline tests deterministic. Repeating an extraction
+upserts source identities (issue, invocation, PR, commit and transition key),
+so rows are updated rather than duplicated. `--since` limits both the GitHub
+issue window and edge index; existing rows outside the window remain intact.
+
+## Sources and joins
+
+* **Issue timeline:** tracked `status:*` and `fleet:*` label changes,
+  close/reopen events, PR cross-references, issue creation, and admission when
+  `status:ready` is first applied. GitHub's timeline does not expose the body
+  as it existed at a label event, so `admission_body_hash` is `NULL` rather
+  than a hash of today's potentially changed body.
+* **Pull requests:** creation, merge/close, head branch, review events and
+  comments, and commits after the first review. A line of the form
+  `provenance: agent=<id> invocation=<uuid> model=<model>` joins a PR to an
+  attempt. The line or an `m0/` head marks agent-authored work; neither means
+  human-authored.
+* **Event log:** every issue-bearing `triggered` event creates exactly one
+  attempt keyed by invocation ID. Its `completed` or `failed` event supplies
+  terminal status, cost, call counts, and end time. Missing fields from older
+  event versions remain `NULL`.
+* **Git history:** mainline merge commits associate files with PRs. A commit
+  during the 14 days after merge is corrective when it references the PR or
+  issue, reverts the merge, or has `fix`/`revert` in its subject and touches a
+  merge file. `corrective_commits.rule` records which test matched.
+* **Human log:** `metrics/interventions.csv` is read from the working tree, or
+  from `origin/metrics` when the metrics orphan branch is not checked out.
+  Missing logs leave the table empty.
+
+## Acceptance rule
+
+An outcome is accepted only after its PR was merged and completed 14 full days
+without a corrective commit. Until that deadline it has
+`accepted = 0`, `accepted_at = NULL`, and `rule = pending_14_days`. A correction
+keeps it unaccepted and records the first correction SHA and matching rule.
+After survival, `accepted_at` is exactly `merged_at + 14 days` and the rule is
+`survived_14_days`. Re-extraction advances pending outcomes once time passes.
+
+The core tables are `tasks`, `transitions`, `attempts`, `outcomes`, and
+`interventions`. Internal `pull_requests` and `corrective_commits` tables retain
+the source facts needed to recompute acceptance and correction LOC without
+re-querying history. `views.sql` installs `first_pass_rate`,
+`attempts_per_accept`, `touch_per_accept` (median minutes), `mtbi` (hours), and
+`correction_ratio` (corrective human LOC / agent PR LOC); each view reports an
+`all_time` and a trailing `30_days` row.
+
+## Tests
+
+Recorded fixtures cover an issue timeline, an agent PR with provenance, a
+human PR without it, exported terminal events, and synthetic git history:
+
+```console
+cd tools/fq-metrics
+python3 -m unittest
+```

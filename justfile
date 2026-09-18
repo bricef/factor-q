@@ -868,6 +868,7 @@ quality:
     run_phase "check-schema-versions" just check-schema-versions
     run_phase "lint-sources" just lint-sources
     run_phase "test-fq-lint" just test-fq-lint
+    run_phase "test-fq-metrics" just test-fq-metrics
     run_phase "lint-sizes"   just lint-sizes
     run_phase "lint-fmt"     just lint-fmt
     run_phase "lint-clippy"  just lint-clippy
@@ -985,6 +986,14 @@ clean:
     for module in adapters/*/go.mod; do dir="${module%/go.mod}"; (cd "$dir" && go clean && rm -rf target); done
     rm -rf dist
     rm -rf docs/design/states docs/design/committed/states
+
+# Build or incrementally update the objective attempt ledger.
+metrics-extract *args:
+    python3 tools/fq-metrics/fq-metrics extract {{args}}
+
+# Recorded-fixture tests for the dependency-free metrics extractor.
+test-fq-metrics:
+    cd tools/fq-metrics && python3 -m unittest
 
 # The measurement instrument's two human-entered inputs
 # (docs/guide/measurement-logs.md, plan docs/plans/active/2026-09-17-measurement-instrument.md).
