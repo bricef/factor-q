@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from fq_metrics.cli import main
+
+main()
