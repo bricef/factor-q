@@ -15,7 +15,7 @@ The data lives on the orphan branch `metrics` (no shared history with
 `main`, never merged), so a row never triggers `main`'s CI or the hourly
 deploy. This script keeps a worktree of that branch at `.metrics-data/` in
 the repository root (gitignored), fast-forwards it, appends the row, commits
-with a fixed message form (`log: fix #838 15m`), and pushes. `--no-push`
+with a fixed message form (`log: fix #NNN 15m`), and pushes. `--no-push`
 commits locally only; `--no-commit` appends without committing (for dry
 runs).
 
