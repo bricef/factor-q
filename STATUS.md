@@ -241,13 +241,19 @@ ladder's §6,
 [#413](https://github.com/bricef/factor-q/issues/413)) sequences five
 deliverables — the attempt ledger, the objective diagrams and measures,
 the human-entered primitives, the trajectory plot and the weekly
-report. Its first slice is on `main` as of 2026-09-17: `just touch` and
-`just tag` append typed interventions, touch minutes and
-baseline-equivalent size tags to logs kept on the orphan `metrics`
-branch, never merged into `main` (see
-[measurement logs](docs/guide/measurement-logs.md)); the ledger, the
-diagrams and the report are not built yet, so M1 is still
-undecidable. Open strategic questions
+report. Two of them are on `main`. The human-entered primitives landed
+2026-09-17: `just touch` and `just tag` append typed interventions,
+touch minutes and baseline-equivalent size tags to logs kept on the
+orphan `metrics` branch, never merged into `main` (see
+[measurement logs](docs/guide/measurement-logs.md)). The attempt
+ledger landed 2026-09-18
+([#838](https://github.com/bricef/factor-q/issues/838)):
+`just metrics-extract` builds and incrementally updates
+`attempt_ledger.sqlite` from issue timelines, pull requests, the event
+log, git history and the intervention log — see the
+[extractor README](tools/fq-metrics/README.md). The diagrams and
+measures, the trajectory plot and the weekly report are not built yet,
+so M1 is still undecidable. Open strategic questions
 (security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
