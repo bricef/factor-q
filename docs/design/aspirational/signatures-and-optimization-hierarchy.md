@@ -130,6 +130,26 @@ The codebase will benefit from explicit lexical separation:
 - `Node` — graph element bound to a signature; resolves to a binding at execution time
 - `Agent` — *deprecated as a primary term*; retained where useful as a synonym for "LLM-backed binding," but no longer the primitive of the architecture
 
+Two execution-level terms sit alongside these (decided 2026-09-20), so that
+"the reducer" is never ambiguous once there is more than one:
+
+- `NodeReducer` — the reducer that runs *inside* a node: the fold over
+  (LLM call → tool dispatch → result → continuation) steps that
+  [ADR-0014](../../adrs/accepted/0014-agent-harness-as-reducer.md) decided and
+  the [reducer harness](../../guide/reducer-harness.md) implements. Today it
+  is an agent reducer only; when other node types land (deterministic
+  functions, System One decision models, subgraphs), each is a `NodeReducer`
+  behind the same signature.
+- `GraphExecutor` — the engine *over* the graph: the traversal that binds
+  nodes, fires edges and charges the traversal budget, decided in
+  [ADR-0007](../../adrs/accepted/0007-inter-agent-communication.md) and
+  specified in the
+  [two-node vertical plan](../../plans/active/2026-07-07-graph-executor-two-node-vertical.md).
+  Not a reducer by name, deliberately: the term already in use is *graph
+  executor*, and keeping it avoids implying the two share a shape.
+
+These are design-vocabulary names, not a rename of the Rust `Reducer` trait.
+
 The vision and architecture documents should be revisited to use this vocabulary. The shift is small in code volume but large in conceptual clarity.
 
 ## Open questions
