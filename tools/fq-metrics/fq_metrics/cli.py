@@ -6,9 +6,10 @@ import argparse
 import csv
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
-from . import events, git_history, github, report as metrics_report
+from . import events, git_history, github, preflight, report as metrics_report
 from .db import connect, upsert
 
 
@@ -38,6 +39,13 @@ def import_interventions(db: sqlite3.Connection, repo_path: Path) -> int:
 
 def extract(args: argparse.Namespace) -> None:
     repo_path = Path(args.repo_path).resolve()
+    if args.events:
+        preflight.check_export(args.events)
+    else:
+        preflight.check_fq()
+    if not args.no_github:
+        preflight.check_gh()
+    preflight.check_git(repo_path, args.git_ref)
     db = connect(args.output)
     try:
         exported = events.read_export(args.events) if args.events else events.edge_events(args.since)
@@ -55,6 +63,7 @@ def extract(args: argparse.Namespace) -> None:
 
 
 def report(args: argparse.Namespace) -> None:
+    preflight.check_ledger(args.ledger)
     metrics_report.write_report(args.ledger, args.output_dir, args.since, args.by)
     print(f"wrote {Path(args.output_dir) / 'report.md'}")
 
@@ -82,4 +91,11 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except preflight.ToolError as error:
+        sys.exit(str(error))
+    except subprocess.CalledProcessError as error:
+        sys.exit(str(preflight.describe_failure(error)))
+    except KeyboardInterrupt:
+        sys.exit(130)
