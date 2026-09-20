@@ -25,8 +25,12 @@ CREATE TABLE IF NOT EXISTS attempts(
 CREATE TABLE IF NOT EXISTS outcomes(
   issue INTEGER NOT NULL, pr_number INTEGER NOT NULL, merged_at TEXT,
   accepted_at TEXT, accepted INTEGER NOT NULL DEFAULT 0,
-  correction_commit TEXT, rule TEXT,
+  correction_commit TEXT, rule TEXT, baseline_equivalent TEXT,
   PRIMARY KEY(issue, pr_number)
+);
+CREATE TABLE IF NOT EXISTS size_tags(
+  pr_number INTEGER PRIMARY KEY, at TEXT NOT NULL, issue INTEGER,
+  baseline_equivalent TEXT NOT NULL, note TEXT, source TEXT
 );
 CREATE TABLE IF NOT EXISTS interventions(
   at TEXT NOT NULL, issue INTEGER NOT NULL, type TEXT NOT NULL, minutes INTEGER,
@@ -49,6 +53,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(outcomes)")}
+    if "baseline_equivalent" not in columns:
+        db.execute("ALTER TABLE outcomes ADD COLUMN baseline_equivalent TEXT")
     return db
 
 

@@ -13,18 +13,19 @@ from . import events, git_history, github, preflight, report as metrics_report
 from .db import connect, upsert
 
 
-def import_interventions(db: sqlite3.Connection, repo_path: Path) -> int:
-    path = repo_path / "metrics" / "interventions.csv"
-    text: str | None = None
+def _log_text(repo_path: Path, name: str) -> str | None:
+    path = repo_path / "metrics" / name
     if path.exists():
-        text = path.read_text(encoding="utf-8")
-    else:
-        result = subprocess.run(
-            ["git", "-C", str(repo_path), "show", "origin/metrics:metrics/interventions.csv"],
-            text=True, capture_output=True,
-        )
-        if result.returncode == 0:
-            text = result.stdout
+        return path.read_text(encoding="utf-8")
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "show", f"origin/metrics:metrics/{name}"],
+        text=True, capture_output=True,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def import_interventions(db: sqlite3.Connection, repo_path: Path) -> int:
+    text = _log_text(repo_path, "interventions.csv")
     if not text:
         return 0
     rows = list(csv.DictReader(text.splitlines()))
@@ -37,6 +38,37 @@ def import_interventions(db: sqlite3.Connection, repo_path: Path) -> int:
     return len(rows)
 
 
+def import_accepted(db: sqlite3.Connection, repo_path: Path) -> tuple[int, int]:
+    text = _log_text(repo_path, "accepted.csv")
+    rows = list(csv.DictReader(text.splitlines())) if text else []
+    for row in rows:
+        size = row["baseline_equivalent"].upper()
+        if size not in ("S", "M", "L", "XL"):
+            raise ValueError(f"unknown baseline-equivalent size {size!r}")
+        upsert(db, "size_tags", {
+            "pr_number": int(row["pr"]), "at": row["at"],
+            "issue": int(row["issue"]) if row.get("issue") else None,
+            "baseline_equivalent": size, "note": row.get("note"),
+            "source": row.get("source"),
+        }, ("pr_number",))
+
+    for tag in db.execute("SELECT * FROM size_tags").fetchall():
+        if tag["issue"] is None:
+            cursor = db.execute(
+                "UPDATE outcomes SET baseline_equivalent=? WHERE pr_number=?",
+                (tag["baseline_equivalent"], tag["pr_number"]),
+            )
+        else:
+            cursor = db.execute(
+                "UPDATE outcomes SET baseline_equivalent=? WHERE pr_number=? AND issue=?",
+                (tag["baseline_equivalent"], tag["pr_number"], tag["issue"]),
+            )
+        if cursor.rowcount:
+            db.execute("DELETE FROM size_tags WHERE pr_number=?", (tag["pr_number"],))
+    pending = db.execute("SELECT COUNT(*) FROM size_tags").fetchone()[0]
+    return len(rows), pending
+
+
 def extract(args: argparse.Namespace) -> None:
     repo_path = Path(args.repo_path).resolve()
     if args.events:
@@ -47,19 +79,21 @@ def extract(args: argparse.Namespace) -> None:
         preflight.check_gh()
     preflight.check_git(repo_path, args.git_ref)
     db = connect(args.output)
+    interventions = tags = pending = 0
     try:
         exported = events.read_export(args.events) if args.events else events.edge_events(args.since)
         events.import_events(db, exported)
         if not args.no_github:
             github.collect(db, args.repo, args.since)
-        import_interventions(db, repo_path)
+        interventions = import_interventions(db, repo_path)
         git_history.extract(db, repo_path, ref=args.git_ref)
+        tags, pending = import_accepted(db, repo_path)
         views = Path(__file__).resolve().parent.parent / "views.sql"
         db.executescript(views.read_text(encoding="utf-8"))
         db.commit()
     finally:
         db.close()
-    print(f"wrote {args.output}")
+    print(f"wrote {args.output}: {interventions} interventions, {tags} size tags ({pending} pending)")
 
 
 def report(args: argparse.Namespace) -> None:
