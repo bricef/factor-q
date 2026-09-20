@@ -23,7 +23,14 @@ func TestGitHubAPISource(t *testing.T) {
 		switch {
 		case r.URL.Path == "/repos/o/r/issues":
 			listedStates = append(listedStates, r.URL.Query().Get("state"))
-			json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "ready"}}}})
+			if r.URL.Query().Get("state") == "all" {
+				json.NewEncoder(w).Encode([]map[string]any{
+					{"number": 8, "state": "open", "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "in-review"}}},
+					{"number": 9, "state": "closed", "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "in-review"}}},
+				})
+			} else {
+				json.NewEncoder(w).Encode([]map[string]any{{"number": 7, "state": "open", "updated_at": "2026-09-15T00:00:00Z", "labels": []map[string]string{{"name": "ready"}}}})
+			}
 		case r.URL.Path == "/repos/o/r/issues/7/labels/ready" && r.Method == http.MethodDelete:
 			removed = true
 			w.Write([]byte("[]"))
@@ -58,8 +65,12 @@ func TestGitHubAPISource(t *testing.T) {
 	if err != nil || len(issues) != 1 || issues[0].Number != 7 || issues[0].UpdatedAt.IsZero() {
 		t.Fatalf("ListByLabel = %#v, %v", issues, err)
 	}
-	if _, err := source.ListByLabelAllStates(ctx, "in-review"); err != nil {
+	allIssues, err := source.ListByLabelAllStates(ctx, "in-review")
+	if err != nil {
 		t.Fatalf("ListByLabelAllStates: %v", err)
+	}
+	if len(allIssues) != 2 || allIssues[0].State != "open" || allIssues[1].State != "closed" {
+		t.Fatalf("ListByLabelAllStates states = %#v, want open then closed", allIssues)
 	}
 	if _, err := source.ListReady(ctx, "ready"); err != nil {
 		t.Fatalf("ListReady: %v", err)
