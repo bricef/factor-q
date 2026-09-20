@@ -111,7 +111,7 @@ tracebacks are gone; if one appears, it is a bug, open an issue with it.
 
 | Message begins | Why | What to do |
 |---|---|---|
-| `` `fq` is not on PATH `` | `fq` is the factor-q CLI; the event log is the only source of attempts and cost | build it (`cargo build --release -p fq-cli`) and pair it (`fq connect …`), or run with `--events` from an [export](#event-export) |
+| `` `fq` is not on PATH `` | `fq` is the factor-q CLI; the event log is the only source of attempts and cost | build it (`cargo build --release -p fq-cli`) and pair it: mint a `read:event` token from a paired client (`docker compose exec fqd fq token attenuate --addr 127.0.0.1:9470 --grant read:event`), tunnel the edge, `fq connect …`; or run with `--events` from an [export](#event-export) |
 | `` `fq events query` failed `` | the CLI is present but has no pairing, the wrong `--addr`, or no daemon | its stderr is shown; `fq connect …`, set `FQ_ADDR`, check the tunnel, or use `--events` |
 | `` `gh` is not on PATH `` / `` `gh` is installed but not signed in `` | issue timelines, PRs and reviews come through `gh api` | `gh auth login`, or `--no-github` for an events-and-git-only ledger |
 | `… is not a git checkout` / `the checkout is shallow` / `` git ref `main` does not exist `` | mainline history decides acceptance and corrections | `--repo-path`, `git fetch --unshallow`, `git fetch origin` or `--git-ref` |
