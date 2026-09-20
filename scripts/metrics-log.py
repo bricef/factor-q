@@ -19,7 +19,7 @@ with a fixed message form (`log: fix #NNN 15m`), and pushes. `--no-push`
 commits locally only; `--no-commit` appends without committing (for dry
 runs).
 
-Types (docs/guide/measurement-logs.md; rubric to land under #840):
+Types (docs/guide/measurement-logs.md; rules in docs/guide/measurement-rubric.md):
 
     unblock  the run could not proceed without a human act (a rebase, a
              re-run of a flaky job, a dependency the agent could not install)
