@@ -50,6 +50,19 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(attempts[1]["outcome_event"], "failed")
         self.assertEqual(attempts[1]["error_kind"], "tool_error")
 
+    def test_trigger_without_an_issue_is_skipped_not_fatal(self):
+        probe = {
+            "envelope": {"agent_id": "doc-drift", "invocation_id": "inv-probe",
+                         "timestamp": "2026-09-15T11:00:00Z"},
+            "payload": {"event_type": "triggered", "payload": {
+                "trigger_id": "trigger-9",
+                "trigger_payload": "Daily doc-drift check. Review the last 36 hours.",
+                "config_snapshot": {"model": "test-model"}}},
+        }
+        events.import_events(self.db, fixture("events.json") + [probe])
+        rows = self.db.execute("SELECT invocation_id FROM attempts ORDER BY 1").fetchall()
+        self.assertEqual([row[0] for row in rows], ["inv-1", "inv-2"])
+
     def test_provenance_joins_attempt_and_human_pr_does_not(self):
         events.import_events(self.db, fixture("events.json"))
         agent_pr, human_pr = fixture("prs.json")

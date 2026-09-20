@@ -66,8 +66,14 @@ def _shape(event: dict) -> tuple[dict, str | None, dict]:
 
 
 def _issue(payload: dict) -> int | None:
-    trigger = payload.get("trigger_payload") or {}
-    github = trigger.get("github") or {}
+    # A cron probe or a doc-drift run is triggered with plain text, not a
+    # GitHub reference; it names no issue and is not an attempt.
+    trigger = payload.get("trigger_payload")
+    if not isinstance(trigger, dict):
+        return None
+    github = trigger.get("github")
+    if not isinstance(github, dict):
+        return None
     value = github.get("issue")
     try:
         return int(value) if value is not None else None

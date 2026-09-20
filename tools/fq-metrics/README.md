@@ -39,7 +39,9 @@ issue window and edge index; existing rows outside the window remain intact.
   attempt. The line or an `m0/` head marks agent-authored work; neither means
   human-authored.
 * **Event log:** every issue-bearing `triggered` event creates exactly one
-  attempt keyed by invocation ID. Its `completed` or `failed` event supplies
+  attempt keyed by invocation ID. A trigger whose payload is plain text rather than
+  a GitHub reference (the doc-drift and probe agents) names no issue and is
+  skipped, not counted. Its `completed` or `failed` event supplies
   terminal status, cost, call counts, and end time. Missing fields from older
   event versions remain `NULL`.
 * **Git history:** mainline merge commits associate files with PRs. A commit
