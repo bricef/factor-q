@@ -50,9 +50,8 @@ just touch <issue> <minutes> <type> [note...]
 | `note` | free text, one line |
 | `source` | `human` (default) or `agent` (a coordinating agent logging on the maintainer's behalf, `--source agent`) |
 
-Types, in one line each; the worked examples and the rules a human holds
-are in the plan's §4 until the rubric lands as `measurement-rubric.md`
-beside this file:
+Types, in one line each; the worked examples, the rules a human holds and
+how minutes are measured are in the [rubric](measurement-rubric.md):
 
 - `unblock` — the run could not proceed without a human act: a rebase, a
   re-run of a flaky job, a dependency the agent could not install.
