@@ -20,6 +20,9 @@ just metrics-extract -- --events /path/to/event-export --output /tmp/ledger.sqli
 
 Without `--events`, the command asks the edge for the triggered-event index
 with `fq events query`, then retrieves each record with `fq events get`.
+Event payloads are retained for thirty days, so run the extractor at least that
+often to preserve the issue join from triggered events. Older attempts retain
+cost and timing from the durable index, but cannot be joined to an issue.
 `--events` recursively reads JSON files from an export instead, which makes
 historical extraction and offline tests deterministic. Repeating an extraction
 upserts source identities (issue, invocation, PR, commit and transition key),

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +29,66 @@ class ExtractorTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.temp.cleanup()
+
+    def test_edge_events_pages_and_tolerates_missing_payloads(self):
+        first_page = [
+            {"event_id": f"t-{number}", "event_type": "triggered",
+             "timestamp": f"2026-09-20T12:{number // 60:02d}:{number % 60:02d}Z"}
+            for number in range(2000)
+        ]
+        missing_trigger = {
+            "event_id": "missing-trigger", "event_type": "triggered",
+            "invocation_id": "missing", "timestamp": "2026-09-20T13:00:00Z",
+        }
+        terminal = {
+            "event_id": "missing-terminal", "event_type": "completed",
+            "invocation_id": "inv-0", "timestamp": "2026-09-20T13:01:00Z",
+            "total_cost": 1.25, "error_kind": "payload_expired", "duration_ms": 60000,
+        }
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            if command[2] == "query":
+                event_type = command[command.index("--event-type") + 1]
+                if event_type == "triggered":
+                    output = [missing_trigger] if "--since" in command else first_page
+                elif event_type == "completed":
+                    output = [terminal]
+                else:
+                    output = []
+                return subprocess.CompletedProcess(command, 0, json.dumps(output), "")
+            event_id = command[3]
+            if event_id.startswith("missing-"):
+                return subprocess.CompletedProcess(command, 1, "", "gone")
+            number = event_id.removeprefix("t-")
+            issue = {"trigger_payload": {"github": {"issue": 863}}} if number == "0" else {}
+            record = {
+                "envelope": {"event_id": event_id, "invocation_id": f"inv-{number}",
+                             "timestamp": "2026-09-20T12:00:00Z"},
+                "payload": {"event_type": "triggered", "payload": issue},
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(record), "")
+
+        stderr = io.StringIO()
+        with patch.object(events.subprocess, "run", side_effect=run), redirect_stderr(stderr):
+            rows = events.edge_events(None)
+
+        second_page = [call for call in calls
+                       if call[2] == "query" and call[4] == "triggered" and "--since" in call]
+        self.assertEqual(len(second_page), 1)
+        self.assertEqual(second_page[0][-1], first_page[-1]["timestamp"])
+        self.assertTrue(all(["--limit", "2000"] == call[6:8]
+                            for call in calls if call[2] == "query"))
+        self.assertEqual(stderr.getvalue(), "2002 index rows, 2 payloads unreadable\n")
+        self.assertNotIn("missing", {row.get("invocation_id") for row in rows})
+
+        events.import_events(self.db, rows)
+        attempt = self.db.execute("SELECT * FROM attempts WHERE invocation_id='inv-0'").fetchone()
+        self.assertEqual(attempt["ended_at"], terminal["timestamp"])
+        self.assertEqual(attempt["total_cost"], terminal["total_cost"])
+        self.assertEqual(attempt["error_kind"], terminal["error_kind"])
+        self.assertIsNone(attempt["llm_calls"])
 
     def test_timeline_records_tracked_transitions_and_admission(self):
         data = fixture("timeline.json")
