@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import events, git_history, github
+from . import events, git_history, github, report as metrics_report
 from .db import connect, upsert
 
 
@@ -54,6 +54,11 @@ def extract(args: argparse.Namespace) -> None:
     print(f"wrote {args.output}")
 
 
+def report(args: argparse.Namespace) -> None:
+    metrics_report.write_report(args.ledger, args.output_dir, args.since, args.by)
+    print(f"wrote {Path(args.output_dir) / 'report.md'}")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="fq-metrics")
     commands = result.add_subparsers(dest="command", required=True)
@@ -66,6 +71,12 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--events", metavar="DIR", help="read an exported JSON tree instead of the edge")
     command.add_argument("--no-github", action="store_true", help=argparse.SUPPRESS)
     command.set_defaults(func=extract)
+    command = commands.add_parser("report", help="render metrics from an attempt ledger")
+    command.add_argument("--ledger", default="attempt_ledger.sqlite")
+    command.add_argument("--since", type=int, default=90, metavar="DAYS")
+    command.add_argument("--by", choices=("week", "day"), default="week")
+    command.add_argument("--output-dir", default="target/metrics/")
+    command.set_defaults(func=report)
     return result
 
 

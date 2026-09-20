@@ -67,6 +67,26 @@ re-querying history. `views.sql` installs `first_pass_rate`,
 `correction_ratio` (corrective human LOC / agent PR LOC); each view reports an
 `all_time` and a trailing `30_days` row.
 
+## Objective report
+
+`fq-metrics report` reads only the extracted ledger and writes a cumulative-flow
+diagram, accepted-change throughput, stage cycle-time distributions, and the
+ladder and cost measures. The renderer uses only Python’s standard library.
+From the repository root:
+
+```console
+just metrics-report
+just metrics-report -- --ledger /path/to/attempt_ledger.sqlite --since 30 --by day --output-dir target/metrics
+```
+
+The defaults are a 90-day window, weekly buckets, `attempt_ledger.sqlite`, and
+`target/metrics/`. The output directory contains `report.md`, machine-readable
+`report.json`, and three SVG diagrams. Closed issues leave cumulative flow unless
+they carry `status:done`; the latest applied `status:*` label wins, falling back
+to the latest applied `fleet:*` label. `status:failed`, `status:blocked`, and
+`fleet:needs-decision` are separate bands. Touch per accept and MTBI are reported
+as `n/a (no interventions logged)` when the window contains no interventions.
+
 ## Tests
 
 Recorded fixtures cover an issue timeline, an agent PR with provenance, a
