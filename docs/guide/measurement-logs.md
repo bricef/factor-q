@@ -4,8 +4,11 @@ The two human-entered inputs of the measurement instrument
 ([plan](../plans/active/2026-09-17-measurement-instrument.md), issue
 [#840](https://github.com/bricef/factor-q/issues/840)). Everything else the
 instrument reads (attempts, outcomes, corrective commits, cost) is extracted
-from the event log, GitHub and git by
-[#838](https://github.com/bricef/factor-q/issues/838); these two logs exist
+from the event log, GitHub and git by the attempt-ledger extractor
+(`just metrics-extract`, landed 2026-09-18 for
+[#838](https://github.com/bricef/factor-q/issues/838) — see the
+[extractor README](../../tools/fq-metrics/README.md)), which also reads the
+intervention log below; these two logs exist
 because interventions and touch minutes cannot be reconstructed from
 history, so they are kept from the day the instrument was decided.
 

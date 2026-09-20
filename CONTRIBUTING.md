@@ -57,6 +57,7 @@ factor-q/
 ├── adapters/fq-cron/           durable cron scheduler (Go)
 ├── adapters/github-watcher/    GitHub issue trigger adapter (Go)
 ├── tools/fq-lint/              source-policy linter — the size ratchets
+├── tools/fq-metrics/           attempt-ledger extractor (Python, stdlib only)
 ├── infrastructure/             docker-compose + NATS config
 ├── agents/examples/            sample agent definitions
 ├── tests/smoke/                end-to-end smoke tests (bash)
