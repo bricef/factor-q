@@ -991,6 +991,10 @@ clean:
 metrics-extract *args:
     python3 tools/fq-metrics/fq-metrics extract {{args}}
 
+# Render objective diagrams and measures from an existing attempt ledger.
+metrics-report *args:
+    python3 tools/fq-metrics/fq-metrics report {{args}}
+
 # Recorded-fixture tests for the dependency-free metrics extractor.
 test-fq-metrics:
     cd tools/fq-metrics && python3 -m unittest
