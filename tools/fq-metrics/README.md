@@ -19,7 +19,8 @@ just metrics-extract -- --events /path/to/event-export --output /tmp/ledger.sqli
 ```
 
 Without `--events`, the command asks the edge for the triggered-event index
-with `fq events query`, then retrieves each record with `fq events get`.
+with `fq events query`, then retrieves each record with `fq events get`; that
+needs a paired `fq` on `PATH` (see [When it fails](#when-it-fails)).
 Event payloads are retained for thirty days, so run the extractor at least that
 often to preserve the issue join from triggered events. Older attempts retain
 cost and timing from the durable index, but cannot be joined to an issue.
@@ -71,6 +72,54 @@ re-querying history. `views.sql` installs `first_pass_rate`,
 `attempts_per_accept`, `touch_per_accept` (median minutes), `mtbi` (hours), and
 `correction_ratio` (corrective human LOC / agent PR LOC); each view reports an
 `all_time` and a trailing `30_days` row.
+
+## Event export
+
+`--events` replaces the edge with a directory of JSON files, which is the way
+to run the extractor on a machine that has no paired `fq`. Make the export
+where `fq` is paired — on the dogfood guest that is inside the `fqd`
+container — and copy it over. The `</dev/null` matters: `docker compose exec`
+otherwise consumes the loop's stdin after the first record.
+
+```bash
+mkdir -p ~/fq-events/full
+for t in triggered completed failed; do
+  docker compose exec -T fqd fq events query --event-type $t --limit 2000 --json </dev/null > ~/fq-events/$t.json
+  mkdir -p ~/fq-events/full/$t
+  python3 -c 'import json,sys;[print(r["event_id"]) for r in json.load(open(sys.argv[1]))]' ~/fq-events/$t.json |
+    while read id; do docker compose exec -T fqd fq events get $id --json </dev/null > ~/fq-events/full/$t/$id.json; done
+done
+find ~/fq-events/full -empty -delete   # payloads older than the daemon's window come back empty
+```
+
+Then, on the clean checkout:
+
+```console
+just metrics-extract -- --events ~/fq-events/full --since 2026-06-22T00:00:00Z
+```
+
+The index caps at 2000 rows per page; for more, narrow with `--since`. The
+daemon keeps payloads for thirty days and the index indefinitely, so an
+event older than that lists but cannot be read back: it keeps cost and
+timing in the ledger, never an issue join.
+
+## When it fails
+
+Every failure the operator can act on prints three lines — what failed,
+why the extractor needs it, and what to do — and exits 1. The bare
+tracebacks are gone; if one appears, it is a bug, open an issue with it.
+
+| Message begins | Why | What to do |
+|---|---|---|
+| `` `fq` is not on PATH `` | `fq` is the factor-q CLI; the event log is the only source of attempts and cost | build it (`cargo build --release -p fq-cli`) and pair it (`fq connect …`), or run with `--events` from an [export](#event-export) |
+| `` `fq events query` failed `` | the CLI is present but has no pairing, the wrong `--addr`, or no daemon | its stderr is shown; `fq connect …`, set `FQ_ADDR`, check the tunnel, or use `--events` |
+| `` `gh` is not on PATH `` / `` `gh` is installed but not signed in `` | issue timelines, PRs and reviews come through `gh api` | `gh auth login`, or `--no-github` for an events-and-git-only ledger |
+| `… is not a git checkout` / `the checkout is shallow` / `` git ref `main` does not exist `` | mainline history decides acceptance and corrections | `--repo-path`, `git fetch --unshallow`, `git fetch origin` or `--git-ref` |
+| `no ledger at …` | `report` only renders | `just metrics-extract` first, or `--ledger` |
+| `` `gh` exited 1 `` mid-run | usually the API rate limit | wait for the reset (`gh api rate_limit`) and re-run; extraction is incremental |
+
+A missing `origin/metrics` ref is a note, not an error: the human logs are
+empty for that run, and `git fetch origin metrics` includes them next time.
 
 ## Objective report
 
