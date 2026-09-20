@@ -23,7 +23,7 @@ FQ_FIX = (
     "    cargo build --release -p fq-cli        # -> target/release/fq, put it on PATH\n"
     "    fq connect <edge-addr> --token <admin token> --fingerprint <fingerprint>\n"
     "  (the daemon wrote both to <state>/edge/ at first run; on the dogfood guest\n"
-    "  that is inside the fqd container, /var/lib/factor-q/edge/, and the edge\n"
+    "  that is inside the fqd container, /var/lib/factor-q/state/edge/, and the edge\n"
     "  listens on the guest's 127.0.0.1:9470, so tunnel it: ssh -L 9470:127.0.0.1:9470),\n"
     "or skip the edge and read an export instead:\n"
     "    just metrics-extract -- --events <dir>\n"
