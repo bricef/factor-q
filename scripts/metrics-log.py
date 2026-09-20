@@ -10,6 +10,7 @@ validates the vocabulary, stamps UTC time, appends a CSV row, and commits it.
 
     scripts/metrics-log.py touch <issue> <minutes> <type> [note...]
     scripts/metrics-log.py tag   <pr>    <size>    [--issue N] [note...]
+    scripts/metrics-log.py spans [--since TS] [--log PATH] [--emit]
 
 The data lives on the orphan branch `metrics` (no shared history with
 `main`, never merged), so a row never triggers `main`'s CI or the hourly
@@ -44,9 +45,12 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import pathlib
 import subprocess
 import sys
+
+from metrics_spans import run_spans
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA_BRANCH = "metrics"
@@ -177,6 +181,10 @@ def record(args: argparse.Namespace, rel: pathlib.Path, header: list[str], row: 
     return f"{summary}; {outcome}"
 
 
+def cmd_spans(args: argparse.Namespace) -> str:
+    return run_spans(args.log, args.since, args.emit)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="metrics-log", description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -202,6 +210,16 @@ def main(argv: list[str]) -> int:
     tag.add_argument("size")
     tag.add_argument("note", nargs="*")
     tag.set_defaults(run=cmd_tag)
+
+    spans = sub.add_parser("spans", help="draft touch rows from Claude Code session events")
+    spans.add_argument("--since", help="only read events at or after this ISO-8601 timestamp")
+    spans.add_argument(
+        "--log",
+        default=str(pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "fq/touch.log"),
+        help="touch-hook log path (default ~/.local/state/fq/touch.log)",
+    )
+    spans.add_argument("--emit", action="store_true", help="print draft `just touch` commands")
+    spans.set_defaults(run=cmd_spans)
 
     # The `just` recipes append every extra word after the positionals, so
     # `--source agent`, `--no-push`, `--data-dir X` and `--issue N` all arrive

@@ -31,6 +31,34 @@ it, validates the vocabulary, stamps UTC time, appends the row, commits it
 with a fixed message form (`log: fix #NNN 15m`) and pushes. Do not edit rows
 by hand except to correct a typo, and then in a commit that says so.
 
+## Where minutes come from
+
+Touch minutes are measured from Claude Code sessions rather than recalled.
+The repository hooks `UserPromptSubmit`, `Stop`, and `SessionEnd`; each event
+is appended to `${XDG_STATE_HOME:-~/.local/state}/fq/touch.log` with its UTC
+time, session, working directory, and current issue. `Stop` is sufficient to
+close a span when a Claude Code version does not offer `SessionEnd`.
+
+A coordinating agent marks the issue when work begins and clears it when work
+ends:
+
+```text
+just touch-start <issue>
+just touch-stop
+```
+
+The marker is `${XDG_STATE_HOME:-~/.local/state}/fq/current-issue`. Run
+`scripts/metrics-log.py spans` to review draft rows, optionally restricting
+them with `--since <timestamp>` or reading another file with `--log <path>`.
+A burst starts at its first `UserPromptSubmit` and ends at its last `Stop`;
+a gap of more than ten minutes starts a new burst. Minutes are rounded up to
+five. Events without a marker are reported separately as unattributed.
+
+`spans --emit` prints `just touch` commands with type `fix` and a session note;
+it never appends measurement rows. The maintainer confirms or edits every
+command before running it, so session events remain evidence rather than an
+automatic intervention log.
+
 ## `interventions.csv`
 
 One row per human act inside the loop other than the terminal accept or
