@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from fq_metrics import events, git_history, github
+from fq_metrics import cli, events, git_history, github
 from fq_metrics.db import connect, upsert
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -164,6 +165,47 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(survived["accepted"], 1)
         self.assertEqual(survived["accepted_at"], "2026-09-29T11:05:00Z")
 
+
+    def test_accepted_tags_apply_or_remain_pending_and_reimport_updates(self):
+        upsert(self.db, "outcomes", {
+            "issue": 811, "pr_number": 900, "accepted": 1,
+            "accepted_at": "2026-09-20T00:00:00Z",
+        }, ("issue", "pr_number"))
+        repo = Path(self.temp.name) / "repo"
+        (repo / "metrics").mkdir(parents=True)
+        accepted = repo / "metrics" / "accepted.csv"
+        shutil.copy(FIXTURES / "accepted.csv", accepted)
+
+        self.assertEqual(cli.import_accepted(self.db, repo), (2, 1))
+        outcome = self.db.execute(
+            "SELECT baseline_equivalent FROM outcomes WHERE pr_number=900").fetchone()
+        self.assertEqual(outcome[0], "M")
+        self.assertEqual(tuple(self.db.execute(
+            "SELECT pr_number,baseline_equivalent FROM size_tags").fetchone()), (999, "S"))
+
+        accepted.write_text(
+            "at,pr,issue,baseline_equivalent,note,source\n"
+            "2026-09-21T10:00:00Z,900,811,L,updated,human\n"
+            "2026-09-21T11:00:00Z,999,999,XL,updated,human\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(cli.import_accepted(self.db, repo), (2, 1))
+        self.assertEqual(self.db.execute(
+            "SELECT baseline_equivalent FROM outcomes WHERE pr_number=900").fetchone()[0], "L")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM size_tags").fetchone()[0], 1)
+        self.assertEqual(self.db.execute(
+            "SELECT baseline_equivalent FROM size_tags WHERE pr_number=999").fetchone()[0], "XL")
+
+    def test_connect_migrates_existing_outcomes_table(self):
+        self.db.close()
+        path = Path(self.temp.name) / "old.sqlite"
+        old = sqlite3.connect(path)
+        old.execute("CREATE TABLE outcomes(issue INTEGER, pr_number INTEGER)")
+        old.close()
+        migrated = connect(path)
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(outcomes)")}
+        migrated.close()
+        self.assertIn("baseline_equivalent", columns)
 
 if __name__ == "__main__":
     unittest.main()

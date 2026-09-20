@@ -51,9 +51,12 @@ issue window and edge index; existing rows outside the window remain intact.
   during the 14 days after merge is corrective when it references the PR or
   issue, reverts the merge, or has `fix`/`revert` in its subject and touches a
   merge file. `corrective_commits.rule` records which test matched.
-* **Human log:** `metrics/interventions.csv` is read from the working tree, or
-  from `origin/metrics` when the metrics orphan branch is not checked out.
-  Missing logs leave the table empty.
+* **Human logs:** `metrics/interventions.csv` and `metrics/accepted.csv` are
+  read from the working tree, or from `origin/metrics` when the metrics orphan
+  branch is not checked out. Accepted changes carry baseline-equivalent sizes
+  weighted as S=1, M=4, L=8, and XL=16 hours. Tags whose outcome has not been
+  extracted yet remain in `size_tags` and are applied by a later extraction.
+  Missing logs leave their tables empty.
 
 ## Acceptance rule
 

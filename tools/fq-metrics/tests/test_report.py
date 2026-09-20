@@ -49,7 +49,8 @@ class ReportTests(unittest.TestCase):
                 "pr_number": pr,
             }, ("invocation_id",))
         upsert(self.db, "outcomes", {"issue": 1, "pr_number": 10,
-               "accepted_at": "2026-01-22T00:00:00Z", "accepted": 1}, ("issue", "pr_number"))
+               "accepted_at": "2026-01-22T00:00:00Z", "accepted": 1,
+               "baseline_equivalent": "M"}, ("issue", "pr_number"))
         upsert(self.db, "interventions", {"at": "2026-01-10T12:00:00Z", "issue": 1,
                "type": "fix", "minutes": 10, "note": "a", "source": "test"},
                ("at", "issue", "type", "note"))
@@ -76,6 +77,9 @@ class ReportTests(unittest.TestCase):
         data = report_data(self.db, since=59, by="week",
                            now=datetime(2026, 1, 29, tzinfo=UTC))
         self.assertEqual(sum(row["accepted"] for row in data["throughput"]), 1)
+        tagged = next(row for row in data["throughput"] if row["accepted"])
+        self.assertEqual(tagged["baseline_equivalent_hours"], 4)
+        self.assertEqual(tagged["size_counts"], {"S": 0, "M": 1, "L": 0, "XL": 0})
         in_progress = next(row for row in data["cycle_times"]
                            if row["stage"] == "status:in-progress")
         self.assertEqual((in_progress["median_days"], in_progress["p90_days"]), (2.0, 2.0))
@@ -88,6 +92,24 @@ class ReportTests(unittest.TestCase):
             "cost_per_attempt": 3.0,
             "cost_per_accepted_change": 2.0,
         })
+
+    def test_throughput_size_hours_and_no_tags_path(self):
+        upsert(self.db, "outcomes", {
+            "issue": 2, "pr_number": 11, "accepted": 1,
+            "accepted_at": "2026-01-23T00:00:00Z", "baseline_equivalent": "XL",
+        }, ("issue", "pr_number"))
+        data = report_data(self.db, since=59, by="week",
+                           now=datetime(2026, 1, 29, tzinfo=UTC))
+        week = next(row for row in data["throughput"] if row["accepted"] == 2)
+        self.assertEqual(week["baseline_equivalent_hours"], 20)
+        self.assertEqual(week["size_counts"], {"S": 0, "M": 1, "L": 0, "XL": 1})
+
+        self.db.execute("UPDATE outcomes SET baseline_equivalent=NULL")
+        untagged = report_data(self.db, since=59, by="week",
+                               now=datetime(2026, 1, 29, tzinfo=UTC))
+        self.assertTrue(all(row["baseline_equivalent_hours"] is None
+                            for row in untagged["throughput"]))
+        self.assertIn("n/a (no size tags)", markdown(untagged))
 
     def test_empty_intervention_measures_are_na(self):
         self.db.execute("DELETE FROM interventions")

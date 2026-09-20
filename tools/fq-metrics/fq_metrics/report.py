@@ -18,6 +18,7 @@ BANDS = (
     "fleet:needs-decision",
 )
 STAGES = BANDS
+SIZE_HOURS = {"S": 1, "M": 4, "L": 8, "XL": 16}
 
 
 def timestamp(value: str) -> datetime:
@@ -83,12 +84,26 @@ def cumulative_flow(db: sqlite3.Connection, points: list[datetime]) -> dict[str,
 
 def throughput(db: sqlite3.Connection, start: datetime, end: datetime, by: str) -> list[dict]:
     counts: dict[datetime, int] = defaultdict(int)
-    for row in db.execute("SELECT accepted_at FROM outcomes WHERE accepted=1 AND accepted_at IS NOT NULL"):
-        at = timestamp(row[0])
+    sizes: dict[datetime, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in db.execute(
+            "SELECT accepted_at,baseline_equivalent FROM outcomes "
+            "WHERE accepted=1 AND accepted_at IS NOT NULL"):
+        at = timestamp(row["accepted_at"])
         if start <= at <= end:
-            counts[bucket_start(at, by)] += 1
-    return [{"at": point.isoformat(), "accepted": counts[point]}
-            for point in bucket_points(start, end, by)]
+            bucket = bucket_start(at, by)
+            counts[bucket] += 1
+            if row["baseline_equivalent"] in SIZE_HOURS:
+                sizes[bucket][row["baseline_equivalent"]] += 1
+    tagged = any(sizes.values())
+    return [{
+        "at": point.isoformat(),
+        "accepted": counts[point],
+        "baseline_equivalent_hours": (
+            sum(sizes[point][size] * hours for size, hours in SIZE_HOURS.items())
+            if tagged else None
+        ),
+        "size_counts": {size: sizes[point][size] for size in SIZE_HOURS},
+    } for point in bucket_points(start, end, by)]
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:
@@ -189,8 +204,13 @@ def markdown(data: dict) -> str:
         ("Cost per accepted change", _display(values["cost_per_accepted_change"])),
     ]
     measure_table = "\n".join(f"| {name} | {value} |" for name, value in rows)
+    def work(row: dict) -> str:
+        hours = row["baseline_equivalent_hours"]
+        return f"{hours} h" if hours is not None else "n/a (no size tags)"
+
     throughput_table = "\n".join(
-        f"| {row['at'][:10]} | {row['accepted']} |" for row in data["throughput"])
+        f"| {row['at'][:10]} | {row['accepted']} | {work(row)} |"
+        for row in data["throughput"])
     cycle_table = "\n".join(
         f"| {row['at'][:10]} | {row['stage']} | {row['median_days']:.2f} | "
         f"{row['p90_days']:.2f} | {row['samples']} |" for row in data["cycle_times"])
@@ -199,7 +219,8 @@ def markdown(data: dict) -> str:
             f"({window['bucket']} buckets).\n\n## Derived measures and cost\n\n"
             f"| Measure | Value |\n|---|---:|\n{measure_table}\n\n"
             "## Cumulative flow\n\n![Cumulative flow](cumulative-flow.svg)\n\n"
-            "## Throughput\n\n| Bucket | Accepted |\n|---|---:|\n"
+            "## Throughput\n\n| Bucket | Accepted | Baseline-equivalent work |\n"
+            "|---|---:|---:|\n"
             f"{throughput_table}\n\n![Accepted changes](throughput.svg)\n\n"
             "## Stage cycle time\n\n| Bucket | Stage | Median days | P90 days | N |\n"
             f"|---|---|---:|---:|---:|\n{cycle_table}\n\n"
