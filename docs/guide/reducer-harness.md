@@ -4,6 +4,8 @@ Every factor-q invocation runs through a single execution path: a **reducer** (a
 
 This shape gives factor-q **suspension, migration, replay, audit logging, and determinism** as structural properties of the boundary rather than features bolted on top.
 
+In the design vocabulary this is the **`NodeReducer`**: the reducer inside one graph node (today, always an agent). The engine over the whole graph is the **`GraphExecutor`**, which is not built yet; see the [naming section of the signatures design](../design/aspirational/signatures-and-optimization-hierarchy.md#naming-and-documentation) for the distinction and why the graph-level term is *executor*, not *reducer*.
+
 This guide covers:
 
 1. [The reducer model](#the-reducer-model) (one diagram)
