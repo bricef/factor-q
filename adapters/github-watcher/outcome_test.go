@@ -18,11 +18,12 @@ import (
 // ops and can answer merged-PR queries, so the outcome reactor and review
 // sweep are testable without gh or NATS.
 type labelSource struct {
-	ops      []string
-	relErr   error
-	inReview []Issue
-	merged   map[int]bool
-	mergeErr error
+	ops        []string
+	relErr     error
+	inReview   []Issue
+	merged     map[int]bool
+	mergeErr   error
+	mergeCalls []int
 }
 
 func (s *labelSource) ListReady(context.Context, string) ([]Issue, error) { return nil, nil }
@@ -40,6 +41,7 @@ func (s *labelSource) ListByLabelAllStates(_ context.Context, _ string) ([]Issue
 }
 
 func (s *labelSource) HasMergedPR(_ context.Context, number int) (bool, error) {
+	s.mergeCalls = append(s.mergeCalls, number)
 	if s.mergeErr != nil {
 		return false, s.mergeErr
 	}
@@ -265,7 +267,7 @@ func TestSweepReviewMovesClosedMergedIssueToDone(t *testing.T) {
 	src := &labelSource{
 		// The all-states listing includes both closed issues. Only the issue
 		// auto-closed by its merged PR should move; the manually closed one stays.
-		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}}, {Number: 11, Labels: []string{"in-review"}}},
+		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}, State: "closed"}, {Number: 11, Labels: []string{"in-review"}, State: "closed"}},
 		merged:   map[int]bool{10: true, 11: false},
 	}
 	w := &Watcher{Source: src, Reviewer: src, Config: outcomeConfig(), Log: discardLogger()}
@@ -273,6 +275,24 @@ func TestSweepReviewMovesClosedMergedIssueToDone(t *testing.T) {
 	want := []string{"relabel #10 in-review->done"}
 	if !slices.Equal(src.ops, want) {
 		t.Errorf("ops = %v, want %v (only the merged issue moves)", src.ops, want)
+	}
+	if wantCalls := []int{10, 11}; !slices.Equal(src.mergeCalls, wantCalls) {
+		t.Errorf("merge checks = %v, want %v for both closed issues", src.mergeCalls, wantCalls)
+	}
+}
+
+func TestSweepReviewLeavesOpenIssueUntouchedWithoutMergeCheck(t *testing.T) {
+	src := &labelSource{
+		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}, State: "open"}},
+		merged:   map[int]bool{10: true},
+	}
+	w := &Watcher{Source: src, Reviewer: src, Config: outcomeConfig(), Log: discardLogger()}
+	w.sweepReview(context.Background())
+	if len(src.ops) != 0 {
+		t.Errorf("ops = %v, want none for an open issue", src.ops)
+	}
+	if len(src.mergeCalls) != 0 {
+		t.Errorf("merge checks = %v, want none for an open issue", src.mergeCalls)
 	}
 }
 
@@ -287,7 +307,7 @@ func TestSweepReviewSkippedWithoutReviewer(t *testing.T) {
 
 func TestSweepReviewMergeCheckErrorLeavesIssue(t *testing.T) {
 	src := &labelSource{
-		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}}},
+		inReview: []Issue{{Number: 10, Labels: []string{"in-review"}, State: "closed"}},
 		mergeErr: errors.New("gh boom"),
 	}
 	w := &Watcher{Source: src, Reviewer: src, Config: outcomeConfig(), Log: discardLogger()}

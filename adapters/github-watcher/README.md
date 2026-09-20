@@ -92,8 +92,9 @@ Either way a failed invocation is moved *off* `in-progress` rather than left
 claimed with no PR and no retry.
 
 **Merged PR → done.** Each poll also sweeps open and closed
-`in-review` issues; when an issue's proposed PR has merged (via the GitHub GraphQL
-`closedByPullRequestsReferences` link), it moves `in-review` → `done`.
+`in-review` issues; when an issue is closed and its proposed PR has merged (via
+GitHub's GraphQL `closedByPullRequestsReferences` link), it moves `in-review` →
+`done`. Open issues are untouched: a reopen is authoritative.
 
 Event observation uses core NATS (at-most-once). A missed outcome is not
 fatal: the durable reconciliation pass recovers the transition on a later poll,

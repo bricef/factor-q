@@ -46,6 +46,7 @@ const MinPollInterval = 60 * time.Second
 type Issue struct {
 	Number    int
 	Labels    []string
+	State     string
 	UpdatedAt time.Time // conservative age bound for in-progress reconciliation
 }
 
@@ -260,9 +261,10 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 	return nil
 }
 
-// sweepReview moves `in-review` issues whose proposed PR has merged to
-// `done`. It is best-effort: per-issue errors are logged and do not stop
-// the others, and a missing Reviewer disables the sweep entirely.
+// sweepReview moves closed `in-review` issues whose proposed PR has merged to
+// `done`. Open issues are untouched: a reopen is authoritative. The sweep is
+// best-effort: per-issue errors are logged and do not stop the others, and a
+// missing Reviewer disables the sweep entirely.
 func (w *Watcher) sweepReview(ctx context.Context) {
 	if w.Reviewer == nil {
 		return
@@ -273,6 +275,10 @@ func (w *Watcher) sweepReview(ctx context.Context) {
 		return
 	}
 	for _, iss := range inReview {
+		if iss.State != "closed" {
+			w.Log.Debug("issue is open; leaving any merged reference untouched and issue in review", "issue", iss.Number)
+			continue
+		}
 		merged, err := w.Reviewer.HasMergedPR(ctx, iss.Number)
 		if err != nil {
 			w.Log.Error("checking merged PR failed; leaving issue in review", "issue", iss.Number, "err", err)

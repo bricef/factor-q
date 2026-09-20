@@ -270,7 +270,7 @@ func TestLostRacesAreNotReportedAsStrandings(t *testing.T) {
 		w := &Watcher{
 			Source:    &labelSource{relErr: lost},
 			Publisher: &fakePublisher{rec: &recorder{}},
-			Reviewer:  &labelSource{inReview: []Issue{{Number: 7, Labels: []string{"in-review"}}}, merged: map[int]bool{7: true}},
+			Reviewer:  &labelSource{inReview: []Issue{{Number: 7, Labels: []string{"in-review"}, State: "closed"}}, merged: map[int]bool{7: true}},
 			Config:    cfg,
 			Log:       slog.New(slog.NewTextHandler(logs, nil)),
 		}
