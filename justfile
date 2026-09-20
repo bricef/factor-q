@@ -869,6 +869,7 @@ quality:
     run_phase "lint-sources" just lint-sources
     run_phase "test-fq-lint" just test-fq-lint
     run_phase "test-fq-metrics" just test-fq-metrics
+    run_phase "test-metrics-log" just test-metrics-log
     run_phase "lint-sizes"   just lint-sizes
     run_phase "lint-fmt"     just lint-fmt
     run_phase "lint-clippy"  just lint-clippy
@@ -999,6 +1000,11 @@ metrics-report *args:
 test-fq-metrics:
     cd tools/fq-metrics && python3 -m unittest
 
+# Session-span and hook tests for the human-entered measurement log.
+test-metrics-log:
+    python3 -m unittest discover -s scripts/tests -p 'test_metrics_log_spans.py'
+    scripts/tests/test_touch_hook.sh
+
 # The measurement instrument's two human-entered inputs
 # (docs/guide/measurement-logs.md, plan docs/plans/active/2026-09-17-measurement-instrument.md).
 # Interventions and touch minutes cannot be reconstructed from history, so they
@@ -1008,6 +1014,20 @@ test-fq-metrics:
 # Log an intervention against an issue: `just touch 838 15 fix "closed a duplicate PR"`.
 touch issue minutes type *note:
     python3 scripts/metrics-log.py touch {{issue}} {{minutes}} {{type}} {{note}}
+
+# Mark the issue whose Claude Code session events should receive touch minutes.
+touch-start issue:
+    #!/bin/sh
+    set -eu
+    state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/fq"
+    mkdir -p "$state_dir"
+    printf '%s\n' '{{issue}}' >"$state_dir/current-issue"
+
+# Clear the current touch-minute issue marker.
+touch-stop:
+    #!/bin/sh
+    state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/fq"
+    rm -f "$state_dir/current-issue"
 
 # Tag an accepted change with its baseline-equivalent size: `just tag 837 M --issue 798`.
 tag pr size *note:
