@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -36,24 +37,39 @@ def read_export(directory: str | Path) -> list[dict]:
 def edge_events(since: str | None) -> list[dict]:
     """Fetch the index and full payload for starts and terminal events."""
     records: list[dict] = []
+    index_rows = 0
+    unreadable = 0
     for event_type in ("triggered", "completed", "failed"):
-        command = ["fq", "events", "query", "--event-type", event_type, "--json"]
-        if since:
-            command.extend(["--since", since])
-        index = json.loads(subprocess.run(command, check=True, text=True,
-                                          capture_output=True).stdout)
-        found_payload = False
-        for row in _documents(index):
-            event_id = row.get("event_id") or (row.get("envelope") or {}).get("event_id")
-            if not event_id:
-                continue
-            output = subprocess.run(["fq", "events", "get", str(event_id), "--json"],
-                                    check=True, text=True, capture_output=True).stdout
-            records.extend(_documents(json.loads(output)))
-            found_payload = True
-        # Some edge versions return the complete records in the query response.
-        if not found_payload:
-            records.extend(_documents(index))
+        page_since = since
+        while True:
+            command = ["fq", "events", "query", "--event-type", event_type,
+                       "--json", "--limit", "2000"]
+            if page_since:
+                command.extend(["--since", page_since])
+            index = json.loads(subprocess.run(command, check=True, text=True,
+                                              capture_output=True).stdout)
+            rows = list(_documents(index))
+            index_rows += len(rows)
+            for row in rows:
+                event_id = row.get("event_id") or (row.get("envelope") or {}).get("event_id")
+                if not event_id:
+                    records.append(row)
+                    continue
+                result = subprocess.run(["fq", "events", "get", str(event_id), "--json"],
+                                        text=True, capture_output=True)
+                if result.returncode:
+                    unreadable += 1
+                    if event_type in ("completed", "failed"):
+                        records.append(row)
+                    continue
+                records.extend(_documents(json.loads(result.stdout)))
+            if len(rows) < 2000:
+                break
+            last = rows[-1]
+            page_since = last.get("timestamp") or (last.get("envelope") or {}).get("timestamp")
+            if not page_since:
+                break
+    print(f"{index_rows} index rows, {unreadable} payloads unreadable", file=sys.stderr)
     return records
 
 
