@@ -93,6 +93,37 @@ class ReportTests(unittest.TestCase):
             "cost_per_accepted_change": 2.0,
         })
 
+    def test_correction_ratio_counts_commit_once_across_prs(self):
+        self.db.execute(
+            "UPDATE outcomes SET correction_commit='abc' WHERE pr_number=10")
+        upsert(self.db, "outcomes", {
+            "issue": 2, "pr_number": 11, "accepted": 0,
+            "correction_commit": "abc", "rule": "fix",
+        }, ("issue", "pr_number"))
+        upsert(self.db, "corrective_commits", {
+            "sha": "abc", "pr_number": 11, "issue": 2,
+            "at": "2026-01-13T00:00:00Z", "rule": "fix",
+            "additions": 5, "deletions": 5,
+        }, ("sha", "pr_number"))
+        self.db.commit()
+
+        data = report_data(self.db, since=59, by="week",
+                           now=datetime(2026, 1, 29, tzinfo=UTC))
+        self.db.executescript(
+            (Path(__file__).parents[1] / "views.sql").read_text())
+        view_ratio = self.db.execute(
+            "SELECT value FROM correction_ratio WHERE window='all_time'"
+        ).fetchone()[0]
+
+        self.assertEqual(data["measures"]["correction_ratio"], 0.1)
+        self.assertEqual(view_ratio, 0.1)
+        outcomes = self.db.execute(
+            "SELECT pr_number, correction_commit FROM outcomes "
+            "WHERE correction_commit='abc' ORDER BY pr_number"
+        ).fetchall()
+        self.assertEqual([(row["pr_number"], row["correction_commit"])
+                          for row in outcomes], [(10, "abc"), (11, "abc")])
+
     def test_throughput_size_hours_and_no_tags_path(self):
         upsert(self.db, "outcomes", {
             "issue": 2, "pr_number": 11, "accepted": 1,

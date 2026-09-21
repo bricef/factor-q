@@ -145,8 +145,10 @@ def measures(db: sqlite3.Connection, start: datetime, end: datetime) -> dict[str
         FROM attempts a LEFT JOIN outcomes o ON o.pr_number=a.pr_number
         WHERE a.dispatched_at BETWEEN ? AND ?""", (hi, lo, hi))
     correction = _one(db, """
-        SELECT 1.0*(SELECT COALESCE(SUM(additions+deletions),0) FROM corrective_commits WHERE at BETWEEN ? AND ?)
-        /NULLIF((SELECT SUM(additions+deletions) FROM pull_requests WHERE agent_authored=1 AND merged_at BETWEEN ? AND ?),0)
+        SELECT 1.0*(SELECT COALESCE(SUM(additions+deletions),0) FROM (
+          SELECT sha, MAX(additions) additions, MAX(deletions) deletions
+          FROM corrective_commits WHERE at BETWEEN ? AND ? GROUP BY sha
+        )) /NULLIF((SELECT SUM(additions+deletions) FROM pull_requests WHERE agent_authored=1 AND merged_at BETWEEN ? AND ?),0)
         """, (lo, hi, lo, hi))
     touches = [float(row[0]) for row in db.execute("""
         SELECT SUM(COALESCE(i.minutes,0)) FROM outcomes o JOIN interventions i ON i.issue=o.issue
