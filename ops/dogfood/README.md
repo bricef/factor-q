@@ -41,7 +41,7 @@ the previous, launcher-based shape was
 fq-dogfood/
 ├── compose.yml              # the stack, and its configuration as values — laid out by bootstrap, refreshed by every deploy from the build it deploys
 ├── compose.override.yml     # host-authored, nothing touches it — the internal Caddyfile, a rehearsal's profiles
-├── .env                     # FQ_TAG (the deploy owns it), image repo, the four host facts the ops service needs, the ops scripts' knobs — from .env.example. Not the stack's configuration
+├── .env                     # FQ_TAG (the deploy owns it), image repo, the five host facts the stack needs, the ops scripts' knobs — from .env.example. Not the stack's configuration
 ├── infra/nats.conf          # broker config; infra/Caddyfile and infra/Caddyfile.internal the proxy's — refreshed with compose.yml
 ├── .secrets/env             # provider keys, GH_TOKEN, the broker token, the adapters' URLs — secrets only (env.example)
 ├── .secrets/dashboard.env   # the dashboard's three edge settings, nothing else (dashboard.env.example)
@@ -120,7 +120,7 @@ container runtime — the only thing we ask of it — creates the deploy
 user `fq` in the `docker` group, lays out `~fq/fq-dogfood` with the
 tracked files and the four secrets files from their templates (one
 broker token generated and written to all four places, a dashboard
-session secret generated), writes the four host facts the ops service
+session secret generated), writes the five host facts the stack
 needs into `.env`, and removes a host crontab and script copies from
 before ADR-0036. It ends by printing what only a human can do:
 
@@ -174,7 +174,7 @@ is pinned by the image's environment and ignored in the file):
 
 ```toml
 [edge]
-bind = "0.0.0.0:9470"                   # compose publishes it on 127.0.0.1:9470; a loopback bind inside the container is unreachable
+bind = "0.0.0.0:9470"                   # compose publishes it on 127.0.0.1:9470 and on FQ_EDGE_ADDR; a loopback bind inside the container is unreachable
 [workspace]
 path = "/var/lib/factor-q/workspace"    # no environment form exists
 [nats]
@@ -208,6 +208,21 @@ The operator's own `fq` on the host pairs to the same published address
 with the same two files (read them through `docker compose exec fqd cat
 …` as above); without a terminal `fq connect` requires `--fingerprint`
 (#544).
+
+**From another machine.** The edge is a remote interface by design —
+TLS with a fingerprint every client pins, capability tokens — so compose
+also publishes it on `FQ_EDGE_ADDR` (`.env`; the live instance:
+`10.20.0.10:9470`, reachable over the WireGuard tunnel like the
+dashboard). Never hand out the admin token: mint a token narrowed to
+what the other client does and pair with that, plus the fingerprint —
+the metrics extractor, for instance, reads events and nothing else:
+
+```sh
+docker compose exec fqd fq token attenuate --addr 127.0.0.1:9470 --grant read:event
+docker compose exec fqd cat /var/lib/factor-q/state/edge/fingerprint
+# then, on the other machine:
+fq connect 10.20.0.10:9470 --token "<the output>" --fingerprint "<the fingerprint>"
+```
 
 **The dashboard's identity.** Mint an attenuated token and write the
 three values into `.secrets/dashboard.env`, then recreate the dashboard
@@ -578,13 +593,15 @@ output goes, and `logs/deploy.log` the unattended deploy's (above); a
 deploy, a rollback, `hygiene`'s warnings and a failed `backup` still
 reach you through `notify.sh` as before.
 
-Four host facts in `.env` describe the service — `FQ_DOGFOOD` (this
+Five host facts in `.env` describe the host — `FQ_DOGFOOD` (this
 directory's absolute path), `FQ_UID` and `FQ_DOCKER_GID` (the deploy
-user and the docker group), `FQ_HOST` (the name the notifications carry)
-— and `bootstrap.sh` writes them, appending to an `.env` that predates
-them. On a host that predates the service: re-run `bootstrap.sh` (the
-`curl` form) — it writes the four values and removes the old crontab and
-the script copies — then `docker compose up -d ops`. The oldest build
+user and the docker group), `FQ_HOST` (the name the notifications carry),
+`FQ_EDGE_ADDR` (the address other machines reach it on; the daemon's edge
+is published there) — and `bootstrap.sh` writes them, appending to an
+`.env` that predates them. On a host that predates the service: re-run
+`bootstrap.sh` (the `curl` form) — it writes the missing values and
+removes the old crontab and the script copies — then `docker compose up
+-d ops`. The oldest build
 the stack can run from then on is the first with an `fq-ops` image;
 `deploy <older sha>` fails at `up`.
 

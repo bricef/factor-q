@@ -18,7 +18,7 @@ cp "$here/../compose.yml" "$work/compose.yml"
 mkdir -p "$work/.secrets" "$work/infra"
 : > "$work/.secrets/env"; : > "$work/.secrets/dashboard.env"; : > "$work/.secrets/caddy.env"
 : > "$work/infra/nats.conf"; : > "$work/infra/Caddyfile"; : > "$work/.secrets/nats-auth.conf"
-printf 'FQ_TAG=abcdef123456\nFQ_DOGFOOD=%s\nFQ_UID=1234\nFQ_DOCKER_GID=987\nFQ_HOST=stub-host\n' "$work" > "$work/.env"
+printf 'FQ_TAG=abcdef123456\nFQ_DOGFOOD=%s\nFQ_UID=1234\nFQ_DOCKER_GID=987\nFQ_HOST=stub-host\nFQ_EDGE_ADDR=10.0.0.1\n' "$work" > "$work/.env"
 
 if ! json="$(cd "$work" && docker compose config --format json 2>&1)"; then
     echo "compose config failed:" >&2; printf '%s\n' "$json" >&2; exit 1
@@ -38,6 +38,7 @@ expect "and nothing else" '.services.ops.volumes | length == 2'
 expect "restarting unless stopped, under an init" '.services.ops.restart == "unless-stopped" and .services.ops.init == true'
 expect "no other service mounts the socket (ADR-0036 clause 5)" '[.services | to_entries[] | select(.key != "ops") | .value.volumes // [] | .[] | select(.source == "/var/run/docker.sock")] | length == 0'
 expect "the daemon's container mounts only its volume" '[.services.fqd.volumes[] | .source] == ["fq-data"]'
+expect "the edge is published on loopback and on FQ_EDGE_ADDR, nothing else" '[.services.fqd.ports[] | select(.target == 9470) | .host_ip] == ["127.0.0.1", "10.0.0.1"] and (.services.fqd.ports | length) == 2'
 
 # The stack's configuration is declared in the file, as values, and
 # delivered by the deploy — not interpolated from a .env on the host.
