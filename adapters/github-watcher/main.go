@@ -120,6 +120,11 @@ func run(args []string) error {
 	// completion/failure. Runs alongside the poll loop; a subscription
 	// error ends its goroutine but does not stop polling (the review
 	// retained-event reconcile is the backstop for missed events).
+	if cfg.MergeVerdicts {
+		w.MergeVerdicts = NewMergeVerdictSweeper(source, cfg, log)
+		log.Info("advisory merge-verdict sweep enabled", "policy", PolicyPath, "areas", AreasPath)
+	}
+
 	reactor := NewOutcomeReactor(source, cfg, log)
 	// Stamp invocation provenance on the PR the agent opened (issue
 	// #162) — same gh-backed source, optional and best-effort.
@@ -176,6 +181,8 @@ func configFromArgs(args []string) (Config, string, string, error) {
 	maxRetries := fs.Int("max-retries", maxRetriesDefault, "bounded auto-retry budget for a transiently-failed issue (env GHW_MAX_RETRIES)")
 	reconcileAfter := fs.Duration("reconcile-after", reconcileAfterDefault, "age before an eventless in-progress issue is recovered (env GHW_RECONCILE_AFTER)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
+	hold := fs.String("hold-label", envOr("GHW_HOLD_LABEL", "hold"), "label a human puts on a PR to withhold it from the merge verdict's checks (env GHW_HOLD_LABEL)")
+	mergeVerdicts := fs.Bool("merge-verdicts", envBoolOr("GHW_MERGE_VERDICTS", false), "run the advisory merge-verdict sweep over open fleet PRs (env GHW_MERGE_VERDICTS)")
 	healthBind := fs.String("health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 
 	if err := fs.Parse(args); err != nil {
@@ -212,6 +219,8 @@ func configFromArgs(args []string) (Config, string, string, error) {
 		MaxRetries:         *maxRetries,
 		ReconcileAfter:     *reconcileAfter,
 		TaskTemplate:       *template,
+		HoldLabel:          *hold,
+		MergeVerdicts:      *mergeVerdicts,
 	}, *natsURL, *healthBind, nil
 }
 
@@ -220,6 +229,22 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBoolOr reads a boolean flag default from the environment. Unlike
+// the int and duration readers it cannot fail: an unparseable value is
+// treated as the default and the flag's own parser reports a bad `-flag=`
+// value. The sweep it gates is advisory and off by default, so refusing
+// to start over a typo in an optional switch would be the worse failure.
+func envBoolOr(key string, def bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func envIntOr(key string, def int) (int, error) {

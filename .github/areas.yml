@@ -107,3 +107,95 @@ docker:
   # The ops image carries these (ADR-0036), so a script change
   # is an image change.
   - 'ops/dogfood/**'
+
+# --- Policy areas ---------------------------------------------------------
+#
+# The areas above answer "which CI job must run?". The ones below answer
+# "how much human supervision does a change here need?" — they are the
+# vocabulary of `.github/merge-policy.yml`, which maps an area name to a
+# merge tier for the github-watcher's advisory merge-verdict sweep.
+#
+# They live in this file for the reason the header gives: an area defined
+# in two places is an area whose two definitions drift. The two groups
+# overlap deliberately and are not merged, because they answer different
+# questions — `go` is "the Go gate must run" (so it includes the justfile
+# and the workflows), while `adapters` is "this is adapter code". A
+# consumer maps only the areas it has an answer for and ignores the rest:
+# CI ignores these, and the merge policy ignores the CI filters above.
+#
+# A changed file belongs to every area whose globs match it, and the merge
+# policy takes the most restrictive tier of all the areas it maps. So an
+# area added here is inert until the policy names it.
+
+# Prose. `docs/**` is the design record; the top-level markdown is the
+# entry points (README, VISION, ARCHITECTURE, CONTRIBUTING, AGENTS, ...),
+# matched at the root only — picomatch's `*` does not cross a separator.
+docs:
+  - 'docs/**'
+top-level-markdown:
+  - '*.md'
+# Reading notes and throwaways: not shipped, not gated.
+research:
+  - 'research/**'
+experiments:
+  - 'experiments/**'
+meta:
+  - 'meta/**'
+# The Go trigger adapters, as code (the `go` filter above is the CI job).
+adapters:
+  - 'adapters/**'
+# The Rust tree, minus the carve-outs that follow it.
+services:
+  - 'services/**'
+tools:
+  - 'tools/**'
+tests:
+  - 'tests/**'
+infrastructure:
+  - 'infrastructure/**'
+# The sandbox is the runtime's security boundary; it is carved out of
+# `services` so the policy can hold it to a stricter tier.
+sandbox:
+  - 'services/fq-runtime/crates/fq-tools/**'
+# Everything under .github/ — the workflows that decide what is gated at
+# all, the issue and PR templates, and the area declarations themselves.
+workflows:
+  - '.github/**'
+# The deployed instance's stack, and the agent definitions the fleet runs.
+ops:
+  - 'ops/**'
+agents:
+  - 'agents/**'
+# What builds, installs and automates the repo. A change here changes what
+# every gate means.
+task-runner:
+  - 'justfile'
+  - 'rust-toolchain.toml'
+install:
+  - 'install.sh'
+scripts:
+  - 'scripts/**'
+# Dependency surface: the workspace manifests, the lockfile, and the
+# reviewed advisory/licence baseline.
+build-manifests:
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - '**/Cargo.toml'
+  - 'deny.toml'
+# The size, arity and allow-census ratchets. They may only ever shrink,
+# so an edit to one is a claim about the whole tree.
+ratchet-baselines:
+  - '.allow-baseline'
+  - '.file-size-baseline'
+  - '.function-arity-baseline'
+  - '.function-size-baseline'
+# The merge-verdict machinery itself: the two declarations it reads, the
+# rubric it will read, and the watcher sources that implement it. Named by
+# glob so a PR cannot widen its own merge rights — see merge-policy.yml.
+merge-verdicts:
+  - '.github/areas.yml'
+  - '.github/merge-policy.yml'
+  - '.github/merge-rubric.yml'
+  - 'adapters/github-watcher/policy*.go'
+  - 'adapters/github-watcher/verdict*.go'
+  - 'adapters/github-watcher/mergeverdict*.go'

@@ -96,6 +96,62 @@ claimed with no PR and no retry.
 GitHub's GraphQL `closedByPullRequestsReferences` link), it moves `in-review` →
 `done`. Open issues are untouched: a reopen is authoritative.
 
+## Advisory merge verdicts
+
+Off by default, behind `--merge-verdicts` / `GHW_MERGE_VERDICTS`. When it
+is on, the **last** step of every poll gives each open *fleet* PR — one
+whose body carries the provenance footer — one advisory verdict: a label
+and one comment. **It is advisory in the strongest sense: it merges
+nothing, closes nothing, and cannot fail a poll cycle.** Every error is
+logged and the next PR is tried. The point is to build and calibrate the
+verdict against the real PR stream before any merge action is considered
+([#879](https://github.com/bricef/factor-q/issues/879)).
+
+**The two files it reads.**
+
+- [`.github/areas.yml`](../../.github/areas.yml) — the repository's code
+  areas, the same declaration CI's path filters use.
+- [`.github/merge-policy.yml`](../../.github/merge-policy.yml) — area →
+  tier (`unsupervised` / `supervised` / `never`), plus `default_tier` for
+  a file in no mapped area and `min_age_minutes` for the age check.
+
+Both are read **at the PR's base ref**, never at its head: a PR that
+could ship the policy judging it could bless itself. The same reasoning
+makes the `merge-verdicts` area — the two files above, the rubric file,
+and the watcher sources implementing the sweep — tier `never`, so a PR
+can never widen its own merge rights. The loader **refuses** a policy
+naming a tier it does not know or an area `areas.yml` does not declare;
+version skew between the two files stops the sweep rather than quietly
+relaxing it.
+
+**The verdict.** A changed file belongs to every area whose globs match
+it; a PR's tier is the *most restrictive* tier of any file it changes,
+and a file in no mapped area takes `default_tier`. Adding a file can
+therefore only ever make a verdict stricter. Seven **structural checks**
+are computed alongside and reported in full — provenance footer present,
+closes exactly one issue and that issue is in review, `mergeable_state`
+clean, a single commit, no changes-requested review, no hold label, older
+than the minimum age. **None of them changes the tier.** CI is not
+re-implemented: branch protection stays the boundary.
+
+**The writes.** Exactly one of `merge:unsupervised`, `merge:supervised`,
+`merge:never` (the other two are removed), and one comment carrying the
+head SHA, the file → area → tier table, the rule that decided, and the
+check table. The comment is found again by a hidden HTML marker and
+**rewritten in place** — one comment per PR, ever — and only when its text
+actually changed, so a watcher restart notifies nobody. A PR nobody has
+pushed to, under a policy nobody has edited, costs no API requests at all.
+
+**The three labels must exist in the repository.** The sweep logs and
+skips rather than creating them, because a label it created would carry
+no colour or description a human chose:
+
+```console
+gh label create merge:unsupervised -R bricef/factor-q -c 0E8A16 -d "Advisory: area policy allows an unsupervised merge (github-watcher, #879)"
+gh label create merge:supervised   -R bricef/factor-q -c FBCA04 -d "Advisory: a human reads this change before it merges (github-watcher, #879)"
+gh label create merge:never        -R bricef/factor-q -c B60205 -d "Advisory: a human merges this, always (github-watcher, #879)"
+```
+
 Event observation uses core NATS (at-most-once). A missed outcome is not
 fatal: the durable reconciliation pass recovers the transition on a later poll,
 and a re-queued issue is re-picked on the next poll.
@@ -146,6 +202,8 @@ Every flag has an environment-variable fallback.
 | `--max-per-poll` | `GHW_MAX_PER_POLL` | `3` | 0 = unbounded |
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |
 | `--reconcile-after` | `GHW_RECONCILE_AFTER` | `4h` | re-queue an eventless `in-progress` issue after twice the expected 2h maximum run |
+| `--hold-label` | `GHW_HOLD_LABEL` | `hold` | a human's "not yet" on a PR; reported by the merge verdict's checks |
+| `--merge-verdicts` | `GHW_MERGE_VERDICTS` | `false` | run the advisory merge-verdict sweep (below) |
 | `--task-template` | `GHW_TASK_TEMPLATE` | `Implement the fix described in GitHub issue #%d.` | `%d` = issue number |
 | `--health-bind` | `GHW_HEALTH_BIND` | `127.0.0.1:9473` | loopback address of `GET /healthz`; empty disables |
 | `--probe` | — | | ask the running watcher's `/healthz` and exit 0 on healthy — the container's `HEALTHCHECK`; needs no `--repo` |
