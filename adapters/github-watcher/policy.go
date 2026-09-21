@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -33,6 +34,26 @@ func (t Tier) String() string {
 		return fmt.Sprintf("tier(%d)", int(t))
 	}
 	return tierNames[t]
+}
+
+// MarshalJSON writes the wire vocabulary, not the ordinal: the `verdict`
+// subcommand's output is read by a script and by a person, and a tier
+// that crossed the seam as `2` would have to be decoded by a second copy
+// of this list.
+func (t Tier) MarshalJSON() ([]byte, error) { return json.Marshal(t.String()) }
+
+// UnmarshalJSON reads the same vocabulary, refusing anything else.
+func (t *Tier) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return err
+	}
+	parsed, err := ParseTier(name)
+	if err != nil {
+		return err
+	}
+	*t = parsed
+	return nil
 }
 
 // Label is the GitHub label that carries this tier's verdict.

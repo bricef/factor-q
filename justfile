@@ -1029,6 +1029,10 @@ touch-stop:
     state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/fq"
     rm -f "$state_dir/current-issue"
 
+# Replay the advisory merge verdict over merged PRs: `just merge-verdicts-replay 2026-09-12 -o replay.csv`.
+merge-verdicts-replay since *args:
+    python3 scripts/merge-verdicts-replay.py --since {{since}} {{args}}
+
 # Tag an accepted change with its baseline-equivalent size: `just tag 837 M --issue 798`.
 tag pr size *note:
     python3 scripts/metrics-log.py tag {{pr}} {{size}} {{note}}

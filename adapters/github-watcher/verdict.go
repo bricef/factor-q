@@ -11,44 +11,49 @@ import (
 // enough to answer "does this PR finish exactly one issue, and was that
 // issue in review?" without a second lookup.
 type ClosingIssue struct {
-	Number int
-	Labels []string
+	Number int      `json:"number"`
+	Labels []string `json:"labels,omitempty"`
 }
 
 // PRFacts is everything the verdict is computed from: the facts about one
 // pull request as observed at ObservedAt. It carries no GitHub client and
 // no policy — Verdict is pure over this struct, which is what lets the
 // live sweep and the replay over already-merged PRs run the same code.
+//
+// The JSON tags are the `verdict` subcommand's wire format (verdictcmd.go):
+// the one seam through which anything but the poll loop computes a
+// verdict, so the replay measures this code rather than a second
+// implementation of the rules.
 type PRFacts struct {
-	Number         int
-	HeadSHA        string
-	BaseRef        string
-	Body           string
-	Files          []string
-	CommitCount    int
-	Labels         []string
-	MergeableState string
-	ChangesRequest bool // a review in the CHANGES_REQUESTED state
-	CreatedAt      time.Time
-	ClosingIssues  []ClosingIssue
-	ObservedAt     time.Time
+	Number         int            `json:"number"`
+	HeadSHA        string         `json:"head_sha,omitempty"`
+	BaseRef        string         `json:"base_ref,omitempty"`
+	Body           string         `json:"body,omitempty"`
+	Files          []string       `json:"files,omitempty"`
+	CommitCount    int            `json:"commit_count"`
+	Labels         []string       `json:"labels,omitempty"`
+	MergeableState string         `json:"mergeable_state,omitempty"`
+	ChangesRequest bool           `json:"changes_requested"` // a review in the CHANGES_REQUESTED state
+	CreatedAt      time.Time      `json:"created_at,omitempty"`
+	ClosingIssues  []ClosingIssue `json:"closing_issues,omitempty"`
+	ObservedAt     time.Time      `json:"observed_at,omitempty"`
 }
 
 // FileTier is one row of a verdict's file table: a changed file, the
 // policy areas it belongs to, and the tier those areas give it.
 type FileTier struct {
-	Path  string
-	Areas []string // the areas the policy maps; empty means the default tier applied
-	Tier  Tier
+	Path  string   `json:"path"`
+	Areas []string `json:"areas,omitempty"` // the areas the policy maps; empty means the default tier applied
+	Tier  Tier     `json:"tier"`
 }
 
 // Check is one structural check's result. Checks are reported, never
 // enforced: the sweep is advisory, and a failing check is a reason a
 // human looks, not a verdict of its own.
 type Check struct {
-	Name   string
-	Pass   bool
-	Reason string
+	Name   string `json:"name"`
+	Pass   bool   `json:"pass"`
+	Reason string `json:"reason"`
 }
 
 // Decision is a full verdict: the tier, the file table it came from, the

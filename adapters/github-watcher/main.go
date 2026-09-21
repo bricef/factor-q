@@ -66,6 +66,13 @@ func run(args []string) error {
 			return probe(envOr(healthBindEnv, defaultHealthBind))
 		}
 	}
+	// `verdict` is answered before flag parsing, like --version and
+	// --probe: it is a pure computation over facts on stdin, needs no
+	// --repo, no token and no broker, and must not inherit the poll
+	// loop's configuration.
+	if len(args) > 0 && args[0] == "verdict" {
+		return runVerdictCmd(args[1:])
+	}
 	cfg, natsURL, healthBind, err := configFromArgs(args)
 	if err != nil {
 		return err
