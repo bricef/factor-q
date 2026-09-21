@@ -241,19 +241,28 @@ ladder's §6,
 [#413](https://github.com/bricef/factor-q/issues/413)) sequences five
 deliverables — the attempt ledger, the objective diagrams and measures,
 the human-entered primitives, the trajectory plot and the weekly
-report. Two of them are on `main`. The human-entered primitives landed
+report. Three of them are on `main`. The human-entered primitives landed
 2026-09-17: `just touch` and `just tag` append typed interventions,
 touch minutes and baseline-equivalent size tags to logs kept on the
 orphan `metrics` branch, never merged into `main` (see
-[measurement logs](docs/guide/measurement-logs.md)). The attempt
-ledger landed 2026-09-18
+[measurement logs](docs/guide/measurement-logs.md)); the rubric that
+makes those entries mean the same thing month to month landed
+2026-09-20 ([#840](https://github.com/bricef/factor-q/issues/840), see
+the [measurement rubric](docs/guide/measurement-rubric.md)). The
+attempt ledger landed 2026-09-18
 ([#838](https://github.com/bricef/factor-q/issues/838)):
 `just metrics-extract` builds and incrementally updates
 `attempt_ledger.sqlite` from issue timelines, pull requests, the event
 log, git history and the intervention log — see the
-[extractor README](tools/fq-metrics/README.md). The diagrams and
-measures, the trajectory plot and the weekly report are not built yet,
-so M1 is still undecidable. Open strategic questions
+[extractor README](tools/fq-metrics/README.md). The objective diagrams
+and measures landed 2026-09-20
+([#839](https://github.com/bricef/factor-q/issues/839)):
+`just metrics-report` reads that ledger and writes the cumulative-flow
+diagram, accepted-change throughput, stage cycle-time distributions and
+the ladder's derived measures and costs as `report.md`, `report.json`
+and SVGs — the baseline-equivalent throughput line is deferred to the
+trajectory work. The trajectory plot and the weekly report are not
+built yet, so M1 is still undecidable. Open strategic questions
 (security sequencing) are in the
 [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
 
