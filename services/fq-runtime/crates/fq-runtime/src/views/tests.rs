@@ -605,9 +605,16 @@ async fn open_llm_dispatch_counts_as_working() {
             trigger_payload: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
-        ws.write_llm_intent("inv-llm", "req-1", "claude-opus-4-8", "{}", 160)
-            .await
-            .unwrap();
+        ws.write_llm_intent(
+            "inv-llm",
+            "req-1",
+            "claude-opus-4-8",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            160,
+        )
+        .await
+        .unwrap();
         ws.write_llm_dispatched("inv-llm", "req-1", 170)
             .await
             .unwrap();
@@ -646,9 +653,16 @@ async fn transcript_outcome_reflects_terminality() {
     {
         let ws = WorkerStore::open(&paths.worker).await.unwrap();
         for (inv, terminal_at) in [("inv-done", Some(150_i64)), ("inv-live", None)] {
-            ws.write_llm_intent(inv, "req-1", "m", "{}", 100)
-                .await
-                .unwrap();
+            ws.write_llm_intent(
+                inv,
+                "req-1",
+                "m",
+                "{}",
+                &crate::events::LlmCallOrigin::AgentTurn,
+                100,
+            )
+            .await
+            .unwrap();
             ws.write_llm_dispatched(inv, "req-1", 101).await.unwrap();
             ws.write_llm_completed(inv, "req-1", r#"{"content":"done"}"#, false, 0.01, 102)
                 .await
