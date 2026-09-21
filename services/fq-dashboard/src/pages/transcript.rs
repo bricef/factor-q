@@ -320,7 +320,7 @@ pub(crate) async fn transcript_page(
     };
     if live {
         body.push_str(&format!(
-            r#"<div data-on-load="@get('/invocations/{}/transcript/stream?after={}&full={}')"></div>"#,
+            r#"<div data-init="@get('/invocations/{}/transcript/stream?after={}&full={}')"></div>"#,
             render::esc(&id),
             seam,
             u8::from(full),

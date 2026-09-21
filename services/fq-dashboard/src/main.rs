@@ -578,7 +578,24 @@ mod tests {
                         message: "no turn".into(),
                     })
                 },
-                |_filter: TurnFilter| async move { Ok(Vec::<TurnState>::new()) },
+                |filter: TurnFilter| async move {
+                    if filter.invocation_id == "live-inv" {
+                        Ok(vec![TurnState {
+                            seq: 1,
+                            invocation_id: filter.invocation_id,
+                            agent_id: "probe".to_string(),
+                            round: 0,
+                            timestamp_ms: 1,
+                            initiating_turn: None,
+                            action: fq_ops::turn::TurnAction::Prompt {
+                                system: None,
+                                user: Some("keep going".to_string()),
+                            },
+                        }])
+                    } else {
+                        Ok(Vec::<TurnState>::new())
+                    }
+                },
                 |_filter: TurnFilter, _from, _wait| async move {
                     Ok(fq_edge::StreamBatch {
                         items: Vec::new(),
@@ -923,6 +940,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // A running transcript starts its SSE tail with the pinned
+        // Datastar bundle's once-on-attach plugin.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/invocations/live-inv/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = body_string(resp).await;
+        assert!(html.contains("data-init="), "got: {html}");
+        assert!(
+            !html.contains("data-on-load"),
+            "unknown plugins must not be rendered: {html}"
+        );
 
         // Transcript of an unknown id: 404 through the empty turn list.
         let resp = app
