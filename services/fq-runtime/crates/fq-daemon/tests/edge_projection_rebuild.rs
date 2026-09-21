@@ -230,7 +230,7 @@ async fn start_daemon(server: &fq_test_support::NatsServer) -> Daemon {
             panic!("fqd exited during startup with {status:?}\n--- log ---\n{text}");
         }
         let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-        if text.contains("Runtime ready") {
+        if text.contains("- edge is listening on ") {
             break text;
         }
         assert!(tokio::time::Instant::now() < deadline, "fqd never ready");

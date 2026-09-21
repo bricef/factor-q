@@ -26,6 +26,7 @@
 use std::process::{Command, Output, Stdio};
 
 use fq_test_support::TestChild;
+use futures::StreamExt;
 use std::time::{Duration, Instant};
 
 use fq_runtime::test_support::mock_anthropic::{MockAnthropicServer, MockResponse};
@@ -342,7 +343,7 @@ async fn crash_into_ambiguous(
 
     let mut daemon = Daemon::spawn(scratch, nats_url, "daemon-first.log");
     daemon
-        .await_log("Runtime ready", Duration::from_secs(30))
+        .await_log("- edge is listening on ", Duration::from_secs(30))
         .await;
     daemon.pair(scratch);
 
@@ -399,7 +400,7 @@ async fn crash_into_ambiguous(
 
     let mut restarted = Daemon::spawn(scratch, nats_url, "daemon-second.log");
     restarted
-        .await_log("Runtime ready", Duration::from_secs(30))
+        .await_log("- edge is listening on ", Duration::from_secs(30))
         .await;
     restarted.pair(scratch);
 
@@ -687,10 +688,28 @@ async fn resume_rejects_unknown_and_dropped_invocations() {
     // authoritative owner status BEFORE recovery classifies, so the
     // dropped invocation neither re-reports ambiguous nor renders a
     // live execution — on any restart, forever.
+    // Subscribe before spawning: `system.recovery` is emitted after the
+    // worker scan completes, so unlike the serving banner it is a barrier
+    // for the reconciliation this assertion depends on.
+    let recovery_client = async_nats::connect(&nats_url)
+        .await
+        .expect("connect for recovery barrier");
+    let mut recovery = recovery_client
+        .subscribe("fq.system.recovery")
+        .await
+        .expect("subscribe to recovery barrier");
+    recovery_client
+        .flush()
+        .await
+        .expect("flush recovery subscription");
     let mut third = Daemon::spawn(&scratch, &nats_url, "daemon-third.log");
     third
-        .await_log("Runtime ready", Duration::from_secs(30))
+        .await_log("- edge is listening on ", Duration::from_secs(30))
         .await;
+    tokio::time::timeout(Duration::from_secs(30), recovery.next())
+        .await
+        .expect("startup recovery did not complete within 30s")
+        .expect("recovery subscription ended before startup recovery");
     third.pair(&scratch);
     let list = run_fq(&scratch, &nats_url, &["invocation", "list"]);
     let list_text = String::from_utf8_lossy(&list.stdout).to_string();
@@ -806,7 +825,7 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
 
     let mut daemon = Daemon::spawn(&scratch, &nats_url, "daemon-live-drop.log");
     daemon
-        .await_log("Runtime ready", Duration::from_secs(30))
+        .await_log("- edge is listening on ", Duration::from_secs(30))
         .await;
     daemon.pair(&scratch);
     let nats = async_nats::connect(&nats_url)
@@ -896,12 +915,28 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
     }
 
     daemon.stop();
+    // Observe the recovery scan itself rather than sleeping after the
+    // serving banner and hoping detached recovery has caught up.
+    let recovery_client = async_nats::connect(&nats_url)
+        .await
+        .expect("connect for recovery barrier");
+    let mut recovery = recovery_client
+        .subscribe("fq.system.recovery")
+        .await
+        .expect("subscribe to recovery barrier");
+    recovery_client
+        .flush()
+        .await
+        .expect("flush recovery subscription");
     let mut restarted = Daemon::spawn(&scratch, &nats_url, "daemon-live-drop-restart.log");
     restarted
-        .await_log("Runtime ready", Duration::from_secs(30))
+        .await_log("- edge is listening on ", Duration::from_secs(30))
         .await;
+    tokio::time::timeout(Duration::from_secs(30), recovery.next())
+        .await
+        .expect("startup recovery did not complete within 30s")
+        .expect("recovery subscription ended before startup recovery");
     restarted.pair(&scratch);
-    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !restarted.log().contains("resuming invocation"),
         "dropped invocation resurrected after restart:\n{}",

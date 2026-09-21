@@ -85,6 +85,8 @@ fn token_reaches_the_broker_but_never_the_banner_log_or_startup_event() {
         .stderr(Stdio::from(log_err))
         .spawn();
 
+    // The banner is the assertion that authenticated broker startup reached
+    // serving; this fresh-store test does not depend on recovery state.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
