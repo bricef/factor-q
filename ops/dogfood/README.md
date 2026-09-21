@@ -128,7 +128,11 @@ before ADR-0036. It ends by printing what only a human can do:
    key per provider `fqd.toml` declares, because a missing one fails the
    daemon at startup and not at invocation time — plus `GH_TOKEN`
    (literal — nothing runs `gh auth token` for you now; #402 wants a
-   per-role PAT). `.env`: `FQ_TAG` naming a build (`docker run --rm
+   per-role PAT). Optionally `TYPESAFE_API_KEY`, which turns on the
+   merge verdict's Jev rubric (#879) — left out, the watcher says
+   "rubric not configured" once at startup and every verdict comment
+   says so too, and the deterministic verdict is unaffected. `.env`:
+   `FQ_TAG` naming a build (`docker run --rm
    ghcr.io/bricef/fq-dogfood:main-latest --version`), so the ops image
    itself can be pulled, and `FQ_NOTIFY_HOOK`, then
    `docker compose run --rm ops notify --test`.

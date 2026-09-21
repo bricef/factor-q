@@ -37,6 +37,11 @@ keeps both rather than hiding either:
                   `--raw-labels` to switch that off, and read
                   `closing_issue_labels` for what the issue carries now.
 
+`--rubric` adds one column per question of the Jev rubric
+(`.github/merge-rubric.yml`) plus `rubric_flagged`, scored through the same
+`verdict` subcommand. It needs `TYPESAFE_API_KEY` and makes one paid API
+call per PR, so it is off unless asked for.
+
 Stdlib only, like the rest of scripts/: the fleet image has python3 and no
 pip.
 """
@@ -56,6 +61,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WATCHER_DIR = ROOT / "adapters" / "github-watcher"
 AREAS = ROOT / ".github" / "areas.yml"
 POLICY = ROOT / ".github" / "merge-policy.yml"
+RUBRIC = ROOT / ".github" / "merge-rubric.yml"
 IN_REVIEW = "status:in-review"
 DONE = "status:done"
 PROVENANCE_MARKER = "<!-- fq-provenance -->"
@@ -78,6 +84,18 @@ COLUMNS = (
     + [f"check_{name.replace('-', '_')}" for name in CHECKS]
     + ["commit_count", "reworked", "closing_issues", "closing_issue_labels", "additions", "deletions", "files"]
 )
+
+
+def rubric_columns(rubric: pathlib.Path) -> list[str]:
+    """One column per rubric question, named from the file, not from code."""
+    ids, in_questions = [], False
+    for line in rubric.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("questions:"):
+            in_questions = True
+        elif in_questions and stripped.startswith("- id:"):
+            ids.append(stripped.split(":", 1)[1].strip())
+    return [f"rubric_{i}" for i in ids] + ["rubric_flagged"]
 
 SEARCH_QUERY = """query($q:String!,$cursor:String){
   search(query:$q, type:ISSUE, first:50, after:$cursor){
@@ -180,11 +198,15 @@ def build_watcher(into: pathlib.Path) -> pathlib.Path:
     return binary
 
 
-def verdicts(binary: pathlib.Path, facts: list[dict], areas: pathlib.Path, policy: pathlib.Path) -> dict[int, dict]:
+def verdicts(binary: pathlib.Path, facts: list[dict], areas: pathlib.Path, policy: pathlib.Path,
+             rubric: pathlib.Path | None) -> dict[int, dict]:
     """Run every PR's facts through the seam in one batch, keyed by number."""
     stdin = "".join(json.dumps(f) + "\n" for f in facts)
+    command = [str(binary), "verdict", "--areas", str(areas), "--policy", str(policy)]
+    if rubric is not None:
+        command += ["--rubric", str(rubric)]
     proc = subprocess.run(
-        [str(binary), "verdict", "--areas", str(areas), "--policy", str(policy)],
+        command,
         input=stdin, capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0:
@@ -228,6 +250,13 @@ def row_for(pr: dict, facts: dict, verdict: dict) -> dict:
     }
     for name in CHECKS:
         row[f"check_{name.replace('-', '_')}"] = checks.get(name, "")
+    scored = verdict.get("rubric")
+    if scored:
+        for answer in scored.get("answers") or []:
+            row[f"rubric_{answer['id']}"] = round(answer["probability"], 4)
+        row["rubric_flagged"] = scored.get("flagged", "")
+        if not scored.get("answers"):
+            row["rubric_flagged"] = scored.get("reason", "")
     return row
 
 
@@ -261,6 +290,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--areas", type=pathlib.Path, default=AREAS, help=argparse.SUPPRESS)
     parser.add_argument("--policy", type=pathlib.Path, default=POLICY, help=argparse.SUPPRESS)
     parser.add_argument("--raw-labels", action="store_true", help="do not replay status:done as status:in-review")
+    parser.add_argument(
+        "--rubric", nargs="?", const=RUBRIC, type=pathlib.Path, default=None,
+        help=f"also score the Jev rubric, adding one column per question (needs TYPESAFE_API_KEY; default file: {RUBRIC.name})",
+    )
     parser.add_argument("-o", "--out", type=pathlib.Path, help="write the CSV here instead of stdout")
     args = parser.parse_args(argv)
 
@@ -271,12 +304,13 @@ def main(argv: list[str]) -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         binary = args.binary or build_watcher(pathlib.Path(tmp))
-        scored = verdicts(binary, facts, args.areas, args.policy)
+        scored = verdicts(binary, facts, args.areas, args.policy, args.rubric)
 
     rows = [row_for(pr, f, scored[pr["number"]]) for pr, f in zip(prs, facts) if pr["number"] in scored]
+    columns = COLUMNS + (rubric_columns(args.rubric) if args.rubric else [])
     handle = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
     try:
-        writer = csv.DictWriter(handle, fieldnames=COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=columns, restval="")
         writer.writeheader()
         writer.writerows(rows)
     finally:

@@ -74,6 +74,8 @@ func (g *GhCliIssueSource) PRFactsFor(ctx context.Context, pr PullRequest) (PRFa
 	}
 	return PRFacts{
 		Number:         pr.Number,
+		Title:          detail.GetTitle(),
+		HeadBranch:     detail.GetHead().GetRef(),
 		HeadSHA:        detail.GetHead().GetSHA(),
 		BaseRef:        detail.GetBase().GetRef(),
 		Body:           detail.GetBody(),
@@ -84,6 +86,8 @@ func (g *GhCliIssueSource) PRFactsFor(ctx context.Context, pr PullRequest) (PRFa
 		ChangesRequest: decision == "CHANGES_REQUESTED",
 		CreatedAt:      detail.GetCreatedAt().Time,
 		ClosingIssues:  closing,
+		Additions:      detail.GetAdditions(),
+		Deletions:      detail.GetDeletions(),
 	}, nil
 }
 
@@ -109,7 +113,7 @@ func (g *GhCliIssueSource) prFiles(ctx context.Context, owner, repo string, numb
 // the watcher does not re-derive "which review is still standing" from a
 // list) and the issues this PR closes, with their labels.
 const prFactsQuery = `query($owner:String!,$repo:String!,$number:Int!){
-  repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewDecision closingIssuesReferences(first:20){ nodes{ number labels(first:50){ nodes{ name } } } } } }
+  repository(owner:$owner,name:$repo){ pullRequest(number:$number){ reviewDecision closingIssuesReferences(first:20){ nodes{ number title body labels(first:50){ nodes{ name } } } } } }
 }`
 
 type ghPRFactsResponse struct {
@@ -119,7 +123,9 @@ type ghPRFactsResponse struct {
 				ReviewDecision          string `json:"reviewDecision"`
 				ClosingIssuesReferences struct {
 					Nodes []struct {
-						Number int `json:"number"`
+						Number int    `json:"number"`
+						Title  string `json:"title"`
+						Body   string `json:"body"`
 						Labels struct {
 							Nodes []struct {
 								Name string `json:"name"`
@@ -153,7 +159,7 @@ func parsePRFactsResponse(raw []byte) (string, []ClosingIssue, error) {
 		for _, l := range n.Labels.Nodes {
 			labels = append(labels, l.Name)
 		}
-		closing = append(closing, ClosingIssue{Number: n.Number, Labels: labels})
+		closing = append(closing, ClosingIssue{Number: n.Number, Labels: labels, Title: n.Title, Body: n.Body})
 	}
 	return pr.ReviewDecision, closing, nil
 }
@@ -219,6 +225,19 @@ func (g *GhCliIssueSource) SetPRLabels(ctx context.Context, pr int, add string, 
 		if _, err := g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, pr, label); err != nil && !isNotFound(err) {
 			return fmt.Errorf("remove %q from #%d: %w", label, pr, err)
 		}
+	}
+	return nil
+}
+
+// RemovePRLabel removes one label, tolerating its absence — the common
+// case when a rubric flag was never set.
+func (g *GhCliIssueSource) RemovePRLabel(ctx context.Context, pr int, label string) error {
+	owner, repo, err := splitRepo(g.Repo)
+	if err != nil {
+		return err
+	}
+	if _, err := g.Client.Issues.RemoveLabelForIssue(ctx, owner, repo, pr, label); err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove %q from #%d: %w", label, pr, err)
 	}
 	return nil
 }

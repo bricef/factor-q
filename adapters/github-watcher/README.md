@@ -152,6 +152,47 @@ gh label create merge:supervised   -R bricef/factor-q -c FBCA04 -d "Advisory: a 
 gh label create merge:never        -R bricef/factor-q -c B60205 -d "Advisory: a human merges this, always (github-watcher, #879)"
 ```
 
+### The second verdict: a Jev rubric
+
+The same comment carries a second, **non-deterministic** verdict: a small
+rubric of yes/no questions put to a TypeSafe System One model (Jev,
+`POST https://api.typesafe.ai/v1/systemone`, model `jev-latest`), answered
+as calibrated probabilities with no rationale. Because it has no
+rationale it can only ever *restrict*, never construct, and it is never
+the safety boundary.
+
+- **The questions live in git**, as data:
+  [`.github/merge-rubric.yml`](../../.github/merge-rubric.yml) — an `id`,
+  the `instructions`, and what `criteria.yes` / `criteria.no` mean, plus
+  `flag_threshold`. **No prompt text is in Go**: the client derives the
+  request from the file, so changing what is asked is a reviewable change
+  to one file. (The API's criteria keys are `true`/`false`; the file says
+  `yes`/`no`, which is what the question actually reads as.)
+- **The state** is the closing issue's title and body, the PR's title,
+  body, head branch and commit count, the changed files with their areas
+  and tiers, and the diff stat. **Not the diff** — the questions are
+  about what the change claims and whether that matches its shape.
+- **The token** comes from `TYPESAFE_API_KEY` in the environment only,
+  delivered the way `GH_TOKEN` is (the dogfood stack's `env_file`), never
+  written to the repo. Unset, the watcher says so once at startup and
+  every comment says `rubric: not configured`.
+- **Failure degrades, never propagates.** Any API failure, timeout (20 s)
+  or unparseable response becomes `rubric: unavailable (reason)` in the
+  comment. Verdict 1 is labelled *before* the rubric is asked anything,
+  so a slow or broken scorer cannot delay or withhold it.
+- **`merge:rubric-flagged`** is set when any probability reaches the
+  threshold and **removed** when none does, so a push that answers the
+  concern clears the flag. The label must exist in the repository, like
+  the three tier labels:
+
+  ```console
+  gh label create merge:rubric-flagged -R bricef/factor-q -c D93F0B -d "Advisory: the Jev rubric flagged a question on this PR (github-watcher, #879)"
+  ```
+
+- **Scored once per push**: the sweep's cache key is the head SHA plus a
+  digest of all three declaration files, so a PR is scored again only
+  when someone pushes to it or edits the areas, the policy or the rubric.
+
 ### Replaying the verdict over merged PRs
 
 A verdict nobody has measured is an opinion. `github-watcher verdict` is
@@ -183,7 +224,10 @@ just merge-verdicts-replay 2026-09-12 -o replay.csv
 facts through the subcommand in one batch, and writes one CSV row per PR
 — tier, the deciding rule, each check, commit count and `reworked`
 (more than one commit: the ground-truth signal available today) — plus a
-summary to stderr. It writes nothing to GitHub. Two checks read
+summary to stderr. `--rubric` adds one column per rubric question plus `rubric_flagged`,
+scored through the same subcommand; it needs `TYPESAFE_API_KEY` and makes
+one paid call per PR, so it is off unless asked for. It writes nothing to
+GitHub. Two checks read
 differently in replay and the script's docstring says so: GitHub reports
 `mergeable: UNKNOWN` for a merged PR, and a merged PR's issue carries
 `status:done` rather than `status:in-review`, which the script replays as

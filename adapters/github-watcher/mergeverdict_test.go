@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,25 @@ func (f *fakeVerdictSource) RepoLabels(context.Context) ([]string, error) {
 
 func (f *fakeVerdictSource) SetPRLabels(_ context.Context, pr int, add string, remove []string) error {
 	f.ops = append(f.ops, fmt.Sprintf("label:%d:+%s:-%s", pr, add, strings.Join(remove, ",")))
-	f.prLabels[pr] = []string{add}
+	kept := []string{add}
+	for _, l := range f.prLabels[pr] {
+		if l != add && !slices.Contains(remove, l) {
+			kept = append(kept, l)
+		}
+	}
+	f.prLabels[pr] = kept
+	return nil
+}
+
+func (f *fakeVerdictSource) RemovePRLabel(_ context.Context, pr int, label string) error {
+	f.ops = append(f.ops, fmt.Sprintf("unlabel:%d:-%s", pr, label))
+	kept := f.prLabels[pr][:0]
+	for _, l := range f.prLabels[pr] {
+		if l != label {
+			kept = append(kept, l)
+		}
+	}
+	f.prLabels[pr] = kept
 	return nil
 }
 
