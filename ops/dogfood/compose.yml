@@ -163,6 +163,12 @@ services:
       GHW_REPO: bricef/factor-q
       GHW_AGENT: m0-issue-fix
       GHW_POLL: 60s
+      # The advisory merge-verdict sweep (#879): off. Turning it on is a
+      # one-line change here — it writes only a `merge:` label and one
+      # comment per fleet PR, and merges nothing — but it is off until
+      # the verdict has been calibrated against the replay of already
+      # merged PRs.
+      GHW_MERGE_VERDICTS: "false"
     env_file:
       - ./.secrets/env
     logging: *logging

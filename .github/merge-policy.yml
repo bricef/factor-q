@@ -1,0 +1,86 @@
+# How much human supervision a change needs, per code area.
+#
+# The github-watcher's merge-verdict sweep reads this file together with
+# `.github/areas.yml` and gives every open fleet PR one advisory verdict:
+# `merge:unsupervised`, `merge:supervised` or `merge:never`. Nothing merges
+# automatically — the label and its comment are a measurement, built and
+# calibrated against the PR stream before any merge action is considered
+# (https://github.com/bricef/factor-q/issues/879).
+#
+# Format:
+#
+#   default_tier      the tier for a changed file that matches no area
+#                     named below. Required.
+#   min_age_minutes   how old a PR must be before the sweep's structural
+#                     check "a human had time to veto" passes. Reported,
+#                     never enforced.
+#   areas             area name -> tier. Every name must exist in
+#                     `.github/areas.yml`; an unknown name is a refusal to
+#                     load, not a skipped line, because a typo would
+#                     silently relax the policy for everything that area
+#                     covers. Not every area needs a tier: the CI filters
+#                     in areas.yml (`runtime`, `store`, `go`, `coupling`,
+#                     `dashboard`, `docker`) answer a different question
+#                     and are deliberately unmapped.
+#
+# Tiers, from least to most restrictive:
+#
+#   unsupervised  a merge here needs no human read of the diff
+#   supervised    a human reads the change before it merges
+#   never         a human merges it, always
+#
+# The rule: a changed file belongs to every area whose globs match it, and
+# a PR's tier is the MOST RESTRICTIVE tier of any file it changes. One
+# `ops/` file in an otherwise documentation-only PR makes the whole PR
+# `never`. A file matching no mapped area takes `default_tier`.
+#
+# Note the `merge-verdicts` entry. This file, `areas.yml`, the rubric and
+# the watcher sources that implement the sweep are `never`, so a PR can
+# never widen its own merge rights: changing the policy is itself a change
+# a human merges.
+
+default_tier: supervised
+min_age_minutes: 30
+
+areas:
+  # Prose and throwaways. Wrong docs are cheap to fix and cannot break a
+  # deploy; `docs/**` is also where the fleet does most of its accepted
+  # work, which is what makes it the cleanest population to calibrate on.
+  docs: unsupervised
+  top-level-markdown: unsupervised
+  research: unsupervised
+  experiments: unsupervised
+  meta: unsupervised
+
+  # The Go trigger adapters. They are standalone binaries behind the wire
+  # contracts, with their own gate; their blast radius stops at the
+  # adapter. The merge-verdict sources inside this adapter are carved back
+  # out by the `merge-verdicts` area below.
+  adapters: unsupervised
+
+  # The Rust tree: real runtime behaviour, read before it lands.
+  services: supervised
+  tools: supervised
+  tests: supervised
+  infrastructure: supervised
+
+  # The sandbox is the runtime's security boundary (ADR-0010). A change
+  # there is a change to what an agent can reach.
+  sandbox: never
+
+  # What decides whether anything is gated, deployed or run at all.
+  workflows: never
+  ops: never
+  agents: never
+  task-runner: never
+  install: never
+  scripts: never
+
+  # The dependency surface and the ratchets. Both are reviewed baselines:
+  # a lockfile bump changes the resolved graph, and a baseline may only
+  # ever shrink, so an edit is a claim about the whole tree.
+  build-manifests: never
+  ratchet-baselines: never
+
+  # The merge verdict's own inputs and implementation.
+  merge-verdicts: never
