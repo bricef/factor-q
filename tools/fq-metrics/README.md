@@ -73,8 +73,9 @@ The core tables are `tasks`, `transitions`, `attempts`, `outcomes`, and
 the source facts needed to recompute acceptance and correction LOC without
 re-querying history. `views.sql` installs `first_pass_rate`,
 `attempts_per_accept`, `touch_per_accept` (median minutes), `mtbi` (hours), and
-`correction_ratio` (corrective human LOC / agent PR LOC); each view reports an
-`all_time` and a trailing `30_days` row.
+`correction_ratio` (corrective human LOC / agent PR LOC); a corrective commit is
+counted once however many PRs it corrects. Each view reports an `all_time` and a
+trailing `30_days` row.
 
 ## Event export
 
