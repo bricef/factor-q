@@ -9,6 +9,8 @@ use std::sync::Mutex;
 
 use uuid::Uuid;
 
+use crate::events::InvocationTotals;
+
 /// The per-invocation Round counters. Keyed by invocation because
 /// one runner services concurrent invocations; entries are seeded
 /// from the WAL on resume and dropped by the runner's active-guard.
@@ -46,40 +48,56 @@ impl RoundLedger {
     }
 
     /// Seed from the WAL's completed-call rows on resume, returning
-    /// the (completed calls, summed cost) pair the totals need — one
-    /// pass serves both.
+    /// the agent-call count plus total and server-origin cost buckets —
+    /// one pass serves the round ledger and invocation totals.
     ///
-    /// The three counts have different filters on purpose. `calls`
+    /// The counters have different filters on purpose. `calls`
     /// feeds `total_llm_calls`, which counts turns that produced an
     /// outcome, so errored rows are excluded. `cost` sums *every*
     /// completed row: since #447 an errored row can carry real spend
     /// (an empty completion still bills for the prefill), and dropping
     /// it here would forget that money on every resume — the budget
     /// accumulator is reconstituted from exactly this column. The Round
-    /// seed likewise counts every completed row, because a failed call
-    /// consumes a Round: a resume that seeded from successes alone
-    /// would re-issue Round numbers the pre-crash run already spent.
+    /// seed likewise counts every completed agent-turn row, because a
+    /// failed agent call consumes a Round. Server-origin calls consume
+    /// cost but are nested inside tools, so they consume no reducer Round.
     pub(crate) fn seed_from_wal(
         &self,
         invocation_id: Uuid,
         llms: &[crate::worker::store::LlmDispatchRow],
-    ) -> (u32, f64) {
+    ) -> InvocationTotals {
+        use crate::events::LlmCallOrigin;
         use crate::worker::store::DispatchStatus;
         let mut calls = 0u32;
         let mut rounds = 0u64;
-        let mut cost = 0.0f64;
-        for r in llms {
-            if r.status != DispatchStatus::Completed {
+        let mut total_cost = 0.0f64;
+        let mut sampling_cost = 0.0f64;
+        let mut elicitation_cost = 0.0f64;
+        for row in llms {
+            if row.status != DispatchStatus::Completed {
                 continue;
             }
-            rounds += 1;
-            cost += r.cost_usd.unwrap_or(0.0);
-            if r.is_error != Some(true) {
-                calls += 1;
+            let cost = row.cost_usd.unwrap_or(0.0);
+            total_cost += cost;
+            match &row.origin {
+                LlmCallOrigin::AgentTurn => {
+                    rounds += 1;
+                    if row.is_error != Some(true) {
+                        calls += 1;
+                    }
+                }
+                LlmCallOrigin::Sampling { .. } => sampling_cost += cost,
+                LlmCallOrigin::Elicitation { .. } => elicitation_cost += cost,
             }
         }
         self.seed(invocation_id, rounds);
-        (calls, cost)
+        InvocationTotals {
+            total_llm_calls: calls,
+            total_cost,
+            sampling_cost,
+            elicitation_cost,
+            ..InvocationTotals::default()
+        }
     }
 
     /// Drop the counter when the invocation leaves the runner.
@@ -88,5 +106,61 @@ impl RoundLedger {
             .lock()
             .expect("rounds lock poisoned")
             .remove(&invocation_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::LlmCallOrigin;
+    use crate::worker::store::{DispatchStatus, LlmDispatchRow};
+
+    fn completed(origin: LlmCallOrigin, cost: f64, is_error: bool) -> LlmDispatchRow {
+        LlmDispatchRow {
+            invocation_id: "inv".to_string(),
+            request_id: format!("request-{cost}"),
+            model: "model".to_string(),
+            status: DispatchStatus::Completed,
+            request_payload: "{}".to_string(),
+            response: None,
+            cost_usd: Some(cost),
+            origin,
+            is_error: Some(is_error),
+            intent_at: 1,
+            dispatched_at: Some(2),
+            completed_at: Some(3),
+            seq: Some(1),
+            deferred_at: None,
+        }
+    }
+
+    #[test]
+    fn wal_seed_counts_only_agent_turns_but_restores_all_cost_buckets() {
+        let ledger = RoundLedger::default();
+        let invocation_id = Uuid::now_v7();
+        let rows = vec![
+            completed(LlmCallOrigin::AgentTurn, 1.0, false),
+            completed(
+                LlmCallOrigin::Sampling {
+                    server: "sampling".to_string(),
+                },
+                2.0,
+                false,
+            ),
+            completed(
+                LlmCallOrigin::Elicitation {
+                    server: "elicitation".to_string(),
+                },
+                3.0,
+                true,
+            ),
+        ];
+
+        let totals = ledger.seed_from_wal(invocation_id, &rows);
+        assert_eq!(totals.total_llm_calls, 1);
+        assert_eq!(totals.total_cost, 6.0);
+        assert_eq!(totals.sampling_cost, 2.0);
+        assert_eq!(totals.elicitation_cost, 3.0);
+        assert_eq!(ledger.next(invocation_id), 2);
     }
 }
