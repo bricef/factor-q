@@ -13,6 +13,14 @@ one-line caveats.
   `/proc/<fqd-pid>/environ` root-only, but arbitrary exec can still reach
   secrets by other means, while network declarations are not yet enforced.
   Treat every agent as network-unrestricted regardless of its definition.
+  The sandbox dimensions are therefore not independent: an `exec_cwd` grant
+  lets a process read and write anything its OS identity can access, inspect
+  ambient secrets (including through `/proc`), and make unrestricted network
+  requests, regardless of narrower `fs_read`, `fs_write`, `env`, or `network`
+  declarations. In practice, exec dominates the other grants; they constrain
+  the built-in tools, not programs started by exec. Do not use a narrow
+  filesystem or environment declaration alongside exec as an isolation
+  boundary.
   Enforcement is tracked
   by [#208](https://github.com/bricef/factor-q/issues/208) (a CONNECT-filtering
   forward proxy) and [#209](https://github.com/bricef/factor-q/issues/209)
@@ -38,6 +46,24 @@ one-line caveats.
   workspace, the Go adapters and the workflow actions. The `main-latest`
   binaries the dogfood host pulls are built from a lockfile that has
   passed this gate.
+
+## Fleet residual risk
+
+The dogfood fleet's unattended agents process untrusted public issue text with
+the repository owner's ambient, write-scoped `GH_TOKEN` and can reach other
+owner credentials, including model API secrets, through exec. Their network
+declarations are not
+enforced, and an agent with `builtin__exec` can deliberately invoke a shell
+(for example, `bash -c`) despite the tool's argv-only interface. Restrictions
+against operations such as pushing or merging are prompt instructions, not
+typed or runtime-enforced controls. Public issue text can therefore influence
+the backlog groomer, which rewrites specifications consumed by an implementing
+agent.
+
+For that chain, the **human review and merge gate is the sole enforced
+control** before agent-produced changes reach the protected branch. Treat the
+fleet as privileged automation with attacker-controlled input, not as sandboxed
+execution, until stronger credential, network, and process isolation ships.
 
 ## Reporting a Vulnerability
 
