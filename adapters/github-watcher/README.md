@@ -98,8 +98,8 @@ GitHub's GraphQL `closedByPullRequestsReferences` link), it moves `in-review` �
 
 ## Advisory merge verdicts
 
-Off by default, behind `--merge-verdicts` / `GHW_MERGE_VERDICTS`. When it
-is on, the **last** step of every poll gives each open *fleet* PR — one
+**On by default**; `--merge-verdicts=false` / `GHW_MERGE_VERDICTS=false`
+opts out. The **last** step of every poll gives each open *fleet* PR — one
 whose body carries the provenance footer — one advisory verdict: a label
 and one comment. **It is advisory in the strongest sense: it merges
 nothing, closes nothing, and cannot fail a poll cycle.** Every error is
@@ -203,7 +203,7 @@ Every flag has an environment-variable fallback.
 | `--max-retries` | `GHW_MAX_RETRIES` | `2` | bounded auto-retry budget per issue for transient failures |
 | `--reconcile-after` | `GHW_RECONCILE_AFTER` | `4h` | re-queue an eventless `in-progress` issue after twice the expected 2h maximum run |
 | `--hold-label` | `GHW_HOLD_LABEL` | `hold` | a human's "not yet" on a PR; reported by the merge verdict's checks |
-| `--merge-verdicts` | `GHW_MERGE_VERDICTS` | `false` | run the advisory merge-verdict sweep (below) |
+| `--merge-verdicts` | `GHW_MERGE_VERDICTS` | `true` | the advisory merge-verdict sweep (below); `false` opts out |
 | `--task-template` | `GHW_TASK_TEMPLATE` | `Implement the fix described in GitHub issue #%d.` | `%d` = issue number |
 | `--health-bind` | `GHW_HEALTH_BIND` | `127.0.0.1:9473` | loopback address of `GET /healthz`; empty disables |
 | `--probe` | — | | ask the running watcher's `/healthz` and exit 0 on healthy — the container's `HEALTHCHECK`; needs no `--repo` |

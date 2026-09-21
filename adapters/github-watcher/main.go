@@ -182,7 +182,7 @@ func configFromArgs(args []string) (Config, string, string, error) {
 	reconcileAfter := fs.Duration("reconcile-after", reconcileAfterDefault, "age before an eventless in-progress issue is recovered (env GHW_RECONCILE_AFTER)")
 	template := fs.String("task-template", envOr("GHW_TASK_TEMPLATE", "Implement the fix described in GitHub issue #%d."), "trigger payload template; %d is the issue number (env GHW_TASK_TEMPLATE)")
 	hold := fs.String("hold-label", envOr("GHW_HOLD_LABEL", "hold"), "label a human puts on a PR to withhold it from the merge verdict's checks (env GHW_HOLD_LABEL)")
-	mergeVerdicts := fs.Bool("merge-verdicts", envBoolOr("GHW_MERGE_VERDICTS", false), "run the advisory merge-verdict sweep over open fleet PRs (env GHW_MERGE_VERDICTS)")
+	mergeVerdicts := fs.Bool("merge-verdicts", envBoolOr("GHW_MERGE_VERDICTS", true), "run the advisory merge-verdict sweep over open fleet PRs; --merge-verdicts=false opts out (env GHW_MERGE_VERDICTS)")
 	healthBind := fs.String("health-bind", envOr(healthBindEnv, defaultHealthBind), "loopback address for GET /healthz, the probe the container's HEALTHCHECK runs; empty disables (env "+healthBindEnv+")")
 
 	if err := fs.Parse(args); err != nil {
@@ -234,8 +234,9 @@ func envOr(key, def string) string {
 // envBoolOr reads a boolean flag default from the environment. Unlike
 // the int and duration readers it cannot fail: an unparseable value is
 // treated as the default and the flag's own parser reports a bad `-flag=`
-// value. The sweep it gates is advisory and off by default, so refusing
-// to start over a typo in an optional switch would be the worse failure.
+// value. The sweep it gates writes only an advisory label and comment, so
+// refusing to start over a typo in an optional switch would be the worse
+// failure.
 func envBoolOr(key string, def bool) bool {
 	switch strings.ToLower(os.Getenv(key)) {
 	case "1", "true", "yes", "on":
