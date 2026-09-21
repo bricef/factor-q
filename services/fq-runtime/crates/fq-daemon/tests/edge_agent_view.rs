@@ -108,7 +108,7 @@ async fn the_agent_view_answers_from_the_daemons_live_registry() {
             panic!("fqd exited during startup with {status:?}\n--- log ---\n{text}");
         }
         let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-        if text.contains("Runtime ready") {
+        if text.contains("- edge is listening on ") {
             break text;
         }
         assert!(tokio::time::Instant::now() < deadline, "fqd never ready");
