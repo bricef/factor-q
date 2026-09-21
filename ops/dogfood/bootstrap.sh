@@ -150,6 +150,7 @@ ensure_env FQ_DOGFOOD "$DOGFOOD"
 ensure_env FQ_UID "$(id -u "$FQ_USER")"
 ensure_env FQ_DOCKER_GID "$(getent group docker | cut -d: -f3)"
 ensure_env FQ_HOST "$(hostname -s 2>/dev/null || hostname)"
+ensure_env FQ_EDGE_ADDR "$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}' | head -1)"
 if seed "$SRC/env.example" "$DOGFOOD/.secrets/env" 600; then
     token="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     sed -i "s/^FQ_NATS_TOKEN=.*/FQ_NATS_TOKEN=$token/; s#^GHW_NATS_URL=.*#GHW_NATS_URL=nats://$token@nats:4222#; s#^FQCRON_NATS_URL=.*#FQCRON_NATS_URL=nats://$token@nats:4222#" "$DOGFOOD/.secrets/env"

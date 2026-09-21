@@ -117,10 +117,15 @@ services:
       # never the docker socket: agents run inside this container.
       - fq-data:/var/lib/factor-q
     ports:
-      # The edge, for the operator's `fq` on the host and for the
-      # dashboard (host-networked below). Loopback only; the edge is
-      # authenticated, but nothing here needs to be reachable off-box.
+      # The edge is a remote interface by design — TLS with a fingerprint
+      # every client pins, and capability tokens — so it is published
+      # twice: on loopback for the dashboard (host-networked below) and
+      # the operator's `fq` on this host, and on FQ_EDGE_ADDR, the address
+      # other machines reach this host on (.env, a host fact bootstrap.sh
+      # detects), for an `fq` elsewhere: the metrics extractor, a laptop.
+      # Nothing else in the stack is reachable off-box.
       - "127.0.0.1:9470:9470"
+      - "${FQ_EDGE_ADDR:?set FQ_EDGE_ADDR in .env to the address other machines reach this host on (bootstrap.sh detects it)}:9470:9470"
     # `docker stop` sends SIGTERM, which the daemon treats as a drain
     # (ADR-0027): in-flight invocations suspend at their next step
     # boundary, bounded by [worker] drain_deadline_ms (120 s by default).
@@ -200,8 +205,8 @@ services:
     # loopback (its own safety property — Caddy is the only door), and a
     # loopback bind inside a container is unreachable from outside it.
     # On the host's network it binds 127.0.0.1:9472 exactly as the
-    # process did, reaches the edge at 127.0.0.1:9470 through the port
-    # published above, and Caddy proxies to it unchanged. Its HEALTHCHECK
+    # process did, reaches the edge at 127.0.0.1:9470 through the loopback
+    # publish above, and Caddy proxies to it unchanged. Its HEALTHCHECK
     # (`fq-dashboard probe`) asks that same loopback bind for /healthz.
     network_mode: host
     # Its own env file with exactly the three edge settings and its
