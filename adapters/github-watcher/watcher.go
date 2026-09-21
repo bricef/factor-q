@@ -122,7 +122,7 @@ type Config struct {
 	ReconcileAfter     time.Duration // maximum expected run before an eventless issue is re-queued
 	TaskTemplate       string        // task template; a single %d is the issue number
 	HoldLabel          string        // the label a human puts on a PR to say "not yet", e.g. "hold"
-	MergeVerdicts      bool          // run the advisory merge-verdict sweep (off by default)
+	MergeVerdicts      bool          // run the advisory merge-verdict sweep (on; --merge-verdicts=false opts out)
 }
 
 // PlannedTrigger is a decision to trigger the agent for one issue.
@@ -179,8 +179,8 @@ type Watcher struct {
 	Reviewer   ReviewSource          // optional; nil disables the merged-PR → done sweep
 	Reconciler *InProgressReconciler // optional; nil disables restart recovery
 	// MergeVerdicts, when set, runs the advisory merge-verdict sweep as
-	// the last step of every poll (issue #879). Optional and off by
-	// default: nil is the whole disable.
+	// the last step of every poll (issue #879). nil is the whole
+	// disable, which is what --merge-verdicts=false produces.
 	MergeVerdicts *MergeVerdictSweeper
 	Config        Config
 	Log           *slog.Logger
