@@ -100,7 +100,8 @@ GitHub's GraphQL `closedByPullRequestsReferences` link), it moves `in-review` �
 
 **On by default**; `--merge-verdicts=false` / `GHW_MERGE_VERDICTS=false`
 opts out. The **last** step of every poll gives each open *fleet* PR — one
-whose body carries the provenance footer — one advisory verdict: a label
+whose body carries either the watcher provenance footer or an agent-written
+`provenance: agent=… invocation=…` line — one advisory verdict: a label
 and one comment. **It is advisory in the strongest sense: it merges
 nothing, closes nothing, and cannot fail a poll cycle.** Every error is
 logged and the next PR is tried. The point is to build and calibrate the
@@ -128,7 +129,8 @@ relaxing it.
 it; a PR's tier is the *most restrictive* tier of any file it changes,
 and a file in no mapped area takes `default_tier`. Adding a file can
 therefore only ever make a verdict stricter. Seven **structural checks**
-are computed alongside and reported in full — provenance footer present,
+are computed alongside and reported in full — provenance present (reporting
+`footer`, `line`, `both`, or `none`),
 closes exactly one issue and that issue is in review, `mergeable_state`
 clean, a single commit, no changes-requested review, no hold label, older
 than the minimum age. **None of them changes the tier.** CI is not
@@ -222,7 +224,7 @@ just merge-verdicts-replay 2026-09-12 -o replay.csv
 [`scripts/merge-verdicts-replay.py`](../../scripts/merge-verdicts-replay.py)
 (stdlib only) reads the merged PRs with `gh api graphql`, pipes their
 facts through the subcommand in one batch, and writes one CSV row per PR
-— tier, the deciding rule, each check, commit count and `reworked`
+— tier, provenance form, the deciding rule, each check, commit count and `reworked`
 (more than one commit: the ground-truth signal available today) — plus a
 summary to stderr. `--rubric` adds one column per rubric question plus `rubric_flagged`,
 scored through the same subcommand; it needs `TYPESAFE_API_KEY` and makes

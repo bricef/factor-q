@@ -345,3 +345,18 @@ func TestVerdictCommentRendersTheTruncationNote(t *testing.T) {
 		t.Errorf("wide PR comment has no truncation note:\n%s", body)
 	}
 }
+
+func TestSweepScoresAgentLineProvenance(t *testing.T) {
+	src := newFakeVerdictSource()
+	src.addPR(900, "aaa", false, []string{"docs/a.md"})
+	body := "The change\n\nprovenance: agent=doc-drift invocation=inv-1 model=test"
+	src.prs[0].Body = body
+	facts := src.facts[900]
+	facts.Body = body
+	src.facts[900] = facts
+
+	newTestSweeper(src).Sweep(context.Background())
+	if got := src.opsMatching("facts:"); len(got) != 1 || got[0] != "facts:900" {
+		t.Errorf("agent-line PR was not swept: %v", got)
+	}
+}

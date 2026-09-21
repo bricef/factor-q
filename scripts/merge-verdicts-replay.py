@@ -64,8 +64,6 @@ POLICY = ROOT / ".github" / "merge-policy.yml"
 RUBRIC = ROOT / ".github" / "merge-rubric.yml"
 IN_REVIEW = "status:in-review"
 DONE = "status:done"
-PROVENANCE_MARKER = "<!-- fq-provenance -->"
-
 # The checks, in the order adapters/github-watcher/verdict.go reports
 # them. They become one CSV column each, so this list is the column
 # contract: renaming one invalidates comparisons with earlier runs.
@@ -80,7 +78,7 @@ CHECKS = [
 ]
 
 COLUMNS = (
-    ["number", "merged_at", "head_branch", "fleet", "tier", "rule", "areas", "file_count", "files_truncated"]
+    ["number", "merged_at", "head_branch", "fleet", "provenance_form", "tier", "rule", "areas", "file_count", "files_truncated"]
     + [f"check_{name.replace('-', '_')}" for name in CHECKS]
     + ["commit_count", "reworked", "closing_issues", "closing_issue_labels", "additions", "deletions", "files"]
 )
@@ -231,7 +229,8 @@ def row_for(pr: dict, facts: dict, verdict: dict) -> dict:
         "number": pr["number"],
         "merged_at": pr["mergedAt"],
         "head_branch": pr["headRefName"],
-        "fleet": PROVENANCE_MARKER in (pr["body"] or ""),
+        "fleet": verdict["provenance_form"] != "none",
+        "provenance_form": verdict["provenance_form"],
         "tier": verdict["tier"],
         "rule": verdict["rule"],
         "areas": " ".join(areas),

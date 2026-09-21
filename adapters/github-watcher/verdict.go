@@ -70,10 +70,12 @@ type Check struct {
 // Decision is a full verdict: the tier, the file table it came from, the
 // one rule that decided it, and every structural check.
 type Decision struct {
-	Tier   Tier
-	Files  []FileTier
-	Rule   string
-	Checks []Check
+	Tier           Tier
+	Files          []FileTier
+	Rule           string
+	Checks         []Check
+	ProvenanceForm string
+	AgentID        string
 }
 
 // Structural check names. They are a stable vocabulary: the replay CSV
@@ -113,7 +115,11 @@ var CheckNames = []string{
 func Verdict(policy Policy, areas Areas, facts PRFacts) Decision {
 	files := fileTiers(policy, areas, facts.Files)
 	tier, rule := decide(policy, files)
-	return Decision{Tier: tier, Files: files, Rule: rule, Checks: structuralChecks(policy, facts)}
+	provenance := parseProvenance(facts.Body)
+	return Decision{
+		Tier: tier, Files: files, Rule: rule, Checks: structuralChecks(policy, facts),
+		ProvenanceForm: provenance.Form, AgentID: provenance.AgentID,
+	}
 }
 
 // fileTiers maps each changed file to the areas the policy knows about
@@ -198,10 +204,11 @@ func structuralChecks(policy Policy, f PRFacts) []Check {
 }
 
 func provenanceCheck(f PRFacts) Check {
-	if strings.Contains(f.Body, provenanceMarker) {
-		return Check{CheckProvenance, true, "body carries the factor-q provenance footer"}
+	provenance := parseProvenance(f.Body)
+	if provenance.Form != "none" {
+		return Check{CheckProvenance, true, fmt.Sprintf("provenance form: %s (agent %q)", provenance.Form, provenance.AgentID)}
 	}
-	return Check{CheckProvenance, false, "no provenance footer in the body"}
+	return Check{CheckProvenance, false, "provenance form: none"}
 }
 
 // closingIssueCheck folds "closes exactly one issue" and "that issue is in

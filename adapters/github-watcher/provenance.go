@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -25,6 +26,46 @@ type ProvenanceStamper interface {
 // it is never stamped again, however many times the completed event is
 // observed (watcher restarts, retriggers of the same issue).
 const provenanceMarker = "<!-- fq-provenance -->"
+
+var (
+	agentProvenanceLine   = regexp.MustCompile(`(?m)^provenance: agent=(\S+) invocation=(\S+)`)
+	footerProvenanceAgent = regexp.MustCompile(`(?m)^🤖 \*\*factor-q provenance\*\* — agent: ` + "`([^`]+)`")
+)
+
+// Provenance identifies which fleet provenance representation a PR body
+// carries. AgentID is populated from the agent-written line when present,
+// otherwise from the watcher footer.
+type Provenance struct {
+	Form    string
+	AgentID string
+}
+
+// parseProvenance is the single definition of a fleet PR. During the
+// migration both the watcher footer and the line agents write themselves
+// are authoritative.
+func parseProvenance(body string) Provenance {
+	hasFooter := strings.Contains(body, provenanceMarker)
+	line := agentProvenanceLine.FindStringSubmatch(body)
+	hasLine := len(line) > 0
+
+	form := "none"
+	switch {
+	case hasFooter && hasLine:
+		form = "both"
+	case hasFooter:
+		form = "footer"
+	case hasLine:
+		form = "line"
+	}
+
+	agentID := ""
+	if hasLine {
+		agentID = line[1]
+	} else if footer := footerProvenanceAgent.FindStringSubmatch(body); len(footer) > 0 {
+		agentID = footer[1]
+	}
+	return Provenance{Form: form, AgentID: agentID}
+}
 
 // provenanceFooter renders the machine-authored provenance block for a
 // PR body. The invocation id is the operator's handle for `fq
