@@ -1,0 +1,83 @@
+# The questions the merge verdict's second half asks about a pull request.
+#
+# The github-watcher sends these to a TypeSafe System One model (Jev,
+# `POST https://api.typesafe.ai/v1/systemone`) as `noul` questions —
+# yes/no questions that come back as a calibrated probability of yes, with
+# no rationale. The questions live here as data, not as prompt text in Go,
+# so the question set is declared once and the client derives the request
+# from it: changing what is asked is a change to this file, reviewable on
+# its own, and the rubric is versioned with the answers it produced.
+#
+# What this is for: measuring, not gating. A probability with no rationale
+# can only ever restrict, never construct, and it is never the safety
+# boundary — verdict 1 (areas + policy) is unaffected by anything here,
+# including the API being down. The threshold below starts loose because a
+# threshold is a calibration *output*, not an input.
+#
+# Format:
+#
+#   flag_threshold  any probability at or above this sets the
+#                   `merge:rubric-flagged` label. One number, one line.
+#   questions       a list of noul questions:
+#                     id            the key answers come back under, and
+#                                   the name in the comment and the CSV
+#                     instructions  the yes/no question itself
+#                     criteria.yes  what a probability near 1 means
+#                     criteria.no   what a probability near 0 means
+#
+# The state the questions are asked about is built by the watcher: the
+# closing issue's title and body, the PR's title, body, head branch and
+# commit count, the changed files with their areas and tiers, and the diff
+# stat. Deliberately not the diff — the questions are about what the
+# change *claims* and whether that matches its shape.
+#
+# Origin: https://github.com/bricef/factor-q/issues/879.
+
+flag_threshold: 0.7
+
+questions:
+  - id: admits_deferred_work
+    instructions: >-
+      Does this pull request's body admit that work was deferred, skipped,
+      left untested, or left for a follow-up?
+    criteria:
+      yes: >-
+        The body says something was not done, not tested, left for later,
+        or handled in a follow-up issue or pull request.
+      no: >-
+        The body describes the change as complete, with its tests and its
+        documentation, and names nothing it left undone.
+
+  - id: stays_within_the_issue
+    instructions: >-
+      Does this change stay within what the issue asked for?
+    criteria:
+      yes: >-
+        Every changed file plausibly serves the issue's stated scope.
+      no: >-
+        The change reaches into areas the issue did not ask about, or does
+        several things where the issue asked for one.
+
+  - id: takes_a_maintainer_decision
+    instructions: >-
+      Does this change take a design decision that the issue left open for
+      the maintainer to make?
+    criteria:
+      yes: >-
+        The issue names an open question, an alternative, or a decision to
+        be taken, and the change picks one without being told to.
+      no: >-
+        Every decision the change embodies was either already settled by
+        the issue or is a routine implementation choice.
+
+  - id: alters_runtime_behaviour
+    instructions: >-
+      Does this change alter runtime behaviour, regardless of what its body
+      claims?
+    criteria:
+      yes: >-
+        The changed files include code that runs in production, and the
+        change could make the running system behave differently.
+      no: >-
+        The change is confined to prose, comments, tests, or tooling that
+        does not run in production.

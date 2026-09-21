@@ -13,6 +13,11 @@ import (
 type ClosingIssue struct {
 	Number int      `json:"number"`
 	Labels []string `json:"labels,omitempty"`
+	// Title and Body are not used by any structural check: they are the
+	// issue half of the rubric's state (rubric.go), which asks whether
+	// the change stayed within what the issue asked for.
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
 }
 
 // PRFacts is everything the verdict is computed from: the facts about one
@@ -26,6 +31,8 @@ type ClosingIssue struct {
 // implementation of the rules.
 type PRFacts struct {
 	Number         int            `json:"number"`
+	Title          string         `json:"title,omitempty"`
+	HeadBranch     string         `json:"head_branch,omitempty"`
 	HeadSHA        string         `json:"head_sha,omitempty"`
 	BaseRef        string         `json:"base_ref,omitempty"`
 	Body           string         `json:"body,omitempty"`
@@ -37,6 +44,10 @@ type PRFacts struct {
 	CreatedAt      time.Time      `json:"created_at,omitempty"`
 	ClosingIssues  []ClosingIssue `json:"closing_issues,omitempty"`
 	ObservedAt     time.Time      `json:"observed_at,omitempty"`
+	// Additions and Deletions are the diff stat the rubric's state
+	// carries. The diff itself is deliberately never sent.
+	Additions int `json:"additions,omitempty"`
+	Deletions int `json:"deletions,omitempty"`
 }
 
 // FileTier is one row of a verdict's file table: a changed file, the

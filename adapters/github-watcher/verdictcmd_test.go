@@ -12,7 +12,7 @@ func runStream(t *testing.T, lines ...string) []verdictResult {
 	t.Helper()
 	var out bytes.Buffer
 	in := strings.NewReader(strings.Join(lines, "\n") + "\n")
-	if err := streamVerdicts(in, &out, testPolicy(t), testAreas(t)); err != nil {
+	if err := streamVerdicts(in, &out, testPolicy(t), testAreas(t), Rubric{}, nil); err != nil {
 		t.Fatalf("streamVerdicts: %v", err)
 	}
 	var results []verdictResult

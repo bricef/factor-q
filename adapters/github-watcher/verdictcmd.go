@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,12 +33,13 @@ import (
 
 // verdictResult is one line of the subcommand's output.
 type verdictResult struct {
-	Number int        `json:"number"`
-	Tier   string     `json:"tier,omitempty"`
-	Rule   string     `json:"rule,omitempty"`
-	Files  []FileTier `json:"files,omitempty"`
-	Checks []Check    `json:"checks,omitempty"`
-	Error  string     `json:"error,omitempty"`
+	Number int           `json:"number"`
+	Tier   string        `json:"tier,omitempty"`
+	Rule   string        `json:"rule,omitempty"`
+	Files  []FileTier    `json:"files,omitempty"`
+	Checks []Check       `json:"checks,omitempty"`
+	Rubric *RubricResult `json:"rubric,omitempty"`
+	Error  string        `json:"error,omitempty"`
 }
 
 // runVerdictCmd implements `github-watcher verdict`.
@@ -47,6 +49,7 @@ func runVerdictCmd(args []string) error {
 	policyPath := fs.String("policy", PolicyPath, "path to the merge policy")
 	inReview := fs.String("in-review-label", defaultInReviewLabel, "the label meaning an issue is in review")
 	hold := fs.String("hold-label", defaultHoldLabel, "the label meaning a human is withholding a PR")
+	rubricPath := fs.String("rubric", "", "path to the Jev rubric; empty skips the second verdict entirely")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -67,12 +70,40 @@ func runVerdictCmd(args []string) error {
 		return err
 	}
 	policy.InReviewLabel, policy.HoldLabel = *inReview, *hold
-	return streamVerdicts(os.Stdin, os.Stdout, policy, areas)
+	rubric, scorer, err := rubricFor(*rubricPath)
+	if err != nil {
+		return err
+	}
+	return streamVerdicts(os.Stdin, os.Stdout, policy, areas, rubric, scorer)
+}
+
+// rubricFor loads the rubric only when one is asked for, and refuses
+// loudly rather than degrading: a replay that silently produced no
+// probabilities would be read as "the model was unsure", which is the one
+// thing it must never be mistaken for. The live sweep degrades instead,
+// because there a missing rubric must not withhold verdict 1.
+func rubricFor(path string) (Rubric, *RubricScorer, error) {
+	if path == "" {
+		return Rubric{}, nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Rubric{}, nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	rubric, err := ParseRubric(raw)
+	if err != nil {
+		return Rubric{}, nil, err
+	}
+	scorer, ok := NewRubricScorer()
+	if !ok {
+		return Rubric{}, nil, fmt.Errorf("--rubric needs %s in the environment", TypeSafeKeyEnv)
+	}
+	return rubric, scorer, nil
 }
 
 // streamVerdicts is the whole loop, taking its streams as arguments so a
 // test drives it without touching the process's stdio.
-func streamVerdicts(in io.Reader, out io.Writer, policy Policy, areas Areas) error {
+func streamVerdicts(in io.Reader, out io.Writer, policy Policy, areas Areas, rubric Rubric, scorer *RubricScorer) error {
 	scanner := bufio.NewScanner(in)
 	// A PR's changed-file list is the long field; a megabyte of paths is
 	// far beyond the largest PR this repo has seen (66 files) and far
@@ -84,14 +115,14 @@ func streamVerdicts(in io.Reader, out io.Writer, policy Policy, areas Areas) err
 		if len(trimSpaceBytes(line)) == 0 {
 			continue
 		}
-		if err := enc.Encode(verdictFor(line, policy, areas)); err != nil {
+		if err := enc.Encode(verdictFor(line, policy, areas, rubric, scorer)); err != nil {
 			return err
 		}
 	}
 	return scanner.Err()
 }
 
-func verdictFor(line []byte, policy Policy, areas Areas) verdictResult {
+func verdictFor(line []byte, policy Policy, areas Areas, rubric Rubric, scorer *RubricScorer) verdictResult {
 	var facts PRFacts
 	if err := json.Unmarshal(line, &facts); err != nil {
 		return verdictResult{Error: fmt.Sprintf("decode facts: %v", err)}
@@ -106,13 +137,18 @@ func verdictFor(line []byte, policy Policy, areas Areas) verdictResult {
 		facts.ObservedAt = facts.CreatedAt
 	}
 	d := Verdict(policy, areas, facts)
-	return verdictResult{
+	result := verdictResult{
 		Number: facts.Number,
 		Tier:   d.Tier.String(),
 		Rule:   d.Rule,
 		Files:  d.Files,
 		Checks: d.Checks,
 	}
+	if scorer != nil {
+		scored := ScoreRubric(context.Background(), scorer, rubric, nil, RubricState(facts, d.Files))
+		result.Rubric = &scored
+	}
+	return result
 }
 
 func trimSpaceBytes(b []byte) []byte {

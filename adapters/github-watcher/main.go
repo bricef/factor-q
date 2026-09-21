@@ -128,7 +128,17 @@ func run(args []string) error {
 	// error ends its goroutine but does not stop polling (the review
 	// retained-event reconcile is the backstop for missed events).
 	if cfg.MergeVerdicts {
-		w.MergeVerdicts = NewMergeVerdictSweeper(source, cfg, log)
+		sweeper := NewMergeVerdictSweeper(source, cfg, log)
+		// The rubric half is opt-in through the environment alone, and
+		// its absence is said once here rather than in every comment's
+		// worth of logs.
+		if scorer, ok := NewRubricScorer(); ok {
+			sweeper.Rubric = scorer
+			log.Info("merge-verdict rubric enabled", "rubric", RubricPath, "model", TypeSafeModel)
+		} else {
+			log.Info("merge-verdict rubric not configured; the deterministic verdict is unaffected", "env", TypeSafeKeyEnv)
+		}
+		w.MergeVerdicts = sweeper
 		log.Info("advisory merge-verdict sweep enabled", "policy", PolicyPath, "areas", AreasPath)
 	}
 

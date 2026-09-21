@@ -161,7 +161,10 @@ services:
     # agent it dispatches, how often it polls; the lifecycle labels are
     # the binary's own `status:` defaults. GHW_NATS_URL (the broker token
     # as userinfo, nats://<token>@nats:4222) and GH_TOKEN are secrets and
-    # come from the env_file. Health is the image's own HEALTHCHECK
+    # come from the env_file — as does TYPESAFE_API_KEY, optional, which
+    # turns on the merge verdict's Jev rubric (#879); without it the
+    # rubric half reports "not configured" and the deterministic half is
+    # unaffected. Health is the image's own HEALTHCHECK
     # (`github-watcher --probe` against its loopback /healthz): attached
     # to the broker and polling.
     environment:

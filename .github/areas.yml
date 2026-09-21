@@ -199,3 +199,4 @@ merge-verdicts:
   - 'adapters/github-watcher/policy*.go'
   - 'adapters/github-watcher/verdict*.go'
   - 'adapters/github-watcher/mergeverdict*.go'
+  - 'adapters/github-watcher/rubric*.go'

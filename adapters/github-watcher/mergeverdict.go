@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -65,6 +66,8 @@ type MergeVerdictSource interface {
 	// SetPRLabels adds one label and removes the others, tolerating a
 	// label that was not there.
 	SetPRLabels(ctx context.Context, pr int, add string, remove []string) error
+	// RemovePRLabel removes one label, tolerating its absence.
+	RemovePRLabel(ctx context.Context, pr int, label string) error
 	// FindPRComment returns the PR's first comment containing marker.
 	FindPRComment(ctx context.Context, pr int, marker string) (PRComment, bool, error)
 	// CreatePRComment posts a new comment on the PR.
@@ -88,6 +91,13 @@ type MergeVerdictSweeper struct {
 	// Now supplies the observation time for the age check; nil means
 	// time.Now. A seam for tests only.
 	Now func() time.Time
+
+	// Rubric, when set, adds the second (non-deterministic) verdict to
+	// the same comment: a TypeSafe System One scorer over
+	// .github/merge-rubric.yml. nil means the token is absent, which is
+	// reported once at startup and then in every comment — never as an
+	// error, and never with any effect on the tier.
+	Rubric *RubricScorer
 
 	// scored remembers the cache key (head SHA + policy digest) each PR
 	// was last scored at, so a PR nobody pushed to costs one listing
@@ -115,7 +125,7 @@ func (s *MergeVerdictSweeper) Sweep(ctx context.Context) {
 		s.Log.Error("list repository labels failed; skipping merge-verdict sweep this poll", "err", err)
 		return
 	}
-	if missing := missingLabels(labels); len(missing) > 0 {
+	if missing := missingLabels(labels, s.Rubric != nil); len(missing) > 0 {
 		s.Log.Error("merge verdict labels do not exist in the repository; skipping the sweep — create them (see the adapter README)",
 			"missing", strings.Join(missing, ", "))
 		return
@@ -147,9 +157,13 @@ func (s *MergeVerdictSweeper) Sweep(ctx context.Context) {
 type loadedPolicy struct {
 	policy Policy
 	areas  Areas
-	digest string
-	ref    string
-	err    error
+	rubric Rubric
+	// rubricErr is kept apart from err: a rubric that will not load must
+	// degrade the rubric half of the comment, never withhold verdict 1.
+	rubricErr error
+	digest    string
+	ref       string
+	err       error
 }
 
 func (s *MergeVerdictSweeper) policyFor(ctx context.Context, ref string, cache map[string]*loadedPolicy) *loadedPolicy {
@@ -186,8 +200,31 @@ func (s *MergeVerdictSweeper) loadPolicy(ctx context.Context, ref string) *loade
 	}
 	policy.InReviewLabel = s.Config.InReviewLabel
 	policy.HoldLabel = s.Config.HoldLabel
-	sum := sha256.Sum256(append(append([]byte{}, areasRaw...), policyRaw...))
-	return &loadedPolicy{policy: policy, areas: areas, digest: hex.EncodeToString(sum[:8]), ref: ref}
+	rubric, rubricRaw, rubricErr := s.loadRubric(ctx, ref)
+	// The digest covers all three files, so editing any of them
+	// re-scores every PR based on this ref without anyone pushing to them.
+	sum := sha256.Sum256(bytes.Join([][]byte{areasRaw, policyRaw, rubricRaw}, nil))
+	return &loadedPolicy{
+		policy: policy, areas: areas, rubric: rubric, rubricErr: rubricErr,
+		digest: hex.EncodeToString(sum[:8]), ref: ref,
+	}
+}
+
+// loadRubric reads the rubric declaration, returning any failure rather
+// than raising it: verdict 1 must land whatever state the rubric file is in.
+func (s *MergeVerdictSweeper) loadRubric(ctx context.Context, ref string) (Rubric, []byte, error) {
+	if s.Rubric == nil {
+		return Rubric{}, nil, nil
+	}
+	raw, err := s.Source.RepoFileAtRef(ctx, RubricPath, ref)
+	if err != nil {
+		return Rubric{}, nil, fmt.Errorf("read %s@%s: %w", RubricPath, ref, err)
+	}
+	rubric, err := ParseRubric(raw)
+	if err != nil {
+		return Rubric{}, raw, err
+	}
+	return rubric, raw, nil
 }
 
 func (s *MergeVerdictSweeper) scorePR(ctx context.Context, pr PullRequest, loaded *loadedPolicy) error {
@@ -197,16 +234,45 @@ func (s *MergeVerdictSweeper) scorePR(ctx context.Context, pr PullRequest, loade
 	}
 	facts.ObservedAt = s.now()
 	decision := Verdict(loaded.policy, loaded.areas, facts)
+	// Verdict 1 is labelled before the rubric is asked anything, so a
+	// slow or failing scorer cannot delay or withhold it.
 	if err := s.Source.SetPRLabels(ctx, pr.Number, decision.Tier.Label(), otherTierLabels(decision.Tier)); err != nil {
 		return fmt.Errorf("apply %s: %w", decision.Tier.Label(), err)
 	}
-	body := renderVerdictComment(decision, facts, loaded)
+	rubric := ScoreRubric(ctx, s.Rubric, loaded.rubric, loaded.rubricErr, RubricState(facts, decision.Files))
+	if s.Rubric != nil {
+		if err := s.setRubricLabel(ctx, pr.Number, rubric.Flagged); err != nil {
+			s.Log.Error("applying the rubric label failed; the verdict comment still lands", "pr", pr.Number, "err", err)
+		}
+	}
+	body := renderVerdictComment(decision, facts, loaded, rubric)
 	if err := s.upsertComment(ctx, pr.Number, body); err != nil {
 		return fmt.Errorf("write verdict comment: %w", err)
 	}
 	s.Log.Info("merge verdict", "pr", pr.Number, "tier", decision.Tier.String(),
-		"head", shortSHA(facts.HeadSHA), "rule", decision.Rule)
+		"head", shortSHA(facts.HeadSHA), "rule", decision.Rule,
+		"rubric", rubricLogValue(rubric))
 	return nil
+}
+
+// setRubricLabel adds or removes RubricFlagLabel. Removing matters as
+// much as adding: a push that answers the concern must clear the flag, or
+// the label outlives the state it described.
+func (s *MergeVerdictSweeper) setRubricLabel(ctx context.Context, pr int, flagged bool) error {
+	if flagged {
+		return s.Source.SetPRLabels(ctx, pr, RubricFlagLabel, nil)
+	}
+	return s.Source.RemovePRLabel(ctx, pr, RubricFlagLabel)
+}
+
+func rubricLogValue(r RubricResult) string {
+	if r.Reason != "" {
+		return r.Reason
+	}
+	if r.Flagged {
+		return "flagged"
+	}
+	return "clear"
 }
 
 // upsertComment writes the verdict comment exactly once per PR, and
@@ -239,13 +305,17 @@ func (s *MergeVerdictSweeper) now() time.Time {
 // The sweep refuses to run without all three rather than applying the one
 // that happens to exist, which would leave a PR carrying a stale verdict
 // the sweep could not remove.
-func missingLabels(existing []string) []string {
+func missingLabels(existing []string, withRubric bool) []string {
 	have := make(map[string]bool, len(existing))
 	for _, l := range existing {
 		have[l] = true
 	}
+	want := TierLabels
+	if withRubric {
+		want = append(append([]string{}, TierLabels...), RubricFlagLabel)
+	}
 	var missing []string
-	for _, l := range TierLabels {
+	for _, l := range want {
 		if !have[l] {
 			missing = append(missing, l)
 		}
@@ -268,7 +338,7 @@ func otherTierLabels(tier Tier) []string {
 // and what a human would look at anyway. It is a pure function of the
 // decision and the facts so the body can be compared against what is
 // already on the PR.
-func renderVerdictComment(d Decision, f PRFacts, loaded *loadedPolicy) string {
+func renderVerdictComment(d Decision, f PRFacts, loaded *loadedPolicy, rubric RubricResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n### 🤖 factor-q merge verdict — `%s`\n\n", mergeVerdictMarker, d.Tier.Label())
 	fmt.Fprintf(&b, "Head `%s` · base `%s` · policy `%s`@`%s` (`%s`)\n\n",
@@ -276,6 +346,7 @@ func renderVerdictComment(d Decision, f PRFacts, loaded *loadedPolicy) string {
 	fmt.Fprintf(&b, "**Rule.** %s\n\n", d.Rule)
 	writeFileTable(&b, d)
 	writeCheckTable(&b, d)
+	writeRubric(&b, rubric)
 	b.WriteString("\n**Advisory.** Nothing merges automatically. The tier says how much " +
 		"human supervision a change to these areas needs; the checks are reported, " +
 		"not enforced. Calibration is the point — see " +
@@ -311,6 +382,31 @@ func writeCheckTable(b *strings.Builder, d Decision) {
 			mark = "✅"
 		}
 		fmt.Fprintf(b, "| `%s` | %s | %s |\n", c.Name, mark, c.Reason)
+	}
+}
+
+// writeRubric renders the second verdict, or the one line saying why
+// there is none. The two verdicts share one comment on purpose: a
+// reviewer reads one thing per PR, and the rubric's probabilities mean
+// something only next to the areas the change touched.
+func writeRubric(b *strings.Builder, r RubricResult) {
+	b.WriteString("\n**Rubric (Jev).** ")
+	if len(r.Answers) == 0 {
+		fmt.Fprintf(b, "%s\n", r.Reason)
+		return
+	}
+	verdict := "nothing reaches the threshold"
+	if r.Flagged {
+		verdict = "**flagged** — at least one question reaches the threshold"
+	}
+	fmt.Fprintf(b, "%s (≥ %.2f). Probabilities are calibrated and carry no rationale; they restrict, never construct.\n\n", verdict, r.Threshold)
+	b.WriteString("| question | P(yes) | |\n|---|---|---|\n")
+	for _, a := range r.Answers {
+		mark := ""
+		if a.Probability >= r.Threshold {
+			mark = "⚑"
+		}
+		fmt.Fprintf(b, "| `%s` | %.2f | %s |\n", a.ID, a.Probability, mark)
 	}
 }
 
