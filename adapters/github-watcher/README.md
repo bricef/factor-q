@@ -152,6 +152,43 @@ gh label create merge:supervised   -R bricef/factor-q -c FBCA04 -d "Advisory: a 
 gh label create merge:never        -R bricef/factor-q -c B60205 -d "Advisory: a human merges this, always (github-watcher, #879)"
 ```
 
+### Replaying the verdict over merged PRs
+
+A verdict nobody has measured is an opinion. `github-watcher verdict` is
+the seam that lets the already-merged PRs answer for it:
+
+```console
+echo '{"number":900,"files":["docs/a.md"],"commit_count":1}' \
+  | github-watcher verdict --areas .github/areas.yml --policy .github/merge-policy.yml
+```
+
+It reads **JSON Lines** on stdin — one `PRFacts` object per line — and
+writes one verdict object per line of stdout, in the same order, so a
+caller may batch or not without changing anything. A line that cannot be
+decoded is answered with an `error` field rather than killing the batch.
+It makes **no GitHub calls**: facts in, verdict out, no `--repo`, no
+token, no broker. A line that omits `observed_at` is measured from the
+PR's own creation, so the age check reads as zero age rather than as an
+accidental pass.
+
+The seam exists so the replay runs *this* verdict function. A replay that
+reimplemented the rules would measure something that merely agrees today.
+
+```console
+just merge-verdicts-replay 2026-09-12 -o replay.csv
+```
+
+[`scripts/merge-verdicts-replay.py`](../../scripts/merge-verdicts-replay.py)
+(stdlib only) reads the merged PRs with `gh api graphql`, pipes their
+facts through the subcommand in one batch, and writes one CSV row per PR
+— tier, the deciding rule, each check, commit count and `reworked`
+(more than one commit: the ground-truth signal available today) — plus a
+summary to stderr. It writes nothing to GitHub. Two checks read
+differently in replay and the script's docstring says so: GitHub reports
+`mergeable: UNKNOWN` for a merged PR, and a merged PR's issue carries
+`status:done` rather than `status:in-review`, which the script replays as
+`in-review` because the review sweep is the only thing that writes `done`.
+
 Event observation uses core NATS (at-most-once). A missed outcome is not
 fatal: the durable reconciliation pass recovers the transition on a later poll,
 and a re-queued issue is re-picked on the next poll.
