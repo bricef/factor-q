@@ -193,6 +193,9 @@ just dashboard-screenshots  # PNG of every page, desktop and phone, from fixture
 just dashboard-e2e          # two processes: a real daemon, real HTTP
 ```
 
+Datastar attributes must name plugins registered by the pinned bundle; list them with
+`grep -o 'name:"[a-z-]*"' assets/datastar.js | sort -u` before adding an attribute.
+
 The tests serve a fixture surface over a **real** `fq-edge` with a token
 attenuated to exactly the seven grants, and drive the router end to end
 with `tower::ServiceExt::oneshot`. Both sides of the wire use the
