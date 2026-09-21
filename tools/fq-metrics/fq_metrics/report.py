@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import svg
+from .measures import measures
 
 BANDS = (
     "fleet:candidate", "fleet:refined", "status:ready", "status:in-progress",
@@ -127,48 +128,6 @@ def cycle_times(db: sqlite3.Connection, start: datetime, end: datetime, by: str)
                        "median_days": statistics.median(values),
                        "p90_days": _percentile(values, .9), "samples": len(values)})
     return result
-
-
-def _one(db: sqlite3.Connection, sql: str, args: tuple = ()) -> float | None:
-    value = db.execute(sql, args).fetchone()[0]
-    return float(value) if value is not None else None
-
-
-def measures(db: sqlite3.Connection, start: datetime, end: datetime) -> dict[str, float | None]:
-    lo, hi = start.isoformat(), end.isoformat()
-    attempts = _one(db, "SELECT COUNT(*) FROM attempts WHERE dispatched_at BETWEEN ? AND ?", (lo, hi))
-    accepted = _one(db, "SELECT COUNT(DISTINCT issue) FROM outcomes WHERE accepted=1 AND accepted_at BETWEEN ? AND ?", (lo, hi))
-    first_pass = _one(db, """
-        SELECT 1.0*SUM(CASE WHEN o.accepted=1 AND NOT EXISTS (
-          SELECT 1 FROM interventions i WHERE i.issue=a.issue AND i.at>=a.dispatched_at
-          AND i.at<=COALESCE(a.ended_at,?)) THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0)
-        FROM attempts a LEFT JOIN outcomes o ON o.pr_number=a.pr_number
-        WHERE a.dispatched_at BETWEEN ? AND ?""", (hi, lo, hi))
-    correction = _one(db, """
-        SELECT 1.0*(SELECT COALESCE(SUM(additions+deletions),0) FROM corrective_commits WHERE at BETWEEN ? AND ?)
-        /NULLIF((SELECT SUM(additions+deletions) FROM pull_requests WHERE agent_authored=1 AND merged_at BETWEEN ? AND ?),0)
-        """, (lo, hi, lo, hi))
-    touches = [float(row[0]) for row in db.execute("""
-        SELECT SUM(COALESCE(i.minutes,0)) FROM outcomes o JOIN interventions i ON i.issue=o.issue
-        WHERE o.accepted=1 AND o.accepted_at BETWEEN ? AND ? GROUP BY o.issue""", (lo, hi))]
-    touch = statistics.median(touches) if touches else None
-    intervention_times = [timestamp(row[0]) for row in db.execute(
-        "SELECT at FROM interventions WHERE at BETWEEN ? AND ? ORDER BY at", (lo, hi))]
-    gaps = [(b-a).total_seconds()/3600 for a, b in zip(intervention_times, intervention_times[1:])]
-    mtbi = statistics.mean(gaps) if gaps else None
-    total_cost = _one(db, "SELECT SUM(total_cost) FROM attempts WHERE dispatched_at BETWEEN ? AND ?", (lo, hi))
-    accepted_cost = _one(db, """
-        SELECT SUM(a.total_cost) FROM attempts a JOIN outcomes o ON o.pr_number=a.pr_number
-        WHERE o.accepted=1 AND o.accepted_at BETWEEN ? AND ?""", (lo, hi))
-    return {
-        "first_pass_rate": first_pass,
-        "attempts_per_accept": attempts / accepted if accepted else None,
-        "correction_ratio": correction,
-        "touch_per_accept_minutes": touch,
-        "mtbi_hours": mtbi,
-        "cost_per_attempt": total_cost / attempts if attempts and total_cost is not None else None,
-        "cost_per_accepted_change": accepted_cost / accepted if accepted and accepted_cost is not None else None,
-    }
 
 
 def report_data(db: sqlite3.Connection, since: int = 90, by: str = "week",
