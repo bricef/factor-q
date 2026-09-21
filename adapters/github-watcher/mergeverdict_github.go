@@ -17,7 +17,7 @@ import (
 
 // ListOpenPullRequests returns every open PR, cheaply — number, head SHA,
 // base ref and body. The body is what says whether a PR is the fleet's
-// (the provenance footer), so the sweep can filter before spending a
+// (a watcher footer or agent-written provenance line), so the sweep can filter before spending a
 // request on anyone else's PR.
 func (g *GhCliIssueSource) ListOpenPullRequests(ctx context.Context) ([]PullRequest, error) {
 	owner, repo, err := splitRepo(g.Repo)

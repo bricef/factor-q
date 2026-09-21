@@ -132,7 +132,7 @@ func (s *MergeVerdictSweeper) Sweep(ctx context.Context) {
 	}
 	policies := make(map[string]*loadedPolicy)
 	for _, pr := range prs {
-		if !strings.Contains(pr.Body, provenanceMarker) {
+		if parseProvenance(pr.Body).Form == "none" {
 			continue
 		}
 		loaded := s.policyFor(ctx, pr.BaseRef, policies)

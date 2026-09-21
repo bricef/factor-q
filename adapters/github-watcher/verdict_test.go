@@ -81,7 +81,7 @@ func cleanFacts() PRFacts {
 		Number:         900,
 		HeadSHA:        "0123456789abcdef",
 		BaseRef:        "main",
-		Body:           "The change\n\n" + provenanceMarker + "\nprovenance",
+		Body:           "The change\n\n" + provenanceFooter("m0-issue-fix", "inv-test", 879, "status:ready", created),
 		Files:          []string{"docs/a.md"},
 		CommitCount:    1,
 		MergeableState: "clean",
@@ -110,7 +110,7 @@ func TestStructuralChecks(t *testing.T) {
 		break_ func(*PRFacts)
 		want   string // a substring of the reason
 	}{
-		{"no provenance footer", CheckProvenance, func(f *PRFacts) { f.Body = "hand-written" }, "no provenance footer"},
+		{"no provenance", CheckProvenance, func(f *PRFacts) { f.Body = "hand-written" }, "provenance form: none"},
 		{"closes nothing", CheckClosingIssue, func(f *PRFacts) { f.ClosingIssues = nil }, "closes no issue"},
 		{"closes two issues", CheckClosingIssue, func(f *PRFacts) {
 			f.ClosingIssues = append(f.ClosingIssues, ClosingIssue{Number: 880})
@@ -178,5 +178,22 @@ func TestVerdictUsesTheWatchersLabelVocabulary(t *testing.T) {
 	}
 	if c := checkByName(t, d, CheckNoHoldLabel); c.Pass {
 		t.Errorf("hold check passed with a renamed hold label present: %s", c.Reason)
+	}
+}
+
+func TestProvenanceCheckReportsEveryForm(t *testing.T) {
+	footer := provenanceFooter("footer-agent", "inv", 887, "status:ready", time.Now())
+	line := "provenance: agent=line-agent invocation=inv"
+	for _, tc := range []struct{ body, form string }{
+		{line, "line"}, {footer, "footer"}, {line + "\n" + footer, "both"}, {"plain", "none"},
+	} {
+		d := Verdict(testPolicy(t), testAreas(t), PRFacts{Body: tc.body})
+		check := checkByName(t, d, CheckProvenance)
+		if !strings.Contains(check.Reason, "form: "+tc.form) {
+			t.Errorf("body form %s reported as %q", tc.form, check.Reason)
+		}
+		if check.Pass != (tc.form != "none") {
+			t.Errorf("body form %s pass = %v", tc.form, check.Pass)
+		}
 	}
 }

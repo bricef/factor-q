@@ -33,13 +33,15 @@ import (
 
 // verdictResult is one line of the subcommand's output.
 type verdictResult struct {
-	Number int           `json:"number"`
-	Tier   string        `json:"tier,omitempty"`
-	Rule   string        `json:"rule,omitempty"`
-	Files  []FileTier    `json:"files,omitempty"`
-	Checks []Check       `json:"checks,omitempty"`
-	Rubric *RubricResult `json:"rubric,omitempty"`
-	Error  string        `json:"error,omitempty"`
+	Number         int           `json:"number"`
+	Tier           string        `json:"tier,omitempty"`
+	Rule           string        `json:"rule,omitempty"`
+	Files          []FileTier    `json:"files,omitempty"`
+	Checks         []Check       `json:"checks,omitempty"`
+	ProvenanceForm string        `json:"provenance_form,omitempty"`
+	AgentID        string        `json:"agent_id,omitempty"`
+	Rubric         *RubricResult `json:"rubric,omitempty"`
+	Error          string        `json:"error,omitempty"`
 }
 
 // runVerdictCmd implements `github-watcher verdict`.
@@ -139,10 +141,8 @@ func verdictFor(line []byte, policy Policy, areas Areas, rubric Rubric, scorer *
 	d := Verdict(policy, areas, facts)
 	result := verdictResult{
 		Number: facts.Number,
-		Tier:   d.Tier.String(),
-		Rule:   d.Rule,
-		Files:  d.Files,
-		Checks: d.Checks,
+		Tier:   d.Tier.String(), Rule: d.Rule, Files: d.Files, Checks: d.Checks,
+		ProvenanceForm: d.ProvenanceForm, AgentID: d.AgentID,
 	}
 	if scorer != nil {
 		scored := ScoreRubric(context.Background(), scorer, rubric, nil, RubricState(facts, d.Files))

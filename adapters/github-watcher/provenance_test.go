@@ -215,3 +215,23 @@ func TestParseOpenPRResponseEmpty(t *testing.T) {
 		t.Fatalf("want none, got %v", prs)
 	}
 }
+
+func TestParseProvenanceFormsAndAgent(t *testing.T) {
+	footer := provenanceFooter("footer-agent", "inv-footer", 887, "status:ready", fixedNow())
+	line := "provenance: agent=line-agent invocation=inv-line model=test"
+	for _, tc := range []struct {
+		name, body, form, agent string
+	}{
+		{"line only", "summary\n" + line, "line", "line-agent"},
+		{"footer only", footer, "footer", "footer-agent"},
+		{"both", line + "\n\n" + footer, "both", "line-agent"},
+		{"neither", "summary only", "none", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseProvenance(tc.body)
+			if got.Form != tc.form || got.AgentID != tc.agent {
+				t.Errorf("parseProvenance() = %+v, want form=%q agent=%q", got, tc.form, tc.agent)
+			}
+		})
+	}
+}

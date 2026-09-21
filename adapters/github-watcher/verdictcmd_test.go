@@ -77,6 +77,9 @@ func TestVerdictCmdCarriesEveryFactAcrossTheSeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := runStream(t, string(line))[0]
+	if result.ProvenanceForm != "footer" || result.AgentID != "m0-issue-fix" {
+		t.Errorf("provenance did not cross the seam: form=%q agent=%q", result.ProvenanceForm, result.AgentID)
+	}
 	byName := map[string]Check{}
 	for _, c := range result.Checks {
 		byName[c.Name] = c
