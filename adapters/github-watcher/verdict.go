@@ -117,7 +117,7 @@ func Verdict(policy Policy, areas Areas, facts PRFacts) Decision {
 	tier, rule := decide(policy, files)
 	provenance := parseProvenance(facts.Body)
 	return Decision{
-		Tier: tier, Files: files, Rule: rule, Checks: structuralChecks(policy, facts),
+		Tier: tier, Files: files, Rule: rule, Checks: structuralChecks(policy, facts, provenance),
 		ProvenanceForm: provenance.Form, AgentID: provenance.AgentID,
 	}
 }
@@ -186,10 +186,14 @@ func strictestArea(policy Policy, f FileTier) string {
 // structuralChecks computes every check, in CheckNames order. Each says
 // why, pass or fail, because "single-commit: fail" without "4 commits"
 // makes a reader open the PR to learn what the sweep already knew.
-func structuralChecks(policy Policy, f PRFacts) []Check {
+//
+// The provenance is passed in rather than parsed again: the verdict needs
+// it for its own fields, and one parse per verdict is one answer per
+// verdict.
+func structuralChecks(policy Policy, f PRFacts, provenance Provenance) []Check {
 	age := f.ObservedAt.Sub(f.CreatedAt)
 	return []Check{
-		provenanceCheck(f),
+		provenanceCheck(provenance),
 		closingIssueCheck(policy, f),
 		{CheckMergeable, f.MergeableState == "clean",
 			fmt.Sprintf("mergeable_state is %s", orUnknown(f.MergeableState))},
@@ -203,8 +207,7 @@ func structuralChecks(policy Policy, f PRFacts) []Check {
 	}
 }
 
-func provenanceCheck(f PRFacts) Check {
-	provenance := parseProvenance(f.Body)
+func provenanceCheck(provenance Provenance) Check {
 	if provenance.Form != "none" {
 		return Check{CheckProvenance, true, fmt.Sprintf("provenance form: %s (agent %q)", provenance.Form, provenance.AgentID)}
 	}

@@ -224,8 +224,33 @@ func TestParseProvenanceFormsAndAgent(t *testing.T) {
 	}{
 		{"line only", "summary\n" + line, "line", "line-agent"},
 		{"footer only", footer, "footer", "footer-agent"},
-		{"both", line + "\n\n" + footer, "both", "line-agent"},
+		// The footer is the half the watcher wrote itself, so it wins the
+		// agent id when the two disagree; the form still reports both.
+		{"both, footer wins the agent", line + "\n\n" + footer, "both", "footer-agent"},
 		{"neither", "summary only", "none", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseProvenance(tc.body)
+			if got.Form != tc.form || got.AgentID != tc.agent {
+				t.Errorf("parseProvenance() = %+v, want form=%q agent=%q", got, tc.form, tc.agent)
+			}
+		})
+	}
+}
+
+func TestParseProvenanceIgnoresQuotedLines(t *testing.T) {
+	footer := provenanceFooter("footer-agent", "inv-footer", 887, "status:ready", fixedNow())
+	line := "provenance: agent=real-agent invocation=inv-line model=test"
+	quoted := "provenance: agent=quoted-agent invocation=inv-quoted model=test"
+	for _, tc := range []struct {
+		name, body, form, agent string
+	}{
+		{"fenced only", "look at this body:\n\n```\n" + quoted + "\n```\n", "none", ""},
+		{"tilde fenced only", "~~~markdown\n" + quoted + "\n~~~\n", "none", ""},
+		{"html comment only", "<!--\n" + quoted + "\n-->\n", "none", ""},
+		{"inline comment only", "<!-- " + quoted + " -->", "none", ""},
+		{"real line beside a fenced one", line + "\n\n```\n" + quoted + "\n```\n", "line", "real-agent"},
+		{"marker still found", footer, "footer", "footer-agent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := parseProvenance(tc.body)
