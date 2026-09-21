@@ -1,0 +1,109 @@
+# The repository's code areas, declared once.
+#
+# This file is the single declaration of what the repo's areas are and which
+# paths belong to each. It is not a CI implementation detail that happens to
+# live under .github/ — it is the shared answer to "which part of the system
+# does this change touch?", and every consumer reads it from here.
+#
+# Today's consumer is CI: the `changes` job in .github/workflows/ci.yml passes
+# this path to dorny/paths-filter, which exposes one boolean output per area so
+# the expensive Rust, Go, dashboard and image steps run only when their own
+# code changed. Consumers already in view — a PR merge-policy sweep in the
+# github-watcher, and skipping a deploy whose areas are untouched — will read
+# this same file. That is the point: an area defined in two places is an area
+# whose two definitions drift, so nothing may copy these globs inline. A
+# consumer that needs a different grouping adds an area here rather than
+# keeping its own list.
+#
+# Format: the dorny/paths-filter `filters` syntax — a map of area name to a
+# list of glob expressions, matched against a change's paths. Comments are
+# preserved by the YAML parser's author, not by the action, so they are for
+# whoever edits this file next. See
+# <https://github.com/dorny/paths-filter#filters-syntax>.
+#
+# Note the entry for this file itself. Several areas conservatively list the
+# workflow definitions, because a change to how a suite is run can break that
+# suite as surely as a change to its code. The area definitions are now part of
+# that surface: editing these globs changes what every downstream job decides
+# to do, and a mistake here is invisible precisely because it makes work
+# *disappear*. So `.github/areas.yml` appears in every area that already
+# triggers on a workflow edit, and is treated exactly as conservatively.
+
+# Per-suite Rust filters (#51) so each build job triggers only on
+# its own changes. The shared entries — the top-level justfile, the
+# toolchain pin, and any workflow edit — conservatively trigger every
+# suite. fq-dashboard path-depends on fq-runtime, so dashboard-ci
+# gates on `runtime || dashboard` (see its `if:` in ci.yml) rather than
+# getting a fourth filter that would duplicate the `runtime` globs.
+runtime:
+  - 'services/fq-runtime/**'
+  # The shared test-only crate is a dev-dependency of the runtime
+  # crates (#233); its gate runs in this job.
+  - 'services/fq-test-support/**'
+  # The workspace root: a manifest or lock change re-resolves
+  # every suite (#194).
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'justfile'
+  - 'rust-toolchain.toml'
+  - '.nats-version'
+  - '.nats-checksums'
+  - '.github/workflows/**'
+  - '.github/areas.yml'
+store:
+  - 'services/fq-store/**'
+  # grant_bus dev-depends on the shared broker guard and the
+  # pinned nats-server it spawns (#233).
+  - 'services/fq-test-support/**'
+  # The workspace root re-resolves every suite (#194).
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'justfile'
+  - 'rust-toolchain.toml'
+  - '.nats-version'
+  - '.nats-checksums'
+  - '.github/workflows/**'
+  - '.github/areas.yml'
+go:
+  - 'adapters/**'
+  - 'justfile'
+  - '.github/workflows/**'
+  - '.github/areas.yml'
+# Any Rust the module graph is built from — deliberately broader
+# than the per-suite filters, which miss `tools/` entirely, and
+# narrower than "always", so a docs-only PR gets no comment.
+coupling:
+  - 'services/**'
+  - 'tools/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'scripts/coupling-comment.py'
+  - 'scripts/coupling-pr-comment.sh'
+  - '.github/workflows/ci.yml'
+  - '.github/areas.yml'
+dashboard:
+  - 'services/fq-dashboard/**'
+  - 'scripts/dashboard-screenshots.sh'
+  - 'scripts/dashboard-pr-comment.sh'
+  - '.github/workflows/ci.yml'
+  - '.github/areas.yml'
+# The image job (ADR-0035): the images are assembled from
+# release binaries, never compiled in-image, so what can break
+# them is the Dockerfile itself, the context filter, the pins
+# the dogfood toolchain tracks, and whatever changes the release
+# build (manifests, lockfile, toolchain, the justfile recipes).
+docker:
+  - 'services/fq-runtime/Dockerfile'
+  - '.dockerignore'
+  - '.nats-version'
+  - '.nats-checksums'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'justfile'
+  - 'rust-toolchain.toml'
+  - 'adapters/*/go.mod'
+  - '.github/workflows/ci.yml'
+  - '.github/areas.yml'
+  # The ops image carries these (ADR-0036), so a script change
+  # is an image change.
+  - 'ops/dogfood/**'
