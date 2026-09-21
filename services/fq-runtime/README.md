@@ -229,9 +229,10 @@ baseline `PATH` and nothing else in the environment, which is exactly
 how an agent's process will see them.
 
 CI runs the same recipes in the `docker` job of
-[`ci.yml`](../../.github/workflows/ci.yml), path-filtered to the
-Dockerfile, the context filter, the pins the dogfood toolchain tracks
-and whatever changes the release build. `just docker-build` is
+[`ci.yml`](../../.github/workflows/ci.yml), path-filtered by the `docker`
+area in [`.github/areas.yml`](../../.github/areas.yml) to the Dockerfile,
+the context filter, the pins the dogfood toolchain tracks and whatever
+changes the release build. `just docker-build` is
 deliberately **not** part of `just ci` — it needs release binaries and a
 docker daemon — so after changing the Dockerfile, run the four commands
 above by hand.

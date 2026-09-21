@@ -20,10 +20,12 @@ permissions:
 #
 # `changes` path-filters so the expensive Rust and Go builds run their
 # steps only when their code (or the build recipe / this workflow) actually
-# changes — a docs-only change skips them. The build jobs still *run* and
-# still report their required status check (they just do nothing when there
-# is nothing to build), so branch protection is never left waiting on a
-# check that never arrives — the reason we gate steps, not the whole job.
+# changes — a docs-only change skips them. The areas it filters on are
+# declared once in `.github/areas.yml`, not here. The build jobs still
+# *run* and still report their required status check (they just do nothing
+# when there is nothing to build), so branch protection is never left
+# waiting on a check that never arrives — the reason we gate steps, not the
+# whole job.
 #
 # Linting is one job, not a phase of each suite: `quality` ("Code quality")
 # runs every non-test gate — the include! scan, the size ratchets, fmt, and
@@ -59,79 +61,11 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
-          filters: |
-            # Per-suite Rust filters (#51) so each build job triggers only on
-            # its own changes. The shared entries — the top-level justfile, the
-            # toolchain pin, and any workflow edit — conservatively trigger every
-            # suite. fq-dashboard path-depends on fq-runtime, so dashboard-ci
-            # gates on `runtime || dashboard` (see its `if:` below) rather than
-            # getting a fourth filter that would duplicate the `runtime` globs.
-            runtime:
-              - 'services/fq-runtime/**'
-              # The shared test-only crate is a dev-dependency of the runtime
-              # crates (#233); its gate runs in this job.
-              - 'services/fq-test-support/**'
-              # The workspace root: a manifest or lock change re-resolves
-              # every suite (#194).
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'justfile'
-              - 'rust-toolchain.toml'
-              - '.nats-version'
-              - '.nats-checksums'
-              - '.github/workflows/**'
-            store:
-              - 'services/fq-store/**'
-              # grant_bus dev-depends on the shared broker guard and the
-              # pinned nats-server it spawns (#233).
-              - 'services/fq-test-support/**'
-              # The workspace root re-resolves every suite (#194).
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'justfile'
-              - 'rust-toolchain.toml'
-              - '.nats-version'
-              - '.nats-checksums'
-              - '.github/workflows/**'
-            go:
-              - 'adapters/**'
-              - 'justfile'
-              - '.github/workflows/**'
-            # Any Rust the module graph is built from — deliberately broader
-            # than the per-suite filters, which miss `tools/` entirely, and
-            # narrower than "always", so a docs-only PR gets no comment.
-            coupling:
-              - 'services/**'
-              - 'tools/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'scripts/coupling-comment.py'
-              - 'scripts/coupling-pr-comment.sh'
-              - '.github/workflows/ci.yml'
-            dashboard:
-              - 'services/fq-dashboard/**'
-              - 'scripts/dashboard-screenshots.sh'
-              - 'scripts/dashboard-pr-comment.sh'
-              - '.github/workflows/ci.yml'
-            # The image job (ADR-0035): the images are assembled from
-            # release binaries, never compiled in-image, so what can break
-            # them is the Dockerfile itself, the context filter, the pins
-            # the dogfood toolchain tracks, and whatever changes the release
-            # build (manifests, lockfile, toolchain, the justfile recipes).
-            docker:
-              - 'services/fq-runtime/Dockerfile'
-              - '.dockerignore'
-              - '.nats-version'
-              - '.nats-checksums'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'justfile'
-              - 'rust-toolchain.toml'
-              - 'adapters/*/go.mod'
-              - '.github/workflows/ci.yml'
-              # The ops image carries these (ADR-0036), so a script change
-              # is an image change.
-              - 'ops/dogfood/**'
+          # The areas themselves are declared once in .github/areas.yml —
+          # the repository's single statement of which paths belong to which
+          # area, read here and by every other consumer. Never copy them back
+          # inline; see that file's header.
+          filters: .github/areas.yml
 
   docs-lint:
     name: Docs lint
