@@ -87,6 +87,7 @@ A design doc's *folder* answers the same question for prose:
 | [0008](draft/0008-extension-model.md) | Extension and plugin model |
 | [0025](draft/0025-storage-gc-observability.md) | Storage GC observability |
 | [0032](draft/0032-exactly-once-trigger-dispatch.md) | Trigger dispatch is exactly-once by durable claim (trigger inbox in NATS KV, CAS-arbitrated), not by ack timing; broker responsibility ends at the post-claim ack — partially implemented: durable claims in the control-plane store closed the duplicate-start gap (#809, incident #327 closed), but the KV inbox this ADR specifies is unbuilt |
+| [0037](draft/0037-isolation-sequenced-after-graph-execution.md) | Isolation is sequenced after the first graph-execution pass: the two-node vertical (#414) is built on the phase-1 sandbox, no substrate work (#208, #209) is built standalone before a dedicated design session, credential scoping (#904, #402) is not held, and the session opens once #414 has merged and run one real issue on dogfood — a dated hold with a named exit |
 
 ## Related guides
 
