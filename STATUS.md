@@ -104,7 +104,18 @@ it is the licence to keep changing shape quickly.
   `just check-schema-versions` fails the gate if a bump ever outruns it
   ([#694](https://github.com/bricef/factor-q/issues/694): a hard-coded
   version 2 silently skipped every completion for the eight days after
-  #510). The intake side of the M0 change loop; ships as
+  #510). The intake side of the M0 change loop. Since 2026-09-21 the
+  last step of every poll also leaves an **advisory merge verdict** on
+  each open fleet PR: one `merge:unsupervised` / `merge:supervised` /
+  `merge:never` label derived from
+  [`.github/areas.yml`](.github/areas.yml) and
+  [`.github/merge-policy.yml`](.github/merge-policy.yml), plus one
+  comment that also carries a non-deterministic Jev-rubric second
+  opinion. It is on by default (`GHW_MERGE_VERDICTS=false` opts out)
+  and enabled on the dogfood stack, and it merges nothing — the point
+  is to calibrate the verdict against the real PR stream before any
+  merge action is considered
+  ([#879](https://github.com/bricef/factor-q/issues/879)). Ships as
   the `github-watcher` image and in the binary bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
   with the public static development token `fq-dev-token`. Do not expose its
