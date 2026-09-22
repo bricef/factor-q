@@ -143,7 +143,7 @@ jobs:
         run: >-
           echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
           >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: ${{ steps.versions.outputs.tools }}
       - run: just audit
@@ -180,7 +180,7 @@ jobs:
         run: >-
           echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
           >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: ${{ steps.versions.outputs.tools }}
       # The renderer is stdlib Python 3 (tomllib, 3.11+) and ubuntu-latest's
