@@ -1444,12 +1444,12 @@ impl EdgeFixture {
                 panic!("fqd exited during startup with {status:?}\n--- log ---\n{text}");
             }
             let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-            if text.contains("Runtime ready") {
+            if text.contains("- edge is listening on ") {
                 break text;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "fqd never reached 'Runtime ready'\n--- log ---\n{text}"
+                "fqd never logged its edge address\n--- log ---\n{text}"
             );
             std::thread::sleep(Duration::from_millis(100));
         };

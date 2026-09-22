@@ -29,8 +29,12 @@ it contradicts the code, one of them is wrong — fix whichever it is.
   declarations. In practice, exec dominates the other grants; they constrain
   the built-in tools, not programs started by exec. Do not use a narrow
   filesystem or environment declaration alongside exec as an isolation
-  boundary. The issues that first identified the gap,
-  [#34](https://github.com/bricef/factor-q/issues/34) and
+  boundary.
+  Enforcement is tracked
+  by [#208](https://github.com/bricef/factor-q/issues/208) (a CONNECT-filtering
+  forward proxy) and [#209](https://github.com/bricef/factor-q/issues/209)
+  (containerised isolation, ADR-0010); the issues that first identified the
+  gap, [#34](https://github.com/bricef/factor-q/issues/34) and
   [#35](https://github.com/bricef/factor-q/issues/35), are closed — #35 by a
   change that added a load-time warning, not enforcement.
 - **NATS:** the bundled NATS service requires a static development token. The
@@ -112,6 +116,24 @@ refreshed whenever a row changes.
 | R5 | Tool output can carry credentials into transcripts and event payloads | Redaction at the transcript and event boundary | [#72](https://github.com/bricef/factor-q/issues/72) |
 | R6 | Shared MCP servers are deduplicated without regard to `env`, so one server can run on another agent's credentials | Include the environment in the sharing key | [#523](https://github.com/bricef/factor-q/issues/523) |
 | R7 | The `includeContext` path of server-initiated MCP execution bypasses the inbound redaction chain | Route `includeContext` injection through the redact chain (ADR-0018 §4) | [#345](https://github.com/bricef/factor-q/issues/345) |
+
+## Fleet residual risk
+
+The dogfood fleet's unattended agents process untrusted public issue text with
+the repository owner's ambient, write-scoped `GH_TOKEN` and can reach other
+owner credentials, including model API secrets, through exec. Their network
+declarations are not
+enforced, and an agent with `builtin__exec` can deliberately invoke a shell
+(for example, `bash -c`) despite the tool's argv-only interface. Restrictions
+against operations such as pushing or merging are prompt instructions, not
+typed or runtime-enforced controls. Public issue text can therefore influence
+the backlog groomer, which rewrites specifications consumed by an implementing
+agent.
+
+For that chain, the **human review and merge gate is the sole enforced
+control** before agent-produced changes reach the protected branch. Treat the
+fleet as privileged automation with attacker-controlled input, not as sandboxed
+execution, until stronger credential, network, and process isolation ships.
 
 ## Reporting a Vulnerability
 

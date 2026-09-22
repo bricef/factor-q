@@ -231,7 +231,8 @@ fn helper_stands_a_daemon_up_and_parks() {
         .spawn();
 
     // Steady state before we report: a daemon killed while still booting
-    // would prove nothing about the guard.
+    // would prove nothing about the guard. This fixture has fresh stores and
+    // only needs serving readiness; it does not inspect recovered state.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = daemon.try_wait().expect("poll fqd") {

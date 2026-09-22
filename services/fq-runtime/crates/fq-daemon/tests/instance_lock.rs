@@ -237,7 +237,7 @@ fn a_second_daemon_on_one_state_dir_refuses_and_leaves_the_first_running() {
     let log = wait_for_log(
         &mut first,
         &scratch.join("daemon.log"),
-        "Runtime ready",
+        "- edge is listening on ",
         Duration::from_secs(30),
     );
     let addr = log

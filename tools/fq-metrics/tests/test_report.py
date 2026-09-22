@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fq_metrics.db import connect, transition, upsert
+from fq_metrics.measures import REPORT_KEYS, views_sql
 from fq_metrics.report import cumulative_flow, markdown, report_data, write_report
 
 UTC = timezone.utc
@@ -117,6 +118,33 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(data["measures"]["touch_per_accept_minutes"])
         self.assertIsNone(data["measures"]["mtbi_hours"])
         self.assertIn("n/a (no interventions logged)", markdown(data))
+
+    def test_per_accept_measures_ignore_human_authored_outcome(self):
+        upsert(self.db, "pull_requests", {
+            "number": 99, "issue": 99, "merged_at": "2026-01-12T00:00:00Z",
+            "agent_authored": 0, "additions": 10, "deletions": 2,
+        }, ("number",))
+        upsert(self.db, "outcomes", {
+            "issue": 99, "pr_number": 99, "accepted": 1,
+            "accepted_at": "2026-01-22T00:00:00Z",
+        }, ("issue", "pr_number"))
+        data = report_data(self.db, since=59, now=datetime(2026, 1, 29, tzinfo=UTC))
+        self.assertEqual(data["measures"]["attempts_per_accept"], 2.0)
+
+    def test_report_all_time_measures_equal_views(self):
+        self.db.executescript(views_sql())
+        data = report_data(self.db, since=59, now=datetime(2026, 1, 29, tzinfo=UTC))
+        view_values = {
+            REPORT_KEYS[view]: self.db.execute(
+                f"SELECT value FROM {view} WHERE window='all_time'"
+            ).fetchone()[0]
+            for view in REPORT_KEYS
+        }
+        self.assertEqual(data["measures"], view_values)
+
+    def test_checked_in_views_are_generated_from_measure_definitions(self):
+        checked_in = Path(__file__).resolve().parents[1] / "views.sql"
+        self.assertEqual(checked_in.read_text(encoding="utf-8"), views_sql())
 
     def test_renderer_writes_parseable_svgs_and_reports(self):
         self.db.close()

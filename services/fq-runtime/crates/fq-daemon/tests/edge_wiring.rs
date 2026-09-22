@@ -73,12 +73,12 @@ async fn wait_for_ready(child: &mut TestChild, log: &std::path::Path) -> String 
             panic!("fqd exited during startup with {status:?}\n--- log ---\n{text}");
         }
         let text = std::fs::read_to_string(log).unwrap_or_default();
-        if text.contains("Runtime ready") {
+        if text.contains("- edge is listening on ") {
             return text;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "fqd never reached 'Runtime ready' within 30s\n--- log ---\n{text}"
+            "fqd never logged its edge address within 30s\n--- log ---\n{text}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
