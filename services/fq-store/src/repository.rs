@@ -7,6 +7,37 @@ use std::collections::HashMap;
 
 use crate::{BlockStore, Cid, NameIndex, Result, StoreError};
 
+#[cfg(feature = "failpoints")]
+fn injected_io(message: Option<String>) -> StoreError {
+    StoreError::Io(std::io::Error::other(
+        message.unwrap_or_else(|| "injected writer I/O error".to_owned()),
+    ))
+}
+
+#[inline]
+fn put_after_reserve_seam() -> Result<()> {
+    fail::fail_point!("fq_store::repo::put::after_reserve", |message| Err(
+        injected_io(message)
+    ));
+    Ok(())
+}
+
+#[inline]
+fn put_before_bind_seam() -> Result<()> {
+    fail::fail_point!("fq_store::repo::put::before_bind", |message| Err(
+        injected_io(message)
+    ));
+    Ok(())
+}
+
+#[inline]
+fn bind_before_commit_seam() -> Result<()> {
+    fail::fail_point!("fq_store::repo::bind::before_commit", |message| Err(
+        injected_io(message)
+    ));
+    Ok(())
+}
+
 /// A named, versioned object store over a content store and a name index.
 pub struct Repository<C, N> {
     content: C,
@@ -77,12 +108,21 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
 
         // Object reserved (un-claimable): write the manifest, then bind the name.
         // Any failure past the reserve must release it plus the block reservations.
-        fail::fail_point!("fq_store::repo::put::before_bind");
+        if let Err(e) = put_after_reserve_seam() {
+            let _ = self.index.release_object(&cid).await;
+            self.release_reservations(&reserved).await;
+            return Err(e);
+        }
         if let Err(e) = self
             .content
             .write_object(&cid, content.len() as u64, &blocks)
             .await
         {
+            let _ = self.index.release_object(&cid).await;
+            self.release_reservations(&reserved).await;
+            return Err(e);
+        }
+        if let Err(e) = put_before_bind_seam() {
             let _ = self.index.release_object(&cid).await;
             self.release_reservations(&reserved).await;
             return Err(e);
@@ -163,7 +203,11 @@ impl<C: BlockStore, N: NameIndex> Repository<C, N> {
         }
         // Seam: object + blocks reserved and manifest revalidated, about to
         // commit the name binding. Zero-cost unless `failpoints`.
-        fail::fail_point!("fq_store::repo::bind::before_commit");
+        if let Err(e) = bind_before_commit_seam() {
+            let _ = self.index.release_object(cid).await;
+            self.release_reservations(&reserved).await;
+            return Err(e);
+        }
         if let Err(e) = self.index.bind(name, cid, &reserved, prev_rc).await {
             let _ = self.index.release_object(cid).await;
             self.release_reservations(&reserved).await;
