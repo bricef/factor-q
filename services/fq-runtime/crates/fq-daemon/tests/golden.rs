@@ -447,6 +447,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             "req-1",
             "claude-haiku",
             &request_payload,
+            &fq_runtime::events::LlmCallOrigin::AgentTurn,
             base_ms,
         )
         .await
@@ -496,6 +497,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             "req-2",
             "claude-haiku",
             &request_payload,
+            &fq_runtime::events::LlmCallOrigin::AgentTurn,
             base_ms + 3_000,
         )
         .await
@@ -524,6 +526,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             "req-open",
             "claude-haiku",
             &request_payload,
+            &fq_runtime::events::LlmCallOrigin::AgentTurn,
             base_ms + 21_000,
         )
         .await

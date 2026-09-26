@@ -262,6 +262,7 @@ mod tests {
                 None
             },
             cost_usd: None,
+            origin: crate::events::LlmCallOrigin::AgentTurn,
             is_error: if status == DispatchStatus::Completed {
                 Some(false)
             } else {

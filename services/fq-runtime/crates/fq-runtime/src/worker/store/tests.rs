@@ -910,7 +910,14 @@ async fn llm_wal_intent_dispatched_completed_round_trip() {
     let req = "req_a";
 
     store
-        .write_llm_intent(inv, req, "claude-haiku", r#"{"messages":[]}"#, 100)
+        .write_llm_intent(
+            inv,
+            req,
+            "claude-haiku",
+            r#"{"messages":[]}"#,
+            &crate::events::LlmCallOrigin::AgentTurn,
+            100,
+        )
         .await
         .unwrap();
     let r = store.get_llm_dispatch(inv, req).await.unwrap().unwrap();
@@ -935,10 +942,88 @@ async fn llm_wal_intent_dispatched_completed_round_trip() {
 }
 
 #[tokio::test]
+async fn llm_origin_variants_round_trip_and_legacy_null_defaults_to_agent_turn() {
+    use crate::events::LlmCallOrigin;
+
+    let (store, _dir) = open_fresh().await;
+    let origins = [
+        LlmCallOrigin::AgentTurn,
+        LlmCallOrigin::Sampling {
+            server: "sampling-server".to_string(),
+        },
+        LlmCallOrigin::Elicitation {
+            server: "elicitation-server".to_string(),
+        },
+    ];
+    for (index, origin) in origins.iter().enumerate() {
+        let request_id = format!("origin-{index}");
+        store
+            .write_llm_intent(
+                "origin-inv",
+                &request_id,
+                "model",
+                "{}",
+                origin,
+                index as i64,
+            )
+            .await
+            .unwrap();
+        let row = store
+            .get_llm_dispatch("origin-inv", &request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&row.origin, origin);
+    }
+    let open = store
+        .open_llm_dispatches_for_invocation("origin-inv")
+        .await
+        .unwrap();
+    assert_eq!(
+        open.iter().map(|row| &row.origin).collect::<Vec<_>>(),
+        origins.iter().collect::<Vec<_>>()
+    );
+
+    // Simulate a row written before v11: migration adds a nullable column.
+    sqlx::query("UPDATE llm_dispatch SET origin = NULL WHERE request_id = 'origin-0'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let legacy = store
+        .get_llm_dispatch("origin-inv", "origin-0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.origin, LlmCallOrigin::AgentTurn);
+}
+
+#[tokio::test]
+async fn v10_to_v11_migration_preserves_rows_and_defaults_origin() {
+    let db = populated_db_at(10).await;
+    let store = WorkerStore::open(&db.path).await.unwrap();
+    let rows = store
+        .list_llm_dispatches_for_invocation(&db.fixture.completed)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter()
+            .all(|row| row.origin == crate::events::LlmCallOrigin::AgentTurn)
+    );
+}
+
+#[tokio::test]
 async fn llm_completed_with_error_round_trip() {
     let (store, _dir) = open_fresh().await;
     store
-        .write_llm_intent("inv-err", "r-err", "haiku", "{}", 1)
+        .write_llm_intent(
+            "inv-err",
+            "r-err",
+            "haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
     store
@@ -1041,20 +1126,41 @@ async fn find_ambiguous_llm_returns_only_dispatched() {
 
     // intent only — safe-resume.
     store
-        .write_llm_intent("inv1", "r1", "haiku", "{}", 1)
+        .write_llm_intent(
+            "inv1",
+            "r1",
+            "haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
 
     // dispatched without completed — ambiguous.
     store
-        .write_llm_intent("inv2", "r2", "haiku", "{}", 2)
+        .write_llm_intent(
+            "inv2",
+            "r2",
+            "haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            2,
+        )
         .await
         .unwrap();
     store.write_llm_dispatched("inv2", "r2", 3).await.unwrap();
 
     // fully completed — safe-replay.
     store
-        .write_llm_intent("inv3", "r3", "haiku", "{}", 4)
+        .write_llm_intent(
+            "inv3",
+            "r3",
+            "haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            4,
+        )
         .await
         .unwrap();
     store.write_llm_dispatched("inv3", "r3", 5).await.unwrap();
@@ -1492,7 +1598,14 @@ async fn v9_to_v10_migration_adds_the_deferral_stamp() {
 
     // A new call, closed as an error, then deferred on.
     store
-        .write_llm_intent("inv", "rl", "m", "{}", 4)
+        .write_llm_intent(
+            "inv",
+            "rl",
+            "m",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            4,
+        )
         .await
         .unwrap();
     let not_yet = store.mark_llm_deferred("inv", "rl", 5).await;
@@ -1522,7 +1635,14 @@ async fn v9_to_v10_migration_adds_the_deferral_stamp() {
 
     // A successful call is never a deferral.
     store
-        .write_llm_intent("inv", "ok", "m", "{}", 8)
+        .write_llm_intent(
+            "inv",
+            "ok",
+            "m",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            8,
+        )
         .await
         .unwrap();
     store.write_llm_dispatched("inv", "ok", 9).await.unwrap();
@@ -1580,7 +1700,14 @@ async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
         .unwrap();
     assert_eq!(old.seq, None, "pre-v9 rows use timestamp fallback");
     store
-        .write_llm_intent("inv", "llm", "m", "{}", 2)
+        .write_llm_intent(
+            "inv",
+            "llm",
+            "m",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            2,
+        )
         .await
         .unwrap();
     store.write_llm_dispatched("inv", "llm", 3).await.unwrap();
