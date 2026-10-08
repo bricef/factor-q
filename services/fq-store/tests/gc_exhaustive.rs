@@ -34,8 +34,12 @@
 //! running no cleanup — a process death that leaks its reservation — at every
 //! reserved-but-unbound point and against every interleaving; the reachability
 //! audit must then recover a clean, at-rest store (the object reconcile, #243).
-//! Still deferred (#253, `storage-concurrency-verification.md`): the block arm
-//! and per-step error injection — the `Proc`/step-machine extends to both.
+//! The companion block machine exhaustively covers reserve/mint vs claim, and
+//! failpoint tests inject graceful I/O errors at every reserved writer seam. Both
+//! extensions complete the deferred #253 coverage.
+
+#[path = "gc_exhaustive/block.rs"]
+mod block;
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
@@ -611,4 +615,14 @@ async fn exhaustive_writer_one_crash_is_recovered_by_audit() {
         "alias/alias",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhaustive_block_writer_vs_collector_is_clean() {
+    block::assert_clean(&FsSqlite).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhaustive_block_checker_catches_claim_sabotage() {
+    block::assert_sabotage_reaches_violation(&FsSqlite).await;
 }
