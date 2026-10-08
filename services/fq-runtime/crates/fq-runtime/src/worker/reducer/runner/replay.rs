@@ -15,6 +15,17 @@
 //! harness.
 
 use crate::worker::reducer::types::{CapabilityResult, ToolCallResult};
+use crate::worker::store::LlmDispatchRow;
+
+/// Only reducer-driven model calls are reducer capabilities. Sampling and
+/// elicitation happen inside tool execution, so replaying their WAL rows as
+/// model results would break the reducer's expected Model → Tool sequence.
+pub(super) fn agent_turn_llm_rows(
+    rows: &[LlmDispatchRow],
+) -> impl Iterator<Item = &LlmDispatchRow> {
+    rows.iter()
+        .filter(|row| matches!(row.origin, crate::events::LlmCallOrigin::AgentTurn))
+}
 
 /// The two candidate orderings for one completed WAL row: the v9 shared
 /// completion `seq` (None on pre-v9 legacy rows) and the row's

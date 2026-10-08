@@ -275,6 +275,7 @@ mod tests {
             request_payload: request.to_string(),
             response: Some(response.to_string()),
             cost_usd: Some(cost),
+            origin: crate::events::LlmCallOrigin::AgentTurn,
             is_error: Some(false),
             intent_at,
             dispatched_at: Some(intent_at + 1),
@@ -725,7 +726,14 @@ mod tests {
 
         // LLM turn 1 (requests a tool), tool result, LLM turn 2 (final).
         store
-            .write_llm_intent(inv, "req-1", "claude-haiku", FIRST_REQUEST, 100)
+            .write_llm_intent(
+                inv,
+                "req-1",
+                "claude-haiku",
+                FIRST_REQUEST,
+                &crate::events::LlmCallOrigin::AgentTurn,
+                100,
+            )
             .await
             .unwrap();
         store.write_llm_dispatched(inv, "req-1", 101).await.unwrap();
@@ -745,7 +753,14 @@ mod tests {
             .unwrap();
 
         store
-            .write_llm_intent(inv, "req-2", "claude-haiku", FIRST_REQUEST, 200)
+            .write_llm_intent(
+                inv,
+                "req-2",
+                "claude-haiku",
+                FIRST_REQUEST,
+                &crate::events::LlmCallOrigin::AgentTurn,
+                200,
+            )
             .await
             .unwrap();
         store.write_llm_dispatched(inv, "req-2", 201).await.unwrap();

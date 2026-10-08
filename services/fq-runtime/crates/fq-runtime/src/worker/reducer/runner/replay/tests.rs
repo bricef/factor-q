@@ -114,3 +114,55 @@ fn replay_order_falls_back_to_timestamps_when_legacy_rows_participate() {
         ["seq1", "seq2", "legacy-first-in", "legacy-second-in"]
     );
 }
+
+fn llm_row(
+    request_id: &str,
+    origin: crate::events::LlmCallOrigin,
+    is_error: bool,
+) -> LlmDispatchRow {
+    LlmDispatchRow {
+        invocation_id: "inv".to_string(),
+        request_id: request_id.to_string(),
+        model: "model".to_string(),
+        status: crate::worker::store::DispatchStatus::Completed,
+        request_payload: "{}".to_string(),
+        response: (!is_error).then(|| "{}".to_string()),
+        cost_usd: Some(0.1),
+        origin,
+        is_error: Some(is_error),
+        intent_at: 1,
+        dispatched_at: Some(2),
+        completed_at: Some(3),
+        seq: Some(1),
+        deferred_at: None,
+    }
+}
+
+#[test]
+fn replay_selects_only_agent_turn_rows() {
+    use crate::events::LlmCallOrigin;
+
+    let rows = vec![
+        llm_row("turn", LlmCallOrigin::AgentTurn, false),
+        llm_row(
+            "sample",
+            LlmCallOrigin::Sampling {
+                server: "srv".to_string(),
+            },
+            false,
+        ),
+        llm_row(
+            "elicitation-error",
+            LlmCallOrigin::Elicitation {
+                server: "srv".to_string(),
+            },
+            true,
+        ),
+        llm_row("agent-error", LlmCallOrigin::AgentTurn, true),
+    ];
+
+    let selected: Vec<_> = agent_turn_llm_rows(&rows)
+        .map(|row| row.request_id.as_str())
+        .collect();
+    assert_eq!(selected, ["turn", "agent-error"]);
+}
