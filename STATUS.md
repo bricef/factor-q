@@ -273,9 +273,15 @@ diagram, accepted-change throughput, stage cycle-time distributions and
 the ladder's derived measures and costs as `report.md`, `report.json`
 and SVGs — the baseline-equivalent throughput line is deferred to the
 trajectory work. The trajectory plot and the weekly report are not
-built yet, so M1 is still undecidable. Open strategic questions
-(security sequencing) are in the
-[2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
+built yet, so M1 is still undecidable. The security-sequencing
+question that the [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md)
+raised now has a dated answer: [SECURITY.md](SECURITY.md) is the
+canonical posture — what is enforced today, what is intended, and a
+risk register of the open exposures — and
+[ADR-0037](docs/adrs/draft/0037-isolation-sequenced-after-graph-execution.md)
+(draft, proposed 2026-09-22) records the hold that sequences isolation
+after the graph executor's first pass (#414), with its named exit. The
+assessment's other open strategic questions still stand there.
 
 ## How the work is sequenced — a July 2026 snapshot
 
@@ -374,4 +380,4 @@ has shipped).
 [Quickstart](QUICKSTART.md) · [Architecture](ARCHITECTURE.md) ·
 [Vision](VISION.md) · [Active plans](docs/plans/active/) ·
 [Issues](https://github.com/bricef/factor-q/issues) · [ADRs](docs/adrs/) ·
-[Guides](docs/guide/)
+[Guides](docs/guide/) · [Security](SECURITY.md)
