@@ -138,7 +138,8 @@ let agent = Agent::build("researcher")
 - A JSON Schema for the frontmatter, enabling editor validation and
   autocomplete — **not built**. No `*.schema.json` exists in the repo and
   `fq-agent` does not depend on `schemars`; frontmatter is parsed straight
-  into a private `Frontmatter` struct by `serde_yaml`. Unknown top-level
+  into a private `Frontmatter` struct by `yaml_serde` (the maintained
+  continuation of `serde_yaml`). Unknown top-level
   keys are **rejected** — the struct carries `deny_unknown_fields`, so a
   misspelled key now fails the definition to load rather than being
   dropped in silence (#514). That closes the failure behind the

@@ -3,10 +3,10 @@ module github.com/bricef/factor-q/adapters/github-watcher
 go 1.26.3
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.2
+	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/google/go-github/v76 v76.0.0
 	github.com/google/uuid v1.6.0
-	github.com/nats-io/nats.go v1.54.0
+	github.com/nats-io/nats.go v1.55.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
