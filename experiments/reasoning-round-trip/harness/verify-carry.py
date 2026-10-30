@@ -20,13 +20,35 @@ is there so a run where summaries vanish is visible in the log.
 An arm is judged on its latest invocation; earlier ones (the harness re-triggers
 an arm once when the provider was unavailable) are reported as superseded.
 
-Exit 0 when every declared arm passes, 1 otherwise, 2 on a usage error.
+An arm declared `--advisory` whose provider was still unavailable on that
+latest invocation is reported as SKIP, with a workflow warning, instead of
+failing the run. Unavailable has two shapes: the invocation failed and every
+failure message is a capacity refusal (`provider-unavailable.txt`, the list
+the harness's re-trigger reads), or it never ended and its last event is a
+model call still waiting on the provider. The outage excuses only what it
+explains — no `completed`, the provider's failures, no reasoning carried. A
+turn that was answered and then not replayed verbatim fails an advisory arm
+like any other.
+
+Exit 0 when every declared arm passes or is an advisory SKIP, 1 otherwise, 2
+on a usage error.
 """
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+
+def load_unavailable_pattern():
+    path = Path(__file__).with_name("provider-unavailable.txt")
+    lines = (line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    return re.compile("|".join(line for line in lines if line and not line.startswith("#")), re.IGNORECASE)
+
+
+UNAVAILABLE = load_unavailable_pattern()
 
 
 def load(path):
@@ -55,19 +77,41 @@ def readable_chars(parts):
     return sum(len(p.get("content", {}).get("text") or "") for p in reasoning_parts(parts))
 
 
-def judge(evs, expect):
-    """One invocation's verdict: (passed, lines)."""
+def provider_unavailable(evs):
+    """Why the provider, not the round trip, ended this invocation — or None."""
+    terminal = [ev for ev in evs if kind(ev) in ("completed", "failed")]
+    if [kind(ev) for ev in terminal] == ["failed"]:
+        # The `failed` event's own message counts too: an invocation that
+        # rode out a 503 and then failed on, say, its budget is not one the
+        # provider explains.
+        messages = [str(body(ev).get("error_message")) for ev in evs if kind(ev) == "llm_failure"]
+        messages.append(str(body(terminal[0]).get("error_message")))
+        hits = [UNAVAILABLE.search(m) for m in messages]
+        if len(messages) > 1 and all(hits):
+            line = next(ln for ln in messages[-1].splitlines() if UNAVAILABLE.search(ln))
+            return f"the provider had no capacity ({line.strip()[:120]})"
+    if not terminal and evs and kind(evs[-1]) in ("llm_request", "llm_dispatched"):
+        return "a model call was still waiting on the provider when the harness stopped waiting"
+    return None
+
+
+def judge(evs, expect, excuse=None):
+    """One invocation's verdict: ("PASS" | "FAIL" | "SKIP", lines).
+
+    `excuse` is set for an advisory arm whose provider was unavailable, and
+    covers the failures an outage explains; `hard` failures it never covers.
+    """
     lines = []
     terminal = [kind(ev) for ev in evs if kind(ev) in ("completed", "failed")]
     failures = [ev for ev in evs if kind(ev) == "llm_failure"]
     cost = sum(float((ev["envelope"].get("cost") or {}).get("total_cost", 0.0)) for ev in evs)
-    ok = True
+    hard = soft = False
 
     if terminal != ["completed"]:
-        ok = False
+        soft = True
         lines.append(f"  terminal={terminal or 'none'} (wanted ['completed'])")
     for f in failures:
-        ok = False
+        soft = True
         b = body(f)
         lines.append(f"  llm.failure: {b.get('error_kind')} {str(b.get('error_message'))[:200]}")
 
@@ -90,7 +134,7 @@ def judge(evs, expect):
         want = canonical({"kind": "assistant", "parts": parts})
         replayed = any(canonical(m) == want for m in body(following).get("messages", []))
         if not replayed:
-            ok = False
+            hard = True
             lines.append(
                 f"  turn {turns}: the assistant turn was not replayed verbatim in the next request "
                 f"(parts={[p.get('kind') for p in parts]})"
@@ -99,10 +143,10 @@ def judge(evs, expect):
             carried += len(reasoning_parts(parts))
 
     if expect == "reasoning" and carried == 0:
-        ok = False
+        soft = True
         lines.append("  no reasoning part was carried across a turn — the run proves nothing")
     if expect == "none" and produced > 0:
-        ok = False
+        hard = True
         lines.append(f"  the control recorded {produced} reasoning part(s)")
 
     lines.insert(
@@ -110,7 +154,9 @@ def judge(evs, expect):
         f"  turns={turns} reasoning produced={produced} carried={carried} "
         f"kinds={dict(kinds) or '{}'} readable_chars={readable} cost=${cost:.4f}",
     )
-    return ok, lines
+    if hard or (soft and not excuse):
+        return "FAIL", lines
+    return ("SKIP" if excuse else "PASS"), lines
 
 
 def main():
@@ -123,6 +169,13 @@ def main():
         metavar="ARM=reasoning|none",
         help="an arm to judge and what it must show; repeatable",
     )
+    ap.add_argument(
+        "--advisory",
+        action="append",
+        default=[],
+        metavar="ARM",
+        help="a declared arm whose provider being unavailable is a warning, not a failure; repeatable",
+    )
     args = ap.parse_args()
     expects = {}
     for item in args.expect:
@@ -133,6 +186,10 @@ def main():
         expects[arm] = what
     if not expects:
         print("nothing to judge: pass at least one --expect", file=sys.stderr)
+        return 2
+    advisory = set(args.advisory)
+    if advisory - expects.keys():
+        print(f"--advisory names an arm with no --expect: {sorted(advisory - expects.keys())}", file=sys.stderr)
         return 2
 
     by_arm = defaultdict(lambda: defaultdict(list))
@@ -157,10 +214,18 @@ def main():
             failures = [str(body(ev).get("error_message"))[:120] for ev in evs if kind(ev) == "llm_failure"]
             print(f"note {arm}: earlier invocation {inv} superseded (terminal={terminal or 'none'}, failures={failures or 'none'})")
         inv, evs = ordered[-1]
-        ok, lines = judge(evs, expect)
-        all_ok &= ok
-        print(f"{'PASS' if ok else 'FAIL'} {arm} ({expect}) invocation {inv}")
+        excuse = provider_unavailable(evs) if arm in advisory else None
+        verdict, lines = judge(evs, expect, excuse)
+        all_ok &= verdict != "FAIL"
+        print(f"{verdict} {arm} ({expect}) invocation {inv}")
         print("\n".join(lines))
+        if verdict == "SKIP":
+            print(f"  advisory arm, skipped: {excuse}")
+            # A workflow command: the run stays green, the annotation says why.
+            print(
+                f"::warning title=Reasoning matrix arm skipped::{arm}: {excuse}. "
+                "Skipped, not failed; any turn it completed was still checked for verbatim replay."
+            )
     return 0 if all_ok else 1
 
 

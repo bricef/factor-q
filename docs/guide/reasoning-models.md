@@ -115,5 +115,8 @@ event log itself (`verify-carry.py`): every arm completed, every assistant
 turn was replayed verbatim into the following request, the reasoning arms
 carried a reasoning part and the control carried none. It runs nightly as
 the `reasoning-matrix` job of the Live suites workflow, with the evidence
-kept as a workflow artifact for two weeks. Adding a provider means adding
+kept as a workflow artifact for two weeks. The native Gemini arm runs on a
+free-tier key, so it is advisory: when Google has no capacity the arm is
+skipped with a warning rather than turning the job red, and any other
+Gemini failure still fails it. Adding a provider means adding
 both.
