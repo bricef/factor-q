@@ -860,9 +860,16 @@ mod tests {
         let terminal_at = chrono::Utc::now().timestamp_millis();
         {
             let ws = WorkerStore::open(&paths.worker).await.unwrap();
-            ws.write_llm_intent(&inv, "req-1", "claude-haiku", "{}", terminal_at - 3)
-                .await
-                .unwrap();
+            ws.write_llm_intent(
+                &inv,
+                "req-1",
+                "claude-haiku",
+                "{}",
+                &crate::events::LlmCallOrigin::AgentTurn,
+                terminal_at - 3,
+            )
+            .await
+            .unwrap();
             ws.write_llm_dispatched(&inv, "req-1", terminal_at - 2)
                 .await
                 .unwrap();

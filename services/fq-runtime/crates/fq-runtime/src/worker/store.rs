@@ -41,6 +41,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
 
 use crate::db::schema::{self, Migration, SchemaError};
+
+mod llm_origin;
 // The verdict type and its check are the kit's; re-exported so the
 // tests and `crate::worker` keep the path they had when the copy lived
 // here.
@@ -89,22 +91,11 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   messages injected into the conversation at reducer step
 ///   boundaries, keyed `(invocation_id, step_index, seq)` so a
 ///   resume replays them verbatim at the recorded positions.
-/// - **v8** — adds `ambiguous_reported_at INTEGER NULL` to
-///   `invocation_state` (#64): the once-per-invocation guard for
-///   `invocation.ambiguous` emission. Set when the event is first
-///   published (recovery scan or failed auto-resume); a restart
-///   that re-classifies the same invocation as ambiguous sees the
-///   stamp and does not re-fire.
-/// - **v9** — adds a nullable per-invocation completion `seq` to both
-///   dispatch tables, providing one total replay order across tool and
-///   LLM results. Pre-v9 rows remain `NULL` and use timestamp fallback.
-/// - **v10** — adds `deferred_at INTEGER NULL` to `llm_dispatch`
-///   (#278): stamped on the errored row a deferral was decided on, so
-///   a resume can tell the 429 an invocation was put down for from a
-///   provider failure whose terminal was lost. Per row on purpose —
-///   `invocation_state.phase` is one column the next step boundary
-///   overwrites, so it cannot classify rows written before it.
-pub const WORKER_SCHEMA_VERSION: u32 = 10;
+/// - **v8** — adds the `ambiguous_reported_at` guard (#64).
+/// - **v9** — adds nullable dispatch completion sequence numbers.
+/// - **v10** — adds the per-row `deferred_at` stamp (#278).
+/// - **v11** — adds LLM `origin`; legacy `NULL` means agent turn.
+pub const WORKER_SCHEMA_VERSION: u32 = 11;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -311,6 +302,7 @@ pub struct LlmDispatchRow {
     pub request_payload: String,
     pub response: Option<String>,
     pub cost_usd: Option<f64>,
+    pub origin: crate::events::LlmCallOrigin,
     /// `Some(true)` if the LLM call returned an error;
     /// `Some(false)` for a successful response;
     /// `None` until the dispatch reaches `completed`.
@@ -343,6 +335,7 @@ pub struct OpenToolDispatchRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenLlmDispatchRow {
     pub model: String,
+    pub origin: crate::events::LlmCallOrigin,
     pub intent_at: i64,
     pub dispatched_at: Option<i64>,
 }
@@ -492,6 +485,7 @@ impl WorkerStore {
         (8, WORKER_MIGRATION_V8_SQL),
         (9, WORKER_MIGRATION_V9_SQL),
         (10, WORKER_MIGRATION_V10_SQL),
+        (11, llm_origin::MIGRATION_V11_SQL),
     ];
 
     /// Initialise schema_meta and run worker migrations. Idempotent.
@@ -759,13 +753,14 @@ impl WorkerStore {
         request_id: &str,
         model: &str,
         request_payload: &str,
+        origin: &crate::events::LlmCallOrigin,
         intent_at: i64,
     ) -> Result<(), WorkerStoreError> {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO llm_dispatch
-                (invocation_id, request_id, model, status, request_payload, intent_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (invocation_id, request_id, model, status, request_payload, origin, intent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(invocation_id)
@@ -773,6 +768,7 @@ impl WorkerStore {
         .bind(model)
         .bind(DispatchStatus::Intent.as_str())
         .bind(request_payload)
+        .bind(llm_origin::encode(origin)?)
         .bind(intent_at)
         .execute(&self.pool)
         .await?;
@@ -862,7 +858,7 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
                    response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
-                   deferred_at
+                   deferred_at, origin
             FROM llm_dispatch
             WHERE invocation_id = ? AND request_id = ?
             "#,
@@ -919,7 +915,7 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
                    response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
-                   deferred_at
+                   deferred_at, origin
             FROM llm_dispatch
             WHERE status = ?
             ORDER BY dispatched_at
@@ -1255,7 +1251,7 @@ impl WorkerStore {
         invocation_id: &str,
     ) -> Result<Vec<OpenLlmDispatchRow>, WorkerStoreError> {
         let rows = sqlx::query(
-            "SELECT model, intent_at, dispatched_at FROM llm_dispatch \
+            "SELECT model, origin, intent_at, dispatched_at FROM llm_dispatch \
              WHERE invocation_id = ? AND status != 'completed' ORDER BY intent_at",
         )
         .bind(invocation_id)
@@ -1265,6 +1261,7 @@ impl WorkerStore {
             .map(|row| {
                 Ok(OpenLlmDispatchRow {
                     model: row.try_get("model")?,
+                    origin: llm_origin::decode(row.try_get("origin")?)?,
                     intent_at: row.try_get("intent_at")?,
                     dispatched_at: row.try_get("dispatched_at")?,
                 })
@@ -1282,7 +1279,7 @@ impl WorkerStore {
             r#"
             SELECT invocation_id, request_id, model, status, request_payload,
                    response, cost_usd, is_error, intent_at, dispatched_at, completed_at, seq,
-                   deferred_at
+                   deferred_at, origin
             FROM llm_dispatch
             WHERE invocation_id = ?
             ORDER BY intent_at
@@ -1344,6 +1341,7 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
         request_payload: row.get("request_payload"),
         response: row.get("response"),
         cost_usd: row.get("cost_usd"),
+        origin: llm_origin::decode(row.get("origin"))?,
         is_error: is_error.map(|x| x != 0),
         intent_at: row.get("intent_at"),
         dispatched_at: row.get("dispatched_at"),

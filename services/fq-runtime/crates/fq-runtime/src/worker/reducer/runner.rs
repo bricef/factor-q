@@ -67,7 +67,8 @@ use crate::worker::{
 };
 
 use replay::{
-    coalesce_tool_results, replay_sort_key, sort_into_replay_order, truncate_incomplete_final_batch,
+    agent_turn_llm_rows, coalesce_tool_results, replay_sort_key, sort_into_replay_order,
+    truncate_incomplete_final_batch,
 };
 
 pub use crate::bus::EventSink;
@@ -739,7 +740,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ));
             }
         }
-        for r in &llms {
+        for r in agent_turn_llm_rows(&llms) {
             if r.status != DispatchStatus::Completed {
                 continue;
             }
@@ -898,17 +899,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // stitching (see step 2 of the envelope-refactor plan).
         // Reconstitute lifetime totals from the WAL so the budget
         // ceiling bounds the invocation's lifetime spend, not the
-        // current attempt's. Errored LLM dispatches are excluded to
-        // match the live path, which counts a call only once the
-        // provider returns. Sampling/elicitation sub-costs cannot be
-        // split back out of the WAL and stay zero — safe, because a
-        // resumed run cannot service server-initiated requests
-        // (ADR-0018 §5), so no sub-budget is consulted after resume.
+        // current attempt's. Successful agent turns count as LLM calls;
+        // every completed agent turn counts as a Round, and every row
+        // contributes cost, with server spend restored to its sub-budget.
+        // ADR-0018 §5 still forbids servicing it on resume.
         // `total_duration_ms` stays attempt-scoped: it is what
         // `start` below measures.
-        let mut totals = InvocationTotals::default();
-        (totals.total_llm_calls, totals.total_cost) =
-            self.rounds.seed_from_wal(invocation_id, &llms);
+        let mut totals = self.rounds.seed_from_wal(invocation_id, &llms);
         // A re-run partial final batch re-counts its already-completed
         // calls in `run_loop_inner`, so exclude them from the seed.
         totals.total_tool_calls = (tools

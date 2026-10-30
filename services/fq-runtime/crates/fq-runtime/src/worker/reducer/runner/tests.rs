@@ -2608,7 +2608,14 @@ async fn resume_safe_replay_continues_to_completion() {
     let response = canned("done.", 50, 5);
     let response_json = serde_json::to_string(&response).unwrap();
     store
-        .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+        .write_llm_intent(
+            &inv_str,
+            "req-0",
+            "claude-haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
     store
@@ -2769,7 +2776,14 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
         reported_cost_usd: None,
     };
     store
-        .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+        .write_llm_intent(
+            &inv_str,
+            "req-0",
+            "claude-haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
     store
@@ -2884,6 +2898,7 @@ async fn resume_with_same_ms_interleave(
     llm0_completed_at: i64,
     tool_completed_at: i64,
     llm1_completed_at: i64,
+    include_sampling_rows: bool,
 ) {
     let server = crate::test_support::nats::test_nats();
     let url = server.url().to_string();
@@ -2985,7 +3000,14 @@ async fn resume_with_same_ms_interleave(
     };
     let end_turn = canned("done.", 60, 4);
     store
-        .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+        .write_llm_intent(
+            &inv_str,
+            "req-0",
+            "claude-haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
     store
@@ -3003,6 +3025,38 @@ async fn resume_with_same_ms_interleave(
         )
         .await
         .unwrap();
+    if include_sampling_rows {
+        for (request_id, is_error) in [("sample-ok", false), ("sample-error", true)] {
+            store
+                .write_llm_intent(
+                    &inv_str,
+                    request_id,
+                    "claude-haiku",
+                    "{}",
+                    &crate::events::LlmCallOrigin::Sampling {
+                        server: "test-server".to_string(),
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+            store
+                .write_llm_dispatched(&inv_str, request_id, 2)
+                .await
+                .unwrap();
+            store
+                .write_llm_completed(
+                    &inv_str,
+                    request_id,
+                    if is_error { "sampling failed" } else { "{}" },
+                    is_error,
+                    0.001,
+                    llm0_completed_at,
+                )
+                .await
+                .unwrap();
+        }
+    }
     store
         .write_tool_intent(&inv_str, "tc-0", "builtin__self_inspect", "{}", 2)
         .await
@@ -3016,7 +3070,14 @@ async fn resume_with_same_ms_interleave(
         .await
         .unwrap();
     store
-        .write_llm_intent(&inv_str, "req-1", "claude-haiku", "{}", 4)
+        .write_llm_intent(
+            &inv_str,
+            "req-1",
+            "claude-haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            4,
+        )
         .await
         .unwrap();
     store
@@ -3071,14 +3132,21 @@ async fn resume_with_same_ms_interleave(
 /// the pre-v9 tools-first tiebreak replayed these backwards.
 #[tokio::test]
 async fn resume_replays_llm_then_tool_same_millisecond_in_true_order() {
-    resume_with_same_ms_interleave("seq-llm-tool", 5, 5, 9).await;
+    resume_with_same_ms_interleave("seq-llm-tool", 5, 5, 9, false).await;
 }
 
 /// The other direction: the tool completion and the following model
 /// turn tie at the same millisecond.
 #[tokio::test]
 async fn resume_replays_tool_then_llm_same_millisecond_in_true_order() {
-    resume_with_same_ms_interleave("seq-tool-llm", 3, 7, 7).await;
+    resume_with_same_ms_interleave("seq-tool-llm", 3, 7, 7, false).await;
+}
+
+/// Sampling WAL rows are nested inside the tool call, not reducer turns.
+/// Both successful and failed sampling rows must be skipped on replay.
+#[tokio::test]
+async fn resume_skips_successful_and_failed_sampling_rows() {
+    resume_with_same_ms_interleave("sampling-rows", 3, 7, 9, true).await;
 }
 
 #[tokio::test]
@@ -3197,7 +3265,14 @@ async fn resume_enforces_lifetime_budget() {
     };
     let response_json = serde_json::to_string(&response).unwrap();
     store
-        .write_llm_intent(&inv_str, "req-0", "claude-haiku", "{}", 1)
+        .write_llm_intent(
+            &inv_str,
+            "req-0",
+            "claude-haiku",
+            "{}",
+            &crate::events::LlmCallOrigin::AgentTurn,
+            1,
+        )
         .await
         .unwrap();
     store
@@ -3823,6 +3898,7 @@ async fn sampling_spends_into_the_invocation_budget() {
         "{}",
         totals.sampling_cost
     );
+    assert_eq!(totals.total_llm_calls, 0, "sampling is not an agent turn");
 
     let events = sink.events();
     let origin = events

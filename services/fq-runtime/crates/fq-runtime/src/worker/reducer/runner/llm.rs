@@ -31,6 +31,12 @@ impl FailedLlmCall {
     }
 }
 
+fn count_agent_turn(totals: &mut InvocationTotals, origin: &LlmCallOrigin) {
+    if matches!(origin, LlmCallOrigin::AgentTurn) {
+        totals.total_llm_calls += 1;
+    }
+}
+
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     fn queue_context_pressure_notice(&self, invocation_id: Uuid) {
         let body = format!(
@@ -200,6 +206,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &req_str,
                 &chat_request.model,
                 &request_payload_json,
+                &origin,
                 self.config.clock.unix_now_ms(),
             )
             .await
@@ -283,7 +290,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return Ok(Err(FailedLlmCall::of(call_id, err)));
         }
 
-        ctx.totals.total_llm_calls += 1;
+        count_agent_turn(ctx.totals, &origin);
 
         // LLM returned control. Mark dispatched (ambiguous
         // window), publish the dispatched event, then transition
