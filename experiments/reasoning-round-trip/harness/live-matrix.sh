@@ -123,9 +123,22 @@ write_agent claude-openrouter-thinker "anthropic/claude-sonnet-4-6" 0.50 "effort
 ARMS=(kimi-k3-reasoner opus-5-thinker gpt4o-mini-control claude-openrouter-thinker)
 # Gemini 3 thinks by default and signs every function call, so the arm
 # sets no effort; the readable summary rides on the adapter's capture flag.
+#
+# It is also the one advisory arm (verify-carry.py --advisory): when its
+# provider stays unavailable, the verdict skips it with a warning rather
+# than failing the run. The free-tier key answers 503 "high demand" for
+# minutes at a time and takes 3-5 minutes a turn when it does answer;
+# from 2026-10-15 to 2026-10-30 the matrix went red seven times, every
+# time on this arm alone and every time on the provider — four 503s that
+# outlasted the re-trigger, three model calls still waiting at the
+# deadline. A nightly that goes red with the weather is one nobody
+# reads. A Gemini failure the provider does not explain — a refused
+# signature, a turn not replayed — still fails the run.
+ADVISORY=()
 if [[ -n "$GEMINI_ARM" ]]; then
   write_agent "$GEMINI_ARM" "gemini-3.8-flash" 0.50 ""
   ARMS+=("$GEMINI_ARM")
+  ADVISORY+=("$GEMINI_ARM")
 fi
 # What each arm must show for the run to pass (verify-carry.py): a
 # reasoning arm carries at least one reasoning part into its next turn,
@@ -306,10 +319,13 @@ run_arm() { # one arm: trigger, wait, collect; sets RESULT[arm]
 # five requests a minute per model, which three turns and a retry can
 # trip. Neither is a verdict on the round trip, so such an arm gets one
 # more attempt after a pause. Anything else that fails stands as it fell.
+# The failure text lives in provider-unavailable.txt, which the verdict
+# reads too.
+UNAVAILABLE_RE="$(grep -vE '^[[:space:]]*(#|$)' "$(dirname "$0")/provider-unavailable.txt" | paste -sd'|' -)"
 capacity_failure() { # arm -> 0 when its invocation failed on a provider 5xx or 429
   local f="$OUT/$1/invocation.json"
   [[ -f "$f" ]] || return 1
-  jq -e '(.. | strings) | select(test("status code .5[0-9][0-9].|UNAVAILABLE|overloaded|high demand|rate.limited|status code .429.|RESOURCE_EXHAUSTED"; "i"))' "$f" > /dev/null 2>&1
+  jq -e --arg re "$UNAVAILABLE_RE" '(.. | strings) | select(test($re; "i"))' "$f" > /dev/null 2>&1
 }
 
 for arm in "${ARMS[@]}"; do
@@ -341,5 +357,6 @@ if [[ "${VERIFY:-1}" == "1" ]]; then
   log "=== verdict"
   expect_args=()
   for arm in "${ARMS[@]}"; do expect_args+=(--expect "$arm=${EXPECT[$arm]}"); done
+  for arm in ${ADVISORY[@]+"${ADVISORY[@]}"}; do expect_args+=(--advisory "$arm"); done
   python3 "$(dirname "$0")/verify-carry.py" "$OUT/events.ndjson" "${expect_args[@]}"
 fi
