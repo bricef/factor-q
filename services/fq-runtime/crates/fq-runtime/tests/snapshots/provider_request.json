@@ -1,25 +1,11 @@
 {
   "chat_options": {
-    "cache_control": null,
-    "capture_content": null,
     "capture_raw_body": true,
     "capture_reasoning_content": true,
-    "capture_tool_calls": null,
-    "capture_usage": null,
-    "extra_body": null,
-    "extra_headers": null,
     "max_tokens": 4096,
-    "normalize_reasoning_content": null,
-    "prompt_cache_key": null,
     "reasoning_effort": "High",
-    "response_format": null,
-    "seed": null,
-    "service_tier": null,
     "stop_sequences": [],
-    "temperature": 0.2,
-    "tool_choice": null,
-    "top_p": null,
-    "verbosity": null
+    "temperature": 0.2
   },
   "chat_request": {
     "messages": [
@@ -40,7 +26,6 @@
             "Text": "Pinned resource: the deploy runbook."
           }
         ],
-        "options": null,
         "role": "User"
       },
       {
@@ -49,7 +34,6 @@
             "Text": "Investigate the failing deploy."
           }
         ],
-        "options": null,
         "role": "User"
       },
       {
@@ -58,7 +42,6 @@
             "Text": "Let me look at the logs."
           }
         ],
-        "options": null,
         "role": "Assistant"
       },
       {
@@ -67,7 +50,6 @@
             "Text": "No tool calls were made and the run is not over."
           }
         ],
-        "options": null,
         "role": "User"
       },
       {
@@ -94,7 +76,6 @@
             }
           }
         ],
-        "options": null,
         "role": "Assistant"
       },
       {
@@ -112,7 +93,6 @@
             }
           }
         ],
-        "options": null,
         "role": "Tool"
       },
       {
@@ -127,10 +107,8 @@
         "role": "User"
       }
     ],
-    "system": null,
     "tools": [
       {
-        "config": null,
         "description": "Read a file from the workspace.",
         "name": "file_read",
         "schema": {
