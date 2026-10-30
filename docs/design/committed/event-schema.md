@@ -481,7 +481,7 @@ Error case:
 }
 ```
 
-`error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`. `timeout` is the host's own deadline on the call — `[tools] default_timeout_secs`, or the tool's own request clamped to `[tools] max_timeout_secs` ([#547](https://github.com/bricef/factor-q/issues/547)). It was previously unreachable: only `exec` had a deadline and it reports its own timeout as an ordinary `is_error` result, so nothing produced the kind. A run of `max_consecutive_timeouts` of them fails the invocation with `tool_error`.
+`error_kind` values: `sandbox_violation`, `invalid_parameters`, `execution_failed`, `timeout`, `permission_denied`. The two denials are easy to confuse and are not interchangeable: `sandbox_violation` is a granted tool refusing its target — a path outside the agent's filesystem scope, an `exec` `cwd` outside `exec_cwd` — and `permission_denied` is a call to a tool the agent was never granted, refused before anything runs. `timeout` is the host's own deadline on the call — `[tools] default_timeout_secs`, or the tool's own request clamped to `[tools] max_timeout_secs` ([#547](https://github.com/bricef/factor-q/issues/547)). It was previously unreachable: only `exec` had a deadline and it reports its own timeout as an ordinary `is_error` result, so nothing produced the kind. A run of `max_consecutive_timeouts` of them fails the invocation with `tool_error`.
 
 **Design notes:**
 

@@ -503,20 +503,44 @@ in one sentence."
     output="$(fq_trigger "${project}/agents" "${project}/cache" \
         "${agent_id}" "Run 'touch sandbox-write' in the directory ${forbidden} and tell me the result." || true)"
 
-    local events
-    events="$(fq_client events query --agent "${agent_id}" \
-        --event-type tool_result --limit 20 --json 2>&1)" || {
-        stop_daemon
-        fail "sandbox denial events query failed"
-        return 1
-    }
+    # Poll, don't read once. `fq_trigger` returns when `invocation list`
+    # says the run is terminal, and that answer comes from the control
+    # plane's store — while `events query` reads the projection, which a
+    # NATS consumer fills on its own schedule. A completed invocation
+    # says nothing about whether its tool result has been indexed yet:
+    # on a CI runner whose model calls come back fast, the single read
+    # this used to make returned `[]` every night.
+    local events=""
+    local deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+        events="$(fq_client events query --agent "${agent_id}" \
+            --event-type tool_result --limit 20 --json 2>&1)" || {
+            stop_daemon
+            fail "sandbox denial events query failed"
+            printf '  %s\n' "${events}"
+            return 1
+        }
+        if [[ "${events}" == *'"event_type": "tool_result"'* ]]; then
+            break
+        fi
+        sleep 0.5
+    done
     stop_daemon
 
-    # The LLM's shell call should fail with a permission denied /
-    # sandbox error. We don't assert on the LLM's exact wording
-    # (model output varies), only the structured tool-result marker.
-    assert_contains "${events}" '"error_kind": "permission_denied"' \
-        "shell tool result records permission denial" || return 1
+    # The LLM's shell call should be refused by the sandbox. We don't
+    # assert on the LLM's exact wording (model output varies), only the
+    # structured tool-result marker. A cwd outside `exec_cwd` is a
+    # sandbox denial, which `classify_tool_error` records as
+    # `sandbox_violation`; `permission_denied` is the other kind, for a
+    # tool the agent was never granted.
+    if ! assert_contains "${events}" '"error_kind": "sandbox_violation"' \
+        "shell tool result records the sandbox denial"; then
+        # Without the transcript a failure here cannot say whether the
+        # sandbox let the call through or the model never made it.
+        printf '  transcript:\n'
+        printf '  %s\n' "${output}" | head -60
+        return 1
+    fi
     if [[ -e "${forbidden_file}" ]]; then
         fail "denied shell command wrote ${forbidden_file}"
         return 1
