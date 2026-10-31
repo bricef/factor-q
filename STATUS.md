@@ -345,9 +345,9 @@ gap left hermetic-only is a Gemini turn with visible text before a
 signed call. Per-provider detail, and how each row was verified, is in
 the [reasoning-models guide](docs/guide/reasoning-models.md). The
 Anthropic path no longer rides a fork of `genai`: upstream carries the
-signed-thinking fix since `0.7.0-beta.21`, the pin is now
-`=0.7.0-beta.23` (which also carries the three changes factor-q sent
-upstream), and each switch is held by wire goldens that did not move.
+signed-thinking fix since `0.7.0-beta.21`, the pin is now `=0.7.1`
+(`0.7.0-beta.23` carried the three changes factor-q sent upstream),
+and each switch is held by wire goldens that did not move.
 
 Issue #424's block on #437 stands, but its stated premise — *"`events`
 has fan-in 10, the parts change ripples through the same ten modules"* —
