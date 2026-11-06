@@ -44,6 +44,13 @@ ignore = [
     # the proc-macro half of biscuit-auth 6 — build-time only. Goes when
     # biscuit-quote migrates off it.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: build-time dependency of biscuit-quote (biscuit-auth 6)" },
+    # crypto-bigint 0.5 has non-constant-time paths; the fix is 0.7, which
+    # needs elliptic-curve 0.14. Reached only through biscuit-auth 6 (the
+    # latest release) → p256/ecdsa 0.13, its Secp256r1 backend. Every key
+    # factor-q mints, loads or attenuates with is Ed25519 (`KeyPair::new()`
+    # and both `from_bytes_hex` call sites), so no secret ever reaches the
+    # P-256 code. Goes when biscuit-auth moves to elliptic-curve 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5: biscuit-auth 6's unused Secp256r1 backend; factor-q keys are Ed25519 only" },
 ]
 
 [licenses]

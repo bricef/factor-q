@@ -104,7 +104,18 @@ it is the licence to keep changing shape quickly.
   `just check-schema-versions` fails the gate if a bump ever outruns it
   ([#694](https://github.com/bricef/factor-q/issues/694): a hard-coded
   version 2 silently skipped every completion for the eight days after
-  #510). The intake side of the M0 change loop; ships as
+  #510). The intake side of the M0 change loop. Since 2026-09-21 the
+  last step of every poll also leaves an **advisory merge verdict** on
+  each open fleet PR: one `merge:unsupervised` / `merge:supervised` /
+  `merge:never` label derived from
+  [`.github/areas.yml`](.github/areas.yml) and
+  [`.github/merge-policy.yml`](.github/merge-policy.yml), plus one
+  comment that also carries a non-deterministic Jev-rubric second
+  opinion. It is on by default (`GHW_MERGE_VERDICTS=false` opts out)
+  and enabled on the dogfood stack, and it merges nothing — the point
+  is to calibrate the verdict against the real PR stream before any
+  merge action is considered
+  ([#879](https://github.com/bricef/factor-q/issues/879)). Ships as
   the `github-watcher` image and in the binary bundle.
 - **Infra** — NATS via `infrastructure/docker-compose.yml`, bound to localhost
   with the public static development token `fq-dev-token`. Do not expose its
@@ -262,9 +273,15 @@ diagram, accepted-change throughput, stage cycle-time distributions and
 the ladder's derived measures and costs as `report.md`, `report.json`
 and SVGs — the baseline-equivalent throughput line is deferred to the
 trajectory work. The trajectory plot and the weekly report are not
-built yet, so M1 is still undecidable. Open strategic questions
-(security sequencing) are in the
-[2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md).
+built yet, so M1 is still undecidable. The security-sequencing
+question that the [2026-07-05 project assessment](docs/reviews/2026-07-05-project-assessment.md)
+raised now has a dated answer: [SECURITY.md](SECURITY.md) is the
+canonical posture — what is enforced today, what is intended, and a
+risk register of the open exposures — and
+[ADR-0037](docs/adrs/draft/0037-isolation-sequenced-after-graph-execution.md)
+(draft, proposed 2026-09-22) records the hold that sequences isolation
+after the graph executor's first pass (#414), with its named exit. The
+assessment's other open strategic questions still stand there.
 
 ## How the work is sequenced — a July 2026 snapshot
 
@@ -363,4 +380,4 @@ has shipped).
 [Quickstart](QUICKSTART.md) · [Architecture](ARCHITECTURE.md) ·
 [Vision](VISION.md) · [Active plans](docs/plans/active/) ·
 [Issues](https://github.com/bricef/factor-q/issues) · [ADRs](docs/adrs/) ·
-[Guides](docs/guide/)
+[Guides](docs/guide/) · [Security](SECURITY.md)

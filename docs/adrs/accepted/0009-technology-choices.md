@@ -52,7 +52,8 @@ These tradeoffs are accepted because the DSL and type-safety benefits compound o
   happened.** Both authoring surfaces are declarative text files —
   Markdown + YAML frontmatter ([ADR-0005](0005-agent-definition-format.md))
   and YAML graphs ([ADR-0012](0012-graph-definition-format.md)) — parsed by
-  `serde_yaml`. Rust's type system carries the *internal* domain model (the
+  `yaml_serde` (the maintained continuation of `serde_yaml`). Rust's type
+  system carries the *internal* domain model (the
   agent builder, the `fq-ops` value declarations, the typed op identifiers),
   not the surface a user writes. The embedded-DSL argument was the deciding
   factor for choosing Rust; the thing it decided was then built another way.

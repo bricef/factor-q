@@ -1,0 +1,16 @@
+# What a provider says when it has no capacity for the call — a 5xx or a
+# 429 that outlasted the runtime's retry budget. None of it is a verdict
+# on the round trip. One alternative per line, matched case-insensitively
+# against failure messages; `#` lines and blank lines are skipped.
+#
+# Read by live-matrix.sh, which re-triggers an arm once that failed this
+# way, and by verify-carry.py, which skips an `--advisory` arm with a
+# warning when its provider was still unavailable — one list, so the
+# re-trigger and the verdict cannot disagree about what "unavailable" is.
+status code .5[0-9][0-9].
+UNAVAILABLE
+overloaded
+high demand
+rate.limited
+status code .429.
+RESOURCE_EXHAUSTED

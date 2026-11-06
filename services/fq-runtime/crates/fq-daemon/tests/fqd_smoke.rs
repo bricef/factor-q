@@ -143,6 +143,8 @@ fn fqd_reaches_steady_state_and_drains_on_sigterm() {
         .stderr(Stdio::from(log_err))
         .spawn();
 
+    // This smoke test has fresh stores and only needs the daemon serving
+    // before it exercises shutdown; no recovered state is asserted.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
@@ -235,6 +237,8 @@ fn fqd_boots_with_a_hung_mcp_server_and_reports_it_unavailable() {
         .stderr(Stdio::from(log_err))
         .spawn();
 
+    // Readiness itself is the observable here: a hung MCP handshake must
+    // not prevent serving, and the fresh stores have no recovery state.
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut ready = false;
     while Instant::now() < deadline {

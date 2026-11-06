@@ -130,7 +130,8 @@ fn daemon_shuts_down_gracefully_on_sigterm() {
         .spawn();
 
     // Wait for the daemon to reach its steady state (the point past which
-    // the shutdown select is armed). Fail loudly if it dies during startup.
+    // the shutdown select is armed). Fresh stores mean this test only needs
+    // serving readiness, not a startup-recovery barrier.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut ready = false;
     while Instant::now() < deadline {
@@ -253,14 +254,14 @@ fn daemon_stops_and_confirms_on_fq_down() {
         }
         if std::fs::read_to_string(&log_path)
             .unwrap_or_default()
-            .contains("Runtime ready")
+            .contains("- edge is listening on ")
         {
             ready = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
+    assert!(ready, "daemon never logged its edge address within 30s");
 
     // `fq down` should stop the daemon AND confirm the exit itself
     // (exit 0 only once the daemon's edge has stopped answering).
@@ -348,14 +349,14 @@ fn daemon_stops_now_on_fq_down_now() {
         }
         if std::fs::read_to_string(&log_path)
             .unwrap_or_default()
-            .contains("Runtime ready")
+            .contains("- edge is listening on ")
         {
             ready = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(ready, "daemon never reached 'Runtime ready' within 30s");
+    assert!(ready, "daemon never logged its edge address within 30s");
 
     let pairing = pair_with(&scratch);
     let down = Command::new(fq_client_binary())
@@ -583,6 +584,8 @@ fn spawn_ready_daemon(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn();
+    // These teardown tests only need the shutdown select armed; their fresh
+    // stores contain no recovery-mutated state to observe.
     wait_for_log_line(
         &mut child,
         &log_path,

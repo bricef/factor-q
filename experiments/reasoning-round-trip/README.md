@@ -179,7 +179,14 @@ a red that still says "no reasoning part was carried" means the model chose not 
 think that night, so rerun once before treating it as a bug. An arm whose invocation
 failed on a provider 5xx or 429 through the runtime's retry budget is triggered once more
 after a minute, and the verdict judges the arm's latest invocation, naming the superseded
-one.
+one. An arm the harness passes as `--advisory` — only the Gemini arm — is skipped
+rather than failed when its provider was still unavailable on that latest invocation:
+every failure message a capacity refusal from `harness/provider-unavailable.txt` (the
+same list the re-trigger reads), or a model call still waiting on the provider when the
+harness stopped waiting. The verdict prints `SKIP` and a workflow `::warning::`, and the
+job stays green. The outage excuses only what it explains: a turn that was answered and
+then not replayed verbatim, or a failure the provider did not cause (a refused
+signature, a budget), fails an advisory arm like any other.
 `VERIFY=0` skips the verdict for a `TASK=` probe whose arms are being read some other
 way. With `AISTUDIO_API_KEY` set the [Gemini arm](#gemini-live-2026-09-07-hermetic-only-from-2026-09-05)
 runs as well.
@@ -238,6 +245,12 @@ requests a minute and 20 a day per model (measured 2026-09-07; the daily count r
 provider had no capacity — a 5xx or a 429 — through the runtime's whole retry budget,
 and the verdict judges an arm's latest invocation. Probing by hand on the arm's model
 spends the nightly's day; probe on a sibling model instead.
+The re-trigger was not enough: from 2026-10-15 to 2026-10-30 the nightly matrix went red
+seven times, every time on this arm alone and every time on the provider — four 503s
+that outlasted the second attempt, three calls still waiting at the 600s deadline after
+turns of three to five minutes. A job that goes red with the weather is one nobody reads,
+so the arm became advisory (see the verdict above): provider unavailability is a warning,
+and anything else that fails it is still red.
 The nightly of 2026-09-10 showed that re-trigger waiting on the wrong row: the second
 attempt matched the first attempt's terminal invocation and reported "failed in 0s" under
 the same id, so the arm was judged on the attempt that had been retried away. The wait now

@@ -292,9 +292,13 @@ You can run commands in /data/project using the `builtin__exec` tool. Pass
 the command as an argv array, e.g. `["ls", "-la"]`.
 ```
 
-Note that `exec_cwd` is a **separate sandbox dimension** from
-`fs_read` and `fs_write`. An agent with read access does not
-automatically get exec access, and vice versa.
+An agent with file-tool access does not automatically get exec access.
+The reverse is not an isolation guarantee: although `exec_cwd` is checked as a
+separate tool dimension, a permitted command can read or write any path its OS
+identity can access. It can therefore bypass narrower `fs_read` and `fs_write`
+declarations, inspect ambient data omitted from `env`, and use unrestricted
+network egress. Treat exec as dominating all four grants, rather than as an
+orthogonal capability.
 
 ### Combined
 
@@ -318,8 +322,9 @@ sandbox:
 budget: 0.50
 ---
 
-You have read access to the project, write access to the output
-directory, and can run commands in the project root.
+The file tools have read access to the project and write access to the output
+directory. Commands can run in the project root and are not constrained by
+those narrower file-tool grants.
 ```
 
 ## Ending the run
@@ -386,6 +391,16 @@ clear error message that the LLM sees and can adapt to.
 > is tracked by #208 (a filtering proxy) and #209
 > ([ADR-0010](../adrs/accepted/0010-agent-execution-isolation.md)'s
 > container boundary).
+>
+> **⚠ `exec_cwd` dominates the other grants.** The path check controls where a
+> process starts, not what that process can do. A process can use ordinary OS
+> operations to read and write outside `fs_read` and `fs_write`, recover data
+> excluded by `env` (including through `/proc` where permissions allow), and
+> reach any host because `network` is unenforced. Thus the practical grant
+> lattice has two levels: exec and no exec. Narrower declarations still govern
+> direct built-in tool calls and record intent, but they do not confine a
+> process. Do not grant exec to an agent that must be isolated by any of those
+> declarations.
 
 ### Path handling
 

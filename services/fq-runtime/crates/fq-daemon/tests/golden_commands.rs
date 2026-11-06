@@ -244,12 +244,12 @@ impl PairedDaemon {
                 panic!("daemon exited during startup with {status:?}\n--- log ---\n{log}");
             }
             let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-            if text.contains("Runtime ready") {
+            if text.contains("- edge is listening on ") {
                 break text;
             }
             assert!(
                 Instant::now() < deadline,
-                "daemon never reached 'Runtime ready' within 30s\n--- log ---\n{text}"
+                "daemon never logged its edge address within 30s\n--- log ---\n{text}"
             );
             std::thread::sleep(Duration::from_millis(100));
         };

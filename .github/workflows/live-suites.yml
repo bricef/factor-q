@@ -172,10 +172,14 @@ jobs:
         run: |
           just build-runtime
           just install-nats
-      # Three arms, one task each, then verify-carry.py judges the event
-      # log: every arm completed, every assistant turn replayed verbatim
-      # into the next request, the reasoning arms carried a reasoning
-      # part, the control carried none. That verdict is the exit status.
+      # Every arm one task, then verify-carry.py judges the event log:
+      # every arm completed, every assistant turn replayed verbatim into
+      # the next request, the reasoning arms carried a reasoning part, the
+      # control carried none. That verdict is the exit status. The Gemini
+      # arm is advisory: when its free-tier provider stays unavailable
+      # (a 503 or 429 through the re-trigger, or a call still waiting at
+      # the deadline) the arm is skipped with a warning annotation; any
+      # other Gemini failure still turns the job red.
       - name: Live matrix
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

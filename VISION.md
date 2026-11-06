@@ -29,6 +29,8 @@ Real-world work — building software products, operating infrastructure, analys
 
 factor-q takes the agent paradigm beyond interactive sessions toward a long-running, event-driven, multi-agent runtime.
 
+Put another way: most harnesses and meta-harnesses serve the *build* part of the lifecycle — a session opens, a change gets made, the session ends. factor-q serves the *run* part — ongoing processes that never finish, where triggers arrive on their own schedule, work suspends and resumes across restarts, spend is bounded over weeks rather than per prompt, and the system has to be operated rather than merely invoked. Continuous operation is the product, not a deployment detail. Others are converging on the same space from different directions — ambient-agent frameworks, durable-execution engines, managed agent runtimes, AI SRE products — and the [2026-09-25 landscape scan](docs/reviews/2026-09-25-landscape-continuous-operations.md) maps where factor-q's combination (self-hosted, model-agnostic, replayable event bus, cost as a safety concern) sits among them.
+
 ## Design Principles
 
 ### Single-tenant, self-hosted

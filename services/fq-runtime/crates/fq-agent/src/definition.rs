@@ -40,7 +40,7 @@ pub(crate) fn parse_agent_definition_with_default(
     default_model: Option<&str>,
 ) -> Result<(Agent, Option<String>), ParseError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
-    let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str)?;
+    let frontmatter: Frontmatter = yaml_serde::from_str(frontmatter_str)?;
     let description = frontmatter.description.clone();
 
     let mut sandbox = Sandbox::new();
@@ -414,7 +414,7 @@ pub enum ParseError {
     #[error("missing or malformed YAML frontmatter")]
     MissingFrontmatter,
     #[error("invalid YAML: {0}")]
-    InvalidYaml(#[from] serde_yaml::Error),
+    InvalidYaml(#[from] yaml_serde::Error),
     #[error("invalid agent: {0}")]
     InvalidAgent(#[from] BuildError),
     #[error("invalid mcp server: {0}")]

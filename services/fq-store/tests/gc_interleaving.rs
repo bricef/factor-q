@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use fq_store::fs::{ChunkParams, FilesystemStore};
 use fq_store::{
-    Collector, ContentStore, NameIndex, ReferenceCollector, Repository, SqliteNameIndex, verify,
+    Collector, ContentStore, NameIndex, ReferenceCollector, Repository, SqliteNameIndex,
+    StoreError, verify,
 };
 
 async fn open_repo(dir: &Path) -> Repository<FilesystemStore, SqliteNameIndex> {
@@ -157,4 +158,85 @@ async fn put_racing_collect_is_reserved_no_s1_obj() {
         violations.is_empty(),
         "put-path S1-obj: a re-put racing collection left a live name over a missing manifest (#173 regression): {violations:#?}"
     );
+}
+
+/// #253: every put seam after the object reservation returns a graceful I/O
+/// error and must release both the object and block reservations. The strict
+/// at-rest oracle plus zero refcounts distinguishes cleanup from a crash leak.
+#[tokio::test]
+async fn put_io_errors_release_object_and_block_reservations() {
+    for seam in [
+        "fq_store::repo::put::after_reserve",
+        "fq_store::repo::put::before_bind",
+    ] {
+        let scenario = fail::FailScenario::setup();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = open_repo(dir.path()).await;
+        fail::cfg(seam, "return(injected I/O failure)").unwrap();
+
+        let error = repo
+            .put("failed", b"graceful-error-cleanup")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::Io(_)), "{seam}: {error:?}");
+        assert_eq!(repo.resolve("failed").await.unwrap(), None);
+        let snapshot = repo.index().snapshot().await.unwrap();
+        assert!(
+            snapshot.objects.iter().all(|(_, refcount)| *refcount == 0),
+            "{seam}: leaked object reservation: {:?}",
+            snapshot.objects
+        );
+        assert!(
+            snapshot.blocks.iter().all(|row| row.refcount == 0),
+            "{seam}: leaked block reservation: {:?}",
+            snapshot.blocks
+        );
+        let violations = verify::check_index(repo.index(), repo.content())
+            .await
+            .unwrap();
+        scenario.teardown();
+        assert!(violations.is_empty(), "{seam}: {violations:#?}");
+    }
+}
+
+/// #253: alias has one reserved seam (after block + object reservation and
+/// manifest revalidation). An I/O error there must restore the exact live
+/// refcounts that existed before the attempted alias.
+#[tokio::test]
+async fn alias_io_error_releases_object_and_block_reservations() {
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = open_repo(dir.path()).await;
+    let cid = repo
+        .put("original", b"graceful-alias-cleanup")
+        .await
+        .unwrap();
+    let before = repo.index().snapshot().await.unwrap();
+    fail::cfg(
+        "fq_store::repo::bind::before_commit",
+        "return(injected I/O failure)",
+    )
+    .unwrap();
+
+    let error = repo.bind("failed-alias", &cid).await.unwrap_err();
+    assert!(matches!(error, StoreError::Io(_)), "{error:?}");
+    assert_eq!(repo.resolve("failed-alias").await.unwrap(), None);
+    let after = repo.index().snapshot().await.unwrap();
+    assert_eq!(after.objects, before.objects, "object reservation leaked");
+    let before_blocks: Vec<_> = before
+        .blocks
+        .iter()
+        .map(|row| (row.hash, row.generation, row.refcount, row.available))
+        .collect();
+    let after_blocks: Vec<_> = after
+        .blocks
+        .iter()
+        .map(|row| (row.hash, row.generation, row.refcount, row.available))
+        .collect();
+    assert_eq!(after_blocks, before_blocks, "block reservation leaked");
+    let violations = verify::check_index(repo.index(), repo.content())
+        .await
+        .unwrap();
+    scenario.teardown();
+    assert!(violations.is_empty(), "{violations:#?}");
 }

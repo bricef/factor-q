@@ -28,7 +28,10 @@ fq-ops = { workspace = true }
 # so carrying it costs the client nothing it does not already link.
 fq-tools = { workspace = true }
 serde = { workspace = true }
-serde_yaml = "0.9"
+# Agent-definition frontmatter. yaml_serde is the YAML org's maintained
+# continuation of the deprecated serde_yaml (same API and parser lineage,
+# on libyaml-rs instead of the unmaintained unsafe-libyaml).
+yaml_serde = "0.10"
 thiserror = { workspace = true }
 # The registry walks a directory of definitions, and says so out loud
 # when one declares a boundary nothing enforces (#35).

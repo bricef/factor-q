@@ -2,7 +2,7 @@
 
 A single-tenant, self-hosted agent runtime for designing, operating, and evolving multi-agent systems that deliver on large, ongoing projects.
 
-factor-q is not a chatbot or an interactive coding assistant. It is a continuously running, event-driven agent orchestrator where human interaction is one input among many.
+factor-q is not a chatbot or an interactive coding assistant. It is a continuously running, event-driven agent orchestrator where human interaction is one input among many. Where most agent harnesses serve the build part of the lifecycle, factor-q is built for continuous operation of ongoing processes — see the [Vision](VISION.md#core-thesis).
 
 ## Key properties
 

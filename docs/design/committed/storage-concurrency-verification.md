@@ -213,9 +213,11 @@ leaked), and the DST injects leaked object reservations across its randomized
 soak. The second-writer extension (#253) now explores put/put, put/alias, and
 alias/alias races against the collector, with independent PCs and reservations;
 it also caught and fixed an alias-vs-recreating-put window by revalidating the
-manifest under the alias's object reservation. Still deferred (#253): the block
-arm and per-step (graceful) error injection — bounded additions the
-`Proc`/step-machine structure extends to.
+manifest under the alias's object reservation. The remaining #253 extensions
+are now covered too: a companion exhaustive machine drives block reserve/mint
+against collector claim/unlink/delete (with claim-CAS sabotage proving the
+oracle non-vacuous), and each reserved writer seam injects a graceful I/O error
+and verifies object plus block reservations are released without a leak.
 
 ### A standing discipline (for layer 2+)
 

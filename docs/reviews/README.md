@@ -17,6 +17,9 @@ exact commit in their header). They come in a few flavours:
   at a pinned commit: themes, what to tackle first, the maintainer
   decisions the tracker is waiting on, and the label and state
   corrections applied that day.
+- **Landscape scans** — surveys of adjacent systems and how factor-q's
+  positioning compares, pinned to the date the survey was taken because
+  the products move faster than the thesis.
 
 A review is never updated — it is a snapshot, only ever superseded by a
 later one. If its findings led to changes, those show up in code, plans,
