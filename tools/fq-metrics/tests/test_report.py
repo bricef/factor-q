@@ -94,6 +94,32 @@ class ReportTests(unittest.TestCase):
             "cost_per_accepted_change": 2.0,
         })
 
+    def test_correction_ratio_counts_a_commit_once_across_the_prs_it_corrects(self):
+        # The fixture's commit `abc` (10 LOC) corrects PR 10; record it as
+        # correcting PR 11 too, the way extraction does when one commit
+        # references an issue with several PRs in its window (#867).
+        self.db.execute("UPDATE outcomes SET correction_commit='abc' WHERE pr_number=10")
+        upsert(self.db, "outcomes", {"issue": 2, "pr_number": 11, "accepted": 0,
+               "correction_commit": "abc", "rule": "fix"}, ("issue", "pr_number"))
+        upsert(self.db, "corrective_commits", {"sha": "abc", "pr_number": 11,
+               "issue": 2, "at": "2026-01-13T00:00:00Z", "rule": "fix",
+               "additions": 5, "deletions": 5}, ("sha", "pr_number"))
+        self.db.commit()
+
+        data = report_data(self.db, since=59, now=datetime(2026, 1, 29, tzinfo=UTC))
+        self.db.executescript(views_sql())
+        view = self.db.execute(
+            "SELECT value FROM correction_ratio WHERE window='all_time'").fetchone()[0]
+        # 10 corrective LOC over 100 agent LOC, not 20 over 100.
+        self.assertEqual(data["measures"]["correction_ratio"], 0.1)
+        self.assertEqual(view, 0.1)
+        # The per-PR rows stay: each PR's outcome still names the commit.
+        self.assertEqual([row["pr_number"] for row in self.db.execute(
+            "SELECT pr_number FROM outcomes WHERE correction_commit='abc' ORDER BY pr_number"
+        )], [10, 11])
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM corrective_commits WHERE sha='abc'").fetchone()[0], 2)
+
     def test_throughput_size_hours_and_no_tags_path(self):
         upsert(self.db, "outcomes", {
             "issue": 2, "pr_number": 11, "accepted": 1,

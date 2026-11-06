@@ -58,9 +58,11 @@ SELECT w.window,m.value FROM windows w LEFT JOIN means m USING(window);
 DROP VIEW IF EXISTS correction_ratio;
 CREATE VIEW correction_ratio AS
 WITH windows(window,start,end) AS (VALUES ('30_days',datetime('now','-30 days'),datetime('now')),('all_time',NULL,NULL)),
-corrections AS (
-  SELECT w.window,COALESCE(SUM(c.additions+c.deletions),0) loc FROM windows w
-  LEFT JOIN corrective_commits c ON (w.start IS NULL OR c.at >= w.start) AND (w.end IS NULL OR c.at <= w.end) GROUP BY w.window
+distinct_corrections AS (
+  SELECT w.window,c.sha,MAX(c.additions) additions,MAX(c.deletions) deletions FROM windows w
+  LEFT JOIN corrective_commits c ON (w.start IS NULL OR c.at >= w.start) AND (w.end IS NULL OR c.at <= w.end) GROUP BY w.window,c.sha
+), corrections AS (
+  SELECT window,COALESCE(SUM(additions+deletions),0) loc FROM distinct_corrections GROUP BY window
 ), agents AS (
   SELECT w.window,COALESCE(SUM(p.additions+p.deletions),0) loc FROM windows w
   LEFT JOIN pull_requests p ON p.agent_authored=1 AND (w.start IS NULL OR p.merged_at >= w.start) AND (w.end IS NULL OR p.merged_at <= w.end) GROUP BY w.window

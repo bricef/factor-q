@@ -50,10 +50,15 @@ gaps AS (
   SELECT window,AVG(hours) value FROM gaps WHERE hours IS NOT NULL GROUP BY window
 )
 SELECT w.window,m.value FROM windows w LEFT JOIN means m USING(window)""",
+    # `corrective_commits` holds one row per (commit, PR it corrects), which
+    # each PR's outcome needs; the ratio's numerator is corrective work, so
+    # it collapses those rows to one per commit before summing (#867).
     "correction_ratio": """
-corrections AS (
-  SELECT w.window,COALESCE(SUM(c.additions+c.deletions),0) loc FROM windows w
-  LEFT JOIN corrective_commits c ON {correction_window} GROUP BY w.window
+distinct_corrections AS (
+  SELECT w.window,c.sha,MAX(c.additions) additions,MAX(c.deletions) deletions FROM windows w
+  LEFT JOIN corrective_commits c ON {correction_window} GROUP BY w.window,c.sha
+), corrections AS (
+  SELECT window,COALESCE(SUM(additions+deletions),0) loc FROM distinct_corrections GROUP BY window
 ), agents AS (
   SELECT w.window,COALESCE(SUM(p.additions+p.deletions),0) loc FROM windows w
   LEFT JOIN pull_requests p ON p.agent_authored=1 AND {merge_window} GROUP BY w.window
