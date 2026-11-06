@@ -134,6 +134,15 @@ recovery) and takes its key from `DRILL_API_KEY_ENV`, same default.
 Smoke is deliberately *not* part of `just ci`: it needs a provider key
 and makes a real, paid call.
 
+Keep smoke to what only a real model can show, such as a real
+provider's tool calls making the round trip. A property that holds
+whatever the model says belongs in a daemon test driven by the scripted
+mock LLM (`fq_runtime::test_support::mock_anthropic`), which runs in
+`just runtime-ci` on every PR. A live test of such a property only runs
+when the model happens to make the call it needs. The exec sandbox
+refusal moved out of smoke for exactly that reason, into
+`services/fq-runtime/crates/fq-daemon/tests/exec_sandbox_denial.rs`.
+
 ### Running everything
 
 ```sh
