@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use crate::events::InvocationTotals;
+use crate::events::{InvocationTotals, LlmCallOrigin};
 
 /// The per-invocation Round counters. Keyed by invocation because
 /// one runner services concurrent invocations; entries are seeded
@@ -39,6 +39,24 @@ impl RoundLedger {
         *round
     }
 
+    /// The Round an LLM call's outcome (`llm.response` or `llm.failure`)
+    /// is stamped with. An agent turn is a new model turn, so it opens
+    /// the next Round. A server-initiated call — sampling or elicitation
+    /// — runs inside a tool call of the current Round, so it belongs to
+    /// that Round and does not advance it (#824): advancing would number
+    /// the tool's own result, and every later turn, one Round high, and
+    /// a resume (which seeds from agent-turn rows, [`Self::seed_from_wal`])
+    /// would then re-issue Round numbers the live run had spent. The
+    /// match is exhaustive so a new origin has to decide.
+    pub(crate) fn for_call(&self, invocation_id: Uuid, origin: &LlmCallOrigin) -> u64 {
+        match origin {
+            LlmCallOrigin::AgentTurn => self.next(invocation_id),
+            LlmCallOrigin::Sampling { .. } | LlmCallOrigin::Elicitation { .. } => {
+                self.current(invocation_id)
+            }
+        }
+    }
+
     /// Seed on resume from the WAL's completed-call count.
     pub(crate) fn seed(&self, invocation_id: Uuid, completed_llm_calls: u64) {
         self.rounds
@@ -66,7 +84,6 @@ impl RoundLedger {
         invocation_id: Uuid,
         llms: &[crate::worker::store::LlmDispatchRow],
     ) -> InvocationTotals {
-        use crate::events::LlmCallOrigin;
         use crate::worker::store::DispatchStatus;
         let mut calls = 0u32;
         let mut rounds = 0u64;
@@ -110,57 +127,4 @@ impl RoundLedger {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::events::LlmCallOrigin;
-    use crate::worker::store::{DispatchStatus, LlmDispatchRow};
-
-    fn completed(origin: LlmCallOrigin, cost: f64, is_error: bool) -> LlmDispatchRow {
-        LlmDispatchRow {
-            invocation_id: "inv".to_string(),
-            request_id: format!("request-{cost}"),
-            model: "model".to_string(),
-            status: DispatchStatus::Completed,
-            request_payload: "{}".to_string(),
-            response: None,
-            cost_usd: Some(cost),
-            origin,
-            is_error: Some(is_error),
-            intent_at: 1,
-            dispatched_at: Some(2),
-            completed_at: Some(3),
-            seq: Some(1),
-            deferred_at: None,
-        }
-    }
-
-    #[test]
-    fn wal_seed_counts_only_agent_turns_but_restores_all_cost_buckets() {
-        let ledger = RoundLedger::default();
-        let invocation_id = Uuid::now_v7();
-        let rows = vec![
-            completed(LlmCallOrigin::AgentTurn, 1.0, false),
-            completed(
-                LlmCallOrigin::Sampling {
-                    server: "sampling".to_string(),
-                },
-                2.0,
-                false,
-            ),
-            completed(
-                LlmCallOrigin::Elicitation {
-                    server: "elicitation".to_string(),
-                },
-                3.0,
-                true,
-            ),
-        ];
-
-        let totals = ledger.seed_from_wal(invocation_id, &rows);
-        assert_eq!(totals.total_llm_calls, 1);
-        assert_eq!(totals.total_cost, 6.0);
-        assert_eq!(totals.sampling_cost, 2.0);
-        assert_eq!(totals.elicitation_cost, 3.0);
-        assert_eq!(ledger.next(invocation_id), 2);
-    }
-}
+mod tests;

@@ -386,6 +386,7 @@ Published when an LLM call returns and the response is durably written. The enve
 
 **Design notes:**
 
+- **`round` numbers agent turns.** An agent turn's response opens the next Round. A `sampling` or `elicitation` call runs inside a tool call, so its response carries that tool call's Round and does not advance the count — the tool's own result and the next agent turn keep the numbers they would have without it, and a resume numbers them the same way ([#824](https://github.com/bricef/factor-q/issues/824)).
 - **Cost rides on the envelope.** See [Cost metadata](#cost-metadata) above. Consumers query `WHERE event_type IN ('llm_response', 'llm_failure') AND total_cost IS NOT NULL` for cost-bearing per-call events.
 - **`tool_call_id` is assigned by the LLM.**
 - **`usage` carries raw token counts**, mirrored in `envelope.cost` along with the computed dollar values.
@@ -422,6 +423,7 @@ The other terminal outcome of an LLM call (#447): the provider errored, or retur
 - **`usage` is optional, and `None` is not zero.** Absent means "we do not know what the provider billed" — a transport failure yields no parsed body. Present means the counts are real: an empty completion still bills for the prefill. `envelope.cost` follows the same rule and is *absent*, never zeroed, when usage is unknown.
 - **`error_kind` mirrors `LlmError`**, plus `empty_response`, which has no error counterpart and is the one failure kind that can bill. The kinds partition by what the provider said: `rate_limited` is a 429 (its `Retry-After`, when sent, is honoured below `LlmClient::chat` and named in `error_message`); `rejected` is any other 4xx the provider answered with, auth aside — the request itself was refused, and is not retried; `request_failed` is a 5xx or a transport failure; `timeout` is the runtime's own deadline on the call, `[worker] llm_timeout_secs`. Before [#546](https://github.com/bricef/factor-q/issues/546) every one of these arrived as `request_failed` with the status buried in `error_message`.
 - **A failed call is not a failed invocation.** The agent-turn case publishes `failed` separately; a failed sampling or elicitation call declines the server's request and the invocation continues (ADR-0018).
+- **`round` follows the `llm.response` rule.** A failed agent turn consumes a Round, because a Round is a model turn that happened, not one that succeeded; a failed sampling or elicitation call carries the Round of the tool call it ran inside.
 - **`duration_ms` includes the hidden retry attempts** inside `RetryingLlmClient`, which is the tell for a rate limit that eventually gave up. The attempt count itself is not surfaced — it lives below `LlmClient::chat` and belongs with #278.
 
 ### `tool.call`
@@ -581,6 +583,13 @@ different axes — the latter is `task_status`.
   "total_duration_ms": 12345
 }
 ```
+
+**`total_llm_calls`** counts the agent turns that returned a response —
+not failed calls, and not `sampling` or `elicitation` calls, which run
+inside a tool call rather than as turns of their own. **`total_cost`**
+is every call's spend, server-initiated calls included. A resumed
+invocation rebuilds both from its WAL by the same rule
+([#824](https://github.com/bricef/factor-q/issues/824)).
 
 **`task_status`** (#125): the agent's own declaration of how the *task*
 went — `success | failed | blocked | partial`, defaulting to `success`
