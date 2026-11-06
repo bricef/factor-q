@@ -20,6 +20,10 @@ exact commit in their header). They come in a few flavours:
 - **Landscape scans** — surveys of adjacent systems and how factor-q's
   positioning compares, pinned to the date the survey was taken because
   the products move faster than the thesis.
+- **Upstream surveys** — what an external standard or dependency has
+  changed across its versions and what that means for factor-q, taken as
+  input to a migration (e.g. the MCP protocol revisions ahead of the
+  rmcp 3.x move).
 
 A review is never updated — it is a snapshot, only ever superseded by a
 later one. If its findings led to changes, those show up in code, plans,
