@@ -3,7 +3,9 @@
 Taken against `main` @ `40417719` (2026-11-06). This is a survey of every
 published revision of the Model Context Protocol: what each one added,
 changed and removed, and what the current revision means for factor-q's
-MCP client. It was written as input to moving factor-q off rmcp 1.x, which
+MCP client. It also covers which revisions servers and clients actually
+speak, and which ones each rmcp release implements, read from the crate
+source. It was written as input to moving factor-q off rmcp 1.x, which
 Dependabot raised as an rmcp 3.x bump in
 <https://github.com/bricef/factor-q/pull/927>. It is a snapshot: the
 specification and rmcp both move every few months, so check the
@@ -17,7 +19,8 @@ of it belong in ADRs.
 - factor-q is a `2025-11-25` client
   ([MCP guide](../guide/mcp.md)). rmcp 1.8, which it builds against,
   recognises the `2026-07-28` version string, but its `LATEST` is
-  `2025-11-25`.
+  `2025-11-25`. Only rmcp 3.x is still released: 1.x ended at 1.8.0 on
+  2026-06-23.
 - `2026-07-28` is a rewrite. It has no `initialize` handshake and no
   sessions: every request carries its own version and capabilities.
 - `2026-07-28` also stops servers from sending requests to the client while
@@ -36,6 +39,19 @@ of it belong in ADRs.
   *inside* one open tool call. Under MRTR it happens *between* separate
   tool-call requests, which reaches the WAL, deadlines, Round numbering
   and the resume simulation.
+- In practice, almost every server and client still speaks the handshake
+  era.
+  - About 77% of reachable public servers negotiate `2025-11-25`.
+  - About 14% also answer the new protocol.
+  - About 0.4% require it.
+  - Most major clients other than Claude Code have not moved.
+  - Nothing yet forces factor-q onto the new protocol.
+- That allows a lower-churn route: upgrade to a maintained rmcp 3.x, but
+  pin the handshake era, and leave the new protocol as later, separate
+  work. An unchanged bump does not do this. It changes the version
+  factor-q offers, does not reach rmcp's MRTR handling, and runs into
+  rmcp's deprecation of the sampling, roots and logging types. See
+  [Two routes](#two-routes).
 
 ## How MCP versions work
 
@@ -293,36 +309,234 @@ in each era:
 | Tasks | 2025-11-25 | Experimental, in the core | Extension, redesigned |
 | Handshake and sessions | 2024-11-05 | Required | Removed |
 
+## The landscape
+
+Most of the ecosystem is still on the handshake era. These figures come
+from third-party measurements, so treat them as indicative. They are
+consistent with each other where they overlap.
+
+**Servers.** Two independent probes of remote servers listed in the
+official registry got almost the same answer three weeks apart. Each sent
+an unauthenticated `initialize` and recorded the negotiated version:
+
+| Negotiated version | 2026-11-05 (DigitalApplied, 550 handshakes) | 2026-10-14 (LocalCan, 257 handshakes) |
+|---|---|---|
+| `2025-11-25` | 76.9% | 76.7% |
+| `2025-06-18` | 16.0% | 16.3% |
+| `2025-03-26` | 3.3% | 3.5% |
+| `2024-11-05` | 3.3% | 3.1% |
+
+- **The new protocol, fourteen weeks after release:**
+  - 140 of 970 streamable endpoints (14.4%) answered `server/discover`.
+  - 137 of those also completed the legacy handshake.
+  - Requiring the new protocol was rare: one server in LocalCan's 257.
+- **Many endpoints did not answer at all.** Only 55% of the sampled
+  registry endpoints completed a handshake. 34% demanded authentication and
+  about 11% were broken or unreachable.
+- **Unregistered servers lag further.** Censys's scan of 12,520
+  internet-exposed servers on 2026-04-28 found 89.4% on `2025-03-26` and
+  0.7% on `2025-11-25`, five months after `2025-11-25` shipped.
+- **Most servers are small and local.** The registry lists about 57,000
+  servers. 97.1% of the packaged ones run over stdio only.
+
+**Clients.** One community survey, dated 2026-10-17, checked each client
+by observation, from source, or from its documentation:
+
+| Client | What it speaks |
+|---|---|
+| Claude Code 2.1.302 | Tries `server/discover` first, and falls back to `initialize` at `2025-11-25` (observed) |
+| Codex 0.163.0 | `2025-06-18` by default; the modern path sits behind a flag that is off (observed) |
+| Cursor CLI 2026.10.16 | Nothing newer than `2025-11-25` in the installed bundle |
+| VS Code 1.142.0 | `2025-11-25` via `initialize` (source) |
+| Gemini CLI 0.64.0 | `2025-06-18`, through an SDK that does not accept `2025-11-25` (source) |
+| ChatGPT, claude.ai, Claude Desktop | Not documented for ordinary servers |
+
+- Sampling is barely implemented anywhere. claude.ai lists it as "not yet"
+  supported.
+- This matches the reason SEP-2577 gave for deprecating it: "low adoption
+  relative to their implementation complexity".
+
+**SDK churn.** The cost has fallen mainly on SDK users.
+
+- **Python SDK v2** renamed `McpError` to `MCPError`. That broke the
+  official `fetch` and `time` reference servers at startup. They were
+  ported by hand, and the merged port (2026-10-07) serves only the legacy
+  era.
+- **TypeScript SDK v2** split the SDK into new packages and changed handler
+  signatures. In the thirty days to mid-October, v1 was downloaded 273.3
+  million times against 37.3 million for the v2 server package.
+- **Public reaction has been muted.** The Hacker News thread on
+  `2026-07-28` drew 127 points and 41 comments, and was mixed. The
+  maintainers acknowledged the cost themselves: "If you built your own
+  implementation, it's going to be a lot of uplift to make this correct."
+
 ## The rmcp line
 
-- **rmcp 1.8** is what factor-q builds today; the manifest asks for `1.7`.
-  `ProtocolVersion::LATEST` is `V_2025_11_25`, and `KNOWN_VERSIONS` already
-  includes `2026-07-28`. Both were read from the crate source.
-- **rmcp 2.0.0** (2026-06-27) aligned its model types with `2025-11-25`,
-  deprecated the roots, sampling and logging types, and relaxed the type of
-  `structuredContent`.
-- **The rmcp 3.0 line** began with betas on 2026-07-23. It added MRTR
-  (SEP-2322), discovery and modern lifecycle modes (SEP-2575), the tasks
-  extension (SEP-2663), cache hints (SEP-2549) and the standard HTTP
-  headers (SEP-2243).
-  - The server option `stateful_mode` became `legacy_session_mode`. The
-    changelog says it only affects legacy versions, and that `2026-07-28`
-    is always served statelessly.
-  - The MCP launch post listed the Rust SDK's support for `2026-07-28` as
-    beta on release day.
-- **Later 3.x releases** carry entries such as "keep initialize on legacy
-  protocol versions" (3.2.0) and "update LATEST and add
-  LATEST_WITH_INITIALIZE" (3.5.0). These suggest rmcp 3.x is dual-era on
-  the client side. **This has not been checked in the source.**
-- **rmcp 3.9.0** shipped on 2026-11-05.
-  <https://github.com/bricef/factor-q/pull/927> bumps to 3.8.0 and is red,
-  failing Code quality, Rust CI, Runtime CI, Dashboard E2E and Container
-  image: the tree does not compile against it.
+Read from the source of every rmcp release on crates.io: the version
+strings in `ProtocolVersion` (`model.rs`) and the version each release
+offers by default (`LATEST`).
+
+| rmcp | Released | Versions recognised | Offered by default |
+|---|---|---|---|
+| 0.1.x | from 2025-03-16 | `2024-11-05` | `2024-11-05` |
+| 0.2 – 0.5 | from 2025-07-02 | + `2025-03-26` | `2025-03-26` |
+| 0.6 – 0.16 | from 2025-08-19 | + `2025-06-18` | `2025-03-26` |
+| 0.17 – 1.4 | from 2026-02-27 | same | `2025-06-18` |
+| 1.5 – 1.7 | from 2026-04-16 | + `2025-11-25` | `2025-11-25` |
+| **1.8** (factor-q) | 2026-06-23 | + `2026-07-28`, as a string only | `2025-11-25` |
+| 2.0 – 3.4 | 2026-06-29 to 2026-09-23 | all five | `2025-11-25` |
+| 3.5 – 3.9 | from 2026-09-28 | all five | `2026-07-28`; `LATEST_WITH_INITIALIZE` stays `2025-11-25` |
+
+- **Recognising a version is not implementing it.**
+  - rmcp 1.8 knows the `2026-07-28` string but has no `server/discover` or
+    MRTR. Those arrive in 3.0.
+  - Features also land ahead of the string. 1.0.0 already carried the
+    tasks types from `2025-11-25`, a version it did not recognise until
+    1.5.0.
+- **rmcp adopts each version as its default late:**
+
+  | Spec version | Default from | Lag |
+  |---|---|---|
+  | `2025-03-26` | 0.2.0 | about 3 months |
+  | `2025-06-18` | 0.17.0 | about 8 months |
+  | `2025-11-25` | 1.5.0 | about 5 months |
+  | `2026-07-28` | 3.5.0 | about 2 months |
+
+  The MCP launch post listed the Rust SDK's `2026-07-28` support as beta on
+  release day; 3.0.0 reached crates.io the same day.
+- **Only 3.x is maintained.**
+  - rmcp went through seventeen 0.x lines, then three majors in five
+    months: 1.0.0 on 2026-03-03, 2.0.0 on 2026-06-29 and 3.0.0 on
+    2026-07-28.
+  - 1.x stopped at 1.8.0 (2026-06-23), and 2.x at 2.2.0 (2026-07-08).
+  - 3.x has had 22 releases since 2026-07-23, the latest 3.9.0 on
+    2026-11-05.
+- **#927 is red.** <https://github.com/bricef/factor-q/pull/927> bumps to
+  3.8.0 and fails Code quality, Rust CI, Runtime CI, Dashboard E2E and
+  Container image: the tree does not compile against it.
+
+### How the rmcp 3.9 client picks an era
+
+From `service/client.rs` in rmcp 3.9.0:
+
+- **`ServiceExt::serve()`**, which factor-q calls today, still runs the
+  legacy `initialize` handshake. Its own doc comment says "Existing
+  `ServiceExt::serve` behavior remains legacy initialization."
+  - It offers whatever version the handler's `get_info()` returns.
+  - If the server answers with `2026-07-28`, rmcp switches the connection
+    to per-request `_meta`.
+- **`serve_with_lifecycle(ClientLifecycleMode::Discover { .. })`** speaks
+  the modern era only. A legacy server is an error.
+- **`serve_with_lifecycle(ClientLifecycleMode::Auto { .. })`** probes with
+  `server/discover`. It falls back to `initialize` when the server answers
+  as legacy, or when it says nothing for 10 seconds.
+- **MRTR, the high-level way.** `call_tool` and `get_prompt` drive
+  `input_required` rounds themselves. They answer each input request
+  through the same `ClientHandler` callbacks as today (`create_message`,
+  `create_elicitation`, `list_roots`), up to `DEFAULT_MRTR_MAX_ROUNDS`
+  (10).
+- **MRTR, the low-level way.** `call_tool_once` and its siblings return the
+  `InputRequiredResult` to the caller and drive no further rounds.
+- **Change notifications.** On a modern connection, list-changed
+  notifications arrive only on a stream the client opens with
+  `Peer::listen`. Anything routed there is not also delivered to the
+  `on_*_list_changed` callbacks.
+- **Deprecations.** 3.9 marks these `#[deprecated]` ("will be removed in a
+  future release"):
+  - **Since 1.8:** the sampling, roots and logging capability fields,
+    `logging/setLevel`, and the resource subscribe and unsubscribe
+    requests.
+  - **New in 3.x:** `LoggingLevel`, the `ClientInfo` alias (in favour of
+    `ClientConfig`), and the sampling-with-tools content types.
 
 ## What changes for factor-q
 
-The sections below cover modern servers only. A legacy server keeps today's
-behaviour exactly, and a dual-era client has to keep both paths.
+The first two sections apply to any move to rmcp 3.x. The rest cover modern
+servers only: a legacy server keeps today's behaviour exactly, and a
+dual-era client has to keep both paths.
+
+### What any rmcp 3.x upgrade runs into
+
+All three were read from source; none has been compiled.
+
+1. **The offered version changes silently.**
+   - factor-q's handler builds `ClientInfo::default()`
+     ([`mcp/handler.rs`](../../services/fq-runtime/crates/fq-runtime/src/mcp/handler.rs),
+     `get_info`), whose protocol version is `ProtocolVersion::default()`,
+     that is `LATEST`.
+   - On rmcp 3.5 and later that is `2026-07-28`, so an unchanged upgrade
+     sends `initialize` offering the modern version.
+   - Legacy servers answer with their own version, as handshake
+     negotiation allows. A dual-era server may accept `2026-07-28` and move
+     the connection to the modern era without factor-q deciding to.
+   - To stay in the handshake era, the handler has to set
+     `ProtocolVersion::LATEST_WITH_INITIALIZE`.
+   - Pinning is not a complete guarantee. In the November census, two
+     servers answered an `initialize` that offered `2025-11-25` with
+     `2026-07-28` anyway, and rmcp then switches the connection to
+     per-request `_meta`.
+2. **rmcp's MRTR handling does not reach factor-q's tool calls.**
+   - factor-q does not use rmcp's `call_tool`.
+     [`mcp/call.rs`](../../services/fq-runtime/crates/fq-runtime/src/mcp/call.rs)
+     sends a raw `CallToolRequest` through `send_cancellable_request`. That
+     lets it read back rmcp's minted progress token
+     (<https://github.com/bricef/factor-q/issues/605>) and cancel at the
+     tool deadline.
+   - It accepts only `ServerResult::CallToolResult`. On a modern
+     connection an `InputRequiredResult` would fail as "unexpected response
+     type".
+   - So the modern era needs factor-q to drive the rounds itself, or to
+     move to `call_tool` and rebuild progress attribution and cancellation
+     on top of it.
+3. **More deprecations reach factor-q's code.**
+   - **Already there in rmcp 1.8:** the roots and sampling capability
+     fields, and `logging/setLevel`, are all deprecated.
+     - factor-q carries one counted `#[allow(deprecated)]` for
+       `set_logging_level`
+       ([`mcp/requests.rs`](../../services/fq-runtime/crates/fq-runtime/src/mcp/requests.rs)).
+     - Its assignments to the deprecated capability fields pass clippy
+       today.
+   - **New in rmcp 3.x:** `LoggingLevel` and the `ClientInfo` alias are
+     deprecated, and `mcp/handler.rs` uses both.
+     - `ClientInfo` only needs renaming to `ClientConfig`.
+     - `LoggingLevel` is how log notifications are folded into tracing.
+       Each new allow it needs is a new `.allow-baseline` entry, which the
+       ratchet refuses.
+   - How many warnings actually appear will only be known once the tree
+     compiles against 3.x. Per AGENTS.md, how to handle them is a
+     maintainer's call, not something to work around.
+
+### Two routes
+
+**Route A: a maintained library, still in the handshake era.**
+
+- What it involves:
+  - Upgrade to rmcp 3.9.
+  - Keep `serve()`, and pin the offered version to
+    `LATEST_WITH_INITIALIZE`.
+  - Fix the API breakage that turns #927 red.
+  - Settle the deprecated items.
+- Protocol behaviour barely changes. Every server factor-q reaches today it
+  still reaches, and a modern-only server stays unreachable, as it is today.
+  The exception is the rare server that answers a `2025-11-25` offer with
+  `2026-07-28`, which still lands in the modern era.
+- Given [the landscape](#the-landscape), that costs almost nothing now.
+- It moves factor-q onto the only rmcp line that still receives fixes.
+
+**Route B: dual-era.**
+
+- Move to `serve_with_lifecycle(Auto { .. })`, and take on the modern-era
+  work in the sections below:
+  - drive MRTR, with the WAL, deadline and leg-bound questions it raises;
+  - open `subscriptions/listen` streams;
+  - set a log level on each request.
+- Two behaviours to plan for:
+  - The `Auto` probe can add up to 10 seconds to starting a legacy stdio
+    server that ignores `server/discover`.
+  - Sampling and elicitation reach the runner in two shapes.
+
+Route A can come first, with Route B as its own later decision once
+modern-only servers become a real share of what agents connect to.
 
 ### Sampling and elicitation
 
@@ -362,7 +576,16 @@ Consequences to design for:
   model calls in between?
 - **A bound on legs.** A server may answer `input_required` indefinitely.
   The client needs a cap per tool call, in the same way
-  `max_discovery_pages` caps a cursor that never ends.
+  `max_discovery_pages` caps a cursor that never ends. rmcp's own helpers
+  default to 10 rounds.
+- **Where the loop lives.** If factor-q moved to rmcp's `call_tool`, the
+  legs would stay inside one future. The sampling callback would fire while
+  it is pending, much as it does today, and the WAL would keep a single
+  tool span. The cost is giving up the raw request factor-q uses for
+  progress attribution and cancellation (see
+  [What any rmcp 3.x upgrade runs into](#what-any-rmcp-3x-upgrade-runs-into)).
+  Driving the loop itself with `call_tool_once` keeps those, but makes each
+  leg visible to the runner.
 - **Rounds.** The rule from #898 still reads naturally: every leg, and
   every completion between legs, belongs to the tool call's Round.
 - **Elicitation** follows the same shape. factor-q advertises form mode
@@ -413,9 +636,10 @@ modern server:
   `subscriptions/listen` stream that the client opens and opts into;
 - the drain loop has to open one per modern server.
 
-rmcp 3.9's changelog has an entry "point on_*_list_changed callbacks to
-Peer::listen". It is not yet clear whether that is a behaviour change or a
-documentation pointer.
+In rmcp 3.9 this is explicit. On a modern connection the client opens the
+stream with `Peer::listen` and a subscription filter. Notifications routed
+to it are not delivered to the `on_*_list_changed` callbacks that
+ADR-0020's drain is built on, so those callbacks only see legacy servers.
 
 ### Lifecycle and startup
 
@@ -456,21 +680,28 @@ probably stands. It is worth stating when the transport is migrated.
 
 ## Open questions
 
-1. How does the rmcp 3.9 client surface MRTR? Two possibilities:
-   - it keeps the `create_message` / `create_elicitation` / `list_roots`
-     callbacks on `ClientHandler` and re-sends the request itself;
-   - it hands the `input_required` result back to the caller.
+1. **Route A first, or straight to Route B?** See [Two routes](#two-routes).
+   The landscape favours A now. It moves factor-q onto a maintained rmcp
+   line without a protocol change.
+2. **How are the new rmcp 3.x deprecations handled?** `LoggingLevel` is
+   used where server logs are folded into tracing, and a new
+   `#[allow(deprecated)]` is a new `.allow-baseline` entry. Compiling
+   against 3.x will say how many there are.
+3. **Under Route B, who drives MRTR?** rmcp's `call_tool` hides the legs
+   inside one future but gives up factor-q's raw-request progress and
+   cancellation handling. A loop over `call_tool_once` keeps them, but
+   exposes each leg to the runner.
 
-   The answer decides how much of the runner changes. It also confirms
-   whether the rmcp 3.x client really falls back to `initialize` for
-   legacy servers.
-2. Does factor-q keep sampling after the deprecation window? The suggested
+   *Answered while writing this review:* rmcp 3.9 offers both. It falls
+   back to `initialize` for legacy servers in `Auto` mode, and `serve()`
+   stays legacy.
+4. Does factor-q keep sampling after the deprecation window? The suggested
    migration, "integrate directly with LLM provider APIs", moves the model
    call into the server. That gives up the budget, attribution and
    validation that ADR-0018 placed in the runner.
-3. Can a crash between MRTR legs be resumed by re-sending the retry, or is
+5. Can a crash between MRTR legs be resumed by re-sending the retry, or is
    it refused as an in-flight tool call is today?
-4. Does a modern grant-bearing server still need its own process per
+6. Does a modern grant-bearing server still need its own process per
    invocation?
 
 ## Sources
@@ -488,3 +719,16 @@ probably stands. It is worth stating when the transport is migrated.
 - [The 2026-07-28 specification (MCP blog)](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
 - [rmcp changelog](https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/CHANGELOG.md)
   and [releases](https://github.com/modelcontextprotocol/rust-sdk/releases)
+- rmcp crate source for every release, from
+  [crates.io](https://crates.io/crates/rmcp/versions): `src/model.rs`
+  (`ProtocolVersion`), `src/service/client.rs` (`ClientLifecycleMode`, the
+  MRTR helpers), `src/model/mrtr.rs` and `src/model/capabilities.rs` in
+  3.9.0
+- [MCP Remote Server Census, November 2026 (DigitalApplied)](https://www.digitalapplied.com/blog/mcp-remote-server-health-census-november-2026)
+- [State of MCP Server Development: October 2026 (LocalCan)](https://www.localcan.com/blog/state-of-mcp-server-development)
+- [MCP Servers on the Internet (Censys)](https://censys.com/blog/mcp-servers-on-the-internet/)
+- [What clients implement today (community survey, 2026-10-17)](https://github.com/allisonmahmood/patchy-cloud/issues/732)
+- [SEP-2577 discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2577)
+- [Python reference servers to SDK v2](https://github.com/modelcontextprotocol/servers/issues/4851)
+- [The Register: MCP prepares to break with its stateful past](https://www.theregister.com/devops/2026/07/23/model-context-protocol-prepares-to-break-with-its-stateful-past/5276722)
+- [Hacker News: the 2026-07-28 specification](https://news.ycombinator.com/item?id=49088058)
