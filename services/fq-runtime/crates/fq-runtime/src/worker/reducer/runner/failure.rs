@@ -24,8 +24,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// with no outcome and a consumer folding the pair could not tell
     /// "the call failed" from "the event was lost" (#447).
     ///
-    /// The failure consumes a Round, exactly as a response does. A
-    /// Round is a model turn that happened, not one that succeeded.
+    /// The failure is stamped with a Round exactly as a response is
+    /// ([`RoundLedger::for_call`](crate::worker::reducer::rounds::RoundLedger::for_call)):
+    /// a failed agent turn consumes one, because a Round is a model turn
+    /// that happened, not one that succeeded; a failed sampling or
+    /// elicitation call belongs to the Round of the tool call it ran in.
     ///
     /// Invocation status is untouched. A failed *call* is not a failed
     /// *invocation* — an agent turn publishes `failed` separately, and
@@ -92,7 +95,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         self.publish_chained(
             cursor,
             emit::llm_failure_event(
-                self.rounds.next(call.invocation_id),
+                self.rounds.for_call(call.invocation_id, call.origin),
                 &call,
                 priced,
                 totals.total_cost,

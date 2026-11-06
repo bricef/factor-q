@@ -91,10 +91,11 @@ pub const SCHEMA_CLASS: &str = "worker";
 ///   messages injected into the conversation at reducer step
 ///   boundaries, keyed `(invocation_id, step_index, seq)` so a
 ///   resume replays them verbatim at the recorded positions.
-/// - **v8** — adds the `ambiguous_reported_at` guard (#64).
-/// - **v9** — adds nullable dispatch completion sequence numbers.
-/// - **v10** — adds the per-row `deferred_at` stamp (#278).
-/// - **v11** — adds LLM `origin`; legacy `NULL` means agent turn.
+/// - **v8** — `ambiguous_reported_at` (#64); why: `WORKER_MIGRATION_V8_SQL`.
+/// - **v9** — completion `seq` on both dispatch tables; pre-v9 rows replay by time.
+/// - **v10** — per-row `deferred_at` (#278); why per row: `provider-throttle-and-deferral.md`.
+/// - **v11** — `llm_dispatch.origin` (#824). Only agent-turn rows replay as reducer
+///   turns; sampling and elicitation run inside a tool call. `NULL` reads as agent turn.
 pub const WORKER_SCHEMA_VERSION: u32 = 11;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.

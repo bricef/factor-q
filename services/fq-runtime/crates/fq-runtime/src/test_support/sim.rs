@@ -238,6 +238,32 @@ pub struct ScriptedTool {
     name: String,
     outputs: Mutex<VecDeque<ToolResult>>,
     dispatches: Arc<Mutex<Vec<Value>>>,
+    sampling: Mutex<SimSampling>,
+}
+
+/// The MCP server behind a sampling [`ScriptedTool`] (#824): the server
+/// name its requests are attributed to, as the agent's grant names it.
+pub const SIM_SAMPLING_SERVER: &str = "sim-server";
+
+/// What one `sampling/createMessage` from a [`ScriptedTool`] came back as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SampledOutcome {
+    /// The runner ran the model call and returned its result.
+    Answered,
+    /// The runner declined it (a failed model call declines, ADR-0018).
+    Declined(String),
+    /// Nothing serviced it — the case for a resumed run, which has no
+    /// server channel (ADR-0018 §5).
+    Unserviced,
+}
+
+/// The sampling side of a [`ScriptedTool`]: which dispatches sample,
+/// where their requests go, and what each one came back as.
+#[derive(Default)]
+struct SimSampling {
+    on_dispatch: std::collections::HashSet<usize>,
+    sender: Option<tokio::sync::mpsc::UnboundedSender<crate::mcp::ServerRequest>>,
+    outcomes: Vec<SampledOutcome>,
 }
 
 impl ScriptedTool {
@@ -246,6 +272,57 @@ impl ScriptedTool {
             name: name.into(),
             outputs: Mutex::new(VecDeque::new()),
             dispatches: Arc::new(Mutex::new(Vec::new())),
+            sampling: Mutex::new(SimSampling::default()),
+        }
+    }
+
+    /// Make the dispatches at these ordinals (0-based, counted across a
+    /// crash and its resume) issue one `sampling/createMessage` before
+    /// returning, the way an MCP tool whose server samples does.
+    pub fn sample_on(&self, ordinals: &[usize]) {
+        self.sampling
+            .lock()
+            .unwrap()
+            .on_dispatch
+            .extend(ordinals.iter().copied());
+    }
+
+    /// The channel the runner services this tool's sampling requests on,
+    /// for [`SimWorld::run_with_sampling`]. Without one a sampling
+    /// dispatch goes [`SampledOutcome::Unserviced`].
+    pub fn sampling_channel(&self) -> crate::worker::reducer::runner::SamplingChannel {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.sampling.lock().unwrap().sender = Some(sender);
+        crate::worker::reducer::runner::SamplingChannel::new(SIM_SAMPLING_SERVER, receiver)
+    }
+
+    /// What each sampling request so far came back as, in order.
+    pub fn sampled(&self) -> Vec<SampledOutcome> {
+        self.sampling.lock().unwrap().outcomes.clone()
+    }
+
+    async fn sample(&self) -> SampledOutcome {
+        use crate::mcp::ServerRequest;
+        let Some(sender) = self.sampling.lock().unwrap().sender.clone() else {
+            return SampledOutcome::Unserviced;
+        };
+        let params = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": {"type": "text", "text": "sample me"}}],
+            "maxTokens": 50
+        }))
+        .expect("sampling params");
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        // A send fails once the run that owned the receiver is gone.
+        if sender
+            .send(ServerRequest::Sampling { params, reply })
+            .is_err()
+        {
+            return SampledOutcome::Unserviced;
+        }
+        match answer.await {
+            Ok(Ok(_)) => SampledOutcome::Answered,
+            Ok(Err(declined)) => SampledOutcome::Declined(declined.message.to_string()),
+            Err(_) => SampledOutcome::Unserviced,
         }
     }
 
@@ -291,7 +368,16 @@ impl Tool for ScriptedTool {
         _ctx: &ToolContext<'_>,
         params: Value,
     ) -> Result<ToolResult, ToolError> {
-        self.dispatches.lock().unwrap().push(params);
+        let ordinal = {
+            let mut dispatches = self.dispatches.lock().unwrap();
+            dispatches.push(params);
+            dispatches.len() - 1
+        };
+        let samples = self.sampling.lock().unwrap().on_dispatch.contains(&ordinal);
+        if samples {
+            let outcome = self.sample().await;
+            self.sampling.lock().unwrap().outcomes.push(outcome);
+        }
         Ok(self
             .outputs
             .lock()
@@ -342,6 +428,7 @@ impl SimWorld {
             budget,
             Arc::new(PricingTable::empty()),
             Some(workspace),
+            None,
         )
         .await
     }
@@ -349,7 +436,18 @@ impl SimWorld {
     /// Build a world with real pricing, for the budget properties
     /// (reducer verification, slice 6).
     pub async fn with_pricing(seed: u64, budget: f64, pricing: Arc<PricingTable>) -> Self {
-        Self::build(seed, budget, pricing, None).await
+        Self::build(seed, budget, pricing, None, None).await
+    }
+
+    /// Build a world whose agent is granted sampling for
+    /// [`SIM_SAMPLING_SERVER`] (#824), so a [`ScriptedTool`] set to
+    /// sample is serviced by [`run_with_sampling`](Self::run_with_sampling).
+    pub async fn with_sampling(seed: u64, budget: f64, pricing: Arc<PricingTable>) -> Self {
+        let grant = crate::agent::SamplingGrant {
+            servers: vec![SIM_SAMPLING_SERVER.to_string()],
+            max_cost: None,
+        };
+        Self::build(seed, budget, pricing, None, Some(grant)).await
     }
 
     async fn build(
@@ -357,6 +455,7 @@ impl SimWorld {
         budget: f64,
         pricing: Arc<PricingTable>,
         workspace: Option<Arc<dyn crate::worker::workspace::WorkspaceProvider>>,
+        sampling: Option<crate::agent::SamplingGrant>,
     ) -> Self {
         let clock = Arc::new(SimClock::new(seed));
         let sink = Arc::new(RecordingSink::new());
@@ -377,9 +476,13 @@ impl SimWorld {
             .model("claude-sim")
             .system_prompt("You are the sim agent.")
             .tools([SIM_TOOL])
-            .budget(budget)
-            .build()
-            .expect("sim agent");
+            .budget(budget);
+        let agent = match sampling {
+            Some(grant) => agent.sampling_grant(grant),
+            None => agent,
+        }
+        .build()
+        .expect("sim agent");
 
         let runner = Arc::new(Self::build_runner(
             &clock,
@@ -549,6 +652,26 @@ impl SimWorld {
                 TriggerSource::Manual,
                 None,
                 json!("sim-go"),
+            )
+            .await
+    }
+
+    /// Run one invocation whose tool calls are serviced for sampling on
+    /// `sampling` (from [`ScriptedTool::sampling_channel`]), the way a
+    /// live run services a granted MCP server (ADR-0018).
+    pub async fn run_with_sampling(
+        &self,
+        llm: &FixtureClient,
+        sampling: crate::worker::reducer::runner::SamplingChannel,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        self.runner
+            .run_with_server_requests(
+                &self.agent,
+                llm,
+                TriggerSource::Manual,
+                None,
+                json!("sim-go"),
+                Some(sampling),
             )
             .await
     }
@@ -1881,6 +2004,381 @@ mod resume_equivalence {
                 );
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod sampling_resume {
+    //! #824: a crash after a server-initiated sampling call resumes like
+    //! any other crash. Sampling runs *inside* a tool call, so its WAL
+    //! row is not a reducer turn: resume must replay the agent turns and
+    //! the tool results around it, keep its spend, and number Rounds
+    //! exactly as the live run did.
+    //!
+    //! The script is two tool turns and an end turn; the first tool call
+    //! samples once. Every top-level span's first publish is a crash
+    //! point (the `resume_equivalence` geometry — the sampling triple is
+    //! nested inside the first tool span, so the boundaries are read off
+    //! the reference trace instead of computed). A crash after the
+    //! sampling tool call finished must resume to exactly the
+    //! uninterrupted run. A crash before it ran re-runs the tool on
+    //! resume, where nothing can service sampling (ADR-0018 §5), so it
+    //! must resume to exactly a run whose sampling went unserviced.
+    //! Pricing is on, so "exactly" covers spend as well as Rounds.
+
+    use std::collections::HashMap;
+
+    use super::resume_equivalence::{RunResult, assert_equivalent, summary_of};
+    use super::tests::{end_turn, sim_tool_call};
+    use super::*;
+    use crate::events::{CompletedPayload, LlmCallOrigin, StopReason, TokenUsage};
+    use crate::llm::{ChatResponse, LlmError};
+    use crate::pricing::ModelPricing;
+    use crate::test_support::oracle::observational_trace;
+    use crate::worker::ResumeError;
+
+    const SEED: u64 = 824;
+
+    /// One model call the script makes, in the order the fixture serves
+    /// them — the sampling call is served between the agent turn that
+    /// called the tool and the next agent turn.
+    #[derive(Clone)]
+    enum Call {
+        Agent(ChatResponse),
+        Sampling { fails: bool },
+    }
+
+    /// The script; `sampling` is the sampling call's fate, or `None` for
+    /// a run in which nothing services it (no sampling call is made).
+    fn script(sampling: Option<bool>) -> Vec<Call> {
+        let mut calls = vec![Call::Agent(sim_tool_call("c0"))];
+        if let Some(fails) = sampling {
+            calls.push(Call::Sampling { fails });
+        }
+        calls.push(Call::Agent(sim_tool_call("c1")));
+        calls.push(Call::Agent(end_turn("all-done")));
+        calls
+    }
+
+    fn load(llm: &FixtureClient, calls: &[Call]) {
+        for call in calls {
+            match call {
+                Call::Agent(response) => llm.push_response(response.clone()),
+                Call::Sampling { fails: false } => llm.push_response(sampled_answer()),
+                Call::Sampling { fails: true } => llm.push_error(LlmError::RequestFailed(
+                    "sim: the sampling provider gave up".to_string(),
+                )),
+            }
+        }
+    }
+
+    fn sampled_answer() -> ChatResponse {
+        ChatResponse {
+            parts: crate::events::assistant_parts(Some("sampled text".to_string()), vec![]),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 40,
+                output_tokens: 12,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            reported_cost_usd: None,
+        }
+    }
+
+    fn rates() -> ModelPricing {
+        ModelPricing {
+            input_per_million: 10.0,
+            output_per_million: 50.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+            cache_write_1h_per_million: None,
+        }
+    }
+
+    fn pricing() -> Arc<PricingTable> {
+        let mut entries = HashMap::new();
+        entries.insert("claude-sim".to_string(), rates());
+        Arc::new(PricingTable::from_map(entries))
+    }
+
+    /// A priced world whose agent is granted sampling and whose first
+    /// tool dispatch samples once.
+    async fn world() -> SimWorld {
+        let world = SimWorld::with_sampling(SEED, 5.0, pricing()).await;
+        world.tool.sample_on(&[0]);
+        world.tool.push_output(ToolResult::ok("out-0"));
+        world.tool.push_output(ToolResult::ok("out-1"));
+        world
+    }
+
+    fn result(world: &SimWorld, outcome: &InvocationOutcome) -> RunResult {
+        RunResult {
+            observed: observational_trace(&world.sink.events()),
+            summary: summary_of(outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        }
+    }
+
+    /// The uninterrupted run whose first tool call samples, with the
+    /// sampling call answered or failing — and its raw events, which the
+    /// crash points are read from.
+    async fn reference(fails: bool) -> (RunResult, Vec<Event>) {
+        let world = world().await;
+        let llm = FixtureClient::new();
+        load(&llm, &script(Some(fails)));
+        let outcome = world
+            .run_with_sampling(&llm, world.tool.sampling_channel())
+            .await
+            .expect("reference run");
+        let sampled = world.tool.sampled();
+        assert_eq!(sampled.len(), 1, "one sampling request: {sampled:?}");
+        assert_eq!(
+            matches!(sampled[0], SampledOutcome::Declined(_)),
+            fails,
+            "a failed sampling call declines, an answered one does not: {sampled:?}"
+        );
+        (result(&world, &outcome), world.sink.events())
+    }
+
+    /// The uninterrupted run in which nothing services the tool's
+    /// sampling request — what a run that executes the sampling tool
+    /// after a resume sees.
+    async fn reference_unserviced() -> RunResult {
+        let world = world().await;
+        let llm = FixtureClient::new();
+        load(&llm, &script(None));
+        let outcome = world.run(&llm).await.expect("unserviced reference run");
+        assert_eq!(world.tool.sampled(), vec![SampledOutcome::Unserviced]);
+        result(&world, &outcome)
+    }
+
+    /// Every top-level span's first publish: each agent turn's
+    /// `llm.request` and each tool span's `tool.call`. The sampling
+    /// call's own publishes are nested inside a tool span and covered by
+    /// [`a_crash_inside_the_sampling_call_is_refused_as_ambiguous`].
+    fn span_boundaries(events: &[Event]) -> Vec<usize> {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, event)| match &event.payload {
+                EventPayload::LlmRequest(p) if p.origin == LlmCallOrigin::AgentTurn => Some(i),
+                EventPayload::ToolCall(_) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    struct Resumed {
+        world: SimWorld,
+        sampled_before_crash: bool,
+        outcome: Result<InvocationOutcome, ExecutorError>,
+        resume_llm: FixtureClient,
+        remaining: usize,
+    }
+
+    /// Crash at publish `fault`, then resume with the calls the crashed
+    /// run had not made — less a sampling call that had not happened,
+    /// because a resumed run cannot make one.
+    async fn crash_and_resume(fails: bool, fault: usize) -> Resumed {
+        let world = world().await;
+        let calls = script(Some(fails));
+        let llm = FixtureClient::new();
+        load(&llm, &calls);
+        world.sink.fail_publish_at(fault);
+        let err = world
+            .run_with_sampling(&llm, world.tool.sampling_channel())
+            .await
+            .expect_err("must crash at the fault");
+        assert!(
+            matches!(err, ExecutorError::Bus(_)),
+            "expected the injected fault at publish {fault}, got {err:?}"
+        );
+        let sampled_before_crash = !world.tool.sampled().is_empty();
+
+        let remaining: Vec<Call> = calls[llm.requests().len()..]
+            .iter()
+            .filter(|call| matches!(call, Call::Agent(_)))
+            .cloned()
+            .collect();
+        let resume_llm = FixtureClient::new();
+        load(&resume_llm, &remaining);
+        let outcome = world.resume(&resume_llm).await;
+        Resumed {
+            world,
+            sampled_before_crash,
+            outcome,
+            resume_llm,
+            remaining: remaining.len(),
+        }
+    }
+
+    async fn every_boundary_is_equivalent(fails: bool) {
+        let (sampled, events) = reference(fails).await;
+        let unserviced = reference_unserviced().await;
+        let boundaries = span_boundaries(&events);
+        assert_eq!(
+            boundaries.len(),
+            5,
+            "three agent turns and two tool spans: {boundaries:?}"
+        );
+        let mut after_sampling = 0;
+        for fault in boundaries {
+            let run = crash_and_resume(fails, fault).await;
+            let outcome = run
+                .outcome
+                .unwrap_or_else(|err| panic!("resume after a crash at publish {fault}: {err:?}"));
+            assert_eq!(
+                run.resume_llm.requests().len(),
+                run.remaining,
+                "the resumed run makes exactly the calls left (publish {fault})"
+            );
+            let resumed = result(&run.world, &outcome);
+            if run.sampled_before_crash {
+                after_sampling += 1;
+                assert_equivalent(&sampled, &resumed, &format!("crash at publish {fault}"));
+            } else {
+                assert_eq!(
+                    run.world.tool.sampled(),
+                    vec![SampledOutcome::Unserviced],
+                    "the tool ran on resume, where nothing services sampling (publish {fault})"
+                );
+                assert_equivalent(&unserviced, &resumed, &format!("crash at publish {fault}"));
+            }
+        }
+        // The second agent turn, its tool span and the end turn all come
+        // after the sampling tool call — the boundaries #824 broke.
+        assert_eq!(after_sampling, 3, "boundaries after the sampling call");
+    }
+
+    /// A crash at every span boundary of a sampling script resumes to the
+    /// reference: the sampled run when the sampling tool call finished
+    /// before the crash, the unserviced run when it had not yet run.
+    #[tokio::test]
+    async fn every_boundary_of_a_sampling_script_is_equivalent() {
+        every_boundary_is_equivalent(false).await;
+    }
+
+    /// The same sweep when the sampling model call fails. Live, a failed
+    /// sampling call declines the server's request and the agent goes on
+    /// (ADR-0018), so a resume after one must reach the same end instead
+    /// of turning the errored row into the invocation's terminal failure.
+    #[tokio::test]
+    async fn every_boundary_after_a_failed_sampling_call_is_equivalent() {
+        every_boundary_is_equivalent(true).await;
+    }
+
+    /// A crash inside the sampling call leaves its tool call dispatched
+    /// and not completed — the tool's side effect is in flight — so
+    /// resume refuses as ambiguous, whatever state the sampling row had
+    /// reached, and does not re-run the tool.
+    #[tokio::test]
+    async fn a_crash_inside_the_sampling_call_is_refused_as_ambiguous() {
+        let (_, events) = reference(false).await;
+        let sampling_call = events
+            .iter()
+            .find_map(|event| match &event.payload {
+                EventPayload::LlmRequest(p) if p.origin != LlmCallOrigin::AgentTurn => {
+                    Some(p.call_id)
+                }
+                _ => None,
+            })
+            .expect("the sampling call's llm.request");
+        let nested: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                let call_id = match &event.payload {
+                    EventPayload::LlmRequest(p) => p.call_id,
+                    EventPayload::LlmDispatched(p) => p.call_id,
+                    EventPayload::LlmResponse(p) => p.call_id,
+                    _ => return false,
+                };
+                call_id == sampling_call
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(nested.len(), 3, "request, dispatched, response: {nested:?}");
+        for fault in nested {
+            let run = crash_and_resume(false, fault).await;
+            assert!(
+                matches!(
+                    run.outcome,
+                    Err(ExecutorError::Resume(ResumeError::AmbiguousWal { .. }))
+                ),
+                "crash at publish {fault}: {:?}",
+                run.outcome
+            );
+            assert_eq!(
+                run.world.tool.dispatches().lock().unwrap().len(),
+                1,
+                "a refused resume must not re-run the tool (publish {fault})"
+            );
+        }
+    }
+
+    /// Rounds number agent turns: the sampling call and the result of the
+    /// tool call it ran inside both belong to the turn that called the
+    /// tool, so the next agent turn is Round 2, not 3.
+    #[tokio::test]
+    async fn a_sampling_call_belongs_to_the_round_of_its_tool_call() {
+        let (_, events) = reference(false).await;
+        let rounds: Vec<(&str, u64)> = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::LlmResponse(p) if p.origin == LlmCallOrigin::AgentTurn => {
+                    Some(("agent", p.round))
+                }
+                EventPayload::LlmResponse(p) => Some(("sampling", p.round)),
+                EventPayload::ToolResult(p) => Some(("tool", p.round)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rounds,
+            vec![
+                ("agent", 1),
+                ("sampling", 1),
+                ("tool", 1),
+                ("agent", 2),
+                ("tool", 2),
+                ("agent", 3),
+            ]
+        );
+    }
+
+    /// The figures a resumed run must reproduce: three agent turns are
+    /// three LLM calls, and the sampling call's spend is in the total.
+    #[tokio::test]
+    async fn sampling_spend_is_in_the_total_but_not_in_the_call_count() {
+        let (_, events) = reference(false).await;
+        let completed: CompletedPayload = events
+            .iter()
+            .find_map(|event| match &event.payload {
+                EventPayload::Completed(p) => Some(p.clone()),
+                _ => None,
+            })
+            .expect("invocation.completed");
+        assert_eq!(completed.total_llm_calls, 3, "agent turns only");
+        let sampling_cost = rates().calculate(&sampled_answer().usage).2;
+        let expected = [
+            sim_tool_call("c0").usage,
+            sim_tool_call("c1").usage,
+            end_turn("all-done").usage,
+        ]
+        .iter()
+        .map(|usage| rates().calculate(usage).2)
+        .sum::<f64>()
+            + sampling_cost;
+        assert!(sampling_cost > 0.0);
+        assert!(
+            (completed.total_cost - expected).abs() < 1e-12,
+            "total {} != {expected}",
+            completed.total_cost
+        );
     }
 }
 

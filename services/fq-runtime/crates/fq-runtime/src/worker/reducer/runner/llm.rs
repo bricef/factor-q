@@ -387,7 +387,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
 
         let mut response_event = crate::worker::reducer::emit::llm_response_event(
-            self.rounds.next(ctx.invocation_id),
+            self.rounds.for_call(ctx.invocation_id, &origin),
             ctx.agent_id,
             ctx.invocation_id,
             call_id,
