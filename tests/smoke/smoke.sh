@@ -469,85 +469,9 @@ command's output."
     assert_contains "${output}" "invocation status: completed" "shell tool trigger completion"
 }
 
-test_shell_tool_sandbox_denial() {
-    local project
-    project="$(make_project shell-denial)"
-    local agent_id
-    agent_id="$(unique_agent_id shell-denied)"
-
-    local work_dir="${TMP_ROOT}/shell-denied-work"
-    mkdir -p "${work_dir}"
-    # Forbidden dir the LLM will be tempted to run commands in.
-    local forbidden="${TMP_ROOT}/forbidden"
-    mkdir -p "${forbidden}"
-    local forbidden_file="${forbidden}/sandbox-write"
-
-    write_agent "${project}" "runner.md" "---
-name: ${agent_id}
-model: ${SMOKE_MODEL}
-tools:
-  - builtin__exec
-sandbox:
-  exec_cwd:
-    - ${work_dir}
-budget: 0.10
----
-
-You are a concise assistant. When asked to run a command, use the
-shell tool. If the tool returns an error, explain what the error was
-in one sentence."
-
-    start_fq_run "${project}/agents" "${project}/cache" || return 1
-
-    local output
-    output="$(fq_trigger "${project}/agents" "${project}/cache" \
-        "${agent_id}" "Run 'touch sandbox-write' in the directory ${forbidden} and tell me the result." || true)"
-
-    # Poll, don't read once. `fq_trigger` returns when `invocation list`
-    # says the run is terminal, and that answer comes from the control
-    # plane's store — while `events query` reads the projection, which a
-    # NATS consumer fills on its own schedule. A completed invocation
-    # says nothing about whether its tool result has been indexed yet:
-    # on a CI runner whose model calls come back fast, the single read
-    # this used to make returned `[]` every night.
-    local events=""
-    local deadline=$((SECONDS + 30))
-    while (( SECONDS < deadline )); do
-        events="$(fq_client events query --agent "${agent_id}" \
-            --event-type tool_result --limit 20 --json 2>&1)" || {
-            stop_daemon
-            fail "sandbox denial events query failed"
-            printf '  %s\n' "${events}"
-            return 1
-        }
-        if [[ "${events}" == *'"event_type": "tool_result"'* ]]; then
-            break
-        fi
-        sleep 0.5
-    done
-    stop_daemon
-
-    # The LLM's shell call should be refused by the sandbox. We don't
-    # assert on the LLM's exact wording (model output varies), only the
-    # structured tool-result marker. A cwd outside `exec_cwd` is a
-    # sandbox denial, which `classify_tool_error` records as
-    # `sandbox_violation`; `permission_denied` is the other kind, for a
-    # tool the agent was never granted.
-    if ! assert_contains "${events}" '"error_kind": "sandbox_violation"' \
-        "shell tool result records the sandbox denial"; then
-        # Without the transcript a failure here cannot say whether the
-        # sandbox let the call through or the model never made it.
-        printf '  transcript:\n'
-        printf '  %s\n' "${output}" | head -60
-        return 1
-    fi
-    if [[ -e "${forbidden_file}" ]]; then
-        fail "denied shell command wrote ${forbidden_file}"
-        return 1
-    fi
-    pass "denied shell command did not write outside the sandbox"
-    assert_contains "${output}" "invocation status: completed" "denied shell trigger still completes"
-}
+# The sandbox-denial case is not here: whether it runs would depend on the
+# model choosing to make the forbidden call. It is a deterministic daemon test,
+# services/fq-runtime/crates/fq-daemon/tests/exec_sandbox_denial.rs.
 
 # Start `fqd` in the background for tests that exercise the
 # projection. Writes its PID to RUN_PID and its log to RUN_LOG so
@@ -842,7 +766,6 @@ main() {
     run_test "trigger: simple single-turn response"      test_trigger_simple_response
     run_test "trigger: file_read tool in a loop"         test_trigger_with_file_read
     run_test "trigger: shell tool in a loop"             test_trigger_with_shell_tool
-    run_test "trigger: shell tool sandbox denial path"   test_shell_tool_sandbox_denial
     run_test "runtime: projection + query + costs"       test_run_projection_query_and_costs
     run_test "runtime: NATS-triggered dispatch"          test_nats_triggered_dispatch
 
