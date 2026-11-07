@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-    ProgressNotificationParam, ProgressToken, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ProgressNotificationParam, ProgressToken, ServerCapabilities,
+    ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, ServiceExt};
@@ -87,8 +88,8 @@ pub(super) struct MockControl {
 }
 
 impl ServerHandler for MockToolServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()
@@ -128,7 +129,7 @@ impl ServerHandler for MockToolServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let progress_token = context.meta.get_progress_token();
         self.calls.lock().await.push(RecordedCall {
             name: request.name.to_string(),
@@ -140,12 +141,11 @@ impl ServerHandler for MockToolServer {
                 if let Some(token) = progress_token {
                     let _ = context
                         .peer
-                        .notify_progress(ProgressNotificationParam {
-                            progress_token: token,
-                            progress: 1.0,
-                            total: Some(4.0),
-                            message: Some("working".to_string()),
-                        })
+                        .notify_progress(
+                            ProgressNotificationParam::new(token, 1.0)
+                                .with_total(4.0)
+                                .with_message("working"),
+                        )
                         .await;
                 }
                 while !self.control.release.load(Ordering::SeqCst) {
@@ -160,7 +160,7 @@ impl ServerHandler for MockToolServer {
                 return Err(rmcp::ErrorData::internal_error("cancelled", None));
             }
         }
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("ok")]).into())
     }
 }
 

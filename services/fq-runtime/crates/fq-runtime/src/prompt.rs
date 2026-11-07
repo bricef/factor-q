@@ -121,12 +121,9 @@ impl ContentMeta {
 /// the spec's `ContentBlock` union. Every variant the protocol can
 /// return has a home so nothing is dropped on the floor.
 ///
-/// Note `Audio` is part of the spec and therefore part of this
-/// type, even though rmcp 1.4–1.7 omit it from `PromptMessageContent`
-/// and reject it on the wire — so an audio prompt currently fails at
-/// fetch rather than reaching this layer. The variant is here so our
-/// representation is canonical and ready the day that gap closes
-/// (tracked in issue #341).
+/// `Audio` arrives since rmcp 3, whose prompt messages carry the same
+/// `ContentBlock` as tool results; rmcp 1.4–1.7 rejected it on the wire
+/// (issue #341).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptContent {

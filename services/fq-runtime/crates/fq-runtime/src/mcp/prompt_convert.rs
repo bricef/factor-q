@@ -5,17 +5,16 @@
 
 use std::collections::BTreeMap;
 
-use rmcp::model::{GetPromptResult, PromptMessageContent, PromptMessageRole, ResourceContents};
+use rmcp::model::{ContentBlock, GetPromptResult, ResourceContents, Role};
 
 /// Convert a fetched rmcp `GetPromptResult` into the owned, lossless
 /// [`PromptSeed`](crate::prompt::PromptSeed) — the rmcp → factor-q
 /// boundary for prompts. Everything downstream is provider-neutral.
 ///
-/// rmcp 1.4–1.7 omit `Audio` from `PromptMessageContent` and reject
-/// it on the wire, so audio prompt content never reaches here (the
-/// fetch fails first). Our [`PromptContent`](crate::prompt::PromptContent)
-/// keeps the spec-canonical `Audio` variant regardless — the
-/// upgrade past rmcp 1.7 is issue #341.
+/// Since rmcp 3, prompt messages carry the same `ContentBlock` as tool
+/// results, so audio prompt content arrives and maps to the
+/// spec-canonical [`PromptContent::Audio`](crate::prompt::PromptContent)
+/// (rmcp 1.4–1.7 rejected it on the wire; issue #341).
 pub(super) fn prompt_seed_from_rmcp(
     server: &str,
     name: &str,
@@ -28,8 +27,8 @@ pub(super) fn prompt_seed_from_rmcp(
         .iter()
         .map(|m| PromptSeedMessage {
             role: match m.role {
-                PromptMessageRole::User => PromptRole::User,
-                PromptMessageRole::Assistant => PromptRole::Assistant,
+                Role::User => PromptRole::User,
+                Role::Assistant => PromptRole::Assistant,
             },
             content: prompt_content_from_rmcp(&m.content),
         })
@@ -47,26 +46,31 @@ pub(super) fn prompt_seed_from_rmcp(
 /// Captures the primary fields plus annotations / `_meta` (verbatim,
 /// as opaque JSON) so the conversion is lossless for everything rmcp
 /// can deliver.
-fn prompt_content_from_rmcp(content: &PromptMessageContent) -> crate::prompt::PromptContent {
+fn prompt_content_from_rmcp(content: &ContentBlock) -> crate::prompt::PromptContent {
     use crate::prompt::{EmbeddedResource, PromptContent};
     match content {
-        PromptMessageContent::Text { text } => PromptContent::Text {
-            text: text.clone(),
-            meta: crate::prompt::ContentMeta::default(),
+        ContentBlock::Text(text) => PromptContent::Text {
+            text: text.text.clone(),
+            meta: content_meta(text.annotations.as_ref(), text.meta.as_ref()),
         },
-        PromptMessageContent::Image { image } => PromptContent::Image {
-            data: image.raw.data.clone(),
-            mime_type: image.raw.mime_type.clone(),
-            meta: content_meta(image.annotations.as_ref(), image.raw.meta.as_ref()),
+        ContentBlock::Image(image) => PromptContent::Image {
+            data: image.data.clone(),
+            mime_type: image.mime_type.clone(),
+            meta: content_meta(image.annotations.as_ref(), image.meta.as_ref()),
         },
-        PromptMessageContent::ResourceLink { link } => PromptContent::ResourceLink {
-            uri: link.raw.uri.clone(),
-            name: link.raw.name.clone(),
-            meta: content_meta(link.annotations.as_ref(), link.raw.meta.as_ref()),
+        ContentBlock::Audio(audio) => PromptContent::Audio {
+            data: audio.data.clone(),
+            mime_type: audio.mime_type.clone(),
+            meta: content_meta(audio.annotations.as_ref(), audio.meta.as_ref()),
         },
-        PromptMessageContent::Resource { resource } => {
+        ContentBlock::ResourceLink(link) => PromptContent::ResourceLink {
+            uri: link.uri.clone(),
+            name: link.name.clone(),
+            meta: content_meta(link.annotations.as_ref(), link.meta.as_ref()),
+        },
+        ContentBlock::Resource(resource) => {
             let annotations = resource.annotations.as_ref();
-            let embedded = match &resource.raw.resource {
+            let embedded = match &resource.resource {
                 ResourceContents::TextResourceContents {
                     uri,
                     mime_type,
@@ -89,9 +93,23 @@ fn prompt_content_from_rmcp(content: &PromptMessageContent) -> crate::prompt::Pr
                     blob: blob.clone(),
                     meta: content_meta(annotations, meta.as_ref()),
                 },
+                // Non-exhaustive in rmcp: an embedded-contents kind added
+                // later is named, not silently dropped.
+                _ => return unsupported_content(),
             };
             PromptContent::EmbeddedResource(embedded)
         }
+        // Non-exhaustive in rmcp: a content block kind added later.
+        _ => unsupported_content(),
+    }
+}
+
+/// The placeholder for a content kind this conversion does not know:
+/// visible to the model as text rather than dropped from the prompt.
+fn unsupported_content() -> crate::prompt::PromptContent {
+    crate::prompt::PromptContent::Text {
+        text: "[unsupported prompt content]".to_string(),
+        meta: crate::prompt::ContentMeta::default(),
     }
 }
 
@@ -108,3 +126,6 @@ fn content_meta<A: serde::Serialize, M: serde::Serialize>(
         meta: meta.and_then(|m| serde_json::to_value(m).ok()),
     }
 }
+
+#[cfg(test)]
+mod tests;
