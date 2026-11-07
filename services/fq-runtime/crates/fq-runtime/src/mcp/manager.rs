@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use fq_tools::Tool;
 use fq_tools::builtin::ExecConfig;
-use rmcp::model::{Root, ServerCapabilities};
+use rmcp::model::ServerCapabilities;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
@@ -25,7 +25,8 @@ use super::progress::ProgressRegistry;
 use super::server_config::SharedServerKey;
 use super::{
     AdvertisedCapabilities, McpClient, McpError, McpResourceReader, McpServerConfig,
-    McpToolRefresher, RootsHandle, ServerNotification, ServerRequest, default_server_root,
+    McpToolRefresher, RootsHandle, ServerNotification, ServerRequest, WorkspaceRoot,
+    default_server_root,
 };
 
 /// The connected clients, by server name, shared with every handle a
@@ -410,7 +411,7 @@ impl McpClientManager {
     pub async fn start_server_with_requests(
         &mut self,
         config: McpServerConfig,
-        roots: Vec<Root>,
+        roots: Vec<WorkspaceRoot>,
         capabilities: AdvertisedCapabilities,
     ) -> Result<
         (
@@ -439,7 +440,7 @@ impl McpClientManager {
         &mut self,
         config: McpServerConfig,
         server_request_tx: Option<mpsc::UnboundedSender<ServerRequest>>,
-        roots: Vec<Root>,
+        roots: Vec<WorkspaceRoot>,
         capabilities: AdvertisedCapabilities,
     ) -> Result<(Vec<Arc<dyn Tool>>, RootsHandle), McpError> {
         let ctx = StartContext {

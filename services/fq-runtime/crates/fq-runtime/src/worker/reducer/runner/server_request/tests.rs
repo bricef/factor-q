@@ -59,3 +59,110 @@ fn elicitation_schema_validation_enforces_per_field_rules() {
         "unexpected field"
     );
 }
+
+/// The model request a sampling request runs as: the server's system
+/// prompt first, each turn as its role's message (an assistant turn a
+/// single text part), the temperature widened to `f64`, `maxTokens` as
+/// the cap, and no tools — the same request the runner built from the
+/// rmcp params.
+#[test]
+fn sampling_request_runs_as_the_same_model_request() {
+    let request = crate::mcp::sampling_request_from_wire(json!({
+        "messages": [
+            { "role": "user", "content": { "type": "text", "text": "hello" } },
+            { "role": "assistant", "content": [
+                { "type": "text", "text": "partial" },
+                { "type": "image", "data": "aGk=", "mimeType": "image/png" }
+            ] }
+        ],
+        "systemPrompt": "Be brief.",
+        "temperature": 0.5,
+        "maxTokens": 32
+    }))
+    .expect("sampling params");
+
+    let built = sampling_to_model_request("claude-haiku", &request);
+
+    let expected = ModelRequest {
+        model: "claude-haiku".to_string(),
+        messages: vec![
+            Message::System {
+                text: "Be brief.".to_string(),
+            },
+            Message::User {
+                text: "hello".to_string(),
+            },
+            Message::Assistant {
+                parts: vec![AssistantPart::Text {
+                    text: "partial\n[non-text sampling content omitted]".to_string(),
+                }],
+            },
+        ],
+        tools: Vec::new(),
+        params: RequestParams {
+            effort: None,
+            temperature: Some(0.5),
+            max_tokens: Some(32),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&built).expect("request serializes"),
+        serde_json::to_value(&expected).expect("request serializes")
+    );
+}
+
+/// No system prompt and no temperature: no system message, and the
+/// temperature left to the provider.
+#[test]
+fn a_bare_sampling_request_adds_no_system_message() {
+    let request = crate::mcp::sampling_request_from_wire(json!({
+        "messages": [{ "role": "user", "content": { "type": "text", "text": "hi" } }],
+        "maxTokens": 8
+    }))
+    .expect("sampling params");
+
+    let built = sampling_to_model_request("m", &request);
+
+    assert_eq!(built.messages.len(), 1);
+    assert!(matches!(&built.messages[0], Message::User { text } if text == "hi"));
+    assert_eq!(built.params.temperature, None);
+    assert_eq!(built.params.max_tokens, Some(8));
+    assert!(built.tools.is_empty());
+}
+
+/// A model response becomes the reply the handler returns: its text
+/// (empty when the model said nothing), the agent's model, and the stop
+/// reason under its protocol name.
+#[test]
+fn model_response_becomes_the_sampling_reply() {
+    let cases = [
+        (StopReason::EndTurn, SamplingStopReason::EndTurn),
+        (StopReason::MaxTokens, SamplingStopReason::MaxTokens),
+        (StopReason::StopSequence, SamplingStopReason::StopSequence),
+        (StopReason::ToolUse, SamplingStopReason::ToolUse),
+    ];
+    for (stop_reason, expected) in cases {
+        let response = ModelResponse {
+            parts: vec![AssistantPart::Text {
+                text: "pong".to_string(),
+            }],
+            stop_reason,
+            usage: crate::events::TokenUsage::default(),
+        };
+        assert_eq!(
+            model_response_to_sampling_reply("claude-haiku", response),
+            SamplingReply {
+                text: "pong".to_string(),
+                model: "claude-haiku".to_string(),
+                stop_reason: expected,
+            }
+        );
+    }
+
+    let silent = ModelResponse {
+        parts: Vec::new(),
+        stop_reason: StopReason::EndTurn,
+        usage: crate::events::TokenUsage::default(),
+    };
+    assert_eq!(model_response_to_sampling_reply("m", silent).text, "");
+}

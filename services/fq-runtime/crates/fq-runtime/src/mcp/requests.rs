@@ -20,14 +20,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolResult, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject,
-    LoggingLevel, Prompt, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceTemplate, SetLevelRequestParams, SubscribeRequestParams,
+    CallToolResult, CompletionContext, CompletionInfo, GetPromptRequestParams, JsonObject, Prompt,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate,
 };
 use serde_json::Value;
 
+use super::handler;
 use super::prompt_convert::prompt_seed_from_rmcp;
-use super::{McpClient, McpClientManager, McpError};
+use super::{McpClient, McpClientManager, McpError, McpLogLevel};
 
 impl McpClientManager {
     /// Find the client handle for a running server by name.
@@ -150,10 +150,8 @@ impl McpClientManager {
     /// Subscribe to update notifications for a resource on a server.
     /// Updates arrive via [`Self::recv_notification`].
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), McpError> {
-        self.client_for(server)?
-            .subscribe(SubscribeRequestParams::new(uri))
+        handler::subscribe(self.client_for(server)?, uri)
             .await
-            .map(|_| ())
             .map_err(|err| McpError::ResourceOp {
                 server: server.to_string(),
                 reason: err.to_string(),
@@ -206,17 +204,14 @@ impl McpClientManager {
     /// Set the minimum logging level the server should send
     /// (`logging/setLevel`); only messages at or above `level` reach the
     /// notification sink thereafter. MCP deprecated the request in
-    /// SEP-2577 (rmcp 1.8 flags it); allowed until servers drop it.
-    #[allow(deprecated)]
+    /// SEP-2577; the handler's wrapper is where that is allowed.
     pub async fn set_logging_level(
         &self,
         server: &str,
-        level: LoggingLevel,
+        level: McpLogLevel,
     ) -> Result<(), McpError> {
-        self.client_for(server)?
-            .set_level(SetLevelRequestParams::new(level))
+        handler::set_level(self.client_for(server)?, level)
             .await
-            .map(|_| ())
             .map_err(|err| McpError::LoggingOp {
                 server: server.to_string(),
                 reason: err.to_string(),

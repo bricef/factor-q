@@ -32,11 +32,6 @@ use super::types::{
     ModelResponse, NextAction, Reducer, StepInput, ToolCallRequest, ToolCallResult, TriggerPayload,
     TriggerSourceKind,
 };
-use rmcp::model::{
-    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestParams,
-    CreateMessageResult, ElicitationAction, ElicitationSchema, EnumSchema, PrimitiveSchema, Role,
-    SamplingContent, SamplingMessage, SamplingMessageContent, StringFormat,
-};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
@@ -52,7 +47,7 @@ use crate::events::{
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
     AdvertisedCapabilities, McpClientManager, McpResourceReader, McpServerConfig, ServerRequest,
-    advertised_roots_from_tool_sandbox, elicitation_decline,
+    advertised_roots_from_tool_sandbox,
 };
 use crate::pricing::served::ServedPricing;
 use crate::tools::ToolRegistry;

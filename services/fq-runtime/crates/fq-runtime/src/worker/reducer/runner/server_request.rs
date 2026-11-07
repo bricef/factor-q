@@ -21,6 +21,11 @@
 //! block by accident of insertion order rather than by kinship.
 
 use super::*;
+use crate::mcp::{
+    ElicitationOutcome, ElicitationReply, ElicitationRequest, ElicitationSchema, EnumSchema,
+    PrimitiveSchema, SamplingReply, SamplingRequest, SamplingRole, SamplingStopReason,
+    StringFormat, elicitation_decline,
+};
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// Service one inbound server-initiated request (ADR-0018). The
@@ -36,13 +41,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         request: ServerRequest,
     ) -> Result<(), ExecutorError> {
         match request {
-            ServerRequest::Sampling { params, reply } => {
-                let result = self.handle_sampling(ctx, agent, server, params).await?;
+            ServerRequest::Sampling { request, reply } => {
+                let result = self.handle_sampling(ctx, agent, server, request).await?;
                 let _ = reply.send(result);
                 Ok(())
             }
-            ServerRequest::Elicitation { params, reply } => {
-                let result = self.handle_elicitation(ctx, agent, server, params).await?;
+            ServerRequest::Elicitation { request, reply } => {
+                let result = self.handle_elicitation(ctx, agent, server, request).await?;
                 let _ = reply.send(result);
                 Ok(())
             }
@@ -63,8 +68,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         ctx: &mut InvocationCtx<'_>,
         agent: &Agent,
         server: &str,
-        params: CreateMessageRequestParams,
-    ) -> Result<Result<CreateMessageResult, rmcp::ErrorData>, ExecutorError> {
+        request: SamplingRequest,
+    ) -> Result<Result<SamplingReply, rmcp::ErrorData>, ExecutorError> {
         // --- gate (no model call on refusal) ---
         let Some(grant) = agent.sampling_grant() else {
             return Ok(Err(sampling_decline(
@@ -106,7 +111,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ctx,
                 &agent.sampling_validation().input_validation,
                 "forwarding a sampling request to the agent's model",
-                &serde_json::to_string(&params).unwrap_or_default(),
+                &request.as_sent,
                 agent.model(),
                 origin.clone(),
                 |t, c| t.sampling_cost += c,
@@ -118,7 +123,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ))));
         }
 
-        let model_request = sampling_to_model_request(agent.model(), &params);
+        let model_request = sampling_to_model_request(agent.model(), &request);
         let (response, call_cost) = match self
             .dispatch_llm(ctx, model_request, origin.clone(), None)
             .await?
@@ -139,7 +144,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // --- outbound validation seam: the pluggable context chain
         // (empty by default) then the agent's declarative config
         // (redaction when `redact_secrets`). ---
-        let result = model_response_to_create_message(agent.model(), response);
+        let result = model_response_to_sampling_reply(agent.model(), response);
         let result = match self.context.sampling_validators.run(result) {
             Ok(result) => result,
             Err(reason) => {
@@ -164,7 +169,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ctx,
                 &agent.sampling_validation().output_validation,
                 "returning a sampling result to the requesting MCP server",
-                &sampling_message_text(&result.message.content),
+                &result.text,
                 agent.model(),
                 origin,
                 |t, c| t.sampling_cost += c,
@@ -193,8 +198,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         ctx: &mut InvocationCtx<'_>,
         agent: &Agent,
         server: &str,
-        params: CreateElicitationRequestParams,
-    ) -> Result<Result<CreateElicitationResult, rmcp::ErrorData>, ExecutorError> {
+        request: ElicitationRequest,
+    ) -> Result<Result<ElicitationReply, rmcp::ErrorData>, ExecutorError> {
         let decline = || Ok(Ok(elicitation_decline()));
 
         // --- gate (no model call on refusal) ---
@@ -218,14 +223,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // --- inbound validation seam: the pluggable context chain
         // (empty by default) then the agent's declarative request policy
         // (sensitive-field rejection when `reject_sensitive_fields`). ---
-        let params = match self.context.elicitation_inbound_validators.run(params) {
-            Ok(params) => params,
+        let request = match self.context.elicitation_inbound_validators.run(request) {
+            Ok(request) => request,
             Err(_) => return decline(),
         };
-        let params = match crate::policy::elicitation_input_chain(agent.elicitation_validation())
-            .run(params)
+        let request = match crate::policy::elicitation_input_chain(agent.elicitation_validation())
+            .run(request)
         {
-            Ok(params) => params,
+            Ok(request) => request,
             Err(_) => return decline(),
         };
 
@@ -238,7 +243,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 ctx,
                 &agent.elicitation_validation().input_validation,
                 "answering an elicitation request from an MCP server",
-                &serde_json::to_string(&params).unwrap_or_default(),
+                request.as_sent(),
                 agent.model(),
                 origin.clone(),
                 |t, c| t.elicitation_cost += c,
@@ -249,11 +254,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
 
         // Only form-mode elicitation is supported; URL mode declines.
-        let CreateElicitationRequestParams::FormElicitationParams {
+        let ElicitationRequest::Form {
             message,
             requested_schema,
             ..
-        } = params
+        } = request
         else {
             return decline();
         };
@@ -305,10 +310,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return decline();
         }
 
-        Ok(Ok(CreateElicitationResult {
-            action: ElicitationAction::Accept,
+        Ok(Ok(ElicitationReply {
+            action: ElicitationOutcome::Accept,
             content: Some(value),
-            meta: None,
         }))
     }
 
@@ -441,26 +445,25 @@ fn sampling_decline(reason: &str) -> rmcp::ErrorData {
 }
 
 /// Build a [`ModelRequest`] for a sampling completion from the
-/// server's `sampling/createMessage` params, run on the agent's own
+/// server's `sampling/createMessage` request, run on the agent's own
 /// model. The server's `systemPrompt` becomes a system message; each
-/// sampling message maps to a user/assistant message. Only text
-/// content is injected in v1 (non-text is a placeholder); tools are
-/// never exposed to a sampling call.
-fn sampling_to_model_request(model: &str, params: &CreateMessageRequestParams) -> ModelRequest {
-    let mut messages = Vec::with_capacity(params.messages.len() + 1);
-    if let Some(system) = &params.system_prompt {
+/// sampling turn maps to a user/assistant message. Only text content
+/// is injected in v1 (the boundary already replaced non-text content
+/// with a placeholder); tools are never exposed to a sampling call.
+fn sampling_to_model_request(model: &str, request: &SamplingRequest) -> ModelRequest {
+    let mut messages = Vec::with_capacity(request.turns.len() + 1);
+    if let Some(system) = &request.system_prompt {
         messages.push(Message::System {
             text: system.clone(),
         });
     }
-    for sampling_message in &params.messages {
+    for turn in &request.turns {
         // MCP sampling turns are scripted context, not turns a model
         // produced here, so an assistant turn is a single text part.
-        // `sampling_message_text` already flattens non-text content.
-        let text = sampling_message_text(&sampling_message.content);
-        messages.push(match sampling_message.role {
-            Role::User => Message::User { text },
-            Role::Assistant => Message::Assistant {
+        let text = turn.text.clone();
+        messages.push(match turn.role {
+            SamplingRole::User => Message::User { text },
+            SamplingRole::Assistant => Message::Assistant {
                 parts: vec![AssistantPart::Text { text }],
             },
         });
@@ -471,50 +474,28 @@ fn sampling_to_model_request(model: &str, params: &CreateMessageRequestParams) -
         tools: Vec::new(),
         params: RequestParams {
             effort: None,
-            temperature: params.temperature.map(|t| t as f64),
-            max_tokens: Some(params.max_tokens),
+            temperature: request.temperature.map(|t| t as f64),
+            max_tokens: Some(request.max_tokens),
         },
     }
 }
 
-/// Flatten a sampling message's content (single or multiple) into a
-/// plain string for the agent model. Non-text content is represented
-/// by a placeholder so conversation structure is preserved without
-/// claiming to faithfully inject images/audio (a later capability).
-fn sampling_message_text(content: &SamplingContent<SamplingMessageContent>) -> String {
-    match content {
-        SamplingContent::Single(item) => sampling_item_text(item),
-        SamplingContent::Multiple(items) => items
-            .iter()
-            .map(sampling_item_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+/// Wrap an agent-model [`ModelResponse`] as the [`SamplingReply`] the
+/// handler returns to the server.
+fn model_response_to_sampling_reply(model: &str, response: ModelResponse) -> SamplingReply {
+    SamplingReply {
+        text: response.text().unwrap_or_default(),
+        model: model.to_string(),
+        stop_reason: stop_reason_to_sampling(response.stop_reason),
     }
 }
 
-fn sampling_item_text(item: &SamplingMessageContent) -> String {
-    match item {
-        SamplingMessageContent::Text(text) => text.text.clone(),
-        _ => "[non-text sampling content omitted]".to_string(),
-    }
-}
-
-/// Wrap an agent-model [`ModelResponse`] back into the
-/// `CreateMessageResult` shape the protocol returns to the server.
-fn model_response_to_create_message(model: &str, response: ModelResponse) -> CreateMessageResult {
-    CreateMessageResult::new(
-        SamplingMessage::assistant_text(response.text().unwrap_or_default()),
-        model.to_string(),
-    )
-    .with_stop_reason(stop_reason_to_mcp(response.stop_reason))
-}
-
-fn stop_reason_to_mcp(stop_reason: StopReason) -> &'static str {
+fn stop_reason_to_sampling(stop_reason: StopReason) -> SamplingStopReason {
     match stop_reason {
-        StopReason::EndTurn => CreateMessageResult::STOP_REASON_END_TURN,
-        StopReason::MaxTokens => CreateMessageResult::STOP_REASON_END_MAX_TOKEN,
-        StopReason::StopSequence => CreateMessageResult::STOP_REASON_END_SEQUENCE,
-        StopReason::ToolUse => CreateMessageResult::STOP_REASON_TOOL_USE,
+        StopReason::EndTurn => SamplingStopReason::EndTurn,
+        StopReason::MaxTokens => SamplingStopReason::MaxTokens,
+        StopReason::StopSequence => SamplingStopReason::StopSequence,
+        StopReason::ToolUse => SamplingStopReason::ToolUse,
     }
 }
 
