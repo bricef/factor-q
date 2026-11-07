@@ -306,7 +306,7 @@ impl ScriptedTool {
         let Some(sender) = self.sampling.lock().unwrap().sender.clone() else {
             return SampledOutcome::Unserviced;
         };
-        let params = serde_json::from_value(json!({
+        let request = crate::mcp::sampling_request_from_wire(json!({
             "messages": [{"role": "user", "content": {"type": "text", "text": "sample me"}}],
             "maxTokens": 50
         }))
@@ -314,7 +314,7 @@ impl ScriptedTool {
         let (reply, answer) = tokio::sync::oneshot::channel();
         // A send fails once the run that owned the receiver is gone.
         if sender
-            .send(ServerRequest::Sampling { params, reply })
+            .send(ServerRequest::Sampling { request, reply })
             .is_err()
         {
             return SampledOutcome::Unserviced;

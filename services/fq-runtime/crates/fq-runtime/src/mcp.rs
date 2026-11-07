@@ -15,7 +15,7 @@
 //!
 //! | module | what lives there |
 //! | --- | --- |
-//! | `handler` | the rmcp client handler and the capabilities it advertises |
+//! | `handler` | the rmcp client handler, the capabilities it advertises, and the one boundary with rmcp's sampling / elicitation / roots / logging types |
 //! | `manager` | the one owner of every running server: register, refresh, shut down |
 //! | `requests` | what the host asks a server that is already connected |
 //! | `lifecycle` | starting / ready / unavailable, concurrent start, retry (#548) |
@@ -56,7 +56,11 @@ mod tools;
 #[cfg(test)]
 mod mock;
 
-pub use handler::{AdvertisedCapabilities, FactorQClientHandler, ServerRequest};
+pub use crate::server_initiated::{
+    ElicitationOutcome, ElicitationReply, ElicitationRequest, McpLogLevel, SamplingReply,
+    SamplingRequest, SamplingRole, SamplingStopReason, SamplingTurn, ServerRequest, WorkspaceRoot,
+};
+pub use handler::{AdvertisedCapabilities, FactorQClientHandler};
 pub use handles::{McpResourceReader, McpToolRefresher};
 pub use lifecycle::{McpServerState, McpServerStates, SharedServerStart, retry_unavailable};
 pub use limits::McpLimits;
@@ -68,7 +72,12 @@ pub use roots::{RootsHandle, advertised_roots_from_tool_sandbox, roots_from_tool
 pub use server_config::McpServerConfig;
 pub use tools::McpTool;
 
-pub(crate) use handler::elicitation_decline;
+pub(crate) use crate::server_initiated::elicitation_decline;
+pub(crate) use crate::server_initiated::{
+    ElicitationSchema, EnumSchema, PrimitiveSchema, StringFormat,
+};
+#[cfg(test)]
+pub(crate) use handler::sampling_request_from_wire;
 pub(crate) use stdio::default_server_root;
 
 /// Errors from MCP server lifecycle and tool calls.

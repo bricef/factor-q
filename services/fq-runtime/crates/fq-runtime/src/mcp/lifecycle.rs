@@ -29,7 +29,6 @@ use std::sync::{Arc, Mutex};
 
 use fq_tools::Tool;
 use rmcp::ServiceExt;
-use rmcp::model::Root;
 use rmcp::transport::StreamableHttpClientTransport;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -40,7 +39,7 @@ use super::manager::RunningServer;
 use super::progress::ProgressRegistry;
 use super::{
     AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpError, McpServerConfig,
-    RootsHandle, ServerNotification, ServerRequest, stdio,
+    RootsHandle, ServerNotification, ServerRequest, WorkspaceRoot, stdio,
 };
 
 /// Where one MCP server is in its life, as every health surface reads
@@ -212,7 +211,7 @@ pub(super) async fn connect(
     config: &McpServerConfig,
     ctx: &StartContext<'_>,
     server_request_tx: Option<mpsc::UnboundedSender<ServerRequest>>,
-    roots: Vec<Root>,
+    roots: Vec<WorkspaceRoot>,
     capabilities: AdvertisedCapabilities,
 ) -> Result<Connected, McpError> {
     info!(

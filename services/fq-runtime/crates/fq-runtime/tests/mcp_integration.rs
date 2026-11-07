@@ -23,11 +23,11 @@ use std::sync::{Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use fq_runtime::mcp::{
-    AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpError, McpServerConfig,
-    RootsHandle, ServerNotification, ServerRequest,
+    AdvertisedCapabilities, FactorQClientHandler, McpClientManager, McpError, McpLogLevel,
+    McpServerConfig, RootsHandle, SamplingReply, SamplingStopReason, ServerNotification,
+    ServerRequest, WorkspaceRoot,
 };
 use fq_tools::{Tool, ToolContext, ToolSandbox};
-use rmcp::model::{CreateMessageResult, LoggingLevel, Root, SamplingMessage};
 use tokio::sync::mpsc;
 
 /// Skip the test if `npx` is not available. When it is, make sure the
@@ -332,7 +332,7 @@ async fn start_everything(manager: &mut McpClientManager) -> Vec<Arc<dyn Tool>> 
 /// retrying the startup handshake once.
 async fn start_everything_with_requests(
     manager: &mut McpClientManager,
-    roots: Vec<Root>,
+    roots: Vec<WorkspaceRoot>,
     capabilities: AdvertisedCapabilities,
 ) -> (
     Vec<Arc<dyn Tool>>,
@@ -1358,22 +1358,22 @@ async fn sampling_request_bridges_to_the_host() {
             .recv()
             .await
             .expect("host should receive the bridged sampling request");
-        let ServerRequest::Sampling { params, reply } = request else {
+        let ServerRequest::Sampling { request, reply } = request else {
             panic!("expected a sampling request, got an elicitation one");
         };
         // The server forwarded its prompt through to us.
         assert!(
-            !params.messages.is_empty(),
+            !request.turns.is_empty(),
             "sampling request should carry the server's messages"
         );
-        assert_eq!(params.max_tokens, 16, "max_tokens should round-trip");
+        assert_eq!(request.max_tokens, 16, "max_tokens should round-trip");
         // Reply with a canned result, as the runner would after
         // running the LLM call.
-        let result = CreateMessageResult::new(
-            SamplingMessage::assistant_text("pong from host"),
-            "test-sampling-model".to_string(),
-        )
-        .with_stop_reason(CreateMessageResult::STOP_REASON_END_TURN);
+        let result = SamplingReply {
+            text: "pong from host".to_string(),
+            model: "test-sampling-model".to_string(),
+            stop_reason: SamplingStopReason::EndTurn,
+        };
         reply
             .send(Ok(result))
             .expect("bridge should still be awaiting the reply");
@@ -1855,7 +1855,7 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
         &bound,
         Some(&grant),
         "everything",
-        &ValidatorChain::<Vec<Root>>::new(),
+        &ValidatorChain::<Vec<WorkspaceRoot>>::new(),
     );
     assert_eq!(roots.len(), 2, "both sandbox paths become roots");
 
@@ -1880,7 +1880,8 @@ async fn roots_derived_from_sandbox_are_advertised_and_updatable() {
     // server re-fetches and reflects the new root.
     roots_handle
         .set_roots(vec![
-            Root::new("file:///tmp/factorq-roots-extra").with_name("/tmp/factorq-roots-extra"),
+            WorkspaceRoot::new("file:///tmp/factorq-roots-extra")
+                .with_name("/tmp/factorq-roots-extra"),
         ])
         .await
         .expect("set_roots + notify list_changed");
@@ -1937,7 +1938,7 @@ async fn workspace_placeholder_roots_advertise_the_bound_path() {
         &bound,
         Some(&grant),
         "everything",
-        &ValidatorChain::<Vec<Root>>::new(),
+        &ValidatorChain::<Vec<WorkspaceRoot>>::new(),
     );
     let expected_uri = format!("file://{}", workspace.path().display());
     assert_eq!(
@@ -1987,7 +1988,7 @@ async fn roots_not_advertised_without_a_grant() {
         &bound,
         None,
         "everything",
-        &ValidatorChain::<Vec<Root>>::new(),
+        &ValidatorChain::<Vec<WorkspaceRoot>>::new(),
     );
     assert!(none.is_empty(), "no grant advertises no roots");
 
@@ -1999,7 +2000,7 @@ async fn roots_not_advertised_without_a_grant() {
         &bound,
         Some(&grant),
         "everything",
-        &ValidatorChain::<Vec<Root>>::new(),
+        &ValidatorChain::<Vec<WorkspaceRoot>>::new(),
     );
     assert!(
         other.is_empty(),
@@ -2359,7 +2360,7 @@ async fn server_log_messages_are_forwarded_after_set_level() {
     // Ask for everything (debug+) so the immediate message — whatever
     // random level it is — is not filtered server-side.
     manager
-        .set_logging_level("everything", LoggingLevel::Debug)
+        .set_logging_level("everything", McpLogLevel::Debug)
         .await
         .expect("logging/setLevel should be accepted");
 

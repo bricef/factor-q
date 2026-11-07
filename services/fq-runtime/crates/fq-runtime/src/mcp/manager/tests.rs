@@ -7,8 +7,8 @@
 //! nor mutates it, and cannot show a test what `_meta` arrived.
 
 use super::*;
-use rmcp::model::LoggingLevel;
 
+use crate::mcp::McpLogLevel;
 use crate::mcp::discovery;
 use crate::mcp::limits::McpLimits;
 use crate::mcp::progress::ProgressRegistry;
@@ -182,7 +182,7 @@ async fn a_logging_level_failure_is_reported_as_a_logging_failure() {
     let manager = manager_with_mock("mock").await;
 
     let err = manager
-        .set_logging_level("mock", LoggingLevel::Debug)
+        .set_logging_level("mock", McpLogLevel::Debug)
         .await
         .expect_err("the mock server implements no logging/setLevel");
     assert!(matches!(err, McpError::LoggingOp { .. }), "{err:?}");
@@ -202,7 +202,7 @@ async fn a_logging_level_failure_is_reported_as_a_logging_failure() {
     // logging one — the variant tracks what failed, not where it was
     // called from.
     let unknown = manager
-        .set_logging_level("absent", LoggingLevel::Debug)
+        .set_logging_level("absent", McpLogLevel::Debug)
         .await
         .expect_err("no server named 'absent' is running");
     assert!(
