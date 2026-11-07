@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::mcp::{ElicitationRequest, SamplingReply};
 
 /// Agent-relevant context for an invocation: the services and
 /// (future) policy/metadata the agent can use or should know,
@@ -41,12 +42,12 @@ pub struct ReducerContext {
     /// reject leakage, etc. Default is an empty chain (allow
     /// everything); concrete validators (e.g. a `HighEntropyRedactor`)
     /// are added without touching the runner.
-    pub(super) sampling_validators: ValidatorChain<CreateMessageResult>,
+    pub(super) sampling_validators: ValidatorChain<SamplingReply>,
     /// Inbound validation seam for elicitation requests (ADR-0018 §4):
     /// inspects the request's message and schema field names — a
     /// server can request `{ api_key: string }` and coax the model to
     /// fill it from context. Default empty (allow).
-    pub(super) elicitation_inbound_validators: ValidatorChain<CreateElicitationRequestParams>,
+    pub(super) elicitation_inbound_validators: ValidatorChain<ElicitationRequest>,
     /// Outbound validation seam for the structured value an
     /// elicitation produced before it returns to the server: censor
     /// secrets in the extracted fields. Default empty (allow).
@@ -85,8 +86,8 @@ impl ReducerContext {
 pub struct ReducerContextBuilder {
     tools: Option<Arc<ToolRegistry>>,
     resources: Option<McpResourceReader>,
-    sampling_validators: Option<ValidatorChain<CreateMessageResult>>,
-    elicitation_inbound_validators: Option<ValidatorChain<CreateElicitationRequestParams>>,
+    sampling_validators: Option<ValidatorChain<SamplingReply>>,
+    elicitation_inbound_validators: Option<ValidatorChain<ElicitationRequest>>,
     elicitation_outbound_validators: Option<ValidatorChain<Value>>,
 }
 
@@ -106,7 +107,7 @@ impl ReducerContextBuilder {
 
     /// Outbound validators for sampling results (optional; defaults
     /// to an empty allow-everything chain).
-    pub fn sampling_validators(mut self, chain: ValidatorChain<CreateMessageResult>) -> Self {
+    pub fn sampling_validators(mut self, chain: ValidatorChain<SamplingReply>) -> Self {
         self.sampling_validators = Some(chain);
         self
     }
@@ -115,7 +116,7 @@ impl ReducerContextBuilder {
     /// to an empty allow-everything chain).
     pub fn elicitation_inbound_validators(
         mut self,
-        chain: ValidatorChain<CreateElicitationRequestParams>,
+        chain: ValidatorChain<ElicitationRequest>,
     ) -> Self {
         self.elicitation_inbound_validators = Some(chain);
         self

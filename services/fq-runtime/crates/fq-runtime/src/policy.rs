@@ -14,12 +14,10 @@
 
 use std::collections::HashMap;
 
-use rmcp::model::{
-    CreateElicitationRequestParams, CreateMessageResult, SamplingContent, SamplingMessageContent,
-};
 use serde_json::Value;
 
 use crate::agent::CapabilityValidation;
+use crate::server_initiated::{ElicitationRequest, SamplingReply};
 use crate::validation::{Validator, ValidatorChain, ValidatorResult};
 
 /// Replacement inserted where a high-entropy (secret-looking) token is
@@ -132,24 +130,16 @@ impl Validator<Value> for HighEntropyRedactor {
     }
 }
 
-impl Validator<CreateMessageResult> for HighEntropyRedactor {
-    fn validate(&self, value: &CreateMessageResult) -> ValidatorResult<CreateMessageResult> {
-        // A factor-q sampling result is always single text content
-        // (`model_response_to_create_message`); redact that case and
-        // pass anything else through untouched in v1.
-        let SamplingContent::Single(SamplingMessageContent::Text(text)) = &value.message.content
-        else {
+impl Validator<SamplingReply> for HighEntropyRedactor {
+    fn validate(&self, value: &SamplingReply) -> ValidatorResult<SamplingReply> {
+        // A factor-q sampling reply is one text completion; redact it.
+        let Some(redacted) = Self::redact_text(&value.text) else {
             return ValidatorResult::Allow;
         };
-        let Some(redacted) = Self::redact_text(&text.text) else {
-            return ValidatorResult::Allow;
-        };
-        let mut next = value.clone();
-        if let SamplingContent::Single(SamplingMessageContent::Text(t)) = &mut next.message.content
-        {
-            t.text = redacted;
-        }
-        ValidatorResult::Modify(next)
+        ValidatorResult::Modify(SamplingReply {
+            text: redacted,
+            ..value.clone()
+        })
     }
 }
 
@@ -161,12 +151,9 @@ impl Validator<CreateMessageResult> for HighEntropyRedactor {
 /// through (it is declined upstream).
 pub struct ValidateRequestPolicy;
 
-impl Validator<CreateElicitationRequestParams> for ValidateRequestPolicy {
-    fn validate(
-        &self,
-        value: &CreateElicitationRequestParams,
-    ) -> ValidatorResult<CreateElicitationRequestParams> {
-        let CreateElicitationRequestParams::FormElicitationParams {
+impl Validator<ElicitationRequest> for ValidateRequestPolicy {
+    fn validate(&self, value: &ElicitationRequest) -> ValidatorResult<ElicitationRequest> {
+        let ElicitationRequest::Form {
             message,
             requested_schema,
             ..
@@ -255,7 +242,7 @@ fn matched_sensitive_pattern(text: &str) -> Option<&'static str> {
 /// agent's config (currently: redaction when `redact_secrets`). The
 /// async evaluator gates (`output_validation`) run separately in the
 /// runner.
-pub fn sampling_output_chain(cv: &CapabilityValidation) -> ValidatorChain<CreateMessageResult> {
+pub fn sampling_output_chain(cv: &CapabilityValidation) -> ValidatorChain<SamplingReply> {
     let mut chain = ValidatorChain::new();
     if cv.redact_secrets {
         chain.push(Box::new(HighEntropyRedactor));
@@ -265,9 +252,7 @@ pub fn sampling_output_chain(cv: &CapabilityValidation) -> ValidatorChain<Create
 
 /// Build the synchronous inbound chain for an elicitation request: the
 /// request-policy gate when `reject_sensitive_fields` is set.
-pub fn elicitation_input_chain(
-    cv: &CapabilityValidation,
-) -> ValidatorChain<CreateElicitationRequestParams> {
+pub fn elicitation_input_chain(cv: &CapabilityValidation) -> ValidatorChain<ElicitationRequest> {
     let mut chain = ValidatorChain::new();
     if cv.reject_sensitive_fields {
         chain.push(Box::new(ValidateRequestPolicy));
@@ -288,7 +273,7 @@ pub fn elicitation_output_chain(cv: &CapabilityValidation) -> ValidatorChain<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::SamplingMessage;
+    use crate::server_initiated::SamplingStopReason;
     use serde_json::json;
 
     const SECRET: &str = "dGhpc2lzYXZlcnlsb25nc2VjcmV0a2V5MTIzNDU2Nzg5MDEK";
@@ -326,27 +311,32 @@ mod tests {
     #[test]
     fn redactor_modifies_secret_in_a_sampling_result() {
         let redactor = HighEntropyRedactor;
-        let result = CreateMessageResult::new(
-            SamplingMessage::assistant_text(format!("here: {SECRET}")),
-            "test-model".to_string(),
-        );
+        let result = SamplingReply {
+            text: format!("here: {SECRET}"),
+            model: "test-model".to_string(),
+            stop_reason: SamplingStopReason::EndTurn,
+        };
         match redactor.validate(&result) {
             ValidatorResult::Modify(v) => {
-                let SamplingContent::Single(SamplingMessageContent::Text(t)) = &v.message.content
-                else {
-                    panic!("expected single text content");
-                };
-                assert_eq!(t.text, "here: [REDACTED]");
+                assert_eq!(v.text, "here: [REDACTED]");
+                assert_eq!(v.model, "test-model", "only the text is redacted");
+                assert_eq!(v.stop_reason, SamplingStopReason::EndTurn);
             }
             other => panic!("expected Modify, got {other:?}"),
         }
+
+        let clean = SamplingReply {
+            text: "nothing secret here".to_string(),
+            ..result
+        };
+        assert_eq!(redactor.validate(&clean), ValidatorResult::Allow);
     }
 
-    fn form_request(message: &str, schema: Value) -> CreateElicitationRequestParams {
-        CreateElicitationRequestParams::FormElicitationParams {
-            meta: None,
+    fn form_request(message: &str, schema: Value) -> ElicitationRequest {
+        ElicitationRequest::Form {
             message: message.to_string(),
             requested_schema: serde_json::from_value(schema).expect("valid elicitation schema"),
+            as_sent: String::new(),
         }
     }
 
@@ -391,6 +381,19 @@ mod tests {
                 "required": ["city"]
             }),
         );
+        assert_eq!(policy.validate(&req), ValidatorResult::Allow);
+    }
+
+    /// URL mode is out of the policy's scope: it passes through, even
+    /// naming a credential, and is declined later by the runner.
+    #[test]
+    fn request_policy_passes_url_mode_through() {
+        let policy = ValidateRequestPolicy;
+        let req = ElicitationRequest::Url {
+            message: "Enter your password at the link".to_string(),
+            url: "https://example.com/login".to_string(),
+            as_sent: String::new(),
+        };
         assert_eq!(policy.validate(&req), ValidatorResult::Allow);
     }
 

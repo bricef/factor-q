@@ -43,6 +43,7 @@ pub mod paths;
 pub mod policy;
 pub mod pricing;
 pub mod prompt;
+pub mod server_initiated;
 // The declared contract shapes now live in the wire crate; re-exported
 // so a caller reaches them by the same path as before. The transient
 // set is a macro, so it re-exports at the crate root the way

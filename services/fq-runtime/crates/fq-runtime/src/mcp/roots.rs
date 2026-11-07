@@ -10,13 +10,12 @@
 use std::sync::Arc;
 
 use fq_tools::ToolSandbox;
-use rmcp::model::Root;
 use tokio::sync::Mutex;
 
 use crate::agent::RootsGrant;
 use crate::validation::ValidatorChain;
 
-use super::{McpClient, McpError};
+use super::{McpClient, McpError, WorkspaceRoot};
 
 /// A host-side handle to a per-invocation server's advertised roots
 /// (ADR-0018). Holds the shared roots cell the handler reads on
@@ -25,7 +24,7 @@ use super::{McpClient, McpError};
 /// sandbox changes) and notify the server, which re-fetches.
 pub struct RootsHandle {
     pub(super) server: String,
-    pub(super) roots: Arc<Mutex<Vec<Root>>>,
+    pub(super) roots: Arc<Mutex<Vec<WorkspaceRoot>>>,
     pub(super) client: Arc<McpClient>,
 }
 
@@ -34,7 +33,7 @@ impl RootsHandle {
     /// `roots/list_changed` so it re-fetches. The full dynamic-workspace
     /// trigger (recomputing from a changed sandbox) is a later
     /// "Workspace state" concern; this exposes the mechanism.
-    pub async fn set_roots(&self, roots: Vec<Root>) -> Result<(), McpError> {
+    pub async fn set_roots(&self, roots: Vec<WorkspaceRoot>) -> Result<(), McpError> {
         *self.roots.lock().await = roots;
         self.client
             .notify_roots_list_changed()
@@ -54,7 +53,7 @@ impl RootsHandle {
 /// makes *advertised roots ⊆ enforced boundary* hold by construction;
 /// the declared sandbox's raw strings may still carry placeholders.
 /// `file://` only for v1.
-pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<Root> {
+pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<WorkspaceRoot> {
     let mut seen = std::collections::BTreeSet::new();
     let mut roots = Vec::new();
     for path in sandbox
@@ -65,7 +64,7 @@ pub fn roots_from_tool_sandbox(sandbox: &ToolSandbox) -> Vec<Root> {
         let path = path.to_string_lossy().into_owned();
         let uri = format!("file://{path}");
         if seen.insert(uri.clone()) {
-            roots.push(Root::new(uri).with_name(path));
+            roots.push(WorkspaceRoot::new(uri).with_name(path));
         }
     }
     roots
@@ -79,8 +78,8 @@ pub fn advertised_roots_from_tool_sandbox(
     sandbox: &ToolSandbox,
     grant: Option<&RootsGrant>,
     server: &str,
-    validators: &ValidatorChain<Vec<Root>>,
-) -> Vec<Root> {
+    validators: &ValidatorChain<Vec<WorkspaceRoot>>,
+) -> Vec<WorkspaceRoot> {
     if !grant.is_some_and(|g| g.permits(server)) {
         return Vec::new();
     }

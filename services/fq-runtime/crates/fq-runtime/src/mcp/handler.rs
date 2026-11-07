@@ -7,68 +7,42 @@
 //! to the runner, and forwards every out-of-band notification onto the
 //! per-server sink drained by
 //! [`drain_server_notifications`](super::drain_server_notifications).
+//!
+//! **This module is the boundary for MCP's server-initiated surface.**
+//! It is the only production code that names rmcp's sampling,
+//! elicitation-envelope, roots and logging types, or calls the peer
+//! methods SEP-2577 deprecates (`logging/setLevel`, and
+//! `resources/subscribe` in later rmcp): the handler converts between
+//! them and factor-q's own values in `server_initiated` (the `convert`
+//! child), and `set_level` / `subscribe` wrap the peer calls for the
+//! request surface. Keeping them here is what lets one module-level lint
+//! expectation cover rmcp's deprecation of them. The elicitation schema
+//! types are not deprecated and are not mirrored; they are re-exported
+//! from here so the runtime names them in one place.
 
 use std::sync::Arc;
 
 use rmcp::ClientHandler;
 use rmcp::model::{
     ClientCapabilities, ClientInfo, CreateElicitationRequestParams, CreateElicitationResult,
-    CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult, ElicitationAction,
-    ElicitationCapability, FormElicitationCapability, ListRootsResult, LoggingLevel,
+    CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult,
+    ElicitationCapability, FormElicitationCapability, ListRootsResult,
     LoggingMessageNotificationParam, ProgressNotificationParam, ResourceUpdatedNotificationParam,
-    Root, RootsCapabilities, SamplingCapability,
+    Root, RootsCapabilities, SamplingCapability, SetLevelRequestParams, SubscribeRequestParams,
 };
-use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext, RoleClient};
+use rmcp::service::{
+    MaybeSendFuture, NotificationContext, Peer, RequestContext, RoleClient, ServiceError,
+};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use super::ServerNotification;
 use super::progress::{ProgressRegistry, progress_token_string};
+use super::{McpLogLevel, ServerNotification, ServerRequest, WorkspaceRoot, elicitation_decline};
 
-/// A request a connected MCP server initiates back toward the host
-/// *mid-invocation* (ADR-0018).
-///
-/// The handler ([`FactorQClientHandler`]) is a thin bridge: it
-/// translates an inbound rmcp request into one of these variants,
-/// forwards it on a per-invocation channel, and awaits the host's
-/// reply on the embedded oneshot. The runner is the sole arbiter —
-/// it gates, runs the LLM call through its single budgeted/WAL'd
-/// path, validates the result, and replies. Step 5 wires the
-/// sampling arm; Step 6 adds an `Elicitation` variant to the same
-/// channel and `select!` arm.
-pub enum ServerRequest {
-    /// `sampling/createMessage` — the server asks the host to run an
-    /// LLM completion and return the result to the *server* (not the
-    /// agent's transcript). `reply` carries either the result or a
-    /// structured decline (e.g. ungranted / over-budget); dropping
-    /// the sender declines with `method_not_found`.
-    Sampling {
-        params: CreateMessageRequestParams,
-        reply: oneshot::Sender<Result<CreateMessageResult, rmcp::ErrorData>>,
-    },
-    /// `elicitation/create` — the server asks for structured user
-    /// input matching a schema. factor-q answers it autonomously on
-    /// the agent's model (ADR-0017); `reply` carries the result, whose
-    /// `action` is `accept` (with content) or `decline`. A dropped
-    /// sender declines.
-    Elicitation {
-        params: CreateElicitationRequestParams,
-        reply: oneshot::Sender<Result<CreateElicitationResult, rmcp::ErrorData>>,
-    },
-}
+mod convert;
 
-/// The structured decline an elicitation request resolves to when
-/// refused (ungranted, over-budget, retries exhausted) or when the
-/// host cannot service it. Per the protocol this is an ordinary
-/// result with `action: decline`, not an error — the server continues
-/// without the input.
-pub(crate) fn elicitation_decline() -> CreateElicitationResult {
-    CreateElicitationResult {
-        action: ElicitationAction::Decline,
-        content: None,
-        meta: None,
-    }
-}
+#[cfg(test)]
+pub(crate) use convert::sampling_request_from_wire;
 
 /// Which inbound (server-initiated) capabilities factor-q advertises to
 /// a given server during the initialize handshake (ADR-0017,
@@ -128,7 +102,7 @@ pub struct FactorQClientHandler {
     /// [`RootsHandle`](super::RootsHandle) so the host can update them
     /// and fire `roots/list_changed`. Empty by default — roots are
     /// nothing-by-default and derived from the agent's sandbox grant.
-    roots: Arc<Mutex<Vec<Root>>>,
+    roots: Arc<Mutex<Vec<WorkspaceRoot>>>,
     /// This server's name and the shared `(server, token) → call`
     /// table, so an inbound `notifications/progress` is attributed to
     /// the invocation and tool call that issued the request (#605).
@@ -165,7 +139,7 @@ impl FactorQClientHandler {
     /// `roots/list` reflects host updates. Used on the per-invocation
     /// start path; the same `Arc` is held by the
     /// [`RootsHandle`](super::RootsHandle).
-    pub(super) fn with_roots(mut self, roots: Arc<Mutex<Vec<Root>>>) -> Self {
+    pub(super) fn with_roots(mut self, roots: Arc<Mutex<Vec<WorkspaceRoot>>>) -> Self {
         self.roots = roots;
         self
     }
@@ -215,10 +189,12 @@ impl ClientHandler for FactorQClientHandler {
     /// Bridge a `sampling/createMessage` request to the runner.
     ///
     /// The handler does no policy and no LLM call (ADR-0018 §2): it
-    /// forwards the params on the per-invocation channel and awaits
-    /// the runner's reply. With no channel wired (a shared tool-only
-    /// server) or no runner listening, it declines with
-    /// `method_not_found` — the rmcp default.
+    /// forwards the params, converted to a
+    /// [`SamplingRequest`](super::SamplingRequest), on the
+    /// per-invocation channel and awaits the runner's reply. With no
+    /// channel wired (a shared tool-only server) or no runner
+    /// listening, it declines with `method_not_found` — the rmcp
+    /// default.
     fn create_message(
         &self,
         params: CreateMessageRequestParams,
@@ -239,7 +215,7 @@ impl ClientHandler for FactorQClientHandler {
             let (reply_tx, reply_rx) = oneshot::channel();
             if tx
                 .send(ServerRequest::Sampling {
-                    params,
+                    request: convert::sampling_request(params),
                     reply: reply_tx,
                 })
                 .is_err()
@@ -248,7 +224,7 @@ impl ClientHandler for FactorQClientHandler {
                 return decline();
             }
             match reply_rx.await {
-                Ok(result) => result,
+                Ok(result) => result.map(CreateMessageResult::from),
                 // Reply sender dropped without answering → decline.
                 Err(_) => decline(),
             }
@@ -270,23 +246,24 @@ impl ClientHandler for FactorQClientHandler {
     + '_ {
         let sink = self.server_requests.clone();
         async move {
+            let decline = || Ok(CreateElicitationResult::from(elicitation_decline()));
             let Some(tx) = sink else {
-                return Ok(elicitation_decline());
+                return decline();
             };
             let (reply_tx, reply_rx) = oneshot::channel();
             if tx
                 .send(ServerRequest::Elicitation {
-                    params,
+                    request: convert::elicitation_request(params),
                     reply: reply_tx,
                 })
                 .is_err()
             {
-                return Ok(elicitation_decline());
+                return decline();
             }
             match reply_rx.await {
-                Ok(result) => result,
+                Ok(result) => result.map(CreateElicitationResult::from),
                 // Reply sender dropped without answering → decline.
-                Err(_) => Ok(elicitation_decline()),
+                Err(_) => decline(),
             }
         }
     }
@@ -301,7 +278,10 @@ impl ClientHandler for FactorQClientHandler {
     ) -> impl std::future::Future<Output = Result<ListRootsResult, rmcp::ErrorData>> + MaybeSendFuture + '_
     {
         let roots = Arc::clone(&self.roots);
-        async move { Ok(ListRootsResult::new(roots.lock().await.clone())) }
+        async move {
+            let roots = roots.lock().await.iter().cloned().map(Root::from).collect();
+            Ok(ListRootsResult::new(roots))
+        }
     }
 
     fn on_resource_updated(
@@ -362,24 +342,25 @@ impl ClientHandler for FactorQClientHandler {
         params: LoggingMessageNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) -> impl std::future::Future<Output = ()> + MaybeSendFuture + '_ {
-        let level = logging_level_name(params.level);
+        let severity = McpLogLevel::from(params.level);
+        let level = severity.as_str();
         let logger = params.logger.as_deref().unwrap_or("mcp-server");
         // Dynamic level → a static-level dispatch (tracing levels are
         // const). MCP's eight levels collapse onto tracing's five.
-        match params.level {
-            LoggingLevel::Debug => {
+        match severity {
+            McpLogLevel::Debug => {
                 debug!(target: "mcp.server.log", %level, logger, data = %params.data)
             }
-            LoggingLevel::Info | LoggingLevel::Notice => {
+            McpLogLevel::Info | McpLogLevel::Notice => {
                 info!(target: "mcp.server.log", %level, logger, data = %params.data)
             }
-            LoggingLevel::Warning => {
+            McpLogLevel::Warning => {
                 warn!(target: "mcp.server.log", %level, logger, data = %params.data)
             }
-            LoggingLevel::Error
-            | LoggingLevel::Critical
-            | LoggingLevel::Alert
-            | LoggingLevel::Emergency => {
+            McpLogLevel::Error
+            | McpLogLevel::Critical
+            | McpLogLevel::Alert
+            | McpLogLevel::Emergency => {
                 tracing::error!(target: "mcp.server.log", %level, logger, data = %params.data)
             }
         }
@@ -432,18 +413,22 @@ impl ClientHandler for FactorQClientHandler {
     }
 }
 
-/// Map an MCP logging level to its canonical lowercase name.
-fn logging_level_name(level: LoggingLevel) -> &'static str {
-    match level {
-        LoggingLevel::Debug => "debug",
-        LoggingLevel::Info => "info",
-        LoggingLevel::Notice => "notice",
-        LoggingLevel::Warning => "warning",
-        LoggingLevel::Error => "error",
-        LoggingLevel::Critical => "critical",
-        LoggingLevel::Alert => "alert",
-        LoggingLevel::Emergency => "emergency",
-    }
+/// Ask a connected server for log records at or above `level`
+/// (`logging/setLevel`). MCP deprecated the request in SEP-2577 (rmcp
+/// 1.8 flags it); allowed until servers drop it.
+#[allow(deprecated)]
+pub(super) async fn set_level(
+    peer: &Peer<RoleClient>,
+    level: McpLogLevel,
+) -> Result<(), ServiceError> {
+    peer.set_level(SetLevelRequestParams::new(level.into()))
+        .await
+}
+
+/// Subscribe to update notifications for one resource on a connected
+/// server (`resources/subscribe`).
+pub(super) async fn subscribe(peer: &Peer<RoleClient>, uri: &str) -> Result<(), ServiceError> {
+    peer.subscribe(SubscribeRequestParams::new(uri)).await
 }
 
 #[cfg(test)]

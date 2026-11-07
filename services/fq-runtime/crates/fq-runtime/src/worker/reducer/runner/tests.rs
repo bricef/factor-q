@@ -464,10 +464,11 @@ async fn sampling_channel_merges_servers_and_drains() {
     use tokio::sync::{mpsc, oneshot};
 
     fn req() -> ServerRequest {
-        let params = serde_json::from_value(json!({ "messages": [], "maxTokens": 8 }))
-            .expect("sampling params");
+        let request =
+            crate::mcp::sampling_request_from_wire(json!({ "messages": [], "maxTokens": 8 }))
+                .expect("sampling params");
         let (reply, _rx) = oneshot::channel();
-        ServerRequest::Sampling { params, reply }
+        ServerRequest::Sampling { request, reply }
     }
 
     let (tx_a, rx_a) = mpsc::unbounded_channel();
@@ -3773,8 +3774,8 @@ fn sampling_agent(budget: f64, sub_budget: Option<f64>) -> Agent {
         .unwrap()
 }
 
-fn sampling_params() -> CreateMessageRequestParams {
-    serde_json::from_value(serde_json::json!({
+fn sampling_request() -> crate::mcp::SamplingRequest {
+    crate::mcp::sampling_request_from_wire(serde_json::json!({
         "messages": [
             {"role": "user", "content": {"type": "text", "text": "hello"}}
         ],
@@ -3805,7 +3806,7 @@ async fn sampling_declined_when_invocation_budget_exhausted() {
             },
             &agent,
             "srv",
-            sampling_params(),
+            sampling_request(),
         )
         .await
         .expect("infrastructure ok")
@@ -3842,7 +3843,7 @@ async fn sampling_declined_when_sub_budget_exhausted() {
             },
             &agent,
             "srv",
-            sampling_params(),
+            sampling_request(),
         )
         .await
         .expect("infrastructure ok")
@@ -3882,7 +3883,7 @@ async fn sampling_spends_into_the_invocation_budget() {
             },
             &agent,
             "srv",
-            sampling_params(),
+            sampling_request(),
         )
         .await
         .expect("infrastructure ok")
@@ -4478,7 +4479,7 @@ async fn a_deadline_falling_during_a_sampling_answer_waits_for_it() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(crate::mcp::ServerRequest::Sampling {
-        params: sampling_params(),
+        request: sampling_request(),
         reply: reply_tx,
     })
     .expect("channel open");
@@ -4620,7 +4621,7 @@ async fn a_servicing_that_outlives_the_backstop_gives_the_tool_its_grace_back() 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(crate::mcp::ServerRequest::Sampling {
-        params: sampling_params(),
+        request: sampling_request(),
         reply: reply_tx,
     })
     .expect("channel open");
@@ -4771,7 +4772,7 @@ async fn a_server_with_a_request_always_ready_cannot_hold_the_call_open() {
     for _ in 0..20 {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.send(crate::mcp::ServerRequest::Sampling {
-            params: sampling_params(),
+            request: sampling_request(),
             reply: reply_tx,
         })
         .expect("channel open");
@@ -4876,7 +4877,7 @@ async fn a_servicing_inside_the_backstop_does_not_move_it() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(crate::mcp::ServerRequest::Sampling {
-        params: sampling_params(),
+        request: sampling_request(),
         reply: reply_tx,
     })
     .expect("channel open");
