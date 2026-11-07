@@ -6,9 +6,9 @@
 //! not change by passing through here.
 
 use rmcp::model::{
-    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequestParams,
-    CreateMessageResult, ElicitationAction, LoggingLevel, Role, Root, SamplingContent,
-    SamplingMessage, SamplingMessageContent,
+    CreateMessageRequestParams, CreateMessageResult, ElicitRequestParams, ElicitResult,
+    ElicitationAction, LoggingLevel, Role, Root, SamplingContent, SamplingMessage,
+    SamplingMessageContentBlock,
 };
 
 use crate::mcp::{
@@ -54,7 +54,7 @@ fn sampling_turn(message: &SamplingMessage) -> SamplingTurn {
 /// plain string for the agent model. Non-text content is represented
 /// by a placeholder so conversation structure is preserved without
 /// claiming to faithfully inject images/audio (a later capability).
-fn sampling_message_text(content: &SamplingContent<SamplingMessageContent>) -> String {
+fn sampling_message_text(content: &SamplingContent<SamplingMessageContentBlock>) -> String {
     match content {
         SamplingContent::Single(item) => sampling_item_text(item),
         SamplingContent::Multiple(items) => items
@@ -65,9 +65,9 @@ fn sampling_message_text(content: &SamplingContent<SamplingMessageContent>) -> S
     }
 }
 
-fn sampling_item_text(item: &SamplingMessageContent) -> String {
+fn sampling_item_text(item: &SamplingMessageContentBlock) -> String {
     match item {
-        SamplingMessageContent::Text(text) => text.text.clone(),
+        SamplingMessageContentBlock::Text(text) => text.text.clone(),
         _ => "[non-text sampling content omitted]".to_string(),
     }
 }
@@ -94,10 +94,10 @@ fn stop_reason_to_mcp(stop_reason: SamplingStopReason) -> &'static str {
 /// An inbound `elicitation/create` as an [`ElicitationRequest`], one
 /// variant per mode. `as_sent` is the params serialized as they
 /// arrived.
-pub(super) fn elicitation_request(params: CreateElicitationRequestParams) -> ElicitationRequest {
+pub(super) fn elicitation_request(params: ElicitRequestParams) -> ElicitationRequest {
     let as_sent = serde_json::to_string(&params).unwrap_or_default();
     match params {
-        CreateElicitationRequestParams::FormElicitationParams {
+        ElicitRequestParams::FormElicitationParams {
             message,
             requested_schema,
             ..
@@ -106,21 +106,20 @@ pub(super) fn elicitation_request(params: CreateElicitationRequestParams) -> Eli
             requested_schema,
             as_sent,
         },
-        CreateElicitationRequestParams::UrlElicitationParams { message, url, .. } => {
-            ElicitationRequest::Url {
-                message,
-                url,
-                as_sent,
-            }
-        }
+        ElicitRequestParams::UrlElicitationParams { message, url, .. } => ElicitationRequest::Url {
+            message,
+            url,
+            as_sent,
+        },
+        _ => ElicitationRequest::Unknown { as_sent },
     }
 }
 
 /// An [`ElicitationReply`] as the protocol's result. factor-q attaches
 /// no `_meta`.
-impl From<ElicitationReply> for CreateElicitationResult {
+impl From<ElicitationReply> for ElicitResult {
     fn from(reply: ElicitationReply) -> Self {
-        let mut result = CreateElicitationResult::new(match reply.action {
+        let mut result = ElicitResult::new(match reply.action {
             ElicitationOutcome::Accept => ElicitationAction::Accept,
             ElicitationOutcome::Decline => ElicitationAction::Decline,
             ElicitationOutcome::Cancel => ElicitationAction::Cancel,

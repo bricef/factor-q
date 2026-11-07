@@ -193,7 +193,7 @@ fn an_empty_sampling_reply_is_an_empty_text_block() {
 /// `{action: decline, content: None, meta: None}` on the wire.
 #[test]
 fn elicitation_decline_maps_to_a_bare_decline() {
-    let wire = CreateElicitationResult::from(elicitation_decline());
+    let wire = ElicitResult::from(elicitation_decline());
     assert_eq!(wire.action, ElicitationAction::Decline);
     assert_eq!(wire.content, None);
     assert_eq!(wire.meta, None);
@@ -207,7 +207,7 @@ fn elicitation_decline_maps_to_a_bare_decline() {
 /// `_meta`; each outcome maps to its protocol action.
 #[test]
 fn elicitation_reply_maps_action_and_content() {
-    let accepted = CreateElicitationResult::from(ElicitationReply {
+    let accepted = ElicitResult::from(ElicitationReply {
         action: ElicitationOutcome::Accept,
         content: Some(json!({ "city": "Lisbon" })),
     });
@@ -219,7 +219,7 @@ fn elicitation_reply_maps_action_and_content() {
         json!({ "action": "accept", "content": { "city": "Lisbon" } })
     );
 
-    let cancelled = CreateElicitationResult::from(ElicitationReply {
+    let cancelled = ElicitResult::from(ElicitationReply {
         action: ElicitationOutcome::Cancel,
         content: None,
     });
@@ -253,10 +253,10 @@ fn elicitation_form_request_carries_message_schema_and_as_sent() {
             }
         }),
     ] {
-        let params: CreateElicitationRequestParams =
+        let params: ElicitRequestParams =
             serde_json::from_value(value).expect("valid elicitation params");
         let expected_as_sent = serde_json::to_string(&params).expect("params serialize");
-        let CreateElicitationRequestParams::FormElicitationParams {
+        let ElicitRequestParams::FormElicitationParams {
             requested_schema: expected_schema,
             ..
         } = params.clone()
@@ -285,7 +285,7 @@ fn elicitation_form_request_carries_message_schema_and_as_sent() {
 /// runner's gates and input evaluators before it is declined.
 #[test]
 fn elicitation_url_request_is_represented() {
-    let params: CreateElicitationRequestParams = serde_json::from_value(json!({
+    let params: ElicitRequestParams = serde_json::from_value(json!({
         "mode": "url",
         "message": "Sign in here",
         "url": "https://example.com/login",

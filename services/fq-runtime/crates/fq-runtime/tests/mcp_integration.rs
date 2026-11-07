@@ -750,7 +750,7 @@ async fn lists_and_reads_resources_from_everything_server() {
     assert!(!resources.is_empty(), "everything server exposes resources");
 
     // Read the first resource by URI; it should carry contents.
-    let uri = resources[0].raw.uri.clone();
+    let uri = resources[0].uri.clone();
     let result = manager
         .read_resource("everything", &uri)
         .await
@@ -809,7 +809,6 @@ async fn resource_tools_let_the_agent_list_and_read() {
         .list_resources("everything")
         .await
         .expect("list resources")[0]
-        .raw
         .uri
         .clone();
     let read = read_tool
@@ -843,7 +842,6 @@ async fn subscribe_delivers_resource_update_notifications() {
         .list_resources("everything")
         .await
         .expect("list resources")[0]
-        .raw
         .uri
         .clone();
     manager
@@ -937,7 +935,6 @@ async fn resource_reader_reads_by_server_and_uri() {
         .list_resources("everything")
         .await
         .expect("list resources")[0]
-        .raw
         .uri
         .clone();
 
@@ -987,7 +984,6 @@ async fn static_resource_pin_appears_in_first_model_request() {
         .list_resources("everything")
         .await
         .expect("list resources")[0]
-        .raw
         .uri
         .clone();
     // The exact text the runner will inject for this pin — rendered
