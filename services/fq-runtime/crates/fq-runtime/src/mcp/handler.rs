@@ -17,8 +17,8 @@
 //! child), and `set_level` / `subscribe` wrap the peer calls for the
 //! request surface. Keeping them here is what lets one module-level lint
 //! expectation cover rmcp's deprecation of them. The elicitation schema
-//! types are not deprecated and are not mirrored; they are re-exported
-//! from here so the runtime names them in one place.
+//! types are not deprecated and are not mirrored: `server_initiated`
+//! re-exports them from rmcp, once.
 
 use std::sync::Arc;
 
