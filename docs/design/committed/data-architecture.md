@@ -509,8 +509,16 @@ reaching terminal:
    stamped by the reducer runner's per-step terminal upsert; the
    `emit_failed` path calls a small `ensure_terminal` helper to
    cover mid-step failure sites that bypass the loop's upsert.
+   On the `completed` path the same write also stores the
+   `completed` event itself — envelope and `event_id` included —
+   in `terminal_outcome` (worker schema v12,
+   [#823](https://github.com/bricef/factor-q/issues/823)).
+   `completed` is the only event that carries the outcome (task
+   status, result summary, cost, totals), so it is made exactly
+   as durable as `terminal_at`.
 2. **Publish `completed` or `failed` to NATS** (sync ack). The
-   lifecycle event the rest of the system reads.
+   lifecycle event the rest of the system reads. Once `completed`
+   is acked, the row's `terminal_published_at` is stamped (sync).
 3. **Publish `invocation.archived` to NATS** (sync ack). Carries
    the final state blob for the control-plane to archive.
 4. **Mark the worker SQLite row `archive_status = 'pending'`**
@@ -521,8 +529,21 @@ Crash semantics:
 
 - After (1), before (2)/(3): recovery on restart sees a terminal
   row with `archive_status IS NULL` and the retry sweeper picks
-  it up via `list_archive_pending`'s NULL-first ordering, then
-  publishes `invocation.archived`.
+  it up via `list_archive_pending`'s NULL-first ordering. While
+  the row's `terminal_outcome` is unstamped it republishes that
+  stored `completed` first and stamps it, then publishes
+  `invocation.archived`. The republish is the lost event itself,
+  so if the original did land (a lost ack, or the run loop
+  racing the sweep) JetStream's `Nats-Msg-Id` dedup and the
+  projection's `event_id` upsert still see one event, with its
+  original timestamp.
+- A `failed` is not stored yet. The mid-step failure sites
+  publish it *before* `ensure_terminal` marks the row, so a lost
+  `failed` there leaves the row in flight, for recovery to
+  resume. A `failed` the reducer itself decides
+  (`NextAction::Failed`, e.g. the iteration ceiling) is
+  published after the loop's terminal upsert, so a lost one is
+  still answered with `invocation.archived` alone.
 - Between (3) and (4): the event went out but the row is still
   NULL. The next sweeper tick treats it the same way and
   republishes; the control-plane's `insert_archive` is
@@ -750,7 +771,7 @@ factor-q runtime starting
   control-plane db: /home/op/.cache/factor-q/control-plane.db
   projection db:    /home/op/.cache/factor-q/projection.db
   control plane:    v1
-  worker schema:    v11
+  worker schema:    v12
   worker:           01997c4e-9b1a-7c33-8f0d-2a5b6c7d8e9f (host: prod-1)
   in-flight:        3 (1 safe-resume, 1 safe-replay, 1 ambiguous)
   pricing entries:  62 (cache: /home/op/.cache/factor-q/pricing.json)

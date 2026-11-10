@@ -614,6 +614,8 @@ async fn invocation_state_upsert_round_trip() {
         trigger_source: Some("subject".to_string()),
         trigger_subject: Some("fq.agent.agent-y.trigger".to_string()),
         trigger_payload: Some("{\"ask\":\"review the docs\"}".to_string()),
+        terminal_outcome: None,
+        terminal_published_at: None,
     };
     store.upsert_invocation_state(&row).await.unwrap();
     let back = store.get_invocation_state("inv-x").await.unwrap().unwrap();
@@ -648,6 +650,8 @@ async fn mark_ambiguous_reported_claims_exactly_once() {
         trigger_source: None,
         trigger_subject: None,
         trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
     };
     store.upsert_invocation_state(&row).await.unwrap();
 
@@ -694,6 +698,8 @@ async fn find_in_flight_excludes_terminal_rows() {
         trigger_source: None,
         trigger_subject: None,
         trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
     };
     let mut done = alive.clone();
     done.invocation_id = "done".to_string();
@@ -727,6 +733,8 @@ async fn operator_terminal_marker_is_sticky_against_late_upsert() {
         trigger_source: None,
         trigger_subject: None,
         trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
     };
     store.upsert_invocation_state(&row).await.unwrap();
     assert_eq!(
@@ -772,6 +780,8 @@ async fn delete_invocation_state_removes_row() {
         trigger_source: None,
         trigger_subject: None,
         trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
     };
     store.upsert_invocation_state(&row).await.unwrap();
     let n = store.delete_invocation_state("to-delete").await.unwrap();
@@ -802,6 +812,8 @@ fn terminal_state_row(id: &str, terminal_at_ms: i64) -> InvocationStateRow {
         trigger_source: None,
         trigger_subject: None,
         trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
     }
 }
 
@@ -1010,6 +1022,105 @@ async fn v10_to_v11_migration_preserves_rows_and_defaults_origin() {
         rows.iter()
             .all(|row| row.origin == crate::events::LlmCallOrigin::AgentTurn)
     );
+}
+
+#[tokio::test]
+async fn v11_to_v12_migration_opens_and_the_terminal_outcome_round_trips() {
+    use crate::events::{CompletedPayload, Event, EventPayload, TaskStatus};
+
+    let db = populated_db_at(11).await;
+    let store = WorkerStore::open(&db.path).await.unwrap();
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+
+    // A row written before v12 stored no outcome: the sweeper owes it
+    // `invocation.archived` alone, and nothing can stamp it.
+    let legacy = store
+        .get_invocation_state(&db.fixture.completed)
+        .await
+        .unwrap()
+        .expect("the completed row survives the migration");
+    assert_eq!(legacy.terminal_outcome, None);
+    assert_eq!(legacy.terminal_published_at, None);
+    assert!(legacy.unpublished_terminal_event().unwrap().is_none());
+    assert_eq!(
+        store
+            .mark_terminal_published(&db.fixture.completed, 5_000)
+            .await
+            .unwrap(),
+        0,
+        "a row with no stored outcome is never stamped"
+    );
+
+    // The terminal upsert writes the outcome; it never writes the stamp.
+    let event = Event::new(
+        crate::agent::AgentId::new("agent-v12").unwrap(),
+        uuid::Uuid::now_v7(),
+        EventPayload::Completed(CompletedPayload {
+            task_status: TaskStatus::Blocked,
+            result_summary: Some("stuck on review".to_string()),
+            total_llm_calls: 4,
+            total_tool_calls: 1,
+            total_cost: 0.5,
+            total_duration_ms: 77,
+        }),
+    );
+    let mut row = terminal_state_row("inv-v12", 2_000);
+    row.terminal_outcome = Some(terminal_outcome::encode(&event).unwrap());
+    row.terminal_published_at = Some(9_999);
+    store.upsert_invocation_state(&row).await.unwrap();
+    let back = store
+        .get_invocation_state("inv-v12")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.terminal_outcome, row.terminal_outcome);
+    assert_eq!(back.terminal_published_at, None, "the stamp has one writer");
+    let owed = back
+        .unpublished_terminal_event()
+        .unwrap()
+        .expect("owed until stamped");
+    assert_eq!(
+        serde_json::to_value(&owed).unwrap(),
+        serde_json::to_value(&event).unwrap(),
+        "the stored event round-trips whole, envelope included"
+    );
+
+    // A terminal row is never rewritten, so a late upsert cannot drop it.
+    let mut late = row.clone();
+    late.terminal_outcome = None;
+    store.upsert_invocation_state(&late).await.unwrap();
+    let back = store
+        .get_invocation_state("inv-v12")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.terminal_outcome, row.terminal_outcome);
+
+    // The first stamp stands; once stamped, nothing is owed.
+    assert_eq!(
+        store
+            .mark_terminal_published("inv-v12", 3_000)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .mark_terminal_published("inv-v12", 4_000)
+            .await
+            .unwrap(),
+        0
+    );
+    let back = store
+        .get_invocation_state("inv-v12")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.terminal_published_at, Some(3_000));
+    assert!(back.unpublished_terminal_event().unwrap().is_none());
 }
 
 #[tokio::test]

@@ -239,6 +239,8 @@ mod tests {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         store
             .upsert_invocation_state(&row(1_700_000_005_000, 1))

@@ -10,6 +10,14 @@
 //! fresh ack is published, which is exactly what an offline
 //! worker would have missed on first transmission.
 //!
+//! Before `archived`, it republishes the row's stored terminal
+//! event (`terminal_outcome`, v12) while that is not stamped
+//! published — the healer for a `completed` publish lost after
+//! the row went terminal (#823). It is the stored event itself,
+//! so a copy that did land (a lost ack, or the run loop racing
+//! this sweep) is one event to JetStream's `Nats-Msg-Id` dedup
+//! and to the projection's `event_id` upsert, not two.
+//!
 //! Two configurable timings:
 //!
 //! - `retry_interval_ms` — how often the sweeper wakes up.
@@ -201,6 +209,28 @@ impl ArchiveRetrySweeper {
             ))
         })?;
 
+        // The terminal event first, if its publish was lost (#823): the
+        // stored event itself, envelope and `event_id` included, so a copy
+        // that did land is deduplicated rather than counted twice.
+        let owed = row
+            .unpublished_terminal_event()
+            .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+        if let Some(terminal) = owed {
+            self.sink
+                .publish(&terminal)
+                .await
+                .map_err(|err| ArchiveRetryError::Publish(err.to_string()))?;
+            self.store
+                .mark_terminal_published(&row.invocation_id, Utc::now().timestamp_millis())
+                .await
+                .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+            debug!(
+                invocation_id = %row.invocation_id,
+                event_id = %terminal.envelope.event_id,
+                "republished the lost terminal event"
+            );
+        }
+
         let event = Event::new(
             agent_id,
             invocation_id,
@@ -246,8 +276,10 @@ pub enum ArchiveRetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::EventPayload;
-    use crate::worker::store::InvocationStateRow;
+    use crate::events::{CompletedPayload, EventPayload, TaskStatus};
+    use crate::test_support::events::event_kind_of;
+    use crate::test_support::sim::RecordingSink;
+    use crate::worker::store::{InvocationStateRow, terminal_outcome};
     use futures::StreamExt;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -270,6 +302,8 @@ mod tests {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         }
     }
 
@@ -332,6 +366,125 @@ mod tests {
             published > 1_000,
             "archive_published_at should advance past the seed value"
         );
+    }
+
+    /// A terminal row holding the `completed` event a crash lost (#823),
+    /// written the way the run loop's terminal upsert writes it, and a
+    /// hermetic sweeper over a recording sink.
+    struct LostCompletion {
+        _dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sink: Arc<RecordingSink>,
+        sweeper: ArchiveRetrySweeper,
+        completed: Event,
+    }
+
+    impl LostCompletion {
+        async fn new() -> Self {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let invocation_id = Uuid::now_v7();
+            let agent_id = AgentId::new("sweep-agent").unwrap();
+            let mut completed = Event::new(
+                agent_id.clone(),
+                invocation_id,
+                EventPayload::Completed(CompletedPayload {
+                    task_status: TaskStatus::Partial,
+                    result_summary: Some("half done".to_string()),
+                    total_llm_calls: 3,
+                    total_tool_calls: 2,
+                    total_cost: 0.25,
+                    total_duration_ms: 1_234,
+                }),
+            );
+            completed.envelope.parent_event_id = Some(Uuid::now_v7());
+            let mut row = terminal_row(&invocation_id.to_string(), agent_id.as_str(), 1_000);
+            row.terminal_outcome = Some(terminal_outcome::encode(&completed).unwrap());
+            store.upsert_invocation_state(&row).await.unwrap();
+            let sink = Arc::new(RecordingSink::new());
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+            Self {
+                _dir: dir,
+                store,
+                sink,
+                sweeper,
+                completed,
+            }
+        }
+
+        fn inv(&self) -> String {
+            self.completed.envelope.invocation_id.to_string()
+        }
+
+        fn kinds(&self) -> Vec<&'static str> {
+            self.sink
+                .events()
+                .iter()
+                .map(|e| event_kind_of(&e.payload))
+                .collect()
+        }
+
+        async fn published_at(&self) -> Option<i64> {
+            let row = self.store.get_invocation_state(&self.inv()).await.unwrap();
+            row.expect("row held until acked").terminal_published_at
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_republishes_a_lost_terminal_event_before_archiving() {
+        let world = LostCompletion::new().await;
+        let mut warned = HashSet::new();
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+        assert_eq!(
+            serde_json::to_value(&world.sink.events()[0]).unwrap(),
+            serde_json::to_value(&world.completed).unwrap(),
+            "the stored event itself, envelope and event_id included"
+        );
+        assert!(world.published_at().await.is_some(), "stamped once out");
+
+        // The ack is still pending, so `archived` goes again; `completed`
+        // does not.
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(
+            world.kinds(),
+            ["completed", "invocation_archived", "invocation_archived"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_a_published_terminal_event_alone() {
+        let world = LostCompletion::new().await;
+        let stamped = world
+            .store
+            .mark_terminal_published(&world.inv(), 1_001)
+            .await
+            .unwrap();
+        assert_eq!(stamped, 1);
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["invocation_archived"]);
+        assert_eq!(world.published_at().await, Some(1_001));
+    }
+
+    #[tokio::test]
+    async fn a_failed_republish_leaves_the_terminal_event_owed() {
+        let world = LostCompletion::new().await;
+        world.sink.fail_publish_at(0);
+        assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
+        assert_eq!(world.published_at().await, None, "stamped only once out");
+
+        world.sink.clear_fault();
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
     }
 
     #[tokio::test]
