@@ -185,6 +185,13 @@ pub fn analyze(src: &str) -> Result<FileFacts, syn::Error> {
         test_mod_decls: Vec::new(),
         mod_decls: Vec::new(),
     };
+    // A file-level inner attribute (`#![allow(..)]` / `#![expect(..)]` at
+    // the top of a module file) covers the whole module: it is an
+    // exception like any other, and reading only the items let it escape
+    // the census.
+    if !is_test_gated(&file.attrs) {
+        record_allows(&file.attrs, &mut facts);
+    }
     walk_items(&file.items, false, "", &mut facts);
     Ok(facts)
 }
@@ -1119,6 +1126,37 @@ mod tests {
                 ("clippy::type_complexity".into(), 1),
                 ("dead_code".into(), 1),
             ])
+        );
+    }
+
+    #[test]
+    fn counts_inner_allow_and_expect_attributes() {
+        // File-level: covers the whole module file.
+        let src = r#"#![expect(deprecated, reason = "the one boundary")]
+#![allow(dead_code)]
+mod inline {
+    #![allow(unused_imports)]
+    fn f() {}
+}
+fn g() {}
+"#;
+        let facts = analyze(src).expect("valid Rust");
+        assert_eq!(
+            facts.allow_counts,
+            BTreeMap::from([
+                ("dead_code".into(), 1),
+                ("deprecated".into(), 1),
+                ("unused_imports".into(), 1),
+            ])
+        );
+
+        // A file gated on `test` is test code, inner attributes included.
+        let test_file = "#![cfg(test)]\n#![allow(dead_code)]\nfn t() {}\n";
+        assert!(
+            analyze(test_file)
+                .expect("valid Rust")
+                .allow_counts
+                .is_empty()
         );
     }
 }
