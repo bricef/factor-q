@@ -192,7 +192,9 @@ impl RecordingSink {
         self.events.lock().unwrap().clone()
     }
 
-    /// Every event an injected [`Self::fail_publish_at`] fault refused.
+    /// Every event an injected fault refused, from either
+    /// [`Self::fail_publish_at`] or
+    /// [`Self::fail_publish_at_invocation_count`].
     pub fn refused(&self) -> Vec<Event> {
         self.refused.lock().unwrap().clone()
     }
@@ -215,6 +217,7 @@ impl EventSink for RecordingSink {
                 let count = counts.entry(event.envelope.invocation_id).or_insert(0);
                 if *count >= nth {
                     *count_arm = None;
+                    self.refused.lock().unwrap().push(event.clone());
                     return Err(BusError::Publish(
                         "sim: injected per-invocation publish fault".to_string(),
                     ));

@@ -493,8 +493,51 @@ mod tests {
         world.sink.fail_publish_at(0);
         assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
         assert_eq!(world.published_at().await, None, "stamped only once out");
+        // The fault refuses every publish, so `archived` would be refused
+        // too had it been tried: what the sink was offered is the check.
+        let refused: Vec<_> = world
+            .sink
+            .refused()
+            .iter()
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(refused, ["completed"], "nothing tried after the failure");
 
         world.sink.clear_fault();
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+    }
+
+    /// `archived` after a failed `completed` is the bug #823 fixes, one
+    /// step removed: the control plane acks, the row is deleted, and the
+    /// outcome is gone. So a `completed` republish that fails once ends the
+    /// row's turn in that pass, with nothing else published for it.
+    #[tokio::test]
+    async fn a_completed_republish_that_fails_once_is_not_followed_by_archived() {
+        let world = LostCompletion::new().await;
+        world.sink.fail_publish_at_invocation_count(0);
+        assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
+        let refused: Vec<_> = world
+            .sink
+            .refused()
+            .iter()
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(refused, ["completed"]);
+        assert!(world.kinds().is_empty(), "no `invocation_archived` either");
+        let row = world
+            .store
+            .get_invocation_state(&world.inv())
+            .await
+            .unwrap();
+        let row = row.expect("row held until acked");
+        assert_eq!(row.archive_status, None, "not archive-pending");
+        assert_eq!(row.terminal_published_at, None);
+        assert!(
+            row.unpublished_terminal_event().unwrap().is_some(),
+            "still owed"
+        );
+
         world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
     }
