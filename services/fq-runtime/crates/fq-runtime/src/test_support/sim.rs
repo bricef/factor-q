@@ -121,6 +121,9 @@ impl Clock for SimClock {
 #[derive(Default)]
 pub struct RecordingSink {
     events: Mutex<Vec<Event>>,
+    /// What the injected faults refused, in order — the events a crash
+    /// lost, so a heal can be compared against the event itself.
+    refused: Mutex<Vec<Event>>,
     fail_at: AtomicUsize,
     /// One-shot fault keyed by per-invocation publish count (see
     /// [`Self::fail_publish_at_invocation_count`]); the per-invocation
@@ -138,6 +141,7 @@ impl RecordingSink {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            refused: Mutex::new(Vec::new()),
             fail_at: AtomicUsize::new(usize::MAX),
             fail_at_invocation_count: Mutex::new(None),
             per_invocation_published: Mutex::new(std::collections::HashMap::new()),
@@ -187,6 +191,11 @@ impl RecordingSink {
     pub fn events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
     }
+
+    /// Every event an injected [`Self::fail_publish_at`] fault refused.
+    pub fn refused(&self) -> Vec<Event> {
+        self.refused.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -194,6 +203,7 @@ impl EventSink for RecordingSink {
     async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         let mut events = self.events.lock().unwrap();
         if events.len() >= self.fail_at.load(Ordering::SeqCst) {
+            self.refused.lock().unwrap().push(event.clone());
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
         }
         // Per-invocation-count fault (Phase 2): fire once, on the first
@@ -2402,11 +2412,13 @@ mod crash_dst {
 
     use std::collections::HashSet;
 
-    use super::resume_equivalence::{load_fixture, run_reference, script, summary_of};
+    use super::resume_equivalence::{RunResult, load_fixture, run_reference, script, summary_of};
     use super::*;
     use crate::llm::{ChatResponse, LlmError};
+    use crate::test_support::events::event_kind_of;
     use crate::test_support::oracle::{
         check_invocation_trace, check_invocation_trace_prefix, check_resume_trace,
+        observational_trace,
     };
     use crate::worker::ArchiveRetrySweeper;
     use crate::worker::recovery::{RecoveryCategory, categorise};
@@ -2508,13 +2520,86 @@ mod crash_dst {
         }
     }
 
+    /// Phase 2 exit criterion, **lost `completed` publish** (#823): the
+    /// fault left a terminal row whose `completed` (or
+    /// `invocation.archived`) never reached the bus. One sweep must
+    /// re-emit exactly what was lost, after which the trace is the
+    /// uninterrupted run's — the outcome (task status, summary, totals)
+    /// survives the crash instead of being archived without it.
+    ///
+    /// A lost `completed` comes back as *the same event* the fault
+    /// refused, envelope and `event_id` included, so JetStream's
+    /// `Nats-Msg-Id` dedup and the projection's `event_id` upsert both
+    /// see one event, never two. Once it is out, a further sweep (the ack
+    /// still pending) republishes `invocation.archived` alone.
+    async fn assert_lost_terminal_publish_heals(
+        world: &SimWorld,
+        turns: usize,
+        fault: usize,
+        reference: &RunResult,
+        label: &str,
+    ) {
+        let lost = world.sink.refused();
+        world.sink.clear_fault();
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&world.sink) as Arc<dyn EventSink>,
+            WorkerId::new("sim-worker").unwrap(),
+            Arc::clone(&world.store),
+        );
+        let mut warned = HashSet::new();
+        let kinds = |events: &[Event]| -> Vec<&'static str> {
+            events.iter().map(|e| event_kind_of(&e.payload)).collect()
+        };
+
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        let events = world.sink.events();
+        let completed_lost = fault == 6 * turns + 4;
+        let want: &[&str] = if completed_lost {
+            &["completed", "invocation_archived"]
+        } else {
+            &["invocation_archived"]
+        };
+        assert_eq!(
+            kinds(&events[fault..]),
+            want,
+            "one sweep re-emits what the crash lost ({label})"
+        );
+        if completed_lost {
+            assert_eq!(kinds(&lost), ["completed"], "({label})");
+            assert_eq!(
+                serde_json::to_value(&events[fault]).unwrap(),
+                serde_json::to_value(&lost[0]).unwrap(),
+                "the republished `completed` is the lost event itself, event_id included ({label})"
+            );
+        }
+        if let Err(violations) = check_invocation_trace(&events) {
+            let lines: Vec<String> = violations.iter().map(|v| format!("  - {v}")).collect();
+            panic!(
+                "healed trace not canonical ({label}):\n{}",
+                lines.join("\n")
+            );
+        }
+        let healed = observational_trace(&events);
+        for (i, (got, want)) in healed.iter().zip(&reference.observed).enumerate() {
+            assert_eq!(got, want, "healed trace diverges at event {i} ({label})");
+        }
+        assert_eq!(healed.len(), reference.observed.len(), "({label})");
+
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(
+            kinds(&world.sink.events()[events.len()..]),
+            ["invocation_archived"],
+            "a published outcome is never re-emitted ({label})"
+        );
+    }
+
     /// The full matrix at one fault point. Returns a short label of
     /// the branch taken, for the sweep's coverage sanity check.
     async fn check_fault_point(
         seed: u64,
         turns: usize,
         fault: usize,
-        reference_summary: &Option<String>,
+        reference: &RunResult,
     ) -> Expect {
         let label = format!("seed {seed}, turns {turns}, fault {fault}");
         let (world, responses) = crash_at(seed, turns, fault).await;
@@ -2545,10 +2630,11 @@ mod crash_dst {
                 );
                 // The archive hand-off is incomplete but healable —
                 // the row is terminal and un-acked, so the sweeper
-                // must pick it up (proved in the dedicated test).
+                // must pick it up, and must restore what was lost.
                 let pending = world.store.list_archive_pending().await.unwrap();
                 assert_eq!(pending.len(), 1, "sweeper must see the row ({label})");
                 assert_eq!(pending[0].invocation_id, inv);
+                assert_lost_terminal_publish_heals(&world, turns, fault, reference, &label).await;
             }
             Expect::Ambiguous => {
                 let inv = world.invocation_id().to_string();
@@ -2588,8 +2674,8 @@ mod crash_dst {
                 load_fixture(&resume_llm, &responses[consumed..]);
                 let outcome = world.resume(&resume_llm).await.expect("auto-resume");
                 assert_eq!(
-                    &summary_of(&outcome),
-                    reference_summary,
+                    summary_of(&outcome),
+                    reference.summary,
                     "outcome must match the uninterrupted run ({label})"
                 );
                 assert_eq!(
@@ -2618,10 +2704,25 @@ mod crash_dst {
         let reference = run_reference(77, turns).await;
         let mut seen = HashSet::new();
         for fault in 0..total_publishes(turns) {
-            seen.insert(check_fault_point(77, turns, fault, &reference.summary).await);
+            seen.insert(check_fault_point(77, turns, fault, &reference).await);
         }
         // The sweep must have exercised every lattice class.
         assert_eq!(seen.len(), 5, "all five WAL classes covered: {seen:?}");
+    }
+
+    /// Phase 2 exit criterion, **lost `completed` publish** (#823): see
+    /// [`assert_lost_terminal_publish_heals`]. The exhaustive sweep above
+    /// reaches this fault point too; it is named here so the criterion
+    /// can be found, and run, on its own.
+    #[tokio::test]
+    async fn lost_completed_publish_is_healed_with_its_outcome() {
+        let turns = 2;
+        let reference = run_reference(77, turns).await;
+        let completed_idx = 6 * turns + 4;
+        assert_eq!(
+            check_fault_point(77, turns, completed_idx, &reference).await,
+            Expect::AlreadyTerminal
+        );
     }
 
     proptest::proptest! {
@@ -2643,7 +2744,7 @@ mod crash_dst {
                 .expect("sim runtime");
             runtime.block_on(async {
                 let reference = run_reference(seed, turns).await;
-                check_fault_point(seed, turns, fault, &reference.summary).await;
+                check_fault_point(seed, turns, fault, &reference).await;
             });
         }
     }
