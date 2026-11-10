@@ -12,7 +12,7 @@ the operational one-line caveats.
 
 ## Posture today
 
-*As of 2026-09-22.* This section describes what the code enforces now. If
+*As of 2026-11-10.* This section describes what the code enforces now. If
 it contradicts the code, one of them is wrong — fix whichever it is.
 
 - **Sandbox:** built-in tools are denied by default, and filesystem and
@@ -116,6 +116,7 @@ refreshed whenever a row changes.
 | R5 | Tool output can carry credentials into transcripts and event payloads | Redaction at the transcript and event boundary | [#72](https://github.com/bricef/factor-q/issues/72) |
 | R6 | Shared MCP servers are deduplicated without regard to `env`, so one server can run on another agent's credentials | Include the environment in the sharing key | [#523](https://github.com/bricef/factor-q/issues/523) |
 | R7 | The `includeContext` path of server-initiated MCP execution bypasses the inbound redaction chain | Route `includeContext` injection through the redact chain (ADR-0018 §4) | [#345](https://github.com/bricef/factor-q/issues/345) |
+| R8 | The bundled SQLite (`libsqlite3-sys` 0.30, via `sqlx` 0.9) can return stale process memory when it opens a crafted database and `-wal` pair (RUSTSEC-2026-0459). factor-q opens only its own state files, so reaching this needs write access to its state directory. Accepted on 2026-11-10; see the [decision log](docs/decision-log.md) | Upgrade `sqlx` once a release allows `libsqlite3-sys` 0.39, then drop the `deny.toml` ignore | [#941](https://github.com/bricef/factor-q/issues/941) |
 
 ## Fleet residual risk
 
