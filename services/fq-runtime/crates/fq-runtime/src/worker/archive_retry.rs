@@ -487,6 +487,67 @@ mod tests {
         assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
     }
 
+    /// A stored outcome this build cannot decode (typically one an older
+    /// build stored, still unpublished at shutdown, read after an event-shape
+    /// change) holds its own row and does not end the pass: the rows behind
+    /// it are still archived.
+    #[tokio::test]
+    async fn an_undecodable_terminal_event_holds_its_row_and_the_sweep_goes_on() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .expect("worker store"),
+        );
+        let bad = Uuid::now_v7().to_string();
+        let healthy = Uuid::now_v7().to_string();
+        let mut row = terminal_row(&bad, "sweep-agent", 1_000);
+        row.terminal_outcome = Some(r#"{"not": "an event"}"#.to_string());
+        store.upsert_invocation_state(&row).await.unwrap();
+        store
+            .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+            .await
+            .unwrap();
+        store.set_archive_pending(&healthy, 1_000).await.unwrap();
+        let order = store.list_archive_pending().await.unwrap();
+        assert_eq!(
+            order[0].invocation_id, bad,
+            "never archived, so first on every pass"
+        );
+
+        let sink = Arc::new(RecordingSink::new());
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&store),
+        );
+        sweeper
+            .sweep_once(&mut HashSet::new())
+            .await
+            .expect("one bad row does not end the pass");
+
+        let events = sink.events();
+        let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
+        assert_eq!(kinds, ["invocation_archived"], "no completed, one archived");
+        assert_eq!(events[0].envelope.invocation_id.to_string(), healthy);
+
+        let held = store
+            .get_invocation_state(&bad)
+            .await
+            .unwrap()
+            .expect("held, not dropped");
+        assert_eq!(held.terminal_published_at, None, "not stamped");
+        assert_eq!(
+            held.archive_status, None,
+            "not archived without its outcome"
+        );
+        assert_eq!(held.archive_published_at, None);
+        assert_eq!(
+            held.terminal_outcome, row.terminal_outcome,
+            "the copy is kept"
+        );
+    }
+
     #[tokio::test]
     async fn sweep_warns_once_after_threshold() {
         // Pure unit test against the warn-once gate; no bus,
