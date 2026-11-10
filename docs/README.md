@@ -21,6 +21,7 @@ them before proposing a design change.
 | [`guide/`](guide/) | How-to guides describing the system **as it works today** — agent definitions, MCP, the reducer harness, access control, storage backends, operating the CAS. | You want to *use* or *operate* factor-q and need the current, live reference. Guides track present state (unlike ADRs, which are point-in-time). |
 | [`adrs/`](adrs/) | Architecture Decision Records: significant, hard-to-reverse decisions and their reasoning. Split into `accepted/` and `draft/`, named `NNNN-slug.md`. | You want to know *what was decided and why*. Each ADR is a snapshot of a decision at a point in time; later ADRs supersede earlier ones. See the [ADR index](adrs/README.md). |
 | [`design/`](design/) | Design documents, split into `committed/` (the system as built, or a decision in force) and `aspirational/` (design-ahead explorations and proposals not yet scheduled). Dated `*-assessment.md` files here are point-in-time snapshots. | You want the reasoning behind a subsystem's shape, or you're exploring a design that isn't committed yet. See the [design README](design/README.md) for how docs move between `committed/` and `aspirational/`. |
+| [`decision-log.md`](decision-log.md) | A dated log of decisions too small for an ADR: accepted dependency advisories, version holds, operational choices. Each entry gives its reason and the condition that reopens it. | You want to know why something was accepted or deferred without an ADR. A decision that leaves a security exposure open is also a row in the [risk register](../SECURITY.md#risk-register). |
 | [`plans/`](plans/) | Implementation plans, split into `active/` (in-flight work) and `closed/` (completed or abandoned), named `YYYY-MM-DD-slug.md`. Deferred work not yet committed to a phase is tracked as [GitHub issues](https://github.com/bricef/factor-q/issues). | You want to know what's being built now, what shipped, or what's parked for later. |
 
 ## How the folders relate
@@ -28,6 +29,10 @@ them before proposing a design change.
 - A **plan** in `plans/active/` describes work in progress; when it lands
   or is dropped it moves to `plans/closed/`.
 - A decision worth recording graduates into an **ADR** in `adrs/accepted/`.
+- A decision too small for an ADR, such as accepting a dependency advisory
+  or holding a version back, goes in the **decision log**. If it leaves a
+  security exposure open, that exposure is also a row in `SECURITY.md`'s
+  risk register.
 - The **design** docs explain the *why* behind subsystems; an aspirational
   design that is adopted becomes an ADR and its doc moves to
   `design/committed/`.
