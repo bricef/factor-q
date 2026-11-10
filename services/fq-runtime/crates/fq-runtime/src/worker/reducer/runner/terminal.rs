@@ -6,7 +6,9 @@
 //! publish chain stay private while this code can still reach them.
 //!
 //! The run loop marks the row terminal before it publishes anything, as
-//! every write in the runner does (SQL first, then NATS). `completed` is
+//! each of its per-step state writes does (SQL first, then NATS; the
+//! mid-step failure sites in `emit_failed` are the exception, publishing
+//! `failed` before they mark the row). `completed` is
 //! the only event carrying the outcome, so it is built first and stored in
 //! that same terminal upsert (`invocation_state.terminal_outcome`): there
 //! is no instant at which the row is terminal and the outcome exists only

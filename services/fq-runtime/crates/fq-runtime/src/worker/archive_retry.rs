@@ -14,19 +14,23 @@
 //! event (`terminal_outcome`, v12) while that is not stamped
 //! published — the healer for a `completed` publish lost after
 //! the row went terminal (#823). It is the stored event itself,
-//! with the original's `event_id`, so delivery is at-least-once
-//! but never a second event: if a copy did land (a lost ack, or
-//! the run loop racing this sweep), JetStream's `Nats-Msg-Id`
-//! dedup drops the republish inside the stream's 120 s
-//! `duplicate_window`, and past it a consumer idempotent on
-//! `event_id` — the projection's upsert — still sees one event.
+//! with the original's `event_id`, and delivery is at-least-once:
+//! if a copy did land (a lost ack, or the run loop racing this
+//! sweep), JetStream's `Nats-Msg-Id` dedup drops the republish only
+//! inside the stream's 120 s `duplicate_window`. Past it the stream
+//! holds a second message with the same `event_id`, which a
+//! consumer idempotent on `event_id` (the projection's upsert)
+//! still reads as one event.
 //!
-//! A stored event this build cannot decode holds its row: no
-//! `completed`, no `archived`, an `error!` per pass, and the
-//! sweep carries on to the rows behind it. Archiving without it
-//! would discard the only copy of the outcome; the price is that
-//! the control plane keeps seeing that invocation unarchived
-//! until a build that can read the event runs.
+//! A stored event that must not be republished (unreadable by this
+//! build, or not this row's terminal event: see `HoldReason`) holds
+//! its row. No `completed`, no `archived`, one `error!` per daemon
+//! run, and the sweep carries on to the rows behind it. Archiving
+//! without it would discard the only copy of the outcome. No later
+//! build reads an older event version, so the hold lasts until an
+//! operator releases the row (`docs/guide/operating-the-daemon.md`,
+//! "When the archive sweeper holds a terminal row"); until then the
+//! control plane sees that invocation as not archived.
 //!
 //! Two configurable timings:
 //!
@@ -43,7 +47,7 @@
 //!   must be held, not deleted, even if the CP never acks.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -55,6 +59,7 @@ use crate::bus::{EventBus, EventSink};
 use crate::events::{Event, EventPayload, InvocationArchivedPayload};
 
 use super::WorkerId;
+use super::store::terminal_outcome::HoldReason;
 use super::store::{InvocationStateRow, WorkerStore};
 
 /// Default cadence between sweeps (10 seconds). Pair this with
@@ -77,6 +82,8 @@ pub struct ArchiveRetrySweeper {
     store: Arc<WorkerStore>,
     retry_interval_ms: u64,
     warn_after_ms: i64,
+    /// Rows this process has already reported held (see `report_held`).
+    held: Mutex<HashSet<String>>,
 }
 
 impl ArchiveRetrySweeper {
@@ -97,6 +104,7 @@ impl ArchiveRetrySweeper {
             store,
             retry_interval_ms: DEFAULT_RETRY_INTERVAL_MS,
             warn_after_ms: DEFAULT_WARN_AFTER_MS,
+            held: Mutex::new(HashSet::new()),
         }
     }
 
@@ -194,6 +202,28 @@ impl ArchiveRetrySweeper {
         warned.insert(row.invocation_id.clone());
     }
 
+    /// Say a row is held: `error!` the first time this process holds it,
+    /// with the release it needs; `debug!` on every later sweep, so a held
+    /// row is one loud line per daemon run rather than one per tick.
+    fn report_held(&self, invocation_id: &str, reason: &HoldReason) {
+        let first = self
+            .held
+            .lock()
+            .expect("held set lock poisoned")
+            .insert(invocation_id.to_string());
+        if first {
+            error!(
+                invocation_id,
+                %reason,
+                "stored terminal event cannot be republished; holding the row unarchived \
+                 until an operator releases it (docs/guide/operating-the-daemon.md, \
+                 \"When the archive sweeper holds a terminal row\")"
+            );
+        } else {
+            debug!(invocation_id, %reason, "terminal row still held");
+        }
+    }
+
     async fn republish(&self, row: &InvocationStateRow) -> Result<(), ArchiveRetryError> {
         let Some(terminal_at_ms) = row.terminal_at else {
             // list_archive_pending filters to terminal rows, so
@@ -225,17 +255,14 @@ impl ArchiveRetrySweeper {
         let owed = match row.unpublished_terminal_event() {
             Ok(owed) => owed,
             // Held, not archived without it: archiving would discard the
-            // only copy of the outcome, while a held row stays loud (the
-            // warn-once above) and a build that can read it heals it. The
-            // likely cause is an event stored by an older build and read
-            // after an event-shape change, not corruption. Like the
-            // non-terminal branch above, it must not end the pass.
-            Err(err) => {
-                error!(
-                    invocation_id = %row.invocation_id,
-                    error = %err,
-                    "stored terminal event does not decode; holding the row unarchived"
-                );
+            // only copy of the outcome. No later build reads an older event
+            // version, so the hold lasts until an operator releases the row
+            // (`docs/guide/operating-the-daemon.md`). The likely cause is an
+            // event an older build stored, unpublished across an envelope
+            // bump, not corruption. Like the non-terminal branch above, it
+            // must not end the pass.
+            Err(reason) => {
+                self.report_held(&row.invocation_id, &reason);
                 return Ok(());
             }
         };
@@ -248,10 +275,10 @@ impl ArchiveRetrySweeper {
                 .mark_terminal_published(&row.invocation_id, Utc::now().timestamp_millis())
                 .await
                 .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
-            debug!(
+            info!(
                 invocation_id = %row.invocation_id,
                 event_id = %terminal.envelope.event_id,
-                "republished the lost terminal event"
+                "republished the stored terminal event"
             );
         }
 

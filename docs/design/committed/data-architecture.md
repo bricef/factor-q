@@ -541,19 +541,30 @@ Crash semantics:
   message with the same `event_id` on the stream, and consumers
   idempotent on `event_id` (the projection's upsert) still see
   one event.
-- A stored `completed` this build cannot decode (typically one
-  an older build stored, read after an event-shape change) holds
-  its row. The sweeper logs an error each pass and publishes
-  neither `completed` nor `invocation.archived` for it, and the
-  pass carries on to the other rows. Archiving without it would
-  discard the only copy of the outcome. The price is that the
-  control plane keeps seeing that invocation as not archived
-  until a build that can read the event runs.
-- A `failed` is not stored yet. The mid-step failure sites
-  publish it *before* `ensure_terminal` marks the row, so a lost
-  `failed` there leaves the row in flight, for recovery to
-  resume. A `failed` the reducer itself decides
-  (`NextAction::Failed`, e.g. the iteration ceiling) is
+- The stored event is read back through `Event::from_wire`, as
+  every consumer reads the log. A stored event that this build
+  cannot read, or that could not be this row's terminal event,
+  **holds** its row. Unreadable means malformed, or (the
+  realistic case) an envelope `schema_version` from an older
+  build that went unpublished across an event-schema bump;
+  republished, it would halt every durable consumer on the
+  stream. Not this row's means another invocation's event, or
+  one that is neither `completed` nor `failed`. The sweeper
+  publishes neither `completed` nor `invocation.archived` for a
+  held row, logs it at error level once per daemon run, and
+  carries on with the other rows. Archiving without it would
+  discard the only copy of the outcome. No later build reads an
+  older event version, so the hold lasts **until an operator
+  releases the row**. The procedure is in
+  [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row);
+  it archives the invocation without its outcome. Until then,
+  the control plane sees that invocation as not archived.
+- A `failed` is not stored yet
+  ([#946](https://github.com/bricef/factor-q/issues/946)). The
+  mid-step failure sites publish it *before* `ensure_terminal`
+  marks the row, so a lost `failed` there leaves the row in
+  flight, for recovery to resume. A `failed` the reducer itself
+  decides (`NextAction::Failed`, e.g. the iteration ceiling) is
   published after the loop's terminal upsert, so a lost one is
   still answered with `invocation.archived` alone.
 - Between (3) and (4): the event went out but the row is still
