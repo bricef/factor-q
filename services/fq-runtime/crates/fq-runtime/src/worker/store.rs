@@ -1122,18 +1122,11 @@ impl WorkerStore {
     /// run — typically a transient sliver, but the sweeper
     /// republishes them too so the flow is self-healing).
     pub async fn list_archive_pending(&self) -> Result<Vec<InvocationStateRow>, WorkerStoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   step_index, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at,
-                   trigger_source, trigger_subject, trigger_payload
-            FROM invocation_state
-            WHERE terminal_at IS NOT NULL
-              AND (archive_status IS NULL OR archive_status = 'pending')
-            ORDER BY archive_published_at IS NULL DESC, archive_published_at ASC
-            "#,
-        )
+        let rows = sqlx::query(select_invocation_state(
+            "WHERE terminal_at IS NOT NULL \
+               AND (archive_status IS NULL OR archive_status = 'pending') \
+             ORDER BY archive_published_at IS NULL DESC, archive_published_at ASC",
+        ))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_invocation_state).collect()
@@ -1144,19 +1137,10 @@ impl WorkerStore {
         &self,
         invocation_id: &str,
     ) -> Result<Option<InvocationStateRow>, WorkerStoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   step_index, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at,
-                   trigger_source, trigger_subject, trigger_payload
-            FROM invocation_state
-            WHERE invocation_id = ?
-            "#,
-        )
-        .bind(invocation_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(select_invocation_state("WHERE invocation_id = ?"))
+            .bind(invocation_id)
+            .fetch_optional(&self.pool)
+            .await?;
         match row {
             Some(r) => Ok(Some(row_to_invocation_state(r)?)),
             None => Ok(None),
@@ -1169,17 +1153,9 @@ impl WorkerStore {
     pub async fn find_in_flight_invocations(
         &self,
     ) -> Result<Vec<InvocationStateRow>, WorkerStoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT invocation_id, agent_id, schema_version, phase, state_blob,
-                   step_index, started_at, updated_at, terminal_at, workspace_ref,
-                   archive_status, archive_published_at,
-                   trigger_source, trigger_subject, trigger_payload
-            FROM invocation_state
-            WHERE terminal_at IS NULL
-            ORDER BY started_at
-            "#,
-        )
+        let rows = sqlx::query(select_invocation_state(
+            "WHERE terminal_at IS NULL ORDER BY started_at",
+        ))
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_invocation_state).collect()
@@ -1350,6 +1326,18 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
         seq: row.get("seq"),
         deferred_at: row.get("deferred_at"),
     })
+}
+
+/// Every [`InvocationStateRow`] column — one list, so a new column is added once, not per reader.
+const INVOCATION_STATE_COLUMNS: &str = "invocation_id, agent_id, schema_version, phase, \
+    state_blob, step_index, started_at, updated_at, terminal_at, workspace_ref, archive_status, \
+    archive_published_at, trigger_source, trigger_subject, trigger_payload";
+
+/// `SELECT` every row column, then `clause`: `'static`, so only a literal reaches asserted-safe SQL.
+fn select_invocation_state(clause: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
+        "SELECT {INVOCATION_STATE_COLUMNS} FROM invocation_state {clause}"
+    ))
 }
 
 fn row_to_invocation_state(
