@@ -1067,15 +1067,12 @@ async fn v11_to_v12_migration_opens_and_the_terminal_outcome_round_trips() {
             total_duration_ms: 77,
         }),
     );
-    let mut row = terminal_state_row("inv-v12", 2_000);
+    let inv = event.envelope.invocation_id.to_string();
+    let mut row = terminal_state_row(&inv, 2_000);
     row.terminal_outcome = Some(terminal_outcome::encode(&event).unwrap());
     row.terminal_published_at = Some(9_999);
     store.upsert_invocation_state(&row).await.unwrap();
-    let back = store
-        .get_invocation_state("inv-v12")
-        .await
-        .unwrap()
-        .unwrap();
+    let back = store.get_invocation_state(&inv).await.unwrap().unwrap();
     assert_eq!(back.terminal_outcome, row.terminal_outcome);
     assert_eq!(back.terminal_published_at, None, "the stamp has one writer");
     let owed = back
@@ -1092,33 +1089,13 @@ async fn v11_to_v12_migration_opens_and_the_terminal_outcome_round_trips() {
     let mut late = row.clone();
     late.terminal_outcome = None;
     store.upsert_invocation_state(&late).await.unwrap();
-    let back = store
-        .get_invocation_state("inv-v12")
-        .await
-        .unwrap()
-        .unwrap();
+    let back = store.get_invocation_state(&inv).await.unwrap().unwrap();
     assert_eq!(back.terminal_outcome, row.terminal_outcome);
 
     // The first stamp stands; once stamped, nothing is owed.
-    assert_eq!(
-        store
-            .mark_terminal_published("inv-v12", 3_000)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        store
-            .mark_terminal_published("inv-v12", 4_000)
-            .await
-            .unwrap(),
-        0
-    );
-    let back = store
-        .get_invocation_state("inv-v12")
-        .await
-        .unwrap()
-        .unwrap();
+    assert_eq!(store.mark_terminal_published(&inv, 3_000).await.unwrap(), 1);
+    assert_eq!(store.mark_terminal_published(&inv, 4_000).await.unwrap(), 0);
+    let back = store.get_invocation_state(&inv).await.unwrap().unwrap();
     assert_eq!(back.terminal_published_at, Some(3_000));
     assert!(back.unpublished_terminal_event().unwrap().is_none());
 }

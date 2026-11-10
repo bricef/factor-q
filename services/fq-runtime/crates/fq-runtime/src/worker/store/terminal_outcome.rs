@@ -21,11 +21,39 @@
 //! same `parent_event_id`, so the chain still holds. A payload-plus-id column
 //! would have to rebuild an envelope that differs from the lost one in
 //! everything but its id. One JSON column rather than six typed ones, too,
-//! so `failed` can share it: [`EventPayload`](crate::events::EventPayload)
-//! is the enum either terminal event already is.
+//! so `failed` can share it: [`EventPayload`] is the enum either terminal
+//! event already is.
+//!
+//! The stored event is read back through [`Event::from_wire`], as every
+//! consumer of the log reads it, and not with plain serde. An event stored
+//! by an older build and still unpublished across an envelope bump may
+//! well parse against this build's types, but its `schema_version` is one
+//! no consumer reads, and republished it would halt every durable consumer
+//! on the stream. Nor is anything published that could not be this row's
+//! terminal event: an event of another invocation, or one that is not
+//! `completed` or `failed` (an unknown `event_type` reads as
+//! [`EventPayload::Unknown`], which is neither). Each of those is a
+//! [`HoldReason`], and the sweeper holds the row rather than publish it.
 
-use crate::events::Event;
+use uuid::Uuid;
+
+use crate::events::{Event, EventParseError, EventPayload};
 use crate::worker::store::{InvocationStateRow, WorkerStore, WorkerStoreError};
+
+/// Why a row's stored terminal event is held rather than republished.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HoldReason {
+    /// Not an event this build reads: malformed, or an envelope version
+    /// outside `SUPPORTED_SCHEMA_VERSIONS` (its message names both).
+    #[error("stored terminal event is unreadable: {0}")]
+    Unreadable(#[from] EventParseError),
+    /// A readable event that is not a terminal one.
+    #[error("stored event is `{0}`, not `completed` or `failed`")]
+    NotTerminal(&'static str),
+    /// A terminal event, but another invocation's.
+    #[error("stored event belongs to invocation {0}, not this row's")]
+    OtherInvocation(Uuid),
+}
 
 pub(super) const MIGRATION_V12_SQL: &str = r#"
 ALTER TABLE invocation_state ADD COLUMN terminal_outcome TEXT;
@@ -42,13 +70,23 @@ impl InvocationStateRow {
     /// unless `terminal_published_at` says it already went out. `None` for
     /// a row that stored none — an operator drop, a `failed` terminal, or a
     /// row written before v12 — whose sweep is `invocation.archived` alone.
-    pub(crate) fn unpublished_terminal_event(&self) -> Result<Option<Event>, WorkerStoreError> {
-        match (&self.terminal_outcome, self.terminal_published_at) {
-            (Some(json), None) => serde_json::from_str(json).map(Some).map_err(|err| {
-                WorkerStoreError::Malformed(format!("invalid terminal outcome: {err}"))
-            }),
-            _ => Ok(None),
+    /// `Err` when the stored event must not be published (see the module
+    /// doc).
+    pub(crate) fn unpublished_terminal_event(&self) -> Result<Option<Event>, HoldReason> {
+        let (Some(json), None) = (&self.terminal_outcome, self.terminal_published_at) else {
+            return Ok(None);
+        };
+        let event = Event::from_wire(json.as_bytes())?;
+        if !matches!(
+            event.payload,
+            EventPayload::Completed(_) | EventPayload::Failed(_)
+        ) {
+            return Err(HoldReason::NotTerminal(event.payload.event_type()));
         }
+        if event.envelope.invocation_id.to_string() != self.invocation_id {
+            return Err(HoldReason::OtherInvocation(event.envelope.invocation_id));
+        }
+        Ok(Some(event))
     }
 }
 
