@@ -39,8 +39,8 @@ use tokio_stream::{StreamExt, StreamMap};
 use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
 use crate::events::{
-    self, AssistantPart, CompletedPayload, Event, EventPayload, FailedPayload, FailureKind,
-    FailurePhase, HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
+    self, AssistantPart, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
     LlmRequestPayload, Message, RequestParams, StopReason, ToolCallPayload, ToolErrorKind,
     ToolSchema, TriggerSource, TriggeredPayload,
 };
@@ -1178,6 +1178,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // ordering violation that surfaced as a flaky test.
             let now_ms = self.config.clock.unix_now_ms();
             let (phase_label, terminal_at) = phase_and_terminal_from(&output.next_action, now_ms);
+            // `completed` rides the terminal write itself (#823; `terminal.rs`).
+            let completion = self.completion(
+                &output.next_action,
+                agent_id,
+                invocation_id,
+                &mut totals,
+                start,
+                *cursor,
+            )?;
             self.config
                 .store
                 .upsert_invocation_state(&InvocationStateRow {
@@ -1199,6 +1208,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
                     trigger_subject: trigger.subject.clone(),
                     trigger_payload: Some(trigger.payload.to_string()),
+                    terminal_outcome: completion.as_ref().map(Completion::outcome),
+                    terminal_published_at: None,
                 })
                 .await
                 .map_err(map_store_err)?;
@@ -1211,49 +1222,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             durable_start.fire(invocation_id);
 
             match output.next_action {
-                NextAction::Complete { text, task_status } => {
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    totals.total_duration_ms = duration_ms;
-                    let summary = if text.is_empty() { None } else { Some(text) };
-                    self.publish_chained(
-                        cursor,
-                        Event::new(
-                            agent_id.clone(),
+                NextAction::Complete { .. } => {
+                    let completion = completion.expect("a Complete step builds its completion");
+                    return self
+                        .finish_completion(
+                            cursor,
+                            agent_id,
                             invocation_id,
-                            EventPayload::Completed(CompletedPayload {
-                                task_status,
-                                result_summary: summary.clone(),
-                                total_llm_calls: totals.total_llm_calls,
-                                total_tool_calls: totals.total_tool_calls,
-                                total_cost: totals.total_cost,
-                                total_duration_ms: duration_ms,
-                            }),
-                        ),
-                    )
-                    .await?;
-
-                    self.publish_archived_and_mark_pending(
-                        cursor,
-                        agent_id,
-                        invocation_id,
-                        "completed",
-                    )
-                    .await?;
-
-                    info!(
-                        agent_id = %agent_id,
-                        invocation_id = %invocation_id,
-                        duration_ms,
-                        cost = totals.total_cost,
-                        "reducer invocation completed"
-                    );
-
-                    return Ok(InvocationOutcome::Completed {
-                        invocation_id,
-                        response: ChatResponse::completed(summary),
-                        cost: totals.total_cost,
-                        duration_ms,
-                    });
+                            completion,
+                            totals.total_cost,
+                        )
+                        .await;
                 }
                 NextAction::Failed(err) => {
                     totals.total_duration_ms = start.elapsed().as_millis() as u64;
@@ -2515,8 +2494,10 @@ mod mcp;
 mod replay;
 mod resume_notice;
 mod server_request;
+mod terminal;
 mod tools_changed_notice;
 use mcp::{GrantServers, triggered_event};
+use terminal::Completion;
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};
 

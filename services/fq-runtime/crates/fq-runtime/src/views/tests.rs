@@ -365,6 +365,8 @@ async fn summary_line_joins_onto_invocation_surfaces() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
         proj.insert_event(
@@ -430,6 +432,8 @@ async fn reads_back_seeded_worker_and_invocation() {
             trigger_source: Some("manual".into()),
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
         ws.write_tool_intent("inv-1", "call-1", "exec", "{}", 160)
@@ -544,6 +548,8 @@ async fn terminal_coordination_status_hides_orphaned_live_execution() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();
@@ -603,6 +609,8 @@ async fn open_llm_dispatch_counts_as_working() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
         ws.write_llm_intent(
@@ -687,6 +695,8 @@ async fn transcript_outcome_reflects_terminality() {
                 trigger_source: None,
                 trigger_subject: None,
                 trigger_payload: None,
+                terminal_outcome: None,
+                terminal_published_at: None,
             };
             ws.upsert_invocation_state(&row).await.unwrap();
         }
@@ -745,6 +755,8 @@ async fn executions_ignore_clock_skew() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         ws.upsert_invocation_state(&row).await.unwrap();
         let _cp = ControlPlaneStore::open(&paths.control_plane).await.unwrap();
