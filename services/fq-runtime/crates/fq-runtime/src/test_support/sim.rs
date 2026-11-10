@@ -2528,10 +2528,13 @@ mod crash_dst {
     /// survives the crash instead of being archived without it.
     ///
     /// A lost `completed` comes back as *the same event* the fault
-    /// refused, envelope and `event_id` included, so JetStream's
-    /// `Nats-Msg-Id` dedup and the projection's `event_id` upsert both
-    /// see one event, never two. Once it is out, a further sweep (the ack
-    /// still pending) republishes `invocation.archived` alone.
+    /// refused, envelope and `event_id` included. Delivery is
+    /// at-least-once: had the original landed, JetStream's `Nats-Msg-Id`
+    /// dedup would drop the copy inside the stream's 120 s
+    /// `duplicate_window`, and past it a consumer idempotent on
+    /// `event_id` (the projection's upsert) would still see one event.
+    /// Once it is out, a further sweep (the ack still pending)
+    /// republishes `invocation.archived` alone.
     async fn assert_lost_terminal_publish_heals(
         world: &SimWorld,
         turns: usize,

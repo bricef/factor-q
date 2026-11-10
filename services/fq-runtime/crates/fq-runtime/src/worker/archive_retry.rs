@@ -14,9 +14,19 @@
 //! event (`terminal_outcome`, v12) while that is not stamped
 //! published — the healer for a `completed` publish lost after
 //! the row went terminal (#823). It is the stored event itself,
-//! so a copy that did land (a lost ack, or the run loop racing
-//! this sweep) is one event to JetStream's `Nats-Msg-Id` dedup
-//! and to the projection's `event_id` upsert, not two.
+//! with the original's `event_id`, so delivery is at-least-once
+//! but never a second event: if a copy did land (a lost ack, or
+//! the run loop racing this sweep), JetStream's `Nats-Msg-Id`
+//! dedup drops the republish inside the stream's 120 s
+//! `duplicate_window`, and past it a consumer idempotent on
+//! `event_id` — the projection's upsert — still sees one event.
+//!
+//! A stored event this build cannot decode holds its row: no
+//! `completed`, no `archived`, an `error!` per pass, and the
+//! sweep carries on to the rows behind it. Archiving without it
+//! would discard the only copy of the outcome; the price is that
+//! the control plane keeps seeing that invocation unarchived
+//! until a build that can read the event runs.
 //!
 //! Two configurable timings:
 //!
@@ -211,10 +221,24 @@ impl ArchiveRetrySweeper {
 
         // The terminal event first, if its publish was lost (#823): the
         // stored event itself, envelope and `event_id` included, so a copy
-        // that did land is deduplicated rather than counted twice.
-        let owed = row
-            .unpublished_terminal_event()
-            .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+        // that did land carries the same `event_id` as the original.
+        let owed = match row.unpublished_terminal_event() {
+            Ok(owed) => owed,
+            // Held, not archived without it: archiving would discard the
+            // only copy of the outcome, while a held row stays loud (the
+            // warn-once above) and a build that can read it heals it. The
+            // likely cause is an event stored by an older build and read
+            // after an event-shape change, not corruption. Like the
+            // non-terminal branch above, it must not end the pass.
+            Err(err) => {
+                error!(
+                    invocation_id = %row.invocation_id,
+                    error = %err,
+                    "stored terminal event does not decode; holding the row unarchived"
+                );
+                return Ok(());
+            }
+        };
         if let Some(terminal) = owed {
             self.sink
                 .publish(&terminal)

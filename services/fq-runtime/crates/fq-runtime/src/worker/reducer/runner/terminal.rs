@@ -97,7 +97,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// out, then `invocation.archived`. A failure at any step leaves the
     /// rest to the sweeper, which republishes `completed` first while the
     /// stamp is missing — the same event, so a republish of one that did
-    /// land is deduplicated on its `event_id`.
+    /// land carries its `event_id` (at-least-once delivery; see
+    /// `store/terminal_outcome.rs` for what deduplicates it, and when).
     pub(super) async fn finish_completion(
         &self,
         cursor: &mut Option<Uuid>,

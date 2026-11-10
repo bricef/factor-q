@@ -533,10 +533,22 @@ Crash semantics:
   the row's `terminal_outcome` is unstamped it republishes that
   stored `completed` first and stamps it, then publishes
   `invocation.archived`. The republish is the lost event itself,
-  so if the original did land (a lost ack, or the run loop
-  racing the sweep) JetStream's `Nats-Msg-Id` dedup and the
-  projection's `event_id` upsert still see one event, with its
-  original timestamp.
+  `event_id` and original timestamp included. Delivery is
+  at-least-once: if the original did land (a lost ack, or the
+  run loop racing the sweep), JetStream's `Nats-Msg-Id` dedup
+  drops the copy only inside the event stream's 120 s
+  `duplicate_window`. A heal later than that puts a second
+  message with the same `event_id` on the stream, and consumers
+  idempotent on `event_id` (the projection's upsert) still see
+  one event.
+- A stored `completed` this build cannot decode (typically one
+  an older build stored, read after an event-shape change) holds
+  its row. The sweeper logs an error each pass and publishes
+  neither `completed` nor `invocation.archived` for it, and the
+  pass carries on to the other rows. Archiving without it would
+  discard the only copy of the outcome. The price is that the
+  control plane keeps seeing that invocation as not archived
+  until a build that can read the event runs.
 - A `failed` is not stored yet. The mid-step failure sites
   publish it *before* `ensure_terminal` marks the row, so a lost
   `failed` there leaves the row in flight, for recovery to
