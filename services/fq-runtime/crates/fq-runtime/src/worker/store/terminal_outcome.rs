@@ -12,11 +12,13 @@
 //! The column holds the **whole event, envelope included**, as the JSON
 //! [`EventBus::publish`](crate::bus::EventBus::publish) puts on the wire —
 //! not the payload with its `event_id` beside it. A republish is then the
-//! lost event exactly: the same `event_id`, so JetStream's `Nats-Msg-Id`
-//! dedup and the projection's `event_id` upsert each see one event, never
-//! two; the same `timestamp`, so the projection does not re-date the
-//! completion to when the sweeper healed it; and the same
-//! `parent_event_id`, so the chain still holds. A payload-plus-id column
+//! lost event exactly. It has the same `event_id`: delivery is
+//! at-least-once, and when a copy did land, JetStream's `Nats-Msg-Id` dedup
+//! drops the republish inside the stream's 120 s `duplicate_window`, while
+//! past it a consumer idempotent on `event_id` (the projection's upsert)
+//! still sees one event. It has the same `timestamp`, so the projection
+//! does not re-date the completion to when the sweeper healed it, and the
+//! same `parent_event_id`, so the chain still holds. A payload-plus-id column
 //! would have to rebuild an envelope that differs from the lost one in
 //! everything but its id. One JSON column rather than six typed ones, too,
 //! so `failed` can share it: [`EventPayload`](crate::events::EventPayload)
