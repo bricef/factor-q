@@ -363,6 +363,53 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+### When the archive sweeper holds a terminal row
+
+A finished invocation's row stays in `worker.db` until the control plane
+acknowledges its `invocation.archived`. Since worker schema v12 the row
+also keeps the invocation's `completed` event until that event is known to
+have reached the bus. If the publish was lost, the archive sweeper
+republishes it first
+([#823](https://github.com/bricef/factor-q/issues/823)).
+
+The sweeper will not republish a stored event that this build cannot
+read, or one that could not be that row's outcome. The case to expect is
+an event an older daemon stored and had not yet published when you
+upgraded across an event-schema bump. Republished, it would halt every
+durable consumer on the stream (see
+[When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
+So the sweeper **holds** the row instead. It publishes neither `completed`
+nor `invocation.archived` for that row, and it carries on with every other
+row. The daemon log reports a held row once per daemon run, at error
+level, as `stored terminal event cannot be republished; holding the row
+unarchived until an operator releases it`, with the `invocation_id` and
+the reason (for example, the `schema_version` it found and the versions
+this build reads).
+
+Nothing releases a held row on its own. No later build reads an older
+event version, so the hold lasts until you release the row. Releasing
+archives the invocation **without** its outcome, so keep a copy of the
+stored event first, because it is the only copy of the run's task status,
+summary and cost:
+
+```sh
+db=~/.cache/factor-q/worker.db   # the `worker db:` line fqd prints at startup
+id=<invocation-id>               # from the error line
+
+# Keep the outcome: this is the only copy.
+sqlite3 -cmd '.timeout 5000' "$db" \
+  "SELECT terminal_outcome FROM invocation_state WHERE invocation_id = '$id'" \
+  > "held-$id.json"
+
+# Release the row: the next sweep archives it without its outcome.
+sqlite3 -cmd '.timeout 5000' "$db" \
+  "UPDATE invocation_state SET terminal_outcome = NULL WHERE invocation_id = '$id'"
+```
+
+The sweeper reads every row afresh on each pass (every 10 s by default),
+so the next pass archives the released row, and the control plane's ack
+deletes it as usual.
+
 ## When a provider hangs or throttles
 
 Every model call has a deadline — `[worker] llm_timeout_secs` (default
