@@ -2444,8 +2444,13 @@ mod crash_dst {
         6 * turns + 6
     }
 
+    /// The publish index of `completed`; `invocation.archived` follows it.
+    fn completed_idx(turns: usize) -> usize {
+        6 * turns + 4
+    }
+
     fn expect_for(fault: usize, turns: usize) -> Expect {
-        let completed_idx = 6 * turns + 4;
+        let completed_idx = completed_idx(turns);
         if fault == 0 {
             Expect::NothingPersisted
         } else if fault >= completed_idx {
@@ -2559,7 +2564,7 @@ mod crash_dst {
 
         sweeper.sweep_once(&mut warned).await.unwrap();
         let events = world.sink.events();
-        let completed_lost = fault == 6 * turns + 4;
+        let completed_lost = fault == completed_idx(turns);
         let want: &[&str] = if completed_lost {
             &["completed", "invocation_archived"]
         } else {
@@ -2724,9 +2729,8 @@ mod crash_dst {
     async fn lost_completed_publish_is_healed_with_its_outcome() {
         let turns = 2;
         let reference = run_reference(77, turns).await;
-        let completed_idx = 6 * turns + 4;
         assert_eq!(
-            check_fault_point(77, turns, completed_idx, &reference).await,
+            check_fault_point(77, turns, completed_idx(turns), &reference).await,
             Expect::AlreadyTerminal
         );
     }
@@ -2804,7 +2808,7 @@ mod crash_dst {
     async fn lost_terminal_publishes_heal_via_the_sweeper() {
         let turns = 1;
         for fault_offset in [0usize, 1] {
-            let fault = 6 * turns + 4 + fault_offset; // completed / archived publish
+            let fault = completed_idx(turns) + fault_offset; // completed / archived publish
             let (world, _) = crash_at(21, turns, fault).await;
             let inv = world.invocation_id().to_string();
             world.sink.clear_fault();
