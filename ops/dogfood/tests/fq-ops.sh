@@ -37,10 +37,20 @@ else printf '  ok   an unknown verb is refused (exit %s)\n' "$(bash "$fq_ops" fr
 if bash "$fq_ops" probe 2>/dev/null; then printf '  FAIL probe passes with no scheduler process\n'; failed=1
 else printf '  ok   probe fails with no scheduler process\n'; fi
 # A process whose comm is `supercronic` — anywhere, not PID 1: the service
-# runs under an init — is what the probe looks for. A symlink's basename
-# is the comm of what it executes.
-ln -s "$(command -v sleep)" "$work/supercronic"
-"$work/supercronic" 30 & fake=$!
+# runs under an init — is what the probe looks for. A script's comm is its
+# own file name, whatever it goes on to run, so the stand-in is a script
+# and not a symlink to `sleep`: a multicall `sleep` (uutils, on
+# ubuntu-26.04) refuses to start under a name it does not know
+# (https://github.com/bricef/factor-q/issues/950). The trap takes the
+# script's own `sleep` with it when the test kills the stand-in.
+cat > "$work/supercronic" <<'FAKE'
+#!/bin/sh
+sleep 30 &
+trap 'kill $!' TERM
+wait
+FAKE
+chmod +x "$work/supercronic"
+"$work/supercronic" & fake=$!
 if bash "$fq_ops" probe 2>/dev/null; then printf '  ok   probe passes while a supercronic process runs\n'
 else printf '  FAIL probe fails with a supercronic process running\n'; failed=1; fi
 kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null
