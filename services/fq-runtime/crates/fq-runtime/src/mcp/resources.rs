@@ -124,7 +124,7 @@ impl Tool for McpResourceTool {
                 Ok(ToolResult {
                     output: render_listing(
                         resources.iter().map(|resource| {
-                            let raw = &resource.raw;
+                            let raw = resource;
                             (
                                 raw.uri.as_str(),
                                 raw.name.as_str(),
@@ -161,7 +161,7 @@ impl Tool for McpResourceTool {
                 Ok(ToolResult {
                     output: render_listing(
                         templates.iter().map(|template| {
-                            let raw = &template.raw;
+                            let raw = template;
                             (
                                 raw.uri_template.as_str(),
                                 raw.name.as_str(),
@@ -229,6 +229,9 @@ pub fn render_resource_contents(result: &ReadResourceResult) -> String {
                     mime_type.as_deref().unwrap_or("unknown")
                 ));
             }
+            // rmcp marks the enum non-exhaustive: a contents kind added
+            // by a later revision is named, not silently dropped.
+            _ => output.push_str("[unsupported resource contents]\n"),
         }
     }
     output

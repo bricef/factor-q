@@ -28,7 +28,9 @@ use tokio::sync::oneshot;
 
 /// The elicitation schema types, re-exported once so the runtime names
 /// them from here rather than from rmcp.
-pub(crate) use rmcp::model::{ElicitationSchema, EnumSchema, PrimitiveSchema, StringFormat};
+pub(crate) use rmcp::model::{
+    ElicitationSchema, EnumSchema, PrimitiveSchemaDefinition as PrimitiveSchema, StringFormat,
+};
 
 /// A request a connected MCP server initiates back toward the host
 /// *mid-invocation* (ADR-0018).
@@ -141,6 +143,13 @@ pub enum ElicitationRequest {
         /// The request serialized exactly as the server sent it.
         as_sent: String,
     },
+    /// A mode a later protocol revision adds (rmcp marks the mode enum
+    /// non-exhaustive): gated, validated and judged like the rest, then
+    /// declined.
+    Unknown {
+        /// The request serialized exactly as the server sent it.
+        as_sent: String,
+    },
 }
 
 impl ElicitationRequest {
@@ -148,7 +157,9 @@ impl ElicitationRequest {
     /// its mode: what an input evaluator judges.
     pub fn as_sent(&self) -> &str {
         match self {
-            Self::Form { as_sent, .. } | Self::Url { as_sent, .. } => as_sent,
+            Self::Form { as_sent, .. } | Self::Url { as_sent, .. } | Self::Unknown { as_sent } => {
+                as_sent
+            }
         }
     }
 }

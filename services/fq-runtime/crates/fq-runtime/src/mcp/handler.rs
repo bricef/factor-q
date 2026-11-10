@@ -20,15 +20,24 @@
 //! types are not deprecated and are not mirrored: `server_initiated`
 //! re-exports them from rmcp, once.
 
+// The one place factor-q names what SEP-2577 deprecates: the handshake-era
+// sampling, roots and logging surface it keeps serving (Route A in
+// `docs/reviews/2026-11-06-mcp-protocol-versions.md`). Child modules, the
+// conversions and their tests, inherit this expectation.
+#![expect(
+    deprecated,
+    reason = "factor-q serves MCP sampling, roots and logging, which SEP-2577 deprecates; this module is their only boundary"
+)]
+
 use std::sync::Arc;
 
 use rmcp::ClientHandler;
 use rmcp::model::{
-    ClientCapabilities, ClientInfo, CreateElicitationRequestParams, CreateElicitationResult,
-    CreateMessageRequestMethod, CreateMessageRequestParams, CreateMessageResult,
-    ElicitationCapability, FormElicitationCapability, ListRootsResult,
-    LoggingMessageNotificationParam, ProgressNotificationParam, ResourceUpdatedNotificationParam,
-    Root, RootsCapabilities, SamplingCapability, SetLevelRequestParams, SubscribeRequestParams,
+    ClientCapabilities, ClientConfig, CreateMessageRequestMethod, CreateMessageRequestParams,
+    CreateMessageResult, ElicitRequestParams, ElicitResult, ElicitationCapability,
+    FormElicitationCapability, ListRootsResult, LoggingMessageNotificationParam,
+    ProgressNotificationParam, ProtocolVersion, ResourceUpdatedNotificationParam, Root,
+    RootsCapabilities, SamplingCapability, SetLevelRequestParams, SubscribeRequestParams,
 };
 use rmcp::service::{
     MaybeSendFuture, NotificationContext, Peer, RequestContext, RoleClient, ServiceError,
@@ -160,28 +169,32 @@ impl FactorQClientHandler {
     pub fn advertised_capabilities(granted: AdvertisedCapabilities) -> ClientCapabilities {
         let mut capabilities = ClientCapabilities::default();
         if granted.roots {
-            capabilities.roots = Some(RootsCapabilities {
-                list_changed: Some(true),
-            });
+            // `RootsCapabilities` is non-exhaustive and has no builder.
+            let mut roots = RootsCapabilities::default();
+            roots.list_changed = Some(true);
+            capabilities.roots = Some(roots);
         }
         if granted.sampling {
             capabilities.sampling = Some(SamplingCapability::default());
         }
         if granted.elicitation {
-            capabilities.elicitation = Some(ElicitationCapability {
-                form: Some(FormElicitationCapability {
-                    schema_validation: Some(true),
-                }),
-                url: None,
-            });
+            capabilities.elicitation = Some(
+                ElicitationCapability::new()
+                    .with_form(FormElicitationCapability::new().with_schema_validation(true)),
+            );
         }
         capabilities
     }
 }
 
 impl ClientHandler for FactorQClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
+    fn get_info(&self) -> ClientConfig {
+        let mut info = ClientConfig::default();
+        // rmcp 3.5+ offers `2026-07-28` by default, which a dual-era
+        // server may accept and move the connection off the handshake era.
+        // factor-q speaks the handshake era only, so it offers that era's
+        // newest version.
+        info.protocol_version = ProtocolVersion::LATEST_WITH_INITIALIZE;
         info.capabilities = Self::advertised_capabilities(self.capabilities);
         info
     }
@@ -239,14 +252,13 @@ impl ClientHandler for FactorQClientHandler {
     /// default).
     fn create_elicitation(
         &self,
-        params: CreateElicitationRequestParams,
+        params: ElicitRequestParams,
         _context: RequestContext<RoleClient>,
-    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>>
-    + MaybeSendFuture
-    + '_ {
+    ) -> impl std::future::Future<Output = Result<ElicitResult, rmcp::ErrorData>> + MaybeSendFuture + '_
+    {
         let sink = self.server_requests.clone();
         async move {
-            let decline = || Ok(CreateElicitationResult::from(elicitation_decline()));
+            let decline = || Ok(ElicitResult::from(elicitation_decline()));
             let Some(tx) = sink else {
                 return decline();
             };
@@ -261,7 +273,7 @@ impl ClientHandler for FactorQClientHandler {
                 return decline();
             }
             match reply_rx.await {
-                Ok(result) => result.map(CreateElicitationResult::from),
+                Ok(result) => result.map(ElicitResult::from),
                 // Reply sender dropped without answering → decline.
                 Err(_) => decline(),
             }
@@ -416,7 +428,6 @@ impl ClientHandler for FactorQClientHandler {
 /// Ask a connected server for log records at or above `level`
 /// (`logging/setLevel`). MCP deprecated the request in SEP-2577 (rmcp
 /// 1.8 flags it); allowed until servers drop it.
-#[allow(deprecated)]
 pub(super) async fn set_level(
     peer: &Peer<RoleClient>,
     level: McpLogLevel,

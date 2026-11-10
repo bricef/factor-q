@@ -664,6 +664,10 @@ fn validate_primitive_value(
                 ))
             }
         }
+        // rmcp marks the enum non-exhaustive. A property kind a later
+        // revision adds is not checked here: like an enum whose allowed
+        // set cannot be read, a spec-valid value is not rejected.
+        _ => Ok(()),
     }
 }
 
@@ -684,6 +688,10 @@ fn string_matches_format(text: &str, format: StringFormat) -> bool {
         StringFormat::DateTime => {
             matches!(text.split_once('T'), Some((date, _)) if is_iso_date(date))
         }
+        // rmcp marks the enum non-exhaustive. A format a later revision
+        // adds is not checked, in keeping with this check being
+        // lightweight rather than a validator for every format.
+        _ => true,
     }
 }
 

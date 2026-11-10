@@ -51,6 +51,15 @@ ignore = [
     # and both `from_bytes_hex` call sites), so no secret ever reaches the
     # P-256 code. Goes when biscuit-auth moves to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5: biscuit-auth 6's unused Secp256r1 backend; factor-q keys are Ed25519 only" },
+    # libsqlite3-sys 0.30.1 bundles a SQLite older than 3.54, which can return
+    # stale page-cache memory when it opens a database beside a crafted `-wal`
+    # file (CVE-2026-119375). The fix is libsqlite3-sys 0.39, but sqlx-sqlite
+    # 0.9.0, the latest, requires `<0.38`. Exploiting it needs an
+    # attacker-written database and WAL pair; factor-q opens only its own
+    # SQLite files in its own state directory and never a user-supplied one.
+    # Accepted 2026-11-10 (docs/decision-log.md, SECURITY.md R8); goes with
+    # the sqlx upgrade in #941.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.30 via sqlx-sqlite 0.9 (latest needs <0.38); exploit needs a crafted DB+WAL pair, and factor-q opens only its own state files" },
 ]
 
 [licenses]

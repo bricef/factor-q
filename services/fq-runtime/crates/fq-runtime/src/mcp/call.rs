@@ -113,10 +113,10 @@ where
             // Best-effort: tell the server to abort. We stop
             // awaiting the response regardless.
             let _ = peer
-                .notify_cancelled(CancelledNotificationParam {
-                    request_id,
-                    reason: Some("cancelled by host".to_string()),
-                })
+                .notify_cancelled(CancelledNotificationParam::new(
+                    Some(request_id),
+                    Some("cancelled by host".to_string()),
+                ))
                 .await;
             Ok(None)
         }

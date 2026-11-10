@@ -335,8 +335,13 @@ cursor gets a second go at it.
   `none`, but a server that asks for `thisServer` or `allServers` is not
   told it was refused: it simply gets a completion built from its own
   messages. The inbound redaction seam lands with context injection.
-- **Roots advertise `file://` only**; audio prompt content awaits an
-  upstream rmcp fix.
+- **Handshake-era servers only.** factor-q speaks the protocol revisions
+  that open with an `initialize` handshake (2025-11-25 and earlier), and
+  offers 2025-11-25 even to a server that would accept the stateless
+  2026-07-28 revision. A server that speaks *only* 2026-07-28 cannot be
+  reached yet. Why, and what supporting the newer revision involves, is
+  in the [2026-11-06 MCP review](../reviews/2026-11-06-mcp-protocol-versions.md).
+- **Roots advertise `file://` only.**
 
 See [ADR-0017](../adrs/accepted/0017-mcp-human-in-the-loop.md) (policy),
 [ADR-0018](../adrs/accepted/0018-mcp-server-initiated-execution.md)

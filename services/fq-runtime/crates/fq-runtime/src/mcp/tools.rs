@@ -108,7 +108,7 @@ impl Tool for McpTool {
         let output: String = result
             .content
             .iter()
-            .filter_map(|c| c.raw.as_text().map(|t| t.text.as_str()))
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
 
