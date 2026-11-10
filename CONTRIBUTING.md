@@ -191,8 +191,11 @@ daemon; after changing the Dockerfile, build them and run
   `ignore` line per advisory that cannot be fixed yet. A red audit on
   your PR is fixed by `cargo update -p <crate>` when a patched release
   exists, and otherwise by one more explained line that the reviewer
-  will read — never by a blanket allow. Dependabot opens the weekly
-  update PRs (`.github/dependabot.yml`).
+  will read — never by a blanket allow. Accepting an advisory is also a
+  dated entry in the [decision log](docs/decision-log.md) saying why it is
+  acceptable and what reopens it, and — when it leaves a security exposure
+  open — a row in [`SECURITY.md`](SECURITY.md)'s risk register. Dependabot
+  opens the weekly update PRs (`.github/dependabot.yml`).
 
 - **Size and exception budgets are ratcheted, not advisory.** No file
   may exceed 800 production lines, no function may exceed 250
