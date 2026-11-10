@@ -412,21 +412,9 @@ mod tests {
                     .expect("worker store"),
             );
             let invocation_id = Uuid::now_v7();
-            let agent_id = AgentId::new("sweep-agent").unwrap();
-            let mut completed = Event::new(
-                agent_id.clone(),
-                invocation_id,
-                EventPayload::Completed(CompletedPayload {
-                    task_status: TaskStatus::Partial,
-                    result_summary: Some("half done".to_string()),
-                    total_llm_calls: 3,
-                    total_tool_calls: 2,
-                    total_cost: 0.25,
-                    total_duration_ms: 1_234,
-                }),
-            );
+            let mut completed = completed_event(invocation_id);
             completed.envelope.parent_event_id = Some(Uuid::now_v7());
-            let mut row = terminal_row(&invocation_id.to_string(), agent_id.as_str(), 1_000);
+            let mut row = terminal_row(&invocation_id.to_string(), "sweep-agent", 1_000);
             row.terminal_outcome = Some(terminal_outcome::encode(&completed).unwrap());
             store.upsert_invocation_state(&row).await.unwrap();
             let sink = Arc::new(RecordingSink::new());
@@ -511,65 +499,175 @@ mod tests {
         assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
     }
 
-    /// A stored outcome this build cannot decode (typically one an older
-    /// build stored, still unpublished at shutdown, read after an event-shape
-    /// change) holds its own row and does not end the pass: the rows behind
-    /// it are still archived.
+    /// A `completed` this invocation could have stored.
+    fn completed_event(invocation_id: Uuid) -> Event {
+        Event::new(
+            AgentId::new("sweep-agent").unwrap(),
+            invocation_id,
+            EventPayload::Completed(CompletedPayload {
+                task_status: TaskStatus::Partial,
+                result_summary: Some("half done".to_string()),
+                total_llm_calls: 3,
+                total_tool_calls: 2,
+                total_cost: 0.25,
+                total_duration_ms: 1_234,
+            }),
+        )
+    }
+
+    /// One sweep over a row whose stored terminal event must not go out,
+    /// sorted ahead of a healthy archive-pending row.
+    struct Held {
+        dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sink: Arc<RecordingSink>,
+        sweeper: ArchiveRetrySweeper,
+        bad: String,
+        healthy: String,
+        stored: String,
+    }
+
+    impl Held {
+        /// Store `stored(invocation_id)` as a terminal row's outcome, sweep
+        /// once, and assert the hold (see [`Self::assert_held`]).
+        async fn sweep(stored: impl FnOnce(Uuid) -> String) -> Self {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let bad_id = Uuid::now_v7();
+            let (bad, healthy) = (bad_id.to_string(), Uuid::now_v7().to_string());
+            let stored = stored(bad_id);
+            let mut row = terminal_row(&bad, "sweep-agent", 1_000);
+            row.terminal_outcome = Some(stored.clone());
+            store.upsert_invocation_state(&row).await.unwrap();
+            store
+                .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&healthy, 1_000).await.unwrap();
+            let order = store.list_archive_pending().await.unwrap();
+            assert_eq!(order[0].invocation_id, bad, "never archived, so first");
+
+            let sink = Arc::new(RecordingSink::new());
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+            sweeper
+                .sweep_once(&mut HashSet::new())
+                .await
+                .expect("a held row does not end the pass");
+            let world = Self {
+                dir,
+                store,
+                sink,
+                sweeper,
+                bad,
+                healthy,
+                stored,
+            };
+            world.assert_held().await;
+            world
+        }
+
+        /// The healthy row behind was archived; nothing went out for the
+        /// held row, which is unstamped, not archive-pending, its copy kept.
+        async fn assert_held(&self) {
+            let events = self.sink.events();
+            let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
+            assert_eq!(kinds, ["invocation_archived"], "no completed, one archived");
+            assert_eq!(events[0].envelope.invocation_id.to_string(), self.healthy);
+            let held = self.store.get_invocation_state(&self.bad).await.unwrap();
+            let held = held.expect("held, not dropped");
+            assert_eq!(held.terminal_published_at, None, "not stamped");
+            assert_eq!(held.archive_status, None, "not archived without it");
+            assert_eq!(held.archive_published_at, None);
+            assert_eq!(held.terminal_outcome.as_deref(), Some(self.stored.as_str()));
+        }
+    }
+
+    /// A stored outcome that is not an event at all holds its own row and
+    /// does not end the pass: the rows behind it are still archived.
     #[tokio::test]
     async fn an_undecodable_terminal_event_holds_its_row_and_the_sweep_goes_on() {
-        let dir = tempdir().unwrap();
-        let store = Arc::new(
-            WorkerStore::open(&dir.path().join("worker.db"))
-                .await
-                .expect("worker store"),
-        );
-        let bad = Uuid::now_v7().to_string();
-        let healthy = Uuid::now_v7().to_string();
-        let mut row = terminal_row(&bad, "sweep-agent", 1_000);
-        row.terminal_outcome = Some(r#"{"not": "an event"}"#.to_string());
-        store.upsert_invocation_state(&row).await.unwrap();
-        store
-            .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+        Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+    }
+
+    /// The realistic hold: an event an older build stored, still unpublished
+    /// across an envelope bump. It may well still parse, but republishing it
+    /// would halt every durable consumer on the stream (`Event::from_wire`).
+    #[tokio::test]
+    async fn a_stored_event_of_an_older_schema_version_is_held() {
+        Held::sweep(|inv| {
+            let mut event = completed_event(inv);
+            event.envelope.schema_version = crate::events::SCHEMA_VERSION - 1;
+            terminal_outcome::encode(&event).unwrap()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_stored_event_for_another_invocation_is_held() {
+        Held::sweep(|_| terminal_outcome::encode(&completed_event(Uuid::now_v7())).unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_stored_event_that_is_not_terminal_is_held() {
+        Held::sweep(|inv| {
+            let notice = EventPayload::HostNotice(crate::events::HostNoticePayload {
+                kind: "sim".to_string(),
+                body: "not an outcome".to_string(),
+            });
+            terminal_outcome::encode(&Event::new(AgentId::new("a").unwrap(), inv, notice)).unwrap()
+        })
+        .await;
+    }
+
+    /// An `event_type` this build has never heard of reads as
+    /// `EventPayload::Unknown` rather than failing: still not terminal.
+    #[tokio::test]
+    async fn a_stored_event_of_an_unknown_type_is_held() {
+        Held::sweep(|inv| {
+            let mut value = serde_json::to_value(completed_event(inv)).unwrap();
+            value["payload"]["event_type"] = "from_the_future".into();
+            value.to_string()
+        })
+        .await;
+    }
+
+    /// The documented release (`operating-the-daemon.md`): once an operator
+    /// clears the stored outcome by hand, the next sweep archives the held
+    /// row without it.
+    #[tokio::test]
+    async fn a_released_row_is_archived_without_its_outcome() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let world = Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+        let operator = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(world.dir.path().join("worker.db")))
             .await
             .unwrap();
-        store.set_archive_pending(&healthy, 1_000).await.unwrap();
-        let order = store.list_archive_pending().await.unwrap();
-        assert_eq!(
-            order[0].invocation_id, bad,
-            "never archived, so first on every pass"
-        );
-
-        let sink = Arc::new(RecordingSink::new());
-        let sweeper = ArchiveRetrySweeper::new_with_sink(
-            Arc::clone(&sink) as Arc<dyn EventSink>,
-            WorkerId::new("sweep-worker").unwrap(),
-            Arc::clone(&store),
-        );
-        sweeper
-            .sweep_once(&mut HashSet::new())
+        sqlx::query("UPDATE invocation_state SET terminal_outcome = NULL WHERE invocation_id = ?")
+            .bind(&world.bad)
+            .execute(&operator)
             .await
-            .expect("one bad row does not end the pass");
+            .unwrap();
+        operator.close().await;
 
-        let events = sink.events();
-        let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
-        assert_eq!(kinds, ["invocation_archived"], "no completed, one archived");
-        assert_eq!(events[0].envelope.invocation_id.to_string(), healthy);
-
-        let held = store
-            .get_invocation_state(&bad)
-            .await
-            .unwrap()
-            .expect("held, not dropped");
-        assert_eq!(held.terminal_published_at, None, "not stamped");
-        assert_eq!(
-            held.archive_status, None,
-            "not archived without its outcome"
-        );
-        assert_eq!(held.archive_published_at, None);
-        assert_eq!(
-            held.terminal_outcome, row.terminal_outcome,
-            "the copy is kept"
-        );
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        let released: Vec<_> = world.sink.events()[1..]
+            .iter()
+            .filter(|e| e.envelope.invocation_id.to_string() == world.bad)
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(released, ["invocation_archived"], "archived, no completed");
+        let row = world.store.get_invocation_state(&world.bad).await.unwrap();
+        assert_eq!(row.unwrap().archive_status.as_deref(), Some("pending"));
     }
 
     #[tokio::test]
