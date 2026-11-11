@@ -66,7 +66,12 @@ agent:
 > ([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
 > Two things in that record bear on this plan. The claim row names one
 > `invocation_id` per trigger and a traversal has several, so what the
-> row names for a traversal is this plan's to decide. And the claim is
+> row names for a traversal is this plan's to decide. Since
+> [#959](https://github.com/bricef/factor-q/issues/959) that id is a
+> recovery key, written at claim time: startup recovery marks a claim
+> started by finding it from an in-flight WAL row, so it must name
+> something that has a WAL row once the traversal has durably started.
+> And the claim is
 > correct for one daemon and assumes one: "node" here means a node of
 > the graph, and this plan as written keeps a single process on the
 > trigger stream, so it does not reopen that decision. Any step beyond
