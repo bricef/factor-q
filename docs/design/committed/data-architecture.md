@@ -629,7 +629,7 @@ constraint.
 > section
 > [What this means for more than one worker](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
 > takes each in turn and says what has to be decided before the role
-> split. Read it before building §7.4.
+> split. Read it before starting [§11](#11-v1-to-v2-evolution-path).
 
 ### 5.8 What was considered and dismissed
 
@@ -1173,6 +1173,13 @@ What changes when an operator splits the deployment.
   without redesigning contracts. Every in-process crossing is one
   more thing that lift has to replace. Module visibility would make
   the count checkable; today it is a thing you have to grep for.
+
+  Trigger dispatch has one of these crossings too (added
+  2026-11-11): the dispatcher learns that an invocation has durably
+  started through `DurableStart`, a one-shot channel handed across
+  the `Worker` trait, and marks the trigger's claim row when it
+  fires. What the lift has to replace there is set out in
+  [ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#3-the-window-between-claim-and-durable-start).
 - The per-store files are fixed names under the cache directory
   (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
   physically separate (#262). A per-role `state_db` config
