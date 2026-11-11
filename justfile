@@ -609,9 +609,9 @@ install-audit-tools:
 #   * `cargo deny check` resolves the workspace's real dependency graph
 #     (every feature on — deny.toml [graph]) and fails on any advisory not
 #     explicitly ignored there, on a yanked crate, on a licence outside the
-#     allow-list, and on a source outside crates.io and the one pinned git
-#     fork. `--locked`: an audit that rewrote Cargo.lock would have audited
-#     something other than what gets built.
+#     allow-list, and on any source other than crates.io, git dependencies
+#     included. `--locked`: an audit that rewrote Cargo.lock would have
+#     audited something other than what gets built.
 #
 # deny.toml is the ONLY ignore list. Its advisory ids are handed to
 # `cargo audit` verbatim, so one explained line accepts a finding in both
