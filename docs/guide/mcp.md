@@ -186,6 +186,22 @@ mcp:
     elicitation: true
 ```
 
+**How much a server can ask for is capped.** A server that holds one
+tool call open could otherwise keep asking until the tool's deadline,
+each answer a model call on the agent's budget. The daemon counts
+requests, sampling and elicitation together: `[worker]
+max_server_requests_per_tool_call` (default 8) per tool call, and
+`max_server_requests_per_invocation` (default 100) across the
+invocation. The count is the last gate before anything is spent — after
+the grant and budget checks, before the `input_validation` evaluators —
+so a request over a cap reaches no model. It is declined the usual way,
+sampling with an error naming the setting, and the invocation carries
+on; the daemon logs one warning per invocation the first time a cap
+refuses. A sampling request's `maxTokens` is also clamped to the agent's
+own output cap (`max_tokens`), so a server never gets a longer
+completion than the agent's own turns do
+([#831](https://github.com/bricef/factor-q/issues/831)).
+
 ## Validation: redaction, request policy, evaluators
 
 The inbound request and outbound result of every sampling / elicitation
