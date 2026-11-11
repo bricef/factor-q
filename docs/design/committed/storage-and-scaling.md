@@ -269,8 +269,11 @@ schema lock the worker and control-plane stores take
 cut short leaves the file as it was, so the next open does it again
 from the start rather than mistaking unstamped tables for a
 pre-versioning file; a second process opening the file waits for the
-first and finds it current. `fq projection rebuild` takes the same
-lock.
+first and finds it current — even one that created the file in the
+same instant, since the pool's first connect, which switches a new
+file into WAL mode before the lock can be taken, is retried on
+`database is locked` within the 30 s the lock wait itself is allowed
+(`SCHEMA_LOCK_WAIT`). `fq projection rebuild` takes the same lock.
 
 **What a rebuild keeps.** Everything below the floor: history from
 before an envelope bump, which this build cannot read and the replay

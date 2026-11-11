@@ -82,7 +82,7 @@ use std::path::Path;
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{QueryBuilder, Sqlite};
 
-use super::{ProjectionStore, StoreError};
+use super::{ProjectionStore, RebuildRecord, StoreError};
 use crate::db::schema::{
     Compatibility, SchemaSeam, check_compatibility, read_user_version, split_sql, with_schema_lock,
     write_user_version,
@@ -472,9 +472,9 @@ impl ProjectionStore {
         path: &Path,
         seam: &mut impl SchemaSeam,
     ) -> Result<(), StoreError> {
-        with_schema_lock(
+        let rebuilt = with_schema_lock(
             &self.pool,
-            async |conn: &mut SqliteConnection| -> Result<(), StoreError> {
+            async |conn: &mut SqliteConnection| -> Result<Option<RebuildRecord>, StoreError> {
                 super::rebuild::ensure_meta_table(conn).await?;
                 let recorded = recorded_version(conn).await?;
                 let verdict = check_compatibility(recorded, PROJECTION_SCHEMA_VERSION);
@@ -493,13 +493,16 @@ impl ProjectionStore {
                             conn,
                             super::rebuild::FRESH_FILE_REASON,
                         )
-                        .await
+                        .await?;
+                        Ok(None)
                     }
-                    Compatibility::Current => level_current(conn).await,
+                    Compatibility::Current => {
+                        level_current(conn).await?;
+                        Ok(None)
+                    }
                     Compatibility::NeedsUpgrade { from } => {
                         let reason = super::rebuild::RebuildReason::SchemaUpgrade { from };
-                        super::rebuild::rebuild_tables(conn, reason).await?;
-                        Ok(())
+                        Ok(Some(super::rebuild::rebuild_tables(conn, reason).await?))
                     }
                     Compatibility::BinaryTooOld { db_version } => {
                         Err(StoreError::IncompatibleSchema {
@@ -511,7 +514,11 @@ impl ProjectionStore {
                 }
             },
         )
-        .await
+        .await?;
+        if let Some(record) = rebuilt {
+            super::rebuild::log_rebuilt(&record);
+        }
+        Ok(())
     }
 
     /// Check that this database is one the read path can serve, on a

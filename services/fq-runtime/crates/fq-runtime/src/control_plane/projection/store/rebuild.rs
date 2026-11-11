@@ -387,20 +387,42 @@ impl ProjectionStore {
     /// Rebuild on demand — the operator path. The same step as the
     /// schema-upgrade rebuild, under the same schema lock; the caller
     /// resets the durable next.
+    ///
+    /// The lock is taken before the rows are carried aside, where the
+    /// old deferred transaction first took it at the `DROP`. That is
+    /// what keeps a write from landing between the copy and the drop,
+    /// and its price is that the daemon's other writers to this file
+    /// (the retention sweep, a dead-letter requeue's claim) wait for the
+    /// whole rebuild with only their pool's 5 s busy timeout, and fail
+    /// that write if it takes longer.
     pub async fn rebuild(&self, reason: Option<&str>) -> Result<RebuildRecord, StoreError> {
         let reason = RebuildReason::Operator(reason.map(str::to_string));
-        with_schema_lock(&self.pool, async |conn: &mut SqliteConnection| {
+        let record = with_schema_lock(&self.pool, async |conn: &mut SqliteConnection| {
             rebuild_tables(conn, reason).await
         })
-        .await
+        .await?;
+        log_rebuilt(&record);
+        Ok(record)
     }
+}
+
+/// Say that a rebuild committed — called once its schema step has
+/// returned, so the line is never written for one that rolled back.
+pub(super) fn log_rebuilt(record: &RebuildRecord) {
+    tracing::info!(
+        to_version = record.schema_version,
+        reason = %record.reason,
+        "projection tables rebuilt with every row carried; the durable consumer will find \
+         the replay floor and be reset before it next reads"
+    );
 }
 
 /// Drop and recreate the projection tables at
 /// [`PROJECTION_SCHEMA_VERSION`], carrying every row across, and note
 /// that the durable must be reset. Runs inside the caller's transaction
 /// — the schema lock's, at open and on demand alike — so it lands whole
-/// or not at all; see the module docs.
+/// or not at all; see the module docs. Says when it starts; the caller
+/// says when it has committed ([`log_rebuilt`]).
 pub(super) async fn rebuild_tables(
     conn: &mut SqliteConnection,
     reason: RebuildReason,
@@ -410,8 +432,7 @@ pub(super) async fn rebuild_tables(
         from_version = ?from_version,
         to_version = PROJECTION_SCHEMA_VERSION,
         reason = %reason.describe(),
-        "rebuilding the projection tables with every row carried; once committed, the \
-         durable consumer finds the replay floor and is reset before it next reads"
+        "rebuilding the projection tables with every row carried, in one transaction"
     );
 
     // Every row, set aside on this connection (a TEMP table is private

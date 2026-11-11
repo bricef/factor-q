@@ -280,10 +280,7 @@ impl ControlPlaneStore {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
+        let pool = schema::connect_store_pool(options, 4).await?;
 
         let store = Self { pool };
         store.bootstrap_schema().await?;

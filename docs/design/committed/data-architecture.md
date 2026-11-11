@@ -629,10 +629,17 @@ applied, and the next start runs it again from the beginning. And it
 is serialised across processes, because the lock is SQLite's own: a
 second process opening the same store waits — up to 30 seconds,
 `SCHEMA_LOCK_WAIT` — for the first to commit, then finds the store
-current. Before this, each migration statement committed on its own,
-so two openers of a fresh file raced on the first `ALTER TABLE ADD
-COLUMN`, and a crash between a migration and its version write left a
-store that failed every later open.
+current. One step comes before that lock and cannot sit inside it:
+switching a newly created file into WAL mode, which happens when the
+store's pool first connects and which SQLite will not wait on. The
+pool's connect is retried on `database is locked`, with a short
+backoff, within the same 30 seconds, so two processes that create the
+same store in the same instant end the same way as any other pair: one
+creates and migrates it, the other waits and finds it current. Before
+this, each migration statement committed on its own, so two openers of
+a fresh file raced on the first `ALTER TABLE ADD COLUMN`, and a crash
+between a migration and its version write left a store that failed
+every later open.
 
 So an operator never sees a per-invocation list of what is
 incompatible, because the refusal is not per-invocation. The remedy is
