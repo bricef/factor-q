@@ -99,7 +99,11 @@ impl TriggerDispatcher {
     /// for every invocation in flight. Without that, a trigger whose last
     /// process died between its first WAL write and its claim's update is
     /// adopted and started again (#959).
-    pub fn with_trigger_claims(mut self, claims: TriggerClaims, worker_id: impl Into<String>) -> Self {
+    pub fn with_trigger_claims(
+        mut self,
+        claims: TriggerClaims,
+        worker_id: impl Into<String>,
+    ) -> Self {
         self.claim_store = Some((claims.store, worker_id.into()));
         self
     }

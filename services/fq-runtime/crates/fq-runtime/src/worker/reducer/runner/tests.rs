@@ -2088,9 +2088,7 @@ async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
         ),
         other => panic!("expected Completed, got {other:?}"),
     }
-    fired
-        .await
-        .expect("the durable start fired during the run");
+    fired.await.expect("the durable start fired during the run");
     let row = store
         .get_invocation_state(&claimed.to_string())
         .await
