@@ -511,9 +511,8 @@ fn event_stream_config() -> consumer::pull::Config {
 ///   was not given, and comparing them would rewrite it forever. The
 ///   trigger consumer is the only durable with a schedule, and the
 ///   consequence — its effective first-delivery ack window is
-///   `TRIGGER_RETRY_BACKOFF[0]`, not `[bus] ack_wait_ms` — belongs to
-///   exactly-once dispatch (<https://github.com/bricef/factor-q/issues/327>),
-///   not here.
+///   `TRIGGER_RETRY_BACKOFF[0]`, not `[bus] ack_wait_ms` — is explained
+///   on [`TRIGGER_RETRY_BACKOFF`], not here.
 fn drifted(existing: &consumer::Config, desired: &consumer::pull::Config) -> bool {
     (desired.backoff.is_empty() && existing.ack_wait != desired.ack_wait)
         || existing.max_deliver != desired.max_deliver
