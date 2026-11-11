@@ -138,6 +138,15 @@ impl Worker for StagedWorker {
             .expect("the gate is never closed")
             .forget();
         durable_start.fire(invocation_id);
+        // An invocation that has just made its first WAL write has work
+        // still to do, and the real runner's next move is always an
+        // await on the store or the broker. So this stub yields once
+        // before it can return. It matters: `TriggerDispatcher::handle`
+        // only learns of a durable start by polling for it, and a
+        // worker that fires the signal and returns within the same poll
+        // is handled as one that never started — its claim row is
+        // released instead of marked `durably_started`.
+        tokio::task::yield_now().await;
         self.finish
             .acquire()
             .await
