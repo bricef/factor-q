@@ -81,15 +81,59 @@ async fn every_durable_carries_an_explicit_ack_wait_and_a_considered_delivery_bo
         trigger.max_deliver, TRIGGER_MAX_DELIVER,
         "the trigger consumer dead-letters, so its bound stays finite"
     );
-    assert_eq!(trigger.backoff, TRIGGER_RETRY_BACKOFF.to_vec());
-    // The server's rule, asserted so nobody reads the explicit
-    // `ack_wait` above it and believes it: a consumer with a `backoff`
-    // schedule has its ack window *replaced* by the schedule's first
-    // entry. This is the trigger consumer's real first-delivery
-    // deadline, and moving it belongs to exactly-once dispatch (#327).
+    // Its schedule, and the ack window the schedule gives it, are the
+    // next test's.
+}
+
+/// The trigger durable's retry ladder as the server holds it
+/// (<https://github.com/bricef/factor-q/issues/953>): thirty seconds,
+/// then two, five and twelve minutes, so a trigger that fails every
+/// delivery is dead-lettered 19.5 minutes after its first.
+///
+/// The expectation is written out rather than read off
+/// [`TRIGGER_RETRY_BACKOFF`], because comparing the server with the
+/// constant passes for whatever the constant says — including the
+/// `[30s, 5s, 30s, 2m]` it said before, where the second retry came
+/// sooner than the first.
+///
+/// The bus is given a 45-second `[bus] ack_wait` so the second assertion
+/// can tell the two windows apart: a consumer with a `backoff` schedule
+/// has its ack window *replaced* by the schedule's first entry, so the
+/// trigger durable's first delivery gets thirty seconds whatever the bus
+/// says. That is the window the 250 ms hold keepalive is sized against.
+#[tokio::test]
+async fn the_trigger_durable_carries_the_decided_retry_ladder() {
+    let server = crate::test_support::nats::test_nats();
+    let policy = ConsumerRedeliveryPolicy {
+        ack_wait: Duration::from_secs(45),
+        ..ConsumerRedeliveryPolicy::default()
+    };
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect NATS")
+        .with_redelivery_policy(policy);
+
+    // The factory the dispatcher opens its durable through.
+    bus.trigger_consumer("t-ladder", crate::bus::NATS_DEFAULT_MAX_ACK_PENDING)
+        .await
+        .expect("trigger consumer");
+    let trigger = server_config(&bus, TRIGGER_STREAM_NAME, "t-ladder").await;
+
     assert_eq!(
-        trigger.ack_wait, TRIGGER_RETRY_BACKOFF[0],
-        "JetStream overrides ack_wait with backoff[0] where a schedule is set"
+        trigger.backoff,
+        vec![
+            Duration::from_secs(30),
+            Duration::from_secs(2 * 60),
+            Duration::from_secs(5 * 60),
+            Duration::from_secs(12 * 60),
+        ],
+        "the trigger durable must carry the ladder decided on #953"
+    );
+    assert_eq!(
+        trigger.ack_wait,
+        Duration::from_secs(30),
+        "the first delivery's real ack window is the ladder's first entry, \
+         not the bus's 45 s"
     );
 }
 
