@@ -30,6 +30,53 @@
 //!   binary *back* across a schema bump has to roll the store back too,
 //!   or delete it, and the store's own error says which.
 //!
+//! ## One lock, one transaction
+//!
+//! The whole of that — read the version, act on the verdict, record the
+//! new version — runs under [`with_schema_lock`]: on one connection of
+//! its own, inside one `BEGIN IMMEDIATE` transaction taken *before* the
+//! version is read. Two properties follow, and every schema step in
+//! this crate relies on both:
+//!
+//! - **Atomic.** SQLite DDL is transactional, so the rungs and the
+//!   version that describes them commit together or not at all. An
+//!   upgrade interrupted anywhere — an error, a crash, a kill — leaves
+//!   the file at its old version with nothing applied, and the next open
+//!   runs the same rungs again from a clean start. Before this, each
+//!   statement committed on its own: a process that died after a rung's
+//!   `ALTER TABLE ADD COLUMN` and before the version write left a file
+//!   that failed every later open with `duplicate column name`.
+//! - **Serialised.** `BEGIN IMMEDIATE` takes SQLite's write lock on the
+//!   file, which is a lock between *connections*, so it holds across
+//!   processes (two daemons, a daemon and a tool) as well as within one.
+//!   A second opener waits for the first to commit, then reads the
+//!   version the first wrote and finds nothing to do. Before this, two
+//!   openers of a fresh file both read "no version", both ran the
+//!   ladder, and the second failed on the first `ADD COLUMN`.
+//!
+//! The wait is bounded by [`SCHEMA_LOCK_WAIT`], set on the step's own
+//! connection rather than inherited from the store's pool, whose busy
+//! timeout is sized for ordinary writes. An opener that cannot get the
+//! lock in that time fails with SQLite's `database is locked`.
+//!
+//! Nothing a schema step runs is refused or mishandled inside a
+//! transaction. The one statement that would be — `PRAGMA journal_mode`,
+//! which cannot change into or out of WAL mid-transaction — is issued by
+//! sqlx when each connection is established, before any transaction
+//! begins, and no ladder or schema block repeats it. `user_version` is
+//! transactional (it lives in the file header), so the projection's
+//! stamp commits with its schema. No rung uses `VACUUM`, `ATTACH`, a
+//! `PRAGMA` or a transaction-control statement; a rung that needed one
+//! could not run inside the step's transaction, and would have to be
+//! designed as a step of its own rather than appended to a ladder.
+//!
+//! That leaves one window outside the lock: the switch into WAL mode
+//! when a file is first created. It needs an exclusive lock that a busy
+//! timeout cannot wait for, so two processes creating the same file in
+//! the same instant can still see one fail that switch with `database
+//! is locked`. Once the file exists in WAL mode the switch only reads
+//! the header and never contends.
+//!
 //! ## Adding a migration to a `schema_meta` store
 //!
 //! Bump the store's version constant, append a `(version, SQL)` rung to
@@ -42,13 +89,35 @@
 //!
 //! The projection has no ladder: its schema is one `CREATE TABLE` block
 //! at the current version, and a bump is answered by a rebuild rather
-//! than a migration (its `schema` module says why).
+//! than a migration (its `schema` module says why). Its open-time step
+//! and its on-demand rebuild run under [`with_schema_lock`] all the
+//! same.
 //!
 //! `fq-store` (a separate workspace) keeps its own pool and pragma
 //! bootstrap in `grant_log.rs`/`index.rs`; it is a different crate with
 //! a different lifecycle and is deliberately not ported onto this kit.
 
-use sqlx::{Pool, Row, Sqlite};
+use std::time::Duration;
+
+use sqlx::sqlite::SqliteConnection;
+use sqlx::{ConnectOptions, Connection, Executor, Pool, Row, Sqlite};
+
+#[cfg(test)]
+pub(crate) mod test_seam;
+#[cfg(test)]
+mod tests;
+
+/// How long a schema step waits for SQLite's write lock before it gives
+/// up — and so how long a second opener waits for a first one's
+/// bootstrap to commit.
+///
+/// A ladder applies in milliseconds; the longest step that can hold the
+/// lock is a projection rebuild, which carries every row of a large file
+/// across and can take seconds. Thirty seconds outlasts that on a loaded
+/// machine, and is still short enough that a holder which never lets go
+/// (a process stopped mid-transaction) surfaces as a failed open naming
+/// the lock rather than a daemon that hangs at startup.
+pub const SCHEMA_LOCK_WAIT: Duration = Duration::from_secs(30);
 
 /// The version table shared by the `schema_meta`-versioned stores: one
 /// row per schema class. Created with `IF NOT EXISTS` on every open, so
@@ -120,23 +189,104 @@ pub enum SchemaError {
     },
 }
 
+/// Where a schema step has got to, told to whoever is watching. Every
+/// method is a no-op unless a test overrides it: production passes `()`.
+///
+/// The seam exists for the tests that make a race deterministic — pause
+/// one opener after it has read the version and before it acts, start a
+/// second, and see what the second can do — and for the ones that kill
+/// a process part-way up a ladder.
+pub(crate) trait SchemaSeam {
+    /// The recorded version has been read and judged, and nothing has
+    /// been applied yet. Under [`with_schema_lock`], the lock is held.
+    async fn version_read(&mut self, _verdict: Compatibility) {}
+
+    /// The rung that brings the schema to `_version` has been applied,
+    /// inside the step's transaction, and not yet committed.
+    async fn rung_applied(&mut self, _version: u32) {}
+}
+
+impl SchemaSeam for () {}
+
+/// Run one schema step under the schema lock: on a connection of its
+/// own, inside one `BEGIN IMMEDIATE` transaction that commits only if
+/// `step` succeeds. See the module docs for what that guarantees.
+///
+/// The connection is opened from the pool's options, so it addresses
+/// the same file with the same journal mode, but with
+/// [`SCHEMA_LOCK_WAIT`] as its busy timeout; it is closed afterwards,
+/// which also gives the lock back on every path. `step` must do all of
+/// its reading and writing through the connection it is handed —
+/// anything sent through the pool runs outside the transaction, and a
+/// write there would wait on the very lock this step holds.
+pub async fn with_schema_lock<T, E>(
+    pool: &Pool<Sqlite>,
+    step: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .busy_timeout(SCHEMA_LOCK_WAIT);
+    let mut conn = options.connect().await?;
+    let outcome = in_immediate_transaction(&mut conn, step).await;
+    let closed = conn.close().await;
+    let value = outcome?;
+    closed?;
+    Ok(value)
+}
+
+async fn in_immediate_transaction<T, E>(
+    conn: &mut SqliteConnection,
+    step: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    // The busy timeout applies here: an opener that finds the lock held
+    // waits for it rather than failing on the spot.
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+    match step(&mut tx).await {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(err) => {
+            // Said rather than left to `Drop`, so an interrupted step is
+            // visibly one that leaves nothing behind. Closing the
+            // connection would roll back too, so a failure here changes
+            // nothing and the step's own error is the one to report.
+            if let Err(rollback) = tx.rollback().await {
+                tracing::debug!(error = %rollback, "schema step: rollback failed; closing rolls back");
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Create `schema_meta` if it is not there. Idempotent.
-pub async fn ensure_schema_meta(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+pub async fn ensure_schema_meta(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     for stmt in split_sql(SCHEMA_META_SQL) {
-        sqlx::query(stmt).execute(pool).await?;
+        sqlx::query(stmt).execute(&mut *conn).await?;
     }
     Ok(())
 }
 
 /// The version `schema_meta` records for `class`, or `None` when no
 /// row exists yet.
-pub async fn read_schema_version(
-    pool: &Pool<Sqlite>,
+pub async fn read_schema_version<'e, E>(
+    executor: E,
     class: &str,
-) -> Result<Option<u32>, sqlx::Error> {
+) -> Result<Option<u32>, sqlx::Error>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let row = sqlx::query("SELECT version FROM schema_meta WHERE class = ?")
         .bind(class)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(row.map(|r| r.get::<i64, _>(0) as u32))
 }
@@ -165,11 +315,14 @@ pub async fn inspect_readable_versioned(
 }
 
 /// Record `version` for `class`, replacing any earlier row.
-pub async fn write_schema_version(
-    pool: &Pool<Sqlite>,
+pub async fn write_schema_version<'e, E>(
+    executor: E,
     class: &str,
     version: u32,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query(
         r#"
@@ -180,25 +333,45 @@ pub async fn write_schema_version(
     .bind(class)
     .bind(version as i64)
     .bind(now)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
 
 /// Apply every rung of `migrations` above `from` and at or below `to`,
-/// in ladder order. Re-running on an up-to-date database applies
-/// nothing, which is what keeps a non-idempotent rung safe.
+/// in ladder order, on `conn`.
+///
+/// Running a rung twice is not safe — `ALTER TABLE ADD COLUMN` fails if
+/// the column is already there — and nothing in this function prevents
+/// it. What does is [`bootstrap_versioned`], which runs the rungs and
+/// the version write that records them in one transaction under the
+/// schema lock: no other opener can read the old version while the
+/// rungs are applied, and no interrupted run can leave the rungs
+/// without the version. Called on its own, outside that, it has neither
+/// property; the migration tests use it that way to build a file at an
+/// old rung.
 pub async fn apply_migrations(
-    pool: &Pool<Sqlite>,
+    conn: &mut SqliteConnection,
     migrations: &[Migration],
     from: u32,
     to: u32,
 ) -> Result<(), sqlx::Error> {
+    apply_ladder(conn, migrations, from, to, &mut ()).await
+}
+
+async fn apply_ladder(
+    conn: &mut SqliteConnection,
+    migrations: &[Migration],
+    from: u32,
+    to: u32,
+    seam: &mut impl SchemaSeam,
+) -> Result<(), sqlx::Error> {
     for &(version, sql) in migrations {
         if from < version && to >= version {
             for stmt in split_sql(sql) {
-                sqlx::query(stmt).execute(pool).await?;
+                sqlx::query(stmt).execute(&mut *conn).await?;
             }
+            seam.rung_applied(version).await;
         }
     }
     Ok(())
@@ -206,35 +379,53 @@ pub async fn apply_migrations(
 
 /// The whole open-time protocol for a `schema_meta`-versioned store:
 /// ensure the version table, read `class`'s row, and act on the
-/// verdict — create, leave alone, migrate, or refuse. Returns the
-/// verdict so a caller can log what happened.
+/// verdict — create, leave alone, migrate, or refuse — all of it under
+/// [`with_schema_lock`]. Returns the verdict so a caller can log what
+/// happened.
+///
+/// A refusal ([`SchemaError::BinaryTooOld`]) rolls the transaction
+/// back, so a file this binary cannot read is left exactly as it was.
 pub async fn bootstrap_versioned(
     pool: &Pool<Sqlite>,
     class: &str,
     binary_version: u32,
     migrations: &[Migration],
 ) -> Result<Compatibility, SchemaError> {
-    ensure_schema_meta(pool).await?;
-    let recorded = read_schema_version(pool, class).await?;
-    let verdict = check_compatibility(recorded, binary_version);
-    match verdict {
-        Compatibility::FreshInstall => {
-            apply_migrations(pool, migrations, 0, binary_version).await?;
-            write_schema_version(pool, class, binary_version).await?;
-        }
-        Compatibility::Current => {}
-        Compatibility::NeedsUpgrade { from } => {
-            apply_migrations(pool, migrations, from, binary_version).await?;
-            write_schema_version(pool, class, binary_version).await?;
-        }
-        Compatibility::BinaryTooOld { db_version } => {
-            return Err(SchemaError::BinaryTooOld {
-                db_version,
-                binary_version,
-            });
-        }
-    }
-    Ok(verdict)
+    bootstrap_observed(pool, class, binary_version, migrations, &mut ()).await
+}
+
+/// [`bootstrap_versioned`], telling `seam` where it has got to.
+pub(crate) async fn bootstrap_observed(
+    pool: &Pool<Sqlite>,
+    class: &str,
+    binary_version: u32,
+    migrations: &[Migration],
+    seam: &mut impl SchemaSeam,
+) -> Result<Compatibility, SchemaError> {
+    with_schema_lock(
+        pool,
+        async |conn: &mut SqliteConnection| -> Result<Compatibility, SchemaError> {
+            ensure_schema_meta(conn).await?;
+            let recorded = read_schema_version(&mut *conn, class).await?;
+            let verdict = check_compatibility(recorded, binary_version);
+            seam.version_read(verdict).await;
+            let from = match verdict {
+                Compatibility::FreshInstall => 0,
+                Compatibility::NeedsUpgrade { from } => from,
+                Compatibility::Current => return Ok(verdict),
+                Compatibility::BinaryTooOld { db_version } => {
+                    return Err(SchemaError::BinaryTooOld {
+                        db_version,
+                        binary_version,
+                    });
+                }
+            };
+            apply_ladder(conn, migrations, from, binary_version, seam).await?;
+            write_schema_version(&mut *conn, class, binary_version).await?;
+            Ok(verdict)
+        },
+    )
+    .await
 }
 
 /// SQLite's `user_version` pragma — the version slot the projection

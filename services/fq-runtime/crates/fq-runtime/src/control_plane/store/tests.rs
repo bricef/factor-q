@@ -182,6 +182,61 @@ async fn open_refuses_when_db_version_higher_than_binary() {
     ));
 }
 
+/// #970 on this store's ladder. Its rungs are all `CREATE ... IF NOT
+/// EXISTS`, so two unserialised openers never failed here — but the
+/// second still read "no version" and ran the ladder over the first's,
+/// and the first rung of this kind to be added would have failed the way
+/// the worker store's did. The rival opener is the real `open`.
+#[tokio::test]
+async fn two_openers_of_a_fresh_control_plane_db_serialise() {
+    use crate::db::schema::test_seam::RivalAtVersionRead;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let rival_path = path.clone();
+    let mut seam = RivalAtVersionRead::new(&path, async move {
+        ControlPlaneStore::open(&rival_path)
+            .await
+            .map(drop)
+            .map_err(|err| err.to_string())
+    });
+    let pool = SqlitePoolOptions::new()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+
+    let first = schema::bootstrap_observed(
+        &pool,
+        SCHEMA_CLASS,
+        CONTROL_PLANE_SCHEMA_VERSION,
+        MIGRATIONS,
+        &mut seam,
+    )
+    .await;
+    let rival = seam.rival_outcome().await;
+
+    assert_eq!(
+        first.expect("the first opener must succeed"),
+        Compatibility::FreshInstall
+    );
+    rival.expect("the second opener must succeed");
+    assert_eq!(
+        seam.lock_held,
+        Some(true),
+        "the first opener read the version without holding the write lock"
+    );
+    let store = ControlPlaneStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(CONTROL_PLANE_SCHEMA_VERSION)
+    );
+}
+
 #[tokio::test]
 async fn open_read_only_refuses_outdated_and_newer_schemas() {
     let dir = tempdir().unwrap();

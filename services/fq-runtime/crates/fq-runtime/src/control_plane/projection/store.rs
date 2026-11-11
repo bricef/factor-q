@@ -51,10 +51,31 @@ impl ProjectionStore {
     /// alone, an older one is **rebuilt** (its tables dropped and
     /// recreated, the sweep-exempt rows carried across, and the durable
     /// consumer marked for the reset that replays the stream into it),
-    /// and a newer one — written by a newer binary — is refused. WAL
-    /// mode is enabled so concurrent readers (the CLI's query commands)
-    /// can run alongside the projection consumer's writes.
+    /// and a newer one — written by a newer binary — is refused. That
+    /// whole step runs under the schema lock (`crate::db::schema`), so a
+    /// second opener waits for it and an interrupted one leaves nothing
+    /// behind. WAL mode is enabled so concurrent readers (the CLI's
+    /// query commands) can run alongside the projection consumer's
+    /// writes.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        let store = Self::connect(path).await?;
+        store.ensure_schema(path).await?;
+        Ok(store)
+    }
+
+    /// [`Self::open`], telling `seam` where its schema step has got to.
+    #[cfg(test)]
+    async fn open_observed(
+        path: &Path,
+        seam: &mut impl crate::db::schema::SchemaSeam,
+    ) -> Result<Self, StoreError> {
+        let store = Self::connect(path).await?;
+        store.ensure_schema_observed(path, seam).await?;
+        Ok(store)
+    }
+
+    /// The pool, on a file created if it is missing; no schema yet.
+    async fn connect(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -69,10 +90,7 @@ impl ProjectionStore {
             .max_connections(4)
             .connect_with(options)
             .await?;
-
-        let store = Self { pool };
-        store.ensure_schema(path).await?;
-        Ok(store)
+        Ok(Self { pool })
     }
 
     /// Open a read-only connection to an existing projection database.
