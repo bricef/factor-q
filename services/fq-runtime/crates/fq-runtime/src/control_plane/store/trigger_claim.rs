@@ -136,6 +136,32 @@ impl ControlPlaneStore {
         Ok(())
     }
 
+    /// Record that the invocation a `claimed` row names has durably
+    /// started, finding the row by that invocation's id rather than by the
+    /// trigger's key.
+    ///
+    /// Startup recovery calls this for every invocation it finds in flight,
+    /// before the dispatcher starts consuming: an in-flight WAL row is proof
+    /// of a durable start whose claim update a crash may have prevented, and
+    /// a redelivered trigger that meets the marked row is dropped instead of
+    /// started a second time (#959). Returns whether a row changed. An
+    /// invocation no claim names (a direct run) changes nothing, and neither
+    /// does a row already `durably_started`.
+    pub async fn mark_trigger_started_by_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        Ok(sqlx::query(
+            "UPDATE trigger_claim SET state = 'durably_started' \
+             WHERE invocation_id = ? AND state = 'claimed'",
+        )
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
     /// Release only unfinished claims; durable-start rows are the dedupe record.
     pub async fn release_trigger_claim(
         &self,

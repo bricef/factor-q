@@ -269,7 +269,14 @@ first. What remains of this as Phase 2 work is an operator surface for
 the trigger-to-invocation link
 ([#954](https://github.com/bricef/factor-q/issues/954)); the claim
 table has no retention, which is a Phase 3 bounded-growth item, and
-ADR-0032 lists the gaps the design knowingly leaves open. The M0
+ADR-0032 lists the gaps the design knowingly leaves open. The first of
+them no longer is: a daemon that died between an invocation's first WAL
+write and its claim being marked started used to have the redelivered
+trigger run a second time beside the resumed invocation. The claim row
+now names the invocation from claim time, and startup recovery marks
+the claim of every invocation it finds in flight before the dispatcher
+consumes a trigger
+([#959](https://github.com/bricef/factor-q/issues/959)). The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the

@@ -740,7 +740,16 @@ Recovery is per-role.
    - **Ambiguous**: latest dispatch row is `dispatched` without
      `completed`. Mark locally as held; publish
      `invocation.ambiguous` to NATS; do not auto-recover.
-8. Resume safe-resume and safe-replay categories automatically.
+8. Report every non-terminal invocation, ambiguous ones included, to
+   the control plane as durably started. Its WAL row proves the
+   durable start, and the trigger claim that has named the invocation
+   since claim time is marked `durably_started`, so a redelivery of
+   its unacked trigger is dropped rather than run a second time
+   ([#959](https://github.com/bricef/factor-q/issues/959)). The worker
+   reports and the control plane records; the control plane does not
+   read the worker's store. In v1 the report is a direct write to the
+   control-plane store, made before the dispatcher consumes a trigger.
+9. Resume safe-resume and safe-replay categories automatically.
    Held ambiguous invocations don't block new triggers.
 
 ### 7.2 Control-plane startup sequence

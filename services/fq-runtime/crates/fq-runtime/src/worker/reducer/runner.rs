@@ -980,7 +980,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // (or replay) sampling (ADR-0018 §5). Any
                 // in-flight sampling is surfaced via `fq invocation list`.
                 None,
-                // The original attempt already acked the trigger (issue #41).
+                // Nothing to ack: the trigger's claim, if any, reads started (#41, #959).
                 DurableStart::noop(),
                 &mut cursor,
                 host_notices.iter().any(|n| n.kind == "context_pressure"),

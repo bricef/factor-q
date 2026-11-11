@@ -657,6 +657,66 @@ async fn a_claim_names_its_invocation_from_claim_time() {
     );
 }
 
+/// **Startup recovery finds a claim by the invocation it names (#959).**
+/// An in-flight WAL row proves a durable start the dispatcher may not have
+/// lived to record. Marking by invocation id turns that row's `claimed`
+/// claim into `durably_started`, once, and touches nothing else: not an id
+/// no claim names, not a row already started, not another trigger's claim.
+#[tokio::test]
+async fn a_claim_is_marked_started_by_the_invocation_it_names() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "dead-worker", "inv-in-flight", 100)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(2), "dead-worker", "inv-never-started", 100)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .mark_trigger_started_by_invocation("inv-in-flight")
+            .await
+            .unwrap(),
+        "the claim naming the invocation is marked"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(1), "worker-b", "inv-redelivered", 101)
+            .await
+            .unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-in-flight".to_string()
+        },
+        "the redelivery now meets a started claim and is dropped"
+    );
+    assert!(
+        !store
+            .mark_trigger_started_by_invocation("inv-in-flight")
+            .await
+            .unwrap(),
+        "a row already started is left as it is"
+    );
+    assert!(
+        !store
+            .mark_trigger_started_by_invocation("inv-of-a-direct-run")
+            .await
+            .unwrap(),
+        "an invocation no claim names changes nothing"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(2), "worker-b", "inv-adopter", 101)
+            .await
+            .unwrap(),
+        TriggerClaim::Held {
+            claimant: "dead-worker".to_string()
+        },
+        "another trigger's unfinished claim is untouched"
+    );
+}
+
 /// **A recreated stream starts a new claim space.** JetStream restarts
 /// sequences at 1 when a stream is rebuilt, so a claim table keyed on
 /// the name and sequence alone would answer `Started` to the first N

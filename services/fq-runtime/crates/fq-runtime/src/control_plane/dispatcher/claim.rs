@@ -196,6 +196,15 @@ impl TriggerDispatcher {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 //
+                // That process may have reached its invocation's first WAL
+                // write and died before marking this row. Startup recovery has
+                // already answered for that case: it marks the claim of every
+                // invocation it finds in flight, by the id the row has named
+                // since claim time, before the daemon builds a dispatcher
+                // (`fq-daemon`'s `recovery::classify_in_flight`, #959). A row
+                // still `claimed` here therefore names an invocation with no
+                // in-flight WAL row, and this start is its trigger's first.
+                //
                 // The adopted claim runs under this copy's own id, written over
                 // the dead process's by the same compare-and-set. Reusing that
                 // one is unsafe where its invocation reached a terminal WAL row
