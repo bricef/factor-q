@@ -11,9 +11,9 @@ inbox is not built. The decision record is
 accepted the same day and rewritten around what landed; see
 [Outcome](#outcome) below. Originally: active (2026-07-19), the
 highest-priority correctness fix, written up from the 2026-07-18
-duplicate-PR incident (issue #189 → PRs #322/#323/#324, board capture
-#327), with the root cause reproduced empirically against a scratch
-broker before the plan was written.
+duplicate-PR incident (issue #189 → PRs #322/#323/#324, board
+capture #327), with the root cause reproduced empirically against a
+scratch broker before the plan was written.
 
 ## Outcome
 
