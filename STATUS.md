@@ -260,10 +260,13 @@ which is not built; it now reads: the two replay tests in
 (`an_invocation_that_outlives_the_ack_window_is_not_redelivered` and
 `a_trigger_redelivered_before_its_first_wal_write_starts_once`) and the
 twelve dispatcher and store unit tests ADR-0032 names pass in
-`just runtime-ci`. The review is a snapshot and is not edited. What
-remains of this as Phase 2 work is the retry ladder
-([#953](https://github.com/bricef/factor-q/issues/953)) and an operator
-surface for the trigger-to-invocation link
+`just runtime-ci`. The review is a snapshot and is not edited. The
+retry ladder is finished
+([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
+durable retries after 30 seconds, then 2, 5 and 12 minutes, and
+dead-letters a trigger that fails every delivery 19.5 minutes after its
+first. What remains of this as Phase 2 work is an operator surface for
+the trigger-to-invocation link
 ([#954](https://github.com/bricef/factor-q/issues/954)); the claim
 table has no retention, which is a Phase 3 bounded-growth item, and
 ADR-0032 lists the gaps the design knowingly leaves open. The M0
