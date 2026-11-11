@@ -645,6 +645,15 @@ audit:
     cargo audit --deny warnings ${ignore_flags[@]+"${ignore_flags[@]}"}
     cargo deny --locked check
 
+# `.github/workflows/scheduled-audit.yml` runs `just audit` on `main` every
+# day and keeps one tracking issue in step with it (scripts/audit-main-issue.py).
+# It only runs for real on main, on a schedule, so its decisions are pinned
+# here instead: recorded audit output, a fake `gh`, no network. Stdlib
+# unittest, a phase of `just quality`.
+# Run audit-main-issue.py's own tests.
+test-audit-main-issue:
+    python3 -m unittest discover -s scripts/tests -p 'test_audit_main_issue.py'
+
 # === Code quality ===
 
 # No include!-based code splicing (postmortem of
@@ -870,6 +879,7 @@ quality:
     run_phase "test-fq-lint" just test-fq-lint
     run_phase "test-fq-metrics" just test-fq-metrics
     run_phase "test-metrics-log" just test-metrics-log
+    run_phase "test-audit-main-issue" just test-audit-main-issue
     run_phase "lint-sizes"   just lint-sizes
     run_phase "lint-fmt"     just lint-fmt
     run_phase "lint-clippy"  just lint-clippy
