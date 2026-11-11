@@ -3814,6 +3814,7 @@ async fn sampling_declined_when_invocation_budget_exhausted() {
                 totals: &mut totals,
                 cursor: &mut cursor,
             },
+            &mut request_caps::ServerRequestCount::default(),
             &agent,
             "srv",
             sampling_request(),
@@ -3851,6 +3852,7 @@ async fn sampling_declined_when_sub_budget_exhausted() {
                 totals: &mut totals,
                 cursor: &mut cursor,
             },
+            &mut request_caps::ServerRequestCount::default(),
             &agent,
             "srv",
             sampling_request(),
@@ -3891,6 +3893,7 @@ async fn sampling_spends_into_the_invocation_budget() {
                 totals: &mut totals,
                 cursor: &mut cursor,
             },
+            &mut request_caps::ServerRequestCount::default(),
             &agent,
             "srv",
             sampling_request(),
@@ -3932,6 +3935,282 @@ async fn sampling_spends_into_the_invocation_budget() {
         (rows[0].cost_usd.unwrap_or(0.0) - 0.15).abs() < 1e-12,
         "WAL row must carry the sampling call's cost, got {:?}",
         rows[0].cost_usd
+    );
+}
+
+// --- #831: what a server may ask for, by count and by size. The loop
+// that resets the per-tool-call count is driven in the sim
+// (`test_support::sim::server_request_caps`); these drive the handlers
+// a live runner calls, with the count the loop would hand them.
+
+/// A sampling request asking for `max_tokens`.
+fn sampling_request_for(max_tokens: u32) -> crate::mcp::SamplingRequest {
+    crate::mcp::sampling_request_from_wire(serde_json::json!({
+        "messages": [{"role": "user", "content": {"type": "text", "text": "hello"}}],
+        "maxTokens": max_tokens
+    }))
+    .expect("sampling params")
+}
+
+/// A form elicitation asking for one string field.
+fn elicitation_request() -> crate::mcp::ElicitationRequest {
+    let schema = json!({
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+    });
+    crate::mcp::ElicitationRequest::Form {
+        message: "who are you?".to_string(),
+        requested_schema: serde_json::from_value(schema.clone()).expect("schema"),
+        as_sent: schema.to_string(),
+    }
+}
+
+/// A runner like [`sampling_runner`] whose request caps are `limits`.
+async fn capped_sampling_runner(
+    sink: &std::sync::Arc<crate::test_support::sim::RecordingSink>,
+    dir: &tempfile::TempDir,
+    limits: ServerRequestLimits,
+) -> ReducerRunner {
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .expect("worker store"),
+    );
+    ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(Arc::clone(sink) as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .server_request_limits(limits)
+                .build(),
+        ),
+        Harness::new(),
+    )
+}
+
+fn llm_requests_published(sink: &crate::test_support::sim::RecordingSink) -> usize {
+    sink.events()
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::LlmRequest(_)))
+        .count()
+}
+
+/// The server's `maxTokens` is clamped to the agent's own output cap —
+/// the daemon default when the definition sets none, the definition's
+/// own when it does — on the request that reaches the provider.
+#[tokio::test]
+async fn a_sampling_request_runs_under_the_agents_own_max_tokens() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let own_cap = Agent::builder()
+        .id(unique_agent_id("sampling-max-tokens"))
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(10.0)
+        .max_tokens(512)
+        .sampling_grant(crate::agent::SamplingGrant {
+            servers: vec!["srv".to_string()],
+            max_cost: None,
+        })
+        .build()
+        .unwrap();
+
+    for (agent, expected) in [
+        (
+            sampling_agent(10.0, None),
+            crate::worker::reducer::harness::DEFAULT_MAX_TOKENS,
+        ),
+        (own_cap, 512),
+    ] {
+        let llm = FixtureClient::new();
+        llm.push_response(canned("sampled.", 10, 10));
+        let mut totals = InvocationTotals::default();
+        let mut cursor = None;
+        runner
+            .handle_sampling(
+                &mut InvocationCtx::new(&llm, agent.id(), Uuid::now_v7(), &mut totals, &mut cursor),
+                &mut request_caps::ServerRequestCount::default(),
+                &agent,
+                "srv",
+                sampling_request_for(100_000),
+            )
+            .await
+            .expect("infrastructure ok")
+            .expect("sampling succeeds");
+        assert_eq!(
+            llm.requests()[0].params.max_tokens,
+            Some(expected),
+            "a server asking for 100000 tokens gets the agent's {expected}"
+        );
+    }
+}
+
+/// Sampling and elicitation draw on one count: four of each fill a tool
+/// call's eight, after which the next of either kind is declined before
+/// any model call — sampling with a message naming the cap, elicitation
+/// with its ordinary decline.
+#[tokio::test]
+async fn sampling_and_elicitation_share_the_request_counts() {
+    let (sink, dir) = sampling_world();
+    let runner = sampling_runner(&sink, &dir).await;
+    let agent = Agent::builder()
+        .id(unique_agent_id("shared-counts"))
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(10.0)
+        .sampling_grant(crate::agent::SamplingGrant {
+            servers: vec!["srv".to_string()],
+            max_cost: None,
+        })
+        .elicitation_grant(crate::agent::ElicitationGrant {
+            servers: vec!["srv".to_string()],
+            max_cost: None,
+        })
+        .build()
+        .unwrap();
+    let llm = FixtureClient::new();
+    for _ in 0..4 {
+        llm.push_response(canned("sampled.", 10, 10));
+    }
+    for _ in 0..4 {
+        llm.push_response(canned(r#"{"name": "Ada"}"#, 10, 10));
+    }
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+    let invocation_id = Uuid::now_v7();
+    let mut requests = request_caps::ServerRequestCount::default();
+    requests.begin_tool_call();
+    let mut ctx = InvocationCtx::new(&llm, agent.id(), invocation_id, &mut totals, &mut cursor);
+
+    for n in 0..4 {
+        runner
+            .handle_sampling(&mut ctx, &mut requests, &agent, "srv", sampling_request())
+            .await
+            .expect("infrastructure ok")
+            .unwrap_or_else(|e| panic!("sampling {n} is admitted: {}", e.message));
+    }
+    for n in 0..4 {
+        let reply = runner
+            .handle_elicitation(
+                &mut ctx,
+                &mut requests,
+                &agent,
+                "srv",
+                elicitation_request(),
+            )
+            .await
+            .expect("infrastructure ok")
+            .expect("an elicitation reply");
+        assert_eq!(
+            reply.action,
+            crate::mcp::ElicitationOutcome::Accept,
+            "elicitation {n} is admitted"
+        );
+    }
+
+    let declined = runner
+        .handle_sampling(&mut ctx, &mut requests, &agent, "srv", sampling_request())
+        .await
+        .expect("infrastructure ok")
+        .expect_err("the ninth request is over the per-tool-call cap");
+    assert!(
+        declined.message.contains("cap of 8")
+            && declined
+                .message
+                .contains("[worker] max_server_requests_per_tool_call"),
+        "the decline names the cap: {}",
+        declined.message
+    );
+    let reply = runner
+        .handle_elicitation(
+            &mut ctx,
+            &mut requests,
+            &agent,
+            "srv",
+            elicitation_request(),
+        )
+        .await
+        .expect("infrastructure ok")
+        .expect("an elicitation reply");
+    assert_eq!(reply.action, crate::mcp::ElicitationOutcome::Decline);
+
+    assert_eq!(
+        llm.requests().len(),
+        8,
+        "nothing past the cap reached a model"
+    );
+    assert_eq!(llm_requests_published(&sink), 8);
+}
+
+/// The count gate runs before the input evaluators, which are model
+/// calls themselves: a request over the cap is declined without the
+/// judge being asked. One request per tool call here, so the second
+/// is over.
+#[tokio::test]
+async fn a_request_over_the_cap_never_reaches_the_input_evaluator() {
+    let (sink, dir) = sampling_world();
+    let runner = capped_sampling_runner(
+        &sink,
+        &dir,
+        ServerRequestLimits {
+            per_tool_call: 1,
+            per_invocation: 100,
+        },
+    )
+    .await;
+    let agent = Agent::builder()
+        .id(unique_agent_id("cap-before-evaluator"))
+        .model("claude-haiku")
+        .system_prompt("You are a test agent.")
+        .budget(10.0)
+        .sampling_grant(crate::agent::SamplingGrant {
+            servers: vec!["srv".to_string()],
+            max_cost: None,
+        })
+        .sampling_validation(crate::agent::CapabilityValidation {
+            input_validation: vec![crate::agent::EvaluatorSpec::Llm { model: None }],
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let llm = FixtureClient::new();
+    llm.push_response(canned(r#"{"approved": true, "reason": "fine"}"#, 10, 10));
+    llm.push_response(canned("sampled.", 10, 10));
+    let mut totals = InvocationTotals::default();
+    let mut cursor = None;
+    let mut requests = request_caps::ServerRequestCount::default();
+    requests.begin_tool_call();
+    let mut ctx = InvocationCtx::new(&llm, agent.id(), Uuid::now_v7(), &mut totals, &mut cursor);
+
+    runner
+        .handle_sampling(&mut ctx, &mut requests, &agent, "srv", sampling_request())
+        .await
+        .expect("infrastructure ok")
+        .expect("the first request is judged and answered");
+    assert_eq!(llm.requests().len(), 2, "the judge, then the completion");
+
+    let declined = runner
+        .handle_sampling(&mut ctx, &mut requests, &agent, "srv", sampling_request())
+        .await
+        .expect("infrastructure ok")
+        .expect_err("the second is over the cap");
+    assert!(
+        declined.message.contains("cap of 1"),
+        "{}",
+        declined.message
+    );
+    assert_eq!(
+        llm.requests().len(),
+        2,
+        "neither the judge nor the model was asked"
     );
 }
 

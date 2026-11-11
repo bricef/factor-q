@@ -3288,6 +3288,12 @@ mod budget_properties {
         /// Finding 1, closed as a property: a crash at any
         /// recoverable point must not reset the accumulator — the
         /// resumed run trips at exactly the reference's total.
+        ///
+        /// The server-request counts (#831) are deliberately not part of
+        /// this: they are attempt-scoped, living on the run's sampling
+        /// channel, and a resumed run is handed none because it cannot
+        /// service server-initiated requests (ADR-0018 §5). They reset on
+        /// resume with nothing to reconstitute; the spend does not.
         #[test]
         fn budget_accumulates_across_resume(
             seed: u64,

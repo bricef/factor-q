@@ -202,6 +202,10 @@ pub struct RunnerConfig {
     /// [`ToolCallLimits::default`](crate::tools::ToolCallLimits), which
     /// is that section's default.
     pub(super) tool_limits: crate::tools::ToolCallLimits,
+    /// How many requests an MCP server may send back while its tools
+    /// run, per tool call and per invocation (#831). Defaults to
+    /// [`ServerRequestLimits::default`], which is `[worker]`'s default.
+    pub(super) server_request_limits: ServerRequestLimits,
     /// The daemon's progress-correlation table (#605), shared into the
     /// per-invocation MCP manager so a grant-bearing server's calls are
     /// visible to the same liveness surface as a shared server's.
@@ -232,6 +236,14 @@ impl RunnerConfig {
         McpClientManager::with_server_root(self.mcp_server_root.clone())
             .sharing_progress(self.mcp_progress.clone())
     }
+
+    /// The output-token cap `agent`'s turns run under: its definition's
+    /// own `max_tokens`, else this daemon's default. A server's sampling
+    /// request is clamped to the same number (#831), so a server never
+    /// gets a longer completion than the agent's own turns do.
+    pub(super) fn max_tokens_for(&self, agent: &Agent) -> u32 {
+        agent.max_tokens().unwrap_or(self.max_tokens)
+    }
 }
 
 impl RunnerConfig {
@@ -258,6 +270,7 @@ pub struct RunnerConfigBuilder {
     workspace: Option<Arc<dyn WorkspaceProvider>>,
     mcp_server_root: Option<PathBuf>,
     tool_limits: Option<crate::tools::ToolCallLimits>,
+    server_request_limits: Option<ServerRequestLimits>,
     mcp_progress: Option<crate::mcp::ProgressRegistry>,
     mcp_states: Option<crate::mcp::McpServerStates>,
     throttle: Option<Arc<crate::llm::ModelThrottle>>,
@@ -354,6 +367,14 @@ impl RunnerConfigBuilder {
         self
     }
 
+    /// The `[worker]` caps on server-initiated requests (#831).
+    /// Optional; defaults to [`ServerRequestLimits::default`]. The daemon
+    /// passes `config.worker.server_request_limits()`.
+    pub fn server_request_limits(mut self, limits: ServerRequestLimits) -> Self {
+        self.server_request_limits = Some(limits);
+        self
+    }
+
     /// Share the daemon's MCP progress table (#605) so per-invocation
     /// grant-bearing servers report into the same one as the shared
     /// servers. Optional; defaults to a private table. The daemon
@@ -400,6 +421,7 @@ impl RunnerConfigBuilder {
                 .mcp_server_root
                 .unwrap_or_else(crate::mcp::default_server_root),
             tool_limits: self.tool_limits.unwrap_or_default(),
+            server_request_limits: self.server_request_limits.unwrap_or_default(),
             mcp_progress: self.mcp_progress.unwrap_or_default(),
             mcp_states: self.mcp_states.unwrap_or_default(),
             throttle: self
