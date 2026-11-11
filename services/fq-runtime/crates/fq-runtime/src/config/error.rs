@@ -126,4 +126,18 @@ pub enum ConfigError {
          default, or set a real bound"
     )]
     McpZeroBound { key: &'static str },
+
+    /// A `[worker]` server-request cap set to zero (#831). It would
+    /// decline every sampling and elicitation request on the daemon —
+    /// what leaving them ungranted already says, per agent and per
+    /// server — so it is refused rather than read as a way to turn them
+    /// off for everyone at once. The key is named because that is the
+    /// line to fix.
+    #[error(
+        "[worker] {key} must be greater than zero: {key} = 0 would decline every sampling and \
+         elicitation request any MCP server sends — to refuse those, leave them ungranted in \
+         the agent definitions; to bound them, remove the line to take the default or set a \
+         real cap"
+    )]
+    ServerRequestCapZero { key: &'static str },
 }

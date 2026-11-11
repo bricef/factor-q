@@ -20,6 +20,7 @@
 //! workspace-binding helpers that were interleaved with the evaluator
 //! block by accident of insertion order rather than by kinship.
 
+use super::request_caps::{CapReached, ServerRequestCount};
 use super::*;
 use crate::mcp::{
     ElicitationOutcome, ElicitationReply, ElicitationRequest, ElicitationSchema, EnumSchema,
@@ -32,22 +33,28 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// runner is the sole arbiter; the handler is a thin bridge, so
     /// the gate/run/validate logic lives here and replies on the
     /// request's oneshot. A dropped reply (the tool finished and the
-    /// bridge went away) is ignored.
+    /// bridge went away) is ignored. `requests` is the run's count of
+    /// admitted requests, which sampling and elicitation share (#831).
     pub(super) async fn handle_server_request(
         &self,
         ctx: &mut InvocationCtx<'_>,
+        requests: &mut ServerRequestCount,
         agent: &Agent,
         server: &str,
         request: ServerRequest,
     ) -> Result<(), ExecutorError> {
         match request {
             ServerRequest::Sampling { request, reply } => {
-                let result = self.handle_sampling(ctx, agent, server, request).await?;
+                let result = self
+                    .handle_sampling(ctx, requests, agent, server, request)
+                    .await?;
                 let _ = reply.send(result);
                 Ok(())
             }
             ServerRequest::Elicitation { request, reply } => {
-                let result = self.handle_elicitation(ctx, agent, server, request).await?;
+                let result = self
+                    .handle_elicitation(ctx, requests, agent, server, request)
+                    .await?;
                 let _ = reply.send(result);
                 Ok(())
             }
@@ -56,16 +63,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
     /// Answer a `sampling/createMessage` request (ADR-0018 §2):
     /// **gate** (granted? within the sampling sub-budget and the
-    /// invocation total?) → **run** through the shared LLM path tagged
-    /// `origin = sampling{server}` → **validate** the result through
-    /// the outbound seam → reply. A policy refusal or a model failure
-    /// returns a structured decline to the *server* and leaves the
-    /// agent invocation untouched — sampling spends the agent's
-    /// budget but never fails its turn. The outer `Err` is
+    /// invocation total? under the request caps?) → **run** through the
+    /// shared LLM path tagged `origin = sampling{server}` → **validate**
+    /// the result through the outbound seam → reply. A policy refusal
+    /// or a model failure returns a structured decline to the *server*
+    /// and leaves the agent invocation untouched — sampling spends the
+    /// agent's budget but never fails its turn. The outer `Err` is
     /// infrastructure (store / bus) and does propagate.
     pub(super) async fn handle_sampling(
         &self,
         ctx: &mut InvocationCtx<'_>,
+        requests: &mut ServerRequestCount,
         agent: &Agent,
         server: &str,
         request: SamplingRequest,
@@ -95,6 +103,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 "invocation budget exhausted; sampling refused",
             )));
         }
+        // The count gate is the last: every check above is free, and
+        // the input evaluators below are model calls (#831).
+        if let Some(refused) = self.over_request_cap(ctx, requests, server) {
+            return Ok(Err(sampling_decline(&format!(
+                "sampling refused: {refused}"
+            ))));
+        }
 
         // --- run through the shared LLM path, tagged as sampling ---
         // (Inbound `includeContext` is forced to `none`: we do not
@@ -123,7 +138,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             ))));
         }
 
-        let model_request = sampling_to_model_request(agent.model(), &request);
+        let model_request =
+            sampling_to_model_request(agent.model(), &request, self.config.max_tokens_for(agent));
         let (response, call_cost) = match self
             .dispatch_llm(ctx, model_request, origin.clone(), None)
             .await?
@@ -189,13 +205,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// answer is a **schema-constrained structured completion**: the
     /// model is asked for JSON matching the requested schema, validated
     /// against it, and retried up to [`ELICITATION_MAX_RETRIES`] times;
-    /// a still-invalid result, a refusal (ungranted / over-budget), or
-    /// a model failure all resolve to a `decline` *result* (not an
-    /// error) so the server continues without the input. The outer
-    /// `Err` is infrastructure (store / bus).
-    async fn handle_elicitation(
+    /// a still-invalid result, a refusal (ungranted / over-budget /
+    /// over a request cap), or a model failure all resolve to a
+    /// `decline` *result* (not an error) so the server continues
+    /// without the input. The outer `Err` is infrastructure (store /
+    /// bus).
+    pub(super) async fn handle_elicitation(
         &self,
         ctx: &mut InvocationCtx<'_>,
+        requests: &mut ServerRequestCount,
         agent: &Agent,
         server: &str,
         request: ElicitationRequest,
@@ -233,6 +251,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             Ok(request) => request,
             Err(_) => return decline(),
         };
+        // The count gate, last of the free checks and ahead of the paid
+        // evaluators; the counts are the ones sampling draws on (#831).
+        if self.over_request_cap(ctx, requests, server).is_some() {
+            return decline();
+        }
 
         // --- input evaluator gates (judge the request before answering) ---
         let origin = LlmCallOrigin::Elicitation {
@@ -314,6 +337,39 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             action: ElicitationOutcome::Accept,
             content: Some(value),
         }))
+    }
+
+    /// The count gate (#831): admit this request against the run's
+    /// `[worker]` caps, or return the cap that refuses it. The run's
+    /// first refusal is logged at `warn` and the rest at `debug`: a
+    /// server past a cap usually keeps asking, and a warning per decline
+    /// would bury the one line an operator needs.
+    fn over_request_cap(
+        &self,
+        ctx: &InvocationCtx<'_>,
+        requests: &mut ServerRequestCount,
+        server: &str,
+    ) -> Option<CapReached> {
+        let refused = requests.admit(self.config.server_request_limits).err()?;
+        if refused.first {
+            warn!(
+                agent_id = %ctx.agent_id,
+                invocation_id = %ctx.invocation_id,
+                server,
+                cap = refused.cap.key(),
+                limit = refused.limit,
+                "an MCP server reached a server-initiated request cap; requests over it are \
+                 declined and the invocation carries on"
+            );
+        } else {
+            debug!(
+                invocation_id = %ctx.invocation_id,
+                server,
+                cap = refused.cap.key(),
+                "declined a server-initiated request over its cap"
+            );
+        }
+        Some(refused)
     }
 
     /// Run an ordered evaluator sequence (A1c) against `subject` with AND
@@ -450,7 +506,14 @@ fn sampling_decline(reason: &str) -> rmcp::ErrorData {
 /// sampling turn maps to a user/assistant message. Only text content
 /// is injected in v1 (the boundary already replaced non-text content
 /// with a placeholder); tools are never exposed to a sampling call.
-fn sampling_to_model_request(model: &str, request: &SamplingRequest) -> ModelRequest {
+/// The server's `maxTokens` is honoured up to `max_tokens`, the agent's
+/// own output cap (#831): a server never gets a longer completion than
+/// the agent's turns do.
+fn sampling_to_model_request(
+    model: &str,
+    request: &SamplingRequest,
+    max_tokens: u32,
+) -> ModelRequest {
     let mut messages = Vec::with_capacity(request.turns.len() + 1);
     if let Some(system) = &request.system_prompt {
         messages.push(Message::System {
@@ -475,7 +538,7 @@ fn sampling_to_model_request(model: &str, request: &SamplingRequest) -> ModelReq
         params: RequestParams {
             effort: None,
             temperature: request.temperature.map(|t| t as f64),
-            max_tokens: Some(request.max_tokens),
+            max_tokens: Some(request.max_tokens.min(max_tokens)),
         },
     }
 }

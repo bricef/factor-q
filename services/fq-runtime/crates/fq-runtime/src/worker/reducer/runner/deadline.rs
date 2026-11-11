@@ -65,7 +65,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// The cost of that choice is that the deadline cannot interrupt a
     /// single wedged server request. It does not need to: the model
     /// call inside one carries `[worker] llm_timeout_secs` (#546), so
-    /// the servicing is itself bounded.
+    /// the servicing is itself bounded. What a run of servicings spends
+    /// is bounded by count as well: past `[worker]
+    /// max_server_requests_per_tool_call` admitted requests this call's
+    /// server is declined before any model call, the count restarting
+    /// with each call (#831).
     ///
     /// **A servicing that outlives the backstop hands the tool its full
     /// grace back, and is the last one this call services.** The gap
@@ -142,6 +146,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Err(_) => timed_out(),
             };
         };
+        // A new tool call: its server-request count starts again, the
+        // invocation's carries on (#831).
+        channel.requests.begin_tool_call();
 
         let tool_fut = tool.execute(ctx, params);
         tokio::pin!(tool_fut);
@@ -167,7 +174,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         );
                         // Runs to completion — see the note above on
                         // why this must never be a dropped future.
-                        self.handle_server_request(&mut ctx, agent, &server, request)
+                        let requests = &mut channel.requests;
+                        self.handle_server_request(&mut ctx, requests, agent, &server, request)
                             .await?;
                         // The host was busy, not the tool. Give back the
                         // teardown budget this servicing consumed,

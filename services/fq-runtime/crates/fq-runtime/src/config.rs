@@ -256,10 +256,29 @@ pub struct WorkerConfig {
     /// those are what should move.
     #[serde(default)]
     pub stuck_threshold_override_secs: Option<u64>,
+    /// How many requests — sampling and elicitation together — an MCP
+    /// server may send back to the host while one of its tools runs
+    /// (#831). Past it the server is declined before any model call,
+    /// and the invocation carries on. Default 8; `0` is refused at load.
+    #[serde(default = "default_max_server_requests_per_tool_call")]
+    pub max_server_requests_per_tool_call: u32,
+    /// The same count across all of one invocation's tool calls: the
+    /// backstop for a server that stays under the per-call cap on every
+    /// call of a long run. Default 100; `0` is refused at load.
+    #[serde(default = "default_max_server_requests_per_invocation")]
+    pub max_server_requests_per_invocation: u32,
 }
 
 fn default_max_concurrent_invocations() -> usize {
     1
+}
+
+fn default_max_server_requests_per_tool_call() -> u32 {
+    crate::worker::reducer::runner::ServerRequestLimits::default().per_tool_call
+}
+
+fn default_max_server_requests_per_invocation() -> u32 {
+    crate::worker::reducer::runner::ServerRequestLimits::default().per_invocation
 }
 
 fn default_llm_timeout_secs() -> u64 {
@@ -289,11 +308,42 @@ impl Default for WorkerConfig {
             llm_connect_timeout_secs: default_llm_connect_timeout_secs(),
             max_concurrent_invocations: default_max_concurrent_invocations(),
             stuck_threshold_override_secs: None,
+            max_server_requests_per_tool_call: default_max_server_requests_per_tool_call(),
+            max_server_requests_per_invocation: default_max_server_requests_per_invocation(),
         }
     }
 }
 
 impl WorkerConfig {
+    /// The two server-request caps as the runner takes them (#831).
+    pub fn server_request_limits(&self) -> crate::worker::reducer::runner::ServerRequestLimits {
+        crate::worker::reducer::runner::ServerRequestLimits {
+            per_tool_call: self.max_server_requests_per_tool_call,
+            per_invocation: self.max_server_requests_per_invocation,
+        }
+    }
+
+    /// A zero cap is refused: it would decline every sampling and
+    /// elicitation request on the daemon, which leaving them ungranted
+    /// already says per agent and per server.
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (key, value) in [
+            (
+                "max_server_requests_per_tool_call",
+                self.max_server_requests_per_tool_call,
+            ),
+            (
+                "max_server_requests_per_invocation",
+                self.max_server_requests_per_invocation,
+            ),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::ServerRequestCapZero { key });
+            }
+        }
+        Ok(())
+    }
+
     /// The two deadlines as the LLM client takes them.
     pub fn llm_timeouts(&self) -> crate::llm::LlmTimeouts {
         crate::llm::LlmTimeouts {
@@ -500,6 +550,7 @@ impl Config {
         }
         self.nats.validate()?;
         self.events.validate()?;
+        self.worker.validate()?;
         self.tools.validate()?;
         self.mcp.validate()
     }
@@ -691,6 +742,47 @@ mod tests {
     fn a_misspelled_mcp_key_is_named() {
         let err = Config::from_toml_str("[mcp]\nstartup_timeout = 5\n").unwrap_err();
         assert!(err.to_string().contains("mcp.startup_timeout"), "{err}");
+    }
+
+    /// #831: the server-request caps are `[worker]` keys with the decided
+    /// defaults, an operator's values reach the runner's own type, and a
+    /// zero is refused at load, naming the key.
+    #[test]
+    fn worker_server_request_caps_default_parse_and_refuse_zero() {
+        use crate::worker::reducer::runner::ServerRequestLimits;
+
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(config.worker.max_server_requests_per_tool_call, 8);
+        assert_eq!(config.worker.max_server_requests_per_invocation, 100);
+        assert_eq!(
+            config.worker.server_request_limits(),
+            ServerRequestLimits::default(),
+            "an empty file gets the runner's own defaults"
+        );
+
+        let config = Config::from_toml_str(
+            "[worker]\nmax_server_requests_per_tool_call = 3\n\
+             max_server_requests_per_invocation = 40\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.worker.server_request_limits(),
+            ServerRequestLimits {
+                per_tool_call: 3,
+                per_invocation: 40,
+            }
+        );
+
+        for key in [
+            "max_server_requests_per_tool_call",
+            "max_server_requests_per_invocation",
+        ] {
+            let err = Config::from_toml_str(&format!("[worker]\n{key} = 0\n"))
+                .expect_err("a zero cap is refused at load")
+                .to_string();
+            assert!(err.contains(&format!("[worker] {key}")), "{key}: {err}");
+            assert!(err.contains("greater than zero"), "{key}: {err}");
+        }
     }
 
     /// #546: the call deadlines and the `Retry-After` cap are `[worker]`

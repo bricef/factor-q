@@ -123,6 +123,10 @@ pub struct SamplingChannel {
     /// them so more than one grant-bearing server can be serviced in a
     /// single invocation (ADR-0018); a closed receiver is dropped.
     channels: StreamMap<String, UnboundedReceiverStream<ServerRequest>>,
+    /// The requests this run has admitted, per tool call and in all
+    /// (#831, `request_caps`). Kept here because the channel is the run's
+    /// ability to receive them: one per live attempt, none on resume.
+    requests: request_caps::ServerRequestCount,
 }
 
 impl SamplingChannel {
@@ -138,6 +142,7 @@ impl SamplingChannel {
                 .into_iter()
                 .map(|(server, rx)| (server, UnboundedReceiverStream::new(rx)))
                 .collect(),
+            requests: Default::default(),
         }
     }
 
@@ -1364,7 +1369,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             tools_available: tool_schemas,
             allowed_tool_names,
             max_iterations: agent.max_iterations().unwrap_or(self.config.max_iterations),
-            max_tokens: agent.max_tokens().unwrap_or(self.config.max_tokens),
+            max_tokens: self.config.max_tokens_for(agent),
             effort: agent.effort(),
         };
         let context = merge_step0_context(
@@ -2492,6 +2497,7 @@ mod failure;
 mod llm;
 mod mcp;
 mod replay;
+mod request_caps;
 mod resume_notice;
 mod server_request;
 mod terminal;
@@ -2500,6 +2506,7 @@ use mcp::{GrantServers, triggered_event};
 use terminal::Completion;
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};
+pub use request_caps::ServerRequestLimits;
 
 #[cfg(test)]
 mod tests;

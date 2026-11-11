@@ -1,13 +1,17 @@
-//! The pure end of ADR-0018 servicing: verdict mapping and elicitation
-//! schema validation, checked without a broker.
+//! The pure end of ADR-0018 servicing: verdict mapping, elicitation
+//! schema validation, and the model request a sampling request becomes
+//! (its `maxTokens` clamp included, #831), checked without a broker.
 //!
 //! Moved with their code out of `runner/tests.rs` (#78). The
 //! broker-backed `handle_sampling` tests stayed there on purpose — they
 //! drive a live runner through the `sampling_world` / `sampling_runner`
 //! fixtures shared with the rest of that file, and dragging those over
 //! would have made this move about test plumbing rather than the seam.
+//! The request-cap tests that need a live runner sit beside them for the
+//! same reason.
 
 use super::*;
+use crate::worker::reducer::harness::DEFAULT_MAX_TOKENS;
 use serde_json::json;
 
 #[test]
@@ -63,8 +67,8 @@ fn elicitation_schema_validation_enforces_per_field_rules() {
 /// The model request a sampling request runs as: the server's system
 /// prompt first, each turn as its role's message (an assistant turn a
 /// single text part), the temperature widened to `f64`, `maxTokens` as
-/// the cap, and no tools — the same request the runner built from the
-/// rmcp params.
+/// the cap when it is under the agent's own, and no tools — the same
+/// request the runner built from the rmcp params.
 #[test]
 fn sampling_request_runs_as_the_same_model_request() {
     let request = crate::mcp::sampling_request_from_wire(json!({
@@ -81,7 +85,7 @@ fn sampling_request_runs_as_the_same_model_request() {
     }))
     .expect("sampling params");
 
-    let built = sampling_to_model_request("claude-haiku", &request);
+    let built = sampling_to_model_request("claude-haiku", &request, DEFAULT_MAX_TOKENS);
 
     let expected = ModelRequest {
         model: "claude-haiku".to_string(),
@@ -121,13 +125,35 @@ fn a_bare_sampling_request_adds_no_system_message() {
     }))
     .expect("sampling params");
 
-    let built = sampling_to_model_request("m", &request);
+    let built = sampling_to_model_request("m", &request, DEFAULT_MAX_TOKENS);
 
     assert_eq!(built.messages.len(), 1);
     assert!(matches!(&built.messages[0], Message::User { text } if text == "hi"));
     assert_eq!(built.params.temperature, None);
     assert_eq!(built.params.max_tokens, Some(8));
     assert!(built.tools.is_empty());
+}
+
+/// #831: a server's `maxTokens` above the agent's own output cap is
+/// clamped to it — a server never gets a longer completion than the
+/// agent's turns do — and one at or below it is left alone.
+#[test]
+fn the_servers_max_tokens_is_clamped_to_the_agents_own() {
+    let asking = |max_tokens: u32| {
+        crate::mcp::sampling_request_from_wire(json!({
+            "messages": [{ "role": "user", "content": { "type": "text", "text": "hi" } }],
+            "maxTokens": max_tokens
+        }))
+        .expect("sampling params")
+    };
+
+    let clamped = sampling_to_model_request("m", &asking(100_000), DEFAULT_MAX_TOKENS);
+    assert_eq!(clamped.params.max_tokens, Some(DEFAULT_MAX_TOKENS));
+
+    let at_cap = sampling_to_model_request("m", &asking(512), 512);
+    assert_eq!(at_cap.params.max_tokens, Some(512));
+    let under = sampling_to_model_request("m", &asking(100_000), 512);
+    assert_eq!(under.params.max_tokens, Some(512), "an agent's own cap");
 }
 
 /// A model response becomes the reply the handler returns: its text
