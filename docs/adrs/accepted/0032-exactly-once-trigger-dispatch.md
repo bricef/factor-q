@@ -397,8 +397,9 @@ the incidents, and none has its own issue yet.
    `Started` arm logs and counts. The same-claimant `Held` arm does
    neither, and the count (`duplicate_dropped` in the consumer ledger)
    is in memory and resets when the daemon restarts. The plan's
-   invariant I5, "duplicate deliveries are dropped loudly", holds for
-   half the cases.
+   invariant I5 asked for every duplicate to be dropped loudly, with a
+   log line, a counter and a `fq doctor` check. That holds for one of
+   the two arms.
 
 5. **The claim table grows without bound.** `durably_started` rows are
    never deleted and `control_plane/retention.rs` does not sweep the
@@ -515,7 +516,7 @@ The other writes on a row do not check the claimant either:
 
 **The inbox.** Adoption is attempted only for a claimant the
 `coordination_worker` sweep has marked stale, and it is a CAS on the
-claimant field (plan §5.2; PR-4). The plan's phrase is "staleness gates
+claimant field (plan §5.2; PR-4). The plan's phrase is "Staleness gates
 only *when* adoption is attempted; the CAS keeps timing out of safety".
 That holds between adopters. The plan does not say that the holder's own
 later writes are conditional on still being the claimant, and they have
@@ -557,7 +558,7 @@ it arrives the row stays `claimed`, the message stays unacked, and
 redeliveries are dropped by the same-claimant arm; if it never arrives,
 the trigger is dead-lettered as exhausted while its invocation runs (the
 third gap above, made routine). The edge and bus transport document
-states the rule for that hop: "never ack upstream until the worker has
+states the rule for that hop: "Never ack upstream until the worker has
 durably accepted downstream".
 
 **The inbox.** The window does not exist on the broker's side. The claim
@@ -696,10 +697,10 @@ The slices are in §6 of the closed plan. None is scheduled.
 | Slice | What it was | The gap it answers |
 |---|---|---|
 | PR-2, claim registry in NATS KV | A claim every instance can see | Question 1, for shape C |
-| PR-3, inbox dispatch | Claim, ack, start from the claim; pre-allocated invocation id; own-claim startup scan | Question 3; and the first single-daemon gap |
+| PR-3, inbox dispatch | Claim, ack, start from the claim; pre-allocated invocation id; own-claim startup scan; one duplicate-drop path that logs and counts | Question 3; and the first and fourth single-daemon gaps |
 | PR-4, multi-worker recovery | Adoption gated on staleness; bounded start attempts; dead-letter disposition | Question 2, with the fencing addition noted there. It does not answer question 4 |
 | PR-5, pull discipline | One pull request per held permit | Question 5, distribution of work |
-| PR-7, watcher alarm and doctor checks | A warning on more than one pull request per issue; claim health checks | Question 5, detection; and the third and fourth single-daemon gaps |
+| PR-7, watcher alarm and doctor checks | A warning on more than one pull request per issue; claim health checks | Question 5, detection; and detecting the third single-daemon gap |
 | No slice | | Question 4 (#475) and question 6 as it applies to the table that landed |
 
 PR-1's remainder is #954 and PR-6's remainder is #953.
@@ -789,9 +790,11 @@ From the draft of 2026-07-19, still standing:
 
 ## Consequences
 
-- A duplicate delivery of a trigger is refused by one daemon whatever
-  caused it and however late it arrives, for as long as the claim row
-  exists. No timing parameter appears in that argument.
+- A running daemon refuses a duplicate delivery of a trigger it has
+  claimed or started, whatever caused the duplicate and however late it
+  arrives, for as long as the claim row exists. No timing parameter
+  appears in that argument. Across a restart the argument rests on
+  adoption, and the first gap is where it fails.
 - The dispatcher keeps its most delicate code: the `DurableStart`
   channel, the ack `select!` in `handle` and the choreography after it.
   The inbox would have deleted them.
