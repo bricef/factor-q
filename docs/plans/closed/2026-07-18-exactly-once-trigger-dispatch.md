@@ -1,68 +1,127 @@
 # Exactly-once trigger dispatch — execution plan
 
-> **Rescoped 2026-08-26; updated 2026-09-16 — still active. The
-> duplicate-start gap this plan is named for is closed by durable
-> claims (#809); the trigger-inbox end state is not built.**
-> Verified against `main` on 2026-08-26, except where a row says
-> otherwise:
->
-> | Slice | State |
-> |---|---|
-> | PR-0 (this plan + ADR-0032) | **Done** — ADR-0032 is in `docs/adrs/draft/` |
-> | PR-1 identity plumbing | **Partial** — the delivery attempt reaches `run_invocation` (`dispatcher.rs:473`) and the transcript preamble; `trigger_stream_seq` is persisted on dead-letter annotations, not on `invocation_state` |
-> | PR-2 claim registry | **Landed in a different shape (2026-09-16, #809)** — durable claims live in the control-plane store (`control_plane/store/trigger_claim.rs`, arbitrated by `control_plane/dispatcher/claim.rs`), keyed on stream + stream-incarnation epoch + sequence; there is still no `fq-trigger-claims` KV bucket |
-> | PR-3 inbox dispatch | **Not started** — `DurableStart` is still the mechanism (`dispatcher.rs:474`), and PR-3 is what would delete it |
-> | PR-4 multi-worker recovery | **Not started** |
-> | PR-5 pull discipline | **Not started** |
-> | PR-6 backoff + `ack_wait` reconcile | **Not started** — `TRIGGER_RETRY_BACKOFF` is still `[1s, 5s, 30s, 2m]`, not the approved `[30s, 2m, 10m, 30m]`, and the consumer drift-update (`bus.rs:497`) reconciles `max_deliver` and `backoff` but not `ack_wait` |
-> | PR-7 watcher alarm + `fq doctor` checks | **Not started** |
->
-> **Two mechanisms protect the system today, and neither is this
-> plan's end state.** The dispatcher still acks on durable start — the
-> invocation's first WAL write — rather than on dispatch or on
-> completion: the pre-existing #41 mechanism, which bounds the
-> 2026-07-06 storm (an invocation outliving the ack deadline being
-> re-run). Since 2026-09-16 (#809) a durable claim in the
-> control-plane store also arbitrates each delivery before drain,
-> routing, or parsing, so a redelivery *before* the first WAL write —
-> the 2026-07-18 incident in §1 — is acked and dropped rather than
-> starting a second invocation. What is still missing is the inbox end
-> state: the KV claim, PR-3's deletion of `DurableStart`, and
-> PR-4–PR-7. §5.3 keeps the #41 mechanism's invariants as a
-> preservation map precisely because PR-3 replaces it.
->
-> **§9's checkboxes are staler than they look** — two of the four are
-> done and were never ticked:
->
-> - *Adjudicate PRs #322/#323/#324* — **done.** All three were closed
->   unmerged on 2026-07-19, within a day of the incident. None was
->   picked; the underlying debt stayed with #189, whose split has
->   since landed by other means (`fq-cli/src/lib.rs` is 233 lines, one
->   module per verb group). Tick it.
-> - *Re-check issue #189* — **effectively done**, per the above; #189
->   itself is still open and is a backlog-grooming question, not a
->   blocker here.
-> - *File the upstream async-nats report* — **still open, still
->   relevant.** The tree is on async-nats 0.38, the version whose pull
->   behaviour §2 blames; the item's own precondition ("check ≥0.39
->   changelogs first") has not been discharged.
-> - *Keep the three invocation archives* — **standing**, nothing to
->   do; it is a do-not-delete note, and the cost-retention sweep
->   exempts those rows.
->
-> **So the real remaining work is the code, not the remediation.** The
-> next action is PR-3 onward, and the open question worth putting to
-> the maintainer first is whether the ADR-0032 KV trigger inbox is
-> still the shape wanted now that #809's control-plane claim has
-> closed the duplicate-start gap, given that the single-daemon
-> dogfood ran from 2026-07-19 to that fix on the #41 mechanism
-> without a recurrence.
+**Status:** closed 2026-11-11, with its end state not built. The
+duplicate-start gap this plan is named for was closed on 2026-09-16 by a
+smaller design than the one planned here, and on 2026-11-11 the
+maintainer decided
+([#835](https://github.com/bricef/factor-q/issues/835)) that the smaller
+design is the project's exactly-once dispatch design and the trigger
+inbox is not built. The decision record is
+[ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md),
+accepted the same day and rewritten around what landed; see
+[Outcome](#outcome) below. Originally: active (2026-07-19), the
+highest-priority correctness fix, written up from the 2026-07-18
+duplicate-PR incident (issue #189 → PRs #322/#323/#324, board capture
+#327), with the root cause reproduced empirically against a scratch
+broker before the plan was written.
 
-**Status:** active (2026-07-19). Highest-priority correctness fix. Written up
-from the 2026-07-18 duplicate-PR incident (issue #189 → PRs #322/#323/#324,
-board capture #327); root cause reproduced empirically against a scratch
-broker before this plan was written. Decision record:
-[ADR-0032](../../adrs/draft/0032-exactly-once-trigger-dispatch.md).
+## Outcome
+
+Recorded at close. Sections 1 to 10 below are the plan as written on
+2026-07-19 and are left as they were. Their line numbers, the one-second
+ack deadline in §2 and the async-nats 0.38 pull behaviour were true then
+and do not describe `main` now. The status header this plan carried from
+2026-08-26 to 2026-11-11 is replaced by this section; one of its figures
+was stale and is corrected in the table (PR-6).
+
+### What was built
+
+| Slice | State at close |
+|---|---|
+| PR-0, this plan and ADR-0032 | **Done.** The ADR was accepted on 2026-11-11 in a rewritten form |
+| PR-1, identity plumbing | **Partly built; the rest is not needed as planned.** The delivery attempt reaches `run_invocation` and the transcript preamble, and `trigger_stream_seq` is on dead-letter annotations. The `invocation_state` column and its worker schema bump were not added: the claim row records which invocation each delivery started. No operator surface reads that link yet, which is [#954](https://github.com/bricef/factor-q/issues/954) |
+| PR-2, claim registry | **Built in a different shape** on 2026-09-16 ([#809](https://github.com/bricef/factor-q/issues/809), PR [#817](https://github.com/bricef/factor-q/pull/817)): a `trigger_claim` table in the control-plane SQLite store (`control_plane/store/trigger_claim.rs`), arbitrated by `control_plane/dispatcher/claim.rs` as the first thing the dispatcher does with a delivery, keyed on stream, stream-incarnation epoch and sequence. There is no `fq-trigger-claims` KV bucket, and the registry is wired into the dispatcher, which PR-2 was not going to do |
+| PR-3, inbox dispatch | **Not built.** The trigger is still acked at the invocation's first WAL write, through `DurableStart`; PR-3 would have deleted that |
+| PR-4, multi-worker recovery | **Not built** |
+| PR-5, pull discipline | **Not built, and `main` went the other way.** Since [#733](https://github.com/bricef/factor-q/issues/733) the consume loop holds no worker permit: it pulls each delivery as it arrives, and a trigger that cannot start is held in the dispatcher and kept alive with in-progress acks |
+| PR-6, backoff and `ack_wait` reconcile | **Partly built, by other routes.** [#810](https://github.com/bricef/factor-q/issues/810) widened the first entry, so `TRIGGER_RETRY_BACKOFF` is `[30s, 5s, 30s, 2m]`: neither the `[1s, 5s, 30s, 2m]` this plan's header went on reporting, nor the approved `[30s, 2m, 10m, 30m]`. The consumer drift repair (`EventBus::durable`, `bus/consumers.rs`) owns `ack_wait`, `max_deliver` and `backoff` and repairs them in place. The rest of the ladder, and the comment that still calls it a stopgap, are [#953](https://github.com/bricef/factor-q/issues/953) |
+| PR-7, watcher alarm and `fq doctor` checks | **Not built.** `fq status` and `fq doctor` report the duplicate deliveries the claim dropped after a durable start (PR #817), which is a count and not an alarm |
+
+### What protects dispatch instead
+
+Two mechanisms, each bounding one of the two incident shapes:
+
+- **The ack at durable start** (the #41 mechanism, which this plan meant
+  to replace) settles the trigger at the invocation's first WAL write,
+  so an invocation that outlives the ack window is not redelivered. That
+  is the 2026-07-06 storm.
+- **The durable claim** refuses any copy of a stream message that is
+  already claimed or already started, so a trigger redelivered before
+  its first WAL write starts nothing. That is the 2026-07-18 incident in
+  §1, and its recurrence on 2026-09-16.
+
+The single-daemon dogfood ran on the first mechanism alone from
+2026-07-19 until 2026-09-16, when the 2026-07-18 class recurred by a
+different route: eight triggers held behind a per-agent cap became
+thirteen invocations after a keepalive tick slipped. #809 was the answer
+to that, and it is the claim.
+
+### What was not built, and why
+
+The trigger inbox: §5 of this plan, and slices PR-3, PR-4, PR-5 and
+PR-7. The maintainer's reason, from #835: the inbox's main payoff is
+supporting more than one worker, multi-node is deliberately on hold
+([#414](https://github.com/bricef/factor-q/issues/414)), and the inbox
+would be the largest single change in the production-readiness review's
+Phase 2, made for a failure the single-daemon deployment no longer
+reaches.
+
+The design in §4 to §7 is not discarded. It is where multi-node work
+starts from, and ADR-0032's section
+[What this means for more than one worker](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+says which of this plan's slices answers which gap in the design that
+landed, and names the condition for reopening the decision: before a
+second process consumes the trigger stream.
+
+Two things in this plan read differently in the light of what landed:
+
+- §5.3's invariant-preservation map exists because PR-3 was going to
+  replace the #41 mechanism. It was not replaced, so the #41 invariants
+  are held by the tests that always held them, and the "new expression"
+  column describes code that does not exist.
+- The alternative §5 rejects, "per-worker SQLite claims (invisible to
+  siblings — rejected by the multi-worker requirement)", is the design
+  that was accepted. The objection stands; the requirement was dropped
+  for now.
+
+### How it was verified
+
+§7's incident-replay integration test was PR-3's gate, and PR-3 is not
+built. Its equivalent for the design that landed is
+`services/fq-runtime/crates/fq-runtime/tests/july_incident_replay.rs`
+([#955](https://github.com/bricef/factor-q/pull/955)): both July
+incidents run through the dispatcher's production consume loop on a
+private broker, with every redelivery caused by a real ack deadline.
+ADR-0032 records those runs and the twelve dispatcher and store unit
+tests run beside them, with the result of disabling each mechanism in
+turn. Phase 2's exit criterion "the incident-replay integration test
+from the exactly-once plan passes" is amended to name those tests; the
+amendment is in ADR-0032 and STATUS.md.
+
+§7's crash-window suite and property sweep were written for the inbox's
+state machine and were not built. The design that landed has one crash
+window §5.2's table would have closed and it does not: a crash between
+the first WAL write and the claim's `durably_started` update. ADR-0032
+lists it first under "What this design does not close".
+
+### Where the leftovers went
+
+- The retry ladder: #953.
+- Reading the trigger-to-invocation link: #954, which also notes that
+  the claim table has no retention.
+- The gaps ADR-0032 lists under "What this design does not close" have
+  no issues of their own at close.
+- §9, incident remediation. The three duplicate pull requests (#322,
+  #323, #324) were closed unmerged on 2026-07-19 and none was picked;
+  #189, the issue they were for, closed on 2026-09-10. The three
+  invocation archives stay, as a standing do-not-delete note. The
+  upstream async-nats report was not filed, as far as this repository
+  records. The tree has since moved from async-nats 0.38 to 0.52, and
+  since #733 the dispatcher does not take a permit before it pulls, so
+  the client behaviour §2 describes no longer bears on dispatch. Whether
+  0.52 still behaves that way was not checked.
+
+## The plan as written, 2026-07-19
 
 **Decisions (2026-07-19, maintainer):** go **straight to the end-state** (no
 interim per-worker claim gate — pre-prod, no detour we'd delete later);
