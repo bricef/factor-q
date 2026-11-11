@@ -7,17 +7,19 @@
 //! the points they used to occupy — the order is load-bearing. Reconciliation
 //! runs before classification so a pre-existing orphan cannot be reported
 //! ambiguous again, and the resume tasks are spawned only after the runner
-//! that drives them exists. Classification, and the claim marks it writes,
-//! completes before the trigger dispatcher is built (#959): a dispatcher
-//! that consumed first could meet the redelivery of a trigger whose
-//! invocation is in flight while its claim still read `claimed`, and start
-//! the trigger a second time.
+//! that drives them exists. The claim marks must land before the trigger
+//! dispatcher consumes anything (#959), or it could meet the redelivery of a
+//! trigger whose invocation is in flight while its claim still read
+//! `claimed`, and start the trigger a second time. That order is held by
+//! type rather than by call order: the [`TriggerClaims`] a dispatcher needs
+//! to arbitrate exist only as what the recording returns.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
 use fq_runtime::agent::{AgentId, AgentRegistry};
+use fq_runtime::control_plane::dispatcher::TriggerClaims;
 use fq_runtime::events::{Event, EventPayload};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::worker::{ClassifiedInvocation, WorkerId};
@@ -118,23 +120,32 @@ pub(crate) async fn reconcile_terminal_owners(
     Ok(())
 }
 
+/// What startup recovery hands the rest of the boot.
+pub(crate) struct Recovered {
+    /// The invocations to re-drive.
+    pub recoverable: Vec<ClassifiedInvocation>,
+    /// The ids whose workspaces the startup prune must keep: every
+    /// in-flight invocation, resumable *or* ambiguous, because resume
+    /// continues from its workspace and triage may need to inspect it.
+    pub in_flight_ids: HashSet<String>,
+    /// The trigger claims the dispatcher arbitrates on. They exist only as
+    /// the result of recording every in-flight invocation's durable start
+    /// on its claim, so no dispatcher can arbitrate before that (#959).
+    pub claims: TriggerClaims,
+}
+
 /// Classify what was in flight when the last process stopped, publish the
 /// `system.recovery` roll-up, surface the cases that cannot be recovered as
-/// `invocation.ambiguous`, mark the trigger claim of every in-flight
-/// invocation `durably_started`, and restore coordination ownership for the
+/// `invocation.ambiguous`, report every in-flight invocation to the control
+/// plane as durably started, and restore coordination ownership for the
 /// ones that can be recovered.
-///
-/// Returns the invocations to re-drive, and the ids whose workspaces the
-/// startup prune must keep — every in-flight invocation, resumable *or*
-/// ambiguous, because resume continues from its workspace and triage may
-/// need to inspect it.
 pub(crate) async fn classify_in_flight(
     worker_store: &Arc<WorkerStore>,
-    cp_store: &ControlPlaneStore,
+    cp_store: &Arc<ControlPlaneStore>,
     bus: &EventBus,
     runtime_id: Uuid,
     worker_id: &WorkerId,
-) -> anyhow::Result<(Vec<ClassifiedInvocation>, HashSet<String>)> {
+) -> anyhow::Result<Recovered> {
     // Worker recovery: scan in-flight invocations from the worker store,
     // classify each, restore ownership for auto-resumed cases, and emit
     // `invocation.ambiguous` events for cases that cannot be recovered.
@@ -234,19 +245,21 @@ pub(crate) async fn classify_in_flight(
 
     // Every in-flight invocation made its first WAL write, so its trigger
     // has durably started, whether or not the process that ran it lived to
-    // record that on the trigger's claim. Record it now, on the claim that
-    // has named the invocation since claim time, so the redelivery of that
-    // still-unacked trigger is dropped rather than started a second time
-    // (#959). Ambiguous invocations count: an operator decides their fate,
-    // not a redelivery. This must land before the dispatcher consumes its
-    // first trigger; `assemble` runs recovery before `run_hosted` builds
-    // the dispatcher, and an error here stops the boot.
-    for invocation_id in &in_flight_ids {
-        cp_store
-            .mark_trigger_started_by_invocation(invocation_id)
-            .await
-            .context("failed to record a recovered invocation's durable start on its claim")?;
-    }
+    // record that on the trigger's claim. The worker reports its in-flight
+    // set and the control plane records it on the claims, so the redelivery
+    // of such a still-unacked trigger is dropped rather than started a
+    // second time (#959). Ambiguous invocations count: an operator decides
+    // their fate, not a redelivery. In this process the report is not a
+    // message but a direct write into the control-plane store, and it must
+    // land before the dispatcher consumes a trigger: the claims the
+    // dispatcher needs are what the recording returns, and an error here
+    // stops the boot.
+    let in_flight = fq_runtime::worker::InFlightReport::scan(worker_store.as_ref())
+        .await
+        .context("failed to read the in-flight invocations to report")?;
+    let claims = TriggerClaims::recover(cp_store.clone(), &in_flight)
+        .await
+        .context("failed to record a recovered invocation's durable start on its claim")?;
 
     // Restore the coordination rows before spawning resumes. A row can be
     // absent after a daemon crash, but the list/dashboard projection keys on
@@ -270,7 +283,11 @@ pub(crate) async fn classify_in_flight(
             recoverable.push(invocation);
         }
     }
-    Ok((recoverable, in_flight_ids))
+    Ok(Recovered {
+        recoverable,
+        in_flight_ids,
+        claims,
+    })
 }
 
 /// Spawn one detached auto-resume task per safe-resume / safe-replay

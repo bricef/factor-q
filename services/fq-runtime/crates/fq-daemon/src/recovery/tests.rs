@@ -183,12 +183,19 @@ struct AfterTheCrash {
 ///
 /// Its writes are the ones the dispatcher and the runner make, in their
 /// order and through the same store calls: the dispatcher's per-delivery
-/// `handle` is private to the runtime crate. That a live dispatcher names
-/// this id on the claim and that the runner writes its WAL rows under it
-/// is shown there (`held_claims_stop_same_worker_and_are_adopted_from_another_worker`,
-/// `a_dispatched_invocation_runs_under_the_id_its_claim_names`). What
+/// `handle` is private to the runtime crate. One variable stands for both
+/// the id on the claim and the id on the WAL row, and the runtime crate's
+/// tests are what make that honest, each by reading the row back:
+/// `a_dispatcher_killed_after_the_first_wal_write_leaves_a_claim_naming_the_wal_row`
+/// kills the real `handle` after a worker's first WAL write and finds the
+/// claim naming the WAL row's id, and
+/// `started_claim_acks_duplicate_without_second_invocation` finds the id
+/// the worker was handed on the started claim. That the real runner writes
+/// its WAL rows under the id it is handed is
+/// `a_dispatched_invocation_runs_under_the_id_its_claim_names`. What
 /// follows the death is shown here, with the daemon's own recovery and the
-/// dispatcher's production consume loop.
+/// dispatcher's production consume loop, and against the real binary in
+/// `tests/crash_before_claim_mark.rs`.
 async fn a_daemon_dies_holding_a_trigger(reached_first_wal_write: bool) -> AfterTheCrash {
     let server = fq_test_support::test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
@@ -330,13 +337,17 @@ impl Restarted {
 
 /// Start the next daemon in `assemble`'s order: startup recovery under a
 /// new runtime id, then the trigger dispatcher on the production durable,
-/// claiming under that id, through `TriggerDispatcher::run` as
-/// `hosted.rs` runs it. The dead daemon's message is redelivered between
-/// the two.
+/// claiming under that id with the claims recovery returned, through
+/// `TriggerDispatcher::run` as `hosted.rs` runs it. The dead daemon's
+/// message is redelivered between the two.
 async fn restart(crash: &AfterTheCrash) -> Restarted {
     let runtime_id = Uuid::now_v7();
     let worker_id = WorkerId::new(runtime_id.to_string()).unwrap();
-    let (recoverable, _) = classify_in_flight(
+    let Recovered {
+        recoverable,
+        claims,
+        ..
+    } = classify_in_flight(
         &crash.worker_store,
         &crash.cp_store,
         &crash.bus,
@@ -363,7 +374,7 @@ async fn restart(crash: &AfterTheCrash) -> Restarted {
         Arc::new(FixtureClient::new()),
         1,
     )
-    .with_trigger_claims(crash.cp_store.clone(), worker_id.as_str());
+    .with_trigger_claims(claims, worker_id.as_str());
     let (shutdown, shutdown_rx) = oneshot::channel();
     let run = tokio::spawn(dispatcher.run(shutdown_rx));
     Restarted {
@@ -526,9 +537,11 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
     let server = fq_test_support::test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let scratch = tempfile::tempdir().unwrap();
-    let cp_store = ControlPlaneStore::open(&scratch.path().join("control-plane.db"))
-        .await
-        .expect("open the control-plane store");
+    let cp_store = Arc::new(
+        ControlPlaneStore::open(&scratch.path().join("control-plane.db"))
+            .await
+            .expect("open the control-plane store"),
+    );
     let worker_store = Arc::new(
         WorkerStore::open(&scratch.path().join("worker.db"))
             .await
@@ -574,7 +587,11 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
         .unwrap();
 
     let runtime_id = Uuid::now_v7();
-    let (recoverable, in_flight) = classify_in_flight(
+    let Recovered {
+        recoverable,
+        in_flight_ids: in_flight,
+        ..
+    } = classify_in_flight(
         &worker_store,
         &cp_store,
         &bus,

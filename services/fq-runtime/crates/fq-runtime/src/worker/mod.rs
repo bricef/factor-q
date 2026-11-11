@@ -43,7 +43,8 @@ pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, Heartb
 // crate and is re-exported here, where the role is.
 pub use fq_ops::worker::WorkerId;
 pub use recovery::{
-    CategoryCounts, ClassifiedInvocation, RecoveryCategory, categorise, scan_in_flight,
+    CategoryCounts, ClassifiedInvocation, InFlightReport, RecoveryCategory, categorise,
+    scan_in_flight,
 };
 pub use reducer::{
     Harness, MAX_SUPPORTED_ITERATIONS, Reducer, ReducerContext, ReducerContextBuilder,

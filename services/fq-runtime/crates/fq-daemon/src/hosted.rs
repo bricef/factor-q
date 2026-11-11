@@ -79,8 +79,13 @@ pub(crate) struct Assembled {
     pub registry: Arc<fq_runtime::AgentRegistry>,
     pub llm: Arc<dyn LlmClient>,
     pub pricing: crate::pricing::DaemonPricing,
+    /// Also the dispatcher's worker: one runner serves new triggers and
+    /// recovered invocations alike.
     pub resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
-    pub worker: Arc<dyn fq_runtime::Worker>,
+    /// The trigger claims the dispatcher arbitrates on, which startup
+    /// recovery returned once it had recorded every in-flight invocation's
+    /// durable start on its claim (#959).
+    pub claims: fq_runtime::control_plane::dispatcher::TriggerClaims,
     pub worker_id: fq_runtime::worker::WorkerId,
     /// The daemon's worker row, armed at registration. This teardown
     /// settles it; `run_daemon` settles whatever this one never reached.
@@ -131,7 +136,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         llm,
         pricing,
         resume_runner,
-        worker,
+        claims,
         worker_id,
         registration,
         edge_listener,
@@ -396,12 +401,12 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let dispatcher = TriggerDispatcher::new(
         bus.clone(),
         shared_registry.clone(),
-        worker,
+        resume_runner.clone(),
         llm,
         config.worker.max_concurrent_invocations,
     )
     .with_throttle(throttle)
-    .with_caps_and_claims(agent_caps.clone(), cp_store.clone(), worker_id.as_str())
+    .with_caps_and_claims(agent_caps.clone(), claims, worker_id.as_str())
     .with_deferrals(deferrals, due_resumes);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
     // Set by the select's own dispatcher arm, which consumes the handle.
