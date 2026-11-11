@@ -56,6 +56,20 @@
 //! have kept is lost to a rebuild, and neither is anything below the
 //! floor.
 //!
+//! ## Under the schema lock
+//!
+//! Everything [`ProjectionStore::open`] does to the schema — reading the
+//! version, and then the fresh create, the same-version levelling or the
+//! rebuild, down to the `user_version` stamp — is one step under the
+//! shared kit's schema lock (`with_schema_lock` in `crate::db::schema`):
+//! one connection, one `BEGIN IMMEDIATE` transaction taken before the
+//! version is read. So a second opener waits and then finds the file
+//! current; a fresh create cut short leaves an empty file rather than
+//! tables with no stamp (which the next open would mistake for a
+//! pre-versioning file and rebuild); and two openers can never both see
+//! a forward-only column missing and both add it. `fq projection
+//! rebuild` takes the same lock.
+//!
 //! ## Bumping the version
 //!
 //! Change the `CREATE TABLE` block, bump [`PROJECTION_SCHEMA_VERSION`],
@@ -65,10 +79,14 @@
 
 use std::path::Path;
 
+use sqlx::sqlite::SqliteConnection;
 use sqlx::{QueryBuilder, Sqlite};
 
 use super::{ProjectionStore, StoreError};
-use crate::db::schema::{Compatibility, check_compatibility, read_user_version, split_sql};
+use crate::db::schema::{
+    Compatibility, SchemaSeam, check_compatibility, read_user_version, split_sql, with_schema_lock,
+    write_user_version,
+};
 
 /// The projection schema version this binary writes and expects.
 ///
@@ -344,58 +362,97 @@ pub(super) async fn evict_transients(conn: &mut sqlx::SqliteConnection) -> Resul
     Ok(())
 }
 
-impl ProjectionStore {
-    /// The version this file records, or `None` for a file that has no
-    /// projection tables yet. `user_version` reads 0 on a file that was
-    /// never stamped, so the tables are what tell a fresh file from a
-    /// pre-versioning one — the latter has tables and needs a rebuild,
-    /// the former needs a schema.
-    pub(super) async fn recorded_version(&self) -> Result<Option<u32>, StoreError> {
-        let tables: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'events'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        if tables == 0 {
-            return Ok(None);
-        }
-        Ok(Some(read_user_version(&self.pool).await?))
+/// The version this file records, or `None` for a file that has no
+/// projection tables yet. `user_version` reads 0 on a file that was
+/// never stamped, so the tables are what tell a fresh file from a
+/// pre-versioning one — the latter has tables and needs a rebuild,
+/// the former needs a schema.
+pub(super) async fn recorded_version(
+    conn: &mut SqliteConnection,
+) -> Result<Option<u32>, StoreError> {
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'events'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if tables == 0 {
+        return Ok(None);
     }
+    Ok(Some(read_user_version(&mut *conn).await?))
+}
 
+/// Add each of `columns` that `table` does not yet have. Existence-
+/// checked via `pragma_table_info` (deterministic and idempotent)
+/// rather than matching driver error text — and, under the schema lock,
+/// checked and added with no other opener in between, which is what
+/// keeps a second opener from adding the same column twice. DDL cannot
+/// take identifiers as parameters, so the statement is composed — from
+/// `'static` names only, which the signature enforces: nothing read at
+/// runtime can reach it.
+async fn add_missing_columns(
+    conn: &mut SqliteConnection,
+    table: &'static str,
+    columns: &[(&'static str, &'static str)],
+) -> Result<(), StoreError> {
+    let present: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+        .bind(table)
+        .fetch_all(&mut *conn)
+        .await?;
+    for &(column, ty) in columns {
+        if present.iter().any(|c| c == column) {
+            continue;
+        }
+        let mut ddl = QueryBuilder::<Sqlite>::new("ALTER TABLE ");
+        ddl.push(table)
+            .push(" ADD COLUMN ")
+            .push(column)
+            .push(' ')
+            .push(ty);
+        ddl.build().execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+/// The schema at the current version on an empty file, stamped.
+async fn create_schema(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    for statement in split_sql(SCHEMA_SQL) {
+        sqlx::query(statement).execute(&mut *conn).await?;
+    }
+    sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
+        .execute(&mut *conn)
+        .await?;
+    write_user_version(&mut *conn, PROJECTION_SCHEMA_VERSION).await?;
+    Ok(())
+}
+
+/// A same-version file, brought level: the tables and columns a file
+/// stamped current can still lack, and the transients older builds left.
+async fn level_current(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    // Idempotent on a file that already matches, and what gives a
+    // same-version file a table it lacks: the legacy split copies only
+    // the tables the v1 file had, so a copy stamped current can still
+    // be short of `triggers`.
+    for statement in split_sql(SCHEMA_SQL) {
+        sqlx::query(statement).execute(&mut *conn).await?;
+    }
+    // The forward-only path: same version, a column added by `ALTER`,
+    // history NULL. See the module docs for when that is the right
+    // tool.
+    add_missing_columns(conn, "events", &ADDED_EVENT_COLUMNS).await?;
+    add_missing_columns(conn, "triggers", &ADDED_TRIGGER_COLUMNS).await?;
+    // Only now, with the column guaranteed present on old databases as
+    // well as new ones — see [`TRIGGER_REQUEUE_INDEX_SQL`].
+    sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
+        .execute(&mut *conn)
+        .await?;
+    evict_transients(conn).await
+}
+
+impl ProjectionStore {
     /// The `user_version` this file carries — what a test reads to
     /// prove a rebuild stamped it.
     pub async fn schema_version(&self) -> Result<u32, StoreError> {
         Ok(read_user_version(&self.pool).await?)
-    }
-
-    /// Add each of `columns` that `table` does not yet have. Existence-
-    /// checked via `pragma_table_info` (deterministic and idempotent)
-    /// rather than matching driver error text. DDL cannot take
-    /// identifiers as parameters, so the statement is composed — from
-    /// `'static` names only, which the signature enforces: nothing read
-    /// at runtime can reach it.
-    async fn add_missing_columns(
-        &self,
-        table: &'static str,
-        columns: &[(&'static str, &'static str)],
-    ) -> Result<(), StoreError> {
-        let present: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
-            .bind(table)
-            .fetch_all(&self.pool)
-            .await?;
-        for &(column, ty) in columns {
-            if present.iter().any(|c| c == column) {
-                continue;
-            }
-            let mut ddl = QueryBuilder::<Sqlite>::new("ALTER TABLE ");
-            ddl.push(table)
-                .push(" ADD COLUMN ")
-                .push(column)
-                .push(' ')
-                .push(ty);
-            ddl.build().execute(&self.pool).await?;
-        }
-        Ok(())
     }
 
     /// Bring the file to [`PROJECTION_SCHEMA_VERSION`] on the way in:
@@ -403,70 +460,58 @@ impl ProjectionStore {
     /// (bar the forward-only columns), rebuild an older one, refuse a
     /// newer one. The module docs are the contract.
     pub(super) async fn ensure_schema(&self, path: &Path) -> Result<(), StoreError> {
-        self.ensure_meta_table().await?;
-        let recorded = self.recorded_version().await?;
-        match check_compatibility(recorded, PROJECTION_SCHEMA_VERSION) {
-            Compatibility::FreshInstall => {
-                self.create_schema().await?;
-                // A file that did not exist a moment ago must not
-                // inherit a durable's position: if the durable is
-                // still there from an earlier life of this store, its
-                // acked floor would leave everything before it out of
-                // the new file for good. The consumer resets it before
-                // it reads (see `rebuild::reset_projection_consumer`).
-                self.request_consumer_reset(super::rebuild::FRESH_FILE_REASON)
-                    .await?;
-            }
-            Compatibility::Current => {
-                // Idempotent on a file that already matches, and what
-                // gives a same-version file a table it lacks: the
-                // legacy split copies only the tables the v1 file had,
-                // so a copy stamped current can still be short of
-                // `triggers`.
-                for statement in split_sql(SCHEMA_SQL) {
-                    sqlx::query(statement).execute(&self.pool).await?;
-                }
-                // The forward-only path: same version, a column added
-                // by `ALTER`, history NULL. See the module docs for
-                // when that is the right tool.
-                self.add_missing_columns("events", &ADDED_EVENT_COLUMNS)
-                    .await?;
-                self.add_missing_columns("triggers", &ADDED_TRIGGER_COLUMNS)
-                    .await?;
-                // Only now, with the column guaranteed present on old
-                // databases as well as new ones — see
-                // [`TRIGGER_REQUEUE_INDEX_SQL`].
-                sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
-                    .execute(&self.pool)
-                    .await?;
-                let mut conn = self.pool.acquire().await?;
-                evict_transients(&mut conn).await?;
-            }
-            Compatibility::NeedsUpgrade { from } => {
-                self.rebuild_tables(super::rebuild::RebuildReason::SchemaUpgrade { from })
-                    .await?;
-            }
-            Compatibility::BinaryTooOld { db_version } => {
-                return Err(StoreError::IncompatibleSchema {
-                    path: path.to_path_buf(),
-                    db_version,
-                    binary_version: PROJECTION_SCHEMA_VERSION,
-                });
-            }
-        }
-        Ok(())
+        self.ensure_schema_observed(path, &mut ()).await
     }
 
-    /// The schema at the current version on an empty file, stamped.
-    async fn create_schema(&self) -> Result<(), StoreError> {
-        for statement in split_sql(SCHEMA_SQL) {
-            sqlx::query(statement).execute(&self.pool).await?;
-        }
-        sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
-            .execute(&self.pool)
-            .await?;
-        crate::db::schema::write_user_version(&self.pool, PROJECTION_SCHEMA_VERSION).await?;
-        Ok(())
+    /// [`Self::ensure_schema`], telling `seam` where it has got to. One
+    /// step under the schema lock, from reading the version to the last
+    /// write, so a second opener waits for it and an interrupted one —
+    /// a failed statement, a killed process — leaves the file as it was.
+    pub(super) async fn ensure_schema_observed(
+        &self,
+        path: &Path,
+        seam: &mut impl SchemaSeam,
+    ) -> Result<(), StoreError> {
+        with_schema_lock(
+            &self.pool,
+            async |conn: &mut SqliteConnection| -> Result<(), StoreError> {
+                super::rebuild::ensure_meta_table(conn).await?;
+                let recorded = recorded_version(conn).await?;
+                let verdict = check_compatibility(recorded, PROJECTION_SCHEMA_VERSION);
+                seam.version_read(verdict).await;
+                match verdict {
+                    Compatibility::FreshInstall => {
+                        create_schema(conn).await?;
+                        // A file that did not exist a moment ago must
+                        // not inherit a durable's position: if the
+                        // durable is still there from an earlier life
+                        // of this store, its acked floor would leave
+                        // everything before it out of the new file for
+                        // good. The consumer resets it before it reads
+                        // (see `rebuild::reset_projection_consumer`).
+                        super::rebuild::request_consumer_reset(
+                            conn,
+                            super::rebuild::FRESH_FILE_REASON,
+                        )
+                        .await
+                    }
+                    Compatibility::Current => level_current(conn).await,
+                    Compatibility::NeedsUpgrade { from } => {
+                        let reason = super::rebuild::RebuildReason::SchemaUpgrade { from };
+                        super::rebuild::rebuild_tables(conn, reason).await?;
+                        Ok(())
+                    }
+                    Compatibility::BinaryTooOld { db_version } => {
+                        Err(StoreError::IncompatibleSchema {
+                            path: path.to_path_buf(),
+                            db_version,
+                            binary_version: PROJECTION_SCHEMA_VERSION,
+                        })
+                    }
+                }
+            },
+        )
+        .await
     }
 
     /// Check that this database is one the read path can serve, on a

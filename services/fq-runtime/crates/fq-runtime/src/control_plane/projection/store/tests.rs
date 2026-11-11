@@ -990,6 +990,106 @@ async fn migrates_existing_projection_with_cache_columns() {
     assert_eq!(summary[0].total_cache_write_tokens, 10);
 }
 
+/// #970 for the projection: its open-time step runs under the same
+/// schema lock as the `schema_meta` stores'. A rival opener arriving
+/// while the first has read the version waits, and neither opener takes
+/// the fresh file for an old one and rebuilds it. The rival is the real
+/// `open`.
+#[tokio::test]
+async fn two_openers_of_a_fresh_projection_serialise_and_neither_rebuilds() {
+    use crate::db::schema::Compatibility;
+    use crate::db::schema::test_seam::RivalAtVersionRead;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let rival_path = path.clone();
+    let mut seam = RivalAtVersionRead::new(&path, async move {
+        ProjectionStore::open(&rival_path)
+            .await
+            .map(drop)
+            .map_err(|err| err.to_string())
+    });
+
+    let first = ProjectionStore::open_observed(&path, &mut seam).await;
+    let rival = seam.rival_outcome().await;
+
+    let store = first.expect("the first opener must succeed");
+    rival.expect("the second opener must succeed");
+    assert_eq!(seam.verdict, Some(Compatibility::FreshInstall));
+    assert_eq!(
+        seam.lock_held,
+        Some(true),
+        "the first opener read the version without holding the write lock"
+    );
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        PROJECTION_SCHEMA_VERSION
+    );
+    assert_eq!(
+        store.rebuild_record().await.unwrap(),
+        None,
+        "a fresh file must never be rebuilt"
+    );
+    assert_eq!(
+        store.consumer_reset_pending().await.unwrap().as_deref(),
+        Some(FRESH_FILE_REASON)
+    );
+}
+
+/// A fresh create cut short. Before the schema lock its statements
+/// committed one at a time, so a failure part-way left tables with no
+/// `user_version` stamp — which the next open reads as a pre-versioning
+/// file and rebuilds. Now nothing is left, and the next open is a fresh
+/// create. The failure is staged with a view where a table belongs:
+/// `CREATE TABLE IF NOT EXISTS` passes over it, and indexing it fails,
+/// after every table before it has been created.
+#[tokio::test]
+async fn a_fresh_create_cut_short_leaves_nothing_for_the_next_open_to_rebuild() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    sqlx::query("CREATE VIEW operator_signals AS SELECT 1 AS timestamp")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = ProjectionStore::open(&path)
+        .await
+        .expect_err("indexing a view must fail the create");
+    assert!(
+        err.to_string().contains("views may not be indexed"),
+        "failed for the wrong reason: {err}"
+    );
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        tables,
+        Vec::<String>::new(),
+        "the tables created before the failure must roll back with it"
+    );
+
+    sqlx::query("DROP VIEW operator_signals")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let store = ProjectionStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.rebuild_record().await.unwrap(),
+        None,
+        "the next open must create the file afresh, not rebuild a half-made one"
+    );
+    assert_eq!(
+        store.consumer_reset_pending().await.unwrap().as_deref(),
+        Some(FRESH_FILE_REASON)
+    );
+}
+
 #[tokio::test]
 async fn inserts_and_counts_events() {
     let (store, _dir) = open_store().await;

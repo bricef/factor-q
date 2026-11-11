@@ -25,11 +25,11 @@
 //! - If the row's version is *higher* than the binary → refuse
 //!   to start, per the §5.6 refuse-and-flag contract.
 //! - If the row's version is *lower* → migrate forward, one rung
-//!   of the ladder in `run_migrations` at a time.
+//!   at a time, committed with the new version or not at all.
 //!
-//! The machinery is [`crate::db::schema`], shared with the
-//! control-plane store; this module contributes its class, its
-//! version and its migration ladder.
+//! The machinery is [`crate::db::schema`] — one lock, one transaction,
+//! shared with the control-plane store; this module contributes its
+//! class, its version and its migration ladder.
 //!
 //! This module owns the worker's durable state: schema migrations,
 //! reducer-state persistence, three-state WAL writes, and recovery queries.
@@ -157,9 +157,9 @@ CREATE INDEX IF NOT EXISTS idx_llm_dispatch_status ON llm_dispatch(status, dispa
 
 /// v2 migration: add `is_error` to `llm_dispatch`.
 ///
-/// `ALTER TABLE ... ADD COLUMN` is idempotent in SQLite *only*
-/// guarded by a check; we run this conditionally based on the
-/// recorded schema version, so re-running is safe.
+/// `ALTER TABLE ... ADD COLUMN` fails if it runs twice. It runs only
+/// above the recorded version and commits with the version that
+/// records it (`crate::db::schema`), so it never does.
 const WORKER_MIGRATION_V2_SQL: &str = r#"
 ALTER TABLE llm_dispatch ADD COLUMN is_error INTEGER;
 "#;
@@ -537,13 +537,14 @@ impl WorkerStore {
         Ok(schema::write_schema_version(&self.pool, SCHEMA_CLASS, version).await?)
     }
 
-    /// Apply the migrations needed to advance from `from` to
-    /// `to`. Migrations are additive and gated on the recorded
-    /// version; re-running on an up-to-date DB is a no-op past
-    /// `IF NOT EXISTS`.
+    /// Apply the rungs from `from` to `to`, and nothing else: no lock,
+    /// no transaction, no version write. Only for building a file at an
+    /// old rung — running a rung twice fails (`ADD COLUMN`), and what
+    /// prevents that in an open is `bootstrap_schema`, not this.
     #[cfg(test)]
     async fn run_migrations(&self, from: u32, to: u32) -> Result<(), WorkerStoreError> {
-        Ok(schema::apply_migrations(&self.pool, Self::MIGRATIONS, from, to).await?)
+        let mut conn = self.pool.acquire().await?;
+        Ok(schema::apply_migrations(&mut conn, Self::MIGRATIONS, from, to).await?)
     }
 
     // -----------------------------------------------------------

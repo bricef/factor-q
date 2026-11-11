@@ -6,7 +6,12 @@
 //! stamp the version, and note in `projection_meta` that the durable
 //! consumer must be reset before it next reads. SQLite runs DDL inside
 //! a transaction, so a crash anywhere in the middle leaves the old file
-//! whole and the next open does it again from the start. Nothing is
+//! whole and the next open does it again from the start. The
+//! transaction is the schema lock's (`with_schema_lock` in
+//! `crate::db::schema`), taken with `BEGIN IMMEDIATE` before the
+//! version that decided on a rebuild was read: no second opener can
+//! read that version and rebuild again, and none can write between the
+//! reads that carry the rows aside and the drop. Nothing is
 //! dropped here: which rows the replay can re-derive and which it
 //! cannot is a fact about the stream, and this transaction runs at
 //! open, without the bus. The file stays readable, whole, until the
@@ -49,13 +54,14 @@
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use sqlx::sqlite::SqliteConnection;
 
 use super::schema::{
     PROJECTION_SCHEMA_VERSION, PROJECTION_TABLES, SCHEMA_SQL, TRIGGER_REQUEUE_INDEX_SQL,
-    evict_transients,
+    evict_transients, recorded_version,
 };
 use super::{ProjectionStore, StoreError};
-use crate::db::schema::{split_sql, write_user_version};
+use crate::db::schema::{split_sql, with_schema_lock, write_user_version};
 
 /// The key-value table that records the rebuild. Not a projection
 /// table — a rebuild recreates those and must not lose this.
@@ -218,29 +224,32 @@ fn encode<T: Serialize>(what: &str, value: &T) -> Result<String, StoreError> {
     serde_json::to_string(value).map_err(|err| StoreError::Backend(format!("encode {what}: {err}")))
 }
 
-impl ProjectionStore {
-    pub(super) async fn ensure_meta_table(&self) -> Result<(), StoreError> {
-        sqlx::query(PROJECTION_META_SQL).execute(&self.pool).await?;
-        Ok(())
-    }
+pub(super) async fn ensure_meta_table(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    sqlx::query(PROJECTION_META_SQL).execute(&mut *conn).await?;
+    Ok(())
+}
 
+/// Note that the durable consumer must be reset before it next reads.
+/// Durable, for the reason in the module docs.
+pub(super) async fn request_consumer_reset(
+    conn: &mut SqliteConnection,
+    reason: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
+        .bind(META_CONSUMER_RESET_PENDING)
+        .bind(reason)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+impl ProjectionStore {
     async fn meta_get(&self, key: &str) -> Result<Option<String>, StoreError> {
         let row = sqlx::query("SELECT value FROM projection_meta WHERE key = ?")
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.get::<String, _>(0)))
-    }
-
-    /// Note that the durable consumer must be reset before it next
-    /// reads. Durable, for the reason in the module docs.
-    pub(super) async fn request_consumer_reset(&self, reason: &str) -> Result<(), StoreError> {
-        sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
-            .bind(META_CONSUMER_RESET_PENDING)
-            .bind(reason)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 
     /// Whether the durable consumer still has to be reset, and why.
@@ -375,120 +384,116 @@ impl ProjectionStore {
         Ok(())
     }
 
-    /// Rebuild on demand — the operator path. Same transaction as the
-    /// schema-upgrade rebuild; the caller resets the durable next.
+    /// Rebuild on demand — the operator path. The same step as the
+    /// schema-upgrade rebuild, under the same schema lock; the caller
+    /// resets the durable next.
     pub async fn rebuild(&self, reason: Option<&str>) -> Result<RebuildRecord, StoreError> {
-        self.rebuild_tables(RebuildReason::Operator(reason.map(str::to_string)))
-            .await
+        let reason = RebuildReason::Operator(reason.map(str::to_string));
+        with_schema_lock(&self.pool, async |conn: &mut SqliteConnection| {
+            rebuild_tables(conn, reason).await
+        })
+        .await
+    }
+}
+
+/// Drop and recreate the projection tables at
+/// [`PROJECTION_SCHEMA_VERSION`], carrying every row across, and note
+/// that the durable must be reset. Runs inside the caller's transaction
+/// — the schema lock's, at open and on demand alike — so it lands whole
+/// or not at all; see the module docs.
+pub(super) async fn rebuild_tables(
+    conn: &mut SqliteConnection,
+    reason: RebuildReason,
+) -> Result<RebuildRecord, StoreError> {
+    let from_version = recorded_version(conn).await?;
+    tracing::info!(
+        from_version = ?from_version,
+        to_version = PROJECTION_SCHEMA_VERSION,
+        reason = %reason.describe(),
+        "rebuilding the projection tables with every row carried; once committed, the \
+         durable consumer finds the replay floor and is reset before it next reads"
+    );
+
+    // Every row, set aside on this connection (a TEMP table is private
+    // to it) before its table goes. Which of them the replay re-derives
+    // is decided at the reset, with the bus in hand; here nothing is
+    // known about the stream and nothing is dropped. A table an older
+    // file never had is simply not carried.
+    let mut carried: Vec<(&'static str, Vec<String>)> = Vec::new();
+    for table in PROJECTION_TABLES {
+        let columns = table_columns(conn, table).await?;
+        if columns.is_empty() {
+            continue;
+        }
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TEMP TABLE carry_{table} AS SELECT * FROM {table}"
+        )))
+        .execute(&mut *conn)
+        .await?;
+        carried.push((table, columns));
     }
 
-    /// Drop and recreate the projection tables at
-    /// [`PROJECTION_SCHEMA_VERSION`], carrying every row across, and
-    /// note that the durable must be reset. One transaction; see the
-    /// module docs.
-    pub(super) async fn rebuild_tables(
-        &self,
-        reason: RebuildReason,
-    ) -> Result<RebuildRecord, StoreError> {
-        let from_version = self.recorded_version().await?;
-        let mut tx = self.pool.begin().await?;
-
-        // Every row, set aside on this connection (a TEMP table is
-        // private to it) before its table goes. Which of them the
-        // replay re-derives is decided at the reset, with the bus in
-        // hand; here nothing is known about the stream and nothing is
-        // dropped. A table an older file never had is simply not
-        // carried.
-        let mut carried: Vec<(&'static str, Vec<String>)> = Vec::new();
-        for table in PROJECTION_TABLES {
-            let columns = table_columns(&mut tx, table).await?;
-            if columns.is_empty() {
-                continue;
-            }
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "CREATE TEMP TABLE carry_{table} AS SELECT * FROM {table}"
-            )))
-            .execute(&mut *tx)
+    for table in PROJECTION_TABLES {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
+            .execute(&mut *conn)
             .await?;
-            carried.push((table, columns));
-        }
-
-        for table in PROJECTION_TABLES {
-            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
-                .execute(&mut *tx)
-                .await?;
-        }
-        for statement in split_sql(SCHEMA_SQL) {
-            sqlx::query(statement).execute(&mut *tx).await?;
-        }
-        sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
-            .execute(&mut *tx)
-            .await?;
-
-        // Back into the new shape, by the columns the two shapes
-        // share: a column the old file lacked reads NULL until the
-        // replay reaches the row, and a column the new schema dropped
-        // is left behind.
-        for (table, old_columns) in carried {
-            let new_columns = table_columns(&mut tx, table).await?;
-            let common: Vec<&str> = new_columns
-                .iter()
-                .filter(|column| old_columns.contains(column))
-                .map(|column| plain_identifier(column))
-                .collect::<Result<_, _>>()?;
-            let list = common.join(", ");
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "INSERT INTO {table} ({list}) SELECT {list} FROM carry_{table}"
-            )))
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE carry_{table}")))
-                .execute(&mut *tx)
-                .await?;
-        }
-        // The one class of row a rebuild does not keep: transients an
-        // older build projected before they stopped being. A same-
-        // version open evicts them; a rebuild, having carried every
-        // row, evicts them here for the same reason.
-        evict_transients(&mut tx).await?;
-
-        write_user_version(&mut *tx, PROJECTION_SCHEMA_VERSION).await?;
-
-        let record = RebuildRecord {
-            started_at: chrono::Utc::now().to_rfc3339(),
-            reason: reason.describe(),
-            from_version: reason.source_version(),
-            schema_version: PROJECTION_SCHEMA_VERSION,
-            target_seq: None,
-            consumer_reset_at: None,
-            floor_seq: None,
-            carried_below_floor: 0,
-        };
-        sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
-            .bind(META_REBUILD)
-            .bind(encode("rebuild record", &record)?)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
-            .bind(META_CONSUMER_RESET_PENDING)
-            .bind(&record.reason)
-            .execute(&mut *tx)
-            .await?;
-        // A floor from an earlier rebuild whose reset never ran must
-        // not be folded into this one.
-        sqlx::query("DELETE FROM projection_meta WHERE key = ?")
-            .bind(META_REPLAY_FLOOR)
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        tracing::info!(
-            from_version = ?from_version,
-            to_version = PROJECTION_SCHEMA_VERSION,
-            reason = %record.reason,
-            "projection tables rebuilt with every row carried; the durable consumer will \
-             find the replay floor and be reset before it next reads"
-        );
-        Ok(record)
     }
+    for statement in split_sql(SCHEMA_SQL) {
+        sqlx::query(statement).execute(&mut *conn).await?;
+    }
+    sqlx::query(TRIGGER_REQUEUE_INDEX_SQL)
+        .execute(&mut *conn)
+        .await?;
+
+    // Back into the new shape, by the columns the two shapes share: a
+    // column the old file lacked reads NULL until the replay reaches
+    // the row, and a column the new schema dropped is left behind.
+    for (table, old_columns) in carried {
+        let new_columns = table_columns(conn, table).await?;
+        let common: Vec<&str> = new_columns
+            .iter()
+            .filter(|column| old_columns.contains(column))
+            .map(|column| plain_identifier(column))
+            .collect::<Result<_, _>>()?;
+        let list = common.join(", ");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {table} ({list}) SELECT {list} FROM carry_{table}"
+        )))
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE carry_{table}")))
+            .execute(&mut *conn)
+            .await?;
+    }
+    // The one class of row a rebuild does not keep: transients an older
+    // build projected before they stopped being. A same-version open
+    // evicts them; a rebuild, having carried every row, evicts them here
+    // for the same reason.
+    evict_transients(conn).await?;
+
+    write_user_version(&mut *conn, PROJECTION_SCHEMA_VERSION).await?;
+
+    let record = RebuildRecord {
+        started_at: chrono::Utc::now().to_rfc3339(),
+        reason: reason.describe(),
+        from_version: reason.source_version(),
+        schema_version: PROJECTION_SCHEMA_VERSION,
+        target_seq: None,
+        consumer_reset_at: None,
+        floor_seq: None,
+        carried_below_floor: 0,
+    };
+    sqlx::query("INSERT OR REPLACE INTO projection_meta (key, value) VALUES (?, ?)")
+        .bind(META_REBUILD)
+        .bind(encode("rebuild record", &record)?)
+        .execute(&mut *conn)
+        .await?;
+    request_consumer_reset(conn, &record.reason).await?;
+    // A floor from an earlier rebuild whose reset never ran must not be
+    // folded into this one.
+    sqlx::query("DELETE FROM projection_meta WHERE key = ?")
+        .bind(META_REPLAY_FLOOR)
+        .execute(&mut *conn)
+        .await?;
+    Ok(record)
 }

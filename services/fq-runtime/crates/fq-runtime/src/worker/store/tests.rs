@@ -419,6 +419,129 @@ async fn open_refuses_when_db_version_higher_than_binary() {
     }
 }
 
+/// A pool opened the way `open_with_pool` opens one, for driving this
+/// store's bootstrap through the kit's test seam.
+async fn worker_pool(path: &Path) -> Pool<Sqlite> {
+    SqlitePoolOptions::new()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap()
+}
+
+async fn llm_dispatch_columns(pool: &Pool<Sqlite>) -> Vec<String> {
+    sqlx::query_scalar("SELECT name FROM pragma_table_info('llm_dispatch')")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// The failure `fqd_smoke` saw (#970): a second opener of a fresh
+/// `worker.db`. Without the schema lock both read "no version", the
+/// rival ran the whole ladder, and the first then failed on rung 2 with
+/// `duplicate column name: is_error`. With it, the rival waits for the
+/// first and finds the file current. The rival is the real `open`.
+#[tokio::test]
+async fn two_openers_of_a_fresh_worker_db_both_succeed() {
+    use crate::db::schema::test_seam::RivalAtVersionRead;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let rival_path = path.clone();
+    let mut seam = RivalAtVersionRead::new(&path, async move {
+        WorkerStore::open(&rival_path)
+            .await
+            .map(drop)
+            .map_err(|err| err.to_string())
+    });
+    let pool = worker_pool(&path).await;
+
+    let first = schema::bootstrap_observed(
+        &pool,
+        SCHEMA_CLASS,
+        WORKER_SCHEMA_VERSION,
+        WorkerStore::MIGRATIONS,
+        &mut seam,
+    )
+    .await;
+    let rival = seam.rival_outcome().await;
+
+    assert_eq!(
+        first.expect("the first opener of a fresh worker.db must succeed"),
+        Compatibility::FreshInstall
+    );
+    rival.expect("the second opener of a fresh worker.db must succeed");
+    assert_eq!(
+        seam.lock_held,
+        Some(true),
+        "the first opener read the version without holding the write lock"
+    );
+    let store = WorkerStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+    assert!(
+        llm_dispatch_columns(&store.pool)
+            .await
+            .contains(&"is_error".to_string())
+    );
+}
+
+/// The crash #970 predicted and nobody had reproduced: an upgrade that
+/// stops after some rungs have applied and before the version is
+/// written. Rung 12 fails part-way here, after rungs 2 to 11 have run;
+/// without the transaction they stayed, the file still read v1, and
+/// every later open re-ran rung 2 and failed on `is_error`. With it,
+/// nothing stays and the next open upgrades cleanly.
+#[tokio::test]
+async fn a_worker_upgrade_interrupted_after_a_rung_reopens_cleanly() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let pool = worker_pool(&path).await;
+    schema::bootstrap_versioned(&pool, SCHEMA_CLASS, 1, WorkerStore::MIGRATIONS)
+        .await
+        .unwrap();
+
+    let mut interrupted = WorkerStore::MIGRATIONS.to_vec();
+    let last = interrupted.last_mut().expect("the ladder has rungs");
+    last.1 = "ALTER TABLE invocation_state ADD COLUMN terminal_outcome TEXT; \
+              SELECT no_such_column FROM invocation_state";
+    let err = schema::bootstrap_versioned(&pool, SCHEMA_CLASS, WORKER_SCHEMA_VERSION, &interrupted)
+        .await
+        .expect_err("the injected statement must fail the upgrade");
+    assert!(
+        err.to_string().contains("no_such_column"),
+        "failed for the wrong reason: {err}"
+    );
+    assert_eq!(
+        schema::read_schema_version(&pool, SCHEMA_CLASS)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let left_behind = llm_dispatch_columns(&pool).await;
+    pool.close().await;
+
+    // The symptom before the cause: an open that fails here is a store
+    // that cannot be opened again without repair by hand.
+    let store = WorkerStore::open(&path)
+        .await
+        .expect("the next open after an interrupted upgrade must succeed");
+    assert!(
+        !left_behind.contains(&"is_error".to_string()),
+        "rung 2 must roll back with the failure of rung 12"
+    );
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(WORKER_SCHEMA_VERSION)
+    );
+}
+
 #[tokio::test]
 async fn open_against_v0_db_applies_migration_without_disturbing_other_tables() {
     // Simulate a pre-Step-2 database: only the projection
