@@ -657,6 +657,24 @@ here. The v2 contract — invocations don't migrate — is
 operator-comprehensible and matches the workspace-locality
 constraint.
 
+> **Trigger claims under this shape (added 2026-11-11).** What makes a
+> trigger start one invocation is a durable claim row in the
+> control-plane store, written by the dispatcher
+> ([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
+> It was accepted as correct for one daemon. Under the v2 shape above it
+> stays sound for as long as one control-plane process is the only
+> consumer of the trigger stream, and three of its assumptions do not
+> carry over by themselves: the claim is adopted from any other claimant
+> id without evidence that the holder is gone; the "durably started"
+> report that ends a claim is an in-process signal today and would
+> cross to the control plane from another process; and nothing recovers
+> the started invocations of a worker that does not come back
+> ([#475](https://github.com/bricef/factor-q/issues/475)). The ADR's
+> section
+> [What this means for more than one worker](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+> takes each in turn and says what has to be decided before the role
+> split. Read it before building §7.4.
+
 ### 5.8 What was considered and dismissed
 
 | Alternative | Why dismissed |

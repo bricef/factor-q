@@ -342,6 +342,16 @@ This means:
   node they're on. Scaling is horizontal replication of a
   stateless service, not per-agent container orchestration.
 
+  *Not true of trigger dispatch as built (note added 2026-11-11).*
+  The claim that stops a trigger from starting twice lives in each
+  daemon's own control-plane store, so N copies on one broker would
+  not see each other's claims, and a redelivered trigger could start
+  once per copy.
+  [ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+  calls this "shape C", says what would have to move first, and makes
+  a second consumer of the trigger stream the condition for reopening
+  its decision.
+
 - **The security story inverts.** The outer container (if used)
   protects the runtime from the host environment, not the other
   way around. The trust boundary you care about — agent isolation

@@ -11,7 +11,7 @@ fixes, tests, and docs (e.g. #270, #293, #306, #321) — more than one
 task type, non-trivial, all CI-validated. The proxy instrumentation,
 baseline stream, and trajectory plot ride on toward M1 as post-M0 work;
 the known duplicate-dispatch defect is tracked by the
-[exactly-once trigger dispatch plan](../active/2026-07-18-exactly-once-trigger-dispatch.md).
+[exactly-once trigger dispatch plan](2026-07-18-exactly-once-trigger-dispatch.md).
 
 Originally proposed 2026-07-05, driving the **M0** milestone named in
 [VISION.md](../../../VISION.md) ("factor-q can be used to work on factor-q
