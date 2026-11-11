@@ -565,6 +565,21 @@ does after any timeout. So one tool call takes at most its deadline,
 plus five seconds, plus one server request; the tool's own deadline
 does not move, and a chatty server buys it no extra running time.
 
+A chatty server is bounded by count as well, because every request it
+gets answered is a model call on the agent's budget. `[worker]
+max_server_requests_per_tool_call` (default 8) caps the sampling and
+elicitation requests one tool call admits, and
+`max_server_requests_per_invocation` (default 100) caps them across the
+invocation, both counted together. A request over either is declined
+before any model call — evaluators included — and the invocation
+carries on: the server sees a decline, nothing fails, and the daemon
+logs one warning per invocation, naming the setting, the first time a
+cap refuses. Zero is refused at startup; to keep a server from asking at
+all, leave sampling and elicitation ungranted in the agent definition.
+The counts belong to one run of the invocation and are not carried
+across a resume, which services no server requests at all
+([#831](https://github.com/bricef/factor-q/issues/831)).
+
 A call past its deadline is abandoned and reported to the model as a
 tool error with `error_kind: timeout`. What the model is told next
 depends on who stopped: a tool that timed *itself* out killed the work

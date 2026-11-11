@@ -214,6 +214,16 @@ models = ["claude-haiku-4-5"]
 # answers fails here rather than after the whole budget. Default 10.
 # llm_connect_timeout_secs = 10
 #
+# How many requests an MCP server may send back while its tools run
+# (#831) — sampling and elicitation counted together, each one a model
+# call on the agent's budget. A request over either cap is declined
+# before any model call and the invocation carries on; the first refusal
+# per invocation is logged as a warning. Per tool call, default 8; per
+# invocation, default 100. Zero is refused: to stop a server asking at
+# all, leave sampling and elicitation ungranted in the agent definition.
+# max_server_requests_per_tool_call = 8
+# max_server_requests_per_invocation = 100
+#
 # When an in-flight invocation counts as STUCK (#37). Normally there is
 # nothing to set here: the threshold is DERIVED from the deadlines above
 # and the [tools] ceiling below, as
