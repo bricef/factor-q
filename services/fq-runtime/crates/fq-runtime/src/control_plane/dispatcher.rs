@@ -941,6 +941,19 @@ mod tests {
     #[test]
     fn trigger_retry_backoff_escalates_and_saturates() {
         use crate::bus::TRIGGER_RETRY_BACKOFF;
+        // Every retry waits longer than the one before it. The ladder this
+        // replaced, `[30s, 5s, 30s, 2m]`, retried a second time sooner
+        // than the first (#953).
+        for attempt in 2..TRIGGER_MAX_DELIVER as u32 {
+            assert!(
+                trigger_retry_backoff(attempt) > trigger_retry_backoff(attempt - 1),
+                "the retry after delivery {attempt} ({:?}) must wait longer than the one \
+                 after delivery {} ({:?})",
+                trigger_retry_backoff(attempt),
+                attempt - 1,
+                trigger_retry_backoff(attempt - 1),
+            );
+        }
         assert_eq!(trigger_retry_backoff(1), TRIGGER_RETRY_BACKOFF[0]);
         assert_eq!(trigger_retry_backoff(2), TRIGGER_RETRY_BACKOFF[1]);
         assert_eq!(trigger_retry_backoff(4), TRIGGER_RETRY_BACKOFF[3]);
@@ -948,6 +961,44 @@ mod tests {
         assert_eq!(trigger_retry_backoff(40), TRIGGER_RETRY_BACKOFF[3]);
         // Attempt 0 (info unavailable defaults to 1 upstream) is safe.
         assert_eq!(trigger_retry_backoff(0), TRIGGER_RETRY_BACKOFF[0]);
+    }
+
+    /// The figure #953 decided the ladder by: a trigger whose every
+    /// delivery fails transiently before its first WAL write is retried
+    /// four times and dead-lettered on its fifth delivery, 19.5 minutes
+    /// after its first — the four NAK delays the dispatcher chooses on
+    /// the way.
+    ///
+    /// Walked through `trigger_fate`, the pure policy `handle` acts on,
+    /// because a live run of the same thing waits through every one of
+    /// those delays against the broker.
+    #[test]
+    fn a_trigger_failing_every_delivery_is_dead_lettered_nineteen_and_a_half_minutes_in() {
+        let transient = || {
+            Err(ExecutorError::Bus(crate::bus::BusError::Publish(
+                "broker away".to_string(),
+            )))
+        };
+        let mut waited = Duration::ZERO;
+        let mut delivery = 1;
+        let dead_lettered_on = loop {
+            match trigger_fate(&transient(), delivery) {
+                TriggerFate::Retry(delay) => waited += delay,
+                TriggerFate::DeadLetter => break delivery,
+                TriggerFate::Consume => panic!("a transient failure is never consumed"),
+            }
+            delivery += 1;
+            assert!(delivery <= 64, "the retries never ended");
+        };
+        assert_eq!(
+            dead_lettered_on, TRIGGER_MAX_DELIVER as u32,
+            "the dispatcher dead-letters on the durable's last delivery"
+        );
+        assert_eq!(
+            waited,
+            Duration::from_secs(19 * 60 + 30),
+            "first delivery to dead letter, when every delivery fails at once"
+        );
     }
 
     #[test]
@@ -1908,6 +1959,129 @@ You are a test agent."#
             info.config.backoff,
             crate::bus::TRIGGER_RETRY_BACKOFF.to_vec()
         );
+    }
+
+    /// #953: the dispatcher's durable, as a build on the previous ladder
+    /// left it, is moved onto this build's ladder when the dispatcher
+    /// starts. That is the whole upgrade — `TriggerDispatcher::run` is
+    /// the daemon's own entry point, and the drift repair in
+    /// `EventBus::durable` rewrites the schedule in place — so a deploy
+    /// that changes the ladder needs no operator step.
+    ///
+    /// A trigger published before the start is run by the dispatcher on
+    /// the repaired durable, as its first delivery: the repair changed
+    /// the schedule, not what the durable had to deliver.
+    #[tokio::test]
+    async fn a_durable_on_the_previous_ladder_is_repaired_when_the_dispatcher_starts() {
+        use async_nats::jetstream::{consumer, stream::Stream};
+
+        /// What the broker holds for the dispatcher's durable.
+        async fn durable_config(stream: &Stream) -> consumer::Config {
+            stream
+                .get_consumer::<consumer::pull::Config>(CONSUMER_NAME)
+                .await
+                .expect("the dispatcher's durable")
+                .info()
+                .await
+                .expect("consumer info")
+                .config
+                .clone()
+        }
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let stream = bus
+            .jetstream()
+            .get_stream(crate::bus::TRIGGER_STREAM_NAME)
+            .await
+            .expect("trigger stream");
+
+        // The durable exactly as the previous build's
+        // `trigger_consumer` created it.
+        let previous_ladder = vec![
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+        ];
+        stream
+            .get_or_create_consumer(
+                CONSUMER_NAME,
+                consumer::pull::Config {
+                    durable_name: Some(CONSUMER_NAME.to_string()),
+                    ack_policy: consumer::AckPolicy::Explicit,
+                    ack_wait: Duration::from_secs(30),
+                    filter_subject: crate::events::subjects::ALL_TRIGGERS.to_string(),
+                    max_ack_pending: crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+                    max_deliver: TRIGGER_MAX_DELIVER,
+                    backoff: previous_ladder.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the previous build's durable");
+        assert_eq!(
+            durable_config(&stream).await.backoff,
+            previous_ladder,
+            "the planted durable is on the previous ladder"
+        );
+
+        let agent_id_str = unique_agent_id("ladder-upgrade");
+        let (_dir, registry) = registry_with(&agent_id_str);
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "waiting across the upgrade"}),
+        )
+        .await
+        .expect("publish trigger");
+
+        let worker = Arc::new(RecordingWorker::default());
+        let dispatcher = TriggerDispatcher::new(
+            bus.clone(),
+            registry,
+            worker.clone(),
+            Arc::new(FixtureClient::new()),
+            1,
+        );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(dispatcher.run(shutdown_rx));
+        wait_for_starts(&worker, 1, Duration::from_secs(10)).await;
+
+        let repaired = durable_config(&stream).await;
+        assert_eq!(
+            repaired.backoff,
+            vec![
+                Duration::from_secs(30),
+                Duration::from_secs(2 * 60),
+                Duration::from_secs(5 * 60),
+                Duration::from_secs(12 * 60),
+            ],
+            "starting the dispatcher must move its durable onto this build's ladder"
+        );
+        assert_eq!(
+            repaired.ack_wait,
+            Duration::from_secs(30),
+            "the first delivery's window is unchanged"
+        );
+        assert_eq!(repaired.max_deliver, TRIGGER_MAX_DELIVER);
+        assert_eq!(
+            worker
+                .starts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.1)
+                .collect::<Vec<_>>(),
+            vec![Some(1)],
+            "the trigger that waited across the upgrade runs once, as its first delivery"
+        );
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("dispatcher exits")
+            .expect("task joins")
+            .expect("clean exit");
     }
 
     /// ADR-0027: once the worker is draining, the dispatcher stops
