@@ -223,25 +223,46 @@ volume, version-controlled in the `bricef/fq-dogfood` ops repo); the
 agent makes the change in a sandboxed working copy, validates with
 `just ci`, and opens a PR behind the human merge gate — the loop that
 met M0 (see the closed
-[M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)). Next on
-that track: exactly-once trigger dispatch
-([plan](docs/plans/active/2026-07-18-exactly-once-trigger-dispatch.md)),
-whose **duplicate-start gap closed on 2026-09-16**
+[M0 plan](docs/plans/closed/2026-07-05-m0-close-the-loop.md)).
+Exactly-once trigger dispatch on that track is **decided, as of
+2026-11-11** ([#835](https://github.com/bricef/factor-q/issues/835)):
+the durable claim that closed the duplicate-start gap on 2026-09-16
 ([#809](https://github.com/bricef/factor-q/issues/809); the
 originating incident
-[#327](https://github.com/bricef/factor-q/issues/327) is closed): the
-dispatcher now arbitrates every delivery against a durable claim row
-in the control-plane store — keyed on the trigger stream, the epoch of
-the stream incarnation it connected to, and the sequence — before it
-drains, routes, or parses anything, so a redelivery another worker
-holds, or one whose invocation already started, is acked and dropped
-instead of starting a second run (`fq status` and `fq doctor` count
-the drops). The claim is not yet ADR-0032's `fq-trigger-claims` KV
-inbox, and `DurableStart` — the #41 ack-after-durable-start that
+[#327](https://github.com/bricef/factor-q/issues/327) is closed) is the
+design, and the trigger inbox that the now-closed
+[plan](docs/plans/closed/2026-07-18-exactly-once-trigger-dispatch.md)
+set out is not built.
+[ADR-0032](docs/adrs/accepted/0032-exactly-once-trigger-dispatch.md) is
+accepted in that form. The dispatcher arbitrates every delivery against
+a durable claim row in the control-plane store — keyed on the trigger
+stream, the epoch of the stream incarnation it connected to, and the
+sequence — before it drains, routes, or parses anything: a copy of a
+trigger this daemon is already holding is dropped, and a copy of one
+whose invocation has durably started is acked and dropped (`fq status`
+and `fq doctor` count the second kind). The trigger is still acked at
+the invocation's first WAL write (`DurableStart`, #41), which is what
 bounds the older failure, a long invocation outliving its ack deadline
-and being re-run — still starts the work, so the plan's PR-3 through
-PR-7 (inbox dispatch, multi-worker recovery, pull discipline, the
-backoff/`ack_wait` reconcile, the watcher alarm) remain open. The M0
+and being re-run. The design is correct for one daemon and assumes one.
+ADR-0032's section
+[What this means for more than one worker](docs/adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+says what that leaves unbuilt and carries the named exit condition:
+the decision is reopened **before a second process consumes the trigger
+stream**. **Phase 2's exit criterion is amended** to match. The
+production-readiness review's "the incident-replay integration test
+from the exactly-once plan passes" named the gate of the plan's PR-3,
+which is not built; it now reads: the two replay tests in
+`fq-runtime/tests/july_incident_replay.rs`
+(`an_invocation_that_outlives_the_ack_window_is_not_redelivered` and
+`a_trigger_redelivered_before_its_first_wal_write_starts_once`) and the
+twelve dispatcher and store unit tests ADR-0032 names pass in
+`just runtime-ci`. The review is a snapshot and is not edited. What
+remains of this as Phase 2 work is the retry ladder
+([#953](https://github.com/bricef/factor-q/issues/953)) and an operator
+surface for the trigger-to-invocation link
+([#954](https://github.com/bricef/factor-q/issues/954)); the claim
+table has no retention, which is a Phase 3 bounded-growth item, and
+ADR-0032 lists the gaps the design knowingly leaves open. The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the

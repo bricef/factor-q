@@ -467,6 +467,19 @@ The mitigation shape is knowable in advance:
 - Worker-side **idempotency becomes mandatory**, not advisory, because
   at-least-once across two hops means genuine duplicate delivery.
 
+The one-hop version of this is now settled, and its record says where the
+second hop breaks it (note added 2026-11-11).
+[ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)
+accepts a durable claim in the control-plane store as what stops a
+redelivered trigger from starting twice, with the ack held until the
+invocation's first WAL write. Both halves assume the dispatcher and the
+worker are one process. Its section
+[What this means for more than one worker](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+treats a remote worker surface as its "shape D": the durable-start report
+becomes a message that can be late or lost, and a claim is adopted from any
+other holder without checking that the holder is gone, which is open
+question 7 below seen from the trigger's side.
+
 ### Partition stops being exceptional
 
 [The data architecture](../committed/data-architecture.md) states that once an
