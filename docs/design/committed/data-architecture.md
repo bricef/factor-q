@@ -772,7 +772,8 @@ Recovery is per-role.
    ([#959](https://github.com/bricef/factor-q/issues/959)). The worker
    reports and the control plane records; the control plane does not
    read the worker's store. In v1 the report is a direct write to the
-   control-plane store, made before the dispatcher consumes a trigger.
+   control-plane store, and the dispatcher cannot arbitrate claims
+   until it has landed (§11.3).
 9. Resume safe-resume and safe-replay categories automatically.
    Held ambiguous invocations don't block new triggers.
 
@@ -1257,6 +1258,23 @@ What changes when an operator splits the deployment.
   the `Worker` trait, and marks the trigger's claim row when it
   fires. What the lift has to replace there is set out in
   [ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#3-the-window-between-claim-and-durable-start).
+
+  Startup recovery adds another, with an ordering requirement
+  (added for [#959](https://github.com/bricef/factor-q/issues/959)).
+  The worker scans its WAL into an `InFlightReport`, and
+  `TriggerClaims::recover` writes it straight into the
+  control-plane store, marking the trigger claim of every in-flight
+  invocation `durably_started`. The worker side reads only its own
+  store and the control-plane side reads only the report, but the
+  hand-over is a direct write, not a message. It has to land before
+  the dispatcher consumes a trigger, or a redelivery can adopt the
+  claim of an invocation that is already in flight and start it a
+  second time. That order is held by type: the dispatcher's
+  claim-installing constructors take only the `TriggerClaims` that
+  `recover` returns. Lifted across a process boundary, the report
+  becomes a message, the §7.1 step 8 report, which then has to be
+  durable, and the order becomes "do not adopt a claim while its
+  holder's report can still arrive".
 - The per-store files are fixed names under the cache directory
   (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
   physically separate (#262). A per-role `state_db` config
