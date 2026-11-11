@@ -95,6 +95,8 @@ impl Fixture {
                 trigger_source: None,
                 trigger_subject: None,
                 trigger_payload: None,
+                terminal_outcome: None,
+                terminal_published_at: None,
             })
             .await
             .unwrap();

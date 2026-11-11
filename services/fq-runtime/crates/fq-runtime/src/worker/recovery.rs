@@ -214,6 +214,8 @@ mod tests {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         }
     }
 
@@ -419,6 +421,8 @@ mod tests {
                     trigger_source: None,
                     trigger_subject: None,
                     trigger_payload: None,
+                    terminal_outcome: None,
+                    terminal_published_at: None,
                 })
                 .await
                 .unwrap();
@@ -470,6 +474,8 @@ mod tests {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         };
         store.upsert_invocation_state(&terminal_row).await.unwrap();
         terminal_row.invocation_id = "terminal-2".to_string();

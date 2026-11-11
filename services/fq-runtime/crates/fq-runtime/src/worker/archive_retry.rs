@@ -10,6 +10,28 @@
 //! fresh ack is published, which is exactly what an offline
 //! worker would have missed on first transmission.
 //!
+//! Before `archived`, it republishes the row's stored terminal
+//! event (`terminal_outcome`, v12) while that is not stamped
+//! published — the healer for a `completed` publish lost after
+//! the row went terminal (#823). It is the stored event itself,
+//! with the original's `event_id`, and delivery is at-least-once:
+//! if a copy did land (a lost ack, or the run loop racing this
+//! sweep), JetStream's `Nats-Msg-Id` dedup drops the republish only
+//! inside the stream's 120 s `duplicate_window`. Past it the stream
+//! holds a second message with the same `event_id`, which a
+//! consumer idempotent on `event_id` (the projection's upsert)
+//! still reads as one event.
+//!
+//! A stored event that must not be republished (unreadable by this
+//! build, or not this row's terminal event: see `HoldReason`) holds
+//! its row. No `completed`, no `archived`, one `error!` per daemon
+//! run, and the sweep carries on to the rows behind it. Archiving
+//! without it would discard the only copy of the outcome. No later
+//! build reads an older event version, so the hold lasts until an
+//! operator releases the row (`docs/guide/operating-the-daemon.md`,
+//! "When the archive sweeper holds a terminal row"); until then the
+//! control plane sees that invocation as not archived.
+//!
 //! Two configurable timings:
 //!
 //! - `retry_interval_ms` — how often the sweeper wakes up.
@@ -25,7 +47,7 @@
 //!   must be held, not deleted, even if the CP never acks.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -37,6 +59,7 @@ use crate::bus::{EventBus, EventSink};
 use crate::events::{Event, EventPayload, InvocationArchivedPayload};
 
 use super::WorkerId;
+use super::store::terminal_outcome::HoldReason;
 use super::store::{InvocationStateRow, WorkerStore};
 
 /// Default cadence between sweeps (10 seconds). Pair this with
@@ -59,6 +82,8 @@ pub struct ArchiveRetrySweeper {
     store: Arc<WorkerStore>,
     retry_interval_ms: u64,
     warn_after_ms: i64,
+    /// Rows this process has already reported held (see `report_held`).
+    held: Mutex<HashSet<String>>,
 }
 
 impl ArchiveRetrySweeper {
@@ -79,6 +104,7 @@ impl ArchiveRetrySweeper {
             store,
             retry_interval_ms: DEFAULT_RETRY_INTERVAL_MS,
             warn_after_ms: DEFAULT_WARN_AFTER_MS,
+            held: Mutex::new(HashSet::new()),
         }
     }
 
@@ -176,6 +202,28 @@ impl ArchiveRetrySweeper {
         warned.insert(row.invocation_id.clone());
     }
 
+    /// Say a row is held: `error!` the first time this process holds it,
+    /// with the release it needs; `debug!` on every later sweep, so a held
+    /// row is one loud line per daemon run rather than one per tick.
+    fn report_held(&self, invocation_id: &str, reason: &HoldReason) {
+        let first = self
+            .held
+            .lock()
+            .expect("held set lock poisoned")
+            .insert(invocation_id.to_string());
+        if first {
+            error!(
+                invocation_id,
+                %reason,
+                "stored terminal event cannot be republished; holding the row unarchived \
+                 until an operator releases it (docs/guide/operating-the-daemon.md, \
+                 \"When the archive sweeper holds a terminal row\")"
+            );
+        } else {
+            debug!(invocation_id, %reason, "terminal row still held");
+        }
+    }
+
     async fn republish(&self, row: &InvocationStateRow) -> Result<(), ArchiveRetryError> {
         let Some(terminal_at_ms) = row.terminal_at else {
             // list_archive_pending filters to terminal rows, so
@@ -200,6 +248,39 @@ impl ArchiveRetrySweeper {
                 row.invocation_id
             ))
         })?;
+
+        // The terminal event first, if its publish was lost (#823): the
+        // stored event itself, envelope and `event_id` included, so a copy
+        // that did land carries the same `event_id` as the original.
+        let owed = match row.unpublished_terminal_event() {
+            Ok(owed) => owed,
+            // Held, not archived without it: archiving would discard the
+            // only copy of the outcome. No later build reads an older event
+            // version, so the hold lasts until an operator releases the row
+            // (`docs/guide/operating-the-daemon.md`). The likely cause is an
+            // event an older build stored, unpublished across an envelope
+            // bump, not corruption. Like the non-terminal branch above, it
+            // must not end the pass.
+            Err(reason) => {
+                self.report_held(&row.invocation_id, &reason);
+                return Ok(());
+            }
+        };
+        if let Some(terminal) = owed {
+            self.sink
+                .publish(&terminal)
+                .await
+                .map_err(|err| ArchiveRetryError::Publish(err.to_string()))?;
+            self.store
+                .mark_terminal_published(&row.invocation_id, Utc::now().timestamp_millis())
+                .await
+                .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+            info!(
+                invocation_id = %row.invocation_id,
+                event_id = %terminal.envelope.event_id,
+                "republished the stored terminal event"
+            );
+        }
 
         let event = Event::new(
             agent_id,
@@ -246,8 +327,10 @@ pub enum ArchiveRetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::EventPayload;
-    use crate::worker::store::InvocationStateRow;
+    use crate::events::{CompletedPayload, EventPayload, TaskStatus};
+    use crate::test_support::events::event_kind_of;
+    use crate::test_support::sim::RecordingSink;
+    use crate::worker::store::{InvocationStateRow, terminal_outcome};
     use futures::StreamExt;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -270,6 +353,8 @@ mod tests {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         }
     }
 
@@ -332,6 +417,327 @@ mod tests {
             published > 1_000,
             "archive_published_at should advance past the seed value"
         );
+    }
+
+    /// A terminal row holding the `completed` event a crash lost (#823),
+    /// written the way the run loop's terminal upsert writes it, and a
+    /// hermetic sweeper over a recording sink.
+    struct LostCompletion {
+        _dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sink: Arc<RecordingSink>,
+        sweeper: ArchiveRetrySweeper,
+        completed: Event,
+    }
+
+    impl LostCompletion {
+        async fn new() -> Self {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let invocation_id = Uuid::now_v7();
+            let mut completed = completed_event(invocation_id);
+            completed.envelope.parent_event_id = Some(Uuid::now_v7());
+            let mut row = terminal_row(&invocation_id.to_string(), "sweep-agent", 1_000);
+            row.terminal_outcome = Some(terminal_outcome::encode(&completed).unwrap());
+            store.upsert_invocation_state(&row).await.unwrap();
+            let sink = Arc::new(RecordingSink::new());
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+            Self {
+                _dir: dir,
+                store,
+                sink,
+                sweeper,
+                completed,
+            }
+        }
+
+        fn inv(&self) -> String {
+            self.completed.envelope.invocation_id.to_string()
+        }
+
+        fn kinds(&self) -> Vec<&'static str> {
+            self.sink
+                .events()
+                .iter()
+                .map(|e| event_kind_of(&e.payload))
+                .collect()
+        }
+
+        async fn published_at(&self) -> Option<i64> {
+            let row = self.store.get_invocation_state(&self.inv()).await.unwrap();
+            row.expect("row held until acked").terminal_published_at
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_republishes_a_lost_terminal_event_before_archiving() {
+        let world = LostCompletion::new().await;
+        let mut warned = HashSet::new();
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+        assert_eq!(
+            serde_json::to_value(&world.sink.events()[0]).unwrap(),
+            serde_json::to_value(&world.completed).unwrap(),
+            "the stored event itself, envelope and event_id included"
+        );
+        assert!(world.published_at().await.is_some(), "stamped once out");
+
+        // The ack is still pending, so `archived` goes again; `completed`
+        // does not.
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(
+            world.kinds(),
+            ["completed", "invocation_archived", "invocation_archived"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_a_published_terminal_event_alone() {
+        let world = LostCompletion::new().await;
+        let stamped = world
+            .store
+            .mark_terminal_published(&world.inv(), 1_001)
+            .await
+            .unwrap();
+        assert_eq!(stamped, 1);
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["invocation_archived"]);
+        assert_eq!(world.published_at().await, Some(1_001));
+    }
+
+    #[tokio::test]
+    async fn a_failed_republish_leaves_the_terminal_event_owed() {
+        let world = LostCompletion::new().await;
+        world.sink.fail_publish_at(0);
+        assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
+        assert_eq!(world.published_at().await, None, "stamped only once out");
+        // The fault refuses every publish, so `archived` would be refused
+        // too had it been tried: what the sink was offered is the check.
+        let refused: Vec<_> = world
+            .sink
+            .refused()
+            .iter()
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(refused, ["completed"], "nothing tried after the failure");
+
+        world.sink.clear_fault();
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+    }
+
+    /// `archived` after a failed `completed` is the bug #823 fixes, one
+    /// step removed: the control plane acks, the row is deleted, and the
+    /// outcome is gone. So a `completed` republish that fails once ends the
+    /// row's turn in that pass, with nothing else published for it.
+    #[tokio::test]
+    async fn a_completed_republish_that_fails_once_is_not_followed_by_archived() {
+        let world = LostCompletion::new().await;
+        world.sink.fail_publish_at_invocation_count(0);
+        assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
+        let refused: Vec<_> = world
+            .sink
+            .refused()
+            .iter()
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(refused, ["completed"]);
+        assert!(world.kinds().is_empty(), "no `invocation_archived` either");
+        let row = world
+            .store
+            .get_invocation_state(&world.inv())
+            .await
+            .unwrap();
+        let row = row.expect("row held until acked");
+        assert_eq!(row.archive_status, None, "not archive-pending");
+        assert_eq!(row.terminal_published_at, None);
+        assert!(
+            row.unpublished_terminal_event().unwrap().is_some(),
+            "still owed"
+        );
+
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+    }
+
+    /// A `completed` this invocation could have stored.
+    fn completed_event(invocation_id: Uuid) -> Event {
+        Event::new(
+            AgentId::new("sweep-agent").unwrap(),
+            invocation_id,
+            EventPayload::Completed(CompletedPayload {
+                task_status: TaskStatus::Partial,
+                result_summary: Some("half done".to_string()),
+                total_llm_calls: 3,
+                total_tool_calls: 2,
+                total_cost: 0.25,
+                total_duration_ms: 1_234,
+            }),
+        )
+    }
+
+    /// One sweep over a row whose stored terminal event must not go out,
+    /// sorted ahead of a healthy archive-pending row.
+    struct Held {
+        dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sink: Arc<RecordingSink>,
+        sweeper: ArchiveRetrySweeper,
+        bad: String,
+        healthy: String,
+        stored: String,
+    }
+
+    impl Held {
+        /// Store `stored(invocation_id)` as a terminal row's outcome, sweep
+        /// once, and assert the hold (see [`Self::assert_held`]).
+        async fn sweep(stored: impl FnOnce(Uuid) -> String) -> Self {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let bad_id = Uuid::now_v7();
+            let (bad, healthy) = (bad_id.to_string(), Uuid::now_v7().to_string());
+            let stored = stored(bad_id);
+            let mut row = terminal_row(&bad, "sweep-agent", 1_000);
+            row.terminal_outcome = Some(stored.clone());
+            store.upsert_invocation_state(&row).await.unwrap();
+            store
+                .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&healthy, 1_000).await.unwrap();
+            let order = store.list_archive_pending().await.unwrap();
+            assert_eq!(order[0].invocation_id, bad, "never archived, so first");
+
+            let sink = Arc::new(RecordingSink::new());
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+            sweeper
+                .sweep_once(&mut HashSet::new())
+                .await
+                .expect("a held row does not end the pass");
+            let world = Self {
+                dir,
+                store,
+                sink,
+                sweeper,
+                bad,
+                healthy,
+                stored,
+            };
+            world.assert_held().await;
+            world
+        }
+
+        /// The healthy row behind was archived; nothing went out for the
+        /// held row, which is unstamped, not archive-pending, its copy kept.
+        async fn assert_held(&self) {
+            let events = self.sink.events();
+            let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
+            assert_eq!(kinds, ["invocation_archived"], "no completed, one archived");
+            assert_eq!(events[0].envelope.invocation_id.to_string(), self.healthy);
+            let held = self.store.get_invocation_state(&self.bad).await.unwrap();
+            let held = held.expect("held, not dropped");
+            assert_eq!(held.terminal_published_at, None, "not stamped");
+            assert_eq!(held.archive_status, None, "not archived without it");
+            assert_eq!(held.archive_published_at, None);
+            assert_eq!(held.terminal_outcome.as_deref(), Some(self.stored.as_str()));
+        }
+    }
+
+    /// A stored outcome that is not an event at all holds its own row and
+    /// does not end the pass: the rows behind it are still archived.
+    #[tokio::test]
+    async fn an_undecodable_terminal_event_holds_its_row_and_the_sweep_goes_on() {
+        Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+    }
+
+    /// The realistic hold: an event an older build stored, still unpublished
+    /// across an envelope bump. It may well still parse, but republishing it
+    /// would halt every durable consumer on the stream (`Event::from_wire`).
+    #[tokio::test]
+    async fn a_stored_event_of_an_older_schema_version_is_held() {
+        Held::sweep(|inv| {
+            let mut event = completed_event(inv);
+            event.envelope.schema_version = crate::events::SCHEMA_VERSION - 1;
+            terminal_outcome::encode(&event).unwrap()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_stored_event_for_another_invocation_is_held() {
+        Held::sweep(|_| terminal_outcome::encode(&completed_event(Uuid::now_v7())).unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_stored_event_that_is_not_terminal_is_held() {
+        Held::sweep(|inv| {
+            let notice = EventPayload::HostNotice(crate::events::HostNoticePayload {
+                kind: "sim".to_string(),
+                body: "not an outcome".to_string(),
+            });
+            terminal_outcome::encode(&Event::new(AgentId::new("a").unwrap(), inv, notice)).unwrap()
+        })
+        .await;
+    }
+
+    /// An `event_type` this build has never heard of reads as
+    /// `EventPayload::Unknown` rather than failing: still not terminal.
+    #[tokio::test]
+    async fn a_stored_event_of_an_unknown_type_is_held() {
+        Held::sweep(|inv| {
+            let mut value = serde_json::to_value(completed_event(inv)).unwrap();
+            value["payload"]["event_type"] = "from_the_future".into();
+            value.to_string()
+        })
+        .await;
+    }
+
+    /// The documented release (`operating-the-daemon.md`): once an operator
+    /// clears the stored outcome by hand, the next sweep archives the held
+    /// row without it.
+    #[tokio::test]
+    async fn a_released_row_is_archived_without_its_outcome() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let world = Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+        let operator = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(world.dir.path().join("worker.db")))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE invocation_state SET terminal_outcome = NULL WHERE invocation_id = ?")
+            .bind(&world.bad)
+            .execute(&operator)
+            .await
+            .unwrap();
+        operator.close().await;
+
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        let released: Vec<_> = world.sink.events()[1..]
+            .iter()
+            .filter(|e| e.envelope.invocation_id.to_string() == world.bad)
+            .map(|e| event_kind_of(&e.payload))
+            .collect();
+        assert_eq!(released, ["invocation_archived"], "archived, no completed");
+        let row = world.store.get_invocation_state(&world.bad).await.unwrap();
+        assert_eq!(row.unwrap().archive_status.as_deref(), Some("pending"));
     }
 
     #[tokio::test]

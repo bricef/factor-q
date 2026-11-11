@@ -288,6 +288,8 @@ fn state_row(
         trigger_source: Some("manual".into()),
         trigger_subject: None,
         trigger_payload: Some("\"golden fixture trigger\"".into()),
+        terminal_outcome: None,
+        terminal_published_at: None,
     }
 }
 

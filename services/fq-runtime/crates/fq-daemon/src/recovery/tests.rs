@@ -33,6 +33,8 @@ async fn publish_ambiguous_once_fires_exactly_once_per_invocation() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();

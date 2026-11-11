@@ -2600,6 +2600,8 @@ async fn resume_safe_replay_continues_to_completion() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();
@@ -2748,6 +2750,8 @@ async fn injected_interrupted_result_reaches_replay_byte_identical() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();
@@ -2970,6 +2974,8 @@ async fn resume_with_same_ms_interleave(
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();
@@ -3233,6 +3239,8 @@ async fn resume_enforces_lifetime_budget() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();
@@ -3392,6 +3400,8 @@ async fn resume_refuses_ambiguous_invocation() {
             trigger_source: None,
             trigger_subject: None,
             trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
         })
         .await
         .unwrap();

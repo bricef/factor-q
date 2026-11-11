@@ -43,6 +43,7 @@ use sqlx::{Pool, Row, Sqlite};
 use crate::db::schema::{self, Migration, SchemaError};
 
 mod llm_origin;
+pub(crate) mod terminal_outcome;
 // The verdict type and its check are the kit's; re-exported so the
 // tests and `crate::worker` keep the path they had when the copy lived
 // here.
@@ -96,7 +97,8 @@ pub const SCHEMA_CLASS: &str = "worker";
 /// - **v10** — per-row `deferred_at` (#278); why per row: `provider-throttle-and-deferral.md`.
 /// - **v11** — `llm_dispatch.origin` (#824). Only agent-turn rows replay as reducer
 ///   turns; sampling and elicitation run inside a tool call. `NULL` reads as agent turn.
-pub const WORKER_SCHEMA_VERSION: u32 = 11;
+/// - **v12** — `terminal_outcome`/`terminal_published_at` (#823); why: `store/terminal_outcome.rs`.
+pub const WORKER_SCHEMA_VERSION: u32 = 12;
 
 /// Soft warning threshold for the `state_blob` size, in bytes.
 /// At this size, a write logs a warning to give the operator
@@ -388,6 +390,9 @@ pub struct InvocationStateRow {
     pub trigger_source: Option<String>,
     pub trigger_subject: Option<String>,
     pub trigger_payload: Option<String>,
+    /// The terminal event, written with `terminal_at` (v12), and when it reached the bus — why: `store/terminal_outcome.rs`.
+    pub terminal_outcome: Option<String>,
+    pub terminal_published_at: Option<i64>,
 }
 
 /// Worker-side store. Cheap to clone (the underlying connection
@@ -487,6 +492,7 @@ impl WorkerStore {
         (9, WORKER_MIGRATION_V9_SQL),
         (10, WORKER_MIGRATION_V10_SQL),
         (11, llm_origin::MIGRATION_V11_SQL),
+        (12, terminal_outcome::MIGRATION_V12_SQL),
     ];
 
     /// Initialise schema_meta and run worker migrations. Idempotent.
@@ -979,7 +985,8 @@ impl WorkerStore {
     /// Does **not** write `archive_status` /
     /// `archive_published_at` — those are owned by
     /// [`Self::set_archive_pending`] and preserved across
-    /// upserts. The fields on `row` are ignored.
+    /// upserts — nor `terminal_published_at`, owned by
+    /// [`Self::mark_terminal_published`]. Those fields on `row` are ignored.
     pub async fn upsert_invocation_state(
         &self,
         row: &InvocationStateRow,
@@ -998,8 +1005,8 @@ impl WorkerStore {
             INSERT INTO invocation_state
                 (invocation_id, agent_id, schema_version, phase, state_blob,
                  step_index, started_at, updated_at, terminal_at, workspace_ref,
-                 trigger_source, trigger_subject, trigger_payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 trigger_source, trigger_subject, trigger_payload, terminal_outcome)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(invocation_id) DO UPDATE SET
                 phase = excluded.phase,
                 state_blob = excluded.state_blob,
@@ -1009,7 +1016,8 @@ impl WorkerStore {
                 workspace_ref = excluded.workspace_ref,
                 trigger_source = excluded.trigger_source,
                 trigger_subject = excluded.trigger_subject,
-                trigger_payload = excluded.trigger_payload
+                trigger_payload = excluded.trigger_payload,
+                terminal_outcome = excluded.terminal_outcome
             WHERE invocation_state.terminal_at IS NULL
             "#,
         )
@@ -1026,6 +1034,7 @@ impl WorkerStore {
         .bind(&row.trigger_source)
         .bind(&row.trigger_subject)
         .bind(&row.trigger_payload)
+        .bind(&row.terminal_outcome)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1331,7 +1340,8 @@ fn row_to_llm_dispatch(row: sqlx::sqlite::SqliteRow) -> Result<LlmDispatchRow, W
 /// Every [`InvocationStateRow`] column — one list, so a new column is added once, not per reader.
 const INVOCATION_STATE_COLUMNS: &str = "invocation_id, agent_id, schema_version, phase, \
     state_blob, step_index, started_at, updated_at, terminal_at, workspace_ref, archive_status, \
-    archive_published_at, trigger_source, trigger_subject, trigger_payload";
+    archive_published_at, trigger_source, trigger_subject, trigger_payload, terminal_outcome, \
+    terminal_published_at";
 
 /// `SELECT` every row column, then `clause`: `'static`, so only a literal reaches asserted-safe SQL.
 fn select_invocation_state(clause: &'static str) -> sqlx::AssertSqlSafe<String> {
@@ -1359,6 +1369,8 @@ fn row_to_invocation_state(
         trigger_source: row.get("trigger_source"),
         trigger_subject: row.get("trigger_subject"),
         trigger_payload: row.get("trigger_payload"),
+        terminal_outcome: row.get("terminal_outcome"),
+        terminal_published_at: row.get("terminal_published_at"),
     })
 }
 
