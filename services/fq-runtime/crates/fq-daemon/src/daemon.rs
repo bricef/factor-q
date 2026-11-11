@@ -369,7 +369,10 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // Worker recovery: scan in-flight invocations from the worker store,
     // classify each, restore ownership for auto-resumed cases, and emit
     // `invocation.ambiguous` events for cases that cannot be recovered.
-    // `in_flight_ids` is the keep set the startup workspace prune reads.
+    // It also marks each in-flight invocation's trigger claim started, which
+    // must happen before the dispatcher exists (#959): `run_hosted` builds it
+    // from what this function returns. `in_flight_ids` is the keep set the
+    // startup workspace prune reads.
     let (recoverable, in_flight_ids) =
         crate::recovery::classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
             .await?;

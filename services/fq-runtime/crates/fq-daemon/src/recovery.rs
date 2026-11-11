@@ -1,12 +1,17 @@
 //! The daemon's startup recovery: reconciling worker rows against operator
 //! terminal decisions, classifying what was in flight when the last process
-//! stopped, restoring coordination ownership, and re-driving the safe cases.
+//! stopped, recording on each one's trigger claim that it durably started,
+//! restoring coordination ownership, and re-driving the safe cases.
 //!
 //! Split out of `run_daemon` (#189) as three straight lifts, called at exactly
 //! the points they used to occupy — the order is load-bearing. Reconciliation
 //! runs before classification so a pre-existing orphan cannot be reported
 //! ambiguous again, and the resume tasks are spawned only after the runner
-//! that drives them exists.
+//! that drives them exists. Classification, and the claim marks it writes,
+//! completes before the trigger dispatcher is built (#959): a dispatcher
+//! that consumed first could meet the redelivery of a trigger whose
+//! invocation is in flight while its claim still read `claimed`, and start
+//! the trigger a second time.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -115,8 +120,9 @@ pub(crate) async fn reconcile_terminal_owners(
 
 /// Classify what was in flight when the last process stopped, publish the
 /// `system.recovery` roll-up, surface the cases that cannot be recovered as
-/// `invocation.ambiguous`, and restore coordination ownership for the ones
-/// that can.
+/// `invocation.ambiguous`, mark the trigger claim of every in-flight
+/// invocation `durably_started`, and restore coordination ownership for the
+/// ones that can be recovered.
 ///
 /// Returns the invocations to re-drive, and the ids whose workspaces the
 /// startup prune must keep — every in-flight invocation, resumable *or*
@@ -225,6 +231,22 @@ pub(crate) async fn classify_in_flight(
         .iter()
         .map(|c| c.state.invocation_id.clone())
         .collect();
+
+    // Every in-flight invocation made its first WAL write, so its trigger
+    // has durably started, whether or not the process that ran it lived to
+    // record that on the trigger's claim. Record it now, on the claim that
+    // has named the invocation since claim time, so the redelivery of that
+    // still-unacked trigger is dropped rather than started a second time
+    // (#959). Ambiguous invocations count: an operator decides their fate,
+    // not a redelivery. This must land before the dispatcher consumes its
+    // first trigger; `assemble` runs recovery before `run_hosted` builds
+    // the dispatcher, and an error here stops the boot.
+    for invocation_id in &in_flight_ids {
+        cp_store
+            .mark_trigger_started_by_invocation(invocation_id)
+            .await
+            .context("failed to record a recovered invocation's durable start on its claim")?;
+    }
 
     // Restore the coordination rows before spawning resumes. A row can be
     // absent after a daemon crash, but the list/dashboard projection keys on

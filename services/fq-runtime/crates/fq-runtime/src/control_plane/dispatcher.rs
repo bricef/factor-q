@@ -2591,6 +2591,167 @@ You are a test agent."#
         );
     }
 
+    /// **What a daemon killed after its invocation's first WAL write
+    /// leaves behind (#959).** The real `handle`, with a worker that makes
+    /// the first WAL write under the id it was handed and then never comes
+    /// back, killed at that point: after the WAL write, before the claim is
+    /// marked or the trigger acked. The claim row must name the invocation
+    /// the WAL row carries, because that id is how startup recovery finds
+    /// it, and the message must still be unacked, so the broker redelivers
+    /// it. What the next daemon does with that is `fq-daemon`'s recovery
+    /// tests.
+    #[tokio::test]
+    async fn a_dispatcher_killed_after_the_first_wal_write_leaves_a_claim_naming_the_wal_row() {
+        struct DiesAfterFirstWalWrite {
+            store: Arc<WorkerStore>,
+        }
+        #[async_trait::async_trait]
+        impl Worker for DiesAfterFirstWalWrite {
+            async fn run_invocation(
+                &self,
+                agent: &Agent,
+                _llm: &dyn crate::llm::LlmClient,
+                _trigger: Trigger,
+                _delivery_attempt: Option<u32>,
+                durable_start: crate::worker::DurableStart,
+            ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+                let invocation_id = durable_start
+                    .invocation_id()
+                    .expect("the dispatcher names the invocation it starts");
+                self.store
+                    .upsert_invocation_state(&crate::worker::InvocationStateRow {
+                        invocation_id: invocation_id.to_string(),
+                        agent_id: agent.id().as_str().to_string(),
+                        schema_version: 1,
+                        phase: "awaiting_model".to_string(),
+                        state_blob: b"{}".to_vec(),
+                        step_index: 0,
+                        started_at: 1_000,
+                        updated_at: 1_000,
+                        terminal_at: None,
+                        workspace_ref: None,
+                        archive_status: None,
+                        archive_published_at: None,
+                        trigger_source: None,
+                        trigger_subject: None,
+                        trigger_payload: None,
+                        terminal_outcome: None,
+                        terminal_published_at: None,
+                    })
+                    .await
+                    .expect("first WAL write");
+                // The process dies here: the signal is never fired and this
+                // never returns.
+                std::future::pending().await
+            }
+            async fn request_drain(&self, _req: crate::worker::DrainRequest) {}
+            fn drain_status(&self) -> crate::worker::DrainState {
+                crate::worker::DrainState::Running
+            }
+        }
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent_id_str = unique_agent_id("killed-after-wal");
+        let (_agents, registry) = registry_with(&agent_id_str);
+        let scratch = tempfile::tempdir().unwrap();
+        let claims = Arc::new(
+            crate::control_plane::ControlPlaneStore::open(&scratch.path().join("cp.db"))
+                .await
+                .unwrap(),
+        );
+        let wal = Arc::new(
+            WorkerStore::open(&scratch.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        let dispatcher = Arc::new(
+            TriggerDispatcher::new(
+                bus.clone(),
+                registry,
+                Arc::new(DiesAfterFirstWalWrite { store: wal.clone() }),
+                Arc::new(FixtureClient::new()),
+                1,
+            )
+            .with_trigger_claims(claims.clone(), "killed-worker"),
+        );
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &unique_consumer_name(),
+                &crate::events::subjects::trigger(&agent_id_str),
+                crate::bus::NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .unwrap();
+        bus.publish_trigger(
+            &AgentId::new(&agent_id_str).unwrap(),
+            &json!({"input": "killed mid-start"}),
+        )
+        .await
+        .unwrap();
+        let msg = {
+            let mut messages = consumer.messages().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .expect("a message within 5s")
+                .expect("stream open")
+                .expect("message ok")
+        };
+        let seq = msg.info().unwrap().stream_sequence;
+
+        let d = dispatcher.clone();
+        let running = tokio::spawn(async move { d.handle(&msg).await });
+        // At most 200 polls, and at most 10 s of them.
+        let in_flight = tokio::time::timeout(Duration::from_secs(10), async {
+            for _ in 0..200 {
+                let rows = wal.find_in_flight_invocations().await.unwrap();
+                if !rows.is_empty() {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Vec::new()
+        })
+        .await
+        .unwrap_or_default();
+        assert_eq!(
+            in_flight.len(),
+            1,
+            "the first WAL write lands: {in_flight:?}"
+        );
+        // The kill.
+        running.abort();
+        let _ = running.await;
+
+        ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
+        assert_eq!(
+            claims
+                .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Held {
+                claimant: "killed-worker".to_string()
+            },
+            "nothing marked the claim: this is the window #959 is about"
+        );
+        assert!(
+            claims
+                .mark_trigger_started_by_invocation(&in_flight[0].invocation_id)
+                .await
+                .unwrap(),
+            "the claim must name the invocation the WAL row carries, or recovery cannot find it"
+        );
+        assert_eq!(
+            claims
+                .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Started {
+                invocation_id: in_flight[0].invocation_id.clone()
+            }
+        );
+    }
+
     /// `num_ack_pending` must *stay* at `expected` for `window`.
     ///
     /// A single read taken the instant `handle` returns proves nothing
