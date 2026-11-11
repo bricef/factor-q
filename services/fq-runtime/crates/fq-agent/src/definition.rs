@@ -578,6 +578,145 @@ mod tests {
         }
     }
 
+    /// The two grants that let a server spend on the agent's model. Every
+    /// bound rule below holds for both, so every test runs over both.
+    const SPENDING_GRANTS: [&str; 2] = ["sampling", "elicitation"];
+
+    /// A definition granting `grant` to one server, with `budgets` (zero
+    /// or more `key: value` lines) at the top level.
+    fn granting(grant: &str, budgets: &str) -> String {
+        format!(
+            "---\nname: g\nmodel: m\n{budgets}mcp:\n  - server: notes\n    command: notes-mcp\n    {grant}: true\n---\nBody.\n"
+        )
+    }
+
+    fn sub_budget_of(agent: &Agent, grant: &str) -> Option<f64> {
+        match grant {
+            "sampling" => agent.sampling_grant().expect("sampling granted").max_cost,
+            "elicitation" => {
+                agent
+                    .elicitation_grant()
+                    .expect("elicitation granted")
+                    .max_cost
+            }
+            other => unreachable!("not a spending grant: {other}"),
+        }
+    }
+
+    /// #830: a server granted sampling or elicitation spends on the
+    /// agent's model, and with neither its sub-budget nor `budget` set
+    /// nothing bounded that spend, while `fq agent validate` reported the
+    /// definition valid. The refusal names both fields that would bound it.
+    #[test]
+    fn a_spending_grant_with_no_budget_at_all_is_refused() {
+        for grant in SPENDING_GRANTS {
+            let err = parse_agent(&granting(grant, ""))
+                .expect_err("a grant with no budget at all must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("unbounded {grant} grant"))
+                    && msg.contains(&format!("`{grant}_budget`"))
+                    && msg.contains("`budget`"),
+                "the refusal must name the fields that would bound `{grant}`, got: {msg}"
+            );
+        }
+    }
+
+    /// The bound must be the *matching* sub-budget: `elicitation_budget`
+    /// puts no ceiling on sampling spend, nor the reverse.
+    #[test]
+    fn another_grants_sub_budget_does_not_bound_a_grant() {
+        for (grant, other) in [("sampling", "elicitation"), ("elicitation", "sampling")] {
+            let err = parse_agent(&granting(grant, &format!("{other}_budget: 0.10\n")))
+                .expect_err("another grant's sub-budget must not count as this grant's bound");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("unbounded {grant} grant")),
+                "`{other}_budget` must not bound `{grant}`, got: {msg}"
+            );
+        }
+    }
+
+    /// `budget` alone bounds a grant: the documented "omit the sub-budget
+    /// to bound only by `budget`" still holds, so no definition that sets
+    /// `budget` changes behaviour (#830, option (b)).
+    #[test]
+    fn a_spending_grant_bounded_by_budget_alone_loads() {
+        for grant in SPENDING_GRANTS {
+            let agent = parse_agent(&granting(grant, "budget: 1.00\n"))
+                .unwrap_or_else(|err| panic!("`budget` alone must bound `{grant}`: {err}"));
+            assert_eq!(agent.budget(), Some(1.0));
+            assert_eq!(sub_budget_of(&agent, grant), None);
+        }
+    }
+
+    /// The matching sub-budget alone bounds a grant too: the server's spend
+    /// is capped, and the agent's own turns are left without a ceiling,
+    /// which is the author's call.
+    #[test]
+    fn a_spending_grant_bounded_by_its_sub_budget_alone_loads() {
+        for grant in SPENDING_GRANTS {
+            let agent = parse_agent(&granting(grant, &format!("{grant}_budget: 0.25\n")))
+                .unwrap_or_else(|err| panic!("`{grant}_budget` alone must bound `{grant}`: {err}"));
+            assert_eq!(agent.budget(), None);
+            assert_eq!(sub_budget_of(&agent, grant), Some(0.25));
+        }
+    }
+
+    /// A sub-budget above `budget` can never bind, because `budget` runs
+    /// out first, so the ceiling its author wrote is one the runtime would
+    /// never apply. Refused, naming both numbers; one equal to `budget`
+    /// binds at the same moment and still loads.
+    #[test]
+    fn a_sub_budget_above_budget_is_refused() {
+        for grant in SPENDING_GRANTS {
+            let err = parse_agent(&granting(
+                grant,
+                &format!("budget: 0.50\n{grant}_budget: 0.75\n"),
+            ))
+            .expect_err("a sub-budget that can never bind must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("`{grant}_budget: 0.75`")) && msg.contains("`budget: 0.5`"),
+                "the refusal must name the sub-budget and the budget it exceeds, got: {msg}"
+            );
+
+            let agent = parse_agent(&granting(
+                grant,
+                &format!("budget: 0.50\n{grant}_budget: 0.50\n"),
+            ))
+            .unwrap_or_else(|err| panic!("`{grant}_budget` equal to `budget` must load: {err}"));
+            assert_eq!(sub_budget_of(&agent, grant), Some(0.5));
+        }
+    }
+
+    /// `.inf` and `.nan` are YAML floats and neither bounds anything, so a
+    /// sub-budget of either must not stand in for a real bound: alone it
+    /// leaves the grant unbounded, and under `budget` it can never bind.
+    #[test]
+    fn a_sub_budget_that_is_not_finite_bounds_nothing() {
+        for grant in SPENDING_GRANTS {
+            for value in [".inf", ".nan"] {
+                let err = parse_agent(&granting(grant, &format!("{grant}_budget: {value}\n")))
+                    .expect_err("a non-finite sub-budget alone must not bound a grant");
+                assert!(
+                    err.to_string().contains(&format!("unbounded {grant} grant")),
+                    "`{grant}_budget: {value}` alone, got: {err}"
+                );
+
+                let err = parse_agent(&granting(
+                    grant,
+                    &format!("budget: 1.00\n{grant}_budget: {value}\n"),
+                ))
+                .expect_err("a non-finite sub-budget under `budget` can never bind");
+                assert!(
+                    err.to_string().contains("can never bind"),
+                    "`{grant}_budget: {value}` under `budget`, got: {err}"
+                );
+            }
+        }
+    }
+
     /// The other half of strictness: correctly-spelled nested blocks must
     /// still load. A `deny_unknown_fields` that also rejected valid input
     /// would be caught by the example definitions, but not before it had

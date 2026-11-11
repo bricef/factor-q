@@ -165,6 +165,30 @@ mod tests {
         );
     }
 
+    /// #830 at the operator's surface: a sampling grant with no budget at
+    /// all is refused by `fq agent validate`, and the line it prints says
+    /// which fields would bound the grant.
+    #[test]
+    fn validate_refuses_an_unbounded_sampling_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unbounded.md");
+        std::fs::write(
+            &path,
+            "---\nname: unbounded\nmodel: claude-haiku\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: true\n---\nDo work.\n",
+        )
+        .unwrap();
+        let err = validate_agent(&path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "{} is invalid: invalid agent: unbounded sampling grant: a server granted \
+                 `sampling` spends on this agent's model with nothing to stop it; set \
+                 `sampling_budget` or `budget` to a finite amount",
+                path.display()
+            )
+        );
+    }
+
     /// The row rendering is the part of verb 9's output that the flip
     /// had to preserve byte-for-byte: id padded to 30, then the three
     /// `key=value` fields in that order.
