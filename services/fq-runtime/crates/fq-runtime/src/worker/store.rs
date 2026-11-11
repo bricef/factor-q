@@ -436,10 +436,7 @@ impl WorkerStore {
             // surfacing SQLITE_BUSY, so concurrent invocations contend
             // on latency rather than erroring.
             .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(max_connections)
-            .connect_with(options)
-            .await?;
+        let pool = schema::connect_store_pool(options, max_connections).await?;
 
         let store = Self { pool };
         store.bootstrap_schema().await?;

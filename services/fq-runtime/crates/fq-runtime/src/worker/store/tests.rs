@@ -422,15 +422,11 @@ async fn open_refuses_when_db_version_higher_than_binary() {
 /// A pool opened the way `open_with_pool` opens one, for driving this
 /// store's bootstrap through the kit's test seam.
 async fn worker_pool(path: &Path) -> Pool<Sqlite> {
-    SqlitePoolOptions::new()
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(path)
-                .create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal),
-        )
-        .await
-        .unwrap()
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    schema::connect_store_pool(options, 4).await.unwrap()
 }
 
 async fn llm_dispatch_columns(pool: &Pool<Sqlite>) -> Vec<String> {

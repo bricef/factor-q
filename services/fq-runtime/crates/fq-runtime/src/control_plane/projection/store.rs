@@ -86,10 +86,7 @@ impl ProjectionStore {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
+        let pool = crate::db::schema::connect_store_pool(options, 4).await?;
         Ok(Self { pool })
     }
 

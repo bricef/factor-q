@@ -215,7 +215,11 @@ transaction: a daemon stopped or killed part-way leaves the store at the
 version it had, and the next start runs the whole migration again. If another
 process holds a store's write lock when the daemon opens it, the daemon waits
 up to 30 seconds for it and then fails to start with `database is locked`,
-naming the store.
+naming the store. One exception to "a stop signal is answered throughout":
+nothing reads one while the stores open, so neither that wait nor a long
+projection rebuild on start ends on `SIGTERM`. `SIGKILL` (what `docker stop`
+sends once its grace period runs out) ends them at once, and is safe there
+for the reason above: nothing they have done is committed.
 
 ## Hot-reloading agents: `fq reload`
 

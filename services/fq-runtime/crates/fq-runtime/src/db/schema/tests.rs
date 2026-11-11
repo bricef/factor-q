@@ -7,13 +7,20 @@
 //! - **Serialised**: a second opener that arrives while the first is
 //!   between reading the version and applying the ladder waits, then
 //!   finds nothing to do — in this process and in another.
-//! - **Atomic**: a ladder that stops part-way — an injected failure, or
-//!   a process killed with `SIGKILL` after a rung — leaves the file at
-//!   its old version with nothing applied, and the next open succeeds.
+//! - **Atomic**: a ladder that stops part-way — an injected failure, a
+//!   cancelled step, or a process killed with `SIGKILL` after a rung —
+//!   leaves the file at its old version with nothing applied, and the
+//!   next open succeeds.
+//!
+//! And the step before the lock: a store whose file another process has
+//! just created, and has not yet switched into WAL mode, waits for it
+//! rather than failing.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use tempfile::tempdir;
 
 use super::test_seam::{RivalAtVersionRead, write_lock_held};
@@ -48,9 +55,7 @@ async fn store_pool(path: &Path) -> Pool<Sqlite> {
         .filename(path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal);
-    SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
+    connect_store_pool(options, 4)
         .await
         .expect("open the store pool")
 }
@@ -257,6 +262,181 @@ async fn a_binary_too_old_refuses_without_changing_the_file() {
     assert!(
         !write_lock_held(&path).await,
         "a refusal must give the schema lock back"
+    );
+}
+
+/// Never lets the step past a rung: the step can only end by being
+/// dropped, as the on-demand rebuild's task is at shutdown.
+struct HangAfterRung(u32);
+
+impl SchemaSeam for HangAfterRung {
+    async fn rung_applied(&mut self, version: u32) {
+        if version == self.0 {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_upgrade_leaves_the_file_at_its_old_version() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("toy.db");
+    file_at_v1(&path).await;
+    let pool = store_pool(&path).await;
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(500),
+        bootstrap_observed(&pool, CLASS, 3, LADDER, &mut HangAfterRung(2)),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the step should still have been held after rung 2: {cancelled:?}"
+    );
+
+    // Dropping the step hands its connection back to SQLite on sqlx's
+    // worker thread, so the lock goes a moment later rather than at
+    // once. Bounded by count and by time: 100 polls, 50 ms apart.
+    let mut released = false;
+    for _ in 0..100 {
+        if !write_lock_held(&path).await {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(released, "the cancelled step never gave the lock back");
+    assert_eq!(
+        on_disk(&path).await,
+        (Some(1), columns(&["id"])),
+        "rung 2 must roll back with the cancelled step"
+    );
+
+    let verdict = bootstrap_versioned(&pool, CLASS, 3, LADDER)
+        .await
+        .expect("the next open after a cancelled upgrade must succeed");
+    assert_eq!(verdict, Compatibility::NeedsUpgrade { from: 1 });
+    assert_eq!(on_disk(&path).await, (Some(3), columns(&["id", "b", "c"])));
+}
+
+// ----- The step before the lock: a file another process is creating -----
+
+/// How long the creating process keeps the file locked. The open under
+/// test must still be waiting when it lets go.
+const CREATOR_HOLDS: Duration = Duration::from_millis(500);
+
+/// What an opener meets when another process created the store's file
+/// an instant earlier and has not yet switched it into WAL mode: a file
+/// in SQLite's default journal mode, with that process's write lock on
+/// it. The opener's own switch into WAL mode needs that lock, and SQLite
+/// will not wait for it. Runs `open` against such a file, lets the
+/// creator go after [`CREATOR_HOLDS`], and returns what was opened.
+async fn open_while_another_process_creates<T: Send + 'static>(
+    path: &Path,
+    open: impl Future<Output = Result<T, String>> + Send + 'static,
+) -> T {
+    let mut creator = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .expect("create the file as the other process");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut creator)
+        .await
+        .expect("take the creator's lock");
+
+    let opening = tokio::spawn(open);
+    tokio::time::sleep(CREATOR_HOLDS).await;
+    let finished_while_held = opening.is_finished();
+    sqlx::query("ROLLBACK")
+        .execute(&mut creator)
+        .await
+        .expect("release the creator's lock");
+    creator.close().await.expect("close the creator");
+
+    let opened = tokio::time::timeout(Duration::from_secs(60), opening)
+        .await
+        .expect("the open did not finish within a minute of the creator letting go")
+        .expect("the open panicked")
+        .unwrap_or_else(|err| panic!("the open must wait for the creator, then succeed: {err}"));
+    assert!(
+        !finished_while_held,
+        "the open finished while the creator still held the file"
+    );
+    opened
+}
+
+/// The version `class` records in the file at `path`.
+async fn recorded(path: &Path, class: &str) -> Option<u32> {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .connect()
+        .await
+        .expect("open for inspection");
+    let version = read_schema_version(&mut conn, class).await.unwrap();
+    conn.close().await.unwrap();
+    version
+}
+
+#[tokio::test]
+async fn a_worker_store_another_process_is_creating_opens_once_it_lets_go() {
+    use crate::worker::store::{SCHEMA_CLASS, WORKER_SCHEMA_VERSION, WorkerStore};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let opening = path.clone();
+    let store = open_while_another_process_creates(&path, async move {
+        WorkerStore::open(&opening)
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await;
+    drop(store);
+    assert_eq!(
+        recorded(&path, SCHEMA_CLASS).await,
+        Some(WORKER_SCHEMA_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn a_control_plane_store_another_process_is_creating_opens_once_it_lets_go() {
+    use crate::control_plane::store::{
+        CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, SCHEMA_CLASS,
+    };
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let opening = path.clone();
+    let store = open_while_another_process_creates(&path, async move {
+        ControlPlaneStore::open(&opening)
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await;
+    drop(store);
+    assert_eq!(
+        recorded(&path, SCHEMA_CLASS).await,
+        Some(CONTROL_PLANE_SCHEMA_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn a_projection_another_process_is_creating_opens_once_it_lets_go() {
+    use crate::control_plane::projection::{PROJECTION_SCHEMA_VERSION, ProjectionStore};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("projection.db");
+    let opening = path.clone();
+    let store = open_while_another_process_creates(&path, async move {
+        ProjectionStore::open(&opening)
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await;
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        PROJECTION_SCHEMA_VERSION
     );
 }
 

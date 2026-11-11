@@ -113,15 +113,9 @@ pub(crate) async fn write_lock_held(path: &Path) -> bool {
                 .expect("release the probe's lock");
             false
         }
-        Err(sqlx::Error::Database(err)) if is_busy(err.code().as_deref()) => true,
+        Err(err) if super::is_busy(&err) => true,
         Err(err) => panic!("the lock probe failed for another reason: {err}"),
     };
     probe.close().await.expect("close the lock probe");
     held
-}
-
-/// `SQLITE_BUSY`, under any of its extended codes.
-fn is_busy(code: Option<&str>) -> bool {
-    code.and_then(|code| code.parse::<i32>().ok())
-        .is_some_and(|code| code & 0xff == 5)
 }

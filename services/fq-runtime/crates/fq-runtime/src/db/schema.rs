@@ -70,18 +70,30 @@
 //! could not run inside the step's transaction, and would have to be
 //! designed as a step of its own rather than appended to a ladder.
 //!
-//! That leaves one window outside the lock: the switch into WAL mode
-//! when a file is first created. It needs an exclusive lock that a busy
-//! timeout cannot wait for, so two processes creating the same file in
-//! the same instant can still see one fail that switch with `database
-//! is locked`. Once the file exists in WAL mode the switch only reads
-//! the header and never contends.
+//! ## The one step before the lock: switching a new file into WAL mode
+//!
+//! That switch is the `PRAGMA journal_mode` sqlx issues when the store's
+//! pool makes its first connection, so it happens before any schema
+//! step can take the lock — and it is the one lock SQLite will not wait
+//! for. On a file not yet in WAL mode the switch takes a read
+//! transaction and then upgrades it to write the header, and SQLite
+//! calls the busy handler only when no transaction is open, so the
+//! upgrade fails at once with `database is locked` if another
+//! connection holds the file (SQLite 3.46, `sqlite3BtreeBeginTrans`).
+//! sqlx's pool does not retry it either: it retries a connect only on an
+//! error the driver marks transient, and the SQLite driver marks none.
+//! Two processes creating one store in the same instant used to have
+//! one of them fail there. [`connect_store_pool`] is what every store
+//! opens its pool with: it retries that connect on `database is locked`,
+//! with a short backoff, for up to [`SCHEMA_LOCK_WAIT`] — the same
+//! budget the step's own lock wait has. Once a file is in WAL mode the
+//! switch only reads the header and never contends.
 //!
 //! ## Adding a migration to a `schema_meta` store
 //!
 //! Bump the store's version constant, append a `(version, SQL)` rung to
 //! its migration ladder, and say in the constant's doc what the rung
-//! changes. [`apply_migrations`] runs every rung above the recorded
+//! changes. [`bootstrap_versioned`] runs every rung above the recorded
 //! version and at or below the binary's, in order, so a file two
 //! versions behind takes both rungs. A rung's SQL may hold several
 //! statements; [`split_sql`] runs them one at a time so a failure names
@@ -93,13 +105,16 @@
 //! and its on-demand rebuild run under [`with_schema_lock`] all the
 //! same.
 //!
-//! `fq-store` (a separate workspace) keeps its own pool and pragma
-//! bootstrap in `grant_log.rs`/`index.rs`; it is a different crate with
-//! a different lifecycle and is deliberately not ported onto this kit.
+//! `fq-store` is a different crate, a member of the same workspace, with
+//! its own pool and pragma bootstrap in `grant_log.rs`/`index.rs`. It is
+//! not yet under this rule: each of its rungs commits atomically with
+//! its version bump, but the version is read outside any transaction,
+//! so two openers can both run a rung. That is tracked in
+//! <https://github.com/bricef/factor-q/issues/975>.
 
 use std::time::Duration;
 
-use sqlx::sqlite::SqliteConnection;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Connection, Executor, Pool, Row, Sqlite};
 
 #[cfg(test)]
@@ -109,15 +124,30 @@ mod tests;
 
 /// How long a schema step waits for SQLite's write lock before it gives
 /// up — and so how long a second opener waits for a first one's
-/// bootstrap to commit.
+/// bootstrap to commit. [`connect_store_pool`] spends the same budget
+/// waiting out the switch into WAL mode.
 ///
-/// A ladder applies in milliseconds; the longest step that can hold the
-/// lock is a projection rebuild, which carries every row of a large file
-/// across and can take seconds. Thirty seconds outlasts that on a loaded
-/// machine, and is still short enough that a holder which never lets go
-/// (a process stopped mid-transaction) surfaces as a failed open naming
-/// the lock rather than a daemon that hangs at startup.
+/// A chosen bound, not a measured one. A ladder is expected to apply in
+/// milliseconds; the longest step that can hold the lock is a projection
+/// rebuild, which carries every row of the file across and grows with
+/// it. Thirty seconds is meant to be comfortably longer than either on a
+/// loaded machine while still turning a holder that never lets go (a
+/// process stopped mid-transaction) into a failed open. When it is
+/// exceeded — a rebuild of a very large projection under another
+/// process's open, say — the waiting open fails with SQLite's `database
+/// is locked`, the holder carries on undisturbed, and starting the
+/// waiter again once the holder has committed finds the work done.
+///
+/// The wait cannot be cut short by a stop signal: nothing reads the
+/// daemon's signal stream while its stores open, so a daemon waiting
+/// here stops only when the wait ends or on `SIGKILL`. Being killed here
+/// is safe, because nothing the step has done is committed.
 pub const SCHEMA_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// The first pause before [`connect_store_pool`] tries again, doubled
+/// on each retry up to [`CONNECT_RETRY_MAX_PAUSE`].
+const CONNECT_RETRY_FIRST_PAUSE: Duration = Duration::from_millis(10);
+const CONNECT_RETRY_MAX_PAUSE: Duration = Duration::from_millis(250);
 
 /// The version table shared by the `schema_meta`-versioned stores: one
 /// row per schema class. Created with `IF NOT EXISTS` on every open, so
@@ -233,10 +263,54 @@ where
         .busy_timeout(SCHEMA_LOCK_WAIT);
     let mut conn = options.connect().await?;
     let outcome = in_immediate_transaction(&mut conn, step).await;
-    let closed = conn.close().await;
-    let value = outcome?;
-    closed?;
-    Ok(value)
+    // By now the step has committed or rolled back. A close that fails
+    // after a commit cannot undo it, so it is reported, not returned:
+    // failing the open would claim the step did not happen.
+    if let Err(err) = conn.close().await {
+        tracing::warn!(error = %err, "schema step: closing its connection failed");
+    }
+    outcome
+}
+
+/// Open a store's pool on `options`, which address a file that may not
+/// exist yet, waiting out the one lock a busy timeout cannot: the
+/// switch into WAL mode (see the module docs).
+///
+/// A connect that fails with `database is locked` is tried again after
+/// a pause that starts at 10 ms and doubles to 250 ms, until
+/// [`SCHEMA_LOCK_WAIT`] has passed; then the last error is returned.
+/// Every other error is returned at once.
+pub async fn connect_store_pool(
+    options: SqliteConnectOptions,
+    max_connections: u32,
+) -> Result<Pool<Sqlite>, sqlx::Error> {
+    let deadline = tokio::time::Instant::now() + SCHEMA_LOCK_WAIT;
+    let mut pause = CONNECT_RETRY_FIRST_PAUSE;
+    loop {
+        let attempt = SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options.clone())
+            .await;
+        match attempt {
+            Err(err) if is_busy(&err) && tokio::time::Instant::now() + pause < deadline => {
+                tracing::debug!(error = %err, ?pause, "store open: file locked, trying again");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(CONNECT_RETRY_MAX_PAUSE);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// `SQLITE_BUSY` (`database is locked`), under any of its extended
+/// codes.
+fn is_busy(err: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(err) = err else {
+        return false;
+    };
+    err.code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 0xff == 5)
 }
 
 async fn in_immediate_transaction<T, E>(
@@ -348,9 +422,10 @@ where
 /// schema lock: no other opener can read the old version while the
 /// rungs are applied, and no interrupted run can leave the rungs
 /// without the version. Called on its own, outside that, it has neither
-/// property; the migration tests use it that way to build a file at an
-/// old rung.
-pub async fn apply_migrations(
+/// property — which is why it exists only for the migration tests, to
+/// build a file at an old rung, and is not a production entry point.
+#[cfg(test)]
+pub(crate) async fn apply_migrations(
     conn: &mut SqliteConnection,
     migrations: &[Migration],
     from: u32,

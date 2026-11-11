@@ -200,15 +200,11 @@ async fn two_openers_of_a_fresh_control_plane_db_serialise() {
             .map(drop)
             .map_err(|err| err.to_string())
     });
-    let pool = SqlitePoolOptions::new()
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal),
-        )
-        .await
-        .unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = schema::connect_store_pool(options, 4).await.unwrap();
 
     let first = schema::bootstrap_observed(
         &pool,
