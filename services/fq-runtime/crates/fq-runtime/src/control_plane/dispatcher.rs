@@ -470,7 +470,7 @@ impl TriggerDispatcher {
         // First operation by design: no drain, routing, parsing, or trigger-id
         // minting happens until this broker identity has been arbitrated.
         let claim::ClaimVerdict::Proceed {
-            stream_seq,
+            claim,
             delivered: delivery_attempt,
         } = self.claim_delivery(msg).await
         else {
@@ -619,7 +619,7 @@ impl TriggerDispatcher {
         // worker that never signals), we ack on return — retrying a
         // permanent error would not help, and the run already happened.
         let delivery_attempt = u32::try_from(delivery_attempt).unwrap_or(1);
-        let (durable_start, mut durably_started) = DurableStart::channel();
+        let (durable_start, mut durably_started) = DurableStart::channel(claim.invocation_id);
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
             &loaded.agent,
             self.llm.as_ref(),
@@ -639,11 +639,9 @@ impl TriggerDispatcher {
                     // returned before its first WAL write). Either way,
                     // stop waiting on this branch; the ack below (on
                     // return) covers the drop case.
-                    if let Ok(invocation_id) = signal {
+                    if signal.is_ok() {
                         durable_start_observed = true;
-                        acked = self
-                            .mark_durable_started(msg, stream_seq, trigger_id, invocation_id)
-                            .await;
+                        acked = self.mark_durable_started(msg, &claim, trigger_id).await;
                     }
                 }
                 outcome = &mut invocation => break outcome,
@@ -1330,9 +1328,10 @@ You are a test agent."#
         struct BlockingWorker {
             started: Arc<AtomicUsize>,
             release: Arc<Notify>,
-            /// The invocation id this worker's first WAL write carries,
-            /// fixed so the test can read it back off the claim row.
-            wal_invocation: Uuid,
+            /// The invocation id this worker was told to run under, which
+            /// its first WAL write would carry, kept so the test can find
+            /// it on the claim row.
+            wal_invocation: Arc<std::sync::Mutex<Option<Uuid>>>,
         }
         #[async_trait::async_trait]
         impl Worker for BlockingWorker {
@@ -1344,11 +1343,12 @@ You are a test agent."#
                 _delivery_attempt: Option<u32>,
                 mut durable_start: crate::worker::DurableStart,
             ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
+                *self.wal_invocation.lock().unwrap() = durable_start.invocation_id();
                 self.started.fetch_add(1, Ordering::SeqCst);
                 // Simulate the first WAL write landing: this is what lets
                 // the dispatcher ack while the invocation is still
                 // in-flight (issue #41).
-                durable_start.fire(self.wal_invocation);
+                durable_start.fire();
                 self.release.notified().await;
                 Ok(crate::worker::InvocationOutcome::Completed {
                     invocation_id: Uuid::now_v7(),
@@ -1383,11 +1383,11 @@ You are a test agent."#
 
         let started = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
-        let durable_invocation_id = Uuid::now_v7();
+        let wal_invocation = Arc::new(std::sync::Mutex::new(None));
         let worker: Arc<dyn Worker> = Arc::new(BlockingWorker {
             started: started.clone(),
             release: release.clone(),
-            wal_invocation: durable_invocation_id,
+            wal_invocation: wal_invocation.clone(),
         });
         let claim_dir = tempfile::tempdir().unwrap();
         let claim_store = Arc::new(
@@ -1491,9 +1491,13 @@ You are a test agent."#
         // before the first copy's ack, and reading it back is how a
         // missing `mark_trigger_started` fails an assertion here instead
         // of turning into a hang somewhere else.
+        let durable_invocation_id = wal_invocation
+            .lock()
+            .unwrap()
+            .expect("the dispatcher names the invocation it starts (#959)");
         assert_eq!(
             claim_store
-                .claim_trigger(test_key(&bus, duplicate_seq), "worker-a", 0)
+                .claim_trigger(test_key(&bus, duplicate_seq), "worker-a", "probe", 0)
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Started {
@@ -2214,7 +2218,7 @@ You are a test agent."#
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            durable_start.fire(uuid::Uuid::now_v7());
+            durable_start.fire();
             self.gate.acquire().await.expect("gate open").forget();
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
@@ -2416,10 +2420,12 @@ You are a test agent."#
         throttle
     }
 
-    /// Records every start with its delivery attempt; drains on a flag.
+    /// Records every start with its delivery attempt, and the invocation
+    /// id the dispatcher told it to run under; drains on a flag.
     #[derive(Default)]
     struct RecordingWorker {
         starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>)>>,
+        invocation_ids: std::sync::Mutex<Vec<Option<Uuid>>>,
         draining: std::sync::atomic::AtomicBool,
     }
     #[async_trait::async_trait]
@@ -2436,7 +2442,11 @@ You are a test agent."#
                 .lock()
                 .unwrap()
                 .push((std::time::Instant::now(), delivery_attempt));
-            durable_start.fire(uuid::Uuid::now_v7());
+            self.invocation_ids
+                .lock()
+                .unwrap()
+                .push(durable_start.invocation_id());
+            durable_start.fire();
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
                 response: canned_response(),
@@ -2515,7 +2525,12 @@ You are a test agent."#
         let seq = msg.info().unwrap().stream_sequence;
         assert_eq!(
             store
-                .claim_trigger(test_key(&bus, seq), "worker-a", 0)
+                .claim_trigger(
+                    test_key(&bus, seq),
+                    "worker-a",
+                    &Uuid::now_v7().to_string(),
+                    0
+                )
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won
@@ -2548,8 +2563,14 @@ You are a test agent."#
                 .unwrap()
         };
         let restart_seq = restart_msg.info().unwrap().stream_sequence;
+        let dead_workers_invocation = Uuid::now_v7();
         store
-            .claim_trigger(test_key(&bus, restart_seq), "dead-worker", 0)
+            .claim_trigger(
+                test_key(&bus, restart_seq),
+                "dead-worker",
+                &dead_workers_invocation.to_string(),
+                0,
+            )
             .await
             .unwrap();
         dispatcher.handle(&restart_msg).await;
@@ -2557,6 +2578,16 @@ You are a test agent."#
             worker.starts.lock().unwrap().len(),
             2,
             "dead worker's claim is adopted"
+        );
+        // Every start runs under an id the dispatcher chose and wrote on
+        // the claim first (#959); the adopted one under its own, never the
+        // dead worker's, which may already belong to a finished run.
+        let ids = worker.invocation_ids.lock().unwrap().clone();
+        assert!(ids.iter().all(Option::is_some), "{ids:?}");
+        assert_ne!(
+            ids[1],
+            Some(dead_workers_invocation),
+            "an adopted claim must not reuse the dead worker's invocation id"
         );
     }
 
@@ -2825,13 +2856,13 @@ You are a test agent."#
         };
         let seq = msg.info().unwrap().stream_sequence;
         store
-            .claim_trigger(test_key(&bus, seq), "worker-a", 0)
+            .claim_trigger(test_key(&bus, seq), "worker-a", "held-invocation", 0)
             .await
             .unwrap();
         dispatcher.requeue_held(&msg, &agent, None, &payload).await;
         assert_eq!(
             store
-                .claim_trigger(test_key(&bus, seq), "worker-a", 1)
+                .claim_trigger(test_key(&bus, seq), "worker-a", "probe", 1)
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won,
@@ -3345,7 +3376,7 @@ You are a test agent."#
             _delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
-            durable_start.fire(uuid::Uuid::now_v7());
+            durable_start.fire();
             *self.deferred_at.lock().unwrap() = Some(std::time::Instant::now());
             Ok(crate::worker::InvocationOutcome::Deferred {
                 invocation_id: self.invocation_id,
@@ -3581,7 +3612,7 @@ You are a test agent."#
             ));
             let open = self.open.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(open, SeqCst);
-            durable_start.fire(uuid::Uuid::now_v7());
+            durable_start.fire();
             self.finish.acquire().await.expect("gate open").forget();
             self.open.fetch_sub(1, SeqCst);
             if self.fail.load(SeqCst) {

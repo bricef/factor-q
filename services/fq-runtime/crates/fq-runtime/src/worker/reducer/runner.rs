@@ -326,13 +326,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         .await
     }
 
-    /// Like [`run`](Self::run) but fires `durable_start` once the
-    /// invocation's first WAL write lands. The trigger dispatcher uses
-    /// this (through the [`Worker`](crate::Worker) seam) to ack a
-    /// trigger only after the run is recoverable from the WAL, closing
-    /// the ack->first-WAL-write window (issue #41). The trigger arrives
-    /// already named — the dispatcher honoured or assigned its identity
-    /// before handing it over.
+    /// Like [`run`](Self::run) but runs under the invocation id that
+    /// `durable_start` carries, if any, and fires it once the first WAL
+    /// write lands. The trigger dispatcher uses this (through the
+    /// [`Worker`](crate::Worker) seam) to ack a trigger only after the
+    /// run is recoverable from the WAL (#41); the id is the one its claim
+    /// row has named since claim time (#959). The trigger arrives already
+    /// named — the dispatcher honoured or assigned its identity.
     pub async fn run_signalling(
         &self,
         agent: &Agent,
@@ -396,7 +396,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         sampling: Option<SamplingChannel>,
         durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        let invocation_id = Uuid::now_v7();
+        let invocation_id = durable_start.invocation_id().unwrap_or_else(Uuid::now_v7);
         let agent_id: AgentId = agent.id().clone();
         let _active = self.mark_active(invocation_id, agent_id.clone());
         let start = Instant::now();
@@ -1224,7 +1224,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // the run is now recoverable from the WAL, so the trigger
             // dispatcher may ack (issue #41). Idempotent — only the
             // first step fires; every later call is a no-op.
-            durable_start.fire(invocation_id);
+            durable_start.fire();
 
             match output.next_action {
                 NextAction::Complete { .. } => {

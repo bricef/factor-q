@@ -2029,6 +2029,75 @@ async fn state_row_written_on_completion_with_terminal_at_set() {
         serde_json::from_slice(&row.state_blob).expect("state_blob deserialises as JSON");
 }
 
+/// **A dispatched invocation runs under the id its trigger's claim
+/// already names (#959).** The dispatcher chooses the id before it claims
+/// the trigger and hands it over in `DurableStart`. The WAL row and the
+/// outcome must carry that id and no fresh one: the WAL row is how startup
+/// recovery finds the claim of an invocation that died before its claim
+/// was marked started. The signal still fires, after the first WAL write.
+#[tokio::test]
+async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("worker.db"))
+            .await
+            .expect("worker store"),
+    );
+    let llm = FixtureClient::new();
+    llm.push_response(end_turn_response("done."));
+    let runner = ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(test_pricing())
+                .store(store.clone())
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    );
+    let agent = simple_responder_agent(&unique_agent_id("claimed-id"));
+
+    let claimed = Uuid::now_v7();
+    let (durable_start, fired) = DurableStart::channel(claimed);
+    let outcome = runner
+        .run_signalling(
+            &agent,
+            &llm,
+            Trigger::mint(TriggerSource::Subject, None, json!({"input": "go"})),
+            Some(1),
+            durable_start,
+        )
+        .await
+        .expect("the invocation completes");
+
+    match outcome {
+        InvocationOutcome::Completed { invocation_id, .. } => assert_eq!(
+            invocation_id, claimed,
+            "the invocation runs under the id it was handed, not one it mints"
+        ),
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    fired
+        .await
+        .expect("the durable start fires once the first WAL write lands");
+    let row = store
+        .get_invocation_state(&claimed.to_string())
+        .await
+        .unwrap()
+        .expect("the WAL row carries the id the claim names");
+    assert_eq!(row.phase, "completed");
+}
+
 /// The error returned to the caller must carry the same
 /// `FailureKind` the `failed` event was emitted with — here the
 /// genuine `max_iterations` case, which previously surfaced as a

@@ -64,7 +64,8 @@ use crate::llm::{ChatResponse, LlmClient, LlmError};
 use crate::trigger::Trigger;
 
 /// A one-shot "durably started" signal the control-plane hands a
-/// worker through [`Worker::run_invocation`].
+/// worker through [`Worker::run_invocation`], carrying the id the
+/// invocation is to run under.
 ///
 /// The worker [`fire`](DurableStart::fire)s it exactly once, right
 /// after the invocation's first durable (WAL) write — the point past
@@ -74,35 +75,54 @@ use crate::trigger::Trigger;
 /// (a crash before the first WAL write leaves the trigger unacked, so
 /// JetStream redelivers it). See `control_plane::dispatcher`.
 ///
+/// The id is the dispatcher's: chosen before it claims the trigger and
+/// written on the claim row with the claim, so the row names the
+/// invocation before the invocation exists. A worker runs the invocation
+/// under it, because the WAL row carrying that id is how startup recovery
+/// finds the claim of an invocation whose durable start a crash kept the
+/// dispatcher from recording (#959).
+///
 /// [`noop`](DurableStart::noop) is the "nobody is waiting" variant —
 /// used by the direct `ReducerRunner::run` paths (CLI, tests, sim)
-/// that ack nothing. Firing a noop signal is a no-op.
+/// that claim and ack nothing, so it carries no id and the worker mints
+/// one. Firing a noop signal is a no-op.
 #[derive(Debug, Default)]
 pub struct DurableStart {
-    tx: Option<oneshot::Sender<uuid::Uuid>>,
+    invocation_id: Option<Uuid>,
+    tx: Option<oneshot::Sender<()>>,
 }
 
 impl DurableStart {
-    /// A signal whose fire notifies `rx`. Returns the signal to hand
-    /// to the worker and the receiver the caller awaits.
-    pub fn channel() -> (Self, oneshot::Receiver<uuid::Uuid>) {
+    /// A signal for an invocation that is to run under `invocation_id`,
+    /// whose fire notifies `rx`. Returns the signal to hand to the
+    /// worker and the receiver the caller awaits.
+    pub fn channel(invocation_id: Uuid) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
-        (Self { tx: Some(tx) }, rx)
+        let signal = Self {
+            invocation_id: Some(invocation_id),
+            tx: Some(tx),
+        };
+        (signal, rx)
     }
 
     /// A signal nobody is listening on — firing it does nothing. For
     /// the direct-run paths that do not ack a trigger.
     pub fn noop() -> Self {
-        Self { tx: None }
+        Self::default()
+    }
+
+    /// The id the invocation must run under, when the caller chose one.
+    pub fn invocation_id(&self) -> Option<Uuid> {
+        self.invocation_id
     }
 
     /// Signal that the invocation has durably started. Idempotent: the
     /// first call notifies the waiter; later calls (and a `noop`) are
     /// no-ops. A dropped receiver (the dispatcher already acked and
     /// moved on) is ignored.
-    pub fn fire(&mut self, invocation_id: uuid::Uuid) {
+    pub fn fire(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(invocation_id);
+            let _ = tx.send(());
         }
     }
 }
@@ -273,7 +293,10 @@ pub trait Worker: Send + Sync {
     /// right after the invocation's first durable (WAL) write — the
     /// control-plane waits on it to ack the trigger only after the run
     /// is recoverable from the WAL (closing the ack→first-WAL-write
-    /// window). Direct callers that ack nothing pass
+    /// window). When it carries an
+    /// [`invocation_id`](DurableStart::invocation_id), the invocation
+    /// runs under that id and no other: the trigger's claim already
+    /// names it. Direct callers that ack nothing pass
     /// [`DurableStart::noop`].
     ///
     /// The trigger arrives as one [`Trigger`] value rather than as

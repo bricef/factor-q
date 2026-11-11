@@ -17,9 +17,23 @@ use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 /// `Admission` in one function is a reading hazard, not a symmetry.
 pub(super) enum ClaimVerdict {
     /// This worker owns the delivery: dispatch it.
-    Proceed { stream_seq: u64, delivered: i64 },
+    Proceed { claim: Claimed, delivered: i64 },
     /// Someone else owns it, or it has already run: leave it alone.
     Stop,
+}
+
+/// The claim a delivery that may proceed holds: where the message sits
+/// on the trigger stream, and the id its invocation will run under.
+///
+/// The id is chosen before the claim row is written and is written with
+/// it, so the row names the invocation from claim time rather than from
+/// its durable start (#959). `handle` hands it to the worker through
+/// [`crate::worker::DurableStart`], which is what makes it the id the
+/// invocation's WAL rows carry.
+#[derive(Clone, Copy)]
+pub(super) struct Claimed {
+    pub(super) stream_seq: u64,
+    pub(super) invocation_id: uuid::Uuid,
 }
 
 impl TriggerDispatcher {
@@ -58,10 +72,13 @@ impl TriggerDispatcher {
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
-        stream_seq: u64,
+        claim: &Claimed,
         trigger_id: uuid::Uuid,
-        invocation_id: uuid::Uuid,
     ) -> bool {
+        let Claimed {
+            stream_seq,
+            invocation_id,
+        } = *claim;
         if let Some((store, _)) = self.claim_store.as_ref()
             && let Err(err) = store
                 .mark_trigger_started(self.trigger_key(stream_seq), &invocation_id.to_string())
@@ -88,17 +105,23 @@ impl TriggerDispatcher {
         }
     }
 
-    /// Claim the stable broker identity before drain, routing, or parsing.
+    /// Claim the stable broker identity before drain, routing, or parsing,
+    /// naming on the claim the invocation id a delivery that proceeds will
+    /// run under.
     pub(super) async fn claim_delivery(
         &self,
         msg: &async_nats::jetstream::Message,
     ) -> ClaimVerdict {
+        let invocation_id = uuid::Uuid::now_v7();
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
             // Unit-level dispatcher tests that do not host a control plane keep
             // their old isolated setup; the daemon always installs the store.
             let info = msg.info().ok();
             return ClaimVerdict::Proceed {
-                stream_seq: info.as_ref().map_or(0, |i| i.stream_sequence),
+                claim: Claimed {
+                    stream_seq: info.as_ref().map_or(0, |i| i.stream_sequence),
+                    invocation_id,
+                },
                 delivered: info.as_ref().map_or(1, |i| i.delivered),
             };
         };
@@ -112,8 +135,9 @@ impl TriggerDispatcher {
         let seq = info.stream_sequence;
         let delivered = info.delivered;
         let now = chrono::Utc::now().timestamp_millis();
+        let named = invocation_id.to_string();
         let result = match store
-            .claim_trigger(self.trigger_key(seq), worker_id, now)
+            .claim_trigger(self.trigger_key(seq), worker_id, &named, now)
             .await
         {
             Ok(result) => result,
@@ -122,16 +146,23 @@ impl TriggerDispatcher {
                 return ClaimVerdict::Stop;
             }
         };
-        match result {
-            TriggerClaim::Won => ClaimVerdict::Proceed {
+        let proceed = ClaimVerdict::Proceed {
+            claim: Claimed {
                 stream_seq: seq,
-                delivered,
+                invocation_id,
             },
-            TriggerClaim::Started { invocation_id } => {
-                // This delivery has no invocation id: refusing it before
-                // `trigger::delivered` is precisely what prevents one being minted.
-                warn!(stream_seq = seq, delivered, started_invocation_id = %invocation_id,
-                    duplicate_invocation_id = "none (refused before minting)",
+            delivered,
+        };
+        match result {
+            TriggerClaim::Won => proceed,
+            TriggerClaim::Started {
+                invocation_id: started,
+            } => {
+                // Refused before `trigger::delivered` names the trigger and
+                // before anything runs. The id this copy chose lost the insert
+                // to the existing row, so it was never written anywhere.
+                warn!(stream_seq = seq, delivered, started_invocation_id = %started,
+                    duplicate_invocation_id = "none (refused before start)",
                     "dropping duplicate trigger delivery after durable start");
                 self.bus
                     .consumer_ledger()
@@ -164,14 +195,25 @@ impl TriggerDispatcher {
             TriggerClaim::Held { claimant } => {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
+                //
+                // The adopted claim runs under this copy's own id, written over
+                // the dead process's by the same compare-and-set. Reusing that
+                // one is unsafe where its invocation reached a terminal WAL row
+                // without its claim being marked: the worker store does not
+                // update a terminal row and the archive keeps the first record
+                // of an id, so a second run under it would have its WAL writes
+                // or its archive refused without a word.
                 match store
-                    .take_over_trigger_claim(self.trigger_key(seq), &claimant, worker_id, now)
+                    .take_over_trigger_claim(
+                        self.trigger_key(seq),
+                        &claimant,
+                        worker_id,
+                        &named,
+                        now,
+                    )
                     .await
                 {
-                    Ok(true) => ClaimVerdict::Proceed {
-                        stream_seq: seq,
-                        delivered,
-                    },
+                    Ok(true) => proceed,
                     Ok(false) => ClaimVerdict::Stop,
                     Err(err) => {
                         error!(error = %err, stream_seq = seq, "cannot adopt trigger claim");
