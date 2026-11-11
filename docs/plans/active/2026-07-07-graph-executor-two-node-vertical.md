@@ -60,6 +60,20 @@ agent:
 - A **single agent is a one-node graph** — the executor is the one dispatch
   path; `trigger → traversal` subsumes `trigger → invocation`.
 
+> **Trigger dispatch under this executor (added 2026-11-11).** A
+> traversal started by a trigger is started under the same durable claim
+> an invocation is today
+> ([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
+> Two things in that record bear on this plan. The claim row names one
+> `invocation_id` per trigger and a traversal has several, so what the
+> row names for a traversal is this plan's to decide. And the claim is
+> correct for one daemon and assumes one: "node" here means a node of
+> the graph, and this plan as written keeps a single process on the
+> trigger stream, so it does not reopen that decision. Any step beyond
+> it that adds a second consumer does. Read
+> [What this means for more than one worker](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md#what-this-means-for-more-than-one-worker)
+> first.
+
 ## The two signatures
 
 Schema notation below is illustrative (the concrete type language is the
