@@ -55,10 +55,14 @@ it is the licence to keep changing shape quickly.
   `report_outcome` — the one that ends an invocation with a declared
   status). Full [MCP client](docs/guide/mcp.md) (spec 2025-11-25):
   stdio + Streamable HTTP transports; tools, resources, prompts, and the
-  server-initiated capabilities (sampling, elicitation, roots). Operator
-  surface, spoken by the thin client `fq` (it cannot start a daemon —
-  `fqd` is the daemon, and reads `fqd.toml` while the client reads
-  `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
+  server-initiated capabilities (sampling, elicitation, roots) — full for
+  the handshake-era revisions only: factor-q offers 2025-11-25 and cannot
+  yet reach a server that speaks only the stateless 2026-07-28 revision
+  (the pin is deliberate, see the
+  [2026-11-06 MCP review](docs/reviews/2026-11-06-mcp-protocol-versions.md)).
+  Operator surface, spoken by the thin client `fq` (it cannot start a
+  daemon — `fqd` is the daemon, and reads `fqd.toml` while the client
+  reads `fq.toml`): `fq init / trigger / reload / down / agent / invocation`
   (including `transcript`) `/ events / costs / notifications / status /
   workers / dead-letters / doctor / projection rebuild` (read commands
   take `--json`; `projection rebuild` re-derives the SQLite read model
