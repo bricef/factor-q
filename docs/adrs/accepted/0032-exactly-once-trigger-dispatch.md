@@ -423,7 +423,7 @@ break those facts differently, so the answers below are given per shape.
 | Shape | Where it is described | Processes consuming `fq-triggers` |
 |---|---|---|
 | **A. A graph of agents on one daemon.** "Node" means a node of an execution graph | [#414](https://github.com/bricef/factor-q/issues/414); the [two-node vertical plan](../../plans/active/2026-07-07-graph-executor-two-node-vertical.md) | One |
-| **B. One control plane, several workers.** The control plane takes the trigger, picks a worker and hands it the invocation | [data architecture](../../design/committed/data-architecture.md) §5.7, §7.2, §7.4 | One |
+| **B. One control plane, several workers.** The control plane takes the trigger, picks a worker and hands it the invocation | [data architecture](../../design/committed/data-architecture.md) §5.7, §7.2, §11 | One |
 | **C. Several whole daemons on one broker.** "N copies of the same thing" | [agent OS architecture](../../design/aspirational/agent-os-architecture.md); the inbox design's own assumption | Several |
 | **D. Remote workers behind a bridge.** Shape B with a second hop | [edge and bus transport](../../design/aspirational/edge-and-bus-transport.md) | One |
 
