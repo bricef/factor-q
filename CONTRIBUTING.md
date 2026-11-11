@@ -197,6 +197,15 @@ daemon; after changing the Dockerfile, build them and run
   open — a row in [`SECURITY.md`](SECURITY.md)'s risk register. Dependabot
   opens the weekly update PRs (`.github/dependabot.yml`).
 
+- **A red audit is never merged around.** It is fixed or formally
+  accepted, as above, before anything else merges. A PR that is red
+  only because a new advisory was published waits for that fix, is
+  then brought up to date with `main`, and merges on a fresh green
+  run. A green audit result that predates a newly published advisory
+  is stale: update the branch and let the audit run again before
+  merging. Branch protection does not enforce this, so it falls to
+  whoever merges, person or agent. `AGENTS.md` has the origin.
+
 - **Size and exception budgets are ratcheted, not advisory.** No file
   may exceed 800 production lines, no function may exceed 250
   lines, and no function may have more than 7 parameters excluding
