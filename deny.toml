@@ -36,10 +36,6 @@ ignore = [
     # Leaving it is a wire-format change for the edge transport — an ADR,
     # not a dependency bump.
     { id = "RUSTSEC-2025-0141", reason = "bincode 1: tarpc's serde-transport-bincode codec; replacing it is an edge wire-format change" },
-    # paste is unmaintained (archived by its author). A proc-macro dependency
-    # of the genai fork pinned by rev in Cargo.toml — build-time only, never
-    # linked into a binary. Goes when upstream genai drops it.
-    { id = "RUSTSEC-2024-0436", reason = "paste: build-time proc-macro dependency of the pinned genai fork" },
     # proc-macro-error2 is unmaintained. Reached only through biscuit-quote,
     # the proc-macro half of biscuit-auth 6 — build-time only. Goes when
     # biscuit-quote migrates off it.
@@ -102,10 +98,9 @@ exceptions = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The one git dependency: the genai fork, pinned to a rev in Cargo.toml until
-# upstream lands the reasoning-parts work (#437). Exactly this repository —
-# no org-wide allow.
-allow-git = ["https://github.com/bricef/rust-genai"]
+# No git source is permitted: with `unknown-git = "deny"` and no `allow-git`,
+# every git dependency is an error. Admitting one is a review decision — an
+# `allow-git` line naming exactly that repository, never an org-wide allow.
 
 [bans]
 # Duplicate major versions cost build time and binary size but are not a

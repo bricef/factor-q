@@ -187,8 +187,9 @@ daemon; after changing the Dockerfile, build them and run
 - **Dependencies are audited, and the baseline is explicit.** `just
   audit` runs `cargo audit` over the lockfile and `cargo deny check`
   over the resolved graph; `deny.toml` is the reviewed baseline — the
-  licence allow-list, the one permitted git source, and one explained
-  `ignore` line per advisory that cannot be fixed yet. A red audit on
+  licence allow-list, the permitted sources (crates.io only: a git
+  dependency fails the audit), and one explained `ignore` line per
+  advisory that cannot be fixed yet. A red audit on
   your PR is fixed by `cargo update -p <crate>` when a patched release
   exists, and otherwise by one more explained line that the reviewer
   will read — never by a blanket allow. Accepting an advisory is also a
