@@ -3943,6 +3943,25 @@ async fn sampling_spends_into_the_invocation_budget() {
 // (`test_support::sim::server_request_caps`); these drive the handlers
 // a live runner calls, with the count the loop would hand them.
 
+/// A plain text completion — what a sampling call, an elicitation's
+/// structured completion and an evaluator's verdict all read.
+fn text_answer(text: &str) -> ChatResponse {
+    ChatResponse {
+        parts: crate::events::assistant_parts(Some(text.to_string()), vec![]),
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
+        },
+        reported_cost_usd: None,
+    }
+}
+
 /// A sampling request asking for `max_tokens`.
 fn sampling_request_for(max_tokens: u32) -> crate::mcp::SamplingRequest {
     crate::mcp::sampling_request_from_wire(serde_json::json!({
@@ -4031,7 +4050,7 @@ async fn a_sampling_request_runs_under_the_agents_own_max_tokens() {
         (own_cap, 512),
     ] {
         let llm = FixtureClient::new();
-        llm.push_response(canned("sampled.", 10, 10));
+        llm.push_response(text_answer("sampled."));
         let mut totals = InvocationTotals::default();
         let mut cursor = None;
         runner
@@ -4078,10 +4097,10 @@ async fn sampling_and_elicitation_share_the_request_counts() {
         .unwrap();
     let llm = FixtureClient::new();
     for _ in 0..4 {
-        llm.push_response(canned("sampled.", 10, 10));
+        llm.push_response(text_answer("sampled."));
     }
     for _ in 0..4 {
-        llm.push_response(canned(r#"{"name": "Ada"}"#, 10, 10));
+        llm.push_response(text_answer(r#"{"name": "Ada"}"#));
     }
     let mut totals = InvocationTotals::default();
     let mut cursor = None;
@@ -4182,8 +4201,8 @@ async fn a_request_over_the_cap_never_reaches_the_input_evaluator() {
         .build()
         .unwrap();
     let llm = FixtureClient::new();
-    llm.push_response(canned(r#"{"approved": true, "reason": "fine"}"#, 10, 10));
-    llm.push_response(canned("sampled.", 10, 10));
+    llm.push_response(text_answer(r#"{"approved": true, "reason": "fine"}"#));
+    llm.push_response(text_answer("sampled."));
     let mut totals = InvocationTotals::default();
     let mut cursor = None;
     let mut requests = request_caps::ServerRequestCount::default();
