@@ -191,6 +191,38 @@ impl CategoryCounts {
     }
 }
 
+/// What a worker's startup recovery reports to the control plane: every
+/// invocation its WAL holds in flight, whatever its category. Each one
+/// made its first WAL write, so each has durably started, and the control
+/// plane records that on the trigger claim that names it
+/// (`TriggerClaims::recover`, #959).
+///
+/// Only [`InFlightReport::scan`] makes one, so a report is a statement
+/// about a real WAL rather than a list someone wrote down. The control
+/// plane reads the report, never the worker's store.
+#[derive(Debug)]
+pub struct InFlightReport {
+    invocation_ids: Vec<String>,
+}
+
+impl InFlightReport {
+    /// Read the in-flight set off `store`'s WAL.
+    pub async fn scan(store: &WorkerStore) -> Result<Self, WorkerStoreError> {
+        let invocation_ids = store
+            .find_in_flight_invocations()
+            .await?
+            .into_iter()
+            .map(|row| row.invocation_id)
+            .collect();
+        Ok(Self { invocation_ids })
+    }
+
+    /// The ids of the invocations in flight.
+    pub fn invocation_ids(&self) -> impl Iterator<Item = &str> {
+        self.invocation_ids.iter().map(String::as_str)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Pure tests over `categorise`. No DB, no I/O.

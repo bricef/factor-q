@@ -42,9 +42,11 @@ impl ControlPlaneStore {
     ///
     /// The row names `invocation_id`, the id the claimant will start the
     /// invocation under, from the moment it is written rather than from
-    /// the durable start: a process that meets the row later can then ask
-    /// whether that invocation reached its first WAL write (#959). A losing
-    /// claim's id is never written.
+    /// the durable start. That is what lets startup recovery find this row
+    /// from an in-flight WAL row and mark it started, through
+    /// [`Self::mark_trigger_started_by_invocation`], when the process that
+    /// made the WAL write died before marking it (#959). A losing claim's
+    /// id is never written.
     pub async fn claim_trigger(
         &self,
         key: TriggerKey<'_>,
@@ -141,7 +143,8 @@ impl ControlPlaneStore {
     /// trigger's key.
     ///
     /// Startup recovery calls this for every invocation it finds in flight,
-    /// before the dispatcher starts consuming: an in-flight WAL row is proof
+    /// through `TriggerClaims::recover`, whose result is what a dispatcher
+    /// needs before it can arbitrate at all: an in-flight WAL row is proof
     /// of a durable start whose claim update a crash may have prevented, and
     /// a redelivered trigger that meets the marked row is dropped instead of
     /// started a second time (#959). Returns whether a row changed. An

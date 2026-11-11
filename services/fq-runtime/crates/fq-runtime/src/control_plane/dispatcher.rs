@@ -48,6 +48,7 @@ mod claim;
 mod dead_letter;
 mod deferral;
 
+pub use claim::TriggerClaims;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -845,6 +846,23 @@ mod tests {
         format!("fq-dispatcher-test-{}", Uuid::now_v7().simple())
     }
 
+    /// The claims a dispatcher under test arbitrates on, got the only way
+    /// there is: recovery over its worker's WAL. These tests' workers have
+    /// a fresh WAL with nothing in flight, so there is nothing to record,
+    /// and saying so is the honest version of skipping the step.
+    async fn recovered_claims(
+        store: &Arc<crate::control_plane::ControlPlaneStore>,
+    ) -> TriggerClaims {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WorkerStore::open(&dir.path().join("worker.db"))
+            .await
+            .unwrap();
+        let in_flight = crate::worker::InFlightReport::scan(&wal).await.unwrap();
+        TriggerClaims::recover(store.clone(), &in_flight)
+            .await
+            .expect("recover claims over an empty WAL")
+    }
+
     /// A variant of TriggerDispatcher that uses a custom consumer
     /// name AND a narrow filter subject so parallel test runs do
     /// not compete for each other's messages on the work-queue
@@ -1405,7 +1423,7 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()) as Arc<dyn crate::llm::LlmClient>,
                 2,
             )
-            .with_trigger_claims(claim_store.clone(), "worker-a"),
+            .with_trigger_claims(recovered_claims(&claim_store).await, "worker-a"),
         );
 
         let mut consumer = bus
@@ -2499,7 +2517,7 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()),
                 1,
             )
-            .with_trigger_claims(store.clone(), "worker-a"),
+            .with_trigger_claims(recovered_claims(&store).await, "worker-a"),
         );
         let mut consumer = bus
             .trigger_consumer_with_filter(
@@ -2579,9 +2597,13 @@ You are a test agent."#
             2,
             "dead worker's claim is adopted"
         );
-        // Every start runs under an id the dispatcher chose and wrote on
-        // the claim first (#959); the adopted one under its own, never the
-        // dead worker's, which may already belong to a finished run.
+        // Every start is handed an invocation id by the dispatcher (#959),
+        // and the adopted one is not the dead worker's, which may already
+        // belong to a finished run. This worker fires and returns in one
+        // poll, so its claims are released rather than marked and this test
+        // cannot read the id off a row; the tests that do are
+        // `a_dispatcher_killed_after_the_first_wal_write_leaves_a_claim_naming_the_wal_row`
+        // and `started_claim_acks_duplicate_without_second_invocation`.
         let ids = worker.invocation_ids.lock().unwrap().clone();
         assert!(ids.iter().all(Option::is_some), "{ids:?}");
         assert_ne!(
@@ -2673,7 +2695,17 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()),
                 1,
             )
-            .with_trigger_claims(claims.clone(), "killed-worker"),
+            // The process that is about to die booted on this same WAL,
+            // which held nothing in flight then.
+            .with_trigger_claims(
+                TriggerClaims::recover(
+                    claims.clone(),
+                    &crate::worker::InFlightReport::scan(&wal).await.unwrap(),
+                )
+                .await
+                .unwrap(),
+                "killed-worker",
+            ),
         );
         let mut consumer = bus
             .trigger_consumer_with_filter(
@@ -2851,7 +2883,7 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()),
                 4,
             )
-            .with_caps_and_claims(caps.clone(), store, "worker-a"),
+            .with_caps_and_claims(caps.clone(), recovered_claims(&store).await, "worker-a"),
         );
 
         let mut consumer = bus
@@ -2995,7 +3027,7 @@ You are a test agent."#
             Arc::new(FixtureClient::new()),
             1,
         )
-        .with_trigger_claims(store.clone(), "worker-a");
+        .with_trigger_claims(recovered_claims(&store).await, "worker-a");
         let agent = AgentId::new(&agent_id_str).unwrap();
         let consumer = bus
             .trigger_consumer_with_filter(

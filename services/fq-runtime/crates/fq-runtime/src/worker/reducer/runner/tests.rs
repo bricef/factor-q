@@ -2034,7 +2034,8 @@ async fn state_row_written_on_completion_with_terminal_at_set() {
 /// the trigger and hands it over in `DurableStart`. The WAL row and the
 /// outcome must carry that id and no fresh one: the WAL row is how startup
 /// recovery finds the claim of an invocation that died before its claim
-/// was marked started. The signal still fires, after the first WAL write.
+/// was marked started. The signal is checked only to have fired by the
+/// time the run returns; when it fires relative to the WAL write is not.
 #[tokio::test]
 async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
     let server = crate::test_support::nats::test_nats();
@@ -2089,7 +2090,7 @@ async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
     }
     fired
         .await
-        .expect("the durable start fires once the first WAL write lands");
+        .expect("the durable start fired during the run");
     let row = store
         .get_invocation_state(&claimed.to_string())
         .await

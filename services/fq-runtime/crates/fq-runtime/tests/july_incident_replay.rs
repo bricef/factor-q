@@ -59,13 +59,14 @@ use fq_runtime::agent::{Agent, AgentId, AgentRegistry};
 use fq_runtime::bus::{
     EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_RETRY_BACKOFF, TRIGGER_STREAM_NAME,
 };
-use fq_runtime::control_plane::dispatcher::CONSUMER_NAME;
+use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, TriggerClaims};
 use fq_runtime::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
 use fq_runtime::llm::fixture::FixtureClient;
 use fq_runtime::llm::{ChatResponse, LlmClient};
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
 use fq_runtime::worker::{
-    DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
+    DrainRequest, DrainState, DurableStart, ExecutorError, InFlightReport, InvocationOutcome,
+    Worker, WorkerStore,
 };
 use fq_runtime::{DispatcherError, TriggerDispatcher, shared_registry};
 use serde_json::json;
@@ -212,6 +213,18 @@ impl World {
                 .await
                 .expect("open the control-plane store"),
         );
+        // The claims the daemon hands its dispatcher come out of startup
+        // recovery over its worker's WAL. The stub worker writes no WAL, so
+        // this one is fresh and holds nothing in flight.
+        let wal = WorkerStore::open(&scratch.path().join("worker.db"))
+            .await
+            .expect("open the worker store");
+        let in_flight = InFlightReport::scan(&wal)
+            .await
+            .expect("scan the worker's WAL");
+        let claims = TriggerClaims::recover(store.clone(), &in_flight)
+            .await
+            .expect("recover the trigger claims");
         let worker = StagedWorker::new();
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -220,7 +233,7 @@ impl World {
             Arc::new(FixtureClient::new()),
             max_concurrent,
         )
-        .with_trigger_claims(store.clone(), "replay-daemon");
+        .with_trigger_claims(claims, "replay-daemon");
 
         // The same durable the dispatcher is about to open, with the same
         // configuration, so opening it here changes nothing about it.

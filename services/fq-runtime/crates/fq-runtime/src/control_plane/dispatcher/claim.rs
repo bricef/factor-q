@@ -6,6 +6,7 @@ use tracing::{error, warn};
 
 use crate::bus::TRIGGER_STREAM_NAME;
 use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
+use crate::worker::InFlightReport;
 
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
@@ -36,26 +37,91 @@ pub(super) struct Claimed {
     pub(super) invocation_id: uuid::Uuid,
 }
 
-impl TriggerDispatcher {
-    /// Install claims for focused tests that construct the dispatcher directly.
-    pub fn with_trigger_claims(
-        mut self,
+/// The trigger-claim table, handed to a dispatcher as its arbiter. The
+/// only way to get one is [`TriggerClaims::recover`], which first records
+/// the durable start of every invocation a worker reported in flight.
+///
+/// The adoption arm of `claim_delivery` reads a `claimed` row under
+/// another claimant's id as "nothing durable has started for this
+/// trigger". That is true only once those durable starts are on their
+/// claims. A process that died between an invocation's first WAL write
+/// and its claim being marked left a `claimed` row whose invocation is in
+/// flight, and adopting that row would start the trigger a second time
+/// (#959). The claim-installing constructors take this value and nothing
+/// else, so a claim-arbitrating dispatcher cannot be built before the
+/// recording has run.
+pub struct TriggerClaims {
+    store: Arc<ControlPlaneStore>,
+}
+
+impl TriggerClaims {
+    /// Record on its claim the durable start of every invocation in
+    /// `in_flight`, then hand `store` over as a claim arbiter.
+    ///
+    /// The report is the worker's: its WAL's in-flight invocations, each
+    /// of which made its first WAL write and so has durably started,
+    /// whatever its claim says. Ambiguous invocations count. Each claim is
+    /// found by the invocation id it has named since claim time
+    /// ([`ControlPlaneStore::mark_trigger_started_by_invocation`]). A claim
+    /// this marks is that crash window, hit and repaired, and is logged
+    /// with the invocation id.
+    ///
+    /// Run it at startup, over the report of the worker this dispatcher
+    /// hands invocations to, before the dispatcher consumes anything. A test
+    /// that builds a dispatcher directly does the same with its worker's
+    /// WAL, empty or not: there is no other way to obtain the claims.
+    pub async fn recover(
         store: Arc<ControlPlaneStore>,
-        worker_id: impl Into<String>,
-    ) -> Self {
-        self.claim_store = Some((store, worker_id.into()));
+        in_flight: &InFlightReport,
+    ) -> Result<Self, crate::control_plane::ControlPlaneStoreError> {
+        for invocation_id in in_flight.invocation_ids() {
+            if store
+                .mark_trigger_started_by_invocation(invocation_id)
+                .await?
+            {
+                warn!(%invocation_id,
+                    "recorded a durable start missing from its trigger's claim: the process that \
+                     started it died before marking it, so the trigger's redelivery will be dropped");
+            }
+        }
+        Ok(Self { store })
+    }
+}
+
+impl TriggerDispatcher {
+    /// Install durable trigger claims, claiming as `worker_id`. For tests
+    /// that build a dispatcher directly; the daemon uses
+    /// [`Self::with_caps_and_claims`].
+    ///
+    /// **Precondition, enforced by the argument's type:** the claims come
+    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
+    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
+    /// for every invocation in flight. Without that, a trigger whose last
+    /// process died between its first WAL write and its claim's update is
+    /// adopted and started again (#959).
+    pub fn with_trigger_claims(mut self, claims: TriggerClaims, worker_id: impl Into<String>) -> Self {
+        self.claim_store = Some((claims.store, worker_id.into()));
         self
     }
 
-    /// Share daemon concurrency state and install durable trigger claims.
+    /// Share daemon concurrency state and install durable trigger claims,
+    /// claiming as `worker_id`.
+    ///
+    /// **Precondition, enforced by the argument's type:** the claims come
+    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
+    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
+    /// for every invocation in flight, and so has run before this
+    /// dispatcher consumes a trigger. Without that, a trigger whose last
+    /// process died between its first WAL write and its claim's update is
+    /// adopted and started again (#959).
     pub fn with_caps_and_claims(
         mut self,
         caps: Arc<crate::control_plane::agent_cap::AgentConcurrency>,
-        store: Arc<ControlPlaneStore>,
+        claims: TriggerClaims,
         worker_id: impl Into<String>,
     ) -> Self {
         self.agent_caps = caps;
-        self.claim_store = Some((store, worker_id.into()));
+        self.claim_store = Some((claims.store, worker_id.into()));
         self
     }
 
@@ -200,10 +266,12 @@ impl TriggerDispatcher {
                 // write and died before marking this row. Startup recovery has
                 // already answered for that case: it marks the claim of every
                 // invocation it finds in flight, by the id the row has named
-                // since claim time, before the daemon builds a dispatcher
-                // (`fq-daemon`'s `recovery::classify_in_flight`, #959). A row
-                // still `claimed` here therefore names an invocation with no
-                // in-flight WAL row, and this start is its trigger's first.
+                // since claim time, and this dispatcher holds claims only as
+                // what that marking returned (`TriggerClaims::recover`, #959).
+                // A row still `claimed` here therefore names an invocation
+                // with no in-flight WAL row, and this start is its trigger's
+                // first, unless the earlier invocation already reached a
+                // terminal row (#966, #967).
                 //
                 // The adopted claim runs under this copy's own id, written over
                 // the dead process's by the same compare-and-set. Reusing that

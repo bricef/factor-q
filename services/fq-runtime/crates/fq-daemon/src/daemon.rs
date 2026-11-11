@@ -369,13 +369,16 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // Worker recovery: scan in-flight invocations from the worker store,
     // classify each, restore ownership for auto-resumed cases, and emit
     // `invocation.ambiguous` events for cases that cannot be recovered.
-    // It also marks each in-flight invocation's trigger claim started, which
-    // must happen before the dispatcher exists (#959): `run_hosted` builds it
-    // from what this function returns. `in_flight_ids` is the keep set the
-    // startup workspace prune reads.
-    let (recoverable, in_flight_ids) =
-        crate::recovery::classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
-            .await?;
+    // It also marks each in-flight invocation's trigger claim started, and
+    // `claims`, which the dispatcher cannot arbitrate without, is what that
+    // marking returns (#959). `in_flight_ids` is the keep set the startup
+    // workspace prune reads.
+    let crate::recovery::Recovered {
+        recoverable,
+        in_flight_ids,
+        claims,
+    } = crate::recovery::classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
+        .await?;
 
     // Load the pricing sources (LiteLLM, and OpenRouter's catalogue for
     // the models routed there), merge config overrides, and enforce the
@@ -482,7 +485,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
             ),
             fq_runtime::Harness::new(),
         ));
-    let worker: Arc<dyn fq_runtime::Worker> = resume_runner.clone();
 
     // Live-drop liveness now lives in the `invocation.drop` command
     // handler on the edge (plan Phase 4, verb 18), which holds this same
@@ -546,7 +548,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         llm,
         pricing,
         resume_runner,
-        worker,
+        claims,
         worker_id,
         registration,
         edge_listener,
