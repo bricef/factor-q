@@ -210,6 +210,13 @@ A second thing follows from the same ordering, and it looks like a hang:
 > is on; a stop signal is answered throughout, so a boot you have given up on
 > can be stopped with `docker stop` or a plain `kill -TERM`.
 
+Stopping a boot mid-migration is safe. Each store's migration on start is one
+transaction: a daemon stopped or killed part-way leaves the store at the
+version it had, and the next start runs the whole migration again. If another
+process holds a store's write lock when the daemon opens it, the daemon waits
+up to 30 seconds for it and then fails to start with `database is locked`,
+naming the store.
+
 ## Hot-reloading agents: `fq reload`
 
 To pick up edited agent definitions without a restart:

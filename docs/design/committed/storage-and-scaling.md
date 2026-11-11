@@ -259,6 +259,19 @@ migration**:
   newer binary wrote. The error names the remedy: run that build, or
   delete the file and let this one rebuild it.
 
+**One lock, one transaction.** Whichever verdict it reaches, the open
+reads the version and acts on it — the fresh create, the same-version
+levelling or the rebuild, down to the `user_version` stamp — in one
+`BEGIN IMMEDIATE` transaction on a connection of its own, the same
+schema lock the worker and control-plane stores take
+(`with_schema_lock` in `fq-runtime/src/db/schema.rs`,
+<https://github.com/bricef/factor-q/issues/970>). A create or rebuild
+cut short leaves the file as it was, so the next open does it again
+from the start rather than mistaking unstamped tables for a
+pre-versioning file; a second process opening the file waits for the
+first and finds it current. `fq projection rebuild` takes the same
+lock.
+
 **What a rebuild keeps.** Everything below the floor: history from
 before an envelope bump, which this build cannot read and the replay
 never reaches, stays in the file exactly as the older build projected

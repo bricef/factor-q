@@ -617,6 +617,23 @@ direction refuses:
   start. This is the downgrade case, and it is the only one the
   "refuse-and-flag" stance actually covers.
 
+The check and whatever it decides happen in one transaction. The open
+takes the store's write lock (`BEGIN IMMEDIATE`, on a connection of its
+own) before it reads the version, and commits only once the migrations
+and the new version are both written — or rolls back, which is also
+how a refusal leaves a newer file untouched
+(<https://github.com/bricef/factor-q/issues/970>). So a migration is
+all-or-nothing: an upgrade interrupted anywhere, by an error or a
+killed process, leaves the store at its old version with nothing
+applied, and the next start runs it again from the beginning. And it
+is serialised across processes, because the lock is SQLite's own: a
+second process opening the same store waits — up to 30 seconds,
+`SCHEMA_LOCK_WAIT` — for the first to commit, then finds the store
+current. Before this, each migration statement committed on its own,
+so two openers of a fresh file raced on the first `ALTER TABLE ADD
+COLUMN`, and a crash between a migration and its version write left a
+store that failed every later open.
+
 So an operator never sees a per-invocation list of what is
 incompatible, because the refusal is not per-invocation. The remedy is
 to roll the binary forward again, or to delete the store and lose the
