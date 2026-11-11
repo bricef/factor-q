@@ -270,11 +270,12 @@ pub enum SampledOutcome {
     Unserviced,
 }
 
-/// The sampling side of a [`ScriptedTool`]: which dispatches sample,
-/// where their requests go, and what each one came back as.
+/// The sampling side of a [`ScriptedTool`]: which dispatches sample and
+/// how many times, where their requests go, and what each one came back
+/// as.
 #[derive(Default)]
 struct SimSampling {
-    on_dispatch: std::collections::HashSet<usize>,
+    on_dispatch: std::collections::HashMap<usize, usize>,
     sender: Option<tokio::sync::mpsc::UnboundedSender<crate::mcp::ServerRequest>>,
     outcomes: Vec<SampledOutcome>,
 }
@@ -293,11 +294,19 @@ impl ScriptedTool {
     /// crash and its resume) issue one `sampling/createMessage` before
     /// returning, the way an MCP tool whose server samples does.
     pub fn sample_on(&self, ordinals: &[usize]) {
+        self.sample_times_on(ordinals, 1);
+    }
+
+    /// Like [`sample_on`](Self::sample_on), but each of these dispatches
+    /// issues `times` requests back to back, each waiting for its reply
+    /// before the next — a server that holds one `tools/call` open while
+    /// it samples in a loop (#831).
+    pub fn sample_times_on(&self, ordinals: &[usize], times: usize) {
         self.sampling
             .lock()
             .unwrap()
             .on_dispatch
-            .extend(ordinals.iter().copied());
+            .extend(ordinals.iter().map(|&ordinal| (ordinal, times)));
     }
 
     /// The channel the runner services this tool's sampling requests on,
@@ -386,8 +395,15 @@ impl Tool for ScriptedTool {
             dispatches.push(params);
             dispatches.len() - 1
         };
-        let samples = self.sampling.lock().unwrap().on_dispatch.contains(&ordinal);
-        if samples {
+        let samples = self
+            .sampling
+            .lock()
+            .unwrap()
+            .on_dispatch
+            .get(&ordinal)
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..samples {
             let outcome = self.sample().await;
             self.sampling.lock().unwrap().outcomes.push(outcome);
         }
@@ -2391,6 +2407,178 @@ mod sampling_resume {
             (completed.total_cost - expected).abs() < 1e-12,
             "total {} != {expected}",
             completed.total_cost
+        );
+    }
+}
+
+#[cfg(test)]
+mod server_request_caps {
+    //! #831: how many requests a server may send back to the host, driven
+    //! through the select loop a live run services them in. Each scripted
+    //! tool call samples back to back, waiting for every reply, the way a
+    //! server holding one `tools/call` open does — so the per-tool-call
+    //! count, the per-invocation count, and the point where one starts
+    //! again are the runner's real ones, not a test's imitation of them.
+    //!
+    //! The caps are at their defaults, 8 per tool call and 100 per
+    //! invocation. A declined request must never reach a model, so each
+    //! script carries exactly the answers the admitted requests consume:
+    //! a request served past a cap would eat the next agent turn's
+    //! response and derail the run.
+
+    use std::time::Duration;
+
+    use super::tests::{end_turn, sim_tool_call};
+    use super::*;
+    use crate::events::{LlmCallOrigin, StopReason, TokenUsage};
+    use crate::llm::ChatResponse;
+
+    const SEED: u64 = 831;
+
+    /// A hermetic run of a hundred-odd scripted calls finishes in well
+    /// under a second; the deadline is there so a regression that loops
+    /// fails instead of hanging the suite.
+    const RUN_DEADLINE: Duration = Duration::from_secs(60);
+
+    fn sampled_answer() -> ChatResponse {
+        ChatResponse {
+            parts: crate::events::assistant_parts(Some("sampled text".to_string()), vec![]),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens: 40,
+                output_tokens: 12,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            reported_cost_usd: None,
+        }
+    }
+
+    async fn world() -> SimWorld {
+        SimWorld::with_sampling(SEED, 5.0, Arc::new(PricingTable::empty())).await
+    }
+
+    /// The run's result, left for the caller to judge after the requests:
+    /// a request served past a cap eats a scripted answer, and the run
+    /// that then runs out of script is the symptom, not the finding.
+    async fn run(
+        world: &SimWorld,
+        llm: &FixtureClient,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        tokio::time::timeout(
+            RUN_DEADLINE,
+            world.run_with_sampling(llm, world.tool.sampling_channel()),
+        )
+        .await
+        .expect("the run finishes inside its deadline")
+    }
+
+    /// The `llm.request` events published for server-initiated calls.
+    fn server_llm_requests(world: &SimWorld) -> usize {
+        world
+            .sink
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(&event.payload, EventPayload::LlmRequest(p)
+                    if p.origin != LlmCallOrigin::AgentTurn)
+            })
+            .count()
+    }
+
+    fn declined_by(outcome: &SampledOutcome, cap: &str, key: &str) -> bool {
+        matches!(outcome, SampledOutcome::Declined(message)
+            if message.contains(cap) && message.contains(key))
+    }
+
+    /// The ninth request inside one tool call is declined, naming the cap,
+    /// before it reaches a model: eight `llm.request`s, not nine. The run
+    /// carries on and completes — a cap is a decline, not a failure.
+    #[tokio::test]
+    async fn the_ninth_request_in_one_tool_call_is_declined_before_any_model_call() {
+        let world = world().await;
+        world.tool.sample_times_on(&[0], 9);
+        let llm = FixtureClient::new();
+        llm.push_response(sim_tool_call("c0"));
+        for _ in 0..8 {
+            llm.push_response(sampled_answer());
+        }
+        llm.push_response(end_turn("done"));
+
+        let outcome = run(&world, &llm).await;
+
+        let sampled = world.tool.sampled();
+        assert_eq!(sampled.len(), 9, "the tool sent nine requests: {sampled:?}");
+        assert!(
+            sampled[..8].iter().all(|o| *o == SampledOutcome::Answered),
+            "the first eight are answered: {sampled:?}"
+        );
+        assert!(
+            declined_by(&sampled[8], "cap of 8", "max_server_requests_per_tool_call"),
+            "the ninth is declined, naming the cap: {:?}",
+            sampled[8]
+        );
+        assert_eq!(
+            server_llm_requests(&world),
+            8,
+            "the declined request publishes no llm.request"
+        );
+        assert!(
+            matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+            "the invocation carries on: {outcome:?}"
+        );
+    }
+
+    /// The per-tool-call count starts again with each tool call; the
+    /// invocation's does not. Thirteen tool calls of eight requests each
+    /// stay inside the per-call cap every time, and come to 104: the
+    /// invocation cap admits the first 100 and declines the last four.
+    #[tokio::test]
+    async fn the_invocation_cap_trips_across_tool_calls() {
+        const CALLS: usize = 13;
+        const PER_CALL: usize = 8;
+        const ADMITTED: usize = 100;
+        let world = world().await;
+        world
+            .tool
+            .sample_times_on(&(0..CALLS).collect::<Vec<_>>(), PER_CALL);
+        let llm = FixtureClient::new();
+        let mut answers = 0;
+        for call in 0..CALLS {
+            llm.push_response(sim_tool_call(&format!("c{call}")));
+            for _ in 0..PER_CALL {
+                if answers < ADMITTED {
+                    llm.push_response(sampled_answer());
+                    answers += 1;
+                }
+            }
+        }
+        llm.push_response(end_turn("done"));
+
+        let outcome = run(&world, &llm).await;
+
+        let sampled = world.tool.sampled();
+        assert_eq!(sampled.len(), CALLS * PER_CALL, "{sampled:?}");
+        assert!(
+            sampled[..ADMITTED]
+                .iter()
+                .all(|o| *o == SampledOutcome::Answered),
+            "no tool call reached the per-call cap: {sampled:?}"
+        );
+        for refused in &sampled[ADMITTED..] {
+            assert!(
+                declined_by(refused, "cap of 100", "max_server_requests_per_invocation"),
+                "past the hundredth, every request is declined naming the invocation cap: \
+                 {refused:?}"
+            );
+        }
+        assert_eq!(server_llm_requests(&world), ADMITTED);
+        assert!(
+            matches!(outcome, Ok(InvocationOutcome::Completed { .. })),
+            "{outcome:?}"
         );
     }
 }
