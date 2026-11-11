@@ -15,9 +15,11 @@
 //!
 //! So exactly the exhaustion the inline path misses produces an
 //! advisory — and it can fire while no dispatcher is alive to hear it
-//! (with the retry backoff, up to ~2 minutes after a crash), which is
-//! why advisories are captured server-side into a durable stream
-//! ([`crate::bus::ADVISORY_STREAM_NAME`]) rather than subscribed live.
+//! (the final delivery's ack window is the retry ladder's last entry,
+//! [`crate::bus::TRIGGER_RETRY_BACKOFF`], so up to twelve minutes after
+//! a crash), which is why advisories are captured server-side into a
+//! durable stream ([`crate::bus::ADVISORY_STREAM_NAME`]) rather than
+//! subscribed live.
 //!
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash

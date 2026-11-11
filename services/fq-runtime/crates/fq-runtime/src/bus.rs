@@ -146,29 +146,64 @@ pub fn trigger_max_deliveries_advisory_subject() -> String {
     format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.>")
 }
 
-/// Escalating redelivery schedule paired with [`TRIGGER_MAX_DELIVER`]:
-/// entry N delays redelivery N+1. Applied twice — as the consumer's
-/// `backoff` (paces ack-wait redelivery when a dispatcher crashes
-/// mid-delivery) and as the dispatcher's explicit NAK delay (a bare
-/// `Nak(None)` redelivers immediately, overriding the consumer
-/// schedule). JetStream requires `max_deliver` > the schedule length,
-/// so four entries cover the four retries after the first delivery.
+/// The trigger durable's retry ladder: how long a trigger that has not
+/// durably started waits between one delivery and the next, paired with
+/// [`TRIGGER_MAX_DELIVER`]. Entry `i` is the wait between delivery
+/// `i + 1` and delivery `i + 2` — thirty seconds, then two, five and
+/// twelve minutes — so a trigger whose every delivery fails at once is
+/// dead-lettered on its fifth, 19.5 minutes after its first. That is
+/// long enough to ride out a broker or store outage of several minutes
+/// without dead-lettering every trigger that arrives during it, and
+/// short enough that a trigger which can never start is reported within
+/// the half hour (decided on
+/// <https://github.com/bricef/factor-q/issues/953>). Each entry is
+/// longer than the one before. Five deliveries have four gaps, and
+/// JetStream refuses a schedule longer than `max_deliver`.
 ///
-/// **The first entry is also the trigger durable's real first-delivery
-/// deadline.** JetStream *replaces* a consumer's `ack_wait` with
+/// The ladder paces two retries, both of a delivery that has not reached
+/// its invocation's first WAL write:
+///
+/// - **Ack-wait redelivery**, as the consumer's `backoff`. A delivery
+///   nobody acks or keeps alive — the dispatcher died, or was stopped,
+///   before durable start — is redelivered when its window lapses, and
+///   delivery `n`'s window is entry `n - 1`. Past the end of the ladder
+///   JetStream reuses the last entry, so the fifth delivery of a trigger
+///   no dispatcher is handling lapses twelve minutes after it was made,
+///   and surfaces as the `MAX_DELIVERIES` advisory that
+///   [`crate::control_plane::advisory_watch`] turns into a dead letter.
+/// - **The dispatcher's explicit NAK** for a transient failure before
+///   the first WAL write. A bare `Nak(None)` would redeliver at once,
+///   overriding the consumer's schedule, so the NAK after delivery `n`
+///   carries entry `n - 1` itself.
+///
+/// **The ladder does not prevent a duplicate start; the durable claim
+/// does.** Under the accepted exactly-once design
+/// (<https://github.com/bricef/factor-q/issues/835>) the dispatcher
+/// arbitrates every delivery against a claim row in the control-plane
+/// store before it does anything else, so a redelivered copy of a
+/// trigger that is still held, or whose invocation has already durably
+/// started, starts nothing; and the trigger is acked at that durable
+/// start, so a long invocation is not redelivered at all. The values
+/// here decide only how soon a trigger is retried and how long before
+/// it is dead-lettered.
+///
+/// **The first entry is also the trigger durable's first-delivery ack
+/// window.** JetStream *replaces* a consumer's `ack_wait` with
 /// `backoff[0]` wherever a schedule is set, so the trigger consumer's
-/// ack window is 30 seconds — not `[bus] ack_wait_ms` — giving the
-/// 250 ms hold keepalive about 120 ticks to reach its first WAL write
-/// without the trigger being redelivered underneath it. The tradeoff is
-/// that a dispatcher crash before durable start is recovered after 30
-/// seconds instead of one. This is a stopgap for the duplicate-invocation
-/// storm of <https://github.com/bricef/factor-q/issues/327>, which owns
-/// the durable design.
+/// window is 30 seconds — not `[bus] ack_wait_ms` — giving the 250 ms
+/// hold keepalive about 120 ticks before a held delivery would be
+/// redelivered underneath it. That is why the first entry stays at 30
+/// seconds; the cost is that a dispatcher crash before durable start is
+/// recovered after 30 seconds rather than one.
+///
+/// The drift repair in `EventBus::durable` rewrites the schedule of a
+/// trigger durable an older build created when the dispatcher opens it,
+/// so a deploy that changes the ladder needs no operator step.
 pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(30),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(30),
-    std::time::Duration::from_secs(120),
+    std::time::Duration::from_secs(2 * 60),
+    std::time::Duration::from_secs(5 * 60),
+    std::time::Duration::from_secs(12 * 60),
 ];
 
 /// Default retention for the trigger stream. Triggers are short-lived
