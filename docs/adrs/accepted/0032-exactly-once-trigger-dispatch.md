@@ -211,7 +211,7 @@ are not in the issue:
   [What this design does not close](#what-this-design-does-not-close),
   and it can be closed without the inbox.
 - What this record accepts is, in the draft's own words, the alternative
-  it rejected: "per-worker SQLite claims: correct for a single-daemon
+  it rejected: "Per-worker SQLite claims: correct for a single-daemon
   deployment, invisible to siblings in a multi-worker one". Both halves
   of that sentence are still true. The decision is that the first half
   is the deployment.
