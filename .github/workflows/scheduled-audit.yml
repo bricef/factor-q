@@ -1,0 +1,64 @@
+name: Scheduled dependency audit
+
+# `just audit` against `main` once a day, with one GitHub issue kept in step
+# with the result by scripts/audit-main-issue.py.
+#
+# Advisories arrive without a commit. The Dependency audit job in ci.yml runs
+# only when something is pushed, so a new advisory used to be found by
+# whichever unrelated pull request ran CI next: RUSTSEC-2026-0486 (rustix
+# 1.1.4) was published overnight on 2026-11-11 and turned every fresh run red.
+# This runs whether or not anything is pushed, so a new advisory arrives as an
+# item of its own, with its own fix.
+#
+# The issue is opened when the audit fails and none is open. It is commented
+# on only when what fails changes, never once a day, and closed by the first
+# green run with the commit that is clean. The run itself is red while `main`
+# is red, so the Actions list never shows a green tick over a failing gate.
+#
+# The tool steps are the Dependency audit job's, line for line: the same
+# pinned toolchain, the same versions read back from the justfile with
+# `just --evaluate`, and the same install-action commit. Bump them together.
+
+on:
+  schedule:
+    # 05:43 UTC. Off the hour, the busiest slot on shared runners, and clear
+    # of the live suites at 03:17.
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+
+# Queue, never overlap: two runs that each find no open issue would each
+# open one.
+concurrency:
+  group: scheduled-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: Audit main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # `main` by name: the issue speaks for main, so a dispatch from another
+      # branch still audits main.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: extractions/setup-just@v4
+      # Keep in lockstep with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - id: versions
+        run: >-
+          echo "tools=cargo-audit@$(just --evaluate cargo_audit_version),cargo-deny@$(just --evaluate cargo_deny_version)"
+          >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: ${{ steps.versions.outputs.tools }}
+      # Stdlib Python 3 and the runner's gh. GITHUB_REPOSITORY,
+      # GITHUB_SERVER_URL and GITHUB_RUN_ID are default Actions variables.
+      - run: python3 scripts/audit-main-issue.py
+        env:
+          GH_TOKEN: ${{ github.token }}
