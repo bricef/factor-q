@@ -113,8 +113,9 @@ lists it first under "What this design does not close".
   no issues of their own at close.
 - §9, incident remediation. The three duplicate pull requests (#322,
   #323, #324) were closed unmerged on 2026-07-19 and none was picked;
-  #189, the issue they were for, closed on 2026-09-10. The three
-  invocation archives stay, as a standing do-not-delete note. The
+  #189, the issue they were for, closed on 2026-09-10. Keeping the
+  three invocation archives was a standing do-not-delete note; whether
+  they are still on the dogfood instance was not checked at close. The
   upstream async-nats report was not filed, as far as this repository
   records. The tree has since moved from async-nats 0.38 to 0.52, and
   since #733 the dispatcher does not take a permit before it pulls, so
