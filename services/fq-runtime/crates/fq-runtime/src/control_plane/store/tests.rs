@@ -584,24 +584,33 @@ fn key(stream_seq: u64) -> TriggerKey<'static> {
 async fn trigger_claim_state_machine_round_trip() {
     let (store, _dir) = open_fresh().await;
     assert_eq!(
-        store.claim_trigger(key(42), "worker-a", 100).await.unwrap(),
+        store
+            .claim_trigger(key(42), "worker-a", "inv-a", 100)
+            .await
+            .unwrap(),
         TriggerClaim::Won
     );
     assert_eq!(
-        store.claim_trigger(key(42), "worker-a", 101).await.unwrap(),
+        store
+            .claim_trigger(key(42), "worker-a", "inv-a2", 101)
+            .await
+            .unwrap(),
         TriggerClaim::Held {
             claimant: "worker-a".to_string()
         }
     );
     assert!(
         store
-            .take_over_trigger_claim(key(42), "worker-a", "worker-b", 102)
+            .take_over_trigger_claim(key(42), "worker-a", "worker-b", "inv-1", 102)
             .await
             .unwrap()
     );
     store.mark_trigger_started(key(42), "inv-1").await.unwrap();
     assert_eq!(
-        store.claim_trigger(key(42), "worker-b", 103).await.unwrap(),
+        store
+            .claim_trigger(key(42), "worker-b", "inv-b", 103)
+            .await
+            .unwrap(),
         TriggerClaim::Started {
             invocation_id: "inv-1".to_string()
         }
@@ -609,15 +618,93 @@ async fn trigger_claim_state_machine_round_trip() {
     // Started claims survive the release used by ordinary ACK paths.
     store.release_trigger_claim(key(42)).await.unwrap();
     assert!(matches!(
-        store.claim_trigger(key(42), "worker-b", 104).await.unwrap(),
+        store
+            .claim_trigger(key(42), "worker-b", "inv-b2", 104)
+            .await
+            .unwrap(),
         TriggerClaim::Started { .. }
     ));
 
-    store.claim_trigger(key(43), "worker-a", 100).await.unwrap();
+    store
+        .claim_trigger(key(43), "worker-a", "inv-c", 100)
+        .await
+        .unwrap();
     store.release_trigger_claim(key(43)).await.unwrap();
     assert_eq!(
-        store.claim_trigger(key(43), "worker-a", 101).await.unwrap(),
+        store
+            .claim_trigger(key(43), "worker-a", "inv-d", 101)
+            .await
+            .unwrap(),
         TriggerClaim::Won
+    );
+}
+
+/// What a claim row names while it is still `claimed`. Not part of the
+/// store's API: the dispatcher never needs to read it back, and startup
+/// recovery finds a row *by* this column rather than reading it.
+async fn claimed_invocation(store: &ControlPlaneStore, key: TriggerKey<'_>) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT invocation_id FROM trigger_claim \
+         WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+    )
+    .bind(key.stream)
+    .bind(key.stream_epoch)
+    .bind(key.stream_seq as i64)
+    .fetch_one(&store.pool)
+    .await
+    .unwrap()
+}
+
+/// **A claim names its invocation from claim time (#959).** The id is
+/// written by the insert that wins the claim, not by the durable start,
+/// so a process that meets an unfinished claim later can tell which
+/// invocation it was for. A copy that loses the insert does not
+/// overwrite it, and an adopter replaces it with its own in the same
+/// compare-and-set that takes the claim over.
+#[tokio::test]
+async fn a_claim_names_its_invocation_from_claim_time() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(7), "worker-a", "inv-first", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_invocation(&store, key(7)).await.as_deref(),
+        Some("inv-first"),
+        "the winning insert writes the id it was given"
+    );
+
+    store
+        .claim_trigger(key(7), "worker-a", "inv-duplicate", 101)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_invocation(&store, key(7)).await.as_deref(),
+        Some("inv-first"),
+        "a copy that loses the insert leaves the row's id alone"
+    );
+
+    assert!(
+        !store
+            .take_over_trigger_claim(key(7), "someone-else", "worker-b", "inv-wrong", 102)
+            .await
+            .unwrap(),
+        "a take-over naming the wrong holder changes nothing"
+    );
+    assert_eq!(
+        claimed_invocation(&store, key(7)).await.as_deref(),
+        Some("inv-first")
+    );
+    assert!(
+        store
+            .take_over_trigger_claim(key(7), "worker-a", "worker-b", "inv-adopted", 103)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        claimed_invocation(&store, key(7)).await.as_deref(),
+        Some("inv-adopted"),
+        "the adopter's id replaces the previous holder's"
     );
 }
 
@@ -642,17 +729,26 @@ async fn a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delive
         ..old
     };
     assert_eq!(
-        store.claim_trigger(old, "worker-a", 0).await.unwrap(),
+        store
+            .claim_trigger(old, "worker-a", "inv-old", 0)
+            .await
+            .unwrap(),
         TriggerClaim::Won
     );
     store.mark_trigger_started(old, "inv-old").await.unwrap();
     assert_eq!(
-        store.claim_trigger(recreated, "worker-a", 1).await.unwrap(),
+        store
+            .claim_trigger(recreated, "worker-a", "inv-new", 1)
+            .await
+            .unwrap(),
         TriggerClaim::Won,
         "sequence 1 of a rebuilt stream is not the sequence 1 that already ran"
     );
     assert_eq!(
-        store.claim_trigger(old, "worker-a", 2).await.unwrap(),
+        store
+            .claim_trigger(old, "worker-a", "inv-probe", 2)
+            .await
+            .unwrap(),
         TriggerClaim::Started {
             invocation_id: "inv-old".to_string()
         },
@@ -675,7 +771,10 @@ async fn schema_v1_upgrades_to_trigger_claim_v2() {
     let upgraded = ControlPlaneStore::open(&path).await.unwrap();
     assert_eq!(upgraded.read_schema_version().await.unwrap(), Some(2));
     assert_eq!(
-        upgraded.claim_trigger(key(1), "worker", 0).await.unwrap(),
+        upgraded
+            .claim_trigger(key(1), "worker", "inv", 0)
+            .await
+            .unwrap(),
         TriggerClaim::Won
     );
 }

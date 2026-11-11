@@ -131,13 +131,15 @@ impl Worker for StagedWorker {
             trigger: trigger.id,
             attempt: delivery_attempt,
         });
-        let invocation_id = Uuid::now_v7();
+        let invocation_id = durable_start
+            .invocation_id()
+            .expect("the dispatcher names the invocation on its claim before it starts");
         self.first_wal_write
             .acquire()
             .await
             .expect("the gate is never closed")
             .forget();
-        durable_start.fire(invocation_id);
+        durable_start.fire();
         // An invocation that has just made its first WAL write has work
         // still to do, and the real runner's next move is always an
         // await on the store or the broker. So this stub yields once
@@ -281,6 +283,7 @@ impl World {
                     stream_seq,
                 },
                 "replay-probe",
+                "replay-probe-invocation",
                 0,
             )
             .await

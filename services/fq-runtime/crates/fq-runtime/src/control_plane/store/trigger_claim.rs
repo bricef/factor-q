@@ -39,22 +39,30 @@ pub enum TriggerClaim {
 impl ControlPlaneStore {
     /// Claim a trigger using one insert-if-absent statement, then read the
     /// winning row.
+    ///
+    /// The row names `invocation_id`, the id the claimant will start the
+    /// invocation under, from the moment it is written rather than from
+    /// the durable start: a process that meets the row later can then ask
+    /// whether that invocation reached its first WAL write (#959). A losing
+    /// claim's id is never written.
     pub async fn claim_trigger(
         &self,
         key: TriggerKey<'_>,
         worker_id: &str,
+        invocation_id: &str,
         now_ms: i64,
     ) -> Result<TriggerClaim, ControlPlaneStoreError> {
         let inserted = sqlx::query(
             "INSERT INTO trigger_claim \
              (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at) \
-             VALUES (?, ?, ?, ?, 'claimed', NULL, ?) \
+             VALUES (?, ?, ?, ?, 'claimed', ?, ?) \
              ON CONFLICT(stream, stream_epoch, stream_seq) DO NOTHING",
         )
         .bind(key.stream)
         .bind(key.stream_epoch)
         .bind(key.stream_seq as i64)
         .bind(worker_id)
+        .bind(invocation_id)
         .bind(now_ms)
         .execute(&self.pool)
         .await?
@@ -82,20 +90,23 @@ impl ControlPlaneStore {
         }
     }
 
-    /// Adopt an unfinished claim from a previous worker process.
+    /// Adopt an unfinished claim from a previous worker process, naming the
+    /// adopter's own `invocation_id` in place of the previous holder's.
     pub async fn take_over_trigger_claim(
         &self,
         key: TriggerKey<'_>,
         claimant: &str,
         worker_id: &str,
+        invocation_id: &str,
         now_ms: i64,
     ) -> Result<bool, ControlPlaneStoreError> {
         Ok(sqlx::query(
-            "UPDATE trigger_claim SET claimant = ?, claimed_at = ? \
+            "UPDATE trigger_claim SET claimant = ?, invocation_id = ?, claimed_at = ? \
              WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? \
              AND claimant = ? AND state = 'claimed'",
         )
         .bind(worker_id)
+        .bind(invocation_id)
         .bind(now_ms)
         .bind(key.stream)
         .bind(key.stream_epoch)
