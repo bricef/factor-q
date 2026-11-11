@@ -321,7 +321,8 @@ struct Frontmatter {
     static_resources: Vec<String>,
     /// Aggregate sampling sub-budget (USD) across all servers granted
     /// `sampling`, enforced per invocation. `None` = bounded only by
-    /// the invocation `budget` (ADR-0017 / ADR-0018).
+    /// the invocation `budget` (ADR-0017 / ADR-0018); a grant with
+    /// neither set is refused (see [`crate::BuildError::UnboundedGrant`]).
     sampling_budget: Option<f64>,
     /// Aggregate elicitation sub-budget (USD), same semantics.
     elicitation_budget: Option<f64>,
@@ -535,7 +536,7 @@ mod tests {
     #[test]
     fn a_bool_capability_grant_still_loads() {
         let granted = parse_agent(
-            "---\nname: b\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: true\n---\nBody.\n",
+            "---\nname: b\nmodel: m\nbudget: 1.00\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling: true\n---\nBody.\n",
         )
         .expect("`sampling: true` must still parse");
         assert!(granted.sampling_grant().is_some());
@@ -554,7 +555,7 @@ mod tests {
     #[test]
     fn a_correctly_spelled_capability_table_still_loads() {
         let agent = parse_agent(
-            "---\nname: t\nmodel: m\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling:\n      redact_secrets: true\n---\nBody.\n",
+            "---\nname: t\nmodel: m\nbudget: 1.00\nmcp:\n  - server: notes\n    command: notes-mcp\n    sampling:\n      redact_secrets: true\n---\nBody.\n",
         )
         .expect("a correctly-spelled validation table must still parse");
         assert!(agent.sampling_grant().is_some());
@@ -612,6 +613,13 @@ mod tests {
         for grant in SPENDING_GRANTS {
             let err = parse_agent(&granting(grant, ""))
                 .expect_err("a grant with no budget at all must be refused");
+            assert!(
+                matches!(
+                    err,
+                    ParseError::InvalidAgent(BuildError::UnboundedGrant { grant: g }) if g == grant
+                ),
+                "expected UnboundedGrant for `{grant}`, got: {err:?}"
+            );
             let msg = err.to_string();
             assert!(
                 msg.contains(&format!("unbounded {grant} grant"))
@@ -675,6 +683,14 @@ mod tests {
                 &format!("budget: 0.50\n{grant}_budget: 0.75\n"),
             ))
             .expect_err("a sub-budget that can never bind must be refused");
+            assert!(
+                matches!(
+                    err,
+                    ParseError::InvalidAgent(BuildError::SubBudgetExceedsBudget { grant: g, .. })
+                        if g == grant
+                ),
+                "expected SubBudgetExceedsBudget for `{grant}`, got: {err:?}"
+            );
             let msg = err.to_string();
             assert!(
                 msg.contains(&format!("`{grant}_budget: 0.75`")) && msg.contains("`budget: 0.5`"),
@@ -700,7 +716,8 @@ mod tests {
                 let err = parse_agent(&granting(grant, &format!("{grant}_budget: {value}\n")))
                     .expect_err("a non-finite sub-budget alone must not bound a grant");
                 assert!(
-                    err.to_string().contains(&format!("unbounded {grant} grant")),
+                    err.to_string()
+                        .contains(&format!("unbounded {grant} grant")),
                     "`{grant}_budget: {value}` alone, got: {err}"
                 );
 
@@ -1402,6 +1419,7 @@ You are a test agent.
         let content = r#"---
 name: validated-agent
 model: claude-haiku
+budget: 1.00
 mcp:
   - server: everything
     command: npx
