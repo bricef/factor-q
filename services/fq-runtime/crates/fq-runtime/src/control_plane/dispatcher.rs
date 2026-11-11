@@ -2883,7 +2883,11 @@ You are a test agent."#
                 Arc::new(FixtureClient::new()),
                 4,
             )
-            .with_caps_and_claims(caps.clone(), recovered_claims(&store).await, "worker-a"),
+            .with_caps_and_claims(
+                caps.clone(),
+                recovered_claims(&store).await,
+                "worker-a",
+            ),
         );
 
         let mut consumer = bus
