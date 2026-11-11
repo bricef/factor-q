@@ -621,6 +621,12 @@ impl AgentBuilder {
         {
             return Err(BuildError::InvalidBudget(budget));
         }
+        if let Some(grant) = &self.sampling {
+            check_spending_bound("sampling", grant.max_cost, self.budget)?;
+        }
+        if let Some(grant) = &self.elicitation {
+            check_spending_bound("elicitation", grant.max_cost, self.budget)?;
+        }
         // Refused rather than read as "unlimited": zero is the one value
         // whose plain meaning — run none of them, ever — is never what
         // an author wants, and an agent that silently never runs looks
@@ -658,6 +664,39 @@ impl AgentBuilder {
     }
 }
 
+/// Refuse a spending grant that nothing bounds (#830).
+///
+/// A server granted `sampling` or `elicitation` spends on the agent's
+/// model on its own schedule, the one cost channel the author does not
+/// steer turn by turn. The runtime declines its requests once the grant's
+/// sub-budget or the invocation `budget` is spent, so one of the two must
+/// be set, and a sub-budget only counts if it can bind: a non-finite one
+/// bounds nothing, and one above `budget` is never reached because
+/// `budget` runs out first. Either may be the bound. With `budget` alone
+/// the server may spend all of it, which is the author's visible choice.
+///
+/// `budget` is already known finite and non-negative here.
+fn check_spending_bound(
+    grant: &'static str,
+    sub_budget: Option<f64>,
+    budget: Option<f64>,
+) -> Result<(), BuildError> {
+    let finite_sub_budget = sub_budget.filter(|cap| cap.is_finite());
+    if finite_sub_budget.is_none() && budget.is_none() {
+        return Err(BuildError::UnboundedGrant { grant });
+    }
+    if let (Some(sub_budget), Some(budget)) = (sub_budget, budget)
+        && (sub_budget.is_nan() || sub_budget > budget)
+    {
+        return Err(BuildError::SubBudgetExceedsBudget {
+            grant,
+            sub_budget,
+            budget,
+        });
+    }
+    Ok(())
+}
+
 /// Errors from [`AgentBuilder::build`] and related validation.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -685,6 +724,29 @@ pub enum BuildError {
 
     #[error("invalid max_tokens: must be at least 1")]
     ZeroMaxTokens,
+
+    /// A sampling or elicitation grant with neither its sub-budget nor
+    /// `budget` set, so the server's spend on the agent's model had no
+    /// ceiling at all (#830). Named with the fields that would bound it
+    /// rather than defaulted, so the bound is written in the definition.
+    #[error(
+        "unbounded {grant} grant: a server granted `{grant}` spends on this agent's model \
+         with nothing to stop it; set `{grant}_budget` or `budget` to a finite amount"
+    )]
+    UnboundedGrant { grant: &'static str },
+
+    /// A sub-budget that can never bind: above `budget`, which runs out
+    /// first, or not a number. The ceiling its author wrote is one the
+    /// runtime would never apply.
+    #[error(
+        "`{grant}_budget: {sub_budget}` can never bind under `budget: {budget}`; \
+         lower it to at most `budget`"
+    )]
+    SubBudgetExceedsBudget {
+        grant: &'static str,
+        sub_budget: f64,
+        budget: f64,
+    },
 
     #[error("invalid static_resources entry: {0}")]
     InvalidStaticResource(String),
@@ -847,6 +909,48 @@ mod tests {
     fn nan_budget_is_rejected() {
         let err = valid_builder().budget(f64::NAN).build().unwrap_err();
         assert!(matches!(err, BuildError::InvalidBudget(_)));
+    }
+
+    /// The bound is enforced by the builder, not only by the parser, so a
+    /// programmatically built agent cannot carry an unbounded grant either
+    /// (#830).
+    #[test]
+    fn a_built_spending_grant_needs_a_bound() {
+        let sampling = || SamplingGrant {
+            servers: vec!["srv".to_string()],
+            max_cost: None,
+        };
+        let err = valid_builder()
+            .sampling_grant(sampling())
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BuildError::UnboundedGrant { grant: "sampling" }
+        ));
+
+        let err = valid_builder()
+            .budget(0.10)
+            .elicitation_grant(ElicitationGrant {
+                servers: vec!["srv".to_string()],
+                max_cost: Some(0.20),
+            })
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BuildError::SubBudgetExceedsBudget {
+                grant: "elicitation",
+                ..
+            }
+        ));
+
+        let agent = valid_builder()
+            .budget(0.10)
+            .sampling_grant(sampling())
+            .build()
+            .expect("`budget` alone bounds a built grant");
+        assert!(agent.sampling_grant().is_some());
     }
 
     #[test]

@@ -521,7 +521,9 @@ budget: 0.50   # half a dollar per invocation
 ```
 
 Omit `budget` to run without a ceiling. This is not recommended
-for unattended agents.
+for unattended agents, and an agent that grants a server `sampling`
+or `elicitation` may omit it only if it sets the matching sub-budget
+(see [Capability grants](#capability-grants)).
 
 ## Iteration cap, output cap, concurrency cap and reasoning effort
 
@@ -696,7 +698,11 @@ mcp:
 - **Sub-budgets.** `sampling_budget` and `elicitation_budget`
   (top-level, USD) cap the *aggregate* spend on each across the
   invocation, inside the overall `budget`. Omit them to bound only by
-  `budget`. Once a sub-budget is reached, further requests are declined
+  `budget`, but one of the two must be set: a grant with neither is
+  refused, and so is a sub-budget above `budget`, which could never
+  bind. Bounded by `budget` alone, a server can spend all of it and
+  leave nothing for the agent's own turns; set the sub-budget if that
+  matters. Once a sub-budget is reached, further requests are declined
   *without* a model call.
 - **Roots are advisory.** They are derived from the sandbox's
   `fs_read`/`fs_write` paths (advertised ⊆ the sandbox boundary) and

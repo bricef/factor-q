@@ -38,8 +38,10 @@ pub struct SamplingGrant {
     /// Optional aggregate sampling sub-budget (USD) within the
     /// invocation. The runtime declines once cumulative sampling
     /// spend reaches it, *before* the model call. `None` = bounded
-    /// only by the invocation budget. `Some(0.0)` = granted in
-    /// principle but no spend allowed (useful for tests / dry policy).
+    /// only by the invocation budget, which must then be set: the
+    /// agent builder refuses a grant with neither (#830).
+    /// `Some(0.0)` = granted in principle but no spend allowed
+    /// (useful for tests / dry policy).
     pub max_cost: Option<f64>,
 }
 
@@ -84,7 +86,8 @@ pub struct ElicitationGrant {
     pub servers: Vec<String>,
     /// Optional aggregate elicitation sub-budget (USD) within the
     /// invocation, enforced *before* each model call. `None` = bounded
-    /// only by the invocation budget; `Some(0.0)` = no spend allowed.
+    /// only by the invocation budget, which must then be set (#830);
+    /// `Some(0.0)` = no spend allowed.
     pub max_cost: Option<f64>,
 }
 

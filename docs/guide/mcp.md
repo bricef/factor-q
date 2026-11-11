@@ -147,7 +147,11 @@ agent's transcript). The request is gated first:
 
 1. Is the server granted `sampling`? If not → declined, no model call.
 2. Is there sampling budget left (`sampling_budget`, and the overall
-   `budget`)? If not → declined, no model call.
+   `budget`)? If not → declined, no model call. One of the two must be
+   set: a definition granting `sampling` with neither is refused at
+   load, as is a `sampling_budget` above `budget`. With `budget` alone,
+   a server can spend all of it and leave nothing for the agent's own
+   turns.
 3. Do the `input_validation` evaluators approve the request? A deny
    short-circuits before the sampling call is made. Note that an `llm`
    evaluator is itself a model call, charged to `sampling_cost` — so
