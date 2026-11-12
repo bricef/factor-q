@@ -825,9 +825,7 @@ fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorRep
 #[test]
 fn stranded_trigger_claims_render_each_finding_in_its_own_words() {
     use fq_ops::health::ClaimHolder::{ExitedProcess, ThisDaemon};
-    use fq_ops::health::StrandedClaimFinding::{
-        AwaitingRedelivery, NeverStarted, StartedUnmarked,
-    };
+    use fq_ops::health::StrandedClaimFinding::{AwaitingRedelivery, NeverStarted, StartedUnmarked};
 
     let report = with_stranded(vec![
         stranded(1, ExitedProcess, AwaitingRedelivery, None),
@@ -878,7 +876,10 @@ fn a_claim_awaiting_redelivery_is_listed_without_becoming_an_issue() {
         fq_ops::health::StrandedClaimFinding::AwaitingRedelivery,
         None,
     )]);
-    assert!(!awaiting.has_issues(), "awaiting redelivery is not an issue");
+    assert!(
+        !awaiting.has_issues(),
+        "awaiting redelivery is not an issue"
+    );
     let out = render_doctor_report_human(&awaiting);
     assert!(out.contains("Verdict: All clear."), "got:\n{out}");
     assert!(

@@ -156,7 +156,10 @@ pub(crate) async fn invocation_show(
                 a.final_phase, a.terminal_at_ms, a.archived_at_ms
             );
         }
-        println!("  trigger:  {}", format_trigger_delivery(detail.trigger.as_ref()));
+        println!(
+            "  trigger:  {}",
+            format_trigger_delivery(detail.trigger.as_ref())
+        );
         // The "what is it doing right now" block, from the worker WAL —
         // present only while the invocation is in flight.
         if let Some(live) = &detail.live {

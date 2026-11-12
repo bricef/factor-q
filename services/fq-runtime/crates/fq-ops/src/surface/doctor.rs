@@ -188,7 +188,9 @@ impl DoctorReport {
 
     /// Stranded trigger claims an operator should act on: every one but
     /// those still inside their redelivery window.
-    pub fn stranded_claim_issues(&self) -> impl Iterator<Item = &crate::health::StrandedTriggerClaim> {
+    pub fn stranded_claim_issues(
+        &self,
+    ) -> impl Iterator<Item = &crate::health::StrandedTriggerClaim> {
         self.trigger_claims
             .stranded
             .iter()
