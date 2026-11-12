@@ -21,7 +21,9 @@
 //!
 //! Lifecycle coupling (plan §3): a **suspended** invocation keeps its
 //! workspace — drain/crash must leave it on disk so resume continues from
-//! it. Reclaim happens only on a *terminal* outcome. The binding is
+//! it. Reclaim happens only on a *terminal* outcome, or when the
+//! invocation failed or stopped before its first WAL write, leaving
+//! nothing to resume. The binding is
 //! persisted in the invocation's durable state
 //! (`invocation_state.workspace_ref`) so recovery re-associates; orphaned
 //! directories of terminal invocations are swept by

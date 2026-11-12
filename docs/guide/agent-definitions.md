@@ -475,7 +475,8 @@ sandbox:
 - With `per_invocation = true`, each invocation gets a fresh **empty**
   directory, so concurrent invocations cannot touch each other's files.
   A suspended invocation keeps its directory across daemon restarts;
-  terminal invocations are reclaimed.
+  terminal invocations are reclaimed, and so is one a drain or a halt
+  stopped before its first step, which has nothing to resume.
 - If no `[workspace]` is configured, an agent that uses the token fails
   loudly at invocation start rather than running with an unresolved
   grant.
