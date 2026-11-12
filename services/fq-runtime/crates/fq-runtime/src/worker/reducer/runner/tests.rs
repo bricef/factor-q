@@ -4657,6 +4657,7 @@ async fn a_hung_tool_times_out_and_the_invocation_continues() {
             default_timeout: Duration::from_millis(200),
             max_timeout: Duration::from_secs(60),
             max_consecutive_timeouts: 3,
+            ..crate::tools::ToolCallLimits::default()
         },
     )
     .await;
@@ -4724,6 +4725,7 @@ async fn consecutive_timeouts_end_the_invocation_naming_the_count() {
             default_timeout: Duration::from_millis(150),
             max_timeout: Duration::from_secs(60),
             max_consecutive_timeouts: 2,
+            ..crate::tools::ToolCallLimits::default()
         },
     )
     .await;
@@ -5350,6 +5352,7 @@ async fn exec_timing_itself_out_counts_toward_the_streak() {
                     default_timeout: Duration::from_secs(30),
                     max_timeout: Duration::from_secs(30),
                     max_consecutive_timeouts: 3,
+                    ..crate::tools::ToolCallLimits::default()
                 })
                 .build(),
         ),

@@ -8,8 +8,10 @@
 //! model and the enforcement primitives.
 
 pub mod builtin;
+pub mod output_cap;
 pub mod sandbox;
 pub mod tool;
 
+pub use output_cap::{cap_output, human_bytes};
 pub use sandbox::{SandboxError, ToolSandbox};
 pub use tool::{Tool, ToolCallIdentity, ToolContext, ToolError, ToolResult};

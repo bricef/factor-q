@@ -11,9 +11,16 @@
 //! safety backstop (dropped bytes are always reported, never silently
 //! lost), and a caller-chosen line limit that is the argv-native
 //! replacement for `| head` and `| tail`.
+//!
+//! The runtime caps every tool's finished result as well
+//! ([`crate::output_cap`], `[tools] max_result_bytes`). That cap is set
+//! above both of these streams together, so by default `exec`'s output is
+//! cut here, once, with the note that names `max_lines` and `tail_lines`.
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::watch;
+
+use crate::output_cap::human_bytes;
 
 /// How to bound returned output beyond the byte cap.
 #[derive(Debug, Clone, Copy)]
@@ -143,19 +150,6 @@ where
     (buf, total, cut)
 }
 
-/// Human-readable byte size, e.g. `3.4 MiB`, `100.0 KiB`, `512 B`.
-pub fn human_bytes(n: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    if n >= MIB {
-        format!("{}.{} MiB", n / MIB, (n % MIB) * 10 / MIB)
-    } else if n >= KIB {
-        format!("{}.{} KiB", n / KIB, (n % KIB) * 10 / KIB)
-    } else {
-        format!("{n} B")
-    }
-}
-
 /// The first `n` lines of `s`, plus whether more lines followed.
 pub(super) fn first_lines(s: &str, n: usize) -> (String, bool) {
     let mut lines = s.lines();
@@ -249,13 +243,6 @@ pub(super) fn push_stream(out: &mut String, name: &str, text: &str, note: Option
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn human_bytes_formats_sizes() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(2048), "2.0 KiB");
-        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
-    }
 
     #[test]
     fn first_lines_takes_head_and_flags_more() {
