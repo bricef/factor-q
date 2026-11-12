@@ -434,16 +434,19 @@ pub struct InvocationDetailView {
     #[serde(default)]
     pub cost: Option<InvocationCostView>,
     /// The trigger delivery that started this invocation, read from the
-    /// dispatcher's claim on it. The claim outlives the run's live state
-    /// and its archive record, so a finished run shows it too.
+    /// dispatcher's claim on it. The claim outlives the run's live state,
+    /// so a finished run shows it too, until the daemon's retention sweep
+    /// deletes the claim (`[state] trigger_claim_retention_days` after it
+    /// was claimed).
     ///
     /// Absent when no claim names the invocation, which says less than it
-    /// seems: the run was not started from the trigger stream, or its
-    /// claim was released or taken over before the run's first durable
-    /// write. A delivery that ends before that write (a refusal, a
-    /// transient failure) gives its claim back, and an adoption writes the
-    /// adopter's own id over the one the claim named, yet a run refused
-    /// that way can already have published events under the id.
+    /// seems: the run was not started from the trigger stream, its claim
+    /// was released or taken over before the run's first durable write,
+    /// or the claim has been swept. A delivery that ends before that write
+    /// (a refusal, a transient failure) gives its claim back, and an
+    /// adoption writes the adopter's own id over the one the claim named,
+    /// yet a run refused that way can already have published events under
+    /// the id.
     #[serde(default)]
     pub trigger: Option<TriggerDeliveryView>,
 }

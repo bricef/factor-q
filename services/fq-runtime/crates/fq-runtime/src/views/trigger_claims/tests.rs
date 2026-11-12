@@ -510,8 +510,10 @@ async fn the_invocation_view_names_the_delivery_that_started_it() {
     assert_eq!(trigger.state, TriggerClaimState::DurablyStarted);
 }
 
-/// The archive is swept after the retention window; the coordination row
-/// that makes the run findable is not, and neither is its claim.
+/// The archive is swept on `retention_days`; the coordination row that
+/// makes the run findable is not swept at all, and the claim goes on a
+/// window of its own. While the claim is kept, the run shows its trigger
+/// without its archive.
 #[tokio::test]
 async fn a_run_whose_archive_was_swept_still_shows_its_trigger() {
     let seed = Seed::new().await;

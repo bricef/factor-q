@@ -51,13 +51,16 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
 /// shows. A delivery that ends before its run's first durable write gives
 /// its claim back, though the run can already have published events under
 /// the claim's id (an agent refused for an unavailable MCP server
-/// does), and an adoption writes the adopter's id over the old one. So no
-/// claim is not proof the run came from somewhere other than the stream.
+/// does), an adoption writes the adopter's id over the old one, and the
+/// daemon's retention sweep deletes a claim once it is older than
+/// `[state] trigger_claim_retention_days`. So no claim is not proof the
+/// run came from somewhere other than the stream.
 /// Pure; covered by unit tests.
 fn format_trigger_delivery(trigger: Option<&fq_ops::views::TriggerDeliveryView>) -> String {
     let Some(t) = trigger else {
-        return "none recorded: not started from the trigger stream, or its claim was released \
-                or taken over before the run's first durable write"
+        return "none recorded: not started from the trigger stream, its claim was released or \
+                taken over before the run's first durable write, or the claim is older than its \
+                retention window"
             .to_string();
     };
     let state = match t.state {
