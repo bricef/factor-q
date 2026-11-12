@@ -47,14 +47,24 @@ print nothing, `grant check` would answer `denied`, `gc` would report that every
 invariant holds and `token mint` would mint a token with no grants, each exiting
 as it would for a real, empty store.
 
+The refusal exits 1, which is also how `grant check` reports a denial and how
+`gc` reports an alarm, so a script that reads only the exit status cannot tell
+them apart; the line on stderr does.
+
 A root that exists but is not a directory, one with a file among its parents,
-and one that `object put` or `grant add` cannot create, because its parent is
-not writable for instance, are named in the same way, with the reason:
+one that is a symbolic link to something that does not exist, and one that
+`object put` or `grant add` cannot create, because its parent is not writable
+for instance, are named in the same way, with the reason:
 
 ```text
 fq-cas: the store root /srv/fq-cas (from --root) is not a directory
+fq-cas: the store root /srv/fq-cas (from --root) is a symbolic link to /mnt/store, which does not exist
 fq-cas: cannot create the store root /srv/fq-cas (from --root): Permission denied (os error 13)
 ```
+
+A link whose target is missing is refused by `object put` and `grant add` too,
+since neither can create a directory through it; create the target, or point
+the root elsewhere. A link to a directory that exists is followed.
 
 `object put` and `grant add` check what they can before they create anything:
 that `object put`'s input path exists, and that `grant add`'s agent id, verbs
@@ -62,7 +72,9 @@ and scope are valid. A mistyped argument therefore prints its own error and
 leaves no new directory behind. A failure after those checks leaves the new
 root with an empty database in it: an `object put` whose input exists but
 cannot be read (a directory, or a file without read permission) leaves the root
-and an empty `index.db`, and the next command uses them as a new store.
+and an empty `index.db`, and the next command uses them as a new store. With
+`-` for its input, `object put` checks nothing first: the root is created
+before standard input is read, so a failed read leaves them too.
 
 The content-addressed commands work as they always have: `put` creates the
 directories it writes into, and `get`, `has`, `size` and `metrics` answer for a
