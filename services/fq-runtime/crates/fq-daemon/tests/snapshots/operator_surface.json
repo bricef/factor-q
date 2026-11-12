@@ -479,6 +479,62 @@
               "intent_at_ms"
             ],
             "type": "object"
+          },
+          "TriggerClaimState": {
+            "description": "How far the dispatch of one trigger delivery has got, as its claim\nrecords it.",
+            "oneOf": [
+              {
+                "const": "claimed",
+                "description": "Taken by a daemon process, and no durable start recorded: the\ntrigger may be waiting to start, starting, or abandoned.",
+                "type": "string"
+              },
+              {
+                "const": "durably_started",
+                "description": "The invocation made its first durable write and the claim records\nit. A redelivery of the same message meets this state and starts\nnothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "TriggerDeliveryView": {
+            "description": "One trigger delivery and the dispatcher's claim on it: which message\non the trigger stream started (or is to start) an invocation.\n\nA message is named by its stream, the incarnation of that stream, and\nits sequence in it. Every redelivery of a message carries the same\nthree, which is why the claim is keyed on them rather than on the\ntrigger's own id: a trigger published without an id is given a new one\non each delivery.",
+            "properties": {
+              "claimant": {
+                "description": "The worker id of the daemon process that holds the claim, or held\nit when the invocation started. A daemon takes a new id every time\nit starts, so any id other than the running daemon's names a\nprocess that has exited.",
+                "type": "string"
+              },
+              "claimed_at_ms": {
+                "description": "When the claim was taken, epoch ms. A claim one process adopted\nfrom another that had exited carries the time of the adoption.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "state": {
+                "$ref": "#/$defs/TriggerClaimState"
+              },
+              "stream": {
+                "description": "The stream the trigger was delivered on.",
+                "type": "string"
+              },
+              "stream_epoch": {
+                "description": "Which incarnation of the stream: the time it was created, in\nnanoseconds since the Unix epoch. A recreated stream numbers its\nmessages from 1 again, so a sequence names a message only together\nwith this.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stream_seq": {
+                "description": "The message's sequence in that incarnation of the stream.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "stream",
+              "stream_epoch",
+              "stream_seq",
+              "state",
+              "claimant",
+              "claimed_at_ms"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -557,6 +613,18 @@
               "string",
               "null"
             ]
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TriggerDeliveryView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The trigger delivery that started this invocation, read from the\ndispatcher's claim on it. The claim outlives the run's live state\nand its archive record, so a finished run shows it too. Absent\nwhen no claim names the invocation: it was not started from the\ntrigger stream."
           }
         },
         "required": [
@@ -2560,7 +2628,7 @@
   },
   {
     "report": {
-      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation that has crossed no step boundary within `stuck_after_ms`, with no tool or model call open recently enough to explain the silence. That threshold is derived from this daemon's own call deadlines — twice the longest a single step can legitimately take — so it is reported rather than assumed, and it is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one.",
+      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation that has crossed no step boundary within `stuck_after_ms`, with no tool or model call open recently enough to explain the silence. That threshold is derived from this daemon's own call deadlines — twice the longest a single step can legitimately take — so it is reported rather than assumed, and it is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one. The trigger-claim block lists deliveries taken off the trigger stream that were neither released nor recorded as started and will not be without help: one whose invocation started while its claim still says it has not, and one an exited process left that has not come back to this daemon within the redelivery window. Each is an issue; one an exited process left that is still inside the window is listed as awaiting its redelivery and is not. A claim this daemon holds for a run that has not started is never listed: it may be waiting behind a paused model or a full agent, and nothing on the claim tells that apart from one that will never start.",
       "domain": "control",
       "name": "doctor",
       "output_schema": {
@@ -2598,6 +2666,21 @@
               "held"
             ],
             "type": "object"
+          },
+          "ClaimHolder": {
+            "description": "Whose claim a stranded claim is.",
+            "oneOf": [
+              {
+                "const": "this_daemon",
+                "description": "The daemon answering the report.",
+                "type": "string"
+              },
+              {
+                "const": "exited_process",
+                "description": "Any other process. One daemon dispatches at a time and takes a new\nid on every start, so a claim under another id was left by a\nprocess that has exited.",
+                "type": "string"
+              }
+            ]
           },
           "ConsumerHealth": {
             "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
@@ -2834,6 +2917,28 @@
             ],
             "type": "object"
           },
+          "DoctorTriggerClaims": {
+            "description": "`control.doctor`'s trigger-claim block.",
+            "properties": {
+              "redelivery_window_ms": {
+                "description": "How long a trigger that an exited process left unacked can take to\nbe redelivered to this daemon, in milliseconds: the trigger retry\nladder from end to end. A claim an exited process left is judged\nagainst it, measured from when this daemon started dispatching.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stranded": {
+                "description": "Every stranded claim, oldest first. Empty on a healthy table.",
+                "items": {
+                  "$ref": "#/$defs/StrandedTriggerClaim"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "redelivery_window_ms",
+              "stranded"
+            ],
+            "type": "object"
+          },
           "DoctorWorkers": {
             "description": "Worker liveness counts plus the ids of any stale workers so\nthe operator can act without a second `fq workers list` call.",
             "properties": {
@@ -2960,6 +3065,63 @@
               }
             ]
           },
+          "StrandedClaimFinding": {
+            "description": "What `control.doctor` makes of a stranded claim.",
+            "oneOf": [
+              {
+                "const": "awaiting_redelivery",
+                "description": "Left by a process that has exited, with no start recorded, and\nthis daemon has not yet been running for the redelivery window.\nThe broker redelivers an unacked trigger within that window and\nthis daemon adopts the claim and starts it. Not an issue.",
+                "type": "string"
+              },
+              {
+                "const": "never_started",
+                "description": "Left by a process that has exited, with no start recorded, and not\nredelivered although this daemon has been running for longer than\nthe redelivery window, so it will not be: its last delivery was\ndead-lettered as exhausted, or its message has left the stream. The\ntrigger was taken and its work never ran.",
+                "type": "string"
+              },
+              {
+                "const": "started_unmarked",
+                "description": "The invocation the claim names has started, and the claim still\nsays it has not. Held by this daemon, every redelivery of the\ntrigger is dropped and it is finally dead-lettered as exhausted\nalthough it ran; left by a process that has exited, a redelivery\nwould be adopted and run the work again.",
+                "type": "string"
+              }
+            ]
+          },
+          "StrandedTriggerClaim": {
+            "description": "A trigger claim that has not settled and will not settle on its own,\nas `control.doctor` reports it: a delivery taken off the trigger\nstream that has neither been released nor recorded as started.\n\nA claim this daemon holds for an invocation that has not started is\nnever one of these, however old. A trigger can wait behind a paused\nmodel or a full agent for hours, and nothing on the claim says\nwhether the daemon holding it is still going to start it, so the\nreport does not guess.",
+            "properties": {
+              "delivery": {
+                "$ref": "#/$defs/TriggerDeliveryView",
+                "description": "The delivery, and the claim on it as the control plane holds it."
+              },
+              "finding": {
+                "$ref": "#/$defs/StrandedClaimFinding"
+              },
+              "holder": {
+                "$ref": "#/$defs/ClaimHolder",
+                "description": "Whether the claim is this daemon's or a process's that has exited."
+              },
+              "invocation_id": {
+                "description": "The invocation id the claim reserved for the run. A claim written\nby a build that did not name it at claim time has none, and then\nthe report cannot look for a start.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "invocation_status": {
+                "default": null,
+                "description": "What the stores record of the invocation the claim names:\n`in_flight`, its terminal phase, or the control plane's\ncoordination status for it. Absent when nothing records that it\nstarted.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "holder",
+              "finding"
+            ],
+            "type": "object"
+          },
           "ThrottledModel": {
             "description": "One model the worker's provider throttle is holding back\n(<https://github.com/bricef/factor-q/issues/278>), as every operator\nsurface reads it: paused, running under its permit ceiling, or\nrate-limited in the current success window. A model with no 429\nhistory is not listed at all.\n\nReported, not judged: a throttled model is the runtime doing its job\nunder a provider's backpressure, so `fq doctor` lists it without\nchanging its verdict.",
             "properties": {
@@ -3013,6 +3175,62 @@
               "in_flight",
               "rate_limited_in_window",
               "waves"
+            ],
+            "type": "object"
+          },
+          "TriggerClaimState": {
+            "description": "How far the dispatch of one trigger delivery has got, as its claim\nrecords it.",
+            "oneOf": [
+              {
+                "const": "claimed",
+                "description": "Taken by a daemon process, and no durable start recorded: the\ntrigger may be waiting to start, starting, or abandoned.",
+                "type": "string"
+              },
+              {
+                "const": "durably_started",
+                "description": "The invocation made its first durable write and the claim records\nit. A redelivery of the same message meets this state and starts\nnothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "TriggerDeliveryView": {
+            "description": "One trigger delivery and the dispatcher's claim on it: which message\non the trigger stream started (or is to start) an invocation.\n\nA message is named by its stream, the incarnation of that stream, and\nits sequence in it. Every redelivery of a message carries the same\nthree, which is why the claim is keyed on them rather than on the\ntrigger's own id: a trigger published without an id is given a new one\non each delivery.",
+            "properties": {
+              "claimant": {
+                "description": "The worker id of the daemon process that holds the claim, or held\nit when the invocation started. A daemon takes a new id every time\nit starts, so any id other than the running daemon's names a\nprocess that has exited.",
+                "type": "string"
+              },
+              "claimed_at_ms": {
+                "description": "When the claim was taken, epoch ms. A claim one process adopted\nfrom another that had exited carries the time of the adoption.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "state": {
+                "$ref": "#/$defs/TriggerClaimState"
+              },
+              "stream": {
+                "description": "The stream the trigger was delivered on.",
+                "type": "string"
+              },
+              "stream_epoch": {
+                "description": "Which incarnation of the stream: the time it was created, in\nnanoseconds since the Unix epoch. A recreated stream numbers its\nmessages from 1 again, so a sequence names a message only together\nwith this.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "stream_seq": {
+                "description": "The message's sequence in that incarnation of the stream.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "stream",
+              "stream_epoch",
+              "stream_seq",
+              "state",
+              "claimant",
+              "claimed_at_ms"
             ],
             "type": "object"
           },
@@ -3115,6 +3333,14 @@
               "$ref": "#/$defs/ThrottledModel"
             },
             "type": "array"
+          },
+          "trigger_claims": {
+            "$ref": "#/$defs/DoctorTriggerClaims",
+            "default": {
+              "redelivery_window_ms": 0,
+              "stranded": []
+            },
+            "description": "Trigger claims that have not settled and will not settle on their\nown: deliveries taken off the trigger stream that were neither\nreleased nor recorded as started. The claim is the only record\nlinking a delivery to its run, so a trigger that was taken and\nnever ran shows up nowhere else."
           },
           "workers": {
             "$ref": "#/$defs/DoctorWorkers"

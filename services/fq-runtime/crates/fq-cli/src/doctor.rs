@@ -450,7 +450,7 @@ fn render_trigger_claims(claims: &fq_ops::surface::DoctorTriggerClaims) -> Strin
             .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_else(|| format!("{}ms", d.claimed_at_ms));
         out.push_str(&format!(
-            "  {} seq {}: claimed {when} by {holder}, for invocation {invocation}\n",
+            "  {} seq {}: claimed {when} by {holder}; invocation {invocation}\n",
             d.stream, d.stream_seq
         ));
         out.push_str(&match (claim.finding, claim.holder) {

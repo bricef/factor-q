@@ -21,4 +21,9 @@ Consumers: 6 checked, 0 unhealthy
   fq-maintenance: ok (pending #)
 Throttled models: none
 Agents at cap: none
+Stranded trigger claims: 2 (1 to act on) — deliveries taken off the trigger stream and not settled
+  fq-triggers seq 2: claimed 2026-01-02T03:04:14Z by worker-alpha, a process that has exited; invocation 2f000000-0000-7000-8000-000000000002
+  -> the run started (failed) but its claim was never marked started: a redelivery of it would be adopted and run the work again — `fq invocation show 2f000000-0000-7000-8000-000000000002`
+  fq-triggers seq 5: claimed 2026-01-02T03:04:45Z by worker-alpha, a process that has exited; invocation 5d000000-0000-7000-8000-000000000005
+  -> not started; this daemon adopts and starts it when the broker redelivers it, which is due within 19m30s of this daemon starting
 Dead-letters: none

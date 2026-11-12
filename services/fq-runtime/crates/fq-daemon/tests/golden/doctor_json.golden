@@ -109,5 +109,38 @@
   ],
   "mcp_servers": [],
   "throttled_models": [],
-  "agents_at_cap": []
+  "agents_at_cap": [],
+  "trigger_claims": {
+    "redelivery_window_ms": 1170000,
+    "stranded": [
+      {
+        "delivery": {
+          "stream": "fq-triggers",
+          "stream_epoch": 1767322985000000000,
+          "stream_seq": 2,
+          "state": "claimed",
+          "claimant": "worker-alpha",
+          "claimed_at_ms": 1767323054000
+        },
+        "invocation_id": "2f000000-0000-7000-8000-000000000002",
+        "holder": "exited_process",
+        "finding": "started_unmarked",
+        "invocation_status": "failed"
+      },
+      {
+        "delivery": {
+          "stream": "fq-triggers",
+          "stream_epoch": 1767322985000000000,
+          "stream_seq": 5,
+          "state": "claimed",
+          "claimant": "worker-alpha",
+          "claimed_at_ms": 1767323085000
+        },
+        "invocation_id": "5d000000-0000-7000-8000-000000000005",
+        "holder": "exited_process",
+        "finding": "awaiting_redelivery",
+        "invocation_status": null
+      }
+    ]
+  }
 }

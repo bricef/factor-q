@@ -104,9 +104,11 @@ pub(crate) fn register_doctor_report(
          neither released nor recorded as started and will not be without help: one whose \
          invocation started while its claim still says it has not, and one an exited \
          process left that has not come back to this daemon within the redelivery window. \
-         A claim this daemon holds for a run that has not started is never listed: it may \
-         be waiting behind a paused model or a full agent, and nothing on the claim tells \
-         that apart from one that will never start.",
+         Each is an issue; one an exited process left that is still inside the window is \
+         listed as awaiting its redelivery and is not. A claim this daemon holds for a run \
+         that has not started is never listed: it may be waiting behind a paused model or a \
+         full agent, and nothing on the claim tells that apart from one that will never \
+         start.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
