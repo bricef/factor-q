@@ -75,7 +75,9 @@ pub enum StoreError {
     /// version above the highest this binary knows: a newer `fq-cas` wrote
     /// it. Every open refuses such a file, read-only ones included, because
     /// an older binary cannot know what a newer schema means even to read
-    /// it; the refusal leaves the file exactly as it was. The remedy is an
+    /// it. The refusal leaves the file as it was; the only step before the
+    /// check is the switch into WAL mode on first connect, which every
+    /// `fq-cas` has already made on both files. The remedy is an
     /// `fq-cas` at least as new as the one that wrote it. The runtime's
     /// stores refuse the same case (`BinaryTooOld` in `fq-runtime`'s
     /// `db/schema.rs`).

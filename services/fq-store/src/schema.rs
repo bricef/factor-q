@@ -99,19 +99,27 @@
 //! an `fq-cas` at least as new as the one that wrote it. The check is made
 //! where the version is read, inside the locked transaction and before any
 //! rung or the `after_ladder` step runs. So the refusal rolls back a
-//! transaction that has written nothing and gives the lock back: the file
-//! is left exactly as the newer binary left it, a `grants.db` projection
-//! that lags its log included, and an opener waiting on the lock goes on to
-//! be refused in its turn rather than waiting out [`SCHEMA_LOCK_WAIT`].
+//! transaction that has written nothing and gives the lock back, and
+//! [`open_store_db`] closes its pool before it returns the error: the file
+//! is left as the newer binary left it, a `grants.db` projection that lags
+//! its log included, and an opener waiting on the lock goes on to be
+//! refused in its turn rather than waiting out [`SCHEMA_LOCK_WAIT`]. The
+//! one step that precedes the check is the switch into WAL mode (above),
+//! which every `fq-cas` has already made on both files.
 //!
-//! Read-only commands are refused too (`fq-cas object ls`, `grant ls`,
-//! `grant check`). This crate has one open path, which every command that
-//! touches either database takes, and an older binary cannot know what a
-//! newer schema means even to read it: a table it reads may have changed
-//! meaning, and a column it never selects may be one the newer binary's
-//! rows depend on. The runtime's read-only opens refuse such a file as its
-//! writable ones do. Rolling a binary back is not supported (`STATUS.md`),
-//! and nothing here downgrades a file.
+//! Read-only commands are refused too: `fq-cas object get`, `object ls`,
+//! `object resolve`, `object history`, `grant ls`, `grant check`, and
+//! `token mint`, which only reads `grants.db`. This crate has one open
+//! path, which every command that touches either database takes, and an
+//! older binary cannot know what a newer schema means even to read it: a
+//! table it reads may have changed meaning, and a column it never selects
+//! may be one the newer binary's rows depend on. The runtime's read-only
+//! opens refuse such a file as its writable ones do. Rolling a binary back
+//! is not supported (`STATUS.md`), and nothing here downgrades a file.
+//!
+//! The check is made at open. A command already running when a newer
+//! binary upgrades the file carries on with it; the runtime's stores have
+//! the same limit.
 //!
 //! ## The runtime's stores
 //!
