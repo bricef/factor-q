@@ -946,7 +946,9 @@ a redelivery of the same message that meets a started claim starts
 nothing ([ADR-0032](../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
 That row is the only record linking a delivery to the run it started.
 The worker's WAL row is deleted once the run is archived, and the archive
-row is swept after `[state] retention_days`; the claim row stays.
+row is swept after `[state] retention_days`; the claim row is kept for
+`[state] trigger_claim_retention_days`, 30 days by default (see
+[How long a claim is kept](#how-long-a-claim-is-kept)).
 
 `fq invocation show <id>` reads it:
 
@@ -967,15 +969,18 @@ seems. A delivery that ends before its run's first durable write gives
 its claim back, yet the run may already have published events under the
 claim's id: an agent refused because a shared MCP server is down
 publishes `triggered` and `failed` and keeps no claim. An adoption also
-writes the adopter's id over the one an exited process reserved. So the
-line reads "not started from the trigger stream, or its claim was
-released or taken over before the run's first durable write".
+writes the adopter's id over the one an exited process reserved, and the
+retention sweep deletes a claim once it is older than its window. So the
+line reads "not started from the trigger stream, its claim was released
+or taken over before the run's first durable write, or the claim is
+older than its retention window".
 
 `fq invocation list` does not carry it. The claim table has no index on
-the invocation id and is never pruned, so a lookup per listed row would
-read the whole table once per row; the link is read one invocation at a
-time, newest claim first. There is no lookup from a sequence to its run
-yet, other than for the claims `fq doctor` reports below.
+the invocation id, so a lookup per listed row would read the whole table
+(every claim inside the retention window) once per row; the link is read
+one invocation at a time, newest claim first. There is no lookup from a
+sequence to its run yet, other than for the claims `fq doctor` reports
+below.
 
 ### Stranded claims in `fq doctor`
 
@@ -1004,8 +1009,8 @@ claimed more recently than the stream keeps messages (a day); a claim is
 never older than its message, so an older claim names a message the
 broker has dropped. The **redelivery window** is the sum of the trigger
 retry ladder (19m30s today), counted from when this daemon started. The
-**horizon** is `[state] retention_days`, the window that ages failures
-and dead letters out of the report.
+**horizon** is `[state] trigger_claim_retention_days`, the age at which
+the retention sweep deletes a claim an exited process left.
 
 - **Not started, awaiting redelivery** (not an issue). A process that has
   exited claimed a deliverable message, nothing records a run, and this
@@ -1023,8 +1028,8 @@ and dead letters out of the report.
   first made), while a fresh `fq trigger` publishes new work every time,
   so check before publishing it again. Either way the work runs under a
   new sequence and a new claim, so this line stays until the claim is
-  older than the horizon, and the report stops listing it then. Nothing
-  deletes the row.
+  older than the horizon, and the report stops listing it then. The
+  retention sweep deletes the row on its next tick after that.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
   still be redelivered. If this daemon holds the claim, every redelivery
@@ -1061,6 +1066,56 @@ also starts the window again, so a deliverable claim (one under a day
 old) that was already reported never started reads as awaiting
 redelivery again for the first window of every daemon run; a claim whose
 message is gone is reported the same way whenever the daemon started.
+
+### How long a claim is kept
+
+A claim row does two jobs. Marked started, it is the record that stops
+a redelivered or replayed copy of its trigger from starting the run a
+second time. And it is the only record of which delivery started which
+run: the `trigger:` line of `fq invocation show`, and the claims
+`fq doctor` reports. The daemon's retention sweep deletes claim rows on
+the same hourly tick (`sweep_interval_seconds`) as the archive and
+stale-worker windows:
+
+```toml
+[state]
+trigger_claim_retention_days = 30 # the default; -1 keeps claim rows for ever
+```
+
+The sweep deletes a claim marked started once it is older than the
+window, whichever incarnation of the stream it was on, and a claim
+still `claimed` by a process that has exited once it is older than the
+window. It never deletes a claim this daemon holds, however old: that
+may be a trigger it is still holding behind a paused model or a full
+agent. Age is counted from when the delivery was claimed (or adopted).
+
+**The floor is the stream's message age plus a day, two days today, and
+a smaller value is refused at startup.** The trigger stream keeps a
+message for a day after it is acked, so a
+durable consumer that is deleted and recreated, or whose state is lost
+in a broker restore, replays up to a day of triggers, and the started
+claims are what keep those from running twice. A claim is never older
+than its message, so a claim older than a day names a message the
+stream has dropped; the floor is that day rounded up, plus a day of
+margin for the two clocks the argument reads.
+
+**What a lower number costs.** Nothing about duplicates, as long as it
+is at or above the floor. It shortens how long a finished run can show
+the delivery that started it: past the window, `fq invocation show`
+reads `none recorded` for a run that did come from the trigger stream.
+The default keeps the link as long as `retention_days` keeps the
+archived run. A higher number keeps the link longer at the cost of a
+larger table; the claim table has no index yet, so the reads that look
+a claim up by its run scan the rows the window keeps.
+
+**One constraint for later work.** `fq doctor` tells a claim whose run
+finished from one that never started by the run's row in the control
+plane's ownership table (`coordination_invocation_owner`), which has no
+retention today. If that table ever gains a window shorter than this
+one, an old claim whose run finished loses its record of the run, and
+the report would turn "started, never marked" into "never started". Keep
+any such window at or above this one, or give the claim its own record
+of the start.
 
 ## Notifications and alerts
 
@@ -1104,7 +1159,7 @@ exist today but do not yet have an out-of-band producer.
 | `fq doctor`: unavailable shared MCP servers | Alert when required work is blocked; otherwise notification | `fq doctor` | The supervisor retries startup; if required work remains blocked, fix the server or its configuration. |
 | `fq doctor`: throttled models or agents at concurrency caps | Notification | `fq doctor` | Provider backoff and available agent slots release held work automatically. |
 | `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. |
-| `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted if the broker redelivers it, and a never-started line ages out at `[state] retention_days`; otherwise none: requeue or re-publish the work of a delivery that never started a run, and do not requeue the false dead letter of a run that started. |
+| `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted if the broker redelivers it, and a never-started line ages out at `[state] trigger_claim_retention_days`, when the sweep deletes its claim; otherwise none: requeue or re-publish the work of a delivery that never started a run, and do not requeue the false dead letter of a run that started. |
 | Pricing change refused by the drift bound (#735) | Notification | None (producer in #735) | The last accepted pricing remains in use; review and accept the change during normal hours. |
 | Pricing data stale (#735) | Alert | None (producer in #735) | None once the safe staleness limit is exhausted; restore the pricing source or provide an override. |
 | Summary consumer `start`, `progress`, and `outcome` lines | Neither; these are the record | Event stream and dashboard | Not applicable; consumers display the durable record and do not page on it. |

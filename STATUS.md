@@ -272,10 +272,14 @@ claimed deliveries that never settled, by what the claim, the stores
 and the stream can show (a delivery that never started a run, a run
 whose claim was never marked), while never reporting a claim the
 running daemon holds for a run that has not started. The claim table
-has no retention or index, which is a Phase 3 bounded-growth item
-([#969](https://github.com/bricef/factor-q/issues/969)): `fq doctor`
-stops listing a dead claim at the retention window, but nothing
-deletes it. ADR-0032 lists the gaps the design knowingly leaves open. The first of
+no longer grows without bound, the fifth gap ADR-0032 lists
+([#969](https://github.com/bricef/factor-q/issues/969)): the retention
+sweep deletes a claim `[state] trigger_claim_retention_days` (default
+30) after it was claimed, a window the config refuses below the trigger
+stream's message age plus a day, and never deletes a claim the running
+daemon holds; `fq doctor` stops listing a dead claim at the same age.
+The table has no index yet
+([#989](https://github.com/bricef/factor-q/issues/989)). ADR-0032 lists the gaps the design knowingly leaves open. The first of
 them no longer is: a daemon that died between an invocation's first WAL
 write and its claim being marked started used to have the redelivered
 trigger run a second time beside the resumed invocation. The claim row
