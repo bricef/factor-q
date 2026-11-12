@@ -52,9 +52,32 @@ the process holding the lock carries on; running the command again once that
 process has finished is enough. A lock that is never released means a process
 stopped in the middle of a write.
 
-A file a newer `fq-cas` has upgraded is opened as it is: nothing is migrated,
-and nothing refuses it either. Rolling `fq-cas` back across a schema change
-therefore means restoring the store from before that change as well.
+### A store a newer `fq-cas` upgraded
+
+An `fq-cas` will not open a database that a newer `fq-cas` has upgraded,
+because it cannot know what the newer schema means, even to read it. Every
+command that opens `index.db` or `grants.db` refuses such a file — the read-only
+ones (`object get`, `object ls`, `grant ls`, `grant check`) as well as the ones
+that write — before it runs any upgrade or projection catch-up. It prints one
+line naming the file and both versions and exits 1:
+
+```text
+fq-cas: incompatible schema: /srv/fq-cas/index.db is at version 7, this binary supports up to 6. The file was written by a newer fq-cas: run an fq-cas at least as new as that one against this store.
+```
+
+The file is left exactly as the newer binary left it. The remedy is the one the
+message names: run an `fq-cas` at least as new as the one that wrote the file —
+usually by finishing an upgrade that reached some of the hosts or scripts using
+this store and not others. Do not delete the file to get past the refusal:
+`index.db` holds the store's names and reference counts and `grants.db` its
+grant log, and neither is rebuilt from anything else. Rolling `fq-cas` back
+across a schema change is not supported; it would mean restoring the store from
+before that change as well.
+
+`grant check` also exits 1 for a denial, so a script that reads only its exit
+status takes a refusal for a denial; the line on stderr tells them apart.
+Commands that open neither database — `put`, `get`, `has`, `size`, `metrics`,
+`serve`, `key generate`, `token attenuate` and `token inspect` — are unaffected.
 
 ## Reclaiming storage: `fq-cas gc`
 
