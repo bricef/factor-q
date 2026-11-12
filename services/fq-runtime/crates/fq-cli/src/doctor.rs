@@ -189,10 +189,13 @@ fn render_consumers(
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
                 ));
+                // The held-copy count does not choose this step. It only
+                // ever grows while the daemon runs, so one slow start in
+                // the morning would make a store failure in the afternoon
+                // read as a duplicate delivery and drop the step that
+                // points at the store. Its own note follows either way.
                 if name == "fq-dispatcher"
-                    && (dispatcher_has_held_triggers
-                        || *duplicate_dropped > 0
-                        || *held_duplicate_dropped > 0)
+                    && (dispatcher_has_held_triggers || *duplicate_dropped > 0)
                 {
                     out.push_str("  -> redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice; the durable claim drops the duplicate (see the duplicates-dropped counts) — check fq invocation list and the transcripts' attempt: field if none is counted\n");
                 } else {
