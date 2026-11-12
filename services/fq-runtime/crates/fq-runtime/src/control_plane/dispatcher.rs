@@ -2644,16 +2644,24 @@ You are a test agent."#
         // Every start is handed an invocation id by the dispatcher (#959),
         // and the adopted one is not the dead worker's, which may already
         // belong to a finished run. This worker fires and returns in one
-        // poll, so its claims are released rather than marked and this test
-        // cannot read the id off a row; the tests that do are
-        // `a_dispatcher_killed_after_the_first_wal_write_leaves_a_claim_naming_the_wal_row`
-        // and `started_claim_acks_duplicate_without_second_invocation`.
+        // poll, which `handle` treats as the durable start it is (#966), so
+        // the adopted claim is marked, and names the id its run was handed.
         let ids = worker.invocation_ids.lock().unwrap().clone();
         assert!(ids.iter().all(Option::is_some), "{ids:?}");
         assert_ne!(
             ids[1],
             Some(dead_workers_invocation),
             "an adopted claim must not reuse the dead worker's invocation id"
+        );
+        assert_eq!(
+            store
+                .claim_trigger(test_key(&bus, restart_seq), "probe", "probe", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Started {
+                invocation_id: ids[1].expect("checked above").to_string()
+            },
+            "the adopted claim is marked started under the id its run was handed"
         );
     }
 
