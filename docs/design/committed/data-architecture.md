@@ -514,16 +514,20 @@ reaching terminal:
    stamped by the reducer runner's per-step terminal upsert; the
    `emit_failed` path calls a small `ensure_terminal` helper to
    cover mid-step failure sites that bypass the loop's upsert.
-   On the `completed` path the same write also stores the
-   `completed` event itself — envelope and `event_id` included —
-   in `terminal_outcome` (worker schema v12,
-   [#823](https://github.com/bricef/factor-q/issues/823)).
-   `completed` is the only event that carries the outcome (task
-   status, result summary, cost, totals), so it is made exactly
-   as durable as `terminal_at`.
+   When the loop's upsert is the terminal write — a `completed`,
+   or a `failed` the reducer itself decides — the same write also
+   stores that event itself, envelope and `event_id` included, in
+   `terminal_outcome` (worker schema v12,
+   [#823](https://github.com/bricef/factor-q/issues/823),
+   [#946](https://github.com/bricef/factor-q/issues/946)). It is
+   the only event that carries the outcome (task status, result
+   summary, cost and totals; or the failure's kind, message, phase
+   and partial totals), so it is made exactly as durable as
+   `terminal_at`.
 2. **Publish `completed` or `failed` to NATS** (sync ack). The
-   lifecycle event the rest of the system reads. Once `completed`
-   is acked, the row's `terminal_published_at` is stamped (sync).
+   lifecycle event the rest of the system reads. Once a stored
+   event is acked, the row's `terminal_published_at` is stamped
+   (sync).
 3. **Publish `invocation.archived` to NATS** (sync ack). Carries
    the final state blob for the control-plane to archive.
 4. **Mark the worker SQLite row `archive_status = 'pending'`**
@@ -536,7 +540,7 @@ Crash semantics:
   row with `archive_status IS NULL` and the retry sweeper picks
   it up via `list_archive_pending`'s NULL-first ordering. While
   the row's `terminal_outcome` is unstamped it republishes that
-  stored `completed` first and stamps it, then publishes
+  stored event first and stamps it, then publishes
   `invocation.archived`. The republish is the lost event itself,
   `event_id` and original timestamp included. Delivery is
   at-least-once: if the original did land (a lost ack, or the
@@ -555,8 +559,8 @@ Crash semantics:
   republished, it would halt every durable consumer on the
   stream. Not this row's means another invocation's event, or
   one that is neither `completed` nor `failed`. The sweeper
-  publishes neither `completed` nor `invocation.archived` for a
-  held row, logs it at error level once per daemon run, and
+  publishes neither the stored event nor `invocation.archived` for
+  a held row, logs it at error level once per daemon run, and
   carries on with the other rows. Archiving without it would
   discard the only copy of the outcome. No later build reads an
   older event version, so the hold lasts **until an operator
@@ -564,14 +568,9 @@ Crash semantics:
   [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row);
   it archives the invocation without its outcome. Until then,
   the control plane sees that invocation as not archived.
-- A `failed` is not stored yet
-  ([#946](https://github.com/bricef/factor-q/issues/946)). The
-  mid-step failure sites publish it *before* `ensure_terminal`
-  marks the row, so a lost `failed` there leaves the row in
-  flight, for recovery to resume. A `failed` the reducer itself
-  decides (`NextAction::Failed`, e.g. the iteration ceiling) is
-  published after the loop's terminal upsert, so a lost one is
-  still answered with `invocation.archived` alone.
+- The mid-step failure sites publish `failed` *before*
+  `ensure_terminal` marks the row, and store no copy, so a lost
+  `failed` there leaves the row in flight, for recovery to resume.
 - Between (3) and (4): the event went out but the row is still
   NULL. The next sweeper tick treats it the same way and
   republishes; the control-plane's `insert_archive` is
