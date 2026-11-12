@@ -2,13 +2,15 @@
 //! its content id, and check `has` / `size`.
 #![cfg(feature = "cli")]
 
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{Command, Output};
 
-/// The binary under test, without `RUST_LOG`: with it, `fq-cas` traces to
-/// stderr, which a test compares exactly.
+/// The binary under test, without `RUST_LOG` or `FQ_CAS_ROOT`: with the
+/// first, `fq-cas` traces to stderr, which a test compares exactly; the
+/// second would give it a root the test did not choose.
 fn fq_cas() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fq-cas"));
-    command.env_remove("RUST_LOG");
+    command.env_remove("RUST_LOG").env_remove("FQ_CAS_ROOT");
     command
 }
 
@@ -434,4 +436,371 @@ fn every_command_refuses_a_database_a_newer_fq_cas_wrote() {
             "a refused command must leave {file} at the newer version"
         );
     }
+}
+
+/// How a test tells `fq-cas` where its store root is.
+#[derive(Clone, Copy, Debug)]
+enum Given {
+    /// `--root`, with the path as the test wrote it.
+    Flag,
+    /// `FQ_CAS_ROOT`.
+    Env,
+    /// Neither: the default, `.fq-cas` in the working directory.
+    Default,
+}
+
+/// A store root that does not exist yet, under a scratch working directory
+/// that every command runs in. A default root therefore lands in scratch
+/// and never in the repository, and a command has left nothing on disk
+/// exactly when the scratch directory is still empty.
+#[derive(Debug)]
+struct NewRoot {
+    cwd: tempfile::TempDir,
+    /// What `--root` or `FQ_CAS_ROOT` is set to; unused for the default.
+    arg: PathBuf,
+    /// The root as an absolute path, as `fq-cas` names it.
+    path: PathBuf,
+    given: Given,
+}
+
+impl NewRoot {
+    /// A root `levels` below the scratch directory, named by an absolute
+    /// path when `absolute`, by one relative to the working directory
+    /// otherwise.
+    fn new(given: Given, levels: &[&str], absolute: bool) -> Self {
+        let cwd = tempfile::tempdir().unwrap();
+        let base = cwd.path().canonicalize().unwrap();
+        let relative: PathBuf = match given {
+            Given::Default => PathBuf::from(".fq-cas"),
+            Given::Flag | Given::Env => levels.iter().collect(),
+        };
+        let path = base.join(&relative);
+        let arg = if absolute { path.clone() } else { relative };
+        Self {
+            cwd,
+            arg,
+            path,
+            given,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = fq_cas();
+        command.current_dir(self.cwd.path());
+        match self.given {
+            Given::Flag => {
+                command.arg("--root").arg(&self.arg);
+            }
+            Given::Env => {
+                command.env("FQ_CAS_ROOT", &self.arg);
+            }
+            Given::Default => {}
+        }
+        command.args(args);
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    /// The line a command that does not create a store prints for this
+    /// root.
+    fn refusal(&self) -> String {
+        let source = match self.given {
+            Given::Flag => "from --root",
+            Given::Env => "from FQ_CAS_ROOT",
+            Given::Default => "the default, in the working directory",
+        };
+        format!(
+            "fq-cas: the store root {} ({source}) does not exist. Point --root or FQ_CAS_ROOT at \
+             an existing store, or start a new one with `fq-cas object put` or `fq-cas grant add`.\n",
+            self.path.display()
+        )
+    }
+
+    fn left_nothing(&self) -> bool {
+        std::fs::read_dir(self.cwd.path()).unwrap().next().is_none()
+    }
+}
+
+/// One new root for each way of naming one: a single missing directory by
+/// `--root`; three missing levels by a relative `--root`, which `fq-cas`
+/// names as an absolute path; two by `FQ_CAS_ROOT`; and the default root.
+fn new_roots() -> [NewRoot; 4] {
+    [
+        NewRoot::new(Given::Flag, &["store"], true),
+        NewRoot::new(Given::Flag, &["a", "b", "c", "store"], false),
+        NewRoot::new(Given::Env, &["a", "b", "store"], true),
+        NewRoot::new(Given::Default, &[], true),
+    ]
+}
+
+fn generated_private_key() -> String {
+    let out = fq_cas().args(["key", "generate"]).output().unwrap();
+    assert!(out.status.success(), "key generate: {out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("private:"))
+        .expect("key generate prints a private key")
+        .trim()
+        .to_string()
+}
+
+/// Every command that opens a database, other than the two that can start
+/// a store, refuses a root that does not exist: one line naming it and
+/// where it came from, exit 1, and nothing created, whichever way the root
+/// was named (<https://github.com/bricef/factor-q/issues/991>). Creating
+/// it instead would answer for an empty store when the root is mistyped.
+#[test]
+fn every_database_command_but_object_put_and_grant_add_refuses_a_missing_root() {
+    let private = generated_private_key();
+    let cid = "ab".repeat(32);
+    let commands: &[&[&str]] = &[
+        &["object", "get", "docs.readme"],
+        &["object", "ls"],
+        &["object", "resolve", "docs.readme"],
+        &["object", "history", "docs.readme"],
+        &["object", "rm", "docs.readme"],
+        &["object", "bind", "docs.alias", &cid],
+        &["gc"],
+        &["grant", "ls", "bob"],
+        &["grant", "check", "bob", "read", "docs.readme"],
+        &["grant", "rm", "1"],
+        &["token", "mint", "bob", "--biscuit-private-key", &private],
+    ];
+    for root in new_roots() {
+        for args in commands {
+            let out = root.run(args);
+            let context = format!(
+                "fq-cas {} with {:?} {:?}",
+                args.join(" "),
+                root.given,
+                root.arg
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                root.refusal(),
+                "{context}"
+            );
+            assert_eq!(out.status.code(), Some(1), "{context}");
+            assert!(out.stdout.is_empty(), "{context}: {out:?}");
+            assert!(root.left_nothing(), "{context} created something");
+        }
+    }
+}
+
+/// `object put` and `grant add` create a root that does not exist, parents
+/// included, as `put` does, whichever way it was named; the commands that
+/// refuse a missing root then work against it.
+#[test]
+fn object_put_and_grant_add_create_a_missing_root() {
+    let inputs = tempfile::tempdir().unwrap();
+    let input = inputs.path().join("input.txt");
+    std::fs::write(&input, b"the first thing in a new store").unwrap();
+    let input = input.to_str().unwrap();
+
+    for root in new_roots() {
+        let context = format!("{:?} {:?}", root.given, root.arg);
+        let out = root.run(&["object", "put", "docs.readme", input]);
+        assert!(out.status.success(), "object put with {context}: {out:?}");
+        assert!(root.path.join("index.db").is_file(), "{context}");
+        let out = root.run(&["object", "ls"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "docs.readme\n");
+        assert!(out.status.success(), "object ls with {context}: {out:?}");
+        assert!(root.run(&["gc"]).status.success(), "gc with {context}");
+    }
+
+    for root in new_roots() {
+        let context = format!("{:?} {:?}", root.given, root.arg);
+        let out = root.run(&["grant", "add", "bob", "read", "docs.*"]);
+        assert!(out.status.success(), "grant add with {context}: {out:?}");
+        assert!(root.path.join("grants.db").is_file(), "{context}");
+        let out = root.run(&["grant", "check", "bob", "read", "docs.readme"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "allowed\n");
+        assert!(out.status.success(), "grant check with {context}: {out:?}");
+    }
+}
+
+/// A creating command checks the arguments it can check without a store
+/// before it creates one, so a mistyped argument against a new root prints
+/// its own error, not a database's, and leaves nothing behind.
+#[test]
+fn a_creating_command_with_a_bad_argument_says_so_and_leaves_no_store() {
+    let inputs = tempfile::tempdir().unwrap();
+    let absent = inputs.path().join("absent.txt");
+    let absent = absent.to_str().unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["object", "put", "docs.readme", absent],
+            "No such file or directory (os error 2)",
+        ),
+        (
+            &["grant", "add", "a.b", "read", "docs.*"],
+            "'a.b' is not a valid agent id \
+             (non-empty; no dots, wildcards, whitespace, or control characters)",
+        ),
+        (
+            &["grant", "add", "bob", "fly", "docs.*"],
+            "unknown verb 'fly' (read|write|delete|list|grant)",
+        ),
+        (
+            &["grant", "add", "bob", "read", "*"],
+            "the scope must be a name or a namespace like research.papers.*",
+        ),
+    ];
+    for root in new_roots() {
+        for (args, error) in cases {
+            let out = root.run(args);
+            let context = format!(
+                "fq-cas {} with {:?} {:?}",
+                args.join(" "),
+                root.given,
+                root.arg
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!("fq-cas: {error}\n"),
+                "{context}"
+            );
+            assert_eq!(out.status.code(), Some(1), "{context}");
+            assert!(root.left_nothing(), "{context} created something");
+        }
+    }
+}
+
+/// A root that is a file, or that has a file among its parents, is named in
+/// the error of every command that opens a database, creating or not.
+#[test]
+fn a_root_that_cannot_be_a_directory_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let input = base.join("input.txt");
+    std::fs::write(&input, b"content").unwrap();
+    let file = base.join("file");
+    std::fs::write(&file, b"not a store").unwrap();
+    let under_file = file.join("store");
+
+    let input = input.to_str().unwrap();
+    let commands: &[&[&str]] = &[
+        &["object", "put", "docs.readme", input],
+        &["object", "ls"],
+        &["grant", "add", "bob", "read", "docs.*"],
+        &["grant", "ls", "bob"],
+    ];
+    for args in commands {
+        let out = run(&file, args);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "fq-cas: the store root {} (from --root) is not a directory\n",
+                file.display()
+            ),
+            "fq-cas {}",
+            args.join(" ")
+        );
+        assert_eq!(out.status.code(), Some(1));
+
+        let out = run(&under_file, args);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "fq-cas: cannot use the store root {} (from --root): \
+                 Not a directory (os error 20)\n",
+                under_file.display()
+            ),
+            "fq-cas {}",
+            args.join(" ")
+        );
+        assert_eq!(out.status.code(), Some(1));
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"not a store");
+}
+
+/// A creating command that cannot create the root, because its parent is
+/// not writable, names the root it was making.
+#[cfg(unix)]
+#[test]
+fn a_root_that_cannot_be_created_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let input = base.join("input.txt");
+    std::fs::write(&input, b"content").unwrap();
+    let parent = base.join("read-only");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::create_dir(parent.join("probe")).is_ok() {
+        // Running as root, which permissions do not stop: nothing to test.
+        eprintln!("skipped: {} is writable at mode 555", parent.display());
+        return;
+    }
+
+    let root = parent.join("store");
+    let input = input.to_str().unwrap();
+    let commands: &[&[&str]] = &[
+        &["object", "put", "docs.readme", input],
+        &["grant", "add", "bob", "read", "docs.*"],
+    ];
+    for args in commands {
+        let out = run(&root, args);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "fq-cas: cannot create the store root {} (from --root): \
+                 Permission denied (os error 13)\n",
+                root.display()
+            ),
+            "fq-cas {}",
+            args.join(" ")
+        );
+        assert_eq!(out.status.code(), Some(1));
+        assert!(!root.exists());
+    }
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The first use `docs/guide/access-control.md` walks through, at the
+/// default root of a new store: `key generate`, then `grant add`, then the
+/// rest of the walk-through.
+#[test]
+fn the_access_control_guides_first_use_works_on_a_new_store() {
+    let root = NewRoot::new(Given::Default, &[], true);
+    let out = root.run(&["key", "generate"]);
+    assert!(out.status.success(), "key generate: {out:?}");
+    assert!(root.left_nothing(), "key generate needs no store");
+    let keys = String::from_utf8(out.stdout).unwrap();
+    let key = |prefix: &str| {
+        keys.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let (private, public) = (key("private:"), key("public:"));
+
+    let out = root.run(&["grant", "add", "bob", "read,write", "research.papers.*"]);
+    assert!(out.status.success(), "grant add: {out:?}");
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let out = root.run(&["grant", "ls", "bob"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{id}\tread,write\tresearch.papers.*\n")
+    );
+    let out = root.run(&["grant", "check", "bob", "read", "research.papers.doc1"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "allowed\n");
+
+    let out = root
+        .command(&["token", "mint", "bob", "--ttl", "300"])
+        .env("FQ_BISCUIT_PRIVATE_KEY", &private)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "token mint: {out:?}");
+    let token = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let out = root.run(&["token", "inspect", &token, "--biscuit-public-key", &public]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "principal: bob\n");
+
+    assert!(root.run(&["grant", "rm", &id]).status.success());
+    assert!(root.path.join("grants.db").is_file());
 }
