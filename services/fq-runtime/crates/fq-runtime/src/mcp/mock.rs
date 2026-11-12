@@ -71,6 +71,8 @@ pub(super) struct MockToolServer {
     calls: CallLog,
     behaviour: CallBehaviour,
     control: MockControl,
+    /// The text parts a `tools/call` answers with, in order.
+    answer: Vec<String>,
 }
 
 /// The two flags a test uses to drive a mock's timing: one it reads,
@@ -121,8 +123,9 @@ impl ServerHandler for MockToolServer {
         })
     }
 
-    /// Record what arrived and answer with a trivial success. The
-    /// progress token is read from the request context's merged `_meta`
+    /// Record what arrived and answer with a success carrying the
+    /// configured text parts. The progress token is read from the
+    /// request context's merged `_meta`
     /// — the same place a real server would look before deciding
     /// whether it may emit `notifications/progress`.
     async fn call_tool(
@@ -160,7 +163,8 @@ impl ServerHandler for MockToolServer {
                 return Err(rmcp::ErrorData::internal_error("cancelled", None));
             }
         }
-        Ok(CallToolResult::success(vec![ContentBlock::text("ok")]).into())
+        let parts = self.answer.iter().cloned().map(ContentBlock::text).collect();
+        Ok(CallToolResult::success(parts).into())
     }
 }
 
@@ -213,6 +217,8 @@ pub(super) struct MockOptions {
     pub(super) endless_cursor: bool,
     pub(super) behaviour: CallBehaviour,
     pub(super) progress: Option<(String, super::progress::ProgressRegistry)>,
+    /// What an answered `tools/call` carries: one text part per entry.
+    pub(super) answer: Vec<String>,
 }
 
 impl Default for MockOptions {
@@ -223,8 +229,36 @@ impl Default for MockOptions {
             endless_cursor: false,
             behaviour: CallBehaviour::Answer,
             progress: None,
+            answer: vec!["ok".to_string()],
         }
     }
+}
+
+/// One MCP tool, discovered from a mock server named `server` and
+/// answering every call with `parts` as its text content — the real
+/// [`McpTool`](super::McpTool) adapter over a real rmcp client, for a
+/// crate test that needs an MCP result to pass through the runner (the
+/// tool-result cap, #827). Registered under `<server>__<tool>`.
+pub(crate) async fn mcp_tool_answering(
+    server: &str,
+    tool: &str,
+    parts: Vec<String>,
+) -> Arc<dyn fq_tools::Tool> {
+    let progress = super::progress::ProgressRegistry::default();
+    let (client, _calls, _control) = serve_mock_options(MockOptions {
+        tools: Arc::new(Mutex::new(vec![mock_tool(tool)])),
+        answer: parts,
+        ..MockOptions::default()
+    })
+    .await;
+    let limits = super::McpLimits::default();
+    let (tools, _) = super::discovery::discover_tools(&client, server, &progress, &limits)
+        .await
+        .expect("the mock's tool is discovered");
+    tools
+        .into_iter()
+        .next()
+        .expect("the mock advertises one tool")
 }
 
 /// The full seam: choose how the server answers `tools/call`, wire the
@@ -257,6 +291,7 @@ pub(super) async fn serve_mock_options(
         endless_cursor,
         behaviour,
         progress,
+        answer,
     } = options;
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -268,6 +303,7 @@ pub(super) async fn serve_mock_options(
         calls: Arc::clone(&calls),
         behaviour,
         control: control.clone(),
+        answer,
     };
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_transport).await {
