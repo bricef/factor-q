@@ -43,5 +43,5 @@ services/fq-runtime/crates/fq-runtime/src/worker/store.rs 1421
 # reap — two JSON fields and one line of the human report. The report is
 # rendered in this file and nowhere else, so the six lines belong beside the
 # other report fields rather than in a module of their own.
-services/fq-store/src/cli.rs 848
+services/fq-store/src/cli.rs 847
 services/fq-store/src/index.rs 819
