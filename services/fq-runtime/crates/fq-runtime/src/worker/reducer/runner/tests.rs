@@ -2037,7 +2037,8 @@ async fn state_row_written_on_completion_with_terminal_at_set() {
 /// outcome must carry that id and no fresh one: the WAL row is how startup
 /// recovery finds the claim of an invocation that died before its claim
 /// was marked started. The signal is checked only to have fired by the
-/// time the run returns; when it fires relative to the WAL write is not.
+/// time the run returns; when it fires relative to the WAL write is
+/// pinned by the two tests after this one.
 #[tokio::test]
 async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
     let server = crate::test_support::nats::test_nats();
@@ -2097,6 +2098,149 @@ async fn a_dispatched_invocation_runs_under_the_id_its_claim_names() {
         .unwrap()
         .expect("the WAL row carries the id the claim names");
     assert_eq!(row.phase, "completed");
+}
+
+/// A runner that writes its WAL to `store` and publishes to `bus`, as
+/// the trigger dispatcher's worker does.
+fn signalling_runner(bus: &EventBus, store: Arc<WorkerStore>) -> ReducerRunner {
+    ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .bus(bus.clone())
+                .pricing(test_pricing())
+                .store(store)
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    )
+}
+
+/// Make every insert into `invocation_state` fail from now on, through a
+/// connection of its own to the worker store's file. An invocation's
+/// first WAL write is its first such insert.
+async fn refuse_wal_rows(worker_db: &std::path::Path) {
+    use sqlx::{ConnectOptions, Connection};
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(worker_db)
+        .connect()
+        .await
+        .expect("open the worker store's file");
+    sqlx::query(
+        "CREATE TRIGGER refuse_wal_rows BEFORE INSERT ON invocation_state \
+         BEGIN SELECT RAISE(ABORT, 'injected: the worker store refuses the WAL write'); END",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("install the refusal");
+    conn.close().await.expect("close the worker store's file");
+}
+
+/// **The durable start fires once the invocation's first WAL write has
+/// landed, not before (#966).** The trigger dispatcher acks a trigger
+/// when this signal fires, because from then on the run is recoverable
+/// from the WAL.
+///
+/// The run is driven with the signal polled first, so once the signal
+/// has fired the run is not polled again and gets no further than the
+/// poll that fired it. By then the invocation's WAL row must exist: the
+/// first step's, in flight, under the id the signal carries.
+#[tokio::test]
+async fn the_durable_start_fires_once_the_first_wal_write_has_landed() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        WorkerStore::open(&store_dir.path().join("worker.db"))
+            .await
+            .expect("worker store"),
+    );
+    let runner = signalling_runner(&bus, store.clone());
+    let agent = simple_responder_agent(&unique_agent_id("fires-after-wal"));
+    // Never asked: the first model call comes after the first WAL write.
+    let llm = FixtureClient::new();
+
+    let invocation_id = Uuid::now_v7();
+    let (durable_start, fired) = DurableStart::channel(invocation_id);
+    let run = runner.run_signalling(
+        &agent,
+        &llm,
+        Trigger::mint(TriggerSource::Subject, None, json!({"input": "go"})),
+        Some(1),
+        durable_start,
+    );
+    tokio::pin!(run);
+    tokio::select! {
+        biased;
+        signal = fired => signal.expect("the durable start fires rather than being dropped"),
+        outcome = &mut run => panic!("the run ended without firing its durable start: {outcome:?}"),
+    }
+
+    let row = store
+        .get_invocation_state(&invocation_id.to_string())
+        .await
+        .unwrap()
+        .expect("the invocation's WAL row exists by the time its durable start fires");
+    assert_eq!(row.step_index, 0, "the row is the first step's");
+    assert_eq!(row.terminal_at, None, "the row is in flight");
+}
+
+/// **A first WAL write that fails drops the durable start unfired
+/// (#966).** The worker store's file refuses every insert into
+/// `invocation_state`, so the invocation's first WAL write fails. The run
+/// must end in that error with its signal dropped, never fired: a signal
+/// fired before the write would have the trigger dispatcher ack a trigger
+/// whose run left nothing to recover.
+#[tokio::test]
+async fn a_failed_first_wal_write_drops_the_durable_start_unfired() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let store_dir = tempdir().expect("tempdir");
+    let worker_db = store_dir.path().join("worker.db");
+    let store = Arc::new(WorkerStore::open(&worker_db).await.expect("worker store"));
+    refuse_wal_rows(&worker_db).await;
+    let runner = signalling_runner(&bus, store.clone());
+    let agent = simple_responder_agent(&unique_agent_id("wal-write-refused"));
+    // Never asked: the first model call comes after the first WAL write.
+    let llm = FixtureClient::new();
+
+    let invocation_id = Uuid::now_v7();
+    let (durable_start, fired) = DurableStart::channel(invocation_id);
+    let outcome = runner
+        .run_signalling(
+            &agent,
+            &llm,
+            Trigger::mint(TriggerSource::Subject, None, json!({"input": "go"})),
+            Some(1),
+            durable_start,
+        )
+        .await;
+
+    assert!(
+        matches!(&outcome, Err(ExecutorError::WorkerStore(msg)) if msg.contains("injected")),
+        "the run ends on the refused WAL write: {outcome:?}"
+    );
+    assert!(
+        fired.await.is_err(),
+        "the durable start fired although the first WAL write failed"
+    );
+    assert!(
+        store
+            .get_invocation_state(&invocation_id.to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused write left no WAL row"
+    );
 }
 
 /// The error returned to the caller must carry the same
