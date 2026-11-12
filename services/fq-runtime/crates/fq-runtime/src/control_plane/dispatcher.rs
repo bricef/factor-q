@@ -731,6 +731,9 @@ pub enum DispatcherError {
 }
 
 #[cfg(test)]
+mod durable_start_signal_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
@@ -843,7 +846,7 @@ mod tests {
     /// there is: recovery over its worker's WAL. These tests' workers have
     /// a fresh WAL with nothing in flight, so there is nothing to record,
     /// and saying so is the honest version of skipping the step.
-    async fn recovered_claims(
+    pub(super) async fn recovered_claims(
         store: &Arc<crate::control_plane::ControlPlaneStore>,
     ) -> TriggerClaims {
         let dir = tempfile::tempdir().unwrap();
