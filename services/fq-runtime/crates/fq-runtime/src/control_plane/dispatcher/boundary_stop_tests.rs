@@ -231,8 +231,9 @@ impl StateDir {
     }
 
     /// What the claim row for `seq` says, read by a claim that cannot win
-    /// it while a row exists. Only for the end of a test: on a missing
-    /// row the probe wins, and writes one.
+    /// it while a row exists. On a row that exists the probe writes
+    /// nothing; on a missing one it wins and writes one, so a probe that
+    /// finds no row is the last thing a test can learn about the claim.
     async fn claim(&self, bus: &EventBus, seq: u64) -> TriggerClaim {
         self.claims
             .claim_trigger(test_key(bus, seq), "probe", "probe", 0)
@@ -269,6 +270,24 @@ async fn next_delivery(consumer: &mut PullConsumer) -> async_nats::jetstream::Me
         .expect("a delivery within 20s")
         .expect("stream open")
         .expect("message ok")
+}
+
+/// Listen on `msg`'s own ack subject from a connection of the test's
+/// own, so every answer anyone sends the broker for that delivery
+/// (`+ACK`, `-NAK`, `+WPI`, `+TERM`) is heard here. The client is
+/// returned with the subscription to keep the connection open.
+async fn answers_to(
+    server_url: &str,
+    msg: &async_nats::jetstream::Message,
+) -> (async_nats::Client, async_nats::Subscriber) {
+    let client = async_nats::connect(server_url).await.expect("listen");
+    let reply = msg.reply.clone().expect("a delivery has an ack subject");
+    let answers = client.subscribe(reply).await.expect("subscribe");
+    client
+        .flush()
+        .await
+        .expect("the subscription reached the broker");
+    (client, answers)
 }
 
 /// Wait until the broker has nothing unacked on `consumer`, and then
@@ -321,6 +340,7 @@ async fn a_drain_during_setup_leaves_the_trigger_for_the_next_binary_which_runs_
     let (mut consumer, msg) = one_delivery(&bus, &agent).await;
     let seq = msg.info().unwrap().stream_sequence;
     let redelivery = msg.clone();
+    let (_listener, mut answers) = answers_to(server.url(), &msg).await;
     let handling = tokio::spawn(async move { first.handle(&msg).await });
 
     let drained = setup.parked().await;
@@ -331,8 +351,36 @@ async fn a_drain_during_setup_leaves_the_trigger_for_the_next_binary_which_runs_
         .expect("handle returns once the invocation stops")
         .expect("task joins");
 
-    // Neither acked nor NAKed: the broker still owns the delivery.
+    // Neither acked nor NAKed. The broker still counts the delivery as
+    // pending, which a NAK with a delay would leave it as too, so what
+    // settles the question is the delivery's ack subject: nothing
+    // answered it, in either direction.
     ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
+    if let Ok(Some(answer)) = tokio::time::timeout(Duration::from_millis(300), answers.next()).await
+    {
+        panic!(
+            "the drained delivery was answered with {:?}; it must be left for the next binary",
+            String::from_utf8_lossy(&answer.payload)
+        );
+    }
+    // The claim stays with the binary that drained, still naming the
+    // invocation that wrote nothing. The next binary's recovery has no
+    // WAL row to mark it by, so its adoption starts the trigger; and had
+    // a row existed, recovery would have marked this claim started and
+    // the redelivery would be dropped instead. A released claim would
+    // lose that: the redelivery would win a fresh one either way.
+    assert_eq!(
+        state.claim(&bus, seq).await,
+        TriggerClaim::Held {
+            claimant: "binary-1".to_string()
+        },
+        "the drained trigger's claim must stay held for the next binary to adopt"
+    );
+    assert_eq!(
+        setup.reclaimed(),
+        vec![drained],
+        "nothing will resume the drained invocation, so its workspace goes"
+    );
     assert!(
         state
             .wal
