@@ -65,4 +65,10 @@ pub struct DaemonFacts {
     /// claim an exited process left the trigger redelivery window from
     /// here before it calls the claim abandoned.
     pub dispatching_since_ms: i64,
+    /// `[state] retention_days` in milliseconds: the window after which
+    /// the retention sweep ages failures and dead letters out of the
+    /// projection. `control.doctor` stops listing a dead trigger claim at
+    /// the same age, so a claim's line goes when the dead letter it points
+    /// at does. `None` when the sweep is off.
+    pub retention_ms: Option<i64>,
 }

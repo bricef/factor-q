@@ -222,19 +222,24 @@ impl ControlPlaneStore {
     /// The claim that names `invocation_id`: the trigger delivery that
     /// started it, or is to.
     ///
-    /// `invocation_id` has no index, so this reads the table through.
-    /// That is why the link is read for one invocation at a time and is
-    /// not a column of any list: a per-row lookup in a list would scan the
-    /// table once per row. An id is named by at most one row — every
-    /// claim writes a fresh one, and an adoption writes the adopter's
-    /// own — so the scan stops at the first match.
+    /// `invocation_id` has no index, so this scans the table. That is why
+    /// the link is read for one invocation at a time and is not a column
+    /// of any list: a per-row lookup in a list would scan the table once
+    /// per row. An id is named by at most one row — every claim writes a
+    /// fresh one, and an adoption writes the adopter's own — so the scan
+    /// stops at its first match, and it runs newest row first (`rowid`
+    /// descending, which SQLite walks without a sort) because the run an
+    /// operator asks about is usually recent: a claim written lately is
+    /// found after reading only the rows written since. A miss, or a run
+    /// whose claim is old, still reads the whole table. The ordering can
+    /// go once the column is indexed, which #969 owns.
     pub async fn trigger_claim_for_invocation(
         &self,
         invocation_id: &str,
     ) -> Result<Option<TriggerClaimRow>, ControlPlaneStoreError> {
         let row = sqlx::query(
             "SELECT stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at \
-             FROM trigger_claim WHERE invocation_id = ? LIMIT 1",
+             FROM trigger_claim WHERE invocation_id = ? ORDER BY rowid DESC LIMIT 1",
         )
         .bind(invocation_id)
         .fetch_optional(&self.pool)

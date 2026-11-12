@@ -1,14 +1,16 @@
-//! How often the trigger-to-invocation link reads the claim table,
-//! counted as statements.
+//! How often the trigger-to-invocation link reads the stores, counted as
+//! statements.
 //!
 //! The claim table has no index on `invocation_id` and nothing sweeps
 //! it, so it grows by one row per trigger and a lookup by invocation
 //! reads it through. What is defended here is that no operator read
 //! multiplies that by the size of what it shows: the invocation list
 //! makes no claim read at all, one invocation's detail makes one, and the
-//! stranded-claim check makes one however many claims it judges. A
-//! timing would say the same thing only on a big enough table and only
-//! sometimes; a statement count says it on any table.
+//! stranded-claim check makes one, plus two primary-key reads for each
+//! claimed row with no record of its run, and nothing for the started
+//! rows that make up the rest of the table. A timing would say the same
+//! thing only on a big enough table and only sometimes; a statement count
+//! says it on any table.
 //!
 //! Its own test binary for the reason `consumer_log_rate.rs` gives: the
 //! statements are seen through sqlx's own `sqlx::query` events, which
@@ -19,7 +21,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use fq_runtime::bus::TRIGGER_REDELIVERY_WINDOW;
+use fq_runtime::bus::{DEFAULT_TRIGGER_MAX_AGE, TRIGGER_REDELIVERY_WINDOW};
 use fq_runtime::control_plane::store::{InvocationArchiveRow, OwnerStatus, TriggerKey};
 use fq_runtime::views::{ClaimJudgement, DEFAULT_LONG_DISPATCH_THRESHOLD_MS};
 use fq_runtime::worker::InvocationStateRow;
@@ -34,6 +36,11 @@ struct Statements(Arc<Mutex<Vec<String>>>);
 impl Statements {
     fn clear(&self) {
         self.0.lock().unwrap().clear();
+    }
+
+    /// Every statement since the last `clear`.
+    fn all(&self) -> usize {
+        self.0.lock().unwrap().len()
     }
 
     /// Statements that named the claim table since the last `clear`.
@@ -173,12 +180,25 @@ async fn no_operator_read_scans_the_claim_table_once_per_row() {
         claimant: THIS_DAEMON,
         dispatching_since_ms: NOW_MS - 86_400_000,
         redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
+        stream_epoch: 1,
+        stream_max_age_ms: DEFAULT_TRIGGER_MAX_AGE.as_millis() as i64,
+        horizon_ms: Some(30 * 86_400_000),
         now_ms: NOW_MS,
     };
+    // Every read once before counting, so the pools have opened the
+    // connections they will use and no set-up statement is counted.
+    views.invocation_index(None, true, 500).await.unwrap();
+    views
+        .invocation("live", NOW_MS, 30_000, DEFAULT_LONG_DISPATCH_THRESHOLD_MS)
+        .await
+        .unwrap();
+    views.stranded_trigger_claims(&judgement).await.unwrap();
 
     // A small table first, then the same reads over forty times the rows.
+    let mut unsettled_total = 1;
     for (finished, unsettled) in [(0, 0), (120, 24)] {
         seed(&cp, 1_000 + finished, finished, unsettled).await;
+        unsettled_total += unsettled;
 
         statements.clear();
         let listed = views.invocation_index(None, true, 500).await.unwrap();
@@ -200,12 +220,21 @@ async fn no_operator_read_scans_the_claim_table_once_per_row() {
 
         statements.clear();
         let stranded = views.stranded_trigger_claims(&judgement).await.unwrap();
-        assert_eq!(stranded.len() as u64, 1 + unsettled);
+        assert_eq!(stranded.len() as u64, unsettled_total);
         assert_eq!(
             statements.on_claim_table(),
             1,
             "{} stranded claims judged from one read of the table",
             stranded.len()
+        );
+        // Each claimed row with no coordination row costs a WAL read and,
+        // when that misses, a second coordination read: two per stranded
+        // claim here, and nothing for the started rows however many.
+        assert_eq!(
+            statements.all() as u64,
+            1 + 2 * unsettled_total,
+            "every statement the check ran, over {} started claims",
+            finished + 4
         );
     }
 }

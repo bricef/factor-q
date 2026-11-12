@@ -99,13 +99,15 @@ fn invocation_summary_view_serialises_to_stable_json_shape() {
 }
 
 /// The `trigger:` line (#954): the delivery that started the run, where
-/// its claim stands, and who took it when. A run nothing on the stream
-/// started says so rather than leaving the line out.
+/// its claim stands, and who took it when. A run no claim names says so
+/// rather than leaving the line out, and says only what an absent claim
+/// shows: a run refused before its first durable write has events under
+/// the id and no claim, though the trigger stream started it.
 #[test]
 fn format_trigger_delivery_names_the_delivery_or_its_absence() {
     let mut delivery = fq_ops::views::TriggerDeliveryView {
         stream: "fq-triggers".to_string(),
-        stream_epoch: 1_767_323_045_000_000_000,
+        stream_epoch: "1767323045000000000".to_string(),
         stream_seq: 42,
         state: fq_ops::views::TriggerClaimState::DurablyStarted,
         claimant: "worker-alpha".to_string(),
@@ -123,6 +125,7 @@ fn format_trigger_delivery_names_the_delivery_or_its_absence() {
     );
     assert_eq!(
         format_trigger_delivery(None),
-        "none (not started from the trigger stream)"
+        "none recorded: not started from the trigger stream, or its claim was released or taken \
+         over before the run's first durable write"
     );
 }

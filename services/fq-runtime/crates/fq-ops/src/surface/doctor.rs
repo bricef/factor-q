@@ -139,22 +139,34 @@ pub struct DoctorReport {
     #[serde(default)]
     pub agents_at_cap: Vec<crate::health::AgentAtCap>,
     /// Trigger claims that have not settled and will not settle on their
-    /// own: deliveries taken off the trigger stream that were neither
-    /// released nor recorded as started. The claim is the only record
-    /// linking a delivery to its run, so a trigger that was taken and
-    /// never ran shows up nowhere else.
+    /// own: claimed deliveries that were neither released nor recorded as
+    /// started. The claim is the only record linking a delivery to its
+    /// run, so a delivery that never started one shows up nowhere else.
     #[serde(default)]
     pub trigger_claims: DoctorTriggerClaims,
 }
 
-/// `control.doctor`'s trigger-claim block.
+/// `control.doctor`'s trigger-claim block, with the bounds its claims were
+/// judged against.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
 pub struct DoctorTriggerClaims {
     /// How long a trigger that an exited process left unacked can take to
-    /// be redelivered to this daemon, in milliseconds: the trigger retry
-    /// ladder from end to end. A claim an exited process left is judged
-    /// against it, measured from when this daemon started dispatching.
+    /// be redelivered to this daemon, in milliseconds: the sum of the
+    /// trigger retry ladder. It is measured from when this daemon started,
+    /// not from when it began consuming, so a broker outage longer than
+    /// the window, or the wall clock stepping forward, can judge a
+    /// deliverable claim never started too early.
     pub redelivery_window_ms: i64,
+    /// How long the trigger stream keeps a message, in milliseconds. A
+    /// claim older than this names a message that has aged out.
+    pub stream_max_age_ms: i64,
+    /// How old a claim an exited process left may be and still be
+    /// reported, in milliseconds: the retention window that ages out
+    /// failures and dead letters. Absent when that retention is turned
+    /// off, and then such a claim is reported for as long as its row
+    /// exists.
+    #[serde(default)]
+    pub horizon_ms: Option<i64>,
     /// Every stranded claim, oldest first. Empty on a healthy table.
     pub stranded: Vec<crate::health::StrandedTriggerClaim>,
 }
@@ -186,8 +198,8 @@ impl DoctorReport {
         self
     }
 
-    /// Stranded trigger claims an operator should act on: every one but
-    /// those still inside their redelivery window.
+    /// Stranded trigger claims that are issues: a delivery that never
+    /// started a run, and a run whose claim was never marked.
     pub fn stranded_claim_issues(
         &self,
     ) -> impl Iterator<Item = &crate::health::StrandedTriggerClaim> {
@@ -218,7 +230,8 @@ impl DoctorReport {
     /// invocations, permanent failures, a consumer that has stopped
     /// making progress, or a stranded trigger claim. In-flight work that
     /// is merely running (not stuck) is healthy, not an issue, and so is
-    /// a consumer that is merely behind or a claim awaiting redelivery.
+    /// a consumer that is merely behind, a claim awaiting redelivery, or a
+    /// claim the report cannot judge.
     pub fn has_issues(&self) -> bool {
         self.workers.stale > 0
             || self.executions.stuck > 0

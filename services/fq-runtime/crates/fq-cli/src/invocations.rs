@@ -45,12 +45,20 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
 }
 
 /// The `trigger:` line of `fq invocation show` (#954): which delivery on
-/// the trigger stream started the run, and where its claim stands. Said
-/// when there is none, too, so "not started from the stream" never has
-/// to be read off a missing line. Pure; covered by unit tests.
+/// the trigger stream started the run, and where its claim stands.
+///
+/// Said when there is none, too, and worded for what an absent claim
+/// shows. A delivery that ends before its run's first durable write gives
+/// its claim back, though the run can already have published events under
+/// the claim's id (an agent refused for an unavailable MCP server
+/// does), and an adoption writes the adopter's id over the old one. So no
+/// claim is not proof the run came from somewhere other than the stream.
+/// Pure; covered by unit tests.
 fn format_trigger_delivery(trigger: Option<&fq_ops::views::TriggerDeliveryView>) -> String {
     let Some(t) = trigger else {
-        return "none (not started from the trigger stream)".to_string();
+        return "none recorded: not started from the trigger stream, or its claim was released \
+                or taken over before the run's first durable write"
+            .to_string();
     };
     let state = match t.state {
         fq_ops::views::TriggerClaimState::DurablyStarted => "durably started",
