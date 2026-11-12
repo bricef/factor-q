@@ -38,7 +38,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     },
     {
@@ -51,7 +52,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     },
     {
@@ -64,7 +66,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     },
     {
@@ -77,7 +80,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     },
     {
@@ -90,7 +94,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     },
     {
@@ -103,7 +108,8 @@
         "redeliveries": #,
         "stuck": false,
         "malformed_acked": 0,
-        "duplicate_dropped": 0
+        "duplicate_dropped": 0,
+        "held_duplicate_dropped": 0
       }
     }
   ],
