@@ -52,6 +52,7 @@ impl TriggerDispatcher {
                 ),
                 phase: FailurePhase::Setup,
                 partial_totals: InvocationTotals::default(),
+                detail: None,
             }),
         )
         .annotate(

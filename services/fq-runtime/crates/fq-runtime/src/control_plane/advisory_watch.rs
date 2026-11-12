@@ -239,6 +239,7 @@ impl AdvisoryWatch {
             ),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         });
         let event = match &agent_id {
             Some(agent) => Event::new(agent.clone(), Uuid::now_v7(), payload),

@@ -410,6 +410,7 @@ mod tests {
                 error_message: "trigger exhausted after 5 deliveries (limit 5)".into(),
                 phase: crate::events::FailurePhase::Setup,
                 partial_totals: Default::default(),
+                detail: None,
             }),
         )
     }

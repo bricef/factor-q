@@ -72,6 +72,7 @@ fn failure(agent: &str, kind: FailureKind, message: &str) -> Event {
             error_message: message.into(),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
 }

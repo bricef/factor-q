@@ -1956,6 +1956,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     error_message,
                     phase,
                     partial_totals,
+                    detail: None,
                 }),
             ),
         )

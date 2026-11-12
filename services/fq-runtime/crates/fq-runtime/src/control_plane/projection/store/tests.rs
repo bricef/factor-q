@@ -515,6 +515,7 @@ fn sample_failed(agent: &str, inv: Uuid) -> Event {
                 sampling_cost: 0.0,
                 elicitation_cost: 0.0,
             },
+            detail: None,
         }),
     )
 }
@@ -1507,6 +1508,7 @@ fn sample_failed_kind(agent: &str, inv: Uuid, kind: FailureKind) -> Event {
             error_message: "boom".to_string(),
             phase: FailurePhase::LlmResponse,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
 }
@@ -1869,6 +1871,7 @@ async fn a_dead_lettered_trigger_is_recorded() {
             error_message: "trigger exhausted after 5 deliveries (limit 5)".into(),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
     .annotate(
