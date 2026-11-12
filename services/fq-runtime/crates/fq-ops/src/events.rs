@@ -562,8 +562,12 @@ impl Annotations {
 // payload-free — so a test can ask "is every type covered?" of a corpus
 // or a renderer without a hand-maintained list that a new variant would
 // silently miss. `From<&EventPayload>` and `EnumIter` come with the
-// derive; the kind names are the variant names.
+// derive; the kind names are the variant names. On the wire, where a
+// payload names another event (`FailureDetail`), a kind is spelled as
+// that event's `event_type`, and a name this build lacks reads as
+// `Unknown`, for the same reason the payload's own tag does.
 #[strum_discriminants(name(EventKind), derive(Hash, PartialOrd, Ord, strum::EnumIter))]
+#[strum_discriminants(derive(Serialize, Deserialize), serde(rename_all = "snake_case"))]
 pub enum EventPayload {
     // Agent lifecycle
     Triggered(TriggeredPayload),
@@ -751,6 +755,7 @@ pub enum EventPayload {
     /// exists only as a deserialisation landing pad, and the payload
     /// body is discarded on the way in.
     #[serde(other)]
+    #[strum_discriminants(serde(other))]
     Unknown,
 }
 
