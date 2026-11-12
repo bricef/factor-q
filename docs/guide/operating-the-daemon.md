@@ -908,6 +908,61 @@ issue on its own; it says poison was skipped, not that history was
 lost. A halt and a malformed count never read as one thing, because
 they call for opposite responses.
 
+**The dispatcher counts the copies of a trigger it refuses, two kinds
+apart.** It arbitrates every delivery against the trigger's claim (see
+[Which trigger started a run](#which-trigger-started-a-run-and-claimed-deliveries-that-never-settled)),
+and a copy the claim refuses starts nothing and leaves no other trace.
+`fq doctor` names both counts on the dispatcher's line, and `fq status`
+prints each on a line of its own under the consumer:
+
+```text
+  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon
+     started: 5 after their run started, 2 while held)
+  -> "while held" is a copy that met a claim this daemon holds with no
+     start recorded, left unacked: its first copy was still waiting or
+     starting, or this daemon will never settle that claim, and the
+     claim does not say which; the daemon log has a warn line for each
+     with its sequence, attempt and the claim's age
+```
+
+- **After their run started.** The claim records the run's first
+  durable write, so the copy is acked and dropped: a redelivery that
+  crossed the run's start, the redelivery of a run a previous process
+  began and this one's recovery resumed, or a replay of the stream.
+- **While held.** The claim is this daemon's and records no start, so
+  the copy is dropped and left unacked for the copy that took the
+  claim. That first copy may be waiting behind a paused model, a full
+  agent or the worker cap, where an in-progress ack every 250 ms keeps
+  it alive and it is redelivered only if those stop landing for a whole
+  ack window. It may be starting: nothing keeps a delivery alive between
+  its worker permit and its first durable write (its workspace, its MCP
+  servers, its first step), so a start slower than the window (30
+  seconds on a first delivery) is redelivered underneath it. Either way
+  it still starts once. Or this daemon may never settle that claim
+  ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
+  task panicked before its first durable write, or recording its start
+  failed, which stops the run for the next start's recovery to resume.
+  Every delivery of that trigger is then dropped the same way until its
+  deliveries run out and it is dead-lettered as `trigger_exhausted`.
+  Nothing on the claim tells these apart, so neither does the count.
+
+Each refused copy has a warn line in the daemon log, `dropping
+duplicate trigger delivery after durable start` or `dropping a
+redelivered trigger whose claim this daemon already holds`, with its
+stream sequence and its attempt (`delivered`); the held line adds the
+claimant, the claim's age (`claim_age_ms`) and the invocation id the
+claim names (`claim_invocation_id`). One held drop is a held or slow
+start redelivered underneath its first copy, and costs the trigger one
+of its five deliveries. The same sequence dropped again on a later
+delivery means its first copy has not started in between. If the
+claim's invocation id has a run (`fq invocation show <id>`), the
+stranded-claims block of `fq doctor` lists it as started and never
+marked. If it has none, the first copy is still starting or never will,
+and a trigger that runs out of deliveries that way is dead-lettered.
+Neither count is a doctor issue. Both are kept in the daemon's memory
+and start again at zero when it restarts; the log lines are the lasting
+record.
+
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
 rows below that point as they were (see
@@ -1036,7 +1091,8 @@ the retention sweep deletes a claim an exited process left.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
   still be redelivered. If this daemon holds the claim, every redelivery
-  is dropped and the trigger ends as a `trigger_exhausted` dead letter
+  is dropped (and counted as a duplicate dropped while held) and the
+  trigger ends as a `trigger_exhausted` dead letter
   although its run started: that dead letter is false, and requeuing it
   starts the work twice. If an exited process left it, a redelivery would
   be adopted and start the work again, and a false dead letter may
@@ -1059,7 +1115,12 @@ model, a full agent or the worker cap for hours (`Throttled models` and
 daemon holding it is still going to start it. A claim this daemon holds
 and will never settle — a run that panicked before its first durable
 write — looks the same, and is not reported until a restart makes its
-holder a process that has exited. A started run whose message is gone,
+holder a process that has exited. Until then its redeliveries are what
+show it: each is dropped, counted on the `fq-dispatcher` line as a
+duplicate dropped while held, and logged with its sequence and the
+claim's age (see
+[the dispatcher's duplicate counts](#when-a-consumer-stops-making-progress)).
+A started run whose message is gone,
 since no redelivery can follow. And a claim an exited process left that
 is older than the horizon.
 
