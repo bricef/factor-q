@@ -623,7 +623,7 @@
               }
             ],
             "default": null,
-            "description": "The trigger delivery that started this invocation, read from the\ndispatcher's claim on it. The claim outlives the run's live state\nand its archive record, so a finished run shows it too.\n\nAbsent when no claim names the invocation, which says less than it\nseems: the run was not started from the trigger stream, or its\nclaim was released or taken over before the run's first durable\nwrite. A delivery that ends before that write (a refusal, a\ntransient failure) gives its claim back, and an adoption writes the\nadopter's own id over the one the claim named, yet a run refused\nthat way can already have published events under the id."
+            "description": "The trigger delivery that started this invocation, read from the\ndispatcher's claim on it. The claim outlives the run's live state,\nso a finished run shows it too, until the daemon's retention sweep\ndeletes the claim (`[state] trigger_claim_retention_days` after it\nwas claimed).\n\nAbsent when no claim names the invocation, which says less than it\nseems: the run was not started from the trigger stream, its claim\nwas released or taken over before the run's first durable write,\nor the claim has been swept. A delivery that ends before that write\n(a refusal, a transient failure) gives its claim back, and an\nadoption writes the adopter's own id over the one the claim named,\nyet a run refused that way can already have published events under\nthe id."
           }
         },
         "required": [
@@ -2941,7 +2941,7 @@
             "properties": {
               "horizon_ms": {
                 "default": null,
-                "description": "How old a claim an exited process left may be and still be\nreported, in milliseconds: the retention window that ages out\nfailures and dead letters. Absent when that retention is turned\noff, and then such a claim is reported for as long as its row\nexists.",
+                "description": "How old a claim an exited process left may be and still be\nreported, in milliseconds: the trigger-claim retention window, the\nage at which the daemon's retention sweep deletes such a claim.\nAbsent when claim retention is turned off, and then such a claim\nis reported for as long as its row exists.",
                 "format": "int64",
                 "type": [
                   "integer",
