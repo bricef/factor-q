@@ -37,6 +37,19 @@ pub enum ConfigError {
     )]
     InvalidEventMaxAge(String),
 
+    /// `[state] trigger_claim_retention_days` below its floor. A started
+    /// claim row is what stops a redelivered trigger from starting a
+    /// second run, so a row swept while its message can still be
+    /// delivered would let that happen. The value and the floor are named:
+    /// the fix is a number, or `-1`.
+    #[error(
+        "[state] trigger_claim_retention_days = {value} is below the minimum of {floor}: a claim \
+         row is what stops a redelivered trigger from starting a second run, so it has to outlive \
+         the trigger stream's maximum message age plus a day — set at least {floor}, or -1 to keep \
+         claim rows for ever"
+    )]
+    TriggerClaimRetentionBelowFloor { value: i64, floor: i64 },
+
     #[error("provider '{0}' is not configured")]
     ProviderNotConfigured(&'static str),
 

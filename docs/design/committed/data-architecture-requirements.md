@@ -373,7 +373,7 @@ are constraints, not choices.
 | Static configuration (`fqd.toml`), agent definitions, and skills are filesystem files. | [`ADR-0005`](../../adrs/accepted/0005-agent-definition-format.md), implementation. |
 | Pricing data is fetched from a remote source and cached locally; the cache is rebuildable. | implementation. |
 | Audit-log retention is operator-set with `[events].max_age` (default 30 days). Trigger and advisory retention remains a separate fixed 24-hour window. | [`config/events.rs`](../../../services/fq-runtime/crates/fq-runtime/src/config/events.rs) and [`bus.rs`](../../../services/fq-runtime/crates/fq-runtime/src/bus.rs). |
-| Control-plane retention **is** operator-set: `[state].retention_days` (default 30) sweeps `invocation_archive` and the projection's non-cost rows; `stale_worker_retention_days` (default 7) is a separate window on the worker roster. | [`config.rs`](../../../services/fq-runtime/crates/fq-runtime/src/config.rs) `StateConfig`. |
+| Control-plane retention **is** operator-set: `[state].retention_days` (default 30) sweeps `invocation_archive` and the projection's non-cost rows; `stale_worker_retention_days` (default 7) is a separate window on the worker roster; `trigger_claim_retention_days` (default 30, never below the trigger stream's message age plus a day) is a third, on the dispatcher's trigger claims. | [`config.rs`](../../../services/fq-runtime/crates/fq-runtime/src/config.rs) `StateConfig`. |
 | Secrets (API keys) are read from environment variables; factor-q itself does not write them anywhere. | [`fqd.toml`](../../../services/fq-runtime/crates/fq-cli/src/templates/fqd.toml) provider section. |
 
 ---

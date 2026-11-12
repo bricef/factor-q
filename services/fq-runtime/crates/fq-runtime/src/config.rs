@@ -110,12 +110,13 @@ pub struct Config {
 /// `[state]` — durable runtime state: where it lives, and how long
 /// the sweepable parts of it are kept. Drives the scheduled sweeps for
 /// the `invocation_archive` and rebuildable projection `events` tables,
-/// and for stale rows in `coordination_worker`.
+/// for stale rows in `coordination_worker`, and for `trigger_claim`.
 ///
-/// Two independent retention windows, because they hold different
+/// Three independent retention windows, because they hold different
 /// things: `retention_days` bounds the record of work that finished,
 /// `stale_worker_retention_days` bounds the roster of daemons that
-/// died. Each disables on its own `-1`.
+/// died, and `trigger_claim_retention_days` bounds the record of which
+/// trigger delivery started which run. Each disables on its own `-1`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateConfig {
     /// Directory for data factor-q must never regenerate — today the
@@ -155,14 +156,43 @@ pub struct StateConfig {
     /// remediations to work normally.
     #[serde(default = "default_stale_worker_retention_days")]
     pub stale_worker_retention_days: i64,
+    /// How long a trigger claim row is kept before the retention sweep
+    /// deletes it, in days, counted from when it was claimed. Default 30.
+    /// Set to `-1` to keep claim rows for ever. A value below
+    /// [`trigger_claim_retention_floor_days`] (two days) is refused at
+    /// load.
+    ///
+    /// The dispatcher claims every trigger delivery before it does
+    /// anything else with it, and marks the claim `durably_started` when
+    /// the run makes its first durable write (ADR-0032). A started row is
+    /// what stops a redelivered or replayed copy of that trigger from
+    /// starting a second run, so it has to outlive the message: the floor
+    /// is the trigger stream's maximum message age plus a day. Past that
+    /// age the row names a message the stream has dropped, and nothing
+    /// can deliver it again.
+    ///
+    /// The row is also the only record of which delivery started which
+    /// run — the `trigger:` line of `fq invocation show` — and the sweep
+    /// takes that link with it. Lowering this loses the link for older
+    /// runs and nothing else. The default keeps it about as long as
+    /// `retention_days` keeps the archived run, but the claim goes first,
+    /// by the run's length plus the archive's lag: this window runs from
+    /// the claim, the archive's from archiving. `fq doctor` stops listing
+    /// a claim an exited process left at this same age, when the sweep
+    /// deletes it. A `claimed` row this daemon holds is never deleted,
+    /// however old: it may be a trigger the daemon is still holding.
+    #[serde(default = "default_trigger_claim_retention_days")]
+    pub trigger_claim_retention_days: i64,
     /// How often the retention sweep runs, in seconds.
     /// Default 1 hour. Production doesn't need faster; tests
-    /// override via `[state]` in their config. Shared by both
-    /// windows above — an hourly tick is right for a sweep whose
+    /// override via `[state]` in their config. Shared by every
+    /// window above — an hourly tick is right for a sweep whose
     /// shortest window is measured in days.
     #[serde(default = "default_sweep_interval_seconds")]
     pub sweep_interval_seconds: u64,
 }
+
+const MS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
 
 fn default_retention_days() -> i64 {
     30
@@ -172,8 +202,63 @@ fn default_stale_worker_retention_days() -> i64 {
     7
 }
 
+fn default_trigger_claim_retention_days() -> i64 {
+    30
+}
+
 fn default_sweep_interval_seconds() -> u64 {
     3_600
+}
+
+/// The least `[state] trigger_claim_retention_days` accepts: the
+/// trigger stream's maximum message age
+/// ([`crate::bus::DEFAULT_TRIGGER_MAX_AGE`], the age the stream is
+/// created with) rounded up to whole days, plus one day. Two days today.
+pub fn trigger_claim_retention_floor_days() -> i64 {
+    claim_retention_floor_days(crate::bus::DEFAULT_TRIGGER_MAX_AGE)
+}
+
+/// The floor, when `days` is a claim window below it: one the config
+/// refuses at load, and the retention sweep refuses to act on if it
+/// arrives some other way. `None` for a window at or above the floor, and
+/// for `< 0`, which keeps claim rows for ever.
+pub fn trigger_claim_retention_below_floor(days: i64) -> Option<i64> {
+    let floor = trigger_claim_retention_floor_days();
+    (0..floor).contains(&days).then_some(floor)
+}
+
+/// `stream_max_age` rounded up to whole days, plus a day of margin.
+///
+/// A claim is never older than its message, so a claim older than the
+/// stream's maximum age names a message the stream has dropped; the
+/// margin covers what that argument reads off two clocks — the claim's
+/// age off the daemon's, the message's expiry off the broker's — and
+/// the broker's expiry pass running behind.
+fn claim_retention_floor_days(stream_max_age: Duration) -> i64 {
+    let day = Duration::from_secs(24 * 60 * 60).as_nanos();
+    let whole_days = stream_max_age.as_nanos().div_ceil(day);
+    i64::try_from(whole_days)
+        .unwrap_or(i64::MAX)
+        .saturating_add(1)
+}
+
+impl StateConfig {
+    /// `trigger_claim_retention_days` in milliseconds: the age at which
+    /// the retention sweep deletes a claim, and so the horizon past which
+    /// `fq doctor` no longer reports one an exited process left. `None`
+    /// when claim rows are kept for ever.
+    pub fn trigger_claim_retention_ms(&self) -> Option<i64> {
+        (self.trigger_claim_retention_days >= 0)
+            .then(|| self.trigger_claim_retention_days.saturating_mul(MS_PER_DAY))
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let days = self.trigger_claim_retention_days;
+        if let Some(floor) = trigger_claim_retention_below_floor(days) {
+            return Err(ConfigError::TriggerClaimRetentionBelowFloor { value: days, floor });
+        }
+        Ok(())
+    }
 }
 
 impl Default for StateConfig {
@@ -182,6 +267,7 @@ impl Default for StateConfig {
             directory: default_state_dir_for_config(),
             retention_days: default_retention_days(),
             stale_worker_retention_days: default_stale_worker_retention_days(),
+            trigger_claim_retention_days: default_trigger_claim_retention_days(),
             sweep_interval_seconds: default_sweep_interval_seconds(),
         }
     }
@@ -550,6 +636,7 @@ impl Config {
         }
         self.nats.validate()?;
         self.events.validate()?;
+        self.state.validate()?;
         self.worker.validate()?;
         self.tools.validate()?;
         self.mcp.validate()
@@ -987,7 +1074,90 @@ api_key_env = "MY_ANTHROPIC_KEY"
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.state.retention_days, 30);
         assert_eq!(config.state.stale_worker_retention_days, 7);
+        assert_eq!(config.state.trigger_claim_retention_days, 30);
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
+    }
+
+    /// The floor is the stream's maximum age in whole days, rounded up,
+    /// plus one: a part-day rounds up rather than down, so the floor can
+    /// never land inside the stream's own window.
+    #[test]
+    fn the_claim_retention_floor_rounds_the_stream_age_up_and_adds_a_day() {
+        let hour = Duration::from_secs(60 * 60);
+        assert_eq!(claim_retention_floor_days(Duration::ZERO), 1);
+        assert_eq!(claim_retention_floor_days(Duration::from_secs(1)), 2);
+        assert_eq!(claim_retention_floor_days(24 * hour), 2);
+        assert_eq!(
+            claim_retention_floor_days(24 * hour + Duration::from_nanos(1)),
+            3
+        );
+        assert_eq!(claim_retention_floor_days(48 * hour), 3);
+        assert!(claim_retention_floor_days(Duration::MAX) > 0);
+    }
+
+    /// The floor the config enforces is the one derived from the age the
+    /// trigger stream is created with, and it outlasts a message plus
+    /// every redelivery the retry ladder can make of it: a claim row at
+    /// the floor names a message the stream has dropped.
+    #[test]
+    fn the_claim_retention_floor_outlives_a_trigger_message_and_its_redeliveries() {
+        use crate::bus::{DEFAULT_TRIGGER_MAX_AGE, TRIGGER_REDELIVERY_WINDOW};
+        assert_eq!(
+            trigger_claim_retention_floor_days(),
+            claim_retention_floor_days(DEFAULT_TRIGGER_MAX_AGE)
+        );
+        assert_eq!(trigger_claim_retention_floor_days(), 2);
+        let floor = Duration::from_secs(trigger_claim_retention_floor_days() as u64 * 86_400);
+        assert!(
+            floor > DEFAULT_TRIGGER_MAX_AGE + TRIGGER_REDELIVERY_WINDOW,
+            "a {floor:?} floor would sweep a started claim while its message could still be \
+             redelivered"
+        );
+    }
+
+    /// A value below the floor is refused at load, naming the value and
+    /// the floor. The floor itself, anything above it, and `-1` load.
+    #[test]
+    fn trigger_claim_retention_below_the_floor_is_refused() {
+        let load = |days: i64| {
+            Config::from_toml_str(&format!("[state]\ntrigger_claim_retention_days = {days}\n"))
+        };
+        for days in [0, 1] {
+            let err = load(days).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::TriggerClaimRetentionBelowFloor { value, floor: 2 } if value == days
+                ),
+                "{days}: {err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!("trigger_claim_retention_days = {days} ")),
+                "{message}"
+            );
+            assert!(message.contains("minimum of 2"), "{message}");
+        }
+        for days in [2, 3, 30, 365, -1] {
+            let config = load(days).unwrap_or_else(|e| panic!("{days}: {e}"));
+            assert_eq!(config.state.trigger_claim_retention_days, days);
+        }
+    }
+
+    /// The sweep's bound and the doctor's horizon are one number, and the
+    /// `-1` that keeps rows for ever is no horizon at all.
+    #[test]
+    fn trigger_claim_retention_in_milliseconds() {
+        let state = |trigger_claim_retention_days| StateConfig {
+            trigger_claim_retention_days,
+            ..StateConfig::default()
+        };
+        assert_eq!(
+            StateConfig::default().trigger_claim_retention_ms(),
+            Some(30 * 86_400_000)
+        );
+        assert_eq!(state(2).trigger_claim_retention_ms(), Some(2 * 86_400_000));
+        assert_eq!(state(-1).trigger_claim_retention_ms(), None);
     }
 
     /// The default worker-retention window must stay orders of
@@ -1035,6 +1205,12 @@ sweep_interval_seconds = 300
         let config = Config::from_toml_str("[state]\nstale_worker_retention_days = -1\n").unwrap();
         assert_eq!(config.state.stale_worker_retention_days, -1);
         assert_eq!(config.state.retention_days, 30);
+        assert_eq!(config.state.trigger_claim_retention_days, 30);
+
+        let config = Config::from_toml_str("[state]\ntrigger_claim_retention_days = -1\n").unwrap();
+        assert_eq!(config.state.trigger_claim_retention_days, -1);
+        assert_eq!(config.state.retention_days, 30);
+        assert_eq!(config.state.stale_worker_retention_days, 7);
     }
 
     #[test]

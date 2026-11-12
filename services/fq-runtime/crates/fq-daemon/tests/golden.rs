@@ -624,8 +624,11 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     // the run reached a terminal row, and INV_NEVER_STARTED names a run
     // nothing records; `doctor` lists neither, and that is the assertion.
     // A started run's claim on a message that is gone can change nothing,
-    // and a dead claim older than the retention window has aged out of
-    // the report, as the dead letter it would point at has.
+    // and a dead claim older than the claim retention window has aged out
+    // of the report, the age at which the daemon's retention sweep would
+    // delete it. That sweep's first tick is an hour after the daemon
+    // starts, so it never runs inside a golden and these rows are still
+    // there when the goldens read them.
     let key = |stream_seq| TriggerKey {
         stream: TRIGGER_STREAM_NAME,
         stream_epoch: SEEDED_STREAM_EPOCH,

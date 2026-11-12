@@ -77,7 +77,7 @@ pub(crate) fn register_doctor_report(
     let agent_caps = facts.agent_caps.clone();
     let worker_id: Arc<str> = facts.worker_id.as_str().into();
     let dispatching_since_ms = facts.dispatching_since_ms;
-    let retention_ms = facts.retention_ms;
+    let claim_retention_ms = facts.trigger_claim_retention_ms;
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -171,7 +171,7 @@ pub(crate) fn register_doctor_report(
                     redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
                     stream_epoch: bus.trigger_stream_epoch(),
                     stream_max_age_ms: DEFAULT_TRIGGER_MAX_AGE.as_millis() as i64,
-                    horizon_ms: retention_ms,
+                    horizon_ms: claim_retention_ms,
                     now_ms,
                 };
                 let trigger_claims = DoctorTriggerClaims {

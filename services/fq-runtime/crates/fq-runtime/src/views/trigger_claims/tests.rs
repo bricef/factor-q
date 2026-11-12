@@ -22,7 +22,7 @@ const OLD_EPOCH: i64 = 1_767_000_000_000_000_000;
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-/// The retention window the daemon would pass: thirty days.
+/// The trigger-claim retention the daemon passes by default: thirty days.
 const HORIZON_MS: i64 = 30 * DAY_MS;
 /// A clock far enough from zero that "sixty days ago" is still positive.
 const NOW_MS: i64 = 1_000 * DAY_MS;
@@ -216,9 +216,9 @@ fn no_run_on_record_held_by_this_daemon_is_never_listed() {
     }
 }
 
-/// Row 5. Nothing deletes a dead claim yet, so the report stops listing
-/// one at the age failures and dead letters age out — whatever else is
-/// true of it. With retention off, it is listed for as long as it exists.
+/// Row 5. The report stops listing a dead claim at the age the retention
+/// sweep deletes it — whatever else is true of it. With claim retention
+/// off, it is listed for as long as it exists.
 #[test]
 fn no_run_on_record_left_by_an_exited_process_past_the_horizon_is_not_listed() {
     let old = claim(9, EXITED, "inv-lost", NOW_MS - HORIZON_MS);
@@ -510,8 +510,10 @@ async fn the_invocation_view_names_the_delivery_that_started_it() {
     assert_eq!(trigger.state, TriggerClaimState::DurablyStarted);
 }
 
-/// The archive is swept after the retention window; the coordination row
-/// that makes the run findable is not, and neither is its claim.
+/// The archive is swept on `retention_days`; the coordination row that
+/// makes the run findable is not swept at all, and the claim goes on a
+/// window of its own. While the claim is kept, the run shows its trigger
+/// without its archive.
 #[tokio::test]
 async fn a_run_whose_archive_was_swept_still_shows_its_trigger() {
     let seed = Seed::new().await;

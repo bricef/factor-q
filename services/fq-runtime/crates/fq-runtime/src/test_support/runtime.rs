@@ -224,15 +224,18 @@ impl TestRuntimeBuilder {
             let _ = retry_sweeper.run(retry_rx).await;
         });
 
-        // RetentionSweeper (CP-side). Both windows disabled by
-        // default (`-1`); scenarios that care override via
-        // `retention_days(N)` / `stale_worker_retention_days(N)`.
+        // RetentionSweeper (CP-side). The archive and worker windows
+        // are disabled by default (`-1`); scenarios that care override
+        // via `retention_days(N)` / `stale_worker_retention_days(N)`.
+        // The trigger-claim window is always off here: this harness
+        // runs no dispatcher, so nothing writes a claim to sweep.
         let (retention_tx, retention_rx) = oneshot::channel();
         let retention_sweeper = RetentionSweeper::new(
             cp_store.clone(),
             &crate::config::StateConfig {
                 retention_days: self.retention_days,
                 stale_worker_retention_days: self.stale_worker_retention_days,
+                trigger_claim_retention_days: -1,
                 sweep_interval_seconds: self.retention_sweep_interval_seconds,
                 ..Default::default()
             },

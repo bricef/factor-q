@@ -125,7 +125,8 @@ fn format_trigger_delivery_names_the_delivery_or_its_absence() {
     );
     assert_eq!(
         format_trigger_delivery(None),
-        "none recorded: not started from the trigger stream, or its claim was released or taken \
-         over before the run's first durable write"
+        "none recorded: not started from the trigger stream, its claim was released or taken \
+         over before the run's first durable write, or the claim is older than its retention \
+         window"
     );
 }

@@ -816,6 +816,130 @@ async fn a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delive
     );
 }
 
+/// **The claim sweeps clear a backlog in batches.** The first sweep on a
+/// long-lived instance meets every claim it has ever written, so each
+/// sweep deletes a batch at a time until a short batch says the backlog
+/// is gone. With a batch of one, every old row is its own round: the
+/// loop must clear them all, count them, and leave the rest alone.
+#[tokio::test]
+async fn trigger_claim_sweeps_clear_a_backlog_in_batches() {
+    let (store, _dir) = open_fresh().await;
+    let cutoff = 1_000;
+    for seq in 1..=3 {
+        store
+            .claim_trigger(key(seq), "worker-old", &format!("inv-{seq}"), 10)
+            .await
+            .unwrap();
+        store
+            .mark_trigger_started(key(seq), &format!("inv-{seq}"))
+            .await
+            .unwrap();
+    }
+    for seq in 4..=6 {
+        store
+            .claim_trigger(key(seq), "worker-old", &format!("inv-{seq}"), 10)
+            .await
+            .unwrap();
+    }
+    // Inside the cutoff, one of each.
+    store
+        .claim_trigger(key(7), "worker-old", "inv-7", cutoff)
+        .await
+        .unwrap();
+    store.mark_trigger_started(key(7), "inv-7").await.unwrap();
+    store
+        .claim_trigger(key(8), "worker-old", "inv-8", cutoff)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .sweep_started_trigger_claims_batched(cutoff, 1)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        store
+            .sweep_abandoned_trigger_claims_batched(cutoff, "worker-now", 1)
+            .await
+            .unwrap(),
+        3
+    );
+    for seq in 1..=6 {
+        assert_eq!(
+            store
+                .trigger_claim_for_invocation(&format!("inv-{seq}"))
+                .await
+                .unwrap(),
+            None,
+            "seq {seq} is older than the cutoff"
+        );
+    }
+    for invocation in ["inv-7", "inv-8"] {
+        assert!(
+            store
+                .trigger_claim_for_invocation(invocation)
+                .await
+                .unwrap()
+                .is_some(),
+            "{invocation} was claimed at the cutoff, not before it"
+        );
+    }
+}
+
+/// Each claim sweep keeps to its own state: the started sweep never
+/// takes a `claimed` row, and the abandoned sweep never takes a started
+/// one, whoever holds it.
+#[tokio::test]
+async fn each_trigger_claim_sweep_takes_only_its_own_state() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-old", "inv-claimed", 0)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(2), "worker-old", "inv-started", 0)
+        .await
+        .unwrap();
+    store
+        .mark_trigger_started(key(2), "inv-started")
+        .await
+        .unwrap();
+
+    assert_eq!(store.sweep_started_trigger_claims(1_000).await.unwrap(), 1);
+    assert!(
+        store
+            .trigger_claim_for_invocation("inv-claimed")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    store
+        .claim_trigger(key(2), "worker-old", "inv-started-again", 0)
+        .await
+        .unwrap();
+    store
+        .mark_trigger_started(key(2), "inv-started-again")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .sweep_abandoned_trigger_claims(1_000, "worker-now")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .trigger_claim_for_invocation("inv-started-again")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn schema_v1_upgrades_to_trigger_claim_v2() {
     let dir = tempdir().unwrap();
