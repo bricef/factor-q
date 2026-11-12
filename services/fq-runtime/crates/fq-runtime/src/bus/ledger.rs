@@ -27,8 +27,15 @@ pub struct ConsumerRecord {
     /// Messages acked because they were not an event in any version,
     /// since the loop started.
     pub malformed_acked: u64,
-    /// Trigger redeliveries dropped after their invocation durably started.
+    /// Trigger redeliveries dropped because their claim records a durable
+    /// start: a copy of a run that has started. Acked.
     pub duplicate_dropped: u64,
+    /// Trigger redeliveries dropped because this process already holds
+    /// their claim and it records no start: a copy of a trigger still in
+    /// hand. Left unacked. Nothing on the claim says whether the first
+    /// copy is waiting, starting, or will never settle it, so the count
+    /// says only that the copy was refused.
+    pub held_duplicate_dropped: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
 }
@@ -62,6 +69,15 @@ impl ConsumerLedger {
             .entry(consumer.to_string())
             .or_default()
             .duplicate_dropped += 1;
+    }
+
+    /// The dispatcher dropped a delivery whose claim it already holds,
+    /// with no start recorded on it.
+    pub fn note_held_duplicate_drop(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .held_duplicate_dropped += 1;
     }
 
     /// The loop halted on an event it cannot read.

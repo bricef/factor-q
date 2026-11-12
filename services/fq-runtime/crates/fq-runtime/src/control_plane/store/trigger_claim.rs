@@ -35,8 +35,20 @@ pub struct TriggerKey<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerClaim {
     Won,
-    Held { claimant: String },
-    Started { invocation_id: String },
+    /// A `claimed` row already exists: the claim as that row holds it,
+    /// read in the statement that found it, so a refused delivery can be
+    /// reported with what the claim says rather than with a later read.
+    Held {
+        claimant: String,
+        /// The invocation id the claim names. `None` on a row written
+        /// before claims named their invocation at claim time.
+        invocation_id: Option<String>,
+        /// When the row was claimed, or last adopted, epoch ms.
+        claimed_at: i64,
+    },
+    Started {
+        invocation_id: String,
+    },
 }
 
 /// One claim row, read back whole for an operator.
@@ -113,7 +125,7 @@ impl ControlPlaneStore {
             return Ok(TriggerClaim::Won);
         }
         let row = sqlx::query(
-            "SELECT claimant, state, invocation_id FROM trigger_claim \
+            "SELECT claimant, state, invocation_id, claimed_at FROM trigger_claim \
              WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
         )
         .bind(key.stream)
@@ -128,6 +140,8 @@ impl ControlPlaneStore {
         } else {
             Ok(TriggerClaim::Held {
                 claimant: row.get("claimant"),
+                invocation_id: row.get("invocation_id"),
+                claimed_at: row.get("claimed_at"),
             })
         }
     }

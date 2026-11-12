@@ -760,6 +760,9 @@ mod durable_start_signal_tests;
 mod claim_retention_tests;
 
 #[cfg(test)]
+mod duplicate_drop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
@@ -2811,15 +2814,17 @@ You are a test agent."#
         let _ = running.await;
 
         ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
-        assert_eq!(
-            claims
-                .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
-                .await
-                .unwrap(),
-            crate::control_plane::TriggerClaim::Held {
-                claimant: "killed-worker".to_string()
-            },
-            "nothing marked the claim: this is the window #959 is about"
+        let held = claims
+            .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &held,
+                crate::control_plane::TriggerClaim::Held { claimant, .. }
+                    if claimant == "killed-worker"
+            ),
+            "nothing marked the claim: this is the window #959 is about; got {held:?}"
         );
         assert!(
             claims
