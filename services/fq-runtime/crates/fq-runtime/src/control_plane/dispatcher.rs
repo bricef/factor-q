@@ -3770,7 +3770,7 @@ You are a test agent."#
     /// only direct evidence a cap was honoured. `RecordingWorker`
     /// returns instantly, so under it two invocations never overlap
     /// whether the cap works or not.
-    struct CappedWorker {
+    pub(super) struct CappedWorker {
         starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>, String)>>,
         open: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
@@ -3784,7 +3784,7 @@ You are a test agent."#
     }
 
     impl CappedWorker {
-        fn new() -> Arc<Self> {
+        pub(super) fn new() -> Arc<Self> {
             Arc::new(CappedWorker {
                 starts: std::sync::Mutex::new(Vec::new()),
                 open: std::sync::atomic::AtomicUsize::new(0),
@@ -3795,10 +3795,10 @@ You are a test agent."#
             })
         }
         /// Let `n` more invocations finish.
-        fn let_finish(&self, n: usize) {
+        pub(super) fn let_finish(&self, n: usize) {
             self.finish.add_permits(n);
         }
-        fn started(&self) -> usize {
+        pub(super) fn started(&self) -> usize {
             self.starts.lock().unwrap().len()
         }
         fn peak(&self) -> usize {
@@ -3827,7 +3827,7 @@ You are a test agent."#
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
-        async fn wait_for_starts(&self, n: usize, within: Duration) {
+        pub(super) async fn wait_for_starts(&self, n: usize, within: Duration) {
             let deadline = std::time::Instant::now() + within;
             while self.started() < n {
                 assert!(
@@ -3939,7 +3939,7 @@ You are a test agent."#
         (shutdown_tx, run)
     }
 
-    async fn publish_triggers(bus: &EventBus, agent_id_str: &str, n: usize) {
+    pub(super) async fn publish_triggers(bus: &EventBus, agent_id_str: &str, n: usize) {
         let agent = AgentId::new(agent_id_str).unwrap();
         for i in 0..n {
             bus.publish_trigger(&agent, &json!({"input": i}))
@@ -3948,7 +3948,7 @@ You are a test agent."#
         }
     }
 
-    async fn stop(
+    pub(super) async fn stop(
         shutdown_tx: oneshot::Sender<()>,
         run: tokio::task::JoinHandle<Result<(), DispatcherError>>,
     ) {

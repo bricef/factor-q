@@ -342,3 +342,6 @@ impl Waiter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
