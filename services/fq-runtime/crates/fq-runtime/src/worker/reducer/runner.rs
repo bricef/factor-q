@@ -1671,7 +1671,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await?;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
-        match outcome {
+        match result_cap::cap_outcome(outcome, self.config.tool_limits.max_result_bytes) {
             Ok(result) => {
                 self.timeouts.record_answer(invocation_id);
                 self.config
@@ -1707,8 +1707,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     duration_ms,
                 })
             }
-            Err(err) => {
-                let (kind, message) = super::emit::classify_tool_error(&err);
+            Err((kind, message)) => {
                 self.config
                     .store
                     .write_tool_completed(
@@ -2498,6 +2497,7 @@ mod llm;
 mod mcp;
 mod replay;
 mod request_caps;
+mod result_cap;
 mod resume_notice;
 mod server_request;
 mod terminal;

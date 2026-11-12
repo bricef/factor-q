@@ -112,6 +112,16 @@ pub enum ConfigError {
         backstop: u64,
     },
 
+    /// `[tools] max_result_bytes = 0` (#827). Every tool result would be
+    /// cut to nothing, so every tool would answer with an empty string
+    /// whatever it did — which no one means to configure.
+    #[error(
+        "[tools] max_result_bytes must be greater than zero: 0 would cut every tool result to \
+         nothing, so no tool could tell the model what it did — remove the line to take the \
+         default (262144), or set a real cap"
+    )]
+    ToolResultCapZero,
+
     /// An `[mcp]` bound set to zero. Every one of them would be
     /// satisfiable only by a server that does nothing — a zero deadline
     /// expires before the handshake is sent, a zero page cap admits no

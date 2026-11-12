@@ -356,7 +356,7 @@ fn render_stream_health_human(health: &fq_ops::health::StreamHealth) -> String {
             out.push_str(&format!("  messages:         {messages}\n"));
             out.push_str(&format!(
                 "  bytes:            {}\n",
-                fq_tools::builtin::exec::human_bytes(*bytes)
+                fq_tools::human_bytes(*bytes)
             ));
             out.push_str(&format!("  first seq:        {first_seq}\n"));
             out.push_str(&format!("  last seq:         {last_seq}\n"));

@@ -1,11 +1,12 @@
 //! `[tools]` — what a tool call is allowed, and the per-tool sections
 //! for the tools that manage part of it themselves.
 //!
-//! Its own module because the section grew a policy: the three keys at
+//! Its own module because the section grew a policy: the four keys at
 //! the top level bound *every* tool call at the one place all of them
-//! pass through, and the ceiling has to be reconciled with the per-tool
-//! section beneath it. That reconciliation ([`ToolsConfig::validate`])
-//! is the reason this is not just a pair of structs.
+//! pass through — how long it may take, and how much it may return —
+//! and the ceiling has to be reconciled with the per-tool section
+//! beneath it. That reconciliation ([`ToolsConfig::validate`]) is the
+//! reason this is not just a pair of structs.
 
 use std::time::Duration;
 
@@ -15,11 +16,12 @@ use super::ConfigError;
 
 /// Tool configuration — `[tools]` in `fqd.toml`.
 ///
-/// The three keys at this level bound **every** tool call, built-in or
+/// The four keys at this level bound **every** tool call, built-in or
 /// MCP, at the one place all of them pass through (`run_tool`). Before
 /// them only `exec` had a deadline, so an MCP server that accepted a
 /// request and never answered parked the invocation forever (review
-/// finding B2, <https://github.com/bricef/factor-q/issues/547>).
+/// finding B2, <https://github.com/bricef/factor-q/issues/547>); and
+/// only `exec` bounded its output (#827).
 /// Per-tool subsections — today only `[tools.exec]` — configure the
 /// tools that manage their own timeout, within this ceiling.
 #[derive(Debug, Clone, Deserialize)]
@@ -56,6 +58,25 @@ pub struct ToolsConfig {
     /// the count, because it proves the machinery is alive.
     #[serde(default = "default_max_consecutive_timeouts")]
     pub max_consecutive_timeouts: u32,
+    /// The most bytes one tool result may carry, in bytes, the
+    /// truncation marker included. Default 262144 (256 KiB).
+    ///
+    /// A tool's output is written to the WAL, published as `tool.result`
+    /// and re-sent to the model in every later `llm.request`, and the
+    /// broker refuses any single message over its `max_payload` (1 MiB
+    /// on a stock NATS). Before this only `exec` bounded its output, so
+    /// one `file_read` of a large log, or one MCP server returning a
+    /// large document, left the invocation unable to publish
+    /// (<https://github.com/bricef/factor-q/issues/827>). Longer output
+    /// is cut on a character boundary and ends with a note saying how
+    /// much was kept of how much.
+    ///
+    /// 256 KiB sits above `exec`'s two 100 KiB streams, so `exec` output
+    /// is never cut twice, and under a quarter of a stock `max_payload`.
+    /// Zero is refused at load: it would cut every tool result to
+    /// nothing.
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: usize,
     #[serde(default)]
     pub exec: ExecToolConfig,
 }
@@ -72,30 +93,37 @@ fn default_max_consecutive_timeouts() -> u32 {
     3
 }
 
+fn default_max_result_bytes() -> usize {
+    256 * 1024
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             default_timeout_secs: default_tool_default_timeout_secs(),
             max_timeout_secs: default_tool_max_timeout_secs(),
             max_consecutive_timeouts: default_max_consecutive_timeouts(),
+            max_result_bytes: default_max_result_bytes(),
             exec: ExecToolConfig::default(),
         }
     }
 }
 
 impl ToolsConfig {
-    /// The three call bounds as the runner takes them.
+    /// The four call bounds as the runner takes them.
     pub fn call_limits(&self) -> crate::tools::ToolCallLimits {
         crate::tools::ToolCallLimits {
             default_timeout: Duration::from_secs(self.default_timeout_secs),
             max_timeout: Duration::from_secs(self.max_timeout_secs),
             max_consecutive_timeouts: self.max_consecutive_timeouts,
+            max_result_bytes: self.max_result_bytes,
         }
     }
 
-    /// Three orderings that must hold, all checked rather than
-    /// silently clamped, because a settings pair that disagrees is an
-    /// operator mistake with an invisible consequence.
+    /// A result cap of zero, and three orderings that must hold, all
+    /// checked rather than silently clamped, because a settings pair
+    /// that disagrees is an operator mistake with an invisible
+    /// consequence.
     ///
     /// **The general ceiling must be at least the `exec` ceiling.**
     /// `[tools] max_timeout_secs = 60` under a `[tools.exec]
@@ -120,6 +148,9 @@ impl ToolsConfig {
     /// survives, which is the defect this whole section is guarding
     /// against (<https://github.com/bricef/factor-q/issues/552>).
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_result_bytes == 0 {
+            return Err(ConfigError::ToolResultCapZero);
+        }
         if self.max_timeout_secs < self.exec.max_timeout_secs {
             return Err(ConfigError::ToolCeilingBelowExec {
                 tools_max: self.max_timeout_secs,
@@ -246,3 +277,6 @@ impl ExecToolConfig {
         self.kill_grace_secs.saturating_add(self.drain_grace_secs)
     }
 }
+
+#[cfg(test)]
+mod tests;

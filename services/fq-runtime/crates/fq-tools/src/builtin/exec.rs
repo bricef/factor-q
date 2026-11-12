@@ -119,9 +119,6 @@ mod output;
 mod reap;
 
 use output::{LineLimit, capture_stream, format_output};
-// Re-exported at the path it has always had: `fq-cli`'s status view
-// renders byte counts with it.
-pub use output::human_bytes;
 
 /// The `PATH` every child the runtime starts with a cleared environment
 /// gets by default: the `exec` tool's children, and the stdio MCP
