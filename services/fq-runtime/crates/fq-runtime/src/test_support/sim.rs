@@ -1436,6 +1436,9 @@ mod tests {
 }
 
 #[cfg(test)]
+mod oversized_tool_output;
+
+#[cfg(test)]
 mod resume_equivalence {
     //! Slice 4 (claim R4): suspension is structural. For any script
     //! and any span boundary, interrupting at the boundary and

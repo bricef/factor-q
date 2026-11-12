@@ -78,6 +78,8 @@ pub(crate) use crate::server_initiated::{
 };
 #[cfg(test)]
 pub(crate) use handler::sampling_request_from_wire;
+#[cfg(test)]
+pub(crate) use mock::mcp_tool_answering;
 pub(crate) use stdio::default_server_root;
 
 /// Errors from MCP server lifecycle and tool calls.
