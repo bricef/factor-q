@@ -58,13 +58,16 @@ const INV_COMPLETED: &str = "1c000000-0000-7000-8000-000000000001";
 const INV_FAILED: &str = "2f000000-0000-7000-8000-000000000002";
 const INV_INFLIGHT: &str = "3a000000-0000-7000-8000-000000000003";
 const INV_ARCHIVED: &str = "4e000000-0000-7000-8000-000000000004";
-/// Named by a trigger claim and by nothing else: a delivery taken and
-/// never started.
+/// Named by a trigger claim and by nothing else: ids reserved by
+/// deliveries that never started a run.
 const INV_NEVER_STARTED: &str = "5d000000-0000-7000-8000-000000000005";
+const INV_AWAITING: &str = "7a000000-0000-7000-8000-000000000007";
+const INV_AGED_OUT: &str = "8b000000-0000-7000-8000-000000000008";
+const INV_EARLIER_STREAM: &str = "9c000000-0000-7000-8000-000000000009";
 
-/// The creation time, in nanoseconds, of the trigger stream the seeded
-/// claims were taken from: a minute before [`BASE_MS`], and so an earlier
-/// incarnation than any the fixture's own broker creates.
+/// The creation time, in nanoseconds, of the incarnation of the trigger
+/// stream the January runs' claims were made on: a minute before
+/// [`BASE_MS`], and so earlier than the one the fixture's broker creates.
 const SEEDED_STREAM_EPOCH: i64 = (BASE_MS - 60_000) * 1_000_000;
 
 const AGENT_RESEARCHER: &str = "researcher";
@@ -607,18 +610,21 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     .await
     .unwrap();
 
-    // The dispatcher's claims on the trigger deliveries (#954), each by
-    // `worker-alpha` — the seeded stale worker, so a process that has
-    // exited by the time the fixture's daemon reads them. Their stream
-    // epoch is an earlier incarnation than the one the fixture's broker
-    // creates, so the live dispatcher never meets them; they are what a
-    // daemon finds on disk after a restart.
+    // The dispatcher's claims on the trigger deliveries the seeded runs
+    // came from (#954), each by `worker-alpha` — the seeded stale worker,
+    // so a process that has exited by the time the fixture's daemon reads
+    // them. They are dated with the runs, in January, on an incarnation of
+    // the stream from before the fixture's broker recreated it (a restart
+    // keeps the incarnation; only recreating the stream changes it), so
+    // the live dispatcher never meets them.
     //
     // INV_COMPLETED's claim is marked started, as every trigger-started
     // run's is: `invocation show` names it. INV_FAILED's never was though
     // the run reached a terminal row, and INV_NEVER_STARTED names a run
-    // nothing records: `doctor` lists both, the second as awaiting the
-    // redelivery a freshly started daemon has not yet had time to see.
+    // nothing records; `doctor` lists neither, and that is the assertion.
+    // A started run's claim on a message that is gone can change nothing,
+    // and a dead claim older than the retention window has aged out of
+    // the report, as the dead letter it would point at has.
     let key = |stream_seq| TriggerKey {
         stream: TRIGGER_STREAM_NAME,
         stream_epoch: SEEDED_STREAM_EPOCH,
@@ -636,6 +642,58 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     cp.mark_trigger_started(key(1), INV_COMPLETED)
         .await
         .unwrap();
+}
+
+/// Claims left by `worker-alpha` hours or days before the golden runs —
+/// the only ages at which `doctor` reports a dead claim, so they cannot be
+/// dated with the January runs. Each names an invocation id it reserved
+/// and nothing records, which is what a delivery that never started a
+/// run leaves. Returns each wall-clock-derived value, with the name the
+/// goldens show in its place.
+///
+/// - seq 1003, on the fixture broker's own stream, claimed two days ago:
+///   its message is older than the stream keeps, so it never started and
+///   will not be redelivered.
+/// - seq 7, on the earlier incarnation, claimed three hours ago: its
+///   message went with that stream.
+/// - seq 1002, on the fixture broker's own stream, claimed an hour ago:
+///   still deliverable, and the daemon has only just started, so it is
+///   awaiting its redelivery. The sequences sit far above anything the
+///   fixture publishes, so no delivery of the live stream meets them.
+async fn seed_recent_claims(dir: &Path, stream_epoch: i64) -> Vec<(String, String)> {
+    let cp = ControlPlaneStore::open(&fq_runtime::db::RuntimeDbPaths::under(dir).control_plane)
+        .await
+        .expect("open control plane");
+    let now_s = chrono::Utc::now().timestamp();
+    let mut named = vec![(stream_epoch.to_string(), "<STREAM_EPOCH>".to_string())];
+    for (seq, epoch, invocation, age_s, name) in [
+        (1003, stream_epoch, INV_AGED_OUT, 2 * 86_400, "AGED_OUT"),
+        (
+            7,
+            SEEDED_STREAM_EPOCH,
+            INV_EARLIER_STREAM,
+            3 * 3_600,
+            "EARLIER_STREAM",
+        ),
+        (1002, stream_epoch, INV_AWAITING, 3_600, "AWAITING"),
+    ] {
+        let claimed_at_ms = (now_s - age_s) * 1_000;
+        let key = TriggerKey {
+            stream: TRIGGER_STREAM_NAME,
+            stream_epoch: epoch,
+            stream_seq: seq,
+        };
+        cp.claim_trigger(key, "worker-alpha", invocation, claimed_at_ms)
+            .await
+            .unwrap();
+        let rendered = chrono::DateTime::from_timestamp_millis(claimed_at_ms)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        named.push((rendered, format!("<CLAIMED_{name}>")));
+        named.push((claimed_at_ms.to_string(), format!("<CLAIMED_{name}_MS>")));
+    }
+    named
 }
 
 // ------------------------------------------------------------------
@@ -1393,6 +1451,11 @@ struct EdgeFixture {
     /// it dialled).
     addr: String,
     broker: fq_test_support::NatsServer,
+    /// Values the fixture derived from the wall clock or from its own
+    /// broker (the recent claims' times, the trigger stream's
+    /// incarnation), each with the name a golden shows in its place —
+    /// redacted by value, so nothing else on their lines is blurred.
+    wall_clock: Vec<(String, String)>,
 }
 
 impl EdgeFixture {
@@ -1424,10 +1487,19 @@ impl EdgeFixture {
         // ancient heartbeat on the in-flight row's owner would
         // (correctly) reclassify live work as ambiguous.
         let dir = tempfile::tempdir().expect("edge fixture dir");
-        tokio::runtime::Runtime::new()
+        // Started before the stores are seeded: the recent trigger claims
+        // are made on this broker's own trigger stream, so their
+        // incarnation is the one the daemon will consume.
+        let broker = fq_test_support::NatsServer::start();
+        let wall_clock = tokio::runtime::Runtime::new()
             .expect("edge fixture runtime")
             .block_on(async {
                 seed_at(dir.path(), BASE_MS).await;
+                let stream_epoch = fq_runtime::EventBus::connect(broker.url())
+                    .await
+                    .expect("connect the fixture broker")
+                    .trigger_stream_epoch();
+                let wall_clock = seed_recent_claims(dir.path(), stream_epoch).await;
                 let paths = fq_runtime::db::RuntimeDbPaths::under(dir.path());
                 let cp = ControlPlaneStore::open(&paths.control_plane)
                     .await
@@ -1443,6 +1515,7 @@ impl EdgeFixture {
                         .await
                         .expect("register owner worker");
                 }
+                wall_clock
             });
         let agents_dir = dir.path().join("agents");
         std::fs::create_dir_all(&agents_dir).expect("agents dir");
@@ -1450,7 +1523,6 @@ impl EdgeFixture {
             std::fs::write(agents_dir.join(name), contents).expect("agent definition");
         }
 
-        let broker = fq_test_support::NatsServer::start();
         let daemon_config = dir.path().join("fqd.toml");
         let pricing = if definitions.is_empty() {
             String::new()
@@ -1749,7 +1821,18 @@ impl EdgeFixture {
             client_config,
             addr,
             broker,
+            wall_clock,
         }
+    }
+
+    /// `raw` with every wall-clock value this fixture derived replaced
+    /// by its name.
+    fn name_wall_clock(&self, raw: &str) -> String {
+        self.wall_clock
+            .iter()
+            .fold(raw.to_string(), |out, (value, name)| {
+                out.replace(value, name)
+            })
     }
 
     /// The transcript fixture: the plain fixture plus the invocation's
@@ -1860,7 +1943,7 @@ fn check_golden_on(fixture: EdgeFixture, name: &str, args: &[&str], volatile_mar
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let actual = redact(&stdout, volatile_markers);
+    let actual = redact(&fixture.name_wall_clock(&stdout), volatile_markers);
     compare_golden(name, &actual);
 }
 

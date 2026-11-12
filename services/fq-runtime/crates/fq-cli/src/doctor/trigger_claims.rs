@@ -65,7 +65,7 @@ fn claim_line(claim: &StrandedTriggerClaim) -> String {
     let invocation = match (&claim.invocation_id, claim.finding) {
         (None, _) => "no invocation id on the claim".to_string(),
         (Some(id), StrandedClaimFinding::StartedUnmarked) => format!("invocation {id}"),
-        (Some(id), _) => format!("id reserved for its run {id}"),
+        (Some(id), _) => format!("reserved invocation id {id}"),
     };
     format!(
         "  {} seq {}{incarnation}: claimed {} by {holder}; {invocation}\n",
