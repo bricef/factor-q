@@ -60,6 +60,9 @@ use crate::worker_registration::WorkerRegistration;
 
 mod teardown;
 
+#[cfg(test)]
+mod tests;
+
 use teardown::DrainOutcome;
 
 /// Everything the daemon worked out before it started anything.
