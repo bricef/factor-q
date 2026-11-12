@@ -200,7 +200,11 @@ async fn a_result_one_byte_over_the_cap_is_capped_the_same_everywhere() {
     let recorded = run_capped(Arc::new(AnswerTool(Answer::Output(output.clone()))), cap).await;
     let text = recorded.text();
 
-    assert!(text.len() <= cap, "{} bytes over a {cap}-byte cap", text.len());
+    assert!(
+        text.len() <= cap,
+        "{} bytes over a {cap}-byte cap",
+        text.len()
+    );
     assert!(
         text.ends_with(&format!(
             "\n\n(truncated at the 256.0 KiB tool-result cap: kept the first {} of {} bytes; \
@@ -233,7 +237,11 @@ async fn an_error_output_over_the_cap_is_capped_too() {
     let recorded = run_capped(Arc::new(AnswerTool(Answer::Failure(message.clone()))), cap).await;
     let text = recorded.text();
 
-    assert!(text.len() <= cap, "{} bytes over a {cap}-byte cap", text.len());
+    assert!(
+        text.len() <= cap,
+        "{} bytes over a {cap}-byte cap",
+        text.len()
+    );
     assert!(text.contains("tool-result cap: kept the first"));
     assert!(message.starts_with(&text[..stated_kept(text)]));
     assert!(recorded.is_error);
@@ -261,7 +269,11 @@ async fn multi_byte_text_straddling_the_cap_is_cut_on_a_character_boundary() {
     let recorded = run_capped(Arc::new(AnswerTool(Answer::Output(output.clone()))), cap).await;
     let text = recorded.text();
 
-    assert!(text.len() <= cap, "{} bytes over a {cap}-byte cap", text.len());
+    assert!(
+        text.len() <= cap,
+        "{} bytes over a {cap}-byte cap",
+        text.len()
+    );
     assert!(std::str::from_utf8(recorded.wal.as_bytes()).is_ok());
     let kept = stated_kept(text);
     assert!(output.is_char_boundary(kept));
@@ -284,7 +296,11 @@ async fn an_mcp_result_over_the_cap_is_capped() {
     let recorded = run_capped(tool, cap).await;
     let text = recorded.text();
 
-    assert!(text.len() <= cap, "{} bytes over a {cap}-byte cap", text.len());
+    assert!(
+        text.len() <= cap,
+        "{} bytes over a {cap}-byte cap",
+        text.len()
+    );
     assert!(
         text.contains(&format!("of {} bytes", joined.len())),
         "the marker counts the joined parts: {}",
