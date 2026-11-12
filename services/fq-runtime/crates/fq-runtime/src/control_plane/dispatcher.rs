@@ -22,8 +22,9 @@
 //!   exactly once from the WAL with no redelivered duplicate. This
 //!   closes both failure windows: a crash, or a drain (#974), *before*
 //!   the first WAL write leaves the trigger unacked, so JetStream
-//!   redelivers it and the otherwise-missed run recovers; and the ack still fires at the
-//!   first WAL write (seconds in), *well before* completion, so a
+//!   redelivers it and the otherwise-missed run recovers; and the ack
+//!   still fires at the first WAL write (seconds in), *well before*
+//!   completion, so a
 //!   long-running invocation is not redelivered and re-run past the
 //!   30s ack-wait — the redelivery storm the M0 dogfood loop found
 //!   (2026-07-06), where an invocation longer than the ack-wait was
@@ -638,9 +639,9 @@ impl TriggerDispatcher {
         //   than the ack-wait — one trigger produced N invocations.
         //
         // The signal is fired at most once; if the invocation returns
-        // before firing it (a permanent error before any WAL write, or a
-        // worker that never signals), we ack on return — retrying a
-        // permanent error would not help, and the run already happened.
+        // before firing it (an error or a stop before any WAL write, or a
+        // worker that never signals), `settle_unstarted` decides on return
+        // whether the trigger is acked, NAKed or left for the next binary.
         let delivery_attempt = u32::try_from(delivery_attempt).unwrap_or(1);
         let (durable_start, mut durably_started) = DurableStart::channel(claim.invocation_id);
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
