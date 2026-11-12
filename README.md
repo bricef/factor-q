@@ -15,6 +15,7 @@ factor-q is not a chatbot or an interactive coding assistant. It is a continuous
 ## Documentation
 
 - [Status](STATUS.md) — one screen: what runs today, where we are, what's next
+- [Milestones](MILESTONES.md) — the states the project is working towards, what each means, and how to tell it has been reached
 - [Security posture](SECURITY.md) — current security limitations and vulnerability reporting
 - [Quickstart](QUICKSTART.md) — clone to running agent in under ten minutes
 - [Vision](VISION.md) — what factor-q is and why it exists

@@ -429,6 +429,7 @@ has shipped).
 ## Pointers
 
 [Quickstart](QUICKSTART.md) · [Architecture](ARCHITECTURE.md) ·
-[Vision](VISION.md) · [Active plans](docs/plans/active/) ·
+[Vision](VISION.md) · [Milestones](MILESTONES.md) ·
+[Active plans](docs/plans/active/) ·
 [Issues](https://github.com/bricef/factor-q/issues) · [ADRs](docs/adrs/) ·
 [Guides](docs/guide/) · [Security](SECURITY.md)
