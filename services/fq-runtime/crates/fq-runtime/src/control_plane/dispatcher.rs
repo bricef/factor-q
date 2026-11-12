@@ -685,8 +685,10 @@ impl TriggerDispatcher {
         // An invocation can fire the signal and return in one poll, and the
         // loop then ends on the result without seeing the signal (#966).
         // Asked once more, a fired signal is a durable start like any other.
-        // A failed mark here has no run left to stop and settles nothing:
-        // the delivery stays un-acked and the claim `claimed` (see #967).
+        // A failed mark here cannot stop the run (a `Deferred` one runs on),
+        // so the delivery is acked anyway, keeping its claim: a run that
+        // started must not be redelivered (`mark_durable_started`, by kind
+        // of return; see #967).
         if !signal_resolved && durably_started.try_recv().is_ok() {
             durable_start_observed = true;
             acked = self
