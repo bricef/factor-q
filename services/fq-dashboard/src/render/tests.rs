@@ -459,6 +459,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
             total_cache_write_tokens: 0,
             total_reasoning_tokens: None,
         }),
+        trigger: None,
     };
     let html = invocation_detail(&detail, 1_000);
     assert_eq!(
@@ -1307,6 +1308,7 @@ fn liveness_and_status_carry_the_health_palette() {
         summary: None,
         cost: None,
         has_transcript: false,
+        trigger: None,
     };
     let html = invocation_detail(&detail, 1_000);
     assert!(
@@ -1644,6 +1646,7 @@ fn invocation_detail_names_reasoning_only_when_reported() {
             total_cache_write_tokens: 0,
             total_reasoning_tokens: reasoning,
         }),
+        trigger: None,
     };
     let html = invocation_detail(&detail(Some(12_500)), 1_000);
     assert!(html.contains(" · 12.5K reasoning</span>"), "got: {html}");

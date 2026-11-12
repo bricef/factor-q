@@ -138,6 +138,25 @@ pub struct DoctorReport {
     /// labelled simply has not been picked up yet.
     #[serde(default)]
     pub agents_at_cap: Vec<crate::health::AgentAtCap>,
+    /// Trigger claims that have not settled and will not settle on their
+    /// own: deliveries taken off the trigger stream that were neither
+    /// released nor recorded as started. The claim is the only record
+    /// linking a delivery to its run, so a trigger that was taken and
+    /// never ran shows up nowhere else.
+    #[serde(default)]
+    pub trigger_claims: DoctorTriggerClaims,
+}
+
+/// `control.doctor`'s trigger-claim block.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DoctorTriggerClaims {
+    /// How long a trigger that an exited process left unacked can take to
+    /// be redelivered to this daemon, in milliseconds: the trigger retry
+    /// ladder from end to end. A claim an exited process left is judged
+    /// against it, measured from when this daemon started dispatching.
+    pub redelivery_window_ms: i64,
+    /// Every stranded claim, oldest first. Empty on a healthy table.
+    pub stranded: Vec<crate::health::StrandedTriggerClaim>,
 }
 
 impl DoctorReport {
@@ -158,6 +177,24 @@ impl DoctorReport {
         self
     }
 
+    /// Attach the trigger-claim block. Separate from
+    /// [`build_doctor_report`] because judging a claim needs facts about
+    /// the daemon answering — its own claimant id and how long it has been
+    /// dispatching — that the store folds the builder reads do not carry.
+    pub fn with_trigger_claims(mut self, claims: DoctorTriggerClaims) -> Self {
+        self.trigger_claims = claims;
+        self
+    }
+
+    /// Stranded trigger claims an operator should act on: every one but
+    /// those still inside their redelivery window.
+    pub fn stranded_claim_issues(&self) -> impl Iterator<Item = &crate::health::StrandedTriggerClaim> {
+        self.trigger_claims
+            .stranded
+            .iter()
+            .filter(|c| c.finding.is_issue())
+    }
+
     /// Total terminal failures across all kinds.
     pub fn failure_total(&self) -> i64 {
         self.failures.iter().map(|f| f.count).sum()
@@ -176,10 +213,10 @@ impl DoctorReport {
 
     /// True when any check reports a problem worth an operator's
     /// attention: stale workers, stuck in-flight work, ambiguous
-    /// invocations, permanent failures, or a consumer that has stopped
-    /// making progress. In-flight work that is merely running (not
-    /// stuck) is healthy, not an issue, and so is a consumer that is
-    /// merely behind.
+    /// invocations, permanent failures, a consumer that has stopped
+    /// making progress, or a stranded trigger claim. In-flight work that
+    /// is merely running (not stuck) is healthy, not an issue, and so is
+    /// a consumer that is merely behind or a claim awaiting redelivery.
     pub fn has_issues(&self) -> bool {
         self.workers.stale > 0
             || self.executions.stuck > 0
@@ -187,6 +224,7 @@ impl DoctorReport {
             || self.failure_total() > 0
             || self.faulty_consumers().next().is_some()
             || self.unavailable_mcp_servers().next().is_some()
+            || self.stranded_claim_issues().next().is_some()
     }
 }
 
@@ -269,5 +307,6 @@ pub fn build_doctor_report(
         mcp_servers,
         throttled_models: Vec::new(),
         agents_at_cap: Vec::new(),
+        trigger_claims: DoctorTriggerClaims::default(),
     }
 }

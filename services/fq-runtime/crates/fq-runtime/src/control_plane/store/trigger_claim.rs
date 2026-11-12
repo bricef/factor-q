@@ -1,6 +1,6 @@
 use sqlx::Row;
 
-use super::{ControlPlaneStore, ControlPlaneStoreError};
+use super::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus};
 
 /// The stable identity of one trigger delivery, as the claim table keys it.
 ///
@@ -34,6 +34,43 @@ pub enum TriggerClaim {
     Won,
     Held { claimant: String },
     Started { invocation_id: String },
+}
+
+/// One claim row, read back whole for an operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerClaimRow {
+    pub stream: String,
+    pub stream_epoch: i64,
+    pub stream_seq: u64,
+    pub claimant: String,
+    /// `state = 'durably_started'`; otherwise the row is `claimed`.
+    pub durably_started: bool,
+    /// Nullable in the schema: a claim written before claims named their
+    /// invocation at claim time has none until it is marked.
+    pub invocation_id: Option<String>,
+    pub claimed_at: i64,
+}
+
+/// A `claimed` row, with the coordination status of the invocation it
+/// names when the control plane records one. An ownership row is written
+/// when an invocation is archived, found ambiguous or dropped, and is
+/// never swept, so its presence says the run got that far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsettledTriggerClaim {
+    pub claim: TriggerClaimRow,
+    pub owner_status: Option<OwnerStatus>,
+}
+
+fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> TriggerClaimRow {
+    TriggerClaimRow {
+        stream: row.get("stream"),
+        stream_epoch: row.get("stream_epoch"),
+        stream_seq: row.get::<i64, _>("stream_seq") as u64,
+        claimant: row.get("claimant"),
+        durably_started: row.get::<String, _>("state") == "durably_started",
+        invocation_id: row.get("invocation_id"),
+        claimed_at: row.get("claimed_at"),
+    }
 }
 
 impl ControlPlaneStore {
@@ -180,5 +217,69 @@ impl ControlPlaneStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The claim that names `invocation_id`: the trigger delivery that
+    /// started it, or is to.
+    ///
+    /// `invocation_id` has no index, so this reads the table through.
+    /// That is why the link is read for one invocation at a time and is
+    /// not a column of any list: a per-row lookup in a list would scan the
+    /// table once per row. An id is named by at most one row — every
+    /// claim writes a fresh one, and an adoption writes the adopter's
+    /// own — so the scan stops at the first match.
+    pub async fn trigger_claim_for_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<TriggerClaimRow>, ControlPlaneStoreError> {
+        let row = sqlx::query(
+            "SELECT stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at \
+             FROM trigger_claim WHERE invocation_id = ? LIMIT 1",
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_claim))
+    }
+
+    /// Every `claimed` row, oldest first, joined in the same statement to
+    /// the coordination status of the invocation each one names.
+    ///
+    /// One pass over the table however many rows it returns: the join is
+    /// on the ownership table's primary key. `claimed` rows are the
+    /// triggers some process has in hand, plus any left behind, so the
+    /// answer stays small while the table grows by one `durably_started`
+    /// row per trigger.
+    pub async fn unsettled_trigger_claims(
+        &self,
+    ) -> Result<Vec<UnsettledTriggerClaim>, ControlPlaneStoreError> {
+        let rows = sqlx::query(
+            "SELECT c.stream AS stream, c.stream_epoch AS stream_epoch, \
+                    c.stream_seq AS stream_seq, c.claimant AS claimant, c.state AS state, \
+                    c.invocation_id AS invocation_id, c.claimed_at AS claimed_at, \
+                    o.status AS owner_status \
+             FROM trigger_claim c \
+             LEFT JOIN coordination_invocation_owner o ON o.invocation_id = c.invocation_id \
+             WHERE c.state = 'claimed' \
+             ORDER BY c.claimed_at, c.stream_seq",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let owner_status = row
+                    .get::<Option<String>, _>("owner_status")
+                    .map(|s| {
+                        OwnerStatus::parse(&s).ok_or_else(|| {
+                            ControlPlaneStoreError::Malformed(format!("unknown owner status `{s}`"))
+                        })
+                    })
+                    .transpose()?;
+                Ok(UnsettledTriggerClaim {
+                    claim: row_to_claim(row),
+                    owner_status,
+                })
+            })
+            .collect()
     }
 }

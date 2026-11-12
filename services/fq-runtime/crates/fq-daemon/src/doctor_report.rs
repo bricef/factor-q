@@ -1,7 +1,7 @@
 //! `control.doctor`, daemon-side (plan Phase 4, verb 15): the
 //! durable-execution health composite — worker liveness, in-flight and
-//! stuck work, ambiguous invocations, permanent failures and dead
-//! letters, in one report.
+//! stuck work, ambiguous invocations, permanent failures, dead letters
+//! and stranded trigger claims, in one report.
 //!
 //! **A machinery report, and the stretch is declared rather than
 //! hidden.** The domain model's definition of a report — a named,
@@ -51,8 +51,8 @@ use std::sync::Arc;
 use fq_edge::wire::WireError;
 use fq_ops::surface::build_doctor_report;
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
-use fq_runtime::surface::{DoctorParams, DoctorReport};
-use fq_runtime::views::Views;
+use fq_runtime::surface::{DoctorParams, DoctorReport, DoctorTriggerClaims};
+use fq_runtime::views::{ClaimJudgement, TRIGGER_REDELIVERY_WINDOW, Views};
 
 /// Register `control.doctor` on the daemon's edge.
 pub(crate) fn register_doctor_report(
@@ -74,6 +74,8 @@ pub(crate) fn register_doctor_report(
     let mcp_servers = facts.mcp_servers.clone();
     let throttle = facts.throttle.clone();
     let agent_caps = facts.agent_caps.clone();
+    let worker_id: Arc<str> = facts.worker_id.as_str().into();
+    let dispatching_since_ms = facts.dispatching_since_ms;
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -97,7 +99,14 @@ pub(crate) fn register_doctor_report(
          The consumer lines are a probe of this daemon's broker at the instant of the \
          call: every durable it expects, named, with a stuck verdict for any that is \
          redelivering rather than progressing. A summariser durable is expected only \
-         where `[summary]` configures one.",
+         where `[summary]` configures one. \
+         The trigger-claim block lists deliveries taken off the trigger stream that were \
+         neither released nor recorded as started and will not be without help: one whose \
+         invocation started while its claim still says it has not, and one an exited \
+         process left that has not come back to this daemon within the redelivery window. \
+         A claim this daemon holds for a run that has not started is never listed: it may \
+         be waiting behind a paused model or a full agent, and nothing on the claim tells \
+         that apart from one that will never start.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
@@ -106,6 +115,7 @@ pub(crate) fn register_doctor_report(
             let mcp_servers = mcp_servers.clone();
             let throttle = throttle.clone();
             let agent_caps = agent_caps.clone();
+            let worker_id = worker_id.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -146,6 +156,17 @@ pub(crate) fn register_doctor_report(
                     bus.consumer_ledger(),
                 )
                 .await;
+                let trigger_claims = DoctorTriggerClaims {
+                    redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
+                    stranded: views
+                        .stranded_trigger_claims(&ClaimJudgement {
+                            claimant: &worker_id,
+                            dispatching_since_ms,
+                            now_ms,
+                        })
+                        .await
+                        .map_err(internal)?,
+                };
                 Ok(build_doctor_report(
                     &workers,
                     &executions,
@@ -159,7 +180,10 @@ pub(crate) fn register_doctor_report(
                 // the builder reads (#278); so is the per-agent count
                 // (#718).
                 .with_throttled_models(throttle.snapshot(now_ms))
-                .with_agents_at_cap(agent_caps.snapshot()))
+                .with_agents_at_cap(agent_caps.snapshot())
+                // Judged against this process's own id and start, which
+                // no store fold carries.
+                .with_trigger_claims(trigger_claims))
             }
         })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;

@@ -29,6 +29,11 @@ mod signals;
 // reads here that are not header folds.
 mod transcript;
 
+// The trigger-claim reads: which delivery started a run, and which were
+// taken and never settled.
+mod trigger_claims;
+pub use trigger_claims::{CLAIM_MARK_GRACE, ClaimJudgement, TRIGGER_REDELIVERY_WINDOW};
+
 // The view types themselves are `fq_ops::views` and are re-exported
 // here, so a caller reaches them by the same path as before. What is
 // left in this module is the reading: the store handles, and the
@@ -766,6 +771,7 @@ impl Views {
             .cost_of_invocation(invocation_id)
             .await?
             .map(InvocationCostView::from);
+        let trigger = self.invocation_trigger(invocation_id).await?;
 
         Ok(Some(InvocationDetailView {
             invocation_id: invocation_id.to_string(),
@@ -781,6 +787,7 @@ impl Views {
             has_transcript,
             summary,
             cost,
+            trigger,
         }))
     }
 }

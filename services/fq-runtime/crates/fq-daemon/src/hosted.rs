@@ -202,7 +202,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             bus: bus.clone(),
             projection: store.clone(),
             control_plane: cp_store.clone(),
-            facts: daemon_facts(&config, mcp.states(), throttle.clone(), agent_caps.clone()),
+            facts: daemon_facts(&config, mcp.states(), &throttle, &agent_caps, &worker_id),
             // The same runner the dispatcher and startup recovery
             // drive invocations with — `invocation.drop` asks it
             // whether the target is live, and arms its halt.
@@ -751,17 +751,21 @@ async fn announce_startup(
     Ok(())
 }
 
-/// What `control.status` answers about this daemon: where its state
-/// lives and how long it will take to stop. All three come from the
-/// config it was started with, so the report describes the process
-/// reporting rather than the machine asking.
+/// What `control.status` and `control.doctor` answer about this daemon:
+/// where its state lives, how long it will take to stop, and which
+/// process it is. They come from the config it was started with and the
+/// id it was given, so the reports describe the process reporting rather
+/// than the machine asking.
 fn daemon_facts(
     config: &Config,
     mcp_servers: fq_runtime::McpServerStates,
-    throttle: Arc<fq_runtime::llm::ModelThrottle>,
-    agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    throttle: &Arc<fq_runtime::llm::ModelThrottle>,
+    agent_caps: &Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    worker_id: &fq_runtime::worker::WorkerId,
 ) -> crate::operator_surface::DaemonFacts {
     crate::operator_surface::DaemonFacts {
+        worker_id: worker_id.as_str().to_string(),
+        dispatching_since_ms: chrono::Utc::now().timestamp_millis(),
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,
@@ -771,7 +775,7 @@ fn daemon_facts(
             maintenance: config.maintenance.enabled,
         },
         mcp_servers,
-        throttle,
-        agent_caps,
+        throttle: throttle.clone(),
+        agent_caps: agent_caps.clone(),
     }
 }
