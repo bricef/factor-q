@@ -26,6 +26,7 @@ pub mod grant_log;
 pub mod grants;
 pub mod index;
 pub mod repository;
+mod schema;
 pub mod stats;
 pub mod tokens;
 pub mod verify;

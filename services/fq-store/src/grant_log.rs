@@ -39,16 +39,16 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::grants::{GrantEvent, GrantId, Grantor, Principal, Scope, Verb};
 use crate::index::now_millis;
 use crate::{Result, StoreError};
 
-/// Schema migrations for the grants database, applied in order (the same
-/// `PRAGMA user_version` pattern as the storage index — see
-/// [`crate::index`]).
-const MIGRATIONS: &[&str] = &[
+/// The grants database's migration ladder: rung *n* brings the schema to
+/// version *n*, recorded in `PRAGMA user_version`. Opening applies the pending
+/// rungs under one lock and one transaction, as for the storage index
+/// ([`crate::schema`]).
+pub(crate) const MIGRATIONS: &[&str] = &[
     // v1 — the event log. `seq` is the log position AND the GrantId of a
     // `granted` row (AUTOINCREMENT: monotone, never reused). `published`
     // marks fan-out progress: 0 = pending (the outbox), 1 = acknowledged by
@@ -99,18 +99,11 @@ pub struct SqliteGrantLog {
 }
 
 impl SqliteGrantLog {
-    /// Open (or create) the grants database at `path` and run migrations.
+    /// Open (or create) the grants database at `path` and bring its schema up
+    /// to date. A second process opening the same file at the same time waits
+    /// for this one's upgrade, then finds nothing to do.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await?;
-        migrate(&pool).await?;
+        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS).await?;
         let log = Self { pool };
         // Catch the projection up with the log (a no-op when they are already
         // level): idempotent recovery for a database written before the
@@ -491,28 +484,6 @@ pub mod nats {
             Ok(())
         }
     }
-}
-
-/// Apply pending migrations (the storage-index pattern: each migration and
-/// its version bump commit atomically).
-async fn migrate(pool: &SqlitePool) -> Result<()> {
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(pool)
-        .await?;
-    for (i, migration) in MIGRATIONS.iter().enumerate() {
-        let target = i as i64 + 1;
-        if version < target {
-            let mut tx = pool.begin().await?;
-            // `raw_sql` steps through multi-statement migration scripts (v2 is
-            // several statements), matching the storage index's `migrate`.
-            sqlx::raw_sql(*migration).execute(&mut *tx).await?;
-            // PRAGMA values cannot be bound; `target` is this loop's integer index.
-            let bump = sqlx::AssertSqlSafe(format!("PRAGMA user_version = {target}"));
-            sqlx::query(bump).execute(&mut *tx).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

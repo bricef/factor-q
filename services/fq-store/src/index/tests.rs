@@ -3,6 +3,7 @@
 //! same access it had inline.
 
 use super::*;
+use sqlx::sqlite::SqliteConnectOptions;
 use tempfile::TempDir;
 
 async fn store() -> (TempDir, SqliteNameIndex) {

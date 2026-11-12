@@ -15,7 +15,6 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::{Cid, Result};
 
@@ -222,10 +221,10 @@ pub struct IndexSnapshot {
     pub current_names: Vec<(String, Cid)>,
 }
 
-/// Schema migrations, applied in order. The DB's `PRAGMA user_version` records
-/// how many have run; each migration runs in its own transaction together with
-/// the version bump, so a crash mid-migration rolls back cleanly and re-runs.
-const MIGRATIONS: &[&str] = &[
+/// The index's migration ladder: rung *n* brings the schema to version *n*,
+/// recorded in `PRAGMA user_version`. Opening applies the pending rungs under
+/// one lock and one transaction ([`crate::schema`]).
+pub(crate) const MIGRATIONS: &[&str] = &[
     // v1 — the M1a/M1b base. `IF NOT EXISTS` makes it a no-op on a pre-M1c
     // database (which already has these tables, but no recorded version).
     "CREATE TABLE IF NOT EXISTS name_versions (
@@ -324,49 +323,20 @@ fn cid_counts(rows: Vec<(String, i64)>) -> Result<Vec<(Cid, i64)>> {
         .collect()
 }
 
-/// Apply any migrations the database has not yet seen, tracked by
-/// `PRAGMA user_version`.
-async fn migrate(pool: &SqlitePool) -> Result<()> {
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(pool)
-        .await?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let target = i as i64 + 1;
-        if version < target {
-            let mut tx = pool.begin().await?;
-            sqlx::raw_sql(*sql).execute(&mut *tx).await?;
-            // PRAGMA values cannot be bound; `target` is this loop's integer index.
-            let bump = sqlx::AssertSqlSafe(format!("PRAGMA user_version = {target}"));
-            sqlx::query(bump).execute(&mut *tx).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
-}
-
 /// SQLite-backed [`NameIndex`] — the reference implementation (ADR-0024 DB #1).
 pub struct SqliteNameIndex {
     pool: SqlitePool,
 }
 
 impl SqliteNameIndex {
-    /// Open (creating if needed) the index database at `path`.
+    /// Open (creating if needed) the index database at `path`, and bring its
+    /// schema up to date. A second process opening the same file at the same
+    /// time waits for this one's upgrade, then finds nothing to do.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        // A single connection serializes every index operation, so the two
-        // reference-counting compare-and-swaps (reserve / claim) and the
-        // multi-statement transactions (bind / unbind) linearize exactly as the
-        // verified protocol assumes: SQLite's single writer. It also sidesteps
-        // WAL's `SQLITE_BUSY_SNAPSHOT`, which a busy timeout cannot retry away.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await?;
-        migrate(&pool).await?;
+        // One connection: the two reference-counting compare-and-swaps
+        // (reserve / claim) and the multi-statement transactions (bind /
+        // unbind) linearize exactly as the verified protocol assumes.
+        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS).await?;
         Ok(Self { pool })
     }
 }
