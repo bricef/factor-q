@@ -6,13 +6,16 @@
 //! file but never the directory it goes in. This module is where `--root`
 //! becomes `root/index.db` and `root/grants.db`, and it is the only way the
 //! CLI opens either, so no command opens a database without having said
-//! what it does about a missing root.
+//! what it does about a missing root. `tests/cli_open_gate.rs` fails on any
+//! other open in the CLI's sources.
 //!
 //! The rule is the one the content-addressed commands already follow:
 //! writing creates, reading does not. `object put` and `grant add`, the two
 //! database commands that can be the first thing done to a new store,
-//! create the root, parents included, as `put` does. Every other command
-//! exits naming the directory and creates nothing. A missing root is
+//! create the root, parents included, as `put` does. Every other database
+//! command exits naming the directory and creates nothing; the commands
+//! that open no database (`put`, `get`, `has`, `size`, `metrics`, `serve`
+//! and the key and offline token commands) do not come here. A missing root is
 //! almost always a mistyped `--root` or the default root from the wrong
 //! working directory, and creating it would make `object ls` print
 //! nothing, `grant check` answer `denied`, `gc` report that every invariant
@@ -113,32 +116,38 @@ impl<'a> StoreRoot<'a> {
     /// Leave the root a directory a database can be opened in, or say why
     /// it is not one.
     async fn prepare(&self, missing: MissingRoot) -> CliResult<()> {
-        let root = self.describe();
-        match tokio::fs::metadata(self.path).await {
-            Ok(meta) if meta.is_dir() => Ok(()),
-            Ok(_) => Err(format!("the store root {root} is not a directory").into()),
+        let why = match tokio::fs::metadata(self.path).await {
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => format!("the store root {} is not a directory", self.describe()),
             // Not found may be a link to nothing, which no command can create
             // through, so it gets no advice to start a store.
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                match tokio::fs::read_link(self.path).await {
-                    Ok(target) => Err(format!(
-                        "the store root {root} is a symbolic link to {}, which does not exist",
+                match (tokio::fs::read_link(self.path).await, missing) {
+                    (Ok(target), _) => format!(
+                        "the store root {} is a symbolic link to {}, which does not exist",
+                        self.describe(),
                         target.display()
-                    )
-                    .into()),
-                    Err(_) => match missing {
-                        MissingRoot::Create => ensure_root_exists(self.path, &root).await,
-                        MissingRoot::Refuse => Err(format!(
-                            "the store root {root} does not exist. Point --root or FQ_CAS_ROOT at \
-                         an existing store, or start a new one with `fq-cas object put` or \
-                         `fq-cas grant add`."
-                        )
-                        .into()),
-                    },
+                    ),
+                    (Err(_), MissingRoot::Create) => return self.ensure_root_exists().await,
+                    (Err(_), MissingRoot::Refuse) => format!(
+                        "the store root {} does not exist. Point --root or FQ_CAS_ROOT at an \
+                         existing store, or start a new one with `fq-cas object put` or \
+                         `fq-cas grant add`.",
+                        self.describe()
+                    ),
                 }
             }
-            Err(e) => Err(format!("cannot use the store root {root}: {e}").into()),
-        }
+            Err(e) => format!("cannot use the store root {}: {e}", self.describe()),
+        };
+        Err(why.into())
+    }
+
+    /// Create the store root, parents included, as `put` does when it first
+    /// writes.
+    async fn ensure_root_exists(&self) -> CliResult<()> {
+        tokio::fs::create_dir_all(self.path)
+            .await
+            .map_err(|e| format!("cannot create the store root {}: {e}", self.describe()).into())
     }
 
     /// The root as an absolute path, so that the default names the working
@@ -152,12 +161,4 @@ impl<'a> StoreRoot<'a> {
         };
         format!("{} ({source})", path.display())
     }
-}
-
-/// Create the store root, parents included, as `put` does when it first
-/// writes.
-async fn ensure_root_exists(path: &Path, described: &str) -> CliResult<()> {
-    tokio::fs::create_dir_all(path)
-        .await
-        .map_err(|e| format!("cannot create the store root {described}: {e}").into())
 }
