@@ -255,9 +255,10 @@ impl TurnFold {
             // The third way a run ends. `fq invocation drop` publishes
             // exactly one `invocation.operator_recovered` and **no**
             // competing terminal event — the reducer's drop path returns
-            // `Suspended` and emits nothing (`reducer/runner.rs`), while
-            // the coordination consumer marks the WAL row terminal from
-            // this event alone. So the WAL-backed transcript closes a
+            // `Suspended`, or `Unstarted` before the first WAL write, and
+            // emits nothing (`reducer/runner/boundary.rs`), while the
+            // coordination consumer marks the WAL row terminal, when there
+            // is one, from this event alone. So the WAL-backed transcript closes a
             // dropped run and, without this arm, the Turn-backed one
             // never would: its dashboard page would tail forever.
             //

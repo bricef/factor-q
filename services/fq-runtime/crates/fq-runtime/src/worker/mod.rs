@@ -150,9 +150,9 @@ impl DurableStart {
     /// returns (#974). Once the signal has fired, the invocation's first
     /// WAL write has landed and the previous step's checkpoint is on
     /// disk, so the stop is [`InvocationOutcome::Suspended`] and recovery
-    /// resumes it. Before that nothing durable exists, so the stop is
-    /// [`InvocationOutcome::Unstarted`]: there is no row for recovery to
-    /// find, and the work is whoever handed it over's to redo or drop.
+    /// resumes it. Before that the worker has written no row, so the stop
+    /// is [`InvocationOutcome::Unstarted`]: there is nothing for recovery
+    /// to find, and the work is whoever handed it over's to redo or drop.
     pub(crate) fn stopped_at_boundary(
         &self,
         invocation_id: Uuid,
@@ -208,15 +208,18 @@ pub enum InvocationOutcome {
     },
     /// The invocation stopped at its first step boundary, **before its
     /// first WAL write** (#974): a drain or an operator halt arrived while
-    /// it was being set up. Nothing durable exists for it. No
-    /// `invocation_state` row was written, so recovery has nothing to
-    /// resume, and no durable start was signalled. Its `triggered` event
-    /// is on the stream, and no outcome event follows it.
+    /// it was being set up. Either way the worker wrote no
+    /// `invocation_state` row, so recovery has nothing to resume, and
+    /// signalled no durable start; its `triggered` event is on the stream.
     ///
-    /// What happens to the work is `stopped_by`'s to decide. The trigger
-    /// dispatcher leaves a drained invocation's trigger un-acked for the
-    /// next binary, and consumes a halted one's, whose drop is its
-    /// outcome.
+    /// The rest depends on `stopped_by`. After a **drain** nothing durable
+    /// exists for the invocation and no outcome event follows its
+    /// `triggered`: the trigger dispatcher leaves its trigger un-acked for
+    /// the next binary, which runs it under a new invocation id. A
+    /// **halt** is the first half of an operator drop, which then publishes
+    /// `invocation.operator_recovered` for the invocation and has the
+    /// control plane write its archive and ownership rows as `failed`:
+    /// that is its outcome, and the dispatcher consumes its trigger.
     Unstarted {
         invocation_id: Uuid,
         stopped_by: BoundaryStop,

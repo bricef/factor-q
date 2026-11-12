@@ -1,8 +1,12 @@
-//! What becomes of a trigger whose invocation returned before its
-//! durable start, the moment `handle` acts on `trigger_fate`.
+//! What becomes of the delivery of an invocation that returned before its
+//! durable start: the moment `handle` acts on `trigger_fate`.
 //!
-//! Split from `dispatcher.rs` to keep that file and `handle` inside their
-//! size budgets when the drain case was added (#974).
+//! Moved out of `handle` when the drain case was added (#974). That was a
+//! choice, not forced by a size budget: before the move `handle` was 233
+//! of its 250 lines and `dispatcher.rs` 742 of its 800, so the new arm
+//! would have fitted. Settling is one step with a policy of its own to
+//! document, and `handle`, where every admission change lands, is shorter
+//! for calling it.
 
 use tracing::info;
 
@@ -12,8 +16,8 @@ use crate::worker::{ExecutorError, InvocationOutcome};
 
 impl TriggerDispatcher {
     /// Settle the delivery of an invocation that returned before the
-    /// durable-start signal fired, so the run left nothing durable
-    /// behind. Its fate comes from the result:
+    /// durable-start signal fired, so the run left no WAL row behind. Its
+    /// fate comes from the result:
     ///
     /// - **Transient** error (bus/store unavailable, a transient LLM
     ///   error): the run could succeed on a retry, so NAK, and JetStream
@@ -23,8 +27,8 @@ impl TriggerDispatcher {
     ///   payload) or a clean `Ok` return: nothing to retry, so ACK. The
     ///   `Failed` event already recorded why, and redelivering a poison
     ///   trigger would loop under the consumer's unbounded redelivery. An
-    ///   operator halt during the invocation's setup is in this group:
-    ///   the drop is its outcome.
+    ///   operator halt during the invocation's setup is in this group: the
+    ///   operator dropped the invocation, and the drop is its outcome.
     /// - A **drain** during the invocation's setup (#974): neither. The
     ///   trigger is the only record of the work, so the delivery is left
     ///   un-acked, the way `handle`'s own drain check leaves one. The
@@ -32,8 +36,10 @@ impl TriggerDispatcher {
     ///   invocation that never wrote a WAL row, so the next binary's
     ///   startup recovery has nothing to mark, and when the broker
     ///   redelivers the trigger, that binary adopts the claim under its
-    ///   new id and starts the trigger once (`claim_delivery`).
-    pub(super) async fn settle_unstarted(
+    ///   new id and starts the trigger once (`claim_delivery`). Adoption
+    ///   writes the new invocation's id over the old one, so the log line
+    ///   here is what links the abandoned invocation to the delivery.
+    pub(super) async fn settle_before_durable_start(
         &self,
         msg: &async_nats::jetstream::Message,
         agent_id: &AgentId,
@@ -66,12 +72,24 @@ impl TriggerDispatcher {
                 )
                 .await;
             }
-            (TriggerFate::Leave, _) => info!(
-                subject = %msg.subject,
-                trigger_id = %trigger_id,
-                "draining — invocation stopped before its first WAL write; \
-                 leaving trigger queued for the next binary"
-            ),
+            (TriggerFate::Leave, _) => {
+                // `trigger_fate` leaves only an `Unstarted` drain.
+                let abandoned = match result {
+                    Ok(InvocationOutcome::Unstarted { invocation_id, .. }) => {
+                        invocation_id.to_string()
+                    }
+                    _ => "-".to_string(),
+                };
+                info!(
+                    subject = %msg.subject,
+                    trigger_id = %trigger_id,
+                    invocation_id = %abandoned,
+                    stream_seq = msg.info().map(|info| info.stream_sequence).unwrap_or(0),
+                    delivery_attempt,
+                    "draining — invocation stopped before its first WAL write; leaving the \
+                     trigger queued for the next binary, which reruns it under a new invocation id"
+                );
+            }
             _ => {
                 self.ack(
                     msg,

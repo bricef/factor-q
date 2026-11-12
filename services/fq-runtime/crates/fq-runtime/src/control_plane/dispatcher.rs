@@ -45,12 +45,12 @@
 
 mod admission;
 mod agent_cap;
+mod before_durable_start;
 #[cfg(test)]
 mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
-mod unstarted;
 
 pub use claim::TriggerClaims;
 use std::sync::Arc;
@@ -640,8 +640,9 @@ impl TriggerDispatcher {
         //
         // The signal is fired at most once; if the invocation returns
         // before firing it (an error or a stop before any WAL write, or a
-        // worker that never signals), `settle_unstarted` decides on return
-        // whether the trigger is acked, NAKed or left for the next binary.
+        // worker that never signals), `settle_before_durable_start`
+        // decides on return whether the trigger is acked, NAKed or left
+        // for the next binary.
         let delivery_attempt = u32::try_from(delivery_attempt).unwrap_or(1);
         let (durable_start, mut durably_started) = DurableStart::channel(claim.invocation_id);
         let mut invocation = std::pin::pin!(self.worker.run_invocation(
@@ -674,9 +675,9 @@ impl TriggerDispatcher {
 
         // The invocation returned before the durable-start signal fired,
         // so the run left nothing durable behind: the trigger's fate is
-        // decided from the result (`unstarted.rs`).
+        // decided from the result (`before_durable_start.rs`).
         if !acked && !durable_start_observed {
-            self.settle_unstarted(
+            self.settle_before_durable_start(
                 msg,
                 &agent_id,
                 trigger_id,
