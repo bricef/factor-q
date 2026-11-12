@@ -3,26 +3,29 @@
 //! store's real ladders:
 //!
 //! - **Serialised**: a second opener that arrives while the first is
-//!   between reading the version and applying the ladder waits, then
-//!   finds nothing to do — in this process and in another.
+//!   between reading what decides its work — the version, or the grant
+//!   log's projection cursor — and acting on it waits, then finds nothing
+//!   to do, in this process and in another.
 //! - **Atomic**: a ladder that stops part-way — an injected failure on a
-//!   later rung, or an open that is cancelled — leaves the file at its old
-//!   version with nothing applied and the lock free, and the next open
-//!   succeeds.
+//!   later rung, an open that is cancelled, a process that is killed —
+//!   leaves the file at its old version with nothing applied and the lock
+//!   free, and the next open succeeds.
 //!
 //! And the step before the lock: a database another connection is still
 //! creating, and has not yet switched into WAL mode, opens once that
 //! connection lets go.
 //!
-//! The races are staged by [`RivalAtVersionRead`], which pauses the first
-//! opener at the moment it has read the version — the window two
+//! The races are staged by [`RivalAt`], which pauses the first opener at a
+//! [`Moment`] where it has read what decides its work — the window two
 //! unserialised openers used to share — starts the second there, and gives
 //! it a bounded head start before letting the first go on. Without the
-//! lock the second reads the same old version and runs the whole ladder
-//! inside its head start, so the first then applies rungs that are already
-//! there and fails. With the lock the second cannot begin until the first
-//! commits, and the head start runs out with it still waiting.
+//! lock the second reads the same old state and does the whole job inside
+//! its head start, so the first then repeats work that is already done and
+//! fails. With the lock the second cannot begin until the first commits,
+//! and the head start runs out with it still waiting; every race test
+//! asserts that it did.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -34,7 +37,8 @@ use tempfile::tempdir;
 use tokio::task::JoinHandle;
 
 use super::*;
-use crate::{SqliteGrantLog, SqliteNameIndex};
+use crate::grant_log::catch_up;
+use crate::{Grantor, LiveGrant, Principal, Scope, SqliteGrantLog, SqliteNameIndex, Verb};
 
 /// The two databases the store keeps, each opened through its own store's
 /// `open`.
@@ -59,6 +63,25 @@ impl Store {
         }
     }
 
+    /// Run `ladder` against the file `options` address as this store's
+    /// `open` does, its `after_ladder` step included, telling `seam` where
+    /// it has got to.
+    async fn migrate(
+        self,
+        options: &SqliteConnectOptions,
+        ladder: &[&'static str],
+        seam: &mut impl MigrationSeam,
+    ) -> Result<()> {
+        match self {
+            Store::Index => migrate_observed(options, ladder, nothing_after_ladder, seam).await,
+            Store::Grants => {
+                let after_ladder =
+                    async |conn: &mut SqliteConnection| catch_up(conn, &mut ()).await;
+                migrate_observed(options, ladder, after_ladder, seam).await
+            }
+        }
+    }
+
     /// Open the file at `path` the way the store does, as a second opener
     /// would, and close it again.
     async fn open(self, path: PathBuf) -> std::result::Result<(), String> {
@@ -79,7 +102,7 @@ impl Store {
     }
 }
 
-/// A file's `user_version`, and every schema object in it as
+/// A file's `user_version`, and every row of `sqlite_master` as
 /// `type name sql`, sorted.
 type OnDisk = (i64, Vec<String>);
 
@@ -111,7 +134,8 @@ async fn on_disk(path: &Path) -> OnDisk {
 async fn pool_at(store: Store, path: &Path, at: usize) -> SqlitePool {
     let pool = connect_store_pool(path).await.expect("open the store pool");
     if at > 0 {
-        migrate(&pool, &store.ladder()[..at])
+        store
+            .migrate(&pool.connect_options(), &store.ladder()[..at], &mut ())
             .await
             .expect("bring the file to its old version");
     }
@@ -160,10 +184,10 @@ async fn lock_released(path: &Path) -> bool {
 // ----- The race, staged -----
 
 /// How long the rival is given while the first opener is paused. Without
-/// the lock a rival ladder finishes in milliseconds, far inside this; with
-/// it the rival cannot finish until the first opener commits, so every race
-/// test spends exactly this long here. Well under [`SCHEMA_LOCK_WAIT`],
-/// which is how long the rival will wait.
+/// the lock a rival finishes in milliseconds, far inside this; with it the
+/// rival cannot finish until the first opener commits, so every race test
+/// spends exactly this long here. Well under [`SCHEMA_LOCK_WAIT`], which is
+/// how long the rival will wait.
 const RIVAL_HEAD_START: Duration = Duration::from_secs(2);
 
 /// How long a test waits for the rival once the first opener has
@@ -172,33 +196,69 @@ const RIVAL_FINISH: Duration = Duration::from_secs(60);
 
 type Rival = Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>;
 
-/// Starts a rival opener when the watched migration reads the version; see
+/// Where [`RivalAt`] pauses the first opener and starts the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    /// The migration has read the recorded version.
+    VersionRead,
+    /// The grant log's catch-up has read the projection cursor.
+    AfterLadderRead,
+}
+
+/// Starts a rival opener when the watched open reaches a [`Moment`]; see
 /// the module docs.
-struct RivalAtVersionRead {
+struct RivalAt {
+    moment: Moment,
     db: PathBuf,
     pending: Option<Rival>,
     running: Option<JoinHandle<std::result::Result<(), String>>>,
     /// The rival's outcome, when it finished inside its head start.
     finished: Option<std::result::Result<(), String>>,
-    /// What the paused migration read.
+    /// The version the paused migration read, if it reported one.
     version: Option<i64>,
-    /// Whether some connection held the write lock while the migration was
-    /// paused: the migration's own, if it took one.
+    /// Whether some connection held the write lock while the first opener
+    /// was paused: the migration's own, if it took one.
     lock_held: Option<bool>,
+    /// Whether the rival was still unfinished when its head start ran out:
+    /// it waited for the first opener rather than racing it.
+    rival_waited: Option<bool>,
 }
 
-impl RivalAtVersionRead {
+impl RivalAt {
     fn new(
+        moment: Moment,
         db: &Path,
         rival: impl Future<Output = std::result::Result<(), String>> + Send + 'static,
     ) -> Self {
-        RivalAtVersionRead {
+        RivalAt {
+            moment,
             db: db.to_path_buf(),
             pending: Some(Box::pin(rival)),
             running: None,
             finished: None,
             version: None,
             lock_held: None,
+            rival_waited: None,
+        }
+    }
+
+    async fn start_rival(&mut self) {
+        let Some(rival) = self.pending.take() else {
+            return;
+        };
+        self.lock_held = Some(write_lock_held(&self.db).await);
+        let mut running = tokio::spawn(rival);
+        // Elapsing is the expected outcome under the lock, not a failure:
+        // the rival is still queued behind it and finishes later.
+        match tokio::time::timeout(RIVAL_HEAD_START, &mut running).await {
+            Ok(joined) => {
+                self.rival_waited = Some(false);
+                self.finished = Some(joined.expect("the rival opener panicked"));
+            }
+            Err(_) => {
+                self.rival_waited = Some(true);
+                self.running = Some(running);
+            }
         }
     }
 
@@ -210,56 +270,67 @@ impl RivalAtVersionRead {
         let rival = self
             .running
             .take()
-            .expect("the watched migration never read a version, so the rival never started");
+            .expect("the watched open never reached its moment, so the rival never started");
         tokio::time::timeout(RIVAL_FINISH, rival)
             .await
             .expect("the rival opener did not finish within a minute of the first committing")
             .expect("the rival opener panicked")
     }
+
+    /// Both openers succeeded, and the second waited for the first.
+    fn assert_serialised(&self, first: Result<()>, rival: std::result::Result<(), String>) {
+        if let Err(err) = first {
+            panic!("the first opener must succeed: {err}");
+        }
+        if let Err(err) = rival {
+            panic!("the second opener must succeed: {err}");
+        }
+        assert_eq!(
+            self.lock_held,
+            Some(true),
+            "the first opener read what decides its work without holding the write lock"
+        );
+        assert_eq!(
+            self.rival_waited,
+            Some(true),
+            "the second opener finished while the first was still paused"
+        );
+    }
 }
 
-impl MigrationSeam for RivalAtVersionRead {
+impl MigrationSeam for RivalAt {
     async fn version_read(&mut self, version: i64) {
         self.version = Some(version);
-        let Some(rival) = self.pending.take() else {
-            return;
-        };
-        self.lock_held = Some(write_lock_held(&self.db).await);
-        let mut running = tokio::spawn(rival);
-        // Elapsing is the expected outcome under the lock, not a failure:
-        // the rival is still queued behind it and finishes later.
-        match tokio::time::timeout(RIVAL_HEAD_START, &mut running).await {
-            Ok(joined) => self.finished = Some(joined.expect("the rival opener panicked")),
-            Err(_) => self.running = Some(running),
+        if self.moment == Moment::VersionRead {
+            self.start_rival().await;
+        }
+    }
+
+    async fn after_ladder_read(&mut self) {
+        if self.moment == Moment::AfterLadderRead {
+            self.start_rival().await;
         }
     }
 }
 
 /// Two openers of the file at `path`, which is at version `at`: the first
 /// paused at its version read, the second the store's own `open`. Both
-/// must succeed and leave the schema a lone open leaves.
+/// must succeed, the second must have waited, and the file must hold what
+/// a lone open leaves.
 async fn race_two_openers(store: Store, at: usize) {
     let dir = tempdir().unwrap();
     let path = dir.path().join(store.file());
     let pool = pool_at(store, &path, at).await;
-    let mut seam = RivalAtVersionRead::new(&path, store.open(path.clone()));
+    let mut seam = RivalAt::new(Moment::VersionRead, &path, store.open(path.clone()));
 
-    let first = migrate_observed(&pool, store.ladder(), &mut seam).await;
+    let first = store
+        .migrate(&pool.connect_options(), store.ladder(), &mut seam)
+        .await;
     let rival = seam.rival_outcome().await;
     pool.close().await;
 
-    if let Err(err) = first {
-        panic!("the first opener must succeed: {err}");
-    }
-    if let Err(err) = rival {
-        panic!("the second opener must succeed: {err}");
-    }
+    seam.assert_serialised(first, rival);
     assert_eq!(seam.version, Some(at as i64), "the first opener's read");
-    assert_eq!(
-        seam.lock_held,
-        Some(true),
-        "the first opener read the version without holding the write lock"
-    );
     assert_eq!(on_disk(&path).await, store.reference().await);
 }
 
@@ -278,6 +349,121 @@ async fn two_openers_of_a_fresh_grants_db_both_succeed_and_leave_one_schema() {
 #[tokio::test]
 async fn two_openers_upgrading_an_index_db_both_succeed() {
     race_two_openers(Store::Index, 2).await;
+}
+
+// ----- The grant log's catch-up -----
+
+/// Every agent's live grants, in a fixed order: the answer the projection
+/// gives.
+async fn live_grants(log: &SqliteGrantLog) -> Vec<Vec<LiveGrant>> {
+    let mut grants = Vec::new();
+    for agent in ["alice", "bob", "carol"] {
+        grants.push(
+            log.live_grants_for(&Principal::Agent(agent.into()))
+                .await
+                .unwrap(),
+        );
+    }
+    grants
+}
+
+/// A `grants.db` at `path` whose projection lags its log, built the way
+/// `open_catches_up_a_stale_projection` builds one: append, then wipe the
+/// projection and reset its cursor. Returns the live grants before the
+/// wipe.
+async fn lagging_grants_db(path: &Path) -> Vec<Vec<LiveGrant>> {
+    let log = SqliteGrantLog::open(path).await.unwrap();
+    let alice = Principal::Agent("alice".into());
+    let bob = Principal::Agent("bob".into());
+    let carol = Principal::Agent("carol".into());
+    let read = BTreeSet::from([Verb::Read]);
+    log.append_granted(
+        &Grantor::Operator,
+        &alice,
+        &BTreeSet::from([Verb::Read, Verb::Grant]),
+        &Scope::Namespace("research".into()),
+    )
+    .await
+    .unwrap();
+    log.append_granted(
+        &Grantor::Agent("alice".into()),
+        &bob,
+        &read,
+        &Scope::Namespace("research.papers".into()),
+    )
+    .await
+    .unwrap();
+    let revoked = log
+        .append_granted(
+            &Grantor::Operator,
+            &carol,
+            &read,
+            &Scope::Name("docs.readme".into()),
+        )
+        .await
+        .unwrap();
+    log.append_revoked(revoked).await.unwrap();
+    let before = live_grants(&log).await;
+    assert!(
+        before.iter().any(|grants| !grants.is_empty()),
+        "the log must leave something live for the projection to lose"
+    );
+    drop(log);
+
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "DELETE FROM projected_grants;
+         DELETE FROM projected_revocations;
+         UPDATE projection_cursor SET applied_seq = 0;",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    before
+}
+
+/// Two openers of a `grants.db` whose projection lags its log: the first
+/// paused once its catch-up has read the cursor, the second the store's own
+/// `open`. Without the lock both read the old cursor, and the first, coming
+/// to write after the second has committed, fails with `database is
+/// locked`.
+#[tokio::test]
+async fn two_openers_of_a_grants_db_with_a_lagging_projection_both_succeed() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(Store::Grants.file());
+    let before = lagging_grants_db(&path).await;
+    let pool = connect_store_pool(&path)
+        .await
+        .expect("open the store pool");
+    let mut seam = RivalAt::new(
+        Moment::AfterLadderRead,
+        &path,
+        Store::Grants.open(path.clone()),
+    );
+
+    let after_ladder = async |conn: &mut SqliteConnection| catch_up(conn, &mut seam).await;
+    let first = migrate_observed(
+        &pool.connect_options(),
+        Store::Grants.ladder(),
+        after_ladder,
+        &mut (),
+    )
+    .await;
+    let rival = seam.rival_outcome().await;
+    pool.close().await;
+
+    seam.assert_serialised(first, rival);
+    let log = SqliteGrantLog::open(&path).await.unwrap();
+    assert_eq!(
+        live_grants(&log).await,
+        before,
+        "the caught-up projection must answer as it did before the wipe"
+    );
 }
 
 // ----- A ladder that stops part-way -----
@@ -301,7 +487,8 @@ async fn interrupted_ladder(store: Store, at: usize) {
         .chain([FAILING_RUNG])
         .collect();
 
-    let err = migrate(&pool, &failing)
+    let err = store
+        .migrate(&pool.connect_options(), &failing, &mut ())
         .await
         .expect_err("the injected rung must fail the migration");
     assert!(
@@ -341,13 +528,19 @@ async fn an_interrupted_index_db_upgrade_stays_at_its_old_version() {
     interrupted_ladder(Store::Index, 2).await;
 }
 
-/// Never lets the migration past a rung: it can only end by being
-/// dropped.
-struct HangAfterRung(i64);
+/// Holds the migration once a rung has been applied, and says so: from
+/// then on the migration can only end by being dropped.
+struct HoldAfterRung {
+    rung: i64,
+    reached: Option<tokio::sync::oneshot::Sender<()>>,
+}
 
-impl MigrationSeam for HangAfterRung {
+impl MigrationSeam for HoldAfterRung {
     async fn rung_applied(&mut self, version: i64) {
-        if version == self.0 {
+        if version == self.rung {
+            if let Some(reached) = self.reached.take() {
+                let _ = reached.send(());
+            }
             std::future::pending::<()>().await;
         }
     }
@@ -360,17 +553,27 @@ async fn a_cancelled_open_leaves_the_file_unchanged_and_the_lock_free() {
     let pool = pool_at(Store::Index, &path, 2).await;
     let before = on_disk(&path).await;
 
-    // Held after rung 4 — rungs 3 and 4 applied, uncommitted — until the
-    // timeout drops it.
-    let cancelled = tokio::time::timeout(
-        Duration::from_millis(500),
-        migrate_observed(&pool, Store::Index.ladder(), &mut HangAfterRung(4)),
-    )
-    .await;
-    assert!(
-        cancelled.is_err(),
-        "the migration should still have been held after rung 4: {cancelled:?}"
-    );
+    let (reached, held) = tokio::sync::oneshot::channel();
+    let mut seam = HoldAfterRung {
+        rung: 4,
+        reached: Some(reached),
+    };
+    {
+        let options = pool.connect_options();
+        let migration = Store::Index.migrate(&options, Store::Index.ladder(), &mut seam);
+        let mut migration = std::pin::pin!(migration);
+        tokio::select! {
+            outcome = &mut migration => {
+                panic!("the migration ended instead of holding after rung 4: {outcome:?}")
+            }
+            held = held => held.expect("the seam was dropped before rung 4"),
+            () = tokio::time::sleep(RIVAL_FINISH) => {
+                panic!("the migration did not reach rung 4 within a minute")
+            }
+        }
+        // Dropped here, held after rung 4: rungs 3 and 4 are applied and
+        // uncommitted.
+    }
 
     assert!(
         lock_released(&path).await,
@@ -391,8 +594,9 @@ async fn a_cancelled_open_leaves_the_file_unchanged_and_the_lock_free() {
 }
 
 /// A file a newer binary has migrated past this ladder is opened as it is.
-/// This crate has never refused one, and this pins that the open still
-/// changes nothing and gives the lock back.
+/// This crate has never refused one (whether it should is
+/// <https://github.com/bricef/factor-q/issues/984>), and this pins that the
+/// open still changes nothing and gives the lock back.
 #[tokio::test]
 async fn a_file_newer_than_the_binary_is_left_as_it_is() {
     let dir = tempdir().unwrap();
@@ -478,35 +682,89 @@ async fn a_grants_db_another_connection_is_creating_opens_once_it_lets_go() {
     open_while_another_connection_creates(Store::Grants).await;
 }
 
-/// The rival is this test binary run again, filtered to `opener_process`
-/// below. What makes this cross-process is that the parent's lock and the
-/// child's are two processes' locks on one file — the lock SQLite takes
-/// for `BEGIN IMMEDIATE`; an in-process mutex would not show up here.
+/// The other process is this test binary run again, filtered to
+/// `opener_process` below. What makes these cross-process is that the
+/// parent's lock and the child's are two processes' locks on one file — the
+/// lock SQLite takes for `BEGIN IMMEDIATE`; an in-process mutex would not
+/// show up here, and a killed process takes nothing with it but its own
+/// uncommitted transaction.
 #[cfg(unix)]
 mod across_processes {
+    use std::io::{BufRead, BufReader};
     use std::process::Stdio;
+
+    use fq_test_support::TestChild;
 
     use super::*;
 
     const OPENER_PROCESS: &str = "schema::tests::across_processes::opener_process";
     const CHILD_DB: &str = "FQ_STORE_SCHEMA_TEST_DB";
+    const CHILD_ROLE: &str = "FQ_STORE_SCHEMA_TEST_ROLE";
+    /// Open `grants.db` through the store and say how it went.
+    const ROLE_OPEN: &str = "open-grants";
+    /// Upgrade `index.db` and stop after rung 4, transaction open, to be
+    /// killed there.
+    const ROLE_STALL: &str = "stall-index-after-rung-4";
     /// Every line the child means the parent to read starts with this.
     const SAYS: &str = "store-schema-test-child: ";
+    /// How long a stalled child waits to be killed before giving up on its
+    /// parent. Bounds the child if the parent dies first.
+    const STALL: Duration = Duration::from_secs(60);
+    /// POSIX gives `SIGKILL` the number 9 on every Unix; spelled out here
+    /// rather than taking `libc` on as a dependency for one constant.
+    const SIGKILL: i32 = 9;
 
-    /// The child process's body: open `grants.db` through the store and say
-    /// how it went. A no-op in an ordinary run; it acts only when the test
-    /// below has started it.
+    fn opener_child(db: &Path, role: &str) -> TestChild {
+        TestChild::builder(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", OPENER_PROCESS, "--nocapture"])
+            .env(CHILD_DB, db)
+            .env(CHILD_ROLE, role)
+            .stdout(Stdio::piped())
+            .spawn()
+    }
+
+    /// Stops the ladder after a rung, with the transaction still open, and
+    /// says so.
+    struct StallAfterRung(i64);
+
+    impl MigrationSeam for StallAfterRung {
+        async fn rung_applied(&mut self, version: i64) {
+            if version == self.0 {
+                println!("{SAYS}rung-applied {version}");
+                tokio::time::sleep(STALL).await;
+            }
+        }
+    }
+
+    /// The child process's body. A no-op in an ordinary run: it acts only
+    /// when a test below has started it.
     #[tokio::test]
     async fn opener_process() {
         let Ok(db) = std::env::var(CHILD_DB) else {
             return;
         };
-        match Store::Grants.open(PathBuf::from(db)).await {
-            Ok(()) => println!("{SAYS}opened"),
-            Err(err) => {
-                println!("{SAYS}error {err}");
-                panic!("the child's open failed: {err}");
+        let db = PathBuf::from(db);
+        let role = std::env::var(CHILD_ROLE).expect("a child is always given a role");
+        match role.as_str() {
+            ROLE_OPEN => match Store::Grants.open(db).await {
+                Ok(()) => println!("{SAYS}opened"),
+                Err(err) => {
+                    println!("{SAYS}error {err}");
+                    panic!("the child's open failed: {err}");
+                }
+            },
+            ROLE_STALL => {
+                let pool = connect_store_pool(&db).await.expect("open the store pool");
+                let outcome = Store::Index
+                    .migrate(
+                        &pool.connect_options(),
+                        Store::Index.ladder(),
+                        &mut StallAfterRung(4),
+                    )
+                    .await;
+                panic!("the child was not killed mid-ladder (outcome: {outcome:?})");
             }
+            other => panic!("unknown child role {other:?}"),
         }
     }
 
@@ -515,31 +773,32 @@ mod across_processes {
     /// rival gets.
     struct ChildAtVersionRead {
         db: PathBuf,
-        child: Option<fq_test_support::TestChild>,
+        child: Option<TestChild>,
         /// Taken at once: a child that exits inside its head start is
         /// reaped by the poll, and its pipe goes with it.
         stdout: Option<std::process::ChildStdout>,
         lock_held: Option<bool>,
+        /// Whether the child exited before its head start ran out, rather
+        /// than waiting for the parent.
+        exited_during_head_start: Option<bool>,
     }
 
     impl MigrationSeam for ChildAtVersionRead {
         async fn version_read(&mut self, _version: i64) {
             self.lock_held = Some(write_lock_held(&self.db).await);
-            let mut child =
-                fq_test_support::TestChild::builder(std::env::current_exe().expect("this binary"))
-                    .args(["--exact", OPENER_PROCESS, "--nocapture"])
-                    .env(CHILD_DB, &self.db)
-                    .stdout(Stdio::piped())
-                    .spawn();
+            let mut child = opener_child(&self.db, ROLE_OPEN);
             self.stdout = child.take_stdout();
             const POLL: Duration = Duration::from_millis(25);
             let polls = RIVAL_HEAD_START.as_millis() / POLL.as_millis();
+            let mut exited = false;
             for _ in 0..polls {
                 if child.try_wait().expect("poll the child").is_some() {
+                    exited = true;
                     break;
                 }
                 tokio::time::sleep(POLL).await;
             }
+            self.exited_during_head_start = Some(exited);
             self.child = Some(child);
         }
     }
@@ -554,9 +813,12 @@ mod across_processes {
             child: None,
             stdout: None,
             lock_held: None,
+            exited_during_head_start: None,
         };
 
-        let first = migrate_observed(&pool, Store::Grants.ladder(), &mut seam).await;
+        let first = Store::Grants
+            .migrate(&pool.connect_options(), Store::Grants.ladder(), &mut seam)
+            .await;
         pool.close().await;
 
         let mut child = seam.child.take().expect("the child was started");
@@ -576,6 +838,72 @@ mod across_processes {
         );
         assert!(said.contains(&format!("{SAYS}opened")), "{said}");
         assert_eq!(seam.lock_held, Some(true));
+        assert_eq!(
+            seam.exited_during_head_start,
+            Some(false),
+            "the second process finished while the first was still paused:\n{said}"
+        );
         assert_eq!(on_disk(&path).await, Store::Grants.reference().await);
+    }
+
+    #[tokio::test]
+    async fn a_process_killed_mid_upgrade_leaves_the_file_at_its_old_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(Store::Index.file());
+        pool_at(Store::Index, &path, 2).await.close().await;
+        let before = on_disk(&path).await;
+
+        let mut child = opener_child(&path, ROLE_STALL);
+        let stdout = child.take_stdout().expect("the child's stdout is piped");
+        let (lines, said) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                if lines.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        // Bounded by count and by time: the child prints a handful of
+        // harness lines before its own.
+        let marker = format!("{SAYS}rung-applied 4");
+        let mut stalled = false;
+        for _ in 0..100 {
+            match said.recv_timeout(Duration::from_secs(60)) {
+                Ok(line) if line.contains(&marker) => {
+                    stalled = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(stalled, "the child never reported rung 4 applied");
+        assert!(
+            write_lock_held(&path).await,
+            "the stalled child should be holding the write lock"
+        );
+
+        child.signal(SIGKILL).expect("kill the child mid-ladder");
+        child
+            .wait_timeout(Duration::from_secs(10))
+            .expect("the killed child was not reaped");
+
+        assert_eq!(
+            on_disk(&path).await,
+            before,
+            "rungs 3 and 4 of the killed upgrade must not have reached the file"
+        );
+        assert!(
+            !write_lock_held(&path).await,
+            "the killed process's lock must have gone with it"
+        );
+        Store::Index
+            .open(path.clone())
+            .await
+            .expect("the next open after the kill must succeed");
+        assert_eq!(on_disk(&path).await, Store::Index.reference().await);
     }
 }
