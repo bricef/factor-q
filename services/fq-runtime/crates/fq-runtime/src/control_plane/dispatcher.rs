@@ -638,16 +638,17 @@ impl TriggerDispatcher {
                 signal = &mut durably_started, if !signal_resolved => {
                     signal_resolved = true;
                     // A resolved receiver panics if polled again (#987),
-                    // so this branch runs once, whatever the signal
-                    // resolved to. `Ok` = fired (first WAL write landed):
-                    // mark the claim and ack; if the mark fails, the
-                    // delivery stays un-acked and the invocation runs on.
-                    // `Err` = the sender was dropped without firing (the
-                    // invocation is ending before its first WAL write):
-                    // the settlement after the loop covers it.
+                    // so this branch runs once. `Ok` = fired (first WAL
+                    // write landed): mark the claim and ack, or stop the
+                    // run if the mark fails (see `mark_durable_started`).
+                    // `Err` = dropped unfired (the invocation is ending
+                    // before its first WAL write): settled after the loop.
                     if signal.is_ok() {
                         durable_start_observed = true;
                         acked = self.mark_durable_started(msg, &claim, trigger_id).await;
+                        if !acked {
+                            return;
+                        }
                     }
                 }
                 outcome = &mut invocation => break outcome,
