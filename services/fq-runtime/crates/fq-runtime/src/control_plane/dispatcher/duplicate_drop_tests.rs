@@ -37,6 +37,8 @@ use crate::test_support::nats::test_nats;
 const HELD_DROP: &str = "dropping a redelivered trigger whose claim this daemon already holds";
 /// The start of the line the started arm logs.
 const STARTED_DROP: &str = "dropping duplicate trigger delivery after durable start";
+/// The clause the held arm adds on a trigger's last delivery.
+const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
 
 /// The warn lines emitted on this thread while a capture is installed.
 #[derive(Clone, Default)]
@@ -153,12 +155,18 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
     for field in [
         format!("stream_seq={seq}"),
         "delivered=2".to_string(),
+        format!("subject={}", crate::events::subjects::trigger(&agent)),
         "claimant=binary-1".to_string(),
         "claim_age_ms=".to_string(),
         format!("claim_invocation_id={named}"),
     ] {
         assert!(held[0].contains(&field), "no `{field}` in {}", held[0]);
     }
+    assert!(
+        !held[0].contains(LAST_DELIVERY),
+        "a second delivery is not the last: {}",
+        held[0]
+    );
     assert!(
         log.lines_with(STARTED_DROP).is_empty(),
         "the held copy is not reported as a copy of a started run"
@@ -202,6 +210,78 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
         (0, 1),
         "the first copy's own settlement is not a drop"
     );
+}
+
+/// **The held drop of a trigger's last delivery says it was the last.**
+///
+/// Past it no copy comes, and the trigger is dead-lettered unless the
+/// delivery is acked, whatever the claim is waiting on. The first copy
+/// parks in its setup; the broker's redeliveries are brought forward one
+/// after another to the bound, and the last one is handed to `handle`.
+/// The first copy then starts and acks the trigger, which the line did
+/// not rule out.
+#[tokio::test]
+async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
+    let server = test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let agent = unique_agent_id("last-delivery-in-setup");
+    let (_agents, registry) = registry_with(&agent);
+    let state = StateDir::new().await;
+    let setup = HeldSetup::new(0);
+    let model = one_answer();
+    let dispatcher = state
+        .dispatcher(
+            &bus,
+            &registry,
+            state.runner(&bus, "binary-1", Some(setup.clone())),
+            model.clone(),
+            "binary-1",
+        )
+        .await;
+    let (mut consumer, msg) = one_delivery(&bus, &agent).await;
+    let mut copy = msg.clone();
+    let first = tokio::spawn({
+        let dispatcher = dispatcher.clone();
+        async move { dispatcher.handle(&msg).await }
+    });
+    setup.parked().await;
+
+    let bound = crate::bus::TRIGGER_MAX_DELIVER;
+    for delivery in 2..=bound {
+        copy.ack_with(AckKind::Nak(None))
+            .await
+            .expect("redeliver the trigger");
+        copy = next_delivery(&mut consumer).await;
+        assert_eq!(copy.info().unwrap().delivered, delivery);
+    }
+
+    let log = Captured::default();
+    {
+        let _capture = log.install();
+        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&copy))
+            .await
+            .expect("the copy is refused, not parked behind the first");
+    }
+    let held = log.lines_with(HELD_DROP);
+    assert_eq!(held.len(), 1, "one line per refused copy: {held:#?}");
+    assert!(
+        held[0].contains(&format!("delivered={bound}")) && held[0].contains(LAST_DELIVERY),
+        "the last delivery's drop says it was the last: {}",
+        held[0]
+    );
+    assert_eq!(drop_counts(&bus), (0, 1));
+
+    setup.let_through();
+    tokio::time::timeout(Duration::from_secs(20), first)
+        .await
+        .expect("the first copy runs to an end")
+        .expect("task joins");
+    settled(
+        &mut consumer,
+        "the first copy's durable start acks the trigger",
+    )
+    .await;
+    assert_eq!(model.requests().len(), 1, "the trigger ran once");
 }
 
 /// **A copy that arrives after the durable start is counted as a copy of a
