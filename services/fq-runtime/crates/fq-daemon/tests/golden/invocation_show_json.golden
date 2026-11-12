@@ -78,7 +78,7 @@
   },
   "trigger": {
     "stream": "fq-triggers",
-    "stream_epoch": 1767322985000000000,
+    "stream_epoch": "1767322985000000000",
     "stream_seq": 1,
     "state": "durably_started",
     "claimant": "worker-alpha",

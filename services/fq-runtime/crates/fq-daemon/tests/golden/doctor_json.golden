@@ -112,32 +112,51 @@
   "agents_at_cap": [],
   "trigger_claims": {
     "redelivery_window_ms": 1170000,
+    "stream_max_age_ms": 86400000,
+    "horizon_ms": 2592000000,
     "stranded": [
       {
         "delivery": {
           "stream": "fq-triggers",
-          "stream_epoch": 1767322985000000000,
-          "stream_seq": 2,
+          "stream_epoch": "<STREAM_EPOCH>",
+          "stream_seq": 1003,
           "state": "claimed",
           "claimant": "worker-alpha",
-          "claimed_at_ms": 1767323054000
+          "claimed_at_ms": <CLAIMED_AGED_OUT_MS>
         },
-        "invocation_id": "2f000000-0000-7000-8000-000000000002",
+        "invocation_id": "8b000000-0000-7000-8000-000000000008",
         "holder": "exited_process",
-        "finding": "started_unmarked",
-        "invocation_status": "failed"
+        "message": "aged_out",
+        "finding": "never_started",
+        "invocation_status": null
       },
       {
         "delivery": {
           "stream": "fq-triggers",
-          "stream_epoch": 1767322985000000000,
-          "stream_seq": 5,
+          "stream_epoch": "1767322985000000000",
+          "stream_seq": 7,
           "state": "claimed",
           "claimant": "worker-alpha",
-          "claimed_at_ms": 1767323085000
+          "claimed_at_ms": <CLAIMED_EARLIER_STREAM_MS>
         },
-        "invocation_id": "5d000000-0000-7000-8000-000000000005",
+        "invocation_id": "9c000000-0000-7000-8000-000000000009",
         "holder": "exited_process",
+        "message": "earlier_incarnation",
+        "finding": "never_started",
+        "invocation_status": null
+      },
+      {
+        "delivery": {
+          "stream": "fq-triggers",
+          "stream_epoch": "<STREAM_EPOCH>",
+          "stream_seq": 1002,
+          "state": "claimed",
+          "claimant": "worker-alpha",
+          "claimed_at_ms": <CLAIMED_AWAITING_MS>
+        },
+        "invocation_id": "7a000000-0000-7000-8000-000000000007",
+        "holder": "exited_process",
+        "message": "deliverable",
         "finding": "awaiting_redelivery",
         "invocation_status": null
       }
