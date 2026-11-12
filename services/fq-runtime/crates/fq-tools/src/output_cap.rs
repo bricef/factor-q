@@ -22,7 +22,11 @@
 //! `max_lines` / `tail_lines` parameters. This one cuts a finished string
 //! to a budget, and no tool has a parameter it could point the model at.
 //! What they share is how a size is said, [`human_bytes`], and the shape
-//! of the note: the cap, how much was kept, how much there was.
+//! of the note: the cap, how much was kept, how much there was. With the
+//! default cap, ordinary `exec` output is cut once, by `exec`; output
+//! with many invalid bytes or control characters renders larger than
+//! `exec`'s raw-byte cap and can be cut again here, losing `exec`'s note
+//! (see #985).
 
 /// The most bytes one byte of text can take inside a JSON string: a
 /// control character written as `\u00XX`.

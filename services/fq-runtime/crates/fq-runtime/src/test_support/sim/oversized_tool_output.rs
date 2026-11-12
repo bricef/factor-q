@@ -58,8 +58,8 @@ fn wire_size(event: &Event) -> usize {
 /// JSON array of integers, roughly four bytes on the wire per byte of
 /// state, so one answer at the 256 KiB cap makes the archive about
 /// 1 MiB. State-blob sizing is outside #827, which names it out of
-/// scope; the archive is left out of the check below rather than the
-/// check being weakened for every event.
+/// scope (see #981); the archive is left out of the check below rather
+/// than the check being weakened for every event.
 #[tokio::test]
 async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
     let world = SimWorld::new(827, 5.0).await;

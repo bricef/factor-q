@@ -488,7 +488,7 @@ Error case:
 **Design notes:**
 
 - **`tool_name` is restated here**, even though the initiating `tool.call` already carries it, so a result renders on its own. The parameters are not restated — those stay on the call, reachable via `parent_event_id`. Empty on events written before the field existed.
-- **`output` is capped** at `[tools] max_result_bytes` (262144 bytes by default), the truncation note included, for every tool and for error messages too. The cap is applied once, before the WAL write, so this field, the worker's WAL row and the tool message in every later `llm.request` carry the same text. A capped `output` keeps its start, cut on a character boundary, and ends with `(truncated at the 256.0 KiB tool-result cap: kept the first N of M bytes; the rest was dropped)` ([#827](https://github.com/bricef/factor-q/issues/827)).
+- **`output` is capped** at `[tools] max_result_bytes` (262144 bytes by default), the truncation note included, for every tool and for error messages too. The cap counts the bytes the string takes in this event as JSON writes it, quotes excluded, so text full of control characters, quotes or backslashes is cut shorter than ordinary text; the note's counts are bytes of text. The cap is applied once, before the WAL write, so this field, the worker's WAL row and the tool message in every later `llm.request` carry the same text. A capped `output` keeps its start, cut on a character boundary, and ends with `(truncated at the 256.0 KiB tool-result cap: kept the first N of M bytes; the rest was dropped)` ([#827](https://github.com/bricef/factor-q/issues/827)).
 
 ### `host_notice`
 

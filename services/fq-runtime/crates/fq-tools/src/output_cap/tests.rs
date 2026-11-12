@@ -5,7 +5,10 @@ use super::*;
 /// The oracle: the bytes `text` takes inside a JSON string, read off
 /// `serde_json` itself rather than off the helper under test.
 fn wire_len(text: &str) -> usize {
-    serde_json::to_string(text).expect("a string serialises").len() - 2
+    serde_json::to_string(text)
+        .expect("a string serialises")
+        .len()
+        - 2
 }
 
 /// The room [`cap_output`] keeps for the marker: its widest form, for an

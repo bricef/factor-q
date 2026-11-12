@@ -13,9 +13,15 @@
 //! replacement for `| head` and `| tail`.
 //!
 //! The runtime caps every tool's finished result as well
-//! ([`crate::output_cap`], `[tools] max_result_bytes`). That cap is set
-//! above both of these streams together, so by default `exec`'s output is
-//! cut here, once, with the note that names `max_lines` and `tail_lines`.
+//! ([`crate::output_cap`], `[tools] max_result_bytes`), by the space it
+//! takes in an event. That cap is set above both of these streams
+//! together, so ordinary `exec` output is cut here, once, with the note
+//! that names `max_lines` and `tail_lines`. Output with many invalid
+//! bytes or control characters is not: the byte cap here counts raw
+//! bytes, `from_utf8_lossy` writes each invalid byte as a three-byte
+//! U+FFFD, and JSON writes a control character as up to six, so the
+//! rendered text can exceed the runtime cap and be cut again from the
+//! end, losing this note and the stderr section (see #985).
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::watch;
