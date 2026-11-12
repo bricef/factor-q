@@ -2150,6 +2150,12 @@ async fn refuse_wal_rows(worker_db: &std::path::Path) {
 /// has fired the run is not polled again and gets no further than the
 /// poll that fired it. By then the invocation's WAL row must exist: the
 /// first step's, in flight, under the id the signal carries.
+///
+/// This is not the deterministic guard on the order; the next test is.
+/// Against a runner that fired just before its write, this one goes red
+/// only because that write is not dispatched in the poll that fires.
+/// That rests on the store's pool pinging a connection before handing it
+/// out, which takes another poll, and on thread timing.
 #[tokio::test]
 async fn the_durable_start_fires_once_the_first_wal_write_has_landed() {
     let server = crate::test_support::nats::test_nats();
