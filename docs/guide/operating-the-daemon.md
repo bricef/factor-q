@@ -191,11 +191,15 @@ An invocation that is still being set up when the drain lands (its workspace
 being provisioned, its MCP servers starting) has taken no step and written
 nothing to resume, so it is not suspended. It stops, its workspace is removed,
 and its trigger is left unacked with the broker. The next start receives the
-trigger again once its 30-second ack window has passed and runs it from the
-beginning, once, under a new invocation id and as `attempt: 2`. The first
-invocation's `triggered` event stays in the log with no outcome after it. Like a
-drain that lands between a trigger's pull and its dispatch, this costs the
-trigger one of its five deliveries
+trigger again once that delivery's ack window has lapsed (30 seconds for a
+first delivery, longer for a redelivered one: 2, 5, then 12 minutes) and runs it
+from the beginning, once, as its next attempt and under a new invocation id.
+The first invocation's `triggered` event stays in the log with no outcome after
+it. Like a drain that lands between a trigger's pull and its dispatch, this
+costs the trigger one of its five deliveries. A trigger caught in setup on its
+fifth and last delivery is not redelivered: when that delivery's window lapses,
+the advisory watch dead-letters it as `trigger_exhausted`, although it never
+ran, and `fq dead-letters requeue <agent>` puts it back
 ([#974](https://github.com/bricef/factor-q/issues/974)).
 
 > **Give the old daemon its port back before starting the new one.** The
