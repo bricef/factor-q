@@ -195,13 +195,24 @@ impl MigrationSeam for () {}
 /// WAL's `SQLITE_BUSY_SNAPSHOT`, which a busy timeout cannot retry away,
 /// cannot arise between them. Two processes on one file each have a pool
 /// of their own, and between them it can.
+///
+/// When the migration fails, a refusal included, the pool is closed
+/// before the error is returned, so nothing of a failed open is still
+/// attached to the file once this returns.
 pub(crate) async fn open_store_db(
     path: &Path,
     ladder: &[&'static str],
     after_ladder: impl AsyncFnOnce(&mut SqliteConnection) -> Result<()>,
 ) -> Result<SqlitePool> {
     let pool = connect_store_pool(path).await?;
-    migrate(&pool.connect_options(), ladder, after_ladder).await?;
+    if let Err(err) = migrate(&pool.connect_options(), ladder, after_ladder).await {
+        // Closed, not dropped. sqlx closes a dropped connection later, on
+        // its own thread, and the last connection to close on a WAL file
+        // checkpoints under an exclusive lock as it goes; a caller that
+        // tried the lock just after a failed open could find it held.
+        pool.close().await;
+        return Err(err);
+    }
     Ok(pool)
 }
 
