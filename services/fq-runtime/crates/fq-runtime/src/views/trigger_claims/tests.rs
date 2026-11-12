@@ -2,6 +2,7 @@
 //! on its own, then both reads against real stores.
 
 use super::*;
+use crate::bus::{TRIGGER_REDELIVERY_WINDOW, TRIGGER_RETRY_BACKOFF};
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::store::{
     ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey,
@@ -39,11 +40,13 @@ fn claim(seq: u64, claimant: &str, invocation_id: &str, claimed_at: i64) -> Trig
     }
 }
 
-/// A daemon that has been dispatching for `for_ms`.
+/// A daemon that has been dispatching for `for_ms`, judging with the
+/// window the daemon passes.
 fn judgement(for_ms: i64) -> ClaimJudgement<'static> {
     ClaimJudgement {
         claimant: THIS_DAEMON,
         dispatching_since_ms: NOW_MS - for_ms,
+        redelivery_window_ms: window_ms(),
         now_ms: NOW_MS,
     }
 }

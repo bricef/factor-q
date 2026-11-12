@@ -206,6 +206,26 @@ pub const TRIGGER_RETRY_BACKOFF: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(12 * 60),
 ];
 
+/// How long a trigger that an exited dispatcher left unacked can take to
+/// be redelivered to the daemon that replaced it: [`TRIGGER_RETRY_BACKOFF`]
+/// end to end. `fq doctor` waits this long into a daemon's run before it
+/// calls such a trigger's claim abandoned.
+///
+/// One redelivery takes at most the ladder's longest entry, since the
+/// broker redelivers when the delivery's window lapses. The whole ladder
+/// leaves room for a dispatcher with a backlog to reach the message, so a
+/// claim the redelivery would have adopted is never reported while it
+/// still could be.
+pub const TRIGGER_REDELIVERY_WINDOW: std::time::Duration = {
+    let mut total = std::time::Duration::ZERO;
+    let mut i = 0;
+    while i < TRIGGER_RETRY_BACKOFF.len() {
+        total = total.saturating_add(TRIGGER_RETRY_BACKOFF[i]);
+        i += 1;
+    }
+    total
+};
+
 /// Default retention for the trigger stream. Triggers are short-lived
 /// — the dispatcher consumes them within seconds under normal
 /// operation. A 24h window is a safety net against a runaway

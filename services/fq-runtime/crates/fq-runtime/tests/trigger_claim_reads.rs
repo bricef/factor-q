@@ -19,6 +19,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
+use fq_runtime::bus::TRIGGER_REDELIVERY_WINDOW;
 use fq_runtime::control_plane::store::{InvocationArchiveRow, OwnerStatus, TriggerKey};
 use fq_runtime::views::{ClaimJudgement, DEFAULT_LONG_DISPATCH_THRESHOLD_MS};
 use fq_runtime::worker::InvocationStateRow;
@@ -171,6 +172,7 @@ async fn no_operator_read_scans_the_claim_table_once_per_row() {
     let judgement = ClaimJudgement {
         claimant: THIS_DAEMON,
         dispatching_since_ms: NOW_MS - 86_400_000,
+        redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
         now_ms: NOW_MS,
     };
 

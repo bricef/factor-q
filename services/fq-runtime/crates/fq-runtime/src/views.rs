@@ -32,7 +32,7 @@ mod transcript;
 // The trigger-claim reads: which delivery started a run, and which were
 // taken and never settled.
 mod trigger_claims;
-pub use trigger_claims::{CLAIM_MARK_GRACE, ClaimJudgement, TRIGGER_REDELIVERY_WINDOW};
+pub use trigger_claims::{CLAIM_MARK_GRACE, ClaimJudgement};
 
 // The view types themselves are `fq_ops::views` and are re-exported
 // here, so a caller reaches them by the same path as before. What is
