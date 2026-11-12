@@ -255,6 +255,14 @@ Seven, in the order `ToolRegistry::with_builtins_exec` registers them
 The exec tool uses argv (no shell invocation), mandatory timeout,
 output cap, and a fresh child env with only a pinned PATH.
 
+Whatever a tool returns, built-in or MCP, error or not, the runner
+caps once more at `[tools] max_result_bytes` (256 KiB by default)
+where every tool's outcome comes back (`run_tool`, through
+`runner/result_cap.rs`), before the WAL write. The WAL row, the
+`tool.result` event and the model therefore see the same text, and a
+cut result ends with a note giving the exact bytes kept of the bytes
+produced.
+
 ### MCP client (`fq-runtime/src/mcp/`)
 
 The full client described under

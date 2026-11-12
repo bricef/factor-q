@@ -224,6 +224,15 @@ to declare. Granting it just adds it to the `tools:` list. See the
 never need to grant, because granting it is not a decision an author gets
 to make. See [Ending the run](#ending-the-run) below.
 
+Whatever a tool returns, the daemon caps it at `[tools]
+max_result_bytes` (256 KiB by default) before the model sees it. A
+longer result keeps its start and ends with a note giving how many
+bytes were kept of how many; the rest is not available to the agent.
+An agent that reads large files or logs does better to ask for the part
+it needs, for instance with `builtin__exec` and `tail_lines`, than to
+read the whole thing. See
+[When a tool returns too much](operating-the-daemon.md#when-a-tool-returns-too-much).
+
 ### File reader
 
 ```markdown

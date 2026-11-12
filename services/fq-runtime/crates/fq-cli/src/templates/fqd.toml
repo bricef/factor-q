@@ -324,10 +324,11 @@ models = ["claude-haiku-4-5"]
 # success_window = 10
 
 [tools]
-# The deadline on every tool call — built-in and MCP alike — applied at
-# the one place all of them pass through. Without it, a tool that never
-# returns (an MCP server that accepts a request and never answers) holds
-# the invocation for as long as the daemon lives.
+# The deadline on every tool call — built-in and MCP alike — and the cap
+# on what it returns, applied at the one place all of them pass through.
+# Without the deadline, a tool that never returns (an MCP server that
+# accepts a request and never answers) holds the invocation for as long
+# as the daemon lives.
 #
 # The deadline for a tool that manages none of its own. Default 120: a
 # tool call is a single bounded action, and two minutes is already
@@ -361,6 +362,20 @@ models = ["claude-haiku-4-5"]
 # ITSELF out counts too: it is the tool most able to hang for minutes
 # at a time, so exempting it would exempt the case that matters.
 # max_consecutive_timeouts = 3
+#
+# The most bytes one tool result may carry, built-in or MCP, error
+# messages included, counting the note that says it was cut. Default
+# 262144 (256 KiB). A result is written to the WAL, published as
+# `tool.result` and sent to the model again on every later turn, and the
+# broker refuses any message over its max_payload (1 MiB on a stock
+# NATS): without this cap one `file_read` of a large log, or one large
+# MCP answer, left the invocation unable to publish anything again.
+# Longer output keeps its start, cut on a character boundary, and ends
+# with "(truncated at the 256.0 KiB tool-result cap: kept the first N of
+# M bytes; the rest was dropped)". The default sits above exec's two
+# 100 KiB streams, so exec output is never cut twice. 0 is refused at
+# startup.
+# max_result_bytes = 262144
 
 [tools.exec]
 # Timeouts for the built-in `exec` tool. Raise these for agents that run
