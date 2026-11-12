@@ -313,6 +313,43 @@ async fn a_queued_resume_starts_when_its_drop_fails() {
     );
 }
 
+/// **One invocation is listed once.** A second resume of an invocation
+/// already queued, or already running, is refused rather than queued
+/// beside it — a drop would hold only one of the two — and once the first
+/// has ended the invocation can be listed again.
+#[tokio::test]
+async fn a_second_listing_of_one_invocation_is_refused_until_the_first_ends() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    let first = workers.queue(Waiter::Operator(id)).await;
+    assert!(first.is_admitted());
+
+    let second = workers.queue(Waiter::Operator(id)).await;
+    assert!(second.is_already_listed(), "while it is queued: {second:?}");
+    assert!(second.permit().await.is_none(), "and nothing starts");
+    let hold = workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("the first listing is untouched");
+    assert!(!hold.is_starting());
+    drop(hold);
+
+    let running = first.permit().await.expect("the first starts");
+    assert!(
+        workers
+            .queue(Waiter::Operator(id))
+            .await
+            .is_already_listed(),
+        "nor while it runs"
+    );
+    drop(running);
+    assert!(
+        workers.queue(Waiter::Operator(id)).await.is_admitted(),
+        "once it has ended, the invocation can be listed again"
+    );
+}
+
 /// **A run the drop finds waiting leaves the queue within a tick**, while
 /// the run ahead of it still holds the only permit: it does not wait for a
 /// permit only to give it straight back.

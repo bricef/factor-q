@@ -207,12 +207,19 @@ impl WorkerPermits {
     /// it; the module doc says why that is the point. A daemon already on
     /// its way out queues nothing: a stopping [`Place`] at once, rather
     /// than a wait that would only let go on its first keepalive tick. A
-    /// resume is listed for a drop to reach from here until it starts.
+    /// resume is listed for a drop to reach from here until its run ends,
+    /// and one invocation is listed once: a second resume of an invocation
+    /// already queued or running here is refused, not queued beside it.
     pub async fn queue(self: &Arc<Self>, waiter: Waiter) -> Place {
         if self.stopping() {
             return Place::never();
         }
-        let entry = QueuedEntry::enter(self, waiter);
+        let Ok(entry) = QueuedEntry::enter(self, waiter) else {
+            return Place {
+                wait: Wait::AlreadyListed,
+                entry: None,
+            };
+        };
         let permits = Arc::clone(self);
         let mut wait: Pin<Box<dyn Future<Output = Option<OwnedSemaphorePermit>> + Send>> =
             Box::pin(async move { permits.wait(None, waiter).await });
@@ -296,7 +303,8 @@ impl WorkerPermits {
 /// Where a queued run stands: what [`WorkerPermits::queue`] returns.
 pub struct Place {
     wait: Wait,
-    /// A resume's listing for a drop, from queueing until it starts.
+    /// A resume's listing for a drop, from queueing until its run ends: it
+    /// moves into the [`RunPermit`] when the run starts.
     entry: Option<QueuedEntry>,
 }
 
@@ -307,6 +315,8 @@ enum Wait {
     Later(Pin<Box<dyn Future<Output = Option<OwnedSemaphorePermit>> + Send>>),
     /// The daemon is draining or shutting down: nothing starts.
     Never,
+    /// The invocation is already queued or running here: nothing starts.
+    AlreadyListed,
 }
 
 impl Place {
@@ -332,6 +342,12 @@ impl Place {
         matches!(self.wait, Wait::Never)
     }
 
+    /// Whether the invocation was already queued or running here, so this
+    /// second resume of it was refused: nothing starts.
+    pub fn is_already_listed(&self) -> bool {
+        matches!(self.wait, Wait::AlreadyListed)
+    }
+
     /// The permit, once the run's turn comes. `None` if a drain or a
     /// shutdown comes first, or a drop: a resume starts under the lock a
     /// drop holds, so one that a drop has gone through for never starts.
@@ -340,7 +356,7 @@ impl Place {
         let permit = match wait {
             Wait::Now(permit) => permit,
             Wait::Later(wait) => wait.await?,
-            Wait::Never => return None,
+            Wait::Never | Wait::AlreadyListed => return None,
         };
         if let Some(entry) = &entry
             && !entry.start().await
@@ -361,6 +377,7 @@ impl fmt::Debug for Place {
             Wait::Now(_) => "Place::Admitted",
             Wait::Later(_) => "Place::Queued",
             Wait::Never => "Place::Stopping",
+            Wait::AlreadyListed => "Place::AlreadyListed",
         })
     }
 }
@@ -401,17 +418,26 @@ struct QueuedEntry {
 }
 
 impl QueuedEntry {
-    /// List a resume; a trigger has nothing for a drop to reach here.
-    fn enter(permits: &Arc<WorkerPermits>, waiter: Waiter) -> Option<Self> {
-        let (id, _) = waiter.resume()?;
+    /// List a resume; a trigger has nothing for a drop to reach here. `Err`
+    /// is an invocation already listed: two runs of one invocation would
+    /// share one listing, and a drop would hold only one of them.
+    fn enter(permits: &Arc<WorkerPermits>, waiter: Waiter) -> Result<Option<Self>, ()> {
+        let Some((id, _)) = waiter.resume() else {
+            return Ok(None);
+        };
         let turn = Arc::new(TurnLock::new(Turn::Waiting));
-        permits.queued().insert(id, Arc::clone(&turn));
-        Some(Self {
+        match permits.queued().entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => return Err(()),
+            std::collections::hash_map::Entry::Vacant(listing) => {
+                listing.insert(Arc::clone(&turn));
+            }
+        }
+        Ok(Some(Self {
             permits: Arc::clone(permits),
             waiter,
             id,
             turn,
-        })
+        }))
     }
 
     /// Start, unless a drop has gone through: under the lock a drop holds

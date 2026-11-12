@@ -104,7 +104,8 @@ impl ResumeControl {
 /// verbatim — the operator must be able to tell terminal / live /
 /// already-resumed / unknown apart without reading daemon logs, and, once
 /// the interrupted results are recorded, a daemon too far into stopping to
-/// re-drive anything.
+/// re-drive anything, or an invocation a concurrent request is already
+/// re-driving.
 pub(crate) async fn handle_resume_request(
     control: &ResumeControl,
     req: InvocationResumeRequest,
@@ -299,6 +300,15 @@ async fn redrive(
              recovery resumes it"
         ));
     }
+    // Two requests for one invocation that both passed the preconditions
+    // before either recorded anything: the first re-drives it, and this
+    // one must not run it a second time beside it.
+    if place.is_already_listed() {
+        return Err(format!(
+            "invocation {invocation_id} is already being resumed by this daemon; \
+             it is not re-driven a second time"
+        ));
+    }
     let message = if place.is_queued() {
         format!(
             "resume accepted; every worker permit is held ({} of max_concurrent_invocations = {}), \
@@ -378,13 +388,14 @@ pub(crate) fn register_resume_command(
          names which precondition failed — terminal, live, already resumed, \
          or unknown — because those are four different things for an \
          operator to do next. After the interrupted results are recorded it \
-         can still refuse the re-drive because this daemon is draining or \
-         stopping; the recorded results stand, and the next start resumes the \
-         invocation on its own. Success is a receipt; the re-drive is \
-         admitted under the worker cap like any other run — at once if a \
-         worker permit is free, otherwise in its turn — and runs detached, so \
-         the invocation may still be waiting, or still working, when this \
-         returns.",
+         can still refuse the re-drive: because this daemon is draining or \
+         stopping, when the recorded results stand and the next start resumes \
+         the invocation on its own; or because a concurrent request for the \
+         same invocation is already re-driving it here. Success is a \
+         receipt; the re-drive is admitted under the worker cap like any \
+         other run — at once if a worker permit is free, otherwise in its \
+         turn — and runs detached, so the invocation may still be waiting, \
+         or still working, when this returns.",
     );
     registry
         .command::<fq_ops::surface::InvocationResumeRequest, _, _>(
