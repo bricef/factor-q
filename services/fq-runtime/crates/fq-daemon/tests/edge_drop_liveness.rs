@@ -258,6 +258,8 @@ impl Surface {
                     mcp_servers: Default::default(),
                     throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
                     agent_caps: fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
+                    worker_id: "operator-surface-test".to_string(),
+                    dispatching_since_ms: 0,
                 },
                 bus: bus.clone(),
                 projection: projection.clone(),

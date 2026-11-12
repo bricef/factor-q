@@ -186,6 +186,9 @@ fn invocation_detail() -> InvocationDetailView {
             total_reasoning_tokens: None,
         }),
         owner: Some(invocation_rows().remove(0)),
+        // The health page and the invocation pages do not render the
+        // trigger delivery yet; `fq invocation show` does.
+        trigger: None,
         // No archive row: this fixture is the standout live case — an
         // in-flight invocation — and a real one is never archived while
         // its WAL row is live (caught by looking at the screenshot).

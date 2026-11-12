@@ -18,8 +18,8 @@
 //! operator reads which one rather than that something is wrong.
 
 pub use fq_ops::health::{
-    AgentAtCap, ConsumerHealth, ConsumerProgress, McpServerHealth, StreamHealth, ThrottledModel,
-    UnsupportedEvent,
+    AgentAtCap, ClaimHolder, ConsumerHealth, ConsumerProgress, McpServerHealth,
+    StrandedClaimFinding, StrandedTriggerClaim, StreamHealth, ThrottledModel, UnsupportedEvent,
 };
 
 use crate::bus::{

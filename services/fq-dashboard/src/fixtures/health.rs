@@ -136,6 +136,7 @@ pub(crate) fn doctor_report() -> DoctorReport {
         // The health page reads the throttle off `control.status`.
         throttled_models: Vec::new(),
         agents_at_cap: Vec::new(),
+        trigger_claims: Default::default(),
         workers: DoctorWorkers {
             alive: 1,
             stale: 2,

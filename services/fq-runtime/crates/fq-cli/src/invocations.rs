@@ -44,6 +44,27 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
     )
 }
 
+/// The `trigger:` line of `fq invocation show` (#954): which delivery on
+/// the trigger stream started the run, and where its claim stands. Said
+/// when there is none, too, so "not started from the stream" never has
+/// to be read off a missing line. Pure; covered by unit tests.
+fn format_trigger_delivery(trigger: Option<&fq_ops::views::TriggerDeliveryView>) -> String {
+    let Some(t) = trigger else {
+        return "none (not started from the trigger stream)".to_string();
+    };
+    let state = match t.state {
+        fq_ops::views::TriggerClaimState::DurablyStarted => "durably started",
+        fq_ops::views::TriggerClaimState::Claimed => "claimed, start not recorded",
+    };
+    let when = chrono::DateTime::from_timestamp_millis(t.claimed_at_ms)
+        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{}ms", t.claimed_at_ms));
+    format!(
+        "{} seq {} ({state}; claimed {when} by {})",
+        t.stream, t.stream_seq, t.claimant
+    )
+}
+
 pub(crate) async fn invocation_list(
     global: &GlobalArgs,
     status: Option<&str>,
@@ -135,6 +156,7 @@ pub(crate) async fn invocation_show(
                 a.final_phase, a.terminal_at_ms, a.archived_at_ms
             );
         }
+        println!("  trigger:  {}", format_trigger_delivery(detail.trigger.as_ref()));
         // The "what is it doing right now" block, from the worker WAL —
         // present only while the invocation is in flight.
         if let Some(live) = &detail.live {

@@ -419,5 +419,77 @@ impl AgentAtCap {
     }
 }
 
+/// A trigger claim that has not settled and will not settle on its own,
+/// as `control.doctor` reports it: a delivery taken off the trigger
+/// stream that has neither been released nor recorded as started.
+///
+/// A claim this daemon holds for an invocation that has not started is
+/// never one of these, however old. A trigger can wait behind a paused
+/// model or a full agent for hours, and nothing on the claim says
+/// whether the daemon holding it is still going to start it, so the
+/// report does not guess.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct StrandedTriggerClaim {
+    /// The delivery, and the claim on it as the control plane holds it.
+    pub delivery: crate::views::TriggerDeliveryView,
+    /// The invocation id the claim reserved for the run. A claim written
+    /// by a build that did not name it at claim time has none, and then
+    /// the report cannot look for a start.
+    pub invocation_id: Option<String>,
+    /// Whether the claim is this daemon's or a process's that has exited.
+    pub holder: ClaimHolder,
+    pub finding: StrandedClaimFinding,
+    /// What the stores record of the invocation the claim names:
+    /// `in_flight`, its terminal phase, or the control plane's
+    /// coordination status for it. Absent when nothing records that it
+    /// started.
+    #[serde(default)]
+    pub invocation_status: Option<String>,
+}
+
+/// Whose claim a stranded claim is.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimHolder {
+    /// The daemon answering the report.
+    ThisDaemon,
+    /// Any other process. One daemon dispatches at a time and takes a new
+    /// id on every start, so a claim under another id was left by a
+    /// process that has exited.
+    ExitedProcess,
+}
+
+/// What `control.doctor` makes of a stranded claim.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StrandedClaimFinding {
+    /// Left by a process that has exited, with no start recorded, and
+    /// this daemon has not yet been running for the redelivery window.
+    /// The broker redelivers an unacked trigger within that window and
+    /// this daemon adopts the claim and starts it. Not an issue.
+    AwaitingRedelivery,
+    /// Left by a process that has exited, with no start recorded, and not
+    /// redelivered although this daemon has been running for longer than
+    /// the redelivery window, so it will not be: its last delivery was
+    /// dead-lettered as exhausted, or its message has left the stream. The
+    /// trigger was taken and its work never ran.
+    NeverStarted,
+    /// The invocation the claim names has started, and the claim still
+    /// says it has not. Held by this daemon, every redelivery of the
+    /// trigger is dropped and it is finally dead-lettered as exhausted
+    /// although it ran; left by a process that has exited, a redelivery
+    /// would be adopted and run the work again.
+    StartedUnmarked,
+}
+
+impl StrandedClaimFinding {
+    /// Whether this finding makes the report one with issues. Every one
+    /// does except a claim still inside its redelivery window, which is
+    /// the runtime about to repair it.
+    pub fn is_issue(self) -> bool {
+        !matches!(self, StrandedClaimFinding::AwaitingRedelivery)
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -56,4 +56,13 @@ pub struct DaemonFacts {
     /// for, so a queue that is not moving has a reason an operator can
     /// read.
     pub agent_caps: std::sync::Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    /// The worker id this process claims triggers under — new on every
+    /// start. `control.doctor` reads a trigger claim under any other id as
+    /// one a process that has exited left behind.
+    pub worker_id: String,
+    /// When this daemon assembled its operator surface, epoch ms: moments
+    /// before its dispatcher starts consuming. `control.doctor` gives a
+    /// claim an exited process left the trigger redelivery window from
+    /// here before it calls the claim abandoned.
+    pub dispatching_since_ms: i64,
 }

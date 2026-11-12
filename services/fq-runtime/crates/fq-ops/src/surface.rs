@@ -452,8 +452,8 @@ pub struct OperatorSignalCounts {
 mod doctor;
 
 pub use doctor::{
-    DoctorDeadLetters, DoctorExecutions, DoctorFailure, DoctorParams, DoctorReport, DoctorWorkers,
-    build_doctor_report,
+    DoctorDeadLetters, DoctorExecutions, DoctorFailure, DoctorParams, DoctorReport,
+    DoctorTriggerClaims, DoctorWorkers, build_doctor_report,
 };
 
 // ---------------------------------------------------------------------
