@@ -2803,7 +2803,7 @@ You are a test agent."#
     /// read leaves. Holding the assertion open across the round trip is
     /// what makes "the duplicate does not ack" bite (#817, review 1
     /// finding 2).
-    async fn ack_pending_stays(
+    pub(super) async fn ack_pending_stays(
         consumer: &mut async_nats::jetstream::consumer::PullConsumer,
         expected: usize,
         window: Duration,
