@@ -18,30 +18,10 @@
 
 use std::time::Duration;
 
-use super::{TriggerClaimState, TriggerDeliveryView, Views, ViewsError};
-use crate::bus::TRIGGER_RETRY_BACKOFF;
-use crate::control_plane::store::{TriggerClaimRow, UnsettledTriggerClaim};
-use crate::health::{ClaimHolder, StrandedClaimFinding, StrandedTriggerClaim};
+use fq_ops::health::{ClaimHolder, StrandedClaimFinding, StrandedTriggerClaim};
 
-/// How long a trigger that an exited process left unacked can take to be
-/// redelivered to the daemon that replaced it: the retry ladder, end to
-/// end.
-///
-/// An unacked delivery comes back when its ack window lapses, and no
-/// window is longer than the ladder's last entry, so one redelivery takes
-/// at most that long. The whole ladder is used instead, which leaves room
-/// for a dispatcher with a backlog to reach the message, and a claim the
-/// redelivery would have adopted is never reported as abandoned while it
-/// could still be adopted.
-pub const TRIGGER_REDELIVERY_WINDOW: Duration = {
-    let mut total = Duration::ZERO;
-    let mut i = 0;
-    while i < TRIGGER_RETRY_BACKOFF.len() {
-        total = total.saturating_add(TRIGGER_RETRY_BACKOFF[i]);
-        i += 1;
-    }
-    total
-};
+use super::{TriggerClaimState, TriggerDeliveryView, Views, ViewsError};
+use crate::control_plane::store::{TriggerClaimRow, UnsettledTriggerClaim};
 
 /// How long an invocation's start may be on record while its claim
 /// still says `claimed` before the check calls the claim unmarked.
@@ -51,15 +31,19 @@ pub const TRIGGER_REDELIVERY_WINDOW: Duration = {
 /// report taken inside it must not call a healthy start unmarked.
 pub const CLAIM_MARK_GRACE: Duration = Duration::from_secs(60);
 
-/// What a claim is judged against: facts about the daemon answering.
+/// What a claim is judged against: facts about the daemon answering, and
+/// the redelivery window, which the caller supplies the way every
+/// threshold a view judges by is supplied.
 #[derive(Debug, Clone, Copy)]
 pub struct ClaimJudgement<'a> {
     /// The worker id this daemon claims triggers under.
     pub claimant: &'a str,
-    /// When this daemon started dispatching, epoch ms. A claim another
-    /// process left is redelivered to this daemon within
-    /// [`TRIGGER_REDELIVERY_WINDOW`] of it.
+    /// When this daemon started dispatching, epoch ms.
     pub dispatching_since_ms: i64,
+    /// How long after [`Self::dispatching_since_ms`] a trigger an exited
+    /// process left unacked has certainly been redelivered to this daemon,
+    /// if it ever will be: [`crate::bus::TRIGGER_REDELIVERY_WINDOW`].
+    pub redelivery_window_ms: i64,
     pub now_ms: i64,
 }
 
@@ -166,8 +150,8 @@ impl Views {
 ///   worker cap, or starting; it may also be abandoned. Nothing on the
 ///   row tells those apart, so it is not reported at all.
 /// - **No start on record, left by an exited process:** `AwaitingRedelivery`
-///   until this daemon has been dispatching for
-///   [`TRIGGER_REDELIVERY_WINDOW`], `NeverStarted` after.
+///   until this daemon has been dispatching for the redelivery window,
+///   `NeverStarted` after.
 pub(crate) fn judge(
     claim: TriggerClaimRow,
     record: Option<StartRecord>,
@@ -179,7 +163,7 @@ pub(crate) fn judge(
         ClaimHolder::ExitedProcess
     };
     let grace_ms = CLAIM_MARK_GRACE.as_millis() as i64;
-    let window_ms = TRIGGER_REDELIVERY_WINDOW.as_millis() as i64;
+    let window_ms = judgement.redelivery_window_ms;
     let (finding, invocation_status) = match record {
         Some(StartRecord {
             started_at_ms: Some(started),

@@ -50,9 +50,10 @@ use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_ops::surface::build_doctor_report;
+use fq_runtime::bus::TRIGGER_REDELIVERY_WINDOW;
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
 use fq_runtime::surface::{DoctorParams, DoctorReport, DoctorTriggerClaims};
-use fq_runtime::views::{ClaimJudgement, TRIGGER_REDELIVERY_WINDOW, Views};
+use fq_runtime::views::{ClaimJudgement, Views};
 
 /// Register `control.doctor` on the daemon's edge.
 pub(crate) fn register_doctor_report(
@@ -158,12 +159,14 @@ pub(crate) fn register_doctor_report(
                     bus.consumer_ledger(),
                 )
                 .await;
+                let redelivery_window_ms = TRIGGER_REDELIVERY_WINDOW.as_millis() as i64;
                 let trigger_claims = DoctorTriggerClaims {
-                    redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
+                    redelivery_window_ms,
                     stranded: views
                         .stranded_trigger_claims(&ClaimJudgement {
                             claimant: &worker_id,
                             dispatching_since_ms,
+                            redelivery_window_ms,
                             now_ms,
                         })
                         .await
