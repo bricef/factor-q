@@ -332,12 +332,15 @@ fn stuck_dispatcher_with_dropped_duplicates_explains_duplicate_dispatch() {
     );
 }
 
-/// A copy dropped while held is the duplicate a held trigger's
-/// redelivery produces, so on a stuck dispatcher it is reason enough for
-/// the duplicate-dispatch next step, with no agent at its cap and no
-/// copy of a started run; and the line explaining the count follows.
+/// The held-copy count does not choose a stuck dispatcher's next step.
+/// It only grows while the daemon runs: a slow start that was
+/// redelivered hours ago leaves it at 1 when the worker store fails and
+/// every trigger is NAKed before its first WAL write. With no trigger
+/// held at a cap and no copy of a started run, the step stays the one
+/// that points at the handler and the store, and the count's own note
+/// follows it, saying what the count cannot tell.
 #[test]
-fn stuck_dispatcher_with_held_duplicates_explains_duplicate_dispatch() {
+fn stuck_dispatcher_with_only_held_duplicates_keeps_the_handler_step() {
     let mut dispatcher = active("fq-dispatcher", true, 5);
     if let fq_ops::health::ConsumerHealth::Active {
         held_duplicate_dropped,
@@ -362,14 +365,17 @@ fn stuck_dispatcher_with_held_duplicates_explains_duplicate_dispatch() {
         "got:\n{out}"
     );
     assert!(
-        out.contains("redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice"),
-        "got:\n{out}"
+        out.contains(
+            "  -> its handler keeps failing; check the daemon log for `consumer=fq-dispatcher` \
+             and free whatever it is blocked on (disk, store, broker)\n  -> \"while held\" is a \
+             copy"
+        ),
+        "the handler step, then the count's note:\n{out}"
     );
     assert!(
-        !out.contains("its handler keeps failing"),
-        "the held copy, not a failing handler, is the dispatcher's next step:\n{out}"
+        !out.contains("may have been delivered twice"),
+        "a count that only grows must not name the cause of a stall:\n{out}"
     );
-    assert!(out.contains("  -> \"while held\" is a copy"), "got:\n{out}");
 }
 
 #[test]
