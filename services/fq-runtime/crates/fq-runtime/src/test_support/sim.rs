@@ -4545,11 +4545,15 @@ mod drain_equivalence {
             panic!("the drained run's trace is not a canonical prefix: {violations:?}");
         }
 
-        // The next binary: the redelivered trigger, run from the start.
+        // The next binary: the redelivered trigger, run from the start. It
+        // runs on its own clock. The run's start time is in its trace (the
+        // step-0 preamble's timestamp), so the next binary is given the
+        // reference's clock, and the comparison below is exact rather than
+        // the drained run's clock reads shifting every timestamp after it.
         let mut registry = ToolRegistry::new();
         registry.register_fixture(Arc::clone(&world.tool) as Arc<dyn Tool>);
         let next = SimWorld::build_runner(
-            &world.clock,
+            &Arc::new(SimClock::new(1234)),
             &world.sink,
             &registry,
             &world.store,
