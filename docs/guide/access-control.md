@@ -143,6 +143,13 @@ Scopes use one piece of sugar: a trailing `.*` means the namespace subtree
 dotted name means exactly that name. Verbs are a comma list
 (`read,write,delete,list,grant`) or `all`.
 
+The walk-through below works on a new store. `key generate` touches no store,
+and `grant add` creates the store root (`--root`, env `FQ_CAS_ROOT`, default
+`./.fq-cas`) if it is not there yet. `grant ls`, `grant check`, `grant rm` and
+`token mint` do not: against a root that does not exist they exit 1 with a line
+naming it, rather than answering as if for an empty store (see
+[A root that does not exist](operating-fq-cas.md#a-root-that-does-not-exist)).
+
 ```console
 $ fq-cas key generate                # once per store: keep private secret
 private: 8a4b…
