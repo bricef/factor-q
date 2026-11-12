@@ -1,7 +1,7 @@
 //! Periodic retention sweeps over control-plane state.
 //!
-//! Two windows, one task, because they are the same job on
-//! different tables and an hourly tick is right for both:
+//! Three windows, one task, because they are the same job on
+//! different tables and an hourly tick is right for all of them:
 //!
 //! 1. **Archive + projected events** (step 10 of
 //!    `data-architecture-v1`): deletes rows whose timestamp is
@@ -11,6 +11,9 @@
 //! 2. **Stale worker registrations**: deletes
 //!    `coordination_worker` rows that went stale longer ago
 //!    than `state.stale_worker_retention_days`.
+//! 3. **Trigger claims**: deletes `trigger_claim` rows claimed
+//!    longer ago than `state.trigger_claim_retention_days`. See
+//!    [the trigger-claim window](#the-trigger-claim-window).
 //!
 //! ## Why (2) is a daemon task and not an operator verb
 //!
@@ -41,10 +44,50 @@
 //! deletion window is therefore its own, much longer setting;
 //! see [`crate::config::StateConfig::stale_worker_retention_days`].
 //!
+//! ## The trigger-claim window
+//!
+//! The dispatcher writes one `trigger_claim` row per trigger
+//! delivery (ADR-0032), and a row marked `durably_started` was
+//! never deleted, so the table grew by one row per trigger for the
+//! life of the instance. The window deletes:
+//!
+//! - a `durably_started` row claimed before the cutoff, whatever
+//!   its stream incarnation;
+//! - a `claimed` row claimed before the cutoff and held by any
+//!   claimant but this daemon's dispatcher: a claim a process that
+//!   has exited left behind.
+//!
+//! It never deletes a `claimed` row this daemon holds, at any age
+//! (it may be a trigger the daemon is still holding behind a paused
+//! model or a full agent), nor any row inside the cutoff. A sweeper
+//! that has not been told its daemon's claimant
+//! ([`RetentionSweeper::with_claimant`]) deletes no `claimed` row,
+//! because it cannot tell which are live.
+//!
+//! Both deletions rest on one fact: a claim is never older than its
+//! message, and the trigger stream drops a message older than its
+//! maximum age, so a row older than that names a message that is
+//! gone and that nothing can deliver again
+//! ([`crate::control_plane::store::ControlPlaneStore::sweep_started_trigger_claims`]
+//! has the argument). The config refuses a window shorter than that
+//! age plus a day ([`crate::config::trigger_claim_retention_floor_days`]).
+//!
+//! The same number is `fq doctor`'s horizon: the report stops
+//! listing a claim an exited process left once it is this old, the
+//! age at which this sweep deletes it. **The ownership table has no
+//! retention, and this depends on that.** The report reads
+//! `coordination_invocation_owner` to tell a claim whose run
+//! finished from one that never started; if that table ever gains a
+//! window shorter than this one, an old `claimed` row whose run
+//! finished loses its record of the run, and the report would turn
+//! "started, never marked" into "never started". Keep any such
+//! window at or above this one, or give the claim its own record of
+//! the start.
+//!
 //! ## Behaviour
-//! - Either window at `>= 0` → that sweep is active.
-//! - Either window at `< 0` → that sweep is skipped. The task
-//!   only exits early when *both* are disabled.
+//! - Any window at `>= 0` → that sweep is active.
+//! - Any window at `< 0` → that sweep is skipped. The task
+//!   only exits early when *every* window is disabled.
 //! - Each tick emits an `info!` log line with the rows-
 //!   deleted count (including zero), so operators can see
 //!   the sweep is alive.
@@ -71,6 +114,12 @@ const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
 /// Tests can exercise this independently of any store.
 pub fn sweep_cutoff_ms(now_ms: i64, retention_days: i64) -> i64 {
     now_ms.saturating_sub(retention_days.saturating_mul(MS_PER_DAY))
+}
+
+/// The cutoff the trigger-claim window sweeps at, or `None` when
+/// `retention_days` is the `< 0` that keeps claim rows for ever.
+pub fn trigger_claim_cutoff_ms(now_ms: i64, retention_days: i64) -> Option<i64> {
+    (retention_days >= 0).then(|| sweep_cutoff_ms(now_ms, retention_days))
 }
 
 /// Does an ownership row still need the worker registration it
@@ -128,6 +177,11 @@ pub struct RetentionSweeper {
     projection_store: Option<Arc<ProjectionStore>>,
     retention_days: i64,
     stale_worker_retention_days: i64,
+    trigger_claim_retention_days: i64,
+    /// The worker id this daemon's dispatcher claims triggers under.
+    /// `None` until [`Self::with_claimant`]: the trigger-claim window
+    /// then deletes no `claimed` row, since any of them could be live.
+    claimant: Option<String>,
     sweep_interval_seconds: u64,
 }
 
@@ -142,6 +196,8 @@ impl RetentionSweeper {
             projection_store: None,
             retention_days: state.retention_days,
             stale_worker_retention_days: state.stale_worker_retention_days,
+            trigger_claim_retention_days: state.trigger_claim_retention_days,
+            claimant: None,
             sweep_interval_seconds: state.sweep_interval_seconds,
         }
     }
@@ -152,15 +208,28 @@ impl RetentionSweeper {
         self
     }
 
+    /// The worker id this daemon's dispatcher claims triggers under —
+    /// the one id whose `claimed` rows the trigger-claim window must
+    /// never delete. Every other claimant has exited, so its old
+    /// `claimed` rows go on the window's schedule.
+    pub fn with_claimant(mut self, claimant: impl Into<String>) -> Self {
+        self.claimant = Some(claimant.into());
+        self
+    }
+
     /// Run until `shutdown` fires. Exits immediately (with a log
-    /// line) only when *both* windows are disabled — a `-1` on
-    /// one must not silently switch off the other, since they
+    /// line) only when *every* window is disabled — a `-1` on
+    /// one must not silently switch off another, since they
     /// bound unrelated tables.
     pub async fn run(self, mut shutdown: oneshot::Receiver<()>) {
-        if self.retention_days < 0 && self.stale_worker_retention_days < 0 {
+        if self.retention_days < 0
+            && self.stale_worker_retention_days < 0
+            && self.trigger_claim_retention_days < 0
+        {
             info!(
                 retention_days = self.retention_days,
                 stale_worker_retention_days = self.stale_worker_retention_days,
+                trigger_claim_retention_days = self.trigger_claim_retention_days,
                 "retention sweep disabled (every window < 0)"
             );
             // Still observe the shutdown channel so the
@@ -172,6 +241,7 @@ impl RetentionSweeper {
         info!(
             retention_days = self.retention_days,
             stale_worker_retention_days = self.stale_worker_retention_days,
+            trigger_claim_retention_days = self.trigger_claim_retention_days,
             sweep_interval_seconds = self.sweep_interval_seconds,
             "retention sweep starting"
         );
@@ -208,7 +278,14 @@ impl RetentionSweeper {
                 .await?
         };
         let worker_deleted = self.sweep_stale_workers(now_ms).await?;
-        let deleted = archive_deleted + event_deleted + signal_deleted + worker_deleted;
+        let (started_claims_deleted, abandoned_claims_deleted) =
+            self.sweep_trigger_claims(now_ms).await?;
+        let deleted = archive_deleted
+            + event_deleted
+            + signal_deleted
+            + worker_deleted
+            + started_claims_deleted
+            + abandoned_claims_deleted;
         if deleted > 0 {
             info!(
                 deleted_rows = deleted,
@@ -221,8 +298,14 @@ impl RetentionSweeper {
                 // read against either.
                 operator_signal_deleted_rows = signal_deleted,
                 stale_worker_deleted_rows = worker_deleted,
+                // Apart for the same reason: a started claim is the
+                // dedupe record of a run, an abandoned one a delivery
+                // an exited process never settled.
+                started_trigger_claim_deleted_rows = started_claims_deleted,
+                abandoned_trigger_claim_deleted_rows = abandoned_claims_deleted,
                 retention_days = self.retention_days,
                 stale_worker_retention_days = self.stale_worker_retention_days,
+                trigger_claim_retention_days = self.trigger_claim_retention_days,
                 "retention sweep deleted rows"
             );
         } else {
@@ -324,6 +407,30 @@ impl RetentionSweeper {
         Ok(deleted)
     }
 
+    /// The trigger-claim half: `durably_started` rows past the cutoff,
+    /// and `claimed` rows past it that another claimant left. Counted
+    /// apart. See
+    /// [the module docs](crate::control_plane::retention#the-trigger-claim-window).
+    async fn sweep_trigger_claims(
+        &self,
+        now_ms: i64,
+    ) -> Result<(u64, u64), super::store::ControlPlaneStoreError> {
+        let Some(cutoff_ms) = trigger_claim_cutoff_ms(now_ms, self.trigger_claim_retention_days)
+        else {
+            return Ok((0, 0));
+        };
+        let started = self.store.sweep_started_trigger_claims(cutoff_ms).await?;
+        let abandoned = match &self.claimant {
+            Some(claimant) => {
+                self.store
+                    .sweep_abandoned_trigger_claims(cutoff_ms, claimant)
+                    .await?
+            }
+            None => 0,
+        };
+        Ok((started, abandoned))
+    }
+
     /// Run a single sweep without ticking. Exposed for tests
     /// so they don't have to wait for the interval timer.
     #[cfg(test)]
@@ -331,6 +438,9 @@ impl RetentionSweeper {
         self.sweep_once().await
     }
 }
+
+#[cfg(test)]
+mod trigger_claim_tests;
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -343,6 +453,7 @@ mod tests {
         StateConfig {
             retention_days,
             stale_worker_retention_days: -1,
+            trigger_claim_retention_days: -1,
             sweep_interval_seconds: 3600,
             ..Default::default()
         }
@@ -353,6 +464,7 @@ mod tests {
         StateConfig {
             retention_days: -1,
             stale_worker_retention_days,
+            trigger_claim_retention_days: -1,
             sweep_interval_seconds: 3600,
             ..Default::default()
         }
