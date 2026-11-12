@@ -349,7 +349,8 @@ under `fq invocation`:
 fq invocation list --status=ambiguous
 fq invocation list --status=in_flight
 
-# The detail on one: owner row, archive row, recent events
+# The detail on one: owner row, archive row, the trigger delivery that
+# started it, recent events
 fq invocation show <invocation-id>
 ```
 
@@ -849,6 +850,90 @@ projector's: `fq projection rebuild` resets `fq-projector` under the
 running daemon, because the daemon stops that consumer itself before
 deleting the durable and starts it again after.
 
+## Which trigger started a run, and triggers taken and never started
+
+Before the dispatcher does anything with a trigger delivery, it claims
+it: a row in the control plane's `trigger_claim` table, keyed on the
+message's place on the trigger stream (the stream, which incarnation of
+it, and the sequence), naming the invocation id the run will have. The
+claim is marked started when the run makes its first durable write, and
+a redelivery of the same message that meets a started claim starts
+nothing ([ADR-0032](../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
+That row is the only record linking a delivery to the run it started.
+The worker's WAL row is deleted once the run is archived, and the archive
+row is swept after `state.retention_days`; the claim row stays.
+
+`fq invocation show <id>` reads it:
+
+```text
+  trigger:  fq-triggers seq 1 (durably started; claimed 2026-01-02T03:04:04Z by 019a4c0e-…)
+```
+
+The claimant is the worker id of the daemon process that took the
+delivery; every start mints a new one, so an id that is not the running
+daemon's is a process that has exited. `--json` adds the stream's
+incarnation as `stream_epoch` (its creation time in nanoseconds), since a
+recreated stream numbers its messages from 1 again. A finished, archived
+run still shows its trigger. A run nothing on the trigger stream started
+reads `none (not started from the trigger stream)`.
+
+`fq invocation list` does not carry it. The claim table has no index on
+the invocation id and is never pruned, so a lookup per listed row would
+read the whole table once per row; the link is read one invocation at a
+time. There is no lookup from a sequence to its run yet, other than for
+the claims `fq doctor` reports below.
+
+### Stranded claims in `fq doctor`
+
+A claim normally settles within seconds: it is marked when the run
+starts, or deleted when the delivery is acked or NAKed without starting.
+`fq doctor` lists the claims that have done neither and will not without
+help:
+
+```text
+Stranded trigger claims: 2 (1 to act on) — deliveries taken off the trigger stream and not settled
+  fq-triggers seq 2: claimed 2026-01-02T03:04:14Z by 019a4c0e-…, a process that has exited; invocation 2f000000-…
+  -> the run started (failed) but its claim was never marked started: a redelivery of it would be adopted and run the work again — `fq invocation show 2f000000-…`
+  fq-triggers seq 5: claimed 2026-01-02T03:04:45Z by 019a4c0e-…, a process that has exited; invocation 5d000000-…
+  -> not started; this daemon adopts and starts it when the broker redelivers it, which is due within 19m30s of this daemon starting
+```
+
+Each line is one of three findings:
+
+- **Not started, awaiting redelivery.** A process that has exited took
+  the delivery and never started it. The broker redelivers an unacked
+  trigger when its ack window lapses, and this daemon adopts the claim
+  and starts the run. The window is the trigger retry ladder end to end,
+  19m30s, counted from when this daemon started. Not an issue: it is the
+  runtime about to repair itself, which is why a doctor run straight
+  after a restart can list some.
+- **Never started.** The same, with this daemon running for longer than
+  the window: the redelivery did not come and will not. Its last
+  delivery was dead-lettered as exhausted, or the message has left the
+  stream (24 hours after it was published). The work never ran. Look
+  for it in `fq dead-letters list` and requeue it from there, or publish
+  the work again.
+- **Started, never marked.** The invocation the claim names has a record
+  of running, and the claim still says it has not. If this daemon holds
+  the claim, every redelivery is dropped and the trigger ends as a
+  `trigger_exhausted` dead letter although it ran: that dead letter is
+  false, and requeuing it runs the work twice. If an exited process
+  left it, a redelivery would be adopted and run the work again.
+
+Every finding but the first is a doctor issue and makes
+`fq doctor --fail-on-issues` exit non-zero.
+
+**What the check cannot tell apart.** A claim this daemon holds for a
+run that has not started is never listed, however old. A trigger can
+wait behind a paused model, a full agent or the worker cap for hours
+(`Throttled models` and `Agents at cap` say why), and nothing on the
+claim records that the daemon holding it is still going to start it. A
+claim this daemon holds and will never settle — a run that panicked
+before its first durable write — looks the same, and is not reported
+until a restart makes its holder a process that has exited. A
+delivery whose claim was deleted instead of marked leaves no row at all,
+so neither `fq invocation show` nor `fq doctor` can show it.
+
 ## Notifications and alerts
 
 Use these terms consistently on dashboards, in runbooks, and in producer
@@ -891,6 +976,7 @@ exist today but do not yet have an out-of-band producer.
 | `fq doctor`: unavailable shared MCP servers | Alert when required work is blocked; otherwise notification | `fq doctor` | The supervisor retries startup; if required work remains blocked, fix the server or its configuration. |
 | `fq doctor`: throttled models or agents at concurrency caps | Notification | `fq doctor` | Provider backoff and available agent slots release held work automatically. |
 | `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. |
+| `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted when the broker redelivers it; otherwise none: re-submit a trigger that never started, and do not requeue the false dead letter of one that ran. |
 | Pricing change refused by the drift bound (#735) | Notification | None (producer in #735) | The last accepted pricing remains in use; review and accept the change during normal hours. |
 | Pricing data stale (#735) | Alert | None (producer in #735) | None once the safe staleness limit is exhausted; restore the pricing source or provide an override. |
 | Summary consumer `start`, `progress`, and `outcome` lines | Neither; these are the record | Event stream and dashboard | Not applicable; consumers display the durable record and do not page on it. |
@@ -1450,6 +1536,8 @@ the home page.
 | See only what could not recover on its own | `fq notifications list --severity alert` (alerts are never swept, so this reaches back past everything else) |
 | Read one signal in full | `fq notifications show <event-id>` |
 | Clear stale workers | *nothing — the daemon sweeps them* |
+| See which trigger delivery started a run | `fq invocation show <id>` (the `trigger:` line) |
+| Find triggers taken and never started, or started and never marked | `fq doctor` (the stranded-trigger-claims block) |
 | Find unresolved invocations | `fq invocation list --status=ambiguous` |
 | Settle one, keeping progress | `fq invocation resume <id>` |
 | Settle one, abandoning progress | `fq invocation drop <id>` |
