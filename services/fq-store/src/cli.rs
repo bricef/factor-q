@@ -345,6 +345,7 @@ fn run() -> CliResult<ExitCode> {
                                 (a remote name service is future)"
                         .into());
                 }
+                ensure_root_exists(&cli.root).await?;
                 let repo = Repository::new(
                     FilesystemStore::new(&cli.root),
                     SqliteNameIndex::open(cli.root.join("index.db")).await?,
@@ -357,6 +358,7 @@ fn run() -> CliResult<ExitCode> {
                                 the CID-level CAS only"
                         .into());
                 }
+                ensure_root_exists(&cli.root).await?;
                 let repo = Repository::new(
                     FilesystemStore::new(&cli.root),
                     SqliteNameIndex::open(cli.root.join("index.db")).await?,
@@ -368,6 +370,7 @@ fn run() -> CliResult<ExitCode> {
                 if cli.server.is_some() {
                     return Err("grant management runs against the local store".into());
                 }
+                ensure_root_exists(&cli.root).await?;
                 let grants = SqliteGrantLog::open(cli.root.join("grants.db")).await?;
                 dispatch_grant(&grants, command).await
             }
@@ -388,6 +391,12 @@ fn run() -> CliResult<ExitCode> {
             }
         }
     })
+}
+
+/// Create the store root before a command opens one of its SQLite databases.
+async fn ensure_root_exists(root: &std::path::Path) -> CliResult<()> {
+    tokio::fs::create_dir_all(root).await?;
+    Ok(())
 }
 
 async fn dispatch(store: &dyn ContentStore, command: Command) -> CliResult<ExitCode> {
@@ -544,6 +553,7 @@ async fn dispatch_token(root: &std::path::Path, command: TokenCommand) -> CliRes
             ttl,
             biscuit_private_key,
         } => {
+            ensure_root_exists(root).await?;
             let grants = SqliteGrantLog::open(root.join("grants.db")).await?;
             let principal = principal(&agent)?;
             let minter =

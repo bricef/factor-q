@@ -42,6 +42,8 @@ fq-cas metrics                             # objects/blocks, sizes, dedup ratio 
 ```
 
 The store lives under `--root` (env `FQ_CAS_ROOT`, default `./.fq-cas`).
+Database-backed commands create the root and any missing parent directories on
+first use.
 Run `fq-cas --help` for the full surface.
 
 ### Named objects

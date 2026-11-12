@@ -105,6 +105,61 @@ fn run(root: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn database_commands_create_a_missing_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.txt");
+    std::fs::write(&input, b"first object").unwrap();
+    let input = input.to_str().unwrap();
+
+    // Each database-backed command should initialize its store root on first use.
+    let object_root = dir.path().join("object").join("store");
+    let out = run(&object_root, &["object", "put", "docs.readme", input]);
+    assert!(
+        out.status.success(),
+        "object put: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(object_root.join("index.db").is_file());
+
+    let gc_root = dir.path().join("gc").join("store");
+    let out = run(&gc_root, &["gc"]);
+    assert!(
+        out.status.success(),
+        "gc: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(gc_root.join("index.db").is_file());
+
+    let grant_root = dir.path().join("grant").join("store");
+    let out = run(&grant_root, &["grant", "add", "bob", "read", "docs.*"]);
+    assert!(
+        out.status.success(),
+        "grant add: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(grant_root.join("grants.db").is_file());
+
+    let token_root = dir.path().join("token").join("store");
+    let key = run(&token_root, &["key", "generate"]);
+    assert!(key.status.success());
+    let private = String::from_utf8(key.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("private:").map(str::trim))
+        .unwrap();
+    let out = run(
+        &token_root,
+        &["token", "mint", "bob", "--biscuit-private-key", private],
+    );
+    assert!(
+        out.status.success(),
+        "token mint: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(token_root.join("grants.db").is_file());
+}
+
+#[test]
 fn named_operations() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
