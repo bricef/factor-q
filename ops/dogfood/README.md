@@ -368,8 +368,12 @@ the daemon. Two checks first, every time:
    them, but a run that is mid tool-call when the deadline expires
    becomes ambiguous and can never be resumed. One still in its setup,
    before its first step, has nothing to resume: its trigger goes back
-   to the broker and the next start runs it from the beginning, as
-   `attempt: 2`
+   to the broker, and once that delivery's ack window lapses (30
+   seconds for a first delivery, longer for a redelivered one) the next
+   start runs it from the beginning as its next attempt. On the
+   trigger's fifth and last delivery it is dead-lettered as
+   `trigger_exhausted` instead, although it never ran;
+   `fq dead-letters requeue <agent>` puts it back
    ([#974](https://github.com/bricef/factor-q/issues/974)).
 2. **Disk.** `df -h /` and `docker system df`. Per-invocation
    workspaces and the build caches fill the volume; a full disk killed
