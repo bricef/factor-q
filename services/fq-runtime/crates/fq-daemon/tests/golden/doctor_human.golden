@@ -21,9 +21,13 @@ Consumers: 6 checked, 0 unhealthy
   fq-maintenance: ok (pending #)
 Throttled models: none
 Agents at cap: none
-Stranded trigger claims: 2 (1 to act on) — deliveries taken off the trigger stream and not settled
-  fq-triggers seq 2: claimed 2026-01-02T03:04:14Z by worker-alpha, a process that has exited; invocation 2f000000-0000-7000-8000-000000000002
-  -> the run started (failed) but its claim was never marked started: a redelivery of it would be adopted and run the work again — `fq invocation show 2f000000-0000-7000-8000-000000000002`
-  fq-triggers seq 5: claimed 2026-01-02T03:04:45Z by worker-alpha, a process that has exited; invocation 5d000000-0000-7000-8000-000000000005
-  -> not started; this daemon adopts and starts it when the broker redelivers it, which is due within 19m30s of this daemon starting
+Stranded trigger claims: 3 (2 issues) — claimed trigger deliveries that have not settled
+  fq-triggers seq 1003: claimed <CLAIMED_AGED_OUT> by worker-alpha, a process that has exited; reserved invocation id 8b000000-0000-7000-8000-000000000008
+  -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  fq-triggers seq 7 (an earlier incarnation of the stream, created 2026-01-02T03:03:05Z): claimed <CLAIMED_EARLIER_STREAM> by worker-alpha, a process that has exited; reserved invocation id 9c000000-0000-7000-8000-000000000009
+  -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  fq-triggers seq 1002: claimed <CLAIMED_AWAITING> by worker-alpha, a process that has exited; reserved invocation id 7a000000-0000-7000-8000-000000000007
+  -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
 Dead-letters: none
