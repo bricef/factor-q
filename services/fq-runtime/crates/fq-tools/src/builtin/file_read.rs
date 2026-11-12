@@ -43,8 +43,10 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the full contents of a text file at the given path. \
-         Only paths within the agent's declared read sandbox are allowed."
+        "Read a text file at the given path. Only paths within the agent's declared \
+         read sandbox are allowed. A file too large for the runtime's tool-result cap is \
+         cut: the result keeps the start of the file and ends with a note saying how many \
+         bytes were kept of how many."
     }
 
     fn parameters_schema(&self) -> Value {
