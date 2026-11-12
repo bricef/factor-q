@@ -126,17 +126,21 @@ pub enum ConsumerHealth {
         /// daemon started; a restart resets it.
         duplicate_dropped: u64,
         /// Redeliveries this consumer dropped and left unacked because
-        /// the daemon already holds the durable claim on that
-        /// delivery's stream sequence and the claim records no start.
-        /// Copies of a trigger still in hand. The first copy may be
-        /// held or still starting (nothing renews a delivery's ack
-        /// window between its worker permit and its first WAL write),
-        /// or the daemon may never settle that claim; nothing on the
-        /// claim says which, and neither does this count. The daemon
-        /// logs each one at warn with its sequence, its attempt and the
-        /// claim's age. Counted in memory since the daemon started,
-        /// like `duplicate_dropped`. A report from a daemon that does
-        /// not send it reads as zero.
+        /// they arrived before a start was recorded on their claim, and
+        /// the claim is the daemon's own. "Held" in the name is the
+        /// claim's state: the daemon holds the durable claim on that
+        /// delivery's stream sequence, and it records no start. It is
+        /// not an admission hold (a paused model, an agent at its cap,
+        /// a wait for a worker permit), though a trigger in one is a
+        /// common first copy. Copies of a trigger still in hand. The
+        /// first copy may be waiting or still starting (nothing renews
+        /// a delivery's ack window between its worker permit and its
+        /// first WAL write), or the daemon may never settle that claim;
+        /// nothing on the claim says which, and neither does this
+        /// count. The daemon logs each one at warn with its subject, its
+        /// sequence, its attempt and the claim's age. Counted in memory
+        /// since the daemon started, like `duplicate_dropped`. A report
+        /// from a daemon that does not send it reads as zero.
         #[serde(default)]
         held_duplicate_dropped: u64,
     },

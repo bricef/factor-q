@@ -280,21 +280,23 @@ fn malformed_suffix(malformed_acked: u64) -> String {
 }
 
 /// `, duplicates dropped since this daemon started: N after their run
-/// started, M while held` (either part alone when the other is zero), or
-/// nothing when neither count is.
+/// started, M before a start was recorded` (either part alone when the
+/// other is zero), or nothing when neither count is.
 ///
 /// The dispatcher's claim refuses a redelivered trigger in two cases
 /// (#809, #968), and a refused copy starts nothing and mints no id, so
-/// it leaves no trace anywhere else. The two are told apart because
-/// they are different facts: a copy of a run that has started was
-/// acked, while a copy that met a claim this daemon holds with no start
-/// recorded was left unacked for a first copy that may or may not
-/// settle it ([`held_duplicate_note`]). Both counts are in the daemon's
-/// memory, which the phrase says.
+/// this and its warn line in the daemon log are its only trace. The two
+/// are told apart by when the copy arrived, because they are different
+/// facts: a copy that came after its run's start was recorded was
+/// acked, while one that came before a start was recorded on a claim
+/// this daemon holds was left unacked for a first copy that may or may
+/// not settle it ([`held_duplicate_note`]). The second is not called
+/// "held": on this report that word is the admission holds' (`Agents at
+/// cap`). Both counts are in the daemon's memory, which the phrase says.
 fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> String {
     let parts: Vec<String> = [
         (duplicate_dropped, "after their run started"),
-        (held_duplicate_dropped, "while held"),
+        (held_duplicate_dropped, "before a start was recorded"),
     ]
     .into_iter()
     .filter(|(count, _)| *count > 0)
@@ -310,26 +312,28 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
     }
 }
 
-/// The line under a consumer that dropped copies while held, saying
-/// what that count can and cannot tell, or nothing when it is zero.
+/// The line under a consumer that dropped copies before a start was
+/// recorded, saying what that count can and cannot tell, or nothing when
+/// it is zero.
 ///
 /// It does not say whether anything is wrong, because the claim does
-/// not. A held trigger's first copy may still be waiting or starting:
-/// a delivery is redelivered under it when its keepalive stops landing,
+/// not. The claim's first copy may still be waiting or starting: a
+/// delivery is redelivered under it when its keepalive stops landing,
 /// or when its start outlasts the ack window. Or this daemon may never
 /// settle the claim, and every delivery of that trigger is dropped the
-/// same way until it is dead-lettered. The stranded-claims block below
-/// lists such a claim once a run is on record for it; one with no run
-/// on record is not listed at all, so this line and the log are where it
-/// shows.
+/// same way until it is dead-lettered. The stranded-claims block of the
+/// same report lists such a claim once a run is on record for it, which
+/// the line points at; one with no run on record is not listed at all,
+/// so this line and the log are where it shows.
 fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
     if held_duplicate_dropped == 0 {
         return String::new();
     }
-    "  -> \"while held\" is a copy that met a claim this daemon holds with no start recorded, \
-     left unacked: its first copy was still waiting or starting, or this daemon will never \
-     settle that claim, and the claim does not say which; the daemon log has a warn line for \
-     each with its sequence, attempt and the claim's age\n"
+    "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
+     start on it, left unacked: its first copy was still waiting or starting, or this daemon \
+     will never settle that claim, and the claim does not say which; the daemon log has a warn \
+     line for each with its subject, sequence, attempt and the claim's age, and such a claim \
+     whose run is on record is listed under \"Stranded trigger claims\" below\n"
         .to_string()
 }
 

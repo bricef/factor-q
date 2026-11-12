@@ -361,14 +361,16 @@ fn stuck_dispatcher_with_only_held_duplicates_keeps_the_handler_step() {
 
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("duplicates dropped since this daemon started: 1 while held\n"),
+        out.contains(
+            "duplicates dropped since this daemon started: 1 before a start was recorded\n"
+        ),
         "got:\n{out}"
     );
     assert!(
         out.contains(
             "  -> its handler keeps failing; check the daemon log for `consumer=fq-dispatcher` \
-             and free whatever it is blocked on (disk, store, broker)\n  -> \"while held\" is a \
-             copy"
+             and free whatever it is blocked on (disk, store, broker)\n  -> \"before a start was \
+             recorded\" is a copy"
         ),
         "the handler step, then the count's note:\n{out}"
     );
@@ -560,18 +562,19 @@ fn duplicate_deliveries_dropped_are_counted_beside_the_consumer() {
         "got:\n{out}"
     );
     assert!(
-        !out.contains("while held"),
-        "copies of a started run are not copies dropped while held:\n{out}"
+        !out.contains("before a start was recorded"),
+        "copies of a started run are not copies dropped before a start was recorded:\n{out}"
     );
 }
 
-/// The two drops are told apart on the consumer's line (#968): a copy
-/// of a run that has started, and a copy that met a claim this daemon
-/// holds with no start recorded. The second gets a line saying what it
-/// can and cannot tell, because nothing on the claim says whether the
-/// first copy is still coming. Neither is a fault, and the line under
-/// the held count names no verdict: it says what is known and where
-/// the daemon logged each one.
+/// The two drops are told apart on the consumer's line (#968), by when
+/// the copy arrived: after its run's start was recorded, or before a
+/// start was recorded on a claim this daemon holds. The second is not
+/// called "held", which on this report means an admission hold. It gets
+/// a line saying what it can and cannot tell, because nothing on the
+/// claim says whether the first copy is still coming, and pointing at
+/// the stranded-claims block where such a claim with a run on record is
+/// listed. Neither is a fault, and the line names no verdict.
 #[test]
 fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
     let mut counted = active("fq-dispatcher", false, 0);
@@ -595,17 +598,19 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
     );
     assert!(
         !report.has_issues(),
-        "a refused copy, held or started, is not a fault"
+        "a refused copy, before or after a recorded start, is not a fault"
     );
     let out = render_doctor_report_human(&report);
     assert!(
         out.contains(
             "  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon started: \
-             5 after their run started, 2 while held)\n  -> \"while held\" is a copy that met \
-             a claim this daemon holds with no start recorded, left unacked: its first copy was \
-             still waiting or starting, or this daemon will never settle that claim, and the \
-             claim does not say which; the daemon log has a warn line for each with its \
-             sequence, attempt and the claim's age\n"
+             5 after their run started, 2 before a start was recorded)\n  -> \"before a start \
+             was recorded\" is a copy that met a claim this daemon holds with no start on it, \
+             left unacked: its first copy was still waiting or starting, or this daemon will \
+             never settle that claim, and the claim does not say which; the daemon log has a \
+             warn line for each with its subject, sequence, attempt and the claim's age, and \
+             such a claim whose run is on record is listed under \"Stranded trigger claims\" \
+             below\n"
         ),
         "got:\n{out}"
     );
@@ -630,7 +635,7 @@ fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
     );
     let out = render_doctor_report_human(&report);
     assert!(!out.contains("duplicate"), "got:\n{out}");
-    assert!(!out.contains("while held"), "got:\n{out}");
+    assert!(!out.contains("before a start was recorded"), "got:\n{out}");
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
