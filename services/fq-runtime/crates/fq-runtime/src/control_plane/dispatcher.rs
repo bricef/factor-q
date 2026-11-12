@@ -740,6 +740,9 @@ pub enum DispatcherError {
 mod durable_start_signal_tests;
 
 #[cfg(test)]
+mod claim_retention_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
