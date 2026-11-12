@@ -521,28 +521,62 @@ fn exemplars() -> Vec<Event> {
 /// only *add* a shape here, never replace the one a reader looks for
 /// first.
 fn variants() -> Vec<(&'static str, Event)> {
-    vec![(
-        // An operator signal resolving an earlier one (#736). The
-        // exemplar above is a signal that opens something; this is the
-        // one that closes it, and `resolves` is the only field between
-        // them. It is worth its own file because the pane's open-alert
-        // count is a fold over exactly that field, and a fold over a
-        // field nothing pins is a count that can silently stop working.
-        "resolving",
-        system_event(
-            29,
-            EventPayload::OperatorSignal(
-                OperatorSignalPayload::notification(
-                    SignalKind::registered(operator_signal::kinds::PRICING_STALE),
-                    "the pricing table refreshed; the staleness alert is resolved",
-                )
-                .with_detail(json!({"last_refresh_ms": 1_788_000_000_000i64}))
-                // A recovery is a notification naming the alert it
-                // closes, by the alert's `envelope.event_id`.
-                .resolving(fixed(28)),
+    vec![
+        (
+            // An operator signal resolving an earlier one (#736). The
+            // exemplar above is a signal that opens something; this is the
+            // one that closes it, and `resolves` is the only field between
+            // them. It is worth its own file because the pane's open-alert
+            // count is a fold over exactly that field, and a fold over a
+            // field nothing pins is a count that can silently stop working.
+            "resolving",
+            system_event(
+                29,
+                EventPayload::OperatorSignal(
+                    OperatorSignalPayload::notification(
+                        SignalKind::registered(operator_signal::kinds::PRICING_STALE),
+                        "the pricing table refreshed; the staleness alert is resolved",
+                    )
+                    .with_detail(json!({"last_refresh_ms": 1_788_000_000_000i64}))
+                    // A recovery is a notification naming the alert it
+                    // closes, by the alert's `envelope.event_id`.
+                    .resolving(fixed(28)),
+                ),
             ),
         ),
-    )]
+        (
+            // A `failed` carrying its typed detail (#952). The exemplar
+            // above has none, which is the shape most failures have and
+            // the one it must keep; this pins the other half, the facts a
+            // reader uses instead of parsing `error_message`. The kind is
+            // `runtime_error` only because no kind of its own exists yet:
+            // see #828, which adds one and is the detail's first producer.
+            "payload_too_large",
+            chained(
+                30,
+                EventPayload::Failed(FailedPayload {
+                    error_kind: FailureKind::RuntimeError,
+                    error_message: "event of 1153433 bytes exceeds the broker max_payload of \
+                                    1048576 bytes"
+                        .to_string(),
+                    phase: FailurePhase::LlmRequest,
+                    partial_totals: InvocationTotals {
+                        total_llm_calls: 2,
+                        total_tool_calls: 1,
+                        total_cost: 0.000216,
+                        total_duration_ms: 4200,
+                        sampling_cost: 0.0,
+                        elicitation_cost: 0.0,
+                    },
+                    detail: Some(FailureDetail::PayloadTooLarge {
+                        event_type: EventKind::LlmRequest,
+                        size_bytes: 1_153_433,
+                        limit_bytes: 1_048_576,
+                    }),
+                }),
+            ),
+        ),
+    ]
 }
 
 fn file_for(event: &Event) -> String {
@@ -655,6 +689,24 @@ async fn every_current_event_type_has_a_file_that_projects() {
             .insert_event(&event, Some(seq))
             .await
             .unwrap_or_else(|e| panic!("{path:?} must project: {e}"));
+    }
+}
+
+/// A failure detail names an event by its [`EventKind`] (#952), and the
+/// name it writes is the one that event carries as its own `event_type`
+/// — both ways, for every type — or a reader joining the two finds
+/// nothing. Asked of the exemplars because they cover every type.
+#[test]
+fn every_event_kind_is_spelled_as_its_event_type_on_the_wire() {
+    for event in exemplars() {
+        let kind = EventKind::from(&event.payload);
+        let tag = serde_json::to_value(&event).unwrap()["payload"]["event_type"].clone();
+        assert_eq!(serde_json::to_value(kind).unwrap(), tag, "{kind:?} writes");
+        assert_eq!(
+            serde_json::from_value::<EventKind>(tag).unwrap(),
+            kind,
+            "{kind:?} reads"
+        );
     }
 }
 
