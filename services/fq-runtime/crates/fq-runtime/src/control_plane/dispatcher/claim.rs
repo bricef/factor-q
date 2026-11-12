@@ -139,6 +139,26 @@ impl TriggerDispatcher {
         }
     }
 
+    /// Record the delivery's durable start on its claim, then ack it.
+    /// Returns whether it did. On `false`, `handle` stops driving the
+    /// invocation and returns, neither acking nor NAKing the delivery.
+    ///
+    /// Stopping is the safe answer to a failed mark. The invocation has
+    /// made its first WAL write, so dropping it leaves its WAL row in
+    /// flight: the next start's recovery marks this claim
+    /// ([`TriggerClaims::recover`]) and resumes the run once, and the
+    /// trigger's redelivery then meets a `durably_started` row and is
+    /// dropped. Until that start, redeliveries meet this process's own
+    /// `claimed` row and are dropped too, and if they run out first the
+    /// trigger is dead-lettered as `trigger_exhausted`.
+    ///
+    /// Letting the invocation run on would end it at a terminal WAL row
+    /// under a claim still `claimed`, with the delivery un-acked. Recovery
+    /// marks only in-flight invocations, so after a restart inside the
+    /// redelivery ladder the next process would adopt that claim and start
+    /// the trigger a second time. Whether a failed mark should instead be
+    /// retried, or the run continued with recovery also marking finished
+    /// runs, is for #967 to decide.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -155,7 +175,8 @@ impl TriggerDispatcher {
                 .await
         {
             error!(error = %err, stream_seq, %invocation_id,
-                "failed to mark trigger durably started; leaving delivery unacked");
+                "failed to mark trigger durably started; stopping the run here, un-acked: \
+                 its WAL row stays in flight and the next start resumes it once");
             return false;
         }
         self.ack(msg, Some(trigger_id), "durably started").await;
