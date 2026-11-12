@@ -313,8 +313,9 @@ async fn a_queued_resume_starts_when_its_drop_fails() {
     );
 }
 
-/// **A run the drop finds waiting leaves the queue within a tick**, giving
-/// its place to the run behind it.
+/// **A run the drop finds waiting leaves the queue within a tick**, while
+/// the run ahead of it still holds the only permit: it does not wait for a
+/// permit only to give it straight back.
 #[tokio::test]
 async fn a_dropped_resume_leaves_the_queue_within_a_tick() {
     let admission = RunAdmission::new(CappedWorker::new(), 1);

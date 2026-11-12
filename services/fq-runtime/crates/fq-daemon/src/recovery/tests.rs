@@ -1520,3 +1520,156 @@ async fn an_operator_resume_on_a_draining_daemon_is_refused_and_left_to_the_next
         "no longer ambiguous: the next start resumes it"
     );
 }
+
+/// Subscribe to every `invocation.operator_recovered`, whichever agent a
+/// drop publishes it under.
+async fn drops_published(
+    bus: &EventBus,
+) -> std::pin::Pin<
+    Box<
+        dyn futures::Stream<Item = Result<fq_runtime::events::Event, fq_runtime::bus::BusError>>
+            + Send,
+    >,
+> {
+    let drops = bus
+        .subscribe("fq.agent.*.invocation.operator_recovered".to_string())
+        .await
+        .expect("subscribe");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drops
+}
+
+/// A drop refused with `InvalidInput`, and its message.
+fn refusal(answer: Result<serde_json::Value, fq_edge::wire::WireError>) -> String {
+    match answer {
+        Err(fq_edge::wire::WireError::InvalidInput { message, .. }) => message,
+        other => panic!("expected the drop to be refused, got {other:?}"),
+    }
+}
+
+/// **A queued run whose permit has come is refused like a live one.** In
+/// the instant between taking its permit and the runner registering it,
+/// a listed run is starting: not driven yet, but no longer waiting. A drop
+/// then — plain or `--live` — is refused with "starting to run" and
+/// publishes nothing; once that permit is given back, the next drop goes
+/// through.
+///
+/// The instant is held open here by taking the recovered invocation's
+/// place and permit exactly as recovery's task does, and not calling
+/// `resume`.
+#[tokio::test]
+async fn a_queued_run_whose_permit_has_come_is_refused_like_a_live_one() {
+    let start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let mut drops = drops_published(&start.bus).await;
+    let id = start.invocation.to_string();
+    let permit = admission
+        .workers()
+        .queue(Waiter::Recovered(start.invocation))
+        .await
+        .permit()
+        .await
+        .expect("the only permit is free");
+
+    for live in [false, true] {
+        let message = refusal(
+            invoke(
+                &surface,
+                fq_ops::Invocation::Drop,
+                serde_json::json!({ "invocation_id": id, "live": live }),
+            )
+            .await,
+        );
+        assert!(
+            message.contains("starting to run"),
+            "live: {live}: {message}"
+        );
+    }
+    let published = tokio::time::timeout(Duration::from_millis(500), drops.next()).await;
+    assert!(
+        published.is_err(),
+        "a refused drop publishes nothing: {published:?}"
+    );
+
+    drop(permit);
+    let dropped = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": id }),
+    )
+    .await;
+    assert!(
+        dropped.is_ok(),
+        "with the permit given back the run is neither starting nor live: {dropped:?}"
+    );
+}
+
+/// **A listed run that is running is dropped as a live one.** A recovered
+/// run keeps its listing for its whole life, so a drop of it while the
+/// runner drives it must take the runner's path, not the queue's: a plain
+/// drop is refused as currently running, and `--live` halts it. The
+/// witness is the run's end: halted at its next step boundary, its row is
+/// not terminal and nothing reports it completed — whereas the model's
+/// reply, left alone, would have completed it.
+#[tokio::test]
+async fn a_running_recovered_run_is_dropped_only_with_live() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let mut completed = start
+        .bus
+        .subscribe(format!("fq.agent.{CAPPED_AGENT}.completed"))
+        .await
+        .expect("subscribe");
+    let id = start.invocation.to_string();
+    let resume = start
+        .spawn_resumes(&admission)
+        .await
+        .handles
+        .pop()
+        .expect("one resume task");
+    start.model.entered().await;
+    assert!(start.runner.is_active(&start.invocation));
+
+    let message = refusal(
+        invoke(
+            &surface,
+            fq_ops::Invocation::Drop,
+            serde_json::json!({ "invocation_id": id }),
+        )
+        .await,
+    );
+    assert!(message.contains("currently running"), "{message}");
+    let live = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": id, "live": true }),
+    )
+    .await;
+    assert!(
+        live.is_ok(),
+        "a live drop of a running listed run: {live:?}"
+    );
+
+    start.model.release();
+    tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("the halted run's task ends")
+        .expect("its task joins");
+    let row = start
+        .worker_store
+        .get_invocation_state(&id)
+        .await
+        .unwrap()
+        .expect("the WAL row is still there");
+    assert_eq!(
+        row.terminal_at, None,
+        "halted at its step boundary, not run to its end"
+    );
+    let reported = tokio::time::timeout(Duration::from_millis(500), completed.next()).await;
+    assert!(
+        reported.is_err(),
+        "a halted run is not reported completed: {reported:?}"
+    );
+}
