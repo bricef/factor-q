@@ -992,6 +992,49 @@ async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_shutdown() {
     a_waiting_recovered_run_lets_go_on(Stop::Shutdown).await;
 }
 
+/// **#994: a recovered run an operator drops while it waits is not
+/// reported ambiguous.** A queued run is not one this runner is driving,
+/// so `fq invocation drop` takes it, and the coordination consumer marks
+/// its WAL row operator-terminal; when its turn comes the resume finds it
+/// ended. Reporting that as `invocation.ambiguous` would flip the dropped
+/// invocation's owner row back to awaiting triage.
+///
+/// (A row the archive hand-off has already deleted is not reported
+/// either, but not because of this: `publish_ambiguous_once` finds no row
+/// to stamp and publishes nothing.)
+#[tokio::test]
+async fn a_recovered_run_dropped_while_it_waits_is_not_reported_ambiguous() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let running = match admission.workers().queue(Waiter::Trigger(None)).await {
+        Place::Admitted(permit) => permit,
+        other => panic!("the permit is free at start: {other:?}"),
+    };
+    let mut ambiguous = start
+        .bus
+        .subscribe(format!("fq.agent.{CAPPED_AGENT}.invocation.ambiguous"))
+        .await
+        .expect("subscribe");
+    let mut resumes = start.spawn_resumes(&admission).await;
+
+    start
+        .worker_store
+        .mark_invocation_operator_terminal(&start.invocation.to_string(), "failed", 2_000)
+        .await
+        .unwrap();
+    drop(running);
+    tokio::time::timeout(Duration::from_secs(10), resumes.pop().expect("one resume"))
+        .await
+        .expect("the resume of a dropped invocation ends")
+        .expect("its task joins");
+    assert_eq!(start.model.calls(), 0, "nothing ran");
+    let quiet = tokio::time::timeout(Duration::from_millis(750), ambiguous.next()).await;
+    assert!(
+        quiet.is_err(),
+        "a dropped invocation was reported ambiguous: {quiet:?}"
+    );
+}
+
 /// **#994 with #718: the per-agent cap bounds a recovered run plus a
 /// dispatched one.** Two worker permits, so the only thing that can hold a
 /// trigger for [`CAPPED_AGENT`] (`max_concurrent: 1`) while its recovered
