@@ -314,7 +314,9 @@ WAL write, signalled through the `Worker` seam — not on dispatch and
 not on completion (#41). That is the fact a producer has to plan
 around, and it closes both windows: a crash *before* the first WAL
 write leaves the trigger unacked, so JetStream redelivers it and the
-run is not lost; and because the ack fires seconds in rather than at
+run is not lost (a drain that stops the invocation there does the
+same, [#974](https://github.com/bricef/factor-q/issues/974)); and
+because the ack fires seconds in rather than at
 completion, a long-running invocation is not redelivered past the ack
 deadline and re-run. From the first WAL write on, in-flight
 durability is the reducer WAL's job (`recovery::scan_in_flight`).

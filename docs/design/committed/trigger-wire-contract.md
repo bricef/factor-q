@@ -208,8 +208,11 @@ had ever arrived.
 So the redelivery window is *dispatch → first WAL write*, seconds wide, and a
 crash inside it is exactly the case where redelivery is what you want: nothing
 durable happened, so the redelivered trigger is the run, not a duplicate of
-it. From the first WAL write on, in-flight durability is the reducer WAL's
-job and a crash resumes rather than re-runs.
+it. A deploy's drain inside it is the same case: the invocation stops before
+its first step, the trigger is left unacked, and the next daemon runs it from
+the beginning ([#974](https://github.com/bricef/factor-q/issues/974)). From
+the first WAL write on, in-flight durability is the reducer WAL's job and a
+crash or a drain resumes rather than re-runs.
 
 A producer should still publish each logical trigger once; de-duplication of a
 re-seen source event is the *producer's* responsibility (e.g. the

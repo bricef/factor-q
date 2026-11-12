@@ -366,7 +366,11 @@ the daemon. Two checks first, every time:
    already-dispatched invocation can be executing. The drain suspends
    in-flight invocations at a step boundary and the next start resumes
    them, but a run that is mid tool-call when the deadline expires
-   becomes ambiguous and can never be resumed.
+   becomes ambiguous and can never be resumed. One still in its setup,
+   before its first step, has nothing to resume: its trigger goes back
+   to the broker and the next start runs it from the beginning, as
+   `attempt: 2`
+   ([#974](https://github.com/bricef/factor-q/issues/974)).
 2. **Disk.** `df -h /` and `docker system df`. Per-invocation
    workspaces and the build caches fill the volume; a full disk killed
    the daemon on 2026-07-20. `build/` and terminal workspaces are
