@@ -392,11 +392,15 @@ you would rather start from a summary.
 
 An invocation waiting for a worker permit is not being driven yet, even
 though every surface shows it as in flight (or, for one you resumed, as
-still ambiguous). That covers a run startup recovery queued and a
-`resume` waiting its turn. A plain `drop` takes it with no `--live`
-needed: by the time `drop` returns, the run can no longer start in this
-daemon, and a drop that fails leaves it waiting as before. In the
-instant its permit arrives the run is starting rather than waiting, and
+still ambiguous), so a plain `drop` takes it with no `--live` needed.
+For a run startup recovery queued and a `resume` waiting its turn, by
+the time `drop` returns the run can no longer start in this daemon, and
+a drop that fails leaves it waiting as before. A drop that errors or is
+cut off (a timeout, a cancelled client) may still have published its
+event, and then the run, left waiting, can start before the event is
+folded. A deferred invocation waiting out a provider's rate limit has no
+such guarantee yet: a drop can still lose to its permit. In the instant
+a queued run's permit arrives it is starting rather than waiting, and
 `drop` refuses it like a live run (`starting to run; retry with
 --live`).
 

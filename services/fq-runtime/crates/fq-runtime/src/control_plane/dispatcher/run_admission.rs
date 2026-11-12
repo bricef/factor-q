@@ -38,19 +38,23 @@
 //! queues behind them all. A recovered run was started before the daemon
 //! stopped and no trigger was, so a backlog of triggers cannot starve it.
 //!
-//! # The agent half
-//!
 //! # A drop reaches a queued run before it starts
 //!
 //! A run waiting here is not one the runner drives, so `fq invocation
 //! drop` takes it on the path for idle work: it publishes the drop, and the
 //! WAL row turns terminal only once the coordination consumer folds that.
 //! A permit arriving in between would start a dropped run. So the resumes
-//! queued here are listed by invocation id, each with a lock of its own:
-//! the drop holds it while it publishes ([`WorkerPermits::hold_for_drop`])
-//! and marks the run dropped if the publish succeeds, and the run takes the
-//! same lock to start ([`Place::permit`]). After the drop's receipt the run
-//! cannot start in this process; if the drop fails, the run is as it was.
+//! queued here — by startup recovery and by `invocation.resume`, through
+//! [`WorkerPermits::queue`] — are listed by invocation id, each with a lock
+//! of its own: the drop holds it while it publishes
+//! ([`WorkerPermits::hold_for_drop`]) and marks the run dropped if the
+//! publish succeeds, and the run takes the same lock to start
+//! ([`Place::permit`]). After the drop's receipt the run cannot start in
+//! this process; if the drop fails, the run is as it was.
+//!
+//! A deferred invocation whose delay has run waits on the same permits,
+//! through `resume_when_permitted`, without being listed: a drop does not
+//! reach it here.
 //!
 //! # The agent half
 //!

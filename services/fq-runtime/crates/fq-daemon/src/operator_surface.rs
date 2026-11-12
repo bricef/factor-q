@@ -250,10 +250,10 @@ pub fn operator_registry(
         "Returns a receipt naming the drop event's sequence — feed it to a \
          gated read for read-your-writes. Refused on an invocation this \
          daemon is actively driving unless `live` is set, which halts it at \
-         its next step boundary (in-flight tools finish) before the drop. An \
-         invocation waiting for a worker permit is not being driven: the \
-         drop takes it, and by the time the receipt returns it can no longer \
-         start.",
+         its next step boundary (in-flight tools finish) before the drop. A \
+         resume that startup recovery or `invocation.resume` queued for a \
+         worker permit is not being driven: the drop takes it, and by the \
+         time the receipt returns it can no longer start in this daemon.",
     );
     registry
         .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
