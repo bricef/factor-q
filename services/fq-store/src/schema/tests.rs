@@ -109,9 +109,7 @@ async fn on_disk(path: &Path) -> OnDisk {
 /// already brought to version `at` — an older binary's file — or left new
 /// and empty when `at` is 0.
 async fn pool_at(store: Store, path: &Path, at: usize) -> SqlitePool {
-    let pool = connect_store_pool(path)
-        .await
-        .expect("open the store pool");
+    let pool = connect_store_pool(path).await.expect("open the store pool");
     if at > 0 {
         migrate(&pool, &store.ladder()[..at])
             .await
@@ -296,7 +294,12 @@ async fn interrupted_ladder(store: Store, at: usize) {
     let path = dir.path().join(store.file());
     let pool = pool_at(store, &path, at).await;
     let before = on_disk(&path).await;
-    let failing: Vec<&'static str> = store.ladder().iter().copied().chain([FAILING_RUNG]).collect();
+    let failing: Vec<&'static str> = store
+        .ladder()
+        .iter()
+        .copied()
+        .chain([FAILING_RUNG])
+        .collect();
 
     let err = migrate(&pool, &failing)
         .await
@@ -396,10 +399,12 @@ async fn a_file_newer_than_the_binary_is_left_as_it_is() {
     let path = dir.path().join(Store::Index.file());
     let pool = pool_at(Store::Index, &path, Store::Index.ladder().len()).await;
     let newer = Store::Index.ladder().len() + 1;
-    sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA user_version = {newer}")))
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {newer}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
     pool.close().await;
     let before = on_disk(&path).await;
 
