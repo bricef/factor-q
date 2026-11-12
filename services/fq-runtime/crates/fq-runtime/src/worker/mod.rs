@@ -211,7 +211,7 @@ pub enum InvocationOutcome {
     /// it was being set up. Nothing durable exists for it. No
     /// `invocation_state` row was written, so recovery has nothing to
     /// resume, and no durable start was signalled. Its `triggered` event
-    /// is on the stream with nothing after it.
+    /// is on the stream, and no outcome event follows it.
     ///
     /// What happens to the work is `stopped_by`'s to decide. The trigger
     /// dispatcher leaves a drained invocation's trigger un-acked for the
