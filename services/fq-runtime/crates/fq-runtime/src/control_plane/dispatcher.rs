@@ -741,6 +741,9 @@ pub enum DispatcherError {
 }
 
 #[cfg(test)]
+mod durable_start_signal_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
@@ -790,7 +793,7 @@ mod tests {
             .unwrap()
     }
 
-    fn canned_response() -> ChatResponse {
+    pub(super) fn canned_response() -> ChatResponse {
         ChatResponse {
             parts: crate::events::assistant_parts(
                 None,
@@ -814,7 +817,7 @@ mod tests {
         }
     }
 
-    fn unique_agent_id(prefix: &str) -> String {
+    pub(super) fn unique_agent_id(prefix: &str) -> String {
         format!("{prefix}-{}", Uuid::now_v7().simple())
     }
 
@@ -834,7 +837,10 @@ mod tests {
     /// sequence. A test that seeds a claim by hand has to agree with the
     /// dispatcher about the epoch or it would be seeding a row for a
     /// different stream.
-    fn test_key(bus: &EventBus, stream_seq: u64) -> crate::control_plane::TriggerKey<'static> {
+    pub(super) fn test_key(
+        bus: &EventBus,
+        stream_seq: u64,
+    ) -> crate::control_plane::TriggerKey<'static> {
         crate::control_plane::TriggerKey {
             stream: TRIGGER_STREAM_NAME,
             stream_epoch: bus.trigger_stream_epoch(),
@@ -842,7 +848,7 @@ mod tests {
         }
     }
 
-    fn unique_consumer_name() -> String {
+    pub(super) fn unique_consumer_name() -> String {
         format!("fq-dispatcher-test-{}", Uuid::now_v7().simple())
     }
 
@@ -850,7 +856,7 @@ mod tests {
     /// there is: recovery over its worker's WAL. These tests' workers have
     /// a fresh WAL with nothing in flight, so there is nothing to record,
     /// and saying so is the honest version of skipping the step.
-    async fn recovered_claims(
+    pub(super) async fn recovered_claims(
         store: &Arc<crate::control_plane::ControlPlaneStore>,
     ) -> TriggerClaims {
         let dir = tempfile::tempdir().unwrap();
@@ -2386,7 +2392,7 @@ You are a test agent."#
 
     /// A registry holding one agent on `claude-haiku`, and the tempdir
     /// its definition was loaded from.
-    fn registry_with(agent_id_str: &str) -> (tempfile::TempDir, SharedRegistry) {
+    pub(super) fn registry_with(agent_id_str: &str) -> (tempfile::TempDir, SharedRegistry) {
         let mut registry = AgentRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let agent_path = dir.path().join(format!("{agent_id_str}.md"));
