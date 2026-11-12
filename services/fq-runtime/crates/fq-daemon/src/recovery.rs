@@ -386,9 +386,10 @@ pub(crate) async fn spawn_resume_tasks(
         waiting += usize::from(place.is_queued());
         resume_handles.push(tokio::spawn(async move {
             let agent_slot = agent_slot;
-            // `None` is a drain or shutdown before its turn came, logged
-            // by the wait itself: the WAL row is untouched, and the next
-            // start's recovery finds it in flight again.
+            // `None`, logged by the admission, is a drain or shutdown
+            // before its turn came — the WAL row is untouched, and the
+            // next start's recovery finds it in flight again — or an
+            // operator's drop of the queued run, which then never starts.
             let Some(_permit) = place.permit().await else {
                 return;
             };
@@ -406,12 +407,12 @@ pub(crate) async fn spawn_resume_tasks(
                     ?outcome,
                     "resume completed"
                 ),
-                // Ended while it waited for its permit — an operator's
-                // `fq invocation drop` reaches a queued run, which this
-                // runner is not driving yet, and the archive hand-off may
-                // have deleted the row since. Nothing is ambiguous about
-                // it, and reporting it so would turn a dropped invocation
-                // back into one awaiting triage.
+                // Ended by some other route while it waited for its permit,
+                // and the archive hand-off may have deleted the row since.
+                // (An `fq invocation drop` of the queued run does not get
+                // here: the drop holds it, and it never starts.) Nothing is
+                // ambiguous about it, and reporting it so would turn an
+                // ended invocation back into one awaiting triage.
                 Err(ExecutorError::Resume(
                     ResumeError::AlreadyTerminal { .. } | ResumeError::NoStateRow { .. },
                 )) => tracing::info!(

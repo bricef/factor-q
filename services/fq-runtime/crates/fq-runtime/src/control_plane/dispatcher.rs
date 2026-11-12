@@ -55,7 +55,7 @@ mod run_admission;
 
 use claim::Marking;
 pub use claim::TriggerClaims;
-pub use run_admission::{Place, QueuedRun, RunAdmission, Waiter, WorkerPermits};
+pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
 use std::sync::Arc;
 
 use futures::StreamExt;

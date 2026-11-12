@@ -20,7 +20,7 @@ use super::super::tests::{
     unique_consumer_name,
 };
 use super::super::{DispatcherError, SharedRegistry, TriggerDispatcher};
-use super::{Place, RunAdmission, Waiter};
+use super::{Place, RunAdmission, RunPermit, Waiter};
 use crate::bus::EventBus;
 use crate::control_plane::ControlPlaneStore;
 use crate::llm::fixture::FixtureClient;
@@ -75,11 +75,9 @@ async fn dispatcher_sharing(
 }
 
 /// The permit a place was admitted with, or a failure naming the place.
-fn admitted(place: Place) -> tokio::sync::OwnedSemaphorePermit {
-    match place {
-        Place::Admitted(permit) => permit,
-        other => panic!("expected a free permit, got {other:?}"),
-    }
+async fn admitted(place: Place) -> RunPermit {
+    assert!(place.is_admitted(), "expected a free permit, got {place:?}");
+    place.permit().await.expect("an admitted place starts")
 }
 
 /// **The order after a restart.** At a worker cap of 1, two runs startup
@@ -106,7 +104,8 @@ async fn runs_queued_before_the_dispatcher_starts_go_before_its_first_trigger() 
             .workers()
             .queue(Waiter::Recovered(Uuid::now_v7()))
             .await,
-    );
+    )
+    .await;
     let second = admission
         .workers()
         .queue(Waiter::Recovered(Uuid::now_v7()))
@@ -163,7 +162,7 @@ async fn a_queued_resume_lets_go_on_a_drain() {
     let worker = CappedWorker::new();
     let admission = RunAdmission::new(worker.clone(), 1);
     let workers = admission.workers();
-    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await);
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
     let queued = workers.queue(Waiter::Recovered(Uuid::now_v7())).await;
     assert!(queued.is_queued());
     let queued = tokio::spawn(queued.permit());
@@ -177,10 +176,10 @@ async fn a_queued_resume_lets_go_on_a_drain() {
         .expect("the wait's task joins");
     assert!(permit.is_none(), "a drained daemon starts nothing");
     assert!(
-        matches!(
-            workers.queue(Waiter::Operator(Uuid::now_v7())).await,
-            Place::Stopping
-        ),
+        workers
+            .queue(Waiter::Operator(Uuid::now_v7()))
+            .await
+            .is_stopping(),
         "nothing queues once the daemon is draining"
     );
     drop(running);
@@ -195,7 +194,7 @@ async fn a_permit_the_drain_frees_starts_no_queued_resume() {
     let worker = CappedWorker::new();
     let admission = RunAdmission::new(worker.clone(), 1);
     let workers = Arc::clone(admission.workers());
-    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await);
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
     let queued = workers.queue(Waiter::Operator(Uuid::now_v7())).await;
     let queued = tokio::spawn(queued.permit());
     // Let the task take over the wait, so the grant wakes it.
@@ -228,7 +227,7 @@ async fn a_queued_resume_lets_go_when_the_dispatcher_shuts_down() {
     let worker = CappedWorker::new();
     let admission = RunAdmission::new(worker.clone(), 1);
     let workers = admission.workers();
-    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await);
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
     let queued = workers.queue(Waiter::Recovered(Uuid::now_v7())).await;
     assert!(queued.is_queued());
     let queued = tokio::spawn(queued.permit());
@@ -243,11 +242,96 @@ async fn a_queued_resume_lets_go_when_the_dispatcher_shuts_down() {
         .expect("the wait's task joins");
     assert!(permit.is_none(), "a stopped daemon starts nothing");
     assert!(
-        matches!(
-            workers.queue(Waiter::Operator(Uuid::now_v7())).await,
-            Place::Stopping
-        ),
+        workers
+            .queue(Waiter::Operator(Uuid::now_v7()))
+            .await
+            .is_stopping(),
         "nothing queues once the dispatcher has stopped"
     );
+    drop(running);
+}
+
+/// **A drop and a start cannot interleave.** A drop holds the queued
+/// resume while it publishes; a permit that comes meanwhile does not start
+/// the run, and once the drop has gone through the run never starts and
+/// the permit goes straight back.
+#[tokio::test]
+async fn a_held_queued_resume_does_not_start_and_a_drop_ends_it() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
+    let id = Uuid::now_v7();
+    let queued = workers.queue(Waiter::Operator(id)).await;
+    let queued = tokio::spawn(queued.permit());
+
+    let hold = workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("a queued resume is there to hold");
+    assert!(!hold.is_starting());
+    drop(running);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !queued.is_finished(),
+        "the permit came while the drop held the run: it must not start yet"
+    );
+    hold.dropped();
+    let permit = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("the run's wait ends once the drop has gone through")
+        .expect("the wait's task joins");
+    assert!(permit.is_none(), "a dropped run never starts");
+    assert_eq!(workers.in_flight(), 0, "and its permit went straight back");
+    assert!(
+        workers.hold_for_drop(&id.to_string()).await.is_none(),
+        "nor is it listed any more"
+    );
+}
+
+/// **A drop that fails leaves the run as it was.** Released without
+/// `dropped`, the hold starts the run on the permit it was waiting for.
+#[tokio::test]
+async fn a_queued_resume_starts_when_its_drop_fails() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
+    let id = Uuid::now_v7();
+    let queued = tokio::spawn(workers.queue(Waiter::Recovered(id)).await.permit());
+
+    let hold = workers.hold_for_drop(&id.to_string()).await.expect("held");
+    drop(running);
+    drop(hold);
+    let permit = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("the run starts")
+        .expect("the wait's task joins");
+    assert!(permit.is_some(), "a failed drop does not stop the run");
+    let hold = workers.hold_for_drop(&id.to_string()).await.expect("held");
+    assert!(
+        hold.is_starting(),
+        "a started run is left to the runner's drop path"
+    );
+}
+
+/// **A run the drop finds waiting leaves the queue within a tick**, giving
+/// its place to the run behind it.
+#[tokio::test]
+async fn a_dropped_resume_leaves_the_queue_within_a_tick() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let running = admitted(workers.queue(Waiter::Recovered(Uuid::now_v7())).await).await;
+    let id = Uuid::now_v7();
+    let queued = tokio::spawn(workers.queue(Waiter::Recovered(id)).await.permit());
+
+    workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("held")
+        .dropped();
+    let permit = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("a dropped run leaves the queue without waiting for a permit")
+        .expect("the wait's task joins");
+    assert!(permit.is_none());
     drop(running);
 }

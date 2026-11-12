@@ -40,6 +40,20 @@
 //!
 //! # The agent half
 //!
+//! # A drop reaches a queued run before it starts
+//!
+//! A run waiting here is not one the runner drives, so `fq invocation
+//! drop` takes it on the path for idle work: it publishes the drop, and the
+//! WAL row turns terminal only once the coordination consumer folds that.
+//! A permit arriving in between would start a dropped run. So the resumes
+//! queued here are listed by invocation id, each with a lock of its own:
+//! the drop holds it while it publishes ([`WorkerPermits::hold_for_drop`])
+//! and marks the run dropped if the publish succeeds, and the run takes the
+//! same lock to start ([`Place::permit`]). After the drop's receipt the run
+//! cannot start in this process; if the drop fails, the run is as it was.
+//!
+//! # The agent half
+//!
 //! [`RunAdmission::agents`] is #718's per-agent count, unchanged. A resume
 //! counts into it as soon as it is queued (`AgentConcurrency::enter`), so
 //! the agent's triggers are held for as long as the resume waits or runs,
@@ -47,14 +61,15 @@
 //! for work this process did not admit, and `agent_cap`'s module doc is
 //! where it is argued.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as TurnLock, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -104,6 +119,19 @@ pub struct WorkerPermits {
     shut_down: AtomicBool,
     /// Asked whether a drain is under way.
     worker: Arc<dyn Worker>,
+    /// The resumes queued here and not yet started, by invocation id:
+    /// what a drop reaches before they start. See the module doc.
+    queued: Mutex<HashMap<Uuid, Arc<TurnLock<Turn>>>>,
+}
+
+/// How far a queued resume has got, as a drop sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Waiting,
+    /// A drop went through: it never starts in this process.
+    Dropped,
+    /// Its permit came and it is starting: live in all but name.
+    Starting,
 }
 
 impl WorkerPermits {
@@ -115,7 +143,32 @@ impl WorkerPermits {
             max_concurrent,
             shut_down: AtomicBool::new(false),
             worker,
+            queued: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn queued(&self) -> MutexGuard<'_, HashMap<Uuid, Arc<TurnLock<Turn>>>> {
+        self.queued
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Hold the queued resume of `invocation_id`, if there is one, for a
+    /// drop: until the hold is released the run cannot start, and
+    /// [`QueuedHold::dropped`] makes sure it never does. `None` when no run
+    /// of that id is queued here, which includes an id that does not parse.
+    pub async fn hold_for_drop(&self, invocation_id: &str) -> Option<QueuedHold> {
+        let id = Uuid::parse_str(invocation_id).ok()?;
+        let turn = self.queued().get(&id).cloned()?;
+        Some(QueuedHold(turn.lock_owned().await))
+    }
+
+    /// Whether a drop has gone through for the queued resume of `id`. A
+    /// drop still in progress holds the lock, and is not one yet.
+    fn is_dropped(&self, id: Uuid) -> bool {
+        self.queued()
+            .get(&id)
+            .is_some_and(|turn| turn.try_lock().is_ok_and(|t| *t == Turn::Dropped))
     }
 
     /// How many invocations may run at once.
@@ -148,20 +201,23 @@ impl WorkerPermits {
     ///
     /// The wait is polled once here, which is when the semaphore enqueues
     /// it; the module doc says why that is the point. A daemon already on
-    /// its way out queues nothing: [`Place::Stopping`] at once, rather than
-    /// a wait that would only let go on its first keepalive tick.
+    /// its way out queues nothing: a stopping [`Place`] at once, rather
+    /// than a wait that would only let go on its first keepalive tick. A
+    /// resume is listed for a drop to reach from here until it starts.
     pub async fn queue(self: &Arc<Self>, waiter: Waiter) -> Place {
         if self.stopping() {
-            return Place::Stopping;
+            return Place::never();
         }
+        let entry = QueuedEntry::enter(self, waiter);
         let permits = Arc::clone(self);
         let mut wait: Pin<Box<dyn Future<Output = Option<OwnedSemaphorePermit>> + Send>> =
             Box::pin(async move { permits.wait(None, waiter).await });
-        match std::future::poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx))).await {
-            Poll::Ready(Some(permit)) => Place::Admitted(permit),
-            Poll::Ready(None) => Place::Stopping,
-            Poll::Pending => Place::Queued(QueuedRun(wait)),
-        }
+        let wait = match std::future::poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx))).await {
+            Poll::Ready(Some(permit)) => Wait::Now(permit),
+            Poll::Ready(None) => return Place::never(),
+            Poll::Pending => Wait::Later(wait),
+        };
+        Place { wait, entry }
     }
 
     /// Wait for a permit, keeping `keepalive`'s delivery alive meanwhile
@@ -211,9 +267,18 @@ impl WorkerPermits {
                         waiter.log_let_go("drain or shutdown while waiting for a worker permit");
                         return None;
                     }
+                    // Not the guarantee — starting takes the lock a drop
+                    // holds — but a dropped run leaves the queue and gives
+                    // its agent's slot back within a tick.
+                    if let Some((id, _)) = waiter.resume()
+                        && self.is_dropped(id)
+                    {
+                        waiter.log_dropped();
+                        return None;
+                    }
                     if !waited {
                         waited = true;
-                        waiter.log_waiting(self.in_flight(), self.max_concurrent);
+                        waiter.log_waiting(self.permits.available_permits(), self.max_concurrent);
                     }
                     if let Some(msg) = keepalive {
                         keep_alive(msg, waiter.trigger_id()).await;
@@ -225,39 +290,147 @@ impl WorkerPermits {
 }
 
 /// Where a queued run stands: what [`WorkerPermits::queue`] returns.
-#[derive(Debug)]
-pub enum Place {
-    /// A permit was free, and this is it: the run starts now.
-    Admitted(OwnedSemaphorePermit),
-    /// Every permit is held: the run has its place in the queue.
-    Queued(QueuedRun),
+pub struct Place {
+    wait: Wait,
+    /// A resume's listing for a drop, from queueing until it starts.
+    entry: Option<QueuedEntry>,
+}
+
+enum Wait {
+    /// A permit was free, and this is it.
+    Now(OwnedSemaphorePermit),
+    /// Every permit is held: the place in the queue, already taken.
+    Later(Pin<Box<dyn Future<Output = Option<OwnedSemaphorePermit>> + Send>>),
     /// The daemon is draining or shutting down: nothing starts.
-    Stopping,
+    Never,
 }
 
 impl Place {
-    /// Whether the run has to wait for its permit.
-    pub fn is_queued(&self) -> bool {
-        matches!(self, Self::Queued(_))
+    fn never() -> Self {
+        Self {
+            wait: Wait::Never,
+            entry: None,
+        }
     }
 
-    /// The permit, once the run's turn comes, or `None` if a drain or
-    /// shutdown comes first.
-    pub async fn permit(self) -> Option<OwnedSemaphorePermit> {
-        match self {
-            Self::Admitted(permit) => Some(permit),
-            Self::Queued(QueuedRun(wait)) => wait.await,
-            Self::Stopping => None,
+    /// Whether a permit was free when the run was queued.
+    pub fn is_admitted(&self) -> bool {
+        matches!(self.wait, Wait::Now(_))
+    }
+
+    /// Whether the run has to wait for its permit.
+    pub fn is_queued(&self) -> bool {
+        matches!(self.wait, Wait::Later(_))
+    }
+
+    /// Whether the daemon was already on its way out: nothing starts.
+    pub fn is_stopping(&self) -> bool {
+        matches!(self.wait, Wait::Never)
+    }
+
+    /// The permit, once the run's turn comes. `None` if a drain or a
+    /// shutdown comes first, or a drop: a resume starts under the lock a
+    /// drop holds, so one that a drop has gone through for never starts.
+    pub async fn permit(self) -> Option<RunPermit> {
+        let Place { wait, entry } = self;
+        let permit = match wait {
+            Wait::Now(permit) => permit,
+            Wait::Later(wait) => wait.await?,
+            Wait::Never => return None,
+        };
+        if let Some(entry) = &entry
+            && !entry.start().await
+        {
+            entry.waiter.log_dropped();
+            return None;
+        }
+        Some(RunPermit {
+            _permit: permit,
+            _entry: entry,
+        })
+    }
+}
+
+impl fmt::Debug for Place {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self.wait {
+            Wait::Now(_) => "Place::Admitted",
+            Wait::Later(_) => "Place::Queued",
+            Wait::Never => "Place::Stopping",
+        })
+    }
+}
+
+/// A run's worker permit, held for as long as it runs.
+pub struct RunPermit {
+    _permit: OwnedSemaphorePermit,
+    _entry: Option<QueuedEntry>,
+}
+
+/// A drop's hold on a queued resume ([`WorkerPermits::hold_for_drop`]).
+/// Released without [`Self::dropped`] — the drop failed — the run is as it
+/// was.
+pub struct QueuedHold(OwnedMutexGuard<Turn>);
+
+impl QueuedHold {
+    /// Whether the run's permit came and it is starting: as live as a
+    /// running one, which a drop takes through the runner, not here.
+    pub fn is_starting(&self) -> bool {
+        *self.0 == Turn::Starting
+    }
+
+    /// The drop went through: the run never starts in this process.
+    pub fn dropped(mut self) {
+        if *self.0 == Turn::Waiting {
+            *self.0 = Turn::Dropped;
         }
     }
 }
 
-/// A wait for a permit that already has its place in the queue.
-pub struct QueuedRun(Pin<Box<dyn Future<Output = Option<OwnedSemaphorePermit>> + Send>>);
+/// A resume's listing in [`WorkerPermits`]'s queued set, removed when it
+/// is dropped — once its run has ended, or it never started.
+struct QueuedEntry {
+    permits: Arc<WorkerPermits>,
+    waiter: Waiter,
+    id: Uuid,
+    turn: Arc<TurnLock<Turn>>,
+}
 
-impl fmt::Debug for QueuedRun {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("QueuedRun")
+impl QueuedEntry {
+    /// List a resume; a trigger has nothing for a drop to reach here.
+    fn enter(permits: &Arc<WorkerPermits>, waiter: Waiter) -> Option<Self> {
+        let (id, _) = waiter.resume()?;
+        let turn = Arc::new(TurnLock::new(Turn::Waiting));
+        permits.queued().insert(id, Arc::clone(&turn));
+        Some(Self {
+            permits: Arc::clone(permits),
+            waiter,
+            id,
+            turn,
+        })
+    }
+
+    /// Start, unless a drop has gone through: under the lock a drop holds
+    /// while it publishes, so the two cannot interleave.
+    async fn start(&self) -> bool {
+        let mut turn = self.turn.lock().await;
+        if *turn == Turn::Dropped {
+            return false;
+        }
+        *turn = Turn::Starting;
+        true
+    }
+}
+
+impl Drop for QueuedEntry {
+    fn drop(&mut self) {
+        let mut queued = self.permits.queued();
+        if queued
+            .get(&self.id)
+            .is_some_and(|turn| Arc::ptr_eq(turn, &self.turn))
+        {
+            queued.remove(&self.id);
+        }
     }
 }
 
@@ -292,10 +465,12 @@ impl Waiter {
         }
     }
 
-    fn log_waiting(self, in_flight: usize, max_concurrent: usize) {
+    fn log_waiting(self, available_permits: usize, max_concurrent: usize) {
+        let in_flight = max_concurrent - available_permits;
         match self.resume() {
             None => info!(
                 trigger_id = %trigger_name(self.trigger_id()),
+                available_permits,
                 in_flight,
                 max_concurrent,
                 "worker permits exhausted; holding the trigger un-started"
@@ -303,10 +478,23 @@ impl Waiter {
             Some((invocation_id, resume)) => info!(
                 %invocation_id,
                 resume,
+                available_permits,
                 in_flight,
                 max_concurrent,
                 "worker permits exhausted; the resume waits for one"
             ),
+        }
+    }
+
+    /// At `info` for the same reason as [`Self::log_let_go`]'s resume line.
+    fn log_dropped(self) {
+        if let Some((invocation_id, resume)) = self.resume() {
+            info!(
+                %invocation_id,
+                resume,
+                "an operator dropped the invocation while it waited for a worker permit; \
+                 it is not resumed"
+            );
         }
     }
 

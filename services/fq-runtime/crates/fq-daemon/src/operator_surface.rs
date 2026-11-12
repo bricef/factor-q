@@ -104,8 +104,14 @@ struct DropCommandInput {
 /// bare drop of live work), not on the invocation's existence. The
 /// operator reads the message verbatim, so each one names its remedy.
 /// Every refusal here precedes the arm, so a refused drop stops nothing.
+///
+/// `queued` is the caller's hold on a run waiting for a worker permit
+/// (#994), if this is one. Held, it cannot start; one whose permit came
+/// just before the hold is starting, and is refused like the live run it
+/// is about to be.
 fn arm_drop_halt(
     runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
+    queued: Option<&fq_runtime::control_plane::dispatcher::QueuedHold>,
     input: &DropCommandInput,
 ) -> Result<Option<fq_runtime::AgentId>, fq_edge::wire::WireError> {
     let refuse = |message: String| fq_edge::wire::WireError::InvalidInput {
@@ -119,6 +125,11 @@ fn arm_drop_halt(
         )));
     };
     let Some(agent) = runner.active_agent(&id) else {
+        if queued.is_some_and(|q| q.is_starting()) {
+            return Err(refuse(format!(
+                "invocation {id} is starting to run; retry with --live to halt and drop it"
+            )));
+        }
         return Ok(None);
     };
     if !input.live {
@@ -239,7 +250,10 @@ pub fn operator_registry(
         "Returns a receipt naming the drop event's sequence — feed it to a \
          gated read for read-your-writes. Refused on an invocation this \
          daemon is actively driving unless `live` is set, which halts it at \
-         its next step boundary (in-flight tools finish) before the drop.",
+         its next step boundary (in-flight tools finish) before the drop. An \
+         invocation waiting for a worker permit is not being driven: the \
+         drop takes it, and by the time the receipt returns it can no longer \
+         start.",
     );
     registry
         .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
@@ -247,7 +261,13 @@ pub fn operator_registry(
             let projection = deps.projection.clone();
             let control_plane = deps.control_plane.clone();
             let runner = deps.runner.clone();
+            let workers = deps.resume.admission.workers().clone();
             async move {
+                // A run queued for a worker permit is not driven, so the
+                // runner cannot halt it and its WAL row turns terminal only
+                // when the drop is folded: held from here to the receipt,
+                // it cannot start meanwhile, and marked dropped, never.
+                let queued = workers.hold_for_drop(&input.invocation_id).await;
                 // Liveness first: a refused drop must leave no trace, so
                 // nothing is published until the halt is armed (or the
                 // invocation is known idle). The arm hands back who the
@@ -255,7 +275,7 @@ pub fn operator_registry(
                 // resolves from that rather than from a projection this
                 // daemon may be ahead of — an armed halt and a NotFound
                 // can never be the same answer (#107).
-                let driving_agent = arm_drop_halt(&runner, &input)?;
+                let driving_agent = arm_drop_halt(&runner, queued.as_ref(), &input)?;
                 // The edge implementing an op IS the runtime boundary, not a
                 // call point to flip.
                 // allow-runtime-internals: daemon-side command handler.
@@ -281,6 +301,9 @@ pub fn operator_registry(
                         message: other.to_string(),
                     },
                 })?;
+                if let Some(queued) = queued {
+                    queued.dropped();
+                }
                 Ok(fq_ops::Receipt {
                     // The drop event, named by the identity `event.get`
                     // takes — the same `event_id` its listing carries,

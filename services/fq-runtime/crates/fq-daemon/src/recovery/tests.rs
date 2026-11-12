@@ -3,7 +3,7 @@ use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use fq_runtime::agent::Agent;
 use fq_runtime::bus::{NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_STREAM_NAME};
-use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, Place};
+use fq_runtime::control_plane::dispatcher::CONSUMER_NAME;
 use fq_runtime::control_plane::{TriggerClaim, TriggerKey};
 use fq_runtime::llm::ChatResponse;
 use fq_runtime::llm::fixture::FixtureClient;
@@ -901,6 +901,18 @@ impl NextStart {
     }
 }
 
+/// Take the worker permit, at a cap of 1 the only one, for a run this test
+/// stands in for.
+async fn hold_the_only_permit(admission: &RunAdmission) -> impl Sized + use<> {
+    admission
+        .workers()
+        .queue(Waiter::Trigger(None))
+        .await
+        .permit()
+        .await
+        .expect("the permit is free at start")
+}
+
 /// How the daemon stops while a recovered run waits.
 #[derive(Clone, Copy, Debug)]
 enum Stop {
@@ -924,10 +936,7 @@ async fn a_waiting_recovered_run_lets_go_on(stop: Stop) {
         start.start_dispatcher(&admission, Arc::new(RestartedWorker::default()));
     // The worker cap is full: a run this test stands in for holds the
     // only permit.
-    let running = match admission.workers().queue(Waiter::Trigger(None)).await {
-        Place::Admitted(permit) => permit,
-        other => panic!("the permit is free at start: {other:?}"),
-    };
+    let running = hold_the_only_permit(&admission).await;
     let mut handles = start.spawn_resumes(&admission).await;
     let resume = handles.pop().expect("one resume task");
 
@@ -992,24 +1001,23 @@ async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_shutdown() {
     a_waiting_recovered_run_lets_go_on(Stop::Shutdown).await;
 }
 
-/// **#994: a recovered run an operator drops while it waits is not
-/// reported ambiguous.** A queued run is not one this runner is driving,
-/// so `fq invocation drop` takes it, and the coordination consumer marks
-/// its WAL row operator-terminal; when its turn comes the resume finds it
-/// ended. Reporting that as `invocation.ambiguous` would flip the dropped
+/// **#994: a recovered run whose row turns terminal while it waits is not
+/// reported ambiguous.** An `fq invocation drop` of a queued run does not
+/// get this far — the drop holds the run, and it never starts (see
+/// `a_queued_recovered_run_dropped_by_an_operator_never_starts`) — but the
+/// row can still be ended by another route while the run waits, as the
+/// coordination consumer does here, and the resume then finds it ended.
+/// Reporting that as `invocation.ambiguous` would flip the ended
 /// invocation's owner row back to awaiting triage.
 ///
 /// (A row the archive hand-off has already deleted is not reported
 /// either, but not because of this: `publish_ambiguous_once` finds no row
 /// to stamp and publishes nothing.)
 #[tokio::test]
-async fn a_recovered_run_dropped_while_it_waits_is_not_reported_ambiguous() {
+async fn a_recovered_run_ended_while_it_waits_is_not_reported_ambiguous() {
     let mut start = NextStart::over_one_run_in_flight().await;
     let admission = RunAdmission::new(start.runner.clone(), 1);
-    let running = match admission.workers().queue(Waiter::Trigger(None)).await {
-        Place::Admitted(permit) => permit,
-        other => panic!("the permit is free at start: {other:?}"),
-    };
+    let running = hold_the_only_permit(&admission).await;
     let mut ambiguous = start
         .bus
         .subscribe(format!("fq.agent.{CAPPED_AGENT}.invocation.ambiguous"))
