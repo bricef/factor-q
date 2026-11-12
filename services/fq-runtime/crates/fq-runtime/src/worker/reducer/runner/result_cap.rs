@@ -35,7 +35,8 @@ use crate::worker::reducer::emit::classify_tool_error;
 /// A tool's outcome as everything downstream records it: a result with
 /// its output capped, or an error classified into its kind and a capped
 /// message. `max_bytes` is `[tools] max_result_bytes` and bounds the
-/// text with its truncation marker.
+/// space the text takes in an event, its truncation marker included
+/// ([`fq_tools::cap_output`]).
 pub(super) fn cap_outcome(
     outcome: Result<ToolResult, ToolError>,
     max_bytes: usize,

@@ -229,9 +229,10 @@ pub struct ToolCallLimits {
     pub max_timeout: Duration,
     /// Consecutive timeouts before the invocation itself fails.
     pub max_consecutive_timeouts: u32,
-    /// The most bytes one tool result may carry, the truncation marker
-    /// included, before it is written to the WAL, published, or shown
-    /// to the model (#827). Applied to every tool, error outputs too.
+    /// The most bytes one tool result may take in an event once JSON
+    /// escapes it, the truncation marker included, before it is written
+    /// to the WAL, published, or shown to the model (#827). Applied to
+    /// every tool, error outputs too.
     pub max_result_bytes: usize,
 }
 

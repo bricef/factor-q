@@ -363,18 +363,27 @@ models = ["claude-haiku-4-5"]
 # at a time, so exempting it would exempt the case that matters.
 # max_consecutive_timeouts = 3
 #
-# The most bytes one tool result may carry, built-in or MCP, error
-# messages included, counting the note that says it was cut. Default
-# 262144 (256 KiB). A result is written to the WAL, published as
-# `tool.result` and sent to the model again on every later turn, and the
-# broker refuses any message over its max_payload (1 MiB on a stock
-# NATS): without this cap one `file_read` of a large log, or one large
-# MCP answer, left the invocation unable to publish anything again.
-# Longer output keeps its start, cut on a character boundary, and ends
-# with "(truncated at the 256.0 KiB tool-result cap: kept the first N of
-# M bytes; the rest was dropped)". The default sits above exec's two
-# 100 KiB streams, so exec output is never cut twice. 0 is refused at
-# startup.
+# The most space one tool result may take in an event, in bytes —
+# built-in or MCP, error messages included, counting the note that says
+# it was cut. Default 262144 (256 KiB). A result is written to the WAL,
+# published as `tool.result` and sent to the model again on every later
+# turn, and the broker refuses any message over its max_payload (1 MiB
+# on a stock NATS): without this cap one `file_read` of a large log, or
+# one large MCP answer, left the invocation unable to publish anything
+# again. Longer output keeps its start, cut on a character boundary, and
+# ends with "(truncated at the 256.0 KiB tool-result cap: kept the first
+# N of M bytes; the rest was dropped)".
+#
+# The number is the space the result takes in the event, which is what
+# the broker measures. Ordinary text is cut at the number; text full of
+# control characters, quotes or backslashes, which JSON writes as two to
+# six bytes each, is cut shorter. 262144 is exactly a quarter of a stock
+# max_payload, so at most three capped results fit in one request to
+# the model alongside the rest of the history. It sits above exec's two
+# 100 KiB streams, so ordinary exec output is cut once, by exec; output
+# with many invalid bytes or control characters can exceed this cap too
+# and be cut again, losing exec's own note (see #985). Values under 1024
+# are refused at startup.
 # max_result_bytes = 262144
 
 [tools.exec]

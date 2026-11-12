@@ -225,9 +225,11 @@ never need to grant, because granting it is not a decision an author gets
 to make. See [Ending the run](#ending-the-run) below.
 
 Whatever a tool returns, the daemon caps it at `[tools]
-max_result_bytes` (256 KiB by default) before the model sees it. A
-longer result keeps its start and ends with a note giving how many
-bytes were kept of how many; the rest is not available to the agent.
+max_result_bytes` (256 KiB by default) before the model sees it,
+counting the space the result takes in an event, so text full of
+control characters is cut shorter than plain text. A longer result
+keeps its start and ends with a note giving how many bytes were kept
+of how many; the rest is not available to the agent.
 An agent that reads large files or logs does better to ask for the part
 it needs, for instance with `builtin__exec` and `tail_lines`, than to
 read the whole thing. See

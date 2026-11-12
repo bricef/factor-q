@@ -654,8 +654,17 @@ it was cut included. Longer output keeps its start, cut on a character
 boundary, and ends with a note like this one:
 
 ```text
-(truncated at the 256.0 KiB tool-result cap: kept the first 262033 of 52428800 bytes; the rest was dropped)
+(truncated at the 256.0 KiB tool-result cap: kept the first 262031 of 52428800 bytes; the rest was dropped)
 ```
+
+The number is the space the result takes in the event, not its length
+as text, because that is what the broker measures. JSON writes most
+text as it is, but a control character takes six bytes (`\u0000`) and
+a quote, a backslash, a newline or a tab takes two. Ordinary text is
+cut at the number; text full of control characters, quotes or
+backslashes is cut shorter. A file that is mostly NUL bytes, such as
+an uncompressed tar, keeps about a sixth of the number. The counts in
+the note are bytes of text, which is what the model can reason about.
 
 The note says what was dropped and offers no way to get it back,
 because no tool can return the rest yet: an agent that needs a later
@@ -666,18 +675,34 @@ output stored by reference
 ([#948](https://github.com/bricef/factor-q/issues/948)) are the
 follow-ups.
 
-The default sits above `exec`'s own cap of 100 KiB per stream, whose
-note names `max_lines` and `tail_lines`, so `exec` output is cut there,
-once, and never twice. It is also under a quarter of a stock
-`max_payload`, so a few capped results and the rest of the history
-still fit in one `llm.request`. A cap of `0` is refused at startup.
+The default is exactly a quarter of a stock `max_payload`, so at most
+three capped results fit in one `llm.request` alongside the rest of
+the history. The cap bounds each result, not a turn: a turn of four
+parallel `file_read` calls on large files still produces a request the
+stock broker refuses. A value under 1024 is refused at startup.
+
+The default also sits above `exec`'s own cap of 100 KiB per stream,
+whose note names `max_lines` and `tail_lines`, so ordinary `exec`
+output is cut there, once. Output with many invalid bytes or control
+characters is the exception: `exec` caps raw bytes, and each invalid
+byte renders as a three-byte replacement character, so that output
+can exceed the runtime cap and be cut again from the end, losing
+`exec`'s note and the stderr section
+([see #985](https://github.com/bricef/factor-q/issues/985)).
 
 One event is outside the cap. `invocation.archived` carries the
 reducer's state blob, which holds the whole conversation and is
-encoded as a JSON array of integers, about four bytes on the wire per
-byte of state. One result at the default cap therefore makes the
-archive a little over 1 MiB, so a broker serving agents that read
-large outputs still needs a `max_payload` above the stock 1 MiB.
+encoded as a JSON array of integers, two to four bytes on the wire per
+byte of state. A state blob of roughly 262,000 to 350,000 bytes,
+depending on the text, therefore makes the archive event larger than a
+stock 1 MiB `max_payload`, and one result at the default cap is most
+of the way there. When that happens the invocation completes, the
+archive publish fails, and every pass of the archive retry sweep stops
+at that row with `archive retry sweep failed; will retry next tick`,
+so rows after it in the pass are not archived either. A broker serving
+agents that read large outputs still needs a `max_payload` above the
+stock 1 MiB
+([see #981](https://github.com/bricef/factor-q/issues/981)).
 
 ## When an invocation stops making progress
 
