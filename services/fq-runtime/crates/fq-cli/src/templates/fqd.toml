@@ -107,9 +107,9 @@ directory = "agents"
 # directory = "./state"
 #
 # The rest of this section is retention: how long the sweepable parts
-# of that state are kept. Two independent windows, because they bound
-# different things — the record of work that finished, and the roster
-# of daemons that died.
+# of that state are kept. Three independent windows, because they bound
+# different things — the record of work that finished, the roster of
+# daemons that died, and the record of which trigger started which run.
 #
 # How long archived invocations and projected event rows are kept, in
 # days. Default 30. Cost-bearing rows are exempt and kept indefinitely,
@@ -127,8 +127,20 @@ directory = "agents"
 # `-1` to keep stale registrations indefinitely.
 # stale_worker_retention_days = 7
 #
+# How long a trigger claim is kept, in days from when it was claimed.
+# Default 30. The dispatcher claims every trigger delivery before it
+# runs anything, and a claim marked started is what stops a redelivered
+# or replayed copy of that trigger from starting the run twice — so it
+# has to outlive the trigger stream's messages (kept for a day). The
+# minimum is 2, and a smaller value is refused at startup. The claim is
+# also the only record of which trigger started which run (the
+# `trigger:` line of `fq invocation show`); a lower number loses that
+# link for older runs sooner, and nothing else. A claim this daemon is
+# still holding is never deleted. Set to `-1` to keep claims for ever.
+# trigger_claim_retention_days = 30
+#
 # How often the retention sweep runs, in seconds. Default 1 hour,
-# shared by both windows above. Production doesn't need faster: the
+# shared by every window above. Production doesn't need faster: the
 # deletes are proportional to the number of rows past the cutoff each
 # tick, so a shorter interval just means smaller per-tick batches.
 # sweep_interval_seconds = 3600

@@ -131,6 +131,13 @@ fn the_daemon_template_teaches_settings_the_daemon_reads() {
     assert_eq!(config.max_iterations, 100);
     assert_eq!(config.state.retention_days, 30);
     assert_eq!(config.state.stale_worker_retention_days, 7);
+    // Tied to the code's default rather than to a literal: the example
+    // teaches the default, and the two are written in two places.
+    assert_eq!(
+        config.state.trigger_claim_retention_days,
+        fq_runtime::config::StateConfig::default().trigger_claim_retention_days,
+        "the template's trigger_claim_retention_days example must show the default"
+    );
     assert_eq!(config.state.sweep_interval_seconds, 3_600);
     assert_eq!(config.worker.max_concurrent_invocations, 1);
     assert_eq!(config.tools.exec.max_timeout_secs, 600);
