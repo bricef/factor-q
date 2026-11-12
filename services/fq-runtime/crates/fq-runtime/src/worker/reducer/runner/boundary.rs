@@ -1,9 +1,14 @@
 //! What stops an invocation at a step boundary, and what the stop
 //! returns (#974).
 //!
-//! Split from `runner.rs` to keep that file and `run_loop_inner` inside
-//! their size budgets; a child module, so the runner's drain flag and
-//! live registry stay private while this code can still reach them.
+//! Moved out of `run_loop_inner` when the first-boundary case was added.
+//! Not forced by the ratchet: before the move `runner.rs` and
+//! `run_loop_inner` were 23 and 21 lines inside their baselines. Both are
+//! far over the caps (1,716 lines over the file cap, 93 over the function
+//! cap) and `runner.rs` is being split under #78, so new logic for them
+//! goes in a module of its own rather than being appended. A child module,
+//! so the runner's drain flag and live registry stay private while this
+//! code can still reach them.
 
 use tracing::info;
 use uuid::Uuid;
@@ -20,8 +25,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     ///
     /// Two things stop it, and neither emits a terminal event. An
     /// operator halt (`invocation.drop --live`) is invocation-scoped: the
-    /// coordination consumer marks the WAL row terminal from the
-    /// operator-drop event, so the halt only stops the in-memory driver.
+    /// coordination consumer records the drop from the operator-drop
+    /// event (marking the WAL row terminal, when there is one), so the
+    /// halt only stops the in-memory driver.
     /// A drain (ADR-0027) stops every invocation on this worker. The halt
     /// is asked first, and consumed when it is.
     ///
@@ -52,13 +58,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return None;
         };
         let outcome = durable_start.stopped_at_boundary(invocation_id, stopped_by);
-        let resumable = matches!(outcome, InvocationOutcome::Suspended { .. });
+        // Whether the first WAL write landed: a halted invocation's row is
+        // the drop's to mark terminal, a drained one's is recovery's.
+        let durably_started = matches!(outcome, InvocationOutcome::Suspended { .. });
         match stopped_by {
             BoundaryStop::Halt => info!(
-                %agent_id, %invocation_id, step_index, resumable,
+                %agent_id, %invocation_id, step_index, durably_started,
                 "operator halt — stopping invocation at step boundary"
             ),
-            BoundaryStop::Drain if resumable => info!(
+            BoundaryStop::Drain if durably_started => info!(
                 %agent_id, %invocation_id, step_index,
                 "draining — suspending invocation at step boundary"
             ),
