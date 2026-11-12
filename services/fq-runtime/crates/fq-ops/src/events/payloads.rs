@@ -382,10 +382,14 @@ pub enum FailureKind {
 /// counted in, the detail is what was measured when it happened. Tagged
 /// by `kind`, like the schema's other payload enums
 /// ([`LlmCallOrigin`](super::LlmCallOrigin), [`Message`](super::Message)).
-// Adding a variant is additive for the schema and breaking for an older
-// reader: there is no `#[serde(other)]` landing pad here, so a build
-// that does not know a variant fails to read the whole `failed` event
-// rather than reading it without its detail.
+// Adding a variant is additive for older readers too, which is what
+// `Unknown` is for: a build that does not know a kind reads the detail
+// as `Unknown` and keeps the rest of the `failed` event. Without it, a
+// detail — an optional enrichment — would make the whole event
+// unreadable: acked as poison by the durable consumers, fatal to every
+// tail reader of the `failed` subject. Only an unknown *tag* degrades; a
+// known kind with a malformed body is still refused, as an unknown
+// `event_type` degrades and a malformed known payload does not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FailureDetail {
@@ -399,6 +403,12 @@ pub enum FailureDetail {
         size_bytes: u64,
         limit_bytes: u64,
     },
+    /// A detail of a kind this build does not know — one a newer build
+    /// added. It is what a reader holds in that case, and nothing ever
+    /// writes it: the runtime never constructs it, and the body it
+    /// stands for is discarded on the way in.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

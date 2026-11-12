@@ -1912,3 +1912,53 @@ fn a_detail_naming_an_event_type_this_build_lacks_still_reads() {
         })
     );
 }
+
+/// A detail of a kind this build does not know — a newer build added it
+/// — reads at the wire boundary as [`FailureDetail::Unknown`], and the
+/// `failed` carrying it keeps its kind, phase and message. Only an
+/// unknown *tag* degrades: a known kind with a field missing is still
+/// refused as malformed, as a malformed known payload is.
+#[test]
+fn only_an_unknown_detail_kind_degrades_to_unknown() {
+    let wire = serde_json::to_value(failed_event(Some(FailureDetail::PayloadTooLarge {
+        event_type: EventKind::LlmRequest,
+        size_bytes: 2_000_000,
+        limit_bytes: 1_048_576,
+    })))
+    .unwrap();
+    let with_detail = |detail: serde_json::Value| {
+        let mut wire = wire.clone();
+        wire["payload"]["payload"]["detail"] = detail;
+        serde_json::to_vec(&wire).unwrap()
+    };
+
+    let newer = with_detail(json!({
+        "kind": "budget_exceeded",
+        "budget_usd": 0.5,
+        "spent_usd": 0.512,
+    }));
+    let event = Event::from_wire(&newer).expect("an unknown detail kind must not fail the event");
+    let EventPayload::Failed(payload) = event.payload else {
+        panic!("an unknown detail kind must still read as a failed payload");
+    };
+    assert!(matches!(payload.error_kind, FailureKind::RuntimeError));
+    assert!(matches!(payload.phase, FailurePhase::LlmRequest));
+    assert_eq!(payload.error_message, "event too large for the broker");
+    assert_eq!(payload.detail, Some(FailureDetail::Unknown));
+
+    let malformed = with_detail(json!({"kind": "payload_too_large", "size_bytes": 1}));
+    assert!(
+        matches!(
+            Event::from_wire(&malformed),
+            Err(EventParseError::Malformed(_))
+        ),
+        "a known kind with a field missing is malformed, not unknown"
+    );
+
+    // What `Unknown` writes, if a reader ever re-serialises one: the tag
+    // alone. The kind it stood for and its fields are gone.
+    assert_eq!(
+        serde_json::to_value(FailureDetail::Unknown).unwrap(),
+        json!({"kind": "unknown"})
+    );
+}
