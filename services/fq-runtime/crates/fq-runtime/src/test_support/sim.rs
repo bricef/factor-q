@@ -4379,7 +4379,8 @@ mod drain_equivalence {
     };
     use super::*;
     use crate::test_support::oracle::{
-        check_invocation_trace_prefix, check_resume_trace, observational_trace,
+        check_invocation_trace, check_invocation_trace_prefix, check_resume_trace,
+        observational_trace,
     };
     use crate::worker::recovery::RecoveryCategory;
 
@@ -4476,6 +4477,103 @@ mod drain_equivalence {
             let drained = run_drained(1234, turns, boundary_span).await;
             assert_equivalent(&reference, &drained, &format!("drain span {boundary_span}"));
         }
+    }
+
+    /// **A drain before the first WAL write leaves the whole run to the
+    /// next binary (#974).** The boundaries above all follow a WAL
+    /// write. Publish 0 is `triggered`, the last thing the runner does
+    /// before its step loop, so a drain armed there is seen at the loop's
+    /// first boundary, before the first `upsert_invocation_state`.
+    /// Nothing durable exists at that point: recovery resumes from
+    /// `invocation_state` rows, and there is none. So the run must not
+    /// say otherwise (`Suspended` promises recovery a row to resume), and
+    /// the work must come back whole: the trigger, redelivered to the
+    /// next binary, runs from the start on a fresh runner over the same
+    /// store, once, and that run is observationally the uninterrupted
+    /// one. The redelivery itself is the dispatcher's, and its tests
+    /// have it (`dispatcher/boundary_stop_tests.rs`).
+    #[tokio::test]
+    async fn a_drain_before_the_first_wal_write_leaves_the_whole_run_to_the_next_binary() {
+        let turns = 2;
+        let reference = run_reference(1234, turns).await;
+        let world = SimWorld::new(1234, 5.0).await;
+        queue_tool_outputs(&world, turns);
+        world.sink.drain_at_publish(0, world.runner.drain_signal());
+        let unasked = FixtureClient::new();
+        load_fixture(&unasked, &script(turns));
+        let outcome = world.run(&unasked).await.expect("a drained run returns Ok");
+
+        let drained = world.invocation_id().to_string();
+        let in_flight = world.store.find_in_flight_invocations().await.unwrap();
+        assert!(
+            in_flight.is_empty(),
+            "nothing was written to resume: {in_flight:?}"
+        );
+        assert!(
+            world
+                .store
+                .get_invocation_state(&drained)
+                .await
+                .unwrap()
+                .is_none(),
+            "the drain landed before the first WAL write"
+        );
+        assert!(
+            !matches!(outcome, InvocationOutcome::Suspended { .. }),
+            "`Suspended` promises recovery a row to resume, and there is none: {outcome:?}"
+        );
+        assert!(
+            unasked.requests().is_empty(),
+            "the drained run took no step"
+        );
+        assert!(world.tool.dispatches().lock().unwrap().is_empty());
+        let prefix = world.sink.events();
+        if let Err(violations) = check_invocation_trace_prefix(&prefix) {
+            panic!("the drained run's trace is not a canonical prefix: {violations:?}");
+        }
+
+        // The next binary: the redelivered trigger, run from the start.
+        let mut registry = ToolRegistry::new();
+        registry.register_fixture(Arc::clone(&world.tool) as Arc<dyn Tool>);
+        let next = SimWorld::build_runner(
+            &world.clock,
+            &world.sink,
+            &registry,
+            &world.store,
+            Arc::new(PricingTable::empty()),
+            world.workspace.clone(),
+        );
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &script(turns));
+        let outcome = next
+            .run(
+                &world.agent,
+                &llm,
+                TriggerSource::Manual,
+                None,
+                json!("sim-go"),
+            )
+            .await
+            .expect("the next binary's run");
+        let rerun = world.sink.events()[prefix.len()..].to_vec();
+        if let Err(violations) = check_invocation_trace(&rerun) {
+            panic!("the next binary's run is not a whole trace: {violations:?}");
+        }
+        let rerun = RunResult {
+            observed: observational_trace(&rerun),
+            summary: summary_of(&outcome),
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        };
+        assert_equivalent(&reference, &rerun, "the next binary's run");
+        assert!(
+            world
+                .store
+                .find_in_flight_invocations()
+                .await
+                .unwrap()
+                .is_empty(),
+            "the run completed and nothing is left in flight"
+        );
     }
 
     proptest::proptest! {
