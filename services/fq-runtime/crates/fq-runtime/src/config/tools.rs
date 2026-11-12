@@ -58,8 +58,8 @@ pub struct ToolsConfig {
     /// the count, because it proves the machinery is alive.
     #[serde(default = "default_max_consecutive_timeouts")]
     pub max_consecutive_timeouts: u32,
-    /// The most bytes one tool result may carry, in bytes, the
-    /// truncation marker included. Default 262144 (256 KiB).
+    /// The most space one tool result may take in an event, in bytes,
+    /// the truncation marker included. Default 262144 (256 KiB).
     ///
     /// A tool's output is written to the WAL, published as `tool.result`
     /// and re-sent to the model in every later `llm.request`, and the
@@ -69,12 +69,21 @@ pub struct ToolsConfig {
     /// large document, left the invocation unable to publish
     /// (<https://github.com/bricef/factor-q/issues/827>). Longer output
     /// is cut on a character boundary and ends with a note saying how
-    /// much was kept of how much.
+    /// many bytes of text were kept of how many.
     ///
-    /// 256 KiB sits above `exec`'s two 100 KiB streams, so `exec` output
-    /// is never cut twice, and under a quarter of a stock `max_payload`.
-    /// Zero is refused at load: it would cut every tool result to
-    /// nothing.
+    /// The number is the space a result takes in an event, because that
+    /// is what the broker measures. Ordinary text is cut at the number;
+    /// text full of control characters, quotes or backslashes, which
+    /// JSON writes as two to six bytes each, is cut shorter.
+    ///
+    /// 256 KiB is exactly a quarter of a stock `max_payload`, so at most
+    /// three capped results fit in one `llm.request` alongside the rest
+    /// of the history. It sits above `exec`'s two 100 KiB streams, so
+    /// ordinary `exec` output is cut once, by `exec`; output with many
+    /// invalid bytes or control characters can exceed this cap too and
+    /// be cut again, losing `exec`'s own note (see #985). Anything
+    /// under 1024 is refused at load: a cap that small turns every
+    /// larger result into a fragment of the note.
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: usize,
     #[serde(default)]
@@ -96,6 +105,12 @@ fn default_max_consecutive_timeouts() -> u32 {
 fn default_max_result_bytes() -> usize {
     256 * 1024
 }
+
+/// The smallest `[tools] max_result_bytes` the daemon accepts. A value
+/// below it is far more likely a slip — `256` written for 256 KiB — than
+/// a wish, and it would leave room for little more than the truncation
+/// note, which alone takes over a hundred bytes.
+const MIN_RESULT_BYTES: usize = 1024;
 
 impl Default for ToolsConfig {
     fn default() -> Self {
@@ -120,9 +135,9 @@ impl ToolsConfig {
         }
     }
 
-    /// A result cap of zero, and three orderings that must hold, all
-    /// checked rather than silently clamped, because a settings pair
-    /// that disagrees is an operator mistake with an invisible
+    /// A floor on the result cap, and three orderings that must hold,
+    /// all checked rather than silently clamped, because a setting that
+    /// cannot mean what it says is an operator mistake with an invisible
     /// consequence.
     ///
     /// **The general ceiling must be at least the `exec` ceiling.**
@@ -148,8 +163,11 @@ impl ToolsConfig {
     /// survives, which is the defect this whole section is guarding
     /// against (<https://github.com/bricef/factor-q/issues/552>).
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
-        if self.max_result_bytes == 0 {
-            return Err(ConfigError::ToolResultCapZero);
+        if self.max_result_bytes < MIN_RESULT_BYTES {
+            return Err(ConfigError::ToolResultCapTooSmall {
+                value: self.max_result_bytes,
+                minimum: MIN_RESULT_BYTES,
+            });
         }
         if self.max_timeout_secs < self.exec.max_timeout_secs {
             return Err(ConfigError::ToolCeilingBelowExec {

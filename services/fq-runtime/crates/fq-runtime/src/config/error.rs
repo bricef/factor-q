@@ -112,15 +112,18 @@ pub enum ConfigError {
         backstop: u64,
     },
 
-    /// `[tools] max_result_bytes = 0` (#827). Every tool result would be
-    /// cut to nothing, so every tool would answer with an empty string
-    /// whatever it did — which no one means to configure.
+    /// `[tools] max_result_bytes` below the floor (#827). The truncation
+    /// note alone takes over a hundred bytes, so a cap this small turns
+    /// every larger result into a fragment of the note, and a small value
+    /// is far more likely a slip — `256` written for 256 KiB — than a
+    /// wish. The value and the floor are named: the fix is a number.
     #[error(
-        "[tools] max_result_bytes must be greater than zero: 0 would cut every tool result to \
-         nothing, so no tool could tell the model what it did — remove the line to take the \
-         default (262144), or set a real cap"
+        "[tools] max_result_bytes = {value} is below the minimum of {minimum}: the cap is in \
+         bytes, and one that small would cut every larger tool result to a fragment of its \
+         truncation note — remove the line to take the default (262144, 256 KiB), or set a \
+         cap of at least {minimum}"
     )]
-    ToolResultCapZero,
+    ToolResultCapTooSmall { value: usize, minimum: usize },
 
     /// An `[mcp]` bound set to zero. Every one of them would be
     /// satisfiable only by a server that does nothing — a zero deadline
