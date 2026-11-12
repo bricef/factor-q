@@ -4,8 +4,12 @@
 
 use std::process::Command;
 
+/// The binary under test, without `RUST_LOG`: with it, `fq-cas` traces to
+/// stderr, which a test compares exactly.
 fn fq_cas() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fq-cas"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fq-cas"));
+    command.env_remove("RUST_LOG");
+    command
 }
 
 #[test]
