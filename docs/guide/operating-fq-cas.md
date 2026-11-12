@@ -23,6 +23,35 @@ The index tracks, transactionally, how many live names reference each object and
 how many live objects reference each block — the counts that decide what is
 garbage.
 
+## Schema upgrades on open
+
+`index.db` and `grants.db` each record a schema version. A command that opens
+one — `object …` and `gc` open `index.db`; `grant …` and `token mint` open
+`grants.db` — first brings it up to the version its binary was built for,
+creating the file if it is not there. This needs no operator involvement, and it
+is safe for several processes to do it at once:
+
+- **One at a time.** An upgrade holds the file's write lock from the moment it
+  reads the version until it commits. A second process opening the same file — a
+  `gc` cron entry that fires while a `grant` command is running, say — waits for
+  the first to finish, then finds the file current. The lock is SQLite's own, so
+  this holds between processes, not only within one.
+- **All or nothing.** The schema changes and the version that records them
+  commit together. An upgrade stopped part-way, by an error, a crash or a kill,
+  leaves the file at its old version with nothing applied, and the next command
+  runs it again from the start.
+
+The wait is bounded at 30 seconds, and so is the wait for another process that
+is creating the same file at the same moment. A command that cannot get the
+lock in that time fails with `database is locked` and changes nothing, while
+the process holding the lock carries on; running the command again once that
+process has finished is enough. A lock that is never released means a process
+stopped in the middle of a write.
+
+A file a newer `fq-cas` has upgraded is opened as it is: nothing is migrated,
+and nothing refuses it either. Rolling `fq-cas` back across a schema change
+therefore means restoring the store from before that change as well.
+
 ## Reclaiming storage: `fq-cas gc`
 
 Deleting a name (`fq-cas object rm …`, or overwriting it) does **not** free disk

@@ -105,12 +105,13 @@
 //! and its on-demand rebuild run under [`with_schema_lock`] all the
 //! same.
 //!
-//! `fq-store` is a different crate, a member of the same workspace, with
-//! its own pool and pragma bootstrap in `grant_log.rs`/`index.rs`. It is
-//! not yet under this rule: each of its rungs commits atomically with
-//! its version bump, but the version is read outside any transaction,
-//! so two openers can both run a rung. That is tracked in
-//! <https://github.com/bricef/factor-q/issues/975>.
+//! `fq-store` is a different crate, a member of the same workspace, and
+//! holds its two databases to the same rule with its own implementation
+//! (`fq-store/src/schema.rs`): one `BEGIN IMMEDIATE` transaction from the
+//! `user_version` read to the version stamp, and the same bounded retry
+//! around the WAL switch
+//! (<https://github.com/bricef/factor-q/issues/975>). It shares no code
+//! with this module, because neither crate depends on the other.
 
 use std::time::Duration;
 
