@@ -625,6 +625,35 @@ Projection `error_kind` values use this same snake_case wire vocabulary. Rebuild
 }
 ```
 
+With a detail ([#952](https://github.com/bricef/factor-q/issues/952)):
+
+```json
+{
+  "error_kind": "runtime_error",
+  "error_message": "event of 1153433 bytes exceeds the broker max_payload of 1048576 bytes",
+  "phase": "llm_request",
+  "partial_totals": { "total_llm_calls": 2, "total_tool_calls": 1, "total_cost": 0.000216, "total_duration_ms": 4200 },
+  "detail": {
+    "kind": "payload_too_large",
+    "event_type": "llm_request",
+    "size_bytes": 1153433,
+    "limit_bytes": 1048576
+  }
+}
+```
+
+`detail` is optional and absent from the wire when a failure has none. Nothing emits one yet: [#828](https://github.com/bricef/factor-q/issues/828) is the first producer. It is one of these, tagged by `kind`:
+
+| `kind` | Fields | Meaning |
+|---|---|---|
+| `payload_too_large` | `event_type`, `size_bytes`, `limit_bytes` | An event was too large for the broker to accept. `event_type` names that event as its own `event_type` on the wire (`llm_request`, `tool_result`, …), or `unknown` when a newer build named a type this one does not have; `size_bytes` is its serialised size and `limit_bytes` the broker's `max_payload`, both in bytes. |
+
+**Design notes:**
+
+- **Typed, not a map.** Each kind of detail is a declared shape, pinned by the compiler and by the golden corpus like every other payload; a map of free keys would bypass both, and its names would drift. The cost accepted is that a new kind is a code change and a corpus exemplar. `error_message` keeps the same facts in prose, for people.
+- **Orthogonal to `error_kind`.** The kind is the bucket a failure is counted in; the detail is what was measured when it happened.
+- **An older reader ignores `detail`**, as it ignores any key it does not know, so adding the field needed no version bump. **A `kind` it does not know is another matter:** there is no landing pad for one, as there is for an unknown `event_type`, so the whole `failed` event fails to parse for a reader built before that kind existed.
+
 ### `invocation.archived`
 
 Published by the worker after an invocation reaches terminal state, carrying the final state blob the control-plane writes into `invocation_archive`. Emitted *after* the terminal lifecycle event (`completed` or `failed`), in the same invocation chain.
@@ -1013,6 +1042,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-09)* `cost.reported_cost` (additive, optional): what the provider itself said the call cost, in USD — OpenRouter's `usage.cost` | The computed `total_cost` is a table rate applied to token counts and cannot see a gateway's fee, a cache discount, or which upstream the gateway chose; the provider's own figure can, and is the one to reconcile against. Absent where the provider reported nothing, which is not `0`. `total_cost` is unchanged — budgets are enforced on it, and it needs a rate before the call. `schema_version` stays at 3. |
 | *(2026-09-10, [#409](https://github.com/bricef/factor-q/issues/409))* `schema_version` is now **read**, not only written: a reader refuses any version outside its supported set — `{3}` today — before it looks at the body, as a distinct error from malformed JSON, and a durable consumer halts on one rather than acking it. See [How a reader treats the version](#how-a-reader-treats-the-version) | No shape change; `schema_version` stays at 3. Before this the field was stamped on every event and inspected by nothing, so a replay across a version boundary — a rebuild of the projection from a stream holding v2 history — acked every unreadable event as poison and completed silently incomplete. Now it stops at the first one and says so. |
 | *(2026-09-10, [#278](https://github.com/bricef/factor-q/issues/278))* A new event type, `invocation.deferred`, on `fq.agent.{agent_id}.invocation.deferred`, with `{ reason, model, retry_after_ms }` | Additive, like `invocation.stuck`; `schema_version` stays at 3. A rate limit the retry layer gave up on used to end the invocation in `failed` (`llm_error`); it now ends the *attempt* in this event, with the row left in flight for a resume. A consumer folding `llm.failure` into "the invocation failed" sees a rate-limited failure that is followed by this rather than by `failed`. |
+| *(2026-11-12, [#952](https://github.com/bricef/factor-q/issues/952))* `failed` gains an optional typed `detail`, tagged by `kind`; its first kind is `payload_too_large`, with `{ event_type, size_bytes, limit_bytes }` | The facts behind a failure — which event, how big, what limit — existed only as numbers inside `error_message`, so a reader that wanted them had to parse prose. Additive, so `schema_version` stays at 3: the key is absent when there is no detail, and an older reader ignores it when there is. Nothing emits one yet; [#828](https://github.com/bricef/factor-q/issues/828) is the first producer. |
 
 ## Changelog: v1 → v2
 
