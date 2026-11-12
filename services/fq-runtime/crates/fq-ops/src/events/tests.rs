@@ -1856,6 +1856,9 @@ fn failed_detail(event: Event) -> Option<FailureDetail> {
 #[test]
 fn a_failed_event_without_a_detail_has_no_detail_key() {
     let wire = serde_json::to_value(failed_event(None)).unwrap();
+    // The path names the payload, so the absence below is not a miss:
+    // a wrong path would read `Null`, which has no `detail` key either.
+    assert_eq!(wire["payload"]["payload"]["error_kind"], "runtime_error");
     assert!(
         wire["payload"]["payload"].get("detail").is_none(),
         "no detail must mean no key: {wire}"
