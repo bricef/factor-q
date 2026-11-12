@@ -73,8 +73,11 @@ impl Terminal {
     }
 }
 
-/// A `failed` event. The one constructor for both writers of one: the
-/// run loop's stored terminal here, and `emit_failed`'s mid-step publish.
+/// A `failed` event, shared by the two writers that end a started run:
+/// the run loop's stored terminal here, and `emit_failed`'s mid-step
+/// publish. A third writer does not use it: `refuse_for_unavailable_mcp`
+/// (`mcp.rs`) builds its `Setup`-phase `failed` by hand, before any row
+/// exists.
 pub(super) fn failed_event(
     agent_id: &AgentId,
     invocation_id: Uuid,
