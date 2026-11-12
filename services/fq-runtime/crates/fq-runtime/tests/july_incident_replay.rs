@@ -144,11 +144,13 @@ impl Worker for StagedWorker {
         // An invocation that has just made its first WAL write has work
         // still to do, and the real runner's next move is always an
         // await on the store or the broker. So this stub yields once
-        // before it can return. It matters: `TriggerDispatcher::handle`
-        // only learns of a durable start by polling for it, and a
-        // worker that fires the signal and returns within the same poll
-        // is handled as one that never started — its claim row is
-        // released instead of marked `durably_started`.
+        // before it can return. `TriggerDispatcher::handle` used to
+        // handle a worker that fires the signal and returns within the
+        // same poll as one that never started, releasing its claim row
+        // instead of marking it `durably_started` (#966). It now asks
+        // the signal once more when the invocation returns, so the
+        // yield keeps the stub faithful to the runner and no longer
+        // decides the claim row.
         tokio::task::yield_now().await;
         self.finish
             .acquire()
