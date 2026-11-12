@@ -1091,22 +1091,42 @@ agent. Age is counted from when the delivery was claimed (or adopted).
 
 **The floor is the stream's message age plus a day, two days today, and
 a smaller value is refused at startup.** The trigger stream keeps a
-message for a day after it is acked, so a
-durable consumer that is deleted and recreated, or whose state is lost
-in a broker restore, replays up to a day of triggers, and the started
-claims are what keep those from running twice. A claim is never older
-than its message, so a claim older than a day names a message the
-stream has dropped; the floor is that day rounded up, plus a day of
-margin for the two clocks the argument reads.
+message for a day after it was published, whether or not it has been
+acked: a trigger held for ten hours and then acked stays fourteen
+hours more. So a durable consumer that is deleted and recreated, or
+whose state is lost in a broker restore, replays the triggers published
+in the last day, and the started claims are what keep those from
+running twice. A claim is never older than its message, so a claim
+older than a day names a message the stream has dropped; the floor is
+that day rounded up, plus a day of margin for the two clocks the
+argument reads.
 
 **What a lower number costs.** Nothing about duplicates, as long as it
 is at or above the floor. It shortens how long a finished run can show
 the delivery that started it: past the window, `fq invocation show`
 reads `none recorded` for a run that did come from the trigger stream.
-The default keeps the link as long as `retention_days` keeps the
-archived run. A higher number keeps the link longer at the cost of a
-larger table; the claim table has no index yet, so the reads that look
-a claim up by its run scan the rows the window keeps.
+The default keeps the link about as long as `retention_days` keeps the
+archived run, but the claim always goes first: its window runs from
+when the delivery was claimed, the archive's from when the finished run
+was archived. The difference is the run's length plus the archive's
+lag, so a run that sat parked for three days reads `trigger: none
+recorded` for the last three days of its archived life. A higher number
+keeps the link longer at the cost of a larger table; the claim table
+has no index yet, so the reads that look a claim up by its run scan the
+rows the window keeps.
+
+**`-1` and `fq doctor`.** With claim rows kept for ever the report has
+no horizon. A never-started line stays for as long as its row exists,
+which is for ever, so `fq doctor --fail-on-issues` stays non-zero, and
+no command clears it.
+
+**The first sweep after an upgrade.** One sweep interval after a daemon
+that has this window starts (an hour by default), its first sweep
+deletes every started claim older than the window and every claim an
+exited process left that is older than it, and the `trigger:` line of
+those runs reads `none recorded` from then on. An instance that set
+`retention_days = -1` to keep its history also needs
+`trigger_claim_retention_days = -1` to keep this link.
 
 **One constraint for later work.** `fq doctor` tells a claim whose run
 finished from one that never started by the run's row in the control

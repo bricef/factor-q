@@ -408,10 +408,15 @@ convenience with no correctness implication.
 **Not to be confused with `state.stale_worker_retention_days`**,
 which defaults to 7 and bounds a different table: how long a
 `coordination_worker` row that has already gone *stale* is kept
-before collection. The two windows are independent, disable
-independently on their own `-1`, and hold unrelated things — one the
-record of work that finished, the other the roster of daemons that
-died.
+before collection, **or with `state.trigger_claim_retention_days`**,
+which defaults to 30 and bounds the dispatcher's `trigger_claim`
+table, counted from each claim and never shorter than the trigger
+stream's message age plus a day
+([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
+The three windows are independent, disable independently on their own
+`-1`, and hold unrelated things — the record of work that finished,
+the roster of daemons that died, and the record of which trigger
+delivery started which run.
 
 ### 5.4 Secret handling — DEFERRED, NAMED
 

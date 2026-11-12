@@ -174,8 +174,10 @@ pub struct StateConfig {
     /// The row is also the only record of which delivery started which
     /// run — the `trigger:` line of `fq invocation show` — and the sweep
     /// takes that link with it. Lowering this loses the link for older
-    /// runs and nothing else; the default keeps it as long as
-    /// `retention_days` keeps the archived run. `fq doctor` stops listing
+    /// runs and nothing else. The default keeps it about as long as
+    /// `retention_days` keeps the archived run, but the claim goes first,
+    /// by the run's length plus the archive's lag: this window runs from
+    /// the claim, the archive's from archiving. `fq doctor` stops listing
     /// a claim an exited process left at this same age, when the sweep
     /// deletes it. A `claimed` row this daemon holds is never deleted,
     /// however old: it may be a trigger the daemon is still holding.

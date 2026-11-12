@@ -1,10 +1,10 @@
 //! A started claim that the retention sweep keeps still refuses a replay.
 //!
 //! The trigger stream is a `Limits` stream that keeps a message for a day
-//! after it is acked, so a durable that is deleted and recreated, or whose
-//! state a broker restore loses, starts again from the oldest message on
-//! the stream (`trigger_consumer_with_filter` sets no deliver policy, so
-//! the default, all, applies). The `durably_started` claim rows are then
+//! after it was published, acked or not, so a durable that is deleted and
+//! recreated, or whose state a broker restore loses, starts again from the
+//! oldest message on the stream (`trigger_consumer_with_filter` sets no
+//! deliver policy, so the default, all, applies). The `durably_started` claim rows are then
 //! the only thing that stops those triggers from running a second time,
 //! which is why the retention sweep may delete one only once its message
 //! is gone (ADR-0032, "Retention of claim rows").
