@@ -28,18 +28,22 @@ garbage.
 `index.db` and `grants.db` each record a schema version. A command that opens
 one — `object …` and `gc` open `index.db`; `grant …` and `token mint` open
 `grants.db` — first brings it up to the version its binary was built for,
-creating the file if it is not there. This needs no operator involvement, and it
-is safe for several processes to do it at once:
+creating the file if it is not there. For `grants.db` that includes bringing the
+permission projection level with the grant log, if it has fallen behind (a file
+from before the projection existed, or one whose projection was wiped). This
+needs no operator involvement, and it is safe for several processes to do it at
+once:
 
 - **One at a time.** An upgrade holds the file's write lock from the moment it
   reads the version until it commits. A second process opening the same file — a
-  `gc` cron entry that fires while a `grant` command is running, say — waits for
-  the first to finish, then finds the file current. The lock is SQLite's own, so
-  this holds between processes, not only within one.
-- **All or nothing.** The schema changes and the version that records them
-  commit together. An upgrade stopped part-way, by an error, a crash or a kill,
-  leaves the file at its old version with nothing applied, and the next command
-  runs it again from the start.
+  `gc` cron entry that fires while an `object put` is starting, say, both of
+  them opening `index.db` — waits for the first to finish, then finds the file
+  current. The lock is SQLite's own, so this holds between processes, not only
+  within one.
+- **All or nothing.** The schema changes, the version that records them and the
+  projection catch-up commit together. An upgrade stopped part-way, by an error,
+  a crash or a kill, leaves the file at its old version with nothing applied, and
+  the next command runs it again from the start.
 
 The wait is bounded at 30 seconds, and so is the wait for another process that
 is creating the same file at the same moment. A command that cannot get the
