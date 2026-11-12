@@ -356,7 +356,7 @@ impl TriggerDispatcher {
                 // A row still `claimed` here therefore names an invocation
                 // with no in-flight WAL row, and this start is its trigger's
                 // first, unless the earlier invocation already reached a
-                // terminal row (#966, #967).
+                // terminal row (see #967).
                 //
                 // The adopted claim runs under this copy's own id, written over
                 // the dead process's by the same compare-and-set. Reusing that

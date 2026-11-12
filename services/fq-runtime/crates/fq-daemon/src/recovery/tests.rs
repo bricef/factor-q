@@ -273,8 +273,9 @@ async fn a_daemon_dies_holding_a_trigger(reached_first_wal_write: bool) -> After
 /// The restarted daemon's worker. Records the invocation id each start was
 /// told to run under, then reaches its first WAL write the way the real
 /// runner does: it fires the durable start and awaits before it can return.
-/// (A worker that fires and returns in one poll is ADR-0032's second gap,
-/// #966, and not what these tests are about.)
+/// (A worker that fires and returns in one poll was ADR-0032's second gap,
+/// #966, which `handle` now treats as the durable start it is; these tests
+/// are not about it.)
 #[derive(Default)]
 struct RestartedWorker {
     starts: std::sync::Mutex<Vec<Option<Uuid>>>,
