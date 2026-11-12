@@ -1822,3 +1822,93 @@ fn every_payload_has_a_kind_and_the_kinds_are_distinct() {
     let event: Event = serde_json::from_value(wire_fixture()).unwrap();
     assert_eq!(EventKind::from(&event.payload), EventKind::Completed);
 }
+
+// ------------------------------------------------------------------
+// The failure detail (#952): the typed facts behind a `failed`, and no
+// key at all when there are none.
+// ------------------------------------------------------------------
+
+/// A `failed` event as the runner writes one, with or without a detail.
+fn failed_event(detail: Option<FailureDetail>) -> Event {
+    Event::new(
+        AgentId::new("researcher").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::Failed(FailedPayload {
+            error_kind: FailureKind::RuntimeError,
+            error_message: "event too large for the broker".to_string(),
+            phase: FailurePhase::LlmRequest,
+            partial_totals: InvocationTotals::default(),
+            detail,
+        }),
+    )
+}
+
+fn failed_detail(event: Event) -> Option<FailureDetail> {
+    match event.payload {
+        EventPayload::Failed(payload) => payload.detail,
+        other => panic!("expected a failed payload, got {}", other.event_type()),
+    }
+}
+
+/// Without a detail there is no `detail` key — not a `null` — so a
+/// `failed` with none is the same bytes it was before the field
+/// existed, and the absent key reads back as no detail.
+#[test]
+fn a_failed_event_without_a_detail_has_no_detail_key() {
+    let wire = serde_json::to_value(failed_event(None)).unwrap();
+    assert!(
+        wire["payload"]["payload"].get("detail").is_none(),
+        "no detail must mean no key: {wire}"
+    );
+    let back: Event = serde_json::from_value(wire).unwrap();
+    assert_eq!(failed_detail(back), None);
+}
+
+/// A detail survives the round trip, in the documented shape: tagged by
+/// `kind`, the event named by its own `event_type`, sizes as integers.
+/// The size is past `u32::MAX` on purpose: it is a byte count, and a
+/// narrower field would not hold it.
+#[test]
+fn a_failed_event_round_trips_its_detail() {
+    let detail = FailureDetail::PayloadTooLarge {
+        event_type: EventKind::LlmRequest,
+        size_bytes: 5_000_000_000,
+        limit_bytes: 1_048_576,
+    };
+    let wire = serde_json::to_value(failed_event(Some(detail.clone()))).unwrap();
+    assert_eq!(
+        wire["payload"]["payload"]["detail"],
+        json!({
+            "kind": "payload_too_large",
+            "event_type": "llm_request",
+            "size_bytes": 5_000_000_000u64,
+            "limit_bytes": 1_048_576u64,
+        })
+    );
+    let back: Event = serde_json::from_value(wire).unwrap();
+    assert_eq!(failed_detail(back), Some(detail));
+}
+
+/// The event a detail names may be a type this build has never heard
+/// of: a newer daemon reporting on a type it added. The name reads as
+/// [`EventKind::Unknown`], the landing pad the payload's own tag has,
+/// and the `failed` event carrying it still reads.
+#[test]
+fn a_detail_naming_an_event_type_this_build_lacks_still_reads() {
+    let mut wire = serde_json::to_value(failed_event(Some(FailureDetail::PayloadTooLarge {
+        event_type: EventKind::ToolResult,
+        size_bytes: 2_000_000,
+        limit_bytes: 1_048_576,
+    })))
+    .unwrap();
+    wire["payload"]["payload"]["detail"]["event_type"] = json!("telepathy");
+    let back: Event = serde_json::from_value(wire).expect("an unknown event type must not fail");
+    assert_eq!(
+        failed_detail(back),
+        Some(FailureDetail::PayloadTooLarge {
+            event_type: EventKind::Unknown,
+            size_bytes: 2_000_000,
+            limit_bytes: 1_048_576,
+        })
+    );
+}
