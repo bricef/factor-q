@@ -20,6 +20,13 @@
 //! Isolation follows daemon_shutdown.rs: every test spawns its own
 //! nats-server (#233) and its own daemon over a scratch config, so
 //! tests run in parallel with no shared broker and no locks.
+//!
+//! The last two tests are about admission rather than the injection
+//! (#994): a resume — the operator's, and startup recovery's automatic
+//! one — takes a `max_concurrent_invocations` permit like every other
+//! run. They share this file for its harness. Both run at the default cap
+//! of 1, and the mock LLM is the oracle again: the order it was asked in
+//! is the order the runs held the one worker.
 
 #![cfg(unix)]
 
@@ -950,6 +957,216 @@ async fn live_drop_requires_opt_in_halts_and_stays_terminal_after_restart() {
     assert!(!resume.status.success(), "terminal live-drop was resumable");
 
     restarted.stop();
+    mock.shutdown().await;
+}
+
+/// The trigger every admission test publishes for its *second* run, so the
+/// two runs' model requests can be told apart: the first one's trigger
+/// says "run the probe", which this does not contain.
+const SECOND_TRIGGER: &str = "run the second probe";
+
+/// Publish `payload` as a trigger for the probe agent, over the wire the
+/// watcher and fq-cron use.
+async fn trigger_probe(nats_url: &str, payload: &str) {
+    let nats = async_nats::connect(nats_url)
+        .await
+        .expect("connect to test broker");
+    nats.publish(
+        "fq.trigger.resume-probe",
+        serde_json::to_vec(&json!(payload)).unwrap().into(),
+    )
+    .await
+    .expect("publish trigger");
+    nats.flush().await.expect("flush trigger publish");
+}
+
+/// The probe's way to end an invocation: declare it done.
+fn report_done(id: &str) -> MockResponse {
+    MockResponse::tool_use(
+        id,
+        "report_outcome",
+        json!({ "status": "success", "summary": "done" }),
+        10,
+        5,
+    )
+}
+
+/// The probe asks to `sleep` for `secs` in its workspace: the run holds its
+/// worker for that long.
+fn sleep_for(scratch: &Scratch, id: &str, secs: u32) -> MockResponse {
+    MockResponse::tool_use(
+        id,
+        "builtin__exec",
+        json!({
+            "command": ["sleep", secs.to_string()],
+            "cwd": scratch.path("workspace"),
+        }),
+        10,
+        5,
+    )
+}
+
+/// Wait until the daemon has logged `n` completed invocations.
+async fn await_completions(daemon: &mut Daemon, n: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let done = daemon.log().matches("reducer invocation completed").count();
+        if done >= n {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{done} of {n} invocations completed within {timeout:?}\n--- log ---\n{}",
+            daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Which run each model request belonged to, in the order the mock was
+/// asked: `second` for the run [`SECOND_TRIGGER`] started, `first`
+/// otherwise.
+fn request_owners(mock: &MockAnthropicServer) -> Vec<&'static str> {
+    mock.received_requests()
+        .iter()
+        .map(|r| {
+            if r.to_string().contains(SECOND_TRIGGER) {
+                "second"
+            } else {
+                "first"
+            }
+        })
+        .collect()
+}
+
+/// **#994, startup recovery.** At the default worker cap of 1, a run that
+/// recovery resumes holds the one worker permit, and a trigger pulled
+/// after the restart does not start until the resumed run gives it back.
+///
+/// The first daemon is drained (SIGTERM) while the probe's `sleep` runs,
+/// so the invocation suspends at the step boundary after it and is
+/// recovered as a safe resume. The restarted daemon resumes it into a
+/// second, longer `sleep`, and the second trigger is published as soon as
+/// the edge is up. Before #994 recovery spawned the resume outside the
+/// permit, so the second trigger started at once and asked the model in
+/// the middle of the resumed run's sleep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovered_run_holds_the_only_worker_permit_until_it_finishes() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("recovered-first", mock.base_url());
+
+    mock.push_response(sleep_for(&scratch, "toolu_before_drain", 3));
+    let mut daemon = Daemon::spawn(&scratch, &nats_url, "daemon-first.log");
+    daemon
+        .await_log("- edge is listening on ", Duration::from_secs(30))
+        .await;
+    daemon.pair(&scratch);
+    trigger_probe(&nats_url, "run the probe").await;
+    daemon
+        .await_log(
+            "model produced tool calls; dispatching",
+            Duration::from_secs(30),
+        )
+        .await;
+    daemon.stop();
+    assert!(
+        daemon
+            .log()
+            .contains("draining — suspending invocation at step boundary"),
+        "the drain did not suspend the invocation\n--- log ---\n{}",
+        daemon.log()
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        1,
+        "one turn before the drain"
+    );
+
+    // The resumed run's two turns and the second run's one. Which response
+    // each request gets is the mock's order, not this list's intent, so
+    // the shapes are interchangeable where it matters: the last two both
+    // end the invocation that asks.
+    mock.push_response(sleep_for(&scratch, "toolu_after_restart", 6));
+    mock.push_response(report_done("toolu_resumed_done"));
+    mock.push_response(report_done("toolu_second_done"));
+
+    let mut restarted = Daemon::spawn(&scratch, &nats_url, "daemon-second.log");
+    restarted
+        .await_log("- edge is listening on ", Duration::from_secs(30))
+        .await;
+    trigger_probe(&nats_url, SECOND_TRIGGER).await;
+    await_completions(&mut restarted, 2, Duration::from_secs(60)).await;
+
+    let owners = request_owners(&mock);
+    assert_eq!(
+        owners,
+        ["first", "first", "first", "second"],
+        "the second trigger asked the model while the recovered run held the only worker \
+         permit: it started beside it instead of after it\n--- log ---\n{}",
+        restarted.log()
+    );
+
+    restarted.stop();
+    mock.shutdown().await;
+}
+
+/// **#994, `fq invocation resume`.** At the default worker cap of 1, with
+/// another run holding the one worker permit, an operator's resume is
+/// accepted at once and waits for the permit: the resumed invocation asks
+/// the model only after the run ahead of it has finished.
+///
+/// Before #994 the re-drive was spawned outside the permit and asked the
+/// model in the middle of the other run's `sleep`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_resume_waits_for_the_worker_permit() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("resume-queued", mock.base_url());
+
+    let (mut daemon, invocation_id) = crash_into_ambiguous(&scratch, &nats_url, &mock).await;
+
+    // The run that holds the worker: a sleep long enough that a resume
+    // issued once it has started is certainly issued before it ends. The
+    // last two responses are interchangeable for the same reason as above.
+    mock.push_response(sleep_for(&scratch, "toolu_holder", 8));
+    mock.push_response(report_done("toolu_holder_done"));
+    mock.push_response(report_done("toolu_resumed_done"));
+    trigger_probe(&nats_url, SECOND_TRIGGER).await;
+    daemon
+        .await_log(
+            "model produced tool calls; dispatching",
+            Duration::from_secs(30),
+        )
+        .await;
+
+    let resume = resume_released(&scratch, &nats_url, &invocation_id).await;
+    assert!(
+        resume.status.success(),
+        "resume failed on an ambiguous invocation: {}\n{}",
+        String::from_utf8_lossy(&resume.stdout),
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    await_completions(&mut daemon, 2, Duration::from_secs(60)).await;
+
+    let requests = mock.received_requests();
+    let resumed_at = requests
+        .iter()
+        .position(|r| r.to_string().contains("interrupted by a runtime crash"))
+        .expect("the resumed invocation asked the model");
+    let owners = request_owners(&mock);
+    assert_eq!(
+        owners,
+        ["first", "second", "second", "first"],
+        "the resumed invocation asked the model while another run held the only worker \
+         permit\n--- log ---\n{}",
+        daemon.log()
+    );
+    assert_eq!(resumed_at, 3, "the resume's turn is the last one asked");
+
+    daemon.stop();
     mock.shutdown().await;
 }
 
