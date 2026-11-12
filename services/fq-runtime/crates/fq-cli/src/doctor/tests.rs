@@ -839,13 +839,13 @@ fn stranded_trigger_claims_render_each_finding_in_its_own_words() {
     let out = render_doctor_report_human(&report);
     let block = "\
 Stranded trigger claims: 4 (3 to act on) — deliveries taken off the trigger stream and not settled
-  fq-triggers seq 1: claimed 2026-01-02T03:05:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited, for invocation 1c000000-0000-7000-8000-000000000001
+  fq-triggers seq 1: claimed 2026-01-02T03:05:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000001
   -> not started; this daemon adopts and starts it when the broker redelivers it, which is due within 19m30s of this daemon starting
-  fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited, for invocation 1c000000-0000-7000-8000-000000000002
+  fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000002
   -> never started, and not redelivered within 19m30s of this daemon starting, so it will not be: it was dead-lettered (`fq dead-letters list`) or has left the stream, and its work never ran
-  fq-triggers seq 3: claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited, for invocation 1c000000-0000-7000-8000-000000000003
+  fq-triggers seq 3: claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000003
   -> the run started (completed) but its claim was never marked started: a redelivery of it would be adopted and run the work again — `fq invocation show 1c000000-0000-7000-8000-000000000003`
-  fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by this daemon, for invocation 1c000000-0000-7000-8000-000000000004
+  fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000004
   -> the run started (in_flight) but its claim was never marked started: redeliveries of it are dropped, and it will be dead-lettered as exhausted although it ran — `fq invocation show 1c000000-0000-7000-8000-000000000004`
 ";
     assert!(out.contains(block), "got:\n{out}");

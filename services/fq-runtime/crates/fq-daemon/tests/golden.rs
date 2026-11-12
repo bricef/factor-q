@@ -30,8 +30,9 @@ use std::process::Command;
 use fq_test_support::TestChild;
 use std::time::Duration;
 
+use fq_runtime::bus::TRIGGER_STREAM_NAME;
 use fq_runtime::control_plane::store::{
-    ControlPlaneStore, InvocationArchiveRow, OwnerStatus, WorkerStatus,
+    ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey, WorkerStatus,
 };
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
@@ -57,6 +58,14 @@ const INV_COMPLETED: &str = "1c000000-0000-7000-8000-000000000001";
 const INV_FAILED: &str = "2f000000-0000-7000-8000-000000000002";
 const INV_INFLIGHT: &str = "3a000000-0000-7000-8000-000000000003";
 const INV_ARCHIVED: &str = "4e000000-0000-7000-8000-000000000004";
+/// Named by a trigger claim and by nothing else: a delivery taken and
+/// never started.
+const INV_NEVER_STARTED: &str = "5d000000-0000-7000-8000-000000000005";
+
+/// The creation time, in nanoseconds, of the trigger stream the seeded
+/// claims were taken from: a minute before [`BASE_MS`], and so an earlier
+/// incarnation than any the fixture's own broker creates.
+const SEEDED_STREAM_EPOCH: i64 = (BASE_MS - 60_000) * 1_000_000;
 
 const AGENT_RESEARCHER: &str = "researcher";
 const AGENT_FIXER: &str = "fixer";
@@ -597,6 +606,36 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     })
     .await
     .unwrap();
+
+    // The dispatcher's claims on the trigger deliveries (#954), each by
+    // `worker-alpha` — the seeded stale worker, so a process that has
+    // exited by the time the fixture's daemon reads them. Their stream
+    // epoch is an earlier incarnation than the one the fixture's broker
+    // creates, so the live dispatcher never meets them; they are what a
+    // daemon finds on disk after a restart.
+    //
+    // INV_COMPLETED's claim is marked started, as every trigger-started
+    // run's is: `invocation show` names it. INV_FAILED's never was though
+    // the run reached a terminal row, and INV_NEVER_STARTED names a run
+    // nothing records: `doctor` lists both, the second as awaiting the
+    // redelivery a freshly started daemon has not yet had time to see.
+    let key = |stream_seq| TriggerKey {
+        stream: TRIGGER_STREAM_NAME,
+        stream_epoch: SEEDED_STREAM_EPOCH,
+        stream_seq,
+    };
+    for (seq, invocation, at) in [
+        (1, INV_COMPLETED, base_ms - 1_000),
+        (2, INV_FAILED, base_ms + 9_000),
+        (5, INV_NEVER_STARTED, base_ms + 40_000),
+    ] {
+        cp.claim_trigger(key(seq), "worker-alpha", invocation, at)
+            .await
+            .unwrap();
+    }
+    cp.mark_trigger_started(key(1), INV_COMPLETED)
+        .await
+        .unwrap();
 }
 
 // ------------------------------------------------------------------
