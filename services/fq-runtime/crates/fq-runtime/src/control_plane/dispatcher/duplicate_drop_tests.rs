@@ -22,10 +22,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
+use futures::StreamExt;
 
 use super::CONSUMER_NAME;
 use super::boundary_stop_tests::{
-    HeldSetup, StateDir, next_delivery, one_answer, one_delivery, settled,
+    HeldSetup, StateDir, answers_to, next_delivery, one_answer, one_delivery, settled,
 };
 use super::tests::{ack_pending_stays, registry_with, unique_agent_id};
 use crate::bus::EventBus;
@@ -132,6 +133,7 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
         (seq, 2),
         "the same trigger, delivered a second time"
     );
+    let (_listener, mut answers) = answers_to(server.url(), &redelivered).await;
 
     let log = Captured::default();
     {
@@ -161,9 +163,19 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
         log.lines_with(STARTED_DROP).is_empty(),
         "the held copy is not reported as a copy of a started run"
     );
-    // Neither acked nor NAKed by the copy: the delivery is the first
-    // copy's to answer.
+    // The copy answers nothing: the delivery is the first copy's to
+    // answer. A NAK with a delay would leave the delivery pending too, so
+    // the pending count alone cannot show that; the copy's own ack
+    // subject can, since every answer for it (`+ACK`, `-NAK`, `+WPI`,
+    // `+TERM`) is published there.
     ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
+    if let Ok(Some(answer)) = tokio::time::timeout(Duration::from_millis(300), answers.next()).await
+    {
+        panic!(
+            "the refused copy was answered with {:?}; it must leave the delivery to its first copy",
+            String::from_utf8_lossy(&answer.payload)
+        );
+    }
 
     // The first copy starts the trigger once, and its durable start acks
     // it.
