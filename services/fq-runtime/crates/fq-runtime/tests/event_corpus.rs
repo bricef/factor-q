@@ -365,6 +365,7 @@ fn exemplars() -> Vec<Event> {
                     sampling_cost: 0.0,
                     elicitation_cost: 0.0,
                 },
+                detail: None,
             }),
         ),
         chained(

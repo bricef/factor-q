@@ -819,6 +819,7 @@ mod tests {
                     error_message: "over budget".to_string(),
                     phase: FailurePhase::LlmResponse,
                     partial_totals: InvocationTotals::default(),
+                    detail: None,
                 }),
             ))
             .await

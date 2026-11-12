@@ -252,6 +252,7 @@ mod tests {
                 error_message: format!("trigger exhausted after 5 deliveries (limit 5) [{source}]"),
                 phase: crate::events::FailurePhase::Setup,
                 partial_totals: crate::events::InvocationTotals::default(),
+                detail: None,
             }),
         )
         .annotate(
@@ -303,6 +304,7 @@ mod tests {
                 error_message: "ordinary failure".to_string(),
                 phase: crate::events::FailurePhase::Setup,
                 partial_totals: crate::events::InvocationTotals::default(),
+                detail: None,
             }),
         ))
         .await

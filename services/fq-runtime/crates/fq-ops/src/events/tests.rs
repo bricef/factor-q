@@ -1418,6 +1418,7 @@ fn schema_id_for_every_payload_variant() {
             error_message: String::new(),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
         EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
             stuck_entity: "tool_dispatch".into(),

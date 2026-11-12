@@ -101,6 +101,7 @@ fn dead_letter(agent: &str, trigger_id: &str, payload: serde_json::Value) -> Eve
             error_message: "trigger exhausted after 5 deliveries (limit 5)".into(),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
     .annotate(DEAD_LETTER_TRIGGER_ID_KEY, json!(trigger_id))
