@@ -25,7 +25,8 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 tarpc = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "rt-multi-thread", "macros", "net"] }
+# `time`: the bounded retry around a store's first connect (`schema.rs`).
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "rt-multi-thread", "macros", "net", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 
