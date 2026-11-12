@@ -4,9 +4,10 @@
 //!
 //! Two changes use it, so it lands with whichever comes first:
 //!
-//! - the tool-result cap (#827), here: every event the run publishes
-//!   stays under a stock `max_payload`, because the answer is cut to
-//!   `[tools] max_result_bytes` before anything records it;
+//! - the tool-result cap (#827), here: the `tool.result` and every
+//!   `llm.request` after it stay under a stock `max_payload`, because
+//!   the answer is cut to `[tools] max_result_bytes` before anything
+//!   records it;
 //! - the crash DST case for an event over `max_payload` (#828), which
 //!   drives the script against a sink with a `max_payload` of its own.
 //!   With the cap in force a tool's answer reaches the sink at no more
@@ -34,8 +35,16 @@ pub(super) fn load_oversized_tool_output(
 
 /// A tool answering twice a stock `max_payload` used to put a 2 MiB
 /// `tool.result` on the bus, and the same text into every later
-/// `llm.request`. Capped, the run completes and every event it
-/// publishes would fit a stock broker.
+/// `llm.request`. Capped, the run completes and every event the cap
+/// governs would fit a stock broker.
+///
+/// `invocation.archived` is not among them. It carries the reducer's
+/// state blob — the conversation, this answer included — encoded as a
+/// JSON array of integers, roughly four bytes on the wire per byte of
+/// state, so one answer at the 256 KiB cap makes the archive about
+/// 1 MiB. State-blob sizing is outside #827, which names it out of
+/// scope; the archive is left out of the check below rather than the
+/// check being weakened for every event.
 #[tokio::test]
 async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
     let world = SimWorld::new(827, 5.0).await;
@@ -62,7 +71,10 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
         answer.contains(&format!("of {} bytes", 2 * STOCK_MAX_PAYLOAD)),
         "the marker counts what the tool produced"
     );
-    for event in &events {
+    let governed = events
+        .iter()
+        .filter(|e| !matches!(e.payload, EventPayload::InvocationArchived(_)));
+    for event in governed {
         let size = serde_json::to_vec(event).expect("the event serialises").len();
         assert!(
             size <= STOCK_MAX_PAYLOAD,
