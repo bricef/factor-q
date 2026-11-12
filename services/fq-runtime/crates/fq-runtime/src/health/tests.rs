@@ -559,3 +559,52 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
         "no daemon has run against this broker, so all seven are missing: {consumers:?}"
     );
 }
+
+/// The probe carries both of the dispatcher's duplicate counts from the
+/// consumer ledger into the report, each into its own field (#968).
+/// Every golden reports them at zero, so this is what would notice the
+/// two swapped, or one dropped on the way.
+#[tokio::test]
+async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let quiet = WorkerId::new(format!("quiet-{}", Uuid::now_v7().simple())).unwrap();
+    let durable = format!("fq-dup-{}", Uuid::now_v7().simple());
+    bus.durable_consumer_with_filter(
+        &durable,
+        &format!("fq.worker.{}.heartbeat", quiet.as_str()),
+        None,
+    )
+    .await
+    .expect("consumer");
+
+    let ledger = bus.consumer_ledger();
+    ledger.note_duplicate_drop(&durable);
+    ledger.note_held_duplicate_drop(&durable);
+    ledger.note_held_duplicate_drop(&durable);
+
+    let health = probe_stream(
+        &bus.jetstream(),
+        crate::bus::STREAM_NAME,
+        &[durable.as_str()],
+        bus.redelivery_policy(),
+        ledger,
+    )
+    .await;
+    let StreamHealth::Available { consumers, .. } = &health else {
+        panic!("the event stream must be available: {health:?}");
+    };
+    let ConsumerHealth::Active {
+        duplicate_dropped,
+        held_duplicate_dropped,
+        ..
+    } = &consumers[0]
+    else {
+        panic!("the durable exists, so it is Active: {:?}", consumers[0]);
+    };
+    assert_eq!(
+        (*duplicate_dropped, *held_duplicate_dropped),
+        (1, 2),
+        "one copy dropped after its run started, two before a start was recorded"
+    );
+}
