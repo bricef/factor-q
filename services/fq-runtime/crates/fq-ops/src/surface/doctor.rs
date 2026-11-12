@@ -161,10 +161,10 @@ pub struct DoctorTriggerClaims {
     /// claim older than this names a message that has aged out.
     pub stream_max_age_ms: i64,
     /// How old a claim an exited process left may be and still be
-    /// reported, in milliseconds: the retention window that ages out
-    /// failures and dead letters. Absent when that retention is turned
-    /// off, and then such a claim is reported for as long as its row
-    /// exists.
+    /// reported, in milliseconds: the trigger-claim retention window, the
+    /// age at which the daemon's retention sweep deletes such a claim.
+    /// Absent when claim retention is turned off, and then such a claim
+    /// is reported for as long as its row exists.
     #[serde(default)]
     pub horizon_ms: Option<i64>,
     /// Every stranded claim, oldest first. Empty on a healthy table.

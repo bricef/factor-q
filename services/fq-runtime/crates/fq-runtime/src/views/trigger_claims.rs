@@ -5,11 +5,13 @@
 //! delivery, keyed on the message's place on the trigger stream, naming
 //! the invocation it starts from the moment it is claimed. Nothing else
 //! records it. The worker's WAL row is deleted once its archive is
-//! acknowledged; the claim row is not deleted at all once it is started.
+//! acknowledged; a started claim row is kept until the retention sweep
+//! deletes it, `[state] trigger_claim_retention_days` after it was claimed
+//! (`control_plane::retention`).
 //!
 //! **What each read costs.** `invocation_id` and `state` have no index on
-//! the claim table and the table is not swept, so a read of it scans.
-//! The invocation detail ([`Views::invocation`]) makes one such read for
+//! the claim table, so a read of it scans the rows the retention window
+//! keeps. The invocation detail ([`Views::invocation`]) makes one such read for
 //! the one invocation it shows, and no list makes any. The stranded-claim
 //! check makes one statement over the table, then, for each `claimed` row
 //! with no coordination row, a primary-key read of its run's WAL row (the
@@ -17,8 +19,11 @@
 //! read) and, when that misses, a primary-key read of the coordination
 //! row. So it grows with the claims some process holds or left behind,
 //! never with a list or with the started rows that make up nearly all of
-//! the table. Indexing and retention for the table are their own change;
-//! nothing here needs either.
+//! the table. Indexing the table is its own change; nothing here needs it.
+//!
+//! The report's horizon ([`ClaimJudgement::horizon_ms`]) is the same
+//! window the sweep deletes at, so a claim an exited process left stops
+//! being listed at the age its row goes.
 
 use std::time::Duration;
 
@@ -61,7 +66,9 @@ pub struct ClaimJudgement<'a> {
     /// ([`crate::bus::DEFAULT_TRIGGER_MAX_AGE`]).
     pub stream_max_age_ms: i64,
     /// How old a claim an exited process left may be and still be
-    /// reported; `None` reports it for as long as its row exists.
+    /// reported; `None` reports it for as long as its row exists. The
+    /// daemon passes the age at which its retention sweep deletes such a
+    /// claim ([`crate::config::StateConfig::trigger_claim_retention_ms`]).
     pub horizon_ms: Option<i64>,
     pub now_ms: i64,
 }

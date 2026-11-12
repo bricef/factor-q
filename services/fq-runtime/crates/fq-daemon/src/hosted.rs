@@ -354,19 +354,18 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 
-    // Spawn the retention sweeps. Two windows, both from `[state]`.
-    // `retention_days` bounds invocation_archive and projected `events`
-    // rows (step 10), except cost-bearing rows, kept indefinitely so
-    // spend figures survive retention. `stale_worker_retention_days`
-    // bounds stale coordination_worker rows, which accrue one per
-    // daemon restart and used to need `fq workers prune`. Either at  allow-dead-command: retired verb, named as history
-    // < 0 skips its own sweep; both < 0 exits the task.
+    // Spawn the retention sweeps: the archive and projection, stale
+    // workers and trigger claims, each a `[state]` window that skips
+    // its own sweep at < 0 (`control_plane::retention` has the rules).
+    // The claim window must never delete a `claimed` row this daemon's
+    // dispatcher holds, so it is told the id that dispatcher claims as.
     let (retention_shutdown_tx, retention_shutdown_rx) = tokio::sync::oneshot::channel();
     let retention_sweeper = fq_runtime::control_plane::retention::RetentionSweeper::new(
         cp_store.clone(),
         &config.state,
     )
-    .with_projection_store(store.clone());
+    .with_projection_store(store.clone())
+    .with_claimant(worker_id.as_str());
     let mut retention_handle =
         tokio::spawn(async move { retention_sweeper.run(retention_shutdown_rx).await });
 
@@ -766,8 +765,7 @@ fn daemon_facts(
     crate::operator_surface::DaemonFacts {
         worker_id: worker_id.as_str().to_string(),
         dispatching_since_ms: chrono::Utc::now().timestamp_millis(),
-        retention_ms: (config.state.retention_days >= 0)
-            .then(|| config.state.retention_days.saturating_mul(86_400_000)),
+        trigger_claim_retention_ms: config.state.trigger_claim_retention_ms(),
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,

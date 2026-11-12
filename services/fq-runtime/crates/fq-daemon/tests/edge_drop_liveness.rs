@@ -260,7 +260,7 @@ impl Surface {
                     agent_caps: fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
                     worker_id: "operator-surface-test".to_string(),
                     dispatching_since_ms: 0,
-                    retention_ms: None,
+                    trigger_claim_retention_ms: None,
                 },
                 bus: bus.clone(),
                 projection: projection.clone(),
