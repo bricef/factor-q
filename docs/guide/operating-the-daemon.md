@@ -634,6 +634,51 @@ A server that reports progress makes a long call visible: the host
 logs one rate-limited line per call carrying the invocation, the tool
 call and the numbers, and records when each call last reported.
 
+## When a tool returns too much
+
+What a tool returns is recorded three times: written to the worker's
+WAL, published as a `tool.result` event, and appended to the
+conversation the model is sent again on every later turn. The broker
+refuses any single message over its `max_payload`, 1 MiB on a stock
+NATS server, so before results were capped one `file_read` of a large
+log, or one MCP server returning a large document, left the invocation
+unable to publish anything further
+([#827](https://github.com/bricef/factor-q/issues/827)).
+
+`[tools] max_result_bytes` (default 262144, which is 256 KiB) bounds
+every tool's result at the one place all of them come back, before
+anything records it, so the WAL, the event and the model all see the
+same text. It applies to built-in and MCP tools alike, and to error
+messages too. The number counts the whole result, the note that says
+it was cut included. Longer output keeps its start, cut on a character
+boundary, and ends with a note like this one:
+
+```text
+(truncated at the 256.0 KiB tool-result cap: kept the first 262033 of 52428800 bytes; the rest was dropped)
+```
+
+The note says what was dropped and offers no way to get it back,
+because no tool can return the rest yet: an agent that needs a later
+part of a large file has to ask for less, for instance with `exec` and
+`tail_lines` where it holds `exec`. A ranged `file_read`
+([#947](https://github.com/bricef/factor-q/issues/947)) and large
+output stored by reference
+([#948](https://github.com/bricef/factor-q/issues/948)) are the
+follow-ups.
+
+The default sits above `exec`'s own cap of 100 KiB per stream, whose
+note names `max_lines` and `tail_lines`, so `exec` output is cut there,
+once, and never twice. It is also under a quarter of a stock
+`max_payload`, so a few capped results and the rest of the history
+still fit in one `llm.request`. A cap of `0` is refused at startup.
+
+One event is outside the cap. `invocation.archived` carries the
+reducer's state blob, which holds the whole conversation and is
+encoded as a JSON array of integers, about four bytes on the wire per
+byte of state. One result at the default cap therefore makes the
+archive a little over 1 MiB, so a broker serving agents that read
+large outputs still needs a `max_payload` above the stock 1 MiB.
+
 ## When an invocation stops making progress
 
 Every individual call an invocation makes is now bounded — a model call
