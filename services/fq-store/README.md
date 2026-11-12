@@ -42,6 +42,10 @@ fq-cas metrics                             # objects/blocks, sizes, dedup ratio 
 ```
 
 The store lives under `--root` (env `FQ_CAS_ROOT`, default `./.fq-cas`).
+`put`, `object put` and `grant add` create it, parents included; the other
+`object` and `grant` commands, `gc` and `token mint` exit with a line naming
+the directory when it does not exist, rather than answering for an empty store
+(see [Operating fq-cas](../../docs/guide/operating-fq-cas.md#a-root-that-does-not-exist)).
 Run `fq-cas --help` for the full surface.
 
 ### Named objects

@@ -23,16 +23,62 @@ The index tracks, transactionally, how many live names reference each object and
 how many live objects reference each block — the counts that decide what is
 garbage.
 
+## A root that does not exist
+
+Writing creates a store; reading does not. `object put` and `grant add`, the
+two database commands that can be the first thing done to a new store, create
+the root, parents included, as `put` does when it first writes. Every other
+command that opens `index.db` or `grants.db` (`object get`, `object ls`,
+`object resolve`, `object history`, `object rm`, `object bind`, `gc`,
+`grant ls`, `grant check`, `grant rm` and `token mint`) refuses a root that is
+not there. It prints one line naming the directory, as an absolute path, and
+where the path came from, exits 1 and creates nothing:
+
+```text
+fq-cas: the store root /home/me/src/.fq-cas (the default, in the working directory) does not exist. Point --root or FQ_CAS_ROOT at an existing store, or start a new one with `fq-cas object put` or `fq-cas grant add`.
+```
+
+The path came from `--root`, from `FQ_CAS_ROOT`, or, as here, from the default.
+The default is the case to look for: `.fq-cas` is taken relative to the working
+directory, so a command run from the wrong directory looks for a store that is
+not there. The refusal is deliberate. A missing root is almost always a path
+that is wrong like this, and if these commands created it, `object ls` would
+print nothing, `grant check` would answer `denied`, `gc` would report that every
+invariant holds and `token mint` would mint a token with no grants, each exiting
+as it would for a real, empty store.
+
+A root that exists but is not a directory, one with a file among its parents,
+and one that `object put` or `grant add` cannot create, because its parent is
+not writable for instance, are named in the same way, with the reason:
+
+```text
+fq-cas: the store root /srv/fq-cas (from --root) is not a directory
+fq-cas: cannot create the store root /srv/fq-cas (from --root): Permission denied (os error 13)
+```
+
+`object put` and `grant add` check what they can before they create anything:
+that `object put`'s input path exists, and that `grant add`'s agent id, verbs
+and scope are valid. A mistyped argument therefore prints its own error and
+leaves no new directory behind. A failure after those checks leaves the new
+root with an empty database in it: an `object put` whose input exists but
+cannot be read (a directory, or a file without read permission) leaves the root
+and an empty `index.db`, and the next command uses them as a new store.
+
+The content-addressed commands work as they always have: `put` creates the
+directories it writes into, and `get`, `has`, `size` and `metrics` answer for a
+missing root as for an empty store.
+
 ## Schema upgrades on open
 
 `index.db` and `grants.db` each record a schema version. A command that opens
 one — `object …` and `gc` open `index.db`; `grant …` and `token mint` open
 `grants.db` — first brings it up to the version its binary was built for,
-creating the file if it is not there. For `grants.db` that includes bringing the
-permission projection level with the grant log, if it has fallen behind (a file
-from before the projection existed, or one whose projection was wiped). This
-needs no operator involvement, and it is safe for several processes to do it at
-once:
+creating the file in the root if it is not there; the root itself is created
+only as [above](#a-root-that-does-not-exist). For `grants.db` that includes
+bringing the permission projection level with the grant log, if it has fallen
+behind (a file from before the projection existed, or one whose projection was
+wiped). This needs no operator involvement, and it is safe for several
+processes to do it at once:
 
 - **One at a time.** An upgrade holds the file's write lock from the moment it
   reads the version until it commits. A second process opening the same file — a
