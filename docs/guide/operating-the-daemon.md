@@ -193,7 +193,7 @@ nothing to resume, so it is not suspended. It stops, its workspace is removed,
 and its trigger is left unacked with the broker. The next start receives the
 trigger again once its 30-second ack window has passed and runs it from the
 beginning, once, under a new invocation id and as `attempt: 2`. The first
-invocation's `triggered` event stays in the log with nothing after it. Like a
+invocation's `triggered` event stays in the log with no outcome after it. Like a
 drain that lands between a trigger's pull and its dispatch, this costs the
 trigger one of its five deliveries
 ([#974](https://github.com/bricef/factor-q/issues/974)).
