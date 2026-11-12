@@ -14,6 +14,7 @@ fn active(stuck: bool, ack_pending: u64, num_pending: u64, delivered: u64) -> Co
         stuck,
         malformed_acked: 0,
         duplicate_dropped: 0,
+        held_duplicate_dropped: 0,
     }
 }
 
@@ -120,4 +121,42 @@ fn a_large_backlog_is_a_verdict_and_not_a_fault() {
     let behind = active(false, 1, 9_000, 10);
     assert_eq!(behind.progress(), Some(ConsumerProgress::Lagging));
     assert!(!behind.is_fault());
+}
+
+/// A report from a daemon that does not send `held_duplicate_dropped`
+/// (#968) still reads, with the count at zero: the field is additive,
+/// and a client newer than the daemon it asks must render that daemon's
+/// report rather than fail on it.
+#[test]
+fn an_active_consumer_without_the_held_duplicate_count_reads_it_as_zero() {
+    let older = serde_json::json!({
+        "active": {
+            "name": "fq-dispatcher",
+            "delivered": 7,
+            "ack_pending": 0,
+            "num_pending": 0,
+            "num_redelivered": 0,
+            "redeliveries": 0,
+            "stuck": false,
+            "malformed_acked": 0,
+            "duplicate_dropped": 3
+        }
+    });
+    let read: ConsumerHealth =
+        serde_json::from_value(older).expect("a report without the field reads");
+    assert_eq!(
+        read,
+        ConsumerHealth::Active {
+            name: "fq-dispatcher".to_string(),
+            delivered: 7,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 3,
+            held_duplicate_dropped: 0,
+        }
+    );
 }

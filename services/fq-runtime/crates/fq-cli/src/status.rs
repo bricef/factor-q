@@ -390,6 +390,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             stuck,
             malformed_acked,
             duplicate_dropped,
+            held_duplicate_dropped,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -423,14 +424,25 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                      skipped)\n"
                 ));
             }
-            // A redelivery of a trigger whose invocation is already
-            // durably running is acked and dropped by the claim (#809):
-            // it starts nothing and mints no id, so this line is the
-            // only trace it leaves.
+            // The dispatcher's claim refuses a redelivered trigger in two
+            // cases (#809, #968), and a refused copy starts nothing and
+            // mints no id, so these lines are the only trace it leaves.
+            // A copy of a run that has started is acked; a copy that met
+            // a claim this daemon holds with no start recorded is left
+            // unacked, and nothing says whether that claim's first copy
+            // is still coming or never will. Both counts live in the
+            // daemon's memory, so each line says they start with it.
             if *duplicate_dropped > 0 {
                 out.push_str(&format!(
-                    "    duplicate dropped: {duplicate_dropped} (redelivered after the \
+                    "    duplicate dropped: {duplicate_dropped} since start (redelivered after the \
                      invocation had durably started; refused, not re-run)\n"
+                ));
+            }
+            if *held_duplicate_dropped > 0 {
+                out.push_str(&format!(
+                    "    duplicate dropped while held: {held_duplicate_dropped} since start \
+                     (redelivered while this daemon held its claim with no start recorded; \
+                     refused and left unacked)\n"
                 ));
             }
             out

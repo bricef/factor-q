@@ -116,16 +116,29 @@ pub enum ConsumerHealth {
         /// read" are different facts calling for opposite responses.
         malformed_acked: u64,
         /// Redeliveries this consumer acked and dropped because the
-        /// invocation they would have started is already running: the
+        /// invocation they would have started has already started: the
         /// durable claim on that delivery's stream sequence had
-        /// recorded its start. Zero on a consumer that was never
-        /// offered a message it had already begun. A climbing figure
-        /// says the broker is redelivering triggers the dispatcher is
-        /// holding — and that the second copy was refused rather than
-        /// run a second time. Reported because it is the only trace
-        /// such a delivery leaves: no invocation is created for it, so
-        /// nothing downstream records it.
+        /// recorded its start. Copies of a run that has started. Zero
+        /// on a consumer that was never offered a message it had
+        /// already begun. Reported because it is the only trace such a
+        /// delivery leaves: no invocation is created for it, so
+        /// nothing downstream records it. Counted in memory since the
+        /// daemon started; a restart resets it.
         duplicate_dropped: u64,
+        /// Redeliveries this consumer dropped and left unacked because
+        /// the daemon already holds the durable claim on that
+        /// delivery's stream sequence and the claim records no start.
+        /// Copies of a trigger still in hand. The first copy may be
+        /// held or still starting (nothing renews a delivery's ack
+        /// window between its worker permit and its first WAL write),
+        /// or the daemon may never settle that claim; nothing on the
+        /// claim says which, and neither does this count. The daemon
+        /// logs each one at warn with its sequence, its attempt and the
+        /// claim's age. Counted in memory since the daemon started,
+        /// like `duplicate_dropped`. A report from a daemon that does
+        /// not send it reads as zero.
+        #[serde(default)]
+        held_duplicate_dropped: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is
