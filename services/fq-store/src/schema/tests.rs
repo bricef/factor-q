@@ -725,21 +725,17 @@ async fn projection(path: &Path) -> Projection {
     projection
 }
 
-/// Which moments of an open it reached.
+/// Which moments of an open it reached. No rung is recorded: on a file
+/// beyond the ladder none can run, wherever the refusal sits.
 #[derive(Debug, Default)]
 struct Reached {
     version: Option<i64>,
-    rungs: Vec<i64>,
     after_ladder_read: bool,
 }
 
 impl MigrationSeam for Reached {
     async fn version_read(&mut self, version: i64) {
         self.version = Some(version);
-    }
-
-    async fn rung_applied(&mut self, version: i64) {
-        self.rungs.push(version);
     }
 
     async fn after_ladder_read(&mut self) {
@@ -791,7 +787,6 @@ async fn a_grants_db_a_newer_binary_wrote_is_refused_before_its_projection_catch
         "a file a newer binary wrote must be refused: {outcome:?}"
     );
     assert_eq!(migration.version, Some(newer_version(Store::Grants)));
-    assert_eq!(migration.rungs, Vec::<i64>::new(), "no rung may run");
     assert!(
         !catching_up.after_ladder_read,
         "the catch-up read its cursor: it ran before the refusal"
@@ -876,7 +871,8 @@ mod across_processes {
     const OPENER_PROCESS: &str = "schema::tests::across_processes::opener_process";
     const CHILD_DB: &str = "FQ_STORE_SCHEMA_TEST_DB";
     const CHILD_ROLE: &str = "FQ_STORE_SCHEMA_TEST_ROLE";
-    /// Open `grants.db` through the store and say how it went.
+    /// Open `grants.db` through the store and say how it went: exit 0
+    /// having said `opened`, or exit 1 having said `error` and why.
     const ROLE_OPEN: &str = "open-grants";
     /// Upgrade `index.db` and stop after rung 4, transaction open, to be
     /// killed there.
@@ -924,9 +920,13 @@ mod across_processes {
         match role.as_str() {
             ROLE_OPEN => match Store::Grants.open(db).await {
                 Ok(()) => println!("{SAYS}opened"),
+                // An exit, not a panic: some tests expect this failure, and
+                // their green runs should not print one. The parent reads
+                // the line and the status.
                 Err(err) => {
                     println!("{SAYS}error {err}");
-                    panic!("the child's open failed: {err}");
+                    std::io::Write::flush(&mut std::io::stdout()).expect("flush the child's line");
+                    std::process::exit(1);
                 }
             },
             ROLE_STALL => {
