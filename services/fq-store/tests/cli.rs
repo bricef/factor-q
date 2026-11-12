@@ -791,6 +791,57 @@ fn a_root_that_cannot_be_a_directory_is_named() {
     assert_eq!(std::fs::read(&file).unwrap(), b"not a store");
 }
 
+/// A root that is a symbolic link to something that does not exist is named
+/// as one, with its target, by the commands that refuse a missing root and
+/// by the two that create one: creating through the link fails, so "start
+/// a new one" would be wrong advice. Nothing is created at the target. A
+/// link whose target exists is followed as before.
+#[cfg(unix)]
+#[test]
+fn a_root_that_is_a_dangling_symbolic_link_is_named_as_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let input = base.join("input.txt");
+    std::fs::write(&input, b"content").unwrap();
+    let target = base.join("gone");
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let input = input.to_str().unwrap();
+    let commands: &[&[&str]] = &[
+        &["object", "ls"],
+        &["gc"],
+        &["object", "put", "docs.readme", input],
+        &["grant", "add", "bob", "read", "docs.*"],
+    ];
+    for args in commands {
+        let out = run(&link, args);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "fq-cas: the store root {} (from --root) is a symbolic link to {}, \
+                 which does not exist\n",
+                link.display(),
+                target.display()
+            ),
+            "fq-cas {}",
+            args.join(" ")
+        );
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            !target.exists(),
+            "fq-cas {} created the target",
+            args.join(" ")
+        );
+    }
+    assert_eq!(std::fs::read_link(&link).unwrap(), target);
+
+    std::fs::create_dir(&target).unwrap();
+    let out = run(&link, &["object", "put", "docs.readme", input]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(target.join("index.db").is_file());
+}
+
 /// A creating command that cannot create the root, because its parent is
 /// not writable, names the root it was making.
 #[cfg(unix)]
