@@ -143,39 +143,52 @@ Scopes use one piece of sugar: a trailing `.*` means the namespace subtree
 dotted name means exactly that name. Verbs are a comma list
 (`read,write,delete,list,grant`) or `all`.
 
-The walk-through below works on a new store. `key generate` touches no store,
+The walk-through below runs as written in an empty directory, where it starts
+a new store at the default root, `./.fq-cas`. `key generate` touches no store,
 and `grant add` creates the store root (`--root`, env `FQ_CAS_ROOT`, default
 `./.fq-cas`) if it is not there yet. `grant ls`, `grant check`, `grant rm` and
 `token mint` do not: against a root that does not exist they exit 1 with a line
 naming it, rather than answering as if for an empty store (see
 [A root that does not exist](operating-fq-cas.md#a-root-that-does-not-exist)).
+Quote a scope that ends in `.*`, or the shell may expand it as a file pattern.
 
 ```console
-$ fq-cas key generate                # once per store: keep private secret
+$ fq-cas key generate > store.keys   # once per store
+Keep the private key secret (e.g. in FQ_BISCUIT_PRIVATE_KEY); share only the public key with verifiers.
+$ chmod 600 store.keys               # it holds the private key
+$ cat store.keys
 private: 8a4b…
 public:  f31c…
 
-$ fq-cas grant add bob read,write research.papers.*
-7                                    # the grant id
+$ fq-cas grant add bob read,write 'research.papers.*'
+1                                    # the grant id; a new store's first is 1
 $ fq-cas grant ls bob
-7   read,write   research.papers.*
+1       read,write      research.papers.*
 $ fq-cas grant check bob read research.papers.doc1
 allowed                              # exit 0 (denied -> exit 1): scriptable
-$ fq-cas grant rm 7                  # immediate, cascades through delegations
 ```
 
 Tokens are minted from an agent's **live** grants (a mint after a revocation
-carries nothing) and verified with only the public key:
+carries nothing) and verified with only the public key. Reading the keys from
+the file keeps them out of shell history:
 
 ```console
-$ export FQ_BISCUIT_PRIVATE_KEY=$(cat store.key)   # avoid the literal in shell history
-$ fq-cas token mint bob --ttl 300
-<base64 token>
-$ fq-cas token attenuate <token> --scope research.papers.reviews.* --verbs read \
-    --biscuit-public-key f31c…
+$ export FQ_BISCUIT_PRIVATE_KEY=$(awk '/^private:/ {print $2}' store.keys)
+$ export FQ_BISCUIT_PUBLIC_KEY=$(awk '/^public:/ {print $2}' store.keys)
+$ token=$(fq-cas token mint bob --ttl 300)
+$ fq-cas token attenuate "$token" --scope 'research.papers.reviews.*' --verbs read
 <narrower base64 token>              # attenuation can only narrow (offline)
-$ fq-cas token inspect <token> --biscuit-public-key f31c…
+$ fq-cas token inspect "$token"
 principal: bob
+```
+
+Revoking takes effect at once, and cascades through any delegations standing on
+the grant:
+
+```console
+$ fq-cas grant rm 1
+$ fq-cas grant check bob read research.papers.doc1
+denied                               # exit 1
 ```
 
 Keys come from `--biscuit-private-key` / `FQ_BISCUIT_PRIVATE_KEY` (minting
