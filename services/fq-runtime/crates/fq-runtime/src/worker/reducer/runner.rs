@@ -614,8 +614,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return;
         };
         let terminal = match outcome {
+            // `Unstarted` wrote no row: the "no row at all" case below.
             Ok(InvocationOutcome::Completed { .. })
-            | Ok(InvocationOutcome::BudgetExceeded { .. }) => true,
+            | Ok(InvocationOutcome::BudgetExceeded { .. })
+            | Ok(InvocationOutcome::Unstarted { .. }) => true,
             Ok(InvocationOutcome::Suspended { .. }) | Ok(InvocationOutcome::Deferred { .. }) => {
                 false
             }
@@ -980,8 +982,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 // (or replay) sampling (ADR-0018 §5). Any
                 // in-flight sampling is surfaced via `fq invocation list`.
                 None,
-                // Nothing to ack: the trigger's claim, if any, reads started (#41, #959).
-                DurableStart::noop(),
+                // Started in an earlier drive: nothing to ack (#41, #959); a stop suspends (#974).
+                DurableStart::resumed(),
                 &mut cursor,
                 host_notices.iter().any(|n| n.kind == "context_pressure"),
                 // Rows recorded for the step the crash interrupted (WAL
@@ -1096,36 +1098,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 carried.push((next_seq, kind, body));
             }
             let host_notices: Vec<String> = carried.into_iter().map(|(_, _, body)| body).collect();
-            // A live operator drop uses the same step-boundary semantics as
-            // drain, but is invocation-scoped. The coordination consumer marks
-            // the WAL row terminal from the operator-drop event, so this path
-            // only stops the in-memory driver and emits no competing terminal.
-            if self.live.take_halt(invocation_id) {
-                info!(
-                    agent_id = %agent_id,
-                    invocation_id = %invocation_id,
-                    step_index,
-                    "operator halt — stopping invocation at step boundary"
-                );
-                return Ok(InvocationOutcome::Suspended { invocation_id });
-            }
-
-            // ADR-0027 graceful drain: suspend at this step boundary if
-            // a drain has been requested. The previous iteration's
-            // checkpoint — or, for `step_index_start`, the `Triggered`
-            // event written before the loop — is already durable, so the
-            // WAL state here is a clean between-steps point, bit-identical
-            // to a crash at this boundary, which recovery resumes. The row
-            // stays in-flight and no terminal event is emitted; the next
-            // binary picks it up.
-            if self.drain.is_draining() {
-                info!(
-                    agent_id = %agent_id,
-                    invocation_id = %invocation_id,
-                    step_index,
-                    "draining — suspending invocation at step boundary"
-                );
-                return Ok(InvocationOutcome::Suspended { invocation_id });
+            // An operator halt or an ADR-0027 drain stops the invocation
+            // here. `Suspended` only once the first WAL write has landed:
+            // before it, a fresh invocation's first boundary has nothing for
+            // recovery to resume, the `triggered` event notwithstanding, and
+            // returns `Unstarted` (#974; `runner/boundary.rs`).
+            if let Some(stopped) =
+                self.stop_at_boundary(invocation_id, agent_id, step_index, &durable_start)
+            {
+                return Ok(stopped);
             }
 
             let input = StepInput {
@@ -2489,6 +2470,7 @@ fn trigger_from_state_row(row: &crate::worker::store::InvocationStateRow) -> Tri
     }
 }
 
+mod boundary;
 mod config;
 mod deadline;
 mod deferral;

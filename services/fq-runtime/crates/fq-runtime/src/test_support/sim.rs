@@ -3281,7 +3281,9 @@ mod budget_properties {
                             panic!("trace not canonical: {violations:?}");
                         }
                     }
-                    InvocationOutcome::Suspended { .. } | InvocationOutcome::Deferred { .. } => {
+                    InvocationOutcome::Suspended { .. }
+                    | InvocationOutcome::Unstarted { .. }
+                    | InvocationOutcome::Deferred { .. } => {
                         panic!("unexpected suspend or deferral in budget-accounting run");
                     }
                 }
@@ -3633,6 +3635,7 @@ mod soak {
                             label = "budget_exceeded";
                         }
                         InvocationOutcome::Suspended { .. }
+                        | InvocationOutcome::Unstarted { .. }
                         | InvocationOutcome::Deferred { .. } => {
                             panic!("unexpected suspend or deferral at seed {seed}");
                         }
@@ -4524,6 +4527,16 @@ mod drain_equivalence {
         assert!(
             !matches!(outcome, InvocationOutcome::Suspended { .. }),
             "`Suspended` promises recovery a row to resume, and there is none: {outcome:?}"
+        );
+        assert!(
+            matches!(
+                outcome,
+                InvocationOutcome::Unstarted {
+                    stopped_by: crate::worker::BoundaryStop::Drain,
+                    ..
+                }
+            ),
+            "a drain before the first WAL write is `Unstarted`: {outcome:?}"
         );
         assert!(
             unasked.requests().is_empty(),
