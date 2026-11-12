@@ -390,6 +390,16 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+An invocation waiting for a worker permit is not being driven yet, even
+though every surface shows it as in flight (or, for one you resumed, as
+still ambiguous). That covers a run startup recovery queued and a
+`resume` waiting its turn. A plain `drop` takes it with no `--live`
+needed: by the time `drop` returns, the run can no longer start in this
+daemon, and a drop that fails leaves it waiting as before. In the
+instant its permit arrives the run is starting rather than waiting, and
+`drop` refuses it like a live run (`starting to run; retry with
+--live`).
+
 An accepted `resume` re-drives the invocation under the worker cap like
 any other run: if `max_concurrent_invocations` runs are already in
 flight, it waits for one of them to end rather than starting beside
@@ -571,20 +581,42 @@ turn, and a new trigger waits behind all of them. At the default cap of
 1 that also means a resumed run and a new one never share the one
 workspace directory at the same time.
 
-A resume that has to wait is not silent. The boot banner counts them
-(`resumes waiting:  N for a worker permit`), and the daemon log names
-each one, with its `invocation_id`, when it starts waiting (`worker
-permits exhausted; the resume waits for one`), when it gets its permit,
-and if a drain or stop comes first (`left in flight for the next start's
-recovery`). Every other surface shows it as in flight, because its WAL
-row is: `fq invocation list --status=in_flight`, `fq invocation show`
-and `fq doctor`'s in-flight count do not yet tell a waiting run from a
-running one. A recovered run's last step is from
-before the restart, so if it waits past the stuck threshold `fq doctor`
-counts it stuck and `invocation.stuck` is published once, exactly as for
-a deferred invocation that waits that long. While it waits it counts
-against its agent's `max_concurrent`, so that agent's triggers are held
-behind it.
+A resume that has to wait is not silent. The boot banner counts the
+recovered ones (`resumes waiting:  N for a worker permit`), and the
+daemon log names each one by `invocation_id`, with `resume=recovered` or
+`resume=operator`, at each of these points:
+
+- when an operator's resume is accepted (`resume accepted; it is
+  running`, or `… so it waits for one`);
+- when a resume starts waiting (`worker permits exhausted; the resume
+  waits for one`);
+- when it gets its permit;
+- if a drain or stop comes first (`left in flight for the next start's
+  recovery`);
+- if an operator drops it first (`it is not resumed`).
+
+No other surface yet tells a waiting run from a running one, and the two
+kinds show differently:
+
+- **A recovered run** is in flight everywhere. Recovery restored its
+  ownership row and its WAL row is in flight, so `fq invocation list
+  --status=in_flight`, `fq invocation show` and `fq doctor`'s in-flight
+  count all show it. Its last step is from before the restart, so if it
+  waits past the stuck threshold `fq doctor` counts it stuck and
+  `invocation.stuck` is published once, exactly as for a deferred
+  invocation that waits that long.
+- **A run `fq invocation resume` queued** still shows as `ambiguous`:
+  under `fq invocation list --status=ambiguous`, in `fq invocation show`,
+  and among `fq doctor`'s ambiguous invocations. That lasts for the whole
+  wait, and the whole run, until it ends, because nothing moves its
+  ownership row on a resume yet. `fq doctor` counts it in flight as well.
+  Resuming it again is refused as `not Ambiguous (it may already have
+  been resumed)`, which is the truth: it has been.
+
+Either way, while it waits it counts against its agent's
+`max_concurrent`, so that agent's triggers are held behind it. And
+either way it is not being driven, so a plain `fq invocation drop` takes
+it (see [Triaging unresolved invocations](#triaging-unresolved-invocations)).
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers

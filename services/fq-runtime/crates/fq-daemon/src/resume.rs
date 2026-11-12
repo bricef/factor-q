@@ -370,13 +370,17 @@ pub(crate) fn register_resume_command(
     )
     .description(
         "Only an invocation that crashed mid-tool-call can be resumed. A \
-         refusal is an error, not a receipt: it names which precondition \
-         failed — terminal, live, already resumed, or unknown — because \
-         those are four different things for an operator to do next. \
-         Success is a receipt; the re-drive is admitted under the worker cap \
-         like any other run — at once if a worker permit is free, otherwise \
-         in its turn — and runs detached, so the invocation may still be \
-         waiting, or still working, when this returns.",
+         refusal is an error, not a receipt. Before anything is recorded it \
+         names which precondition failed — terminal, live, already resumed, \
+         or unknown — because those are four different things for an \
+         operator to do next. After the interrupted results are recorded it \
+         can still refuse the re-drive because this daemon is draining or \
+         stopping; the recorded results stand, and the next start resumes the \
+         invocation on its own. Success is a receipt; the re-drive is \
+         admitted under the worker cap like any other run — at once if a \
+         worker permit is free, otherwise in its turn — and runs detached, so \
+         the invocation may still be waiting, or still working, when this \
+         returns.",
     );
     registry
         .command::<fq_ops::surface::InvocationResumeRequest, _, _>(
