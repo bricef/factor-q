@@ -623,6 +623,79 @@ fn object_put_and_grant_add_create_a_missing_root() {
     }
 }
 
+/// `--root` given after the subcommand is still the flag: it wins over
+/// `FQ_CAS_ROOT`, and the refusal says `from --root`. Both rest on clap
+/// carrying a global argument given to a subcommand back up to the
+/// matches the source is read from.
+#[test]
+fn a_root_flag_after_the_subcommand_wins_over_the_environment_and_is_named() {
+    let root = NewRoot::new(Given::Flag, &["flag", "store"], true);
+    let other = root.cwd.path().join("env").join("store");
+    let out = fq_cas()
+        .current_dir(root.cwd.path())
+        .env("FQ_CAS_ROOT", &other)
+        .args(["object", "ls", "--root"])
+        .arg(&root.path)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), root.refusal());
+    assert_eq!(out.status.code(), Some(1));
+    assert!(root.left_nothing(), "{out:?}");
+}
+
+/// `--server` refuses a command that needs the local store before anything
+/// looks at the root, the creating commands included: a new root gets the
+/// server refusal, exit 1, and is not created.
+#[test]
+fn the_server_refusal_comes_before_the_root() {
+    let inputs = tempfile::tempdir().unwrap();
+    let input = inputs.path().join("input.txt");
+    std::fs::write(&input, b"content").unwrap();
+    let input = input.to_str().unwrap();
+    let private = generated_private_key();
+    let named = "named operations run against the local store; --server addresses the \
+                 CID-level CAS only (a remote name service is future)";
+    let cases: &[(&[&str], &str)] = &[
+        (&["object", "ls"], named),
+        (&["object", "put", "docs.readme", input], named),
+        (
+            &["gc"],
+            "gc runs against the local store; --server addresses the CID-level CAS only",
+        ),
+        (
+            &["grant", "ls", "bob"],
+            "grant management runs against the local store",
+        ),
+        (
+            &["grant", "add", "bob", "read", "docs.*"],
+            "grant management runs against the local store",
+        ),
+        (
+            &["token", "mint", "bob", "--biscuit-private-key", &private],
+            "token operations run against the local store",
+        ),
+    ];
+    for root in new_roots() {
+        for (args, refusal) in cases {
+            let with_server = [&["--server", "127.0.0.1:1"][..], args].concat();
+            let out = root.run(&with_server);
+            let context = format!(
+                "fq-cas {} with {:?} {:?}",
+                with_server.join(" "),
+                root.given,
+                root.arg
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!("fq-cas: {refusal}\n"),
+                "{context}"
+            );
+            assert_eq!(out.status.code(), Some(1), "{context}");
+            assert!(root.left_nothing(), "{context} created something");
+        }
+    }
+}
+
 /// A creating command checks the arguments it can check without a store
 /// before it creates one, so a mistyped argument against a new root prints
 /// its own error, not a database's, and leaves nothing behind.
