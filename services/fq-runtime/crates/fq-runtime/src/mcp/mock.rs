@@ -163,7 +163,12 @@ impl ServerHandler for MockToolServer {
                 return Err(rmcp::ErrorData::internal_error("cancelled", None));
             }
         }
-        let parts = self.answer.iter().cloned().map(ContentBlock::text).collect();
+        let parts = self
+            .answer
+            .iter()
+            .cloned()
+            .map(ContentBlock::text)
+            .collect();
         Ok(CallToolResult::success(parts).into())
     }
 }

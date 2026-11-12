@@ -38,7 +38,11 @@ fn one_byte_over_the_cap_is_cut_to_the_cap_with_the_marker() {
     let kept = stated_kept(&capped);
     assert_eq!(
         capped,
-        format!("{}{}", &output[..kept], truncation_marker(kept, cap + 1, cap)),
+        format!(
+            "{}{}",
+            &output[..kept],
+            truncation_marker(kept, cap + 1, cap)
+        ),
         "the kept prefix, then the marker, and nothing else"
     );
     // ASCII loses nothing to a character boundary: the kept prefix is

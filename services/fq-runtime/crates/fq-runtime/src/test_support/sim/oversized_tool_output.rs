@@ -28,7 +28,9 @@ pub(super) fn load_oversized_tool_output(
     llm: &FixtureClient,
     output_bytes: usize,
 ) {
-    world.tool.push_output(ToolResult::ok("o".repeat(output_bytes)));
+    world
+        .tool
+        .push_output(ToolResult::ok("o".repeat(output_bytes)));
     llm.push_response(sim_tool_call("oversized"));
     llm.push_response(end_turn("read the large answer"));
 }
@@ -66,7 +68,11 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
             _ => None,
         })
         .expect("a tool.result event");
-    assert!(answer.len() <= cap, "{} bytes over a {cap}-byte cap", answer.len());
+    assert!(
+        answer.len() <= cap,
+        "{} bytes over a {cap}-byte cap",
+        answer.len()
+    );
     assert!(
         answer.contains(&format!("of {} bytes", 2 * STOCK_MAX_PAYLOAD)),
         "the marker counts what the tool produced"
@@ -75,7 +81,9 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
         .iter()
         .filter(|e| !matches!(e.payload, EventPayload::InvocationArchived(_)));
     for event in governed {
-        let size = serde_json::to_vec(event).expect("the event serialises").len();
+        let size = serde_json::to_vec(event)
+            .expect("the event serialises")
+            .len();
         assert!(
             size <= STOCK_MAX_PAYLOAD,
             "{} is {size} bytes, over a stock max_payload",
