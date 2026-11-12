@@ -405,7 +405,7 @@ that serves it. `bin/fq.rs` is a shim. The daemon is not here — it is the
 | `fq events get` | One whole event by its identity — `event.get` over the edge, read from the log with its payload, for as long as the log still holds it. Names the three ways that fails apart: `not found`, `unlocatable`, `gone` |
 | `fq costs` | Per-agent cost aggregation — `cost.summary` over the edge, the surface's first declared report. Answers over the whole history: cost rows are exempt from retention, and the total names its unallocated remainder (`framework_cost`) rather than leaving it to be derived |
 | `fq status` | Runtime overview — `control.status` over the edge: the daemon's build, its stream and consumer health, its live agent registry, its projection position and its recovery counts. The one migrated read that still answers with no daemon: it reports the absence as the finding, keeps the genuinely local half — the edge address this client dials, and nothing else — and exits non-zero. The store paths are *not* local: they belong to the process that owns those files, so they travel on the daemon's report and are absent, with the reason, when none arrives |
-| `fq doctor` | Durable-execution health in one report — `control.doctor` over the edge. A composite over workers, current work, ambiguity and failures; needs the daemon it reports on, and says so when there is none |
+| `fq doctor` | Durable-execution health in one report — `control.doctor` over the edge. A composite over workers, current work, ambiguity, failures and trigger claims that never settled; needs the daemon it reports on, and says so when there is none |
 
 ### Content store (`services/fq-store`)
 
