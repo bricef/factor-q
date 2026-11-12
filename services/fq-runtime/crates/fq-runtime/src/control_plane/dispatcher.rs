@@ -44,6 +44,8 @@
 
 mod admission;
 mod agent_cap;
+#[cfg(test)]
+mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
@@ -760,7 +762,7 @@ mod tests {
     use tokio::sync::OwnedSemaphorePermit;
     use uuid::Uuid;
 
-    fn test_pricing() -> Arc<PricingTable> {
+    pub(super) fn test_pricing() -> Arc<PricingTable> {
         let mut entries = HashMap::new();
         entries.insert(
             "claude-haiku".to_string(),
@@ -775,7 +777,7 @@ mod tests {
         Arc::new(PricingTable::from_map(entries))
     }
 
-    fn test_tools() -> Arc<ToolRegistry> {
+    pub(super) fn test_tools() -> Arc<ToolRegistry> {
         Arc::new(ToolRegistry::with_builtins())
     }
 
@@ -790,7 +792,7 @@ mod tests {
             .unwrap()
     }
 
-    fn canned_response() -> ChatResponse {
+    pub(super) fn canned_response() -> ChatResponse {
         ChatResponse {
             parts: crate::events::assistant_parts(
                 None,
@@ -814,7 +816,7 @@ mod tests {
         }
     }
 
-    fn unique_agent_id(prefix: &str) -> String {
+    pub(super) fn unique_agent_id(prefix: &str) -> String {
         format!("{prefix}-{}", Uuid::now_v7().simple())
     }
 
@@ -834,7 +836,10 @@ mod tests {
     /// sequence. A test that seeds a claim by hand has to agree with the
     /// dispatcher about the epoch or it would be seeding a row for a
     /// different stream.
-    fn test_key(bus: &EventBus, stream_seq: u64) -> crate::control_plane::TriggerKey<'static> {
+    pub(super) fn test_key(
+        bus: &EventBus,
+        stream_seq: u64,
+    ) -> crate::control_plane::TriggerKey<'static> {
         crate::control_plane::TriggerKey {
             stream: TRIGGER_STREAM_NAME,
             stream_epoch: bus.trigger_stream_epoch(),
@@ -842,7 +847,7 @@ mod tests {
         }
     }
 
-    fn unique_consumer_name() -> String {
+    pub(super) fn unique_consumer_name() -> String {
         format!("fq-dispatcher-test-{}", Uuid::now_v7().simple())
     }
 
@@ -2386,7 +2391,7 @@ You are a test agent."#
 
     /// A registry holding one agent on `claude-haiku`, and the tempdir
     /// its definition was loaded from.
-    fn registry_with(agent_id_str: &str) -> (tempfile::TempDir, SharedRegistry) {
+    pub(super) fn registry_with(agent_id_str: &str) -> (tempfile::TempDir, SharedRegistry) {
         let mut registry = AgentRegistry::new();
         let dir = tempfile::tempdir().unwrap();
         let agent_path = dir.path().join(format!("{agent_id_str}.md"));
@@ -2792,7 +2797,7 @@ You are a test agent."#
     /// read leaves. Holding the assertion open across the round trip is
     /// what makes "the duplicate does not ack" bite (#817, review 1
     /// finding 2).
-    async fn ack_pending_stays(
+    pub(super) async fn ack_pending_stays(
         consumer: &mut async_nats::jetstream::consumer::PullConsumer,
         expected: usize,
         window: Duration,
