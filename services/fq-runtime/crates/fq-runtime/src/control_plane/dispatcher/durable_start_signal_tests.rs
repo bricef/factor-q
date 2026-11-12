@@ -420,16 +420,49 @@ async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried(
     );
 }
 
-/// The signal fires and the invocation fails with a transient error in
-/// the same poll, and the claim store refuses the mark (#966). There is
-/// no run left to stop, and the pre-start settlement would release the
-/// claim and NAK the delivery, whose redelivery would then win a fresh
-/// claim and start the work again. `handle` must settle nothing: the
-/// claim stays `claimed` by the dispatcher and the delivery un-acked. A
-/// finished run under a claim that still says `claimed` is the state
-/// #967 is about; this test pins only that it is not made worse.
+/// What a refused mark after a return in the same poll must leave: the
+/// claim as it was, `claimed` by the dispatcher, and the delivery acked.
+///
+/// The run started and has returned, so it cannot be stopped, and a
+/// redelivery is never wanted: on this daemon the same-claimant `Held`
+/// arm would drop each one until the trigger was dead-lettered as
+/// `trigger_exhausted` although it ran, and after a restart a finished
+/// run's claim would be adopted and the work run again. So the delivery
+/// is acked. The claim is not released first: a lost ack would then let
+/// the redelivery win a fresh claim. A started run under a claim that
+/// still says `claimed` is what is left; see #967.
+async fn assert_acked_with_the_claim_kept(pulled: &mut Pulled) {
+    assert!(pulled.ran_to_end(), "the invocation ran to its end");
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Held {
+            claimant: "worker-a".to_string()
+        },
+        "the claim must be left as it was, `claimed` by the dispatcher, not released"
+    );
+    pulled.wait_until_acked().await;
+}
+
+/// The signal fires and the invocation completes in the same poll, and
+/// the claim store refuses the mark (#966): a finished run, acked with
+/// its claim kept ([`assert_acked_with_the_claim_kept`]).
 #[tokio::test]
-async fn a_failed_mark_after_a_signal_fired_in_the_poll_that_returns_settles_nothing() {
+async fn a_failed_mark_after_a_completion_in_the_same_poll_acks_and_keeps_the_claim() {
+    let mut pulled =
+        Pulled::new(Resolve::FireIntoRefusedMark, Turn::Same, Returns::Completed).await;
+
+    pulled.handle().await;
+
+    assert_acked_with_the_claim_kept(&mut pulled).await;
+}
+
+/// The signal fires and the invocation fails with a transient error in
+/// the same poll, and the claim store refuses the mark (#966). Before
+/// durable start a transient error is NAKed for a retry; this run had
+/// started, so it is acked with its claim kept instead
+/// ([`assert_acked_with_the_claim_kept`]).
+#[tokio::test]
+async fn a_failed_mark_after_a_transient_error_in_the_same_poll_acks_and_keeps_the_claim() {
     let mut pulled = Pulled::new(
         Resolve::FireIntoRefusedMark,
         Turn::Same,
@@ -439,13 +472,5 @@ async fn a_failed_mark_after_a_signal_fired_in_the_poll_that_returns_settles_not
 
     pulled.handle().await;
 
-    assert!(pulled.ran_to_end(), "the invocation ran to its end");
-    assert_eq!(
-        pulled.probe_claim().await,
-        TriggerClaim::Held {
-            claimant: "worker-a".to_string()
-        },
-        "the claim must be left as it was, `claimed` by the dispatcher, not released"
-    );
-    ack_pending_stays(&mut pulled.consumer, 1, Duration::from_millis(300)).await;
+    assert_acked_with_the_claim_kept(&mut pulled).await;
 }
