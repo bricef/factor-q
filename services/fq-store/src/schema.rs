@@ -36,18 +36,19 @@
 //! - **Serialised.** `BEGIN IMMEDIATE` takes SQLite's write lock on the
 //!   file. That is a lock between *connections*, held through the file
 //!   itself (the `-shm` index in WAL mode), so it serialises two
-//!   processes — two `fq-cas` commands, or a command and `fq-cas serve`
-//!   — exactly as it serialises two tasks in one. There is no in-process
-//!   mutex, and nothing here relies on one. A second opener waits for the
-//!   first to commit, then reads the version the first wrote and finds
-//!   nothing to do.
+//!   processes — two `fq-cas` commands on one root — exactly as it
+//!   serialises two tasks in one. There is no in-process mutex, and
+//!   nothing here relies on one. A second opener waits for the first to
+//!   commit, then reads the version the first wrote and finds nothing to
+//!   do.
 //!
-//! Before that, each rung committed with its own version bump, which made
-//! it atomic, but the version that chose the rungs was read on the pool
-//! outside any transaction. Two openers of a fresh `grants.db` both read
-//! 0, and the second failed on `table grant_events already exists`; two
-//! openers of an `index.db` failed the same way on the `ADD COLUMN`
-//! rungs.
+//! The protocol this replaced committed each rung with its own version
+//! bump, which made each rung atomic, but it read the version that chose
+//! the rungs on the pool, outside any transaction. Two openers of a fresh
+//! `grants.db` both read 0, and the second failed on `table grant_events
+//! already exists`. Two openers of a fresh `index.db` failed on rung 2's
+//! copy of the old `blocks` table, and two upgrading one failed on the
+//! first `ADD COLUMN`.
 //!
 //! The wait for the lock is bounded by [`SCHEMA_LOCK_WAIT`], set on the
 //! migration's own connection. The pool's busy timeout,
@@ -58,11 +59,12 @@
 //! Nothing a rung runs is refused or mishandled inside a transaction.
 //! Every rung of both ladders is `CREATE TABLE`, `CREATE INDEX`,
 //! `INSERT`, `DROP TABLE` or `ALTER TABLE`, and each already ran inside a
-//! transaction of its own before this one. No rung uses `PRAGMA journal_mode` (which
-//! cannot change into or out of WAL mid-transaction), `VACUUM`, `ATTACH`,
-//! another `PRAGMA` or a transaction-control statement. A rung that
-//! needed one could not be appended to a ladder; it would have to be a
-//! step of its own outside [`migrate`].
+//! transaction of its own under the protocol this replaced. No rung uses
+//! `PRAGMA journal_mode` (which cannot change into or out of WAL
+//! mid-transaction), `VACUUM`, `ATTACH`, another `PRAGMA` or a
+//! transaction-control statement. A rung that needed one could not be
+//! appended to a ladder; it would have to be a step of its own outside
+//! [`migrate`].
 //!
 //! ## The one step before the lock: switching a new file into WAL mode
 //!
