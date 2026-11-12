@@ -293,7 +293,13 @@ started, its claim released and a transient error NAKed for a second
 run. The dispatcher now asks the signal once more when an invocation
 returns, and tests pin that the runner fires the signal only once its
 first WAL write has landed
-([#966](https://github.com/bricef/factor-q/issues/966)). The M0
+([#966](https://github.com/bricef/factor-q/issues/966)). Startup
+recovery's resumes and `fq invocation resume` now wait for a
+`max_concurrent_invocations` permit like every other run, as a deferred
+resume already did, so a restart no longer runs its recovered
+invocations on top of the cap, and they start ahead of any new trigger
+(the review's finding C5,
+[#994](https://github.com/bricef/factor-q/issues/994)). The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the

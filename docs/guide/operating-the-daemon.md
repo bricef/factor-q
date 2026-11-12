@@ -390,6 +390,17 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+An accepted `resume` re-drives the invocation under the worker cap like
+any other run: if `max_concurrent_invocations` runs are already in
+flight, it waits for one of them to end rather than starting beside
+them. The command answers once the interrupted results are recorded, so
+`Resume accepted` means running or waiting its turn, and the daemon log
+says which (see
+[Every run takes a worker permit](#when-a-provider-hangs-or-throttles)).
+A daemon that is already draining or stopping refuses the re-drive and
+says so, but the recorded results stand, so the next start resumes the
+invocation on its own.
+
 ### When the archive sweeper holds a terminal row
 
 A finished invocation's row stays in `worker.db` until the control plane
@@ -546,6 +557,34 @@ If every permit is busy when a parked trigger becomes ready, it waits
 for one the same way it waited for the pause — kept alive, still its
 first delivery — and the permits are handed out in the order the
 triggers began waiting.
+
+**Every run takes a worker permit, resumes included.**
+`max_concurrent_invocations` bounds everything the daemon runs, not only
+what the dispatcher pulls: a deferred invocation's resume, the resumes
+startup recovery queues, and `fq invocation resume` all wait for a
+permit in the same queue as triggers
+([#994](https://github.com/bricef/factor-q/issues/994)). After a
+restart, recovery queues every invocation it found before the dispatcher
+pulls its first trigger, so they go first: the first
+`max_concurrent_invocations` of them resume at once, the rest wait in
+turn, and a new trigger waits behind all of them. At the default cap of
+1 that also means a resumed run and a new one never share the one
+workspace directory at the same time.
+
+A resume that has to wait is not silent. The boot banner counts them
+(`resumes waiting:  N for a worker permit`), and the daemon log names
+each one, with its `invocation_id`, when it starts waiting (`worker
+permits exhausted; the resume waits for one`), when it gets its permit,
+and if a drain or stop comes first (`left in flight for the next start's
+recovery`). Every other surface shows it as in flight, because its WAL
+row is: `fq invocation list --status=in_flight`, `fq invocation show`
+and `fq doctor`'s in-flight count do not yet tell a waiting run from a
+running one. A recovered run's last step is from
+before the restart, so if it waits past the stuck threshold `fq doctor`
+counts it stuck and `invocation.stuck` is published once, exactly as for
+a deferred invocation that waits that long. While it waits it counts
+against its agent's `max_concurrent`, so that agent's triggers are held
+behind it.
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers
