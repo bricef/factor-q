@@ -286,7 +286,14 @@ trigger run a second time beside the resumed invocation. The claim row
 now names the invocation from claim time, and startup recovery marks
 the claim of every invocation it finds in flight before the dispatcher
 consumes a trigger
-([#959](https://github.com/bricef/factor-q/issues/959)). The M0
+([#959](https://github.com/bricef/factor-q/issues/959)). The second
+no longer is either: an invocation that fired its durable-start signal
+and returned within one poll used to be settled as if it had never
+started, its claim released and a transient error NAKed for a second
+run. The dispatcher now asks the signal once more when an invocation
+returns, and tests pin that the runner fires the signal only once its
+first WAL write has landed
+([#966](https://github.com/bricef/factor-q/issues/966)). The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the

@@ -15,6 +15,11 @@
 //! creating, and has not yet switched into WAL mode, opens once that
 //! connection lets go.
 //!
+//! And the one file no open may touch: one a newer binary wrote, which is
+//! refused by name before any rung or the grant log's catch-up runs, and
+//! left as it was with the lock free
+//! (<https://github.com/bricef/factor-q/issues/984>).
+//!
 //! The races are staged by [`RivalAt`], which pauses the first opener at a
 //! [`Moment`] where it has read what decides its work — the window two
 //! unserialised openers used to share — starts the second there, and gives
@@ -38,7 +43,9 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::grant_log::catch_up;
-use crate::{Grantor, LiveGrant, Principal, Scope, SqliteGrantLog, SqliteNameIndex, Verb};
+use crate::{
+    Grantor, LiveGrant, Principal, Scope, SqliteGrantLog, SqliteNameIndex, StoreError, Verb,
+};
 
 /// The two databases the store keeps, each opened through its own store's
 /// `open`.
@@ -82,14 +89,19 @@ impl Store {
         }
     }
 
+    /// Open the file at `path` through the store's own `open`, and close it
+    /// again.
+    async fn try_open(self, path: &Path) -> Result<()> {
+        match self {
+            Store::Index => SqliteNameIndex::open(path).await.map(drop),
+            Store::Grants => SqliteGrantLog::open(path).await.map(drop),
+        }
+    }
+
     /// Open the file at `path` the way the store does, as a second opener
     /// would, and close it again.
     async fn open(self, path: PathBuf) -> std::result::Result<(), String> {
-        let opened = match self {
-            Store::Index => SqliteNameIndex::open(&path).await.map(drop),
-            Store::Grants => SqliteGrantLog::open(&path).await.map(drop),
-        };
-        opened.map_err(|err| err.to_string())
+        self.try_open(&path).await.map_err(|err| err.to_string())
     }
 
     /// What a file this store opened on its own, with nobody racing it,
@@ -593,34 +605,193 @@ async fn a_cancelled_open_leaves_the_file_unchanged_and_the_lock_free() {
     assert_eq!(on_disk(&path).await, Store::Index.reference().await);
 }
 
-/// A file a newer binary has migrated past this ladder is opened as it is.
-/// This crate has never refused one (whether it should is
-/// <https://github.com/bricef/factor-q/issues/984>), and this pins that the
-/// open still changes nothing and gives the lock back.
-#[tokio::test]
-async fn a_file_newer_than_the_binary_is_left_as_it_is() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join(Store::Index.file());
-    let pool = pool_at(Store::Index, &path, Store::Index.ladder().len()).await;
-    let newer = Store::Index.ladder().len() + 1;
+// ----- A file a newer binary wrote -----
+
+/// The highest version `store`'s ladder brings a file to: this binary's.
+fn binary_version(store: Store) -> i64 {
+    store.ladder().len() as i64
+}
+
+/// One version past this binary's: the least a newer binary's ladder can
+/// have left.
+fn newer_version(store: Store) -> i64 {
+    binary_version(store) + 1
+}
+
+/// Records the version the file at `path` as a newer binary's ladder would
+/// have left it.
+async fn stamp(path: &Path, version: i64) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .connect()
+        .await
+        .expect("open to stamp");
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "PRAGMA user_version = {newer}"
+        "PRAGMA user_version = {version}"
     )))
-    .execute(&pool)
+    .execute(&mut conn)
     .await
     .unwrap();
-    pool.close().await;
-    let before = on_disk(&path).await;
+    conn.close().await.unwrap();
+}
 
-    let index = SqliteNameIndex::open(&path)
+/// The file at `path`, which records [`newer_version`], meets the store's
+/// own `open`. It must be refused by name — the file, the version it
+/// records, this binary's — and left exactly as it was, with the lock free.
+async fn assert_refused_and_left_as_it_is(store: Store, path: &Path) {
+    let before = on_disk(path).await;
+    assert_eq!(before.0, newer_version(store), "the fixture's stamp");
+
+    let err = store
+        .try_open(path)
         .await
-        .expect("a newer file opens");
+        .expect_err("a file a newer binary wrote must be refused");
+    let StoreError::BinaryTooOld {
+        path: refused,
+        db_version,
+        binary_version: supported,
+    } = &err
+    else {
+        panic!("refused for the wrong reason: {err}");
+    };
+    assert_eq!(refused, path, "the refusal names the file");
+    assert_eq!(*db_version, newer_version(store), "the file's version");
+    assert_eq!(*supported, binary_version(store), "this binary's version");
+    let message = err.to_string();
+    for part in [
+        path.display().to_string(),
+        format!("version {}", newer_version(store)),
+        format!("supports up to {}", binary_version(store)),
+        "written by a newer fq-cas".to_string(),
+        "at least as new".to_string(),
+    ] {
+        assert!(message.contains(&part), "{part:?} is not in: {message}");
+    }
+
     assert!(
-        !write_lock_held(&path).await,
-        "an open with nothing to do must give the lock back"
+        !write_lock_held(path).await,
+        "a refused open must give the lock back"
     );
-    drop(index);
-    assert_eq!(on_disk(&path).await, before);
+    assert_eq!(
+        on_disk(path).await,
+        before,
+        "a refused open must leave the file as it was"
+    );
+}
+
+#[tokio::test]
+async fn an_index_db_a_newer_binary_wrote_is_refused_and_left_as_it_is() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(Store::Index.file());
+    pool_at(Store::Index, &path, Store::Index.ladder().len())
+        .await
+        .close()
+        .await;
+    stamp(&path, newer_version(Store::Index)).await;
+
+    assert_refused_and_left_as_it_is(Store::Index, &path).await;
+}
+
+/// How far a `grants.db`'s projection has got: its cursor and the rows it
+/// holds, beside the last sequence in its log.
+#[derive(Debug, PartialEq, Eq)]
+struct Projection {
+    cursor: i64,
+    grants: i64,
+    revocations: i64,
+    last_event: i64,
+}
+
+async fn projection(path: &Path) -> Projection {
+    async fn scalar(conn: &mut SqliteConnection, sql: &'static str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(conn).await.unwrap()
+    }
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .connect()
+        .await
+        .expect("open for inspection");
+    let projection = Projection {
+        cursor: scalar(
+            &mut conn,
+            "SELECT applied_seq FROM projection_cursor WHERE id = 1",
+        )
+        .await,
+        grants: scalar(&mut conn, "SELECT COUNT(*) FROM projected_grants").await,
+        revocations: scalar(&mut conn, "SELECT COUNT(*) FROM projected_revocations").await,
+        last_event: scalar(&mut conn, "SELECT COALESCE(MAX(seq), 0) FROM grant_events").await,
+    };
+    conn.close().await.unwrap();
+    projection
+}
+
+/// Which moments of an open it reached. No rung is recorded: on a file
+/// beyond the ladder none can run, wherever the refusal sits.
+#[derive(Debug, Default)]
+struct Reached {
+    version: Option<i64>,
+    after_ladder_read: bool,
+}
+
+impl MigrationSeam for Reached {
+    async fn version_read(&mut self, version: i64) {
+        self.version = Some(version);
+    }
+
+    async fn after_ladder_read(&mut self) {
+        self.after_ladder_read = true;
+    }
+}
+
+/// A newer `grants.db` whose projection lags its log is refused before the
+/// catch-up runs. The file shows it — the projection is as far behind
+/// afterwards as before — but a rollback would undo a catch-up that ran
+/// before the refusal too, so the seam shows it directly: the catch-up
+/// never read its cursor.
+#[tokio::test]
+async fn a_grants_db_a_newer_binary_wrote_is_refused_before_its_projection_catches_up() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(Store::Grants.file());
+    lagging_grants_db(&path).await;
+    stamp(&path, newer_version(Store::Grants)).await;
+    let lagging = projection(&path).await;
+    assert!(
+        lagging.cursor < lagging.last_event && lagging.grants == 0,
+        "the fixture's projection must lag its log: {lagging:?}"
+    );
+
+    assert_refused_and_left_as_it_is(Store::Grants, &path).await;
+    assert_eq!(
+        projection(&path).await,
+        lagging,
+        "a refused open must leave the projection where it was"
+    );
+
+    let pool = connect_store_pool(&path)
+        .await
+        .expect("open the store pool");
+    let mut migration = Reached::default();
+    let mut catching_up = Reached::default();
+    let after_ladder = async |conn: &mut SqliteConnection| catch_up(conn, &mut catching_up).await;
+    let outcome = migrate_observed(
+        &pool.connect_options(),
+        Store::Grants.ladder(),
+        after_ladder,
+        &mut migration,
+    )
+    .await;
+    pool.close().await;
+
+    assert!(
+        matches!(outcome, Err(StoreError::BinaryTooOld { .. })),
+        "a file a newer binary wrote must be refused: {outcome:?}"
+    );
+    assert_eq!(migration.version, Some(newer_version(Store::Grants)));
+    assert!(
+        !catching_up.after_ladder_read,
+        "the catch-up read its cursor: it ran before the refusal"
+    );
+    assert_eq!(projection(&path).await, lagging);
 }
 
 // ----- The step before the lock: a file another connection is creating -----
@@ -700,7 +871,8 @@ mod across_processes {
     const OPENER_PROCESS: &str = "schema::tests::across_processes::opener_process";
     const CHILD_DB: &str = "FQ_STORE_SCHEMA_TEST_DB";
     const CHILD_ROLE: &str = "FQ_STORE_SCHEMA_TEST_ROLE";
-    /// Open `grants.db` through the store and say how it went.
+    /// Open `grants.db` through the store and say how it went: exit 0
+    /// having said `opened`, or exit 1 having said `error` and why.
     const ROLE_OPEN: &str = "open-grants";
     /// Upgrade `index.db` and stop after rung 4, transaction open, to be
     /// killed there.
@@ -748,9 +920,13 @@ mod across_processes {
         match role.as_str() {
             ROLE_OPEN => match Store::Grants.open(db).await {
                 Ok(()) => println!("{SAYS}opened"),
+                // An exit, not a panic: some tests expect this failure, and
+                // their green runs should not print one. The parent reads
+                // the line and the status.
                 Err(err) => {
                     println!("{SAYS}error {err}");
-                    panic!("the child's open failed: {err}");
+                    std::io::Write::flush(&mut std::io::stdout()).expect("flush the child's line");
+                    std::process::exit(1);
                 }
             },
             ROLE_STALL => {
@@ -844,6 +1020,70 @@ mod across_processes {
             "the second process finished while the first was still paused:\n{said}"
         );
         assert_eq!(on_disk(&path).await, Store::Grants.reference().await);
+    }
+
+    /// A refusal gives the lock back as a failure does. The first process
+    /// is refused a `grants.db` a newer binary wrote while a second waits
+    /// on its lock; the second must then be refused by name too, not left
+    /// to fail with `database is locked` once its wait runs out.
+    #[tokio::test]
+    async fn a_second_process_waits_for_the_first_ones_refusal_and_is_refused_too() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(Store::Grants.file());
+        pool_at(Store::Grants, &path, Store::Grants.ladder().len())
+            .await
+            .close()
+            .await;
+        stamp(&path, newer_version(Store::Grants)).await;
+        let before = on_disk(&path).await;
+        let pool = connect_store_pool(&path)
+            .await
+            .expect("open the store pool");
+        let mut seam = ChildAtVersionRead {
+            db: path.clone(),
+            child: None,
+            stdout: None,
+            lock_held: None,
+            exited_during_head_start: None,
+        };
+
+        let first = Store::Grants
+            .migrate(&pool.connect_options(), Store::Grants.ladder(), &mut seam)
+            .await;
+        pool.close().await;
+
+        let mut child = seam.child.take().expect("the child was started");
+        let mut stdout = seam.stdout.take().expect("the child's stdout is piped");
+        let status = child
+            .wait_timeout(Duration::from_secs(60))
+            .expect("the child opener did not finish within a minute of the parent's refusal");
+        let mut said = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut said).unwrap();
+
+        assert!(
+            matches!(first, Err(StoreError::BinaryTooOld { .. })),
+            "the first process must be refused: {first:?}\nthe child said:\n{said}"
+        );
+        assert!(
+            !status.success(),
+            "the second process must be refused too: {status:?}\n{said}"
+        );
+        assert!(
+            said.contains(&format!("{SAYS}error incompatible schema: "))
+                && said.contains("written by a newer fq-cas"),
+            "the second process must be refused by name:\n{said}"
+        );
+        assert_eq!(seam.lock_held, Some(true));
+        assert_eq!(
+            seam.exited_during_head_start,
+            Some(false),
+            "the second process finished while the first was still paused:\n{said}"
+        );
+        assert!(
+            !write_lock_held(&path).await,
+            "both refusals give the lock back"
+        );
+        assert_eq!(on_disk(&path).await, before);
     }
 
     #[tokio::test]

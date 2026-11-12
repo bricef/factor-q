@@ -120,6 +120,7 @@ mod tests {
                 error_message: "trigger exhausted after 5 deliveries (limit 5)".into(),
                 phase: FailurePhase::Setup,
                 partial_totals: InvocationTotals::default(),
+                detail: None,
             }),
         )
     }

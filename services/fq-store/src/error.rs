@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use crate::Cid;
@@ -68,6 +70,30 @@ pub enum StoreError {
     /// No object is bound to the given name in the index.
     #[error("name not found: {0}")]
     NameNotFound(String),
+
+    /// A store database (`index.db` or `grants.db`) records a schema
+    /// version above the highest this binary knows: a newer `fq-cas` wrote
+    /// it. Every open refuses such a file, read-only ones included, because
+    /// an older binary cannot know what a newer schema means even to read
+    /// it. The refusal leaves the file as it was; the only step before the
+    /// check is the switch into WAL mode on first connect, which every
+    /// `fq-cas` has already made on both files. The remedy is an
+    /// `fq-cas` at least as new as the one that wrote it. The runtime's
+    /// stores refuse the same case (`BinaryTooOld` in `fq-runtime`'s
+    /// `db/schema.rs`).
+    #[error(
+        "incompatible schema: {path} is at version {db_version}, this binary supports up to \
+         {binary_version}. The file was written by a newer fq-cas: run an fq-cas at least as \
+         new as that one against this store."
+    )]
+    BinaryTooOld {
+        /// The database file that was refused.
+        path: PathBuf,
+        /// The schema version the file records.
+        db_version: i64,
+        /// The highest schema version this binary knows.
+        binary_version: i64,
+    },
 }
 
 impl From<sqlx::Error> for StoreError {

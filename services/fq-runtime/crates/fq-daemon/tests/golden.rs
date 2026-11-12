@@ -364,6 +364,7 @@ async fn seed_at(dir: &Path, base_ms: i64) {
                         total_duration_ms: 2_000,
                         ..Default::default()
                     },
+                    detail: None,
                 }),
             ),
             6,
@@ -2682,6 +2683,7 @@ fn dead_letter_event(
             error_message: format!("trigger exhausted after 5 deliveries (limit 5) [{source}]"),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
     .annotate(
@@ -2740,6 +2742,7 @@ fn dead_letter_events() -> Vec<Event> {
                     error_message: "ordinary failure".into(),
                     phase: FailurePhase::Setup,
                     partial_totals: InvocationTotals::default(),
+                    detail: None,
                 }),
             ),
             23,

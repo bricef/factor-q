@@ -4,8 +4,12 @@
 
 use std::process::Command;
 
+/// The binary under test, without `RUST_LOG`: with it, `fq-cas` traces to
+/// stderr, which a test compares exactly.
 fn fq_cas() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fq-cas"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fq-cas"));
+    command.env_remove("RUST_LOG");
+    command
 }
 
 #[test]
@@ -325,4 +329,109 @@ fn access_control_operator_flow() {
     );
     // Removing a nonexistent grant fails loudly.
     assert!(!run(root, &["grant", "rm", "9999"]).status.success());
+}
+
+/// The `user_version` of the SQLite file at `db`, set to `stamp` first when
+/// one is given: what a newer `fq-cas`'s upgrade would have recorded.
+fn user_version(db: &std::path::Path, stamp: Option<i64>) -> i64 {
+    use sqlx::{ConnectOptions, Connection};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db)
+            .connect()
+            .await
+            .unwrap();
+        if let Some(version) = stamp {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "PRAGMA user_version = {version}"
+            )))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        }
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+        version
+    })
+}
+
+/// A store a newer `fq-cas` upgraded is refused by every command that opens
+/// one of its databases, the read-only ones included: each prints the
+/// refusal on one line, naming the file and both versions, and exits 1,
+/// and the file keeps the version the newer binary recorded
+/// (<https://github.com/bricef/factor-q/issues/984>).
+#[test]
+fn every_command_refuses_a_database_a_newer_fq_cas_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let input = dir.path().join("input.txt");
+    std::fs::write(&input, b"written before the upgrade").unwrap();
+    let input = input.to_str().unwrap();
+    let out = run(root, &["object", "put", "docs.readme", input]);
+    assert!(out.status.success(), "object put: {out:?}");
+    let cid = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert!(
+        run(root, &["grant", "add", "bob", "read", "docs.*"])
+            .status
+            .success()
+    );
+    let keys = String::from_utf8(run(root, &["key", "generate"]).stdout).unwrap();
+    let private = keys
+        .lines()
+        .find_map(|line| line.strip_prefix("private:"))
+        .expect("key generate prints a private key")
+        .trim()
+        .to_string();
+
+    let index: &[&[&str]] = &[
+        &["object", "get", "docs.readme"],
+        &["object", "ls"],
+        &["object", "resolve", "docs.readme"],
+        &["object", "history", "docs.readme"],
+        &["object", "put", "docs.other", input],
+        &["object", "bind", "docs.alias", &cid],
+        &["object", "rm", "docs.readme"],
+        &["gc"],
+    ];
+    let grants: &[&[&str]] = &[
+        &["grant", "ls", "bob"],
+        &["grant", "check", "bob", "read", "docs.readme"],
+        &["grant", "add", "carol", "read", "docs.*"],
+        &["grant", "rm", "1"],
+        &["token", "mint", "bob", "--biscuit-private-key", &private],
+    ];
+    for (file, commands) in [("index.db", index), ("grants.db", grants)] {
+        let db = root.join(file);
+        let supported = user_version(&db, None);
+        let newer = user_version(&db, Some(supported + 1));
+        let refusal = format!(
+            "fq-cas: incompatible schema: {} is at version {newer}, this binary supports up to \
+             {supported}. The file was written by a newer fq-cas: run an fq-cas at least as new \
+             as that one against this store.\n",
+            db.display()
+        );
+        for args in commands {
+            let out = run(root, args);
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                refusal,
+                "fq-cas {}",
+                args.join(" ")
+            );
+            assert_eq!(out.status.code(), Some(1), "fq-cas {}", args.join(" "));
+            assert!(out.stdout.is_empty(), "fq-cas {}: {out:?}", args.join(" "));
+        }
+        assert_eq!(
+            user_version(&db, None),
+            newer,
+            "a refused command must leave {file} at the newer version"
+        );
+    }
 }

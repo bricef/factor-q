@@ -81,6 +81,7 @@ fn dead_letter(
             error_message: "trigger exhausted after 5 deliveries (limit 5) [inline]".into(),
             phase: FailurePhase::Setup,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         }),
     )
     .annotate(

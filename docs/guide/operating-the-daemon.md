@@ -1037,8 +1037,12 @@ the retention sweep deletes a claim an exited process left.
   although its run started: that dead letter is false, and requeuing it
   starts the work twice. If an exited process left it, a redelivery would
   be adopted and start the work again, and a false dead letter may
-  already exist. There is nothing to repair from the CLI: read the run
-  with `fq invocation show`, and do not requeue its dead letter.
+  already exist. Neither happens when the mark failed after the run had
+  already returned: the dispatcher acked that delivery anyway, so no
+  redelivery comes, though the report cannot tell that case from the
+  others ([#967](https://github.com/bricef/factor-q/issues/967)). There
+  is nothing to repair from the CLI: read the run with
+  `fq invocation show`, and do not requeue its dead letter.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
   cannot look for a run.
@@ -1053,10 +1057,8 @@ daemon holding it is still going to start it. A claim this daemon holds
 and will never settle — a run that panicked before its first durable
 write — looks the same, and is not reported until a restart makes its
 holder a process that has exited. A started run whose message is gone,
-since no redelivery can follow. A claim an exited process left that is
-older than the horizon. And a delivery whose claim was deleted instead
-of marked leaves no row, so neither `fq invocation show` nor `fq doctor`
-can show it.
+since no redelivery can follow. And a claim an exited process left that
+is older than the horizon.
 
 **Where the window can be wrong.** It counts this daemon's time since it
 started, not time spent consuming, and it reads the wall clock. A broker

@@ -420,6 +420,7 @@ async fn the_turn_atom_lives_end_to_end() {
                     total_llm_calls: 1,
                     ..Default::default()
                 },
+                detail: None,
             }),
         ))
         .await

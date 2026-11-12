@@ -699,6 +699,7 @@ mod tests {
             error_message: "boom".to_string(),
             phase: FailurePhase::LlmResponse,
             partial_totals: InvocationTotals::default(),
+            detail: None,
         })
     }
 

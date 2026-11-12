@@ -52,6 +52,7 @@ mod claim;
 mod dead_letter;
 mod deferral;
 
+use claim::Marking;
 pub use claim::TriggerClaims;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -669,7 +670,9 @@ impl TriggerDispatcher {
                     // before its first WAL write): settled after the loop.
                     if signal.is_ok() {
                         durable_start_observed = true;
-                        acked = self.mark_durable_started(msg, &claim, trigger_id).await;
+                        acked = self
+                            .mark_durable_started(msg, &claim, trigger_id, Marking::WhileRunning)
+                            .await;
                         if !acked {
                             return;
                         }
@@ -678,6 +681,20 @@ impl TriggerDispatcher {
                 outcome = &mut invocation => break outcome,
             }
         };
+
+        // An invocation can fire the signal and return in one poll, and the
+        // loop then ends on the result without seeing the signal (#966).
+        // Asked once more, a fired signal is a durable start like any other.
+        // A failed mark here cannot stop the run (a `Deferred` one runs on),
+        // so the delivery is acked anyway, keeping its claim: a run that
+        // started must not be redelivered (`mark_durable_started`, by kind
+        // of return; see #967).
+        if !signal_resolved && durably_started.try_recv().is_ok() {
+            durable_start_observed = true;
+            acked = self
+                .mark_durable_started(msg, &claim, trigger_id, Marking::AfterReturn)
+                .await;
+        }
 
         // The invocation returned before the durable-start signal fired,
         // so the run left nothing durable behind: the trigger's fate is
@@ -2630,16 +2647,24 @@ You are a test agent."#
         // Every start is handed an invocation id by the dispatcher (#959),
         // and the adopted one is not the dead worker's, which may already
         // belong to a finished run. This worker fires and returns in one
-        // poll, so its claims are released rather than marked and this test
-        // cannot read the id off a row; the tests that do are
-        // `a_dispatcher_killed_after_the_first_wal_write_leaves_a_claim_naming_the_wal_row`
-        // and `started_claim_acks_duplicate_without_second_invocation`.
+        // poll, which `handle` treats as the durable start it is (#966), so
+        // the adopted claim is marked, and names the id its run was handed.
         let ids = worker.invocation_ids.lock().unwrap().clone();
         assert!(ids.iter().all(Option::is_some), "{ids:?}");
         assert_ne!(
             ids[1],
             Some(dead_workers_invocation),
             "an adopted claim must not reuse the dead worker's invocation id"
+        );
+        assert_eq!(
+            store
+                .claim_trigger(test_key(&bus, restart_seq), "probe", "probe", 0)
+                .await
+                .unwrap(),
+            crate::control_plane::TriggerClaim::Started {
+                invocation_id: ids[1].expect("checked above").to_string()
+            },
+            "the adopted claim is marked started under the id its run was handed"
         );
     }
 

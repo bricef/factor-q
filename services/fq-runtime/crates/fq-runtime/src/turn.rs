@@ -690,6 +690,7 @@ mod tests {
                     total_llm_calls: 2,
                     ..Default::default()
                 },
+                detail: None,
             }),
         );
         let failed_turn = TurnFold::new().apply(21, &failed).unwrap();

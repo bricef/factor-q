@@ -217,6 +217,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     error_message: message.clone(),
                     phase: FailurePhase::Setup,
                     partial_totals: totals,
+                    detail: None,
                 }),
             ),
         )
