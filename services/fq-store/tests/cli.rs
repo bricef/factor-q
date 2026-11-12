@@ -761,46 +761,99 @@ fn a_root_that_cannot_be_created_is_named() {
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The first use `docs/guide/access-control.md` walks through, at the
-/// default root of a new store: `key generate`, then `grant add`, then the
-/// rest of the walk-through.
+/// The walk-through in `docs/guide/access-control.md`, "Managing grants and
+/// tokens", in an empty directory, where it starts a new store at the
+/// default root. Each step is one `$` line of the guide, in the guide's
+/// order, and `store.keys` is written and read as the shell would; a change
+/// to either should be made to both.
 #[test]
-fn the_access_control_guides_first_use_works_on_a_new_store() {
+fn the_access_control_guides_walk_through_runs_on_a_new_store() {
     let root = NewRoot::new(Given::Default, &[], true);
+    let keys = root.cwd.path().join("store.keys");
+    let stdout = |out: &Output| String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // $ fq-cas key generate > store.keys
     let out = root.run(&["key", "generate"]);
     assert!(out.status.success(), "key generate: {out:?}");
-    assert!(root.left_nothing(), "key generate needs no store");
-    let keys = String::from_utf8(out.stdout).unwrap();
-    let key = |prefix: &str| {
-        keys.lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .unwrap()
-            .trim()
-            .to_string()
-    };
-    let (private, public) = (key("private:"), key("public:"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Keep the private key secret (e.g. in FQ_BISCUIT_PRIVATE_KEY); \
+         share only the public key with verifiers.\n"
+    );
+    std::fs::write(&keys, &out.stdout).unwrap();
+    assert!(!root.path.exists(), "key generate touches no store");
+    // $ chmod 600 store.keys
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    // $ cat store.keys
+    let pair = std::fs::read_to_string(&keys).unwrap();
+    let lines: Vec<&str> = pair.lines().collect();
+    assert_eq!(lines.len(), 2, "{pair}");
+    assert!(lines[0].starts_with("private: "), "{pair}");
+    assert!(lines[1].starts_with("public:  "), "{pair}");
 
+    // $ fq-cas grant add bob read,write 'research.papers.*'
     let out = root.run(&["grant", "add", "bob", "read,write", "research.papers.*"]);
     assert!(out.status.success(), "grant add: {out:?}");
-    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert_eq!(stdout(&out), "1\n");
+    // $ fq-cas grant ls bob
     let out = root.run(&["grant", "ls", "bob"]);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        format!("{id}\tread,write\tresearch.papers.*\n")
-    );
+    assert_eq!(stdout(&out), "1\tread,write\tresearch.papers.*\n");
+    // $ fq-cas grant check bob read research.papers.doc1
     let out = root.run(&["grant", "check", "bob", "read", "research.papers.doc1"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "allowed\n");
+    assert_eq!(
+        (stdout(&out), out.status.code()),
+        ("allowed\n".into(), Some(0))
+    );
 
-    let out = root
-        .command(&["token", "mint", "bob", "--ttl", "300"])
-        .env("FQ_BISCUIT_PRIVATE_KEY", &private)
-        .output()
-        .unwrap();
+    // $ export FQ_BISCUIT_PRIVATE_KEY=$(awk '/^private:/ {print $2}' store.keys)
+    // $ export FQ_BISCUIT_PUBLIC_KEY=$(awk '/^public:/ {print $2}' store.keys)
+    let awk = |label: &str| {
+        pair.lines()
+            .filter(|line| line.starts_with(label))
+            .find_map(|line| line.split_whitespace().nth(1))
+            .unwrap()
+            .to_string()
+    };
+    let (private, public) = (awk("private:"), awk("public:"));
+    let exported = |args: &[&str]| {
+        root.command(args)
+            .env("FQ_BISCUIT_PRIVATE_KEY", &private)
+            .env("FQ_BISCUIT_PUBLIC_KEY", &public)
+            .output()
+            .unwrap()
+    };
+    // $ token=$(fq-cas token mint bob --ttl 300)
+    let out = exported(&["token", "mint", "bob", "--ttl", "300"]);
     assert!(out.status.success(), "token mint: {out:?}");
-    let token = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    let out = root.run(&["token", "inspect", &token, "--biscuit-public-key", &public]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "principal: bob\n");
+    let token = stdout(&out).trim_end_matches('\n').to_string();
+    // $ fq-cas token attenuate "$token" --scope 'research.papers.reviews.*' --verbs read
+    let out = exported(&[
+        "token",
+        "attenuate",
+        &token,
+        "--scope",
+        "research.papers.reviews.*",
+        "--verbs",
+        "read",
+    ]);
+    assert!(out.status.success(), "token attenuate: {out:?}");
+    let narrower = stdout(&out).trim_end_matches('\n').to_string();
+    assert!(!narrower.is_empty() && narrower != token);
+    // $ fq-cas token inspect "$token"
+    let out = exported(&["token", "inspect", &token]);
+    assert_eq!(stdout(&out), "principal: bob\n");
 
-    assert!(root.run(&["grant", "rm", &id]).status.success());
-    assert!(root.path.join("grants.db").is_file());
+    // $ fq-cas grant rm 1
+    let out = exported(&["grant", "rm", "1"]);
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    // $ fq-cas grant check bob read research.papers.doc1
+    let out = exported(&["grant", "check", "bob", "read", "research.papers.doc1"]);
+    assert_eq!(
+        (stdout(&out), out.status.code()),
+        ("denied\n".into(), Some(1))
+    );
 }
