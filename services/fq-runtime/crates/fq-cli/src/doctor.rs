@@ -27,6 +27,9 @@ use fq_ops::surface::DoctorReport;
 
 use crate::edge_call::edge_client_for;
 
+mod trigger_claims;
+use trigger_claims::render_trigger_claims;
+
 /// Pure: render the human-readable `fq doctor` report, mirroring
 /// `render_recovery_guidance` — an overall verdict, then per-failing-
 /// check the count plus the copy-paste next-step command. Returns
@@ -126,10 +129,10 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // reads the answer here.
     out.push_str(&render_agents_at_cap(&report.agents_at_cap));
 
-    // Stranded trigger claims (#954): deliveries taken off the stream
-    // and never settled. The claim is the only record linking a delivery
-    // to its run, so this is the only place a trigger that was taken and
-    // never ran shows up. Above the dead letters, which it points at.
+    // Stranded trigger claims (#954): claimed deliveries that never
+    // settled. The claim is the only record linking a delivery to its
+    // run, so this is the only place a delivery that never started one
+    // shows up. Above the dead letters, which it points at.
     out.push_str(&render_trigger_claims(&report.trigger_claims));
 
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
@@ -410,82 +413,6 @@ fn render_agents_at_cap(agents: &[fq_ops::health::AgentAtCap]) -> String {
          Raise `max_concurrent` in the definition and `fq reload` to widen one\n",
     );
     out
-}
-
-/// Pure: the trigger-claim block of `fq doctor` (#954). One line per
-/// stranded claim — the delivery, who took it and when — and a line under
-/// it saying what that means and what to do. "none" when every claim has
-/// settled or is in hand, so the block is always on the page.
-///
-/// Each finding is worded for what the report can stand behind, and the
-/// holder is named in words rather than left to an id the reader would
-/// have to compare with this daemon's: "a process that has exited" is the
-/// fact the verdict rests on.
-fn render_trigger_claims(claims: &fq_ops::surface::DoctorTriggerClaims) -> String {
-    use fq_ops::health::{ClaimHolder, StrandedClaimFinding};
-
-    if claims.stranded.is_empty() {
-        return "Stranded trigger claims: none\n".to_string();
-    }
-    let issues = claims
-        .stranded
-        .iter()
-        .filter(|c| c.finding.is_issue())
-        .count();
-    let window = format_minutes(claims.redelivery_window_ms);
-    let mut out = format!(
-        "Stranded trigger claims: {} ({issues} to act on) — deliveries taken off the trigger \
-         stream and not settled\n",
-        claims.stranded.len()
-    );
-    for claim in &claims.stranded {
-        let d = &claim.delivery;
-        let holder = match claim.holder {
-            ClaimHolder::ThisDaemon => "this daemon".to_string(),
-            ClaimHolder::ExitedProcess => format!("{}, a process that has exited", d.claimant),
-        };
-        let invocation = claim.invocation_id.as_deref().unwrap_or("(none named)");
-        let status = claim.invocation_status.as_deref().unwrap_or("?");
-        let when = chrono::DateTime::from_timestamp_millis(d.claimed_at_ms)
-            .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-            .unwrap_or_else(|| format!("{}ms", d.claimed_at_ms));
-        out.push_str(&format!(
-            "  {} seq {}: claimed {when} by {holder}; invocation {invocation}\n",
-            d.stream, d.stream_seq
-        ));
-        out.push_str(&match (claim.finding, claim.holder) {
-            (StrandedClaimFinding::AwaitingRedelivery, _) => format!(
-                "  -> not started; this daemon adopts and starts it when the broker redelivers \
-                 it, which is due within {window} of this daemon starting\n"
-            ),
-            (StrandedClaimFinding::NeverStarted, _) => format!(
-                "  -> never started, and not redelivered within {window} of this daemon starting, \
-                 so it will not be: it was dead-lettered (`fq dead-letters list`) or has left the \
-                 stream, and its work never ran\n"
-            ),
-            (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ThisDaemon) => format!(
-                "  -> the run started ({status}) but its claim was never marked started: \
-                 redeliveries of it are dropped, and it will be dead-lettered as exhausted \
-                 although it ran — `fq invocation show {invocation}`\n"
-            ),
-            (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ExitedProcess) => format!(
-                "  -> the run started ({status}) but its claim was never marked started: a \
-                 redelivery of it would be adopted and run the work again — \
-                 `fq invocation show {invocation}`\n"
-            ),
-        });
-    }
-    out
-}
-
-/// A minutes-long window as `19m30s`, or `20m` when it is whole minutes.
-fn format_minutes(ms: i64) -> String {
-    let (minutes, seconds) = (ms / 60_000, (ms % 60_000) / 1_000);
-    if seconds == 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{minutes}m{seconds}s")
-    }
 }
 
 /// An epoch-millisecond instant as a relative phrase. Relative because

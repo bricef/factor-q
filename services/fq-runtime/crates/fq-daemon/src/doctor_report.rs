@@ -50,7 +50,7 @@ use std::sync::Arc;
 
 use fq_edge::wire::WireError;
 use fq_ops::surface::build_doctor_report;
-use fq_runtime::bus::TRIGGER_REDELIVERY_WINDOW;
+use fq_runtime::bus::{DEFAULT_TRIGGER_MAX_AGE, TRIGGER_REDELIVERY_WINDOW};
 use fq_runtime::control_plane::coordination_consumer::DEFAULT_STALE_THRESHOLD_MS;
 use fq_runtime::surface::{DoctorParams, DoctorReport, DoctorTriggerClaims};
 use fq_runtime::views::{ClaimJudgement, Views};
@@ -77,10 +77,11 @@ pub(crate) fn register_doctor_report(
     let agent_caps = facts.agent_caps.clone();
     let worker_id: Arc<str> = facts.worker_id.as_str().into();
     let dispatching_since_ms = facts.dispatching_since_ms;
+    let retention_ms = facts.retention_ms;
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
-         failures, dead letters.",
+         failures, dead letters, stranded trigger claims.",
         fq_ops::Stability::Experimental,
     )
     .description(
@@ -101,15 +102,18 @@ pub(crate) fn register_doctor_report(
          call: every durable it expects, named, with a stuck verdict for any that is \
          redelivering rather than progressing. A summariser durable is expected only \
          where `[summary]` configures one. \
-         The trigger-claim block lists deliveries taken off the trigger stream that were \
-         neither released nor recorded as started and will not be without help: one whose \
-         invocation started while its claim still says it has not, and one an exited \
-         process left that has not come back to this daemon within the redelivery window. \
-         Each is an issue; one an exited process left that is still inside the window is \
-         listed as awaiting its redelivery and is not. A claim this daemon holds for a run \
-         that has not started is never listed: it may be waiting behind a paused model or a \
-         full agent, and nothing on the claim tells that apart from one that will never \
-         start.",
+         The trigger-claim block lists claimed deliveries that were neither released nor \
+         recorded as started and will not settle without help. Two findings are issues: a \
+         run whose claim still says it has not started while its message can still be \
+         redelivered, and a delivery an exited process left that never started a run and \
+         will not be redelivered, because its message is gone or did not come back within \
+         the redelivery window. Two are listed without being issues: such a delivery still \
+         inside the window, and one whose claim names no invocation, so the report cannot \
+         tell. A claim this daemon holds for a run that has not started is never listed: it \
+         may be waiting behind a paused model or a full agent, and nothing on the claim \
+         tells that apart from one that will never start. Nor is a claim whose message is \
+         gone after its run started, or one an exited process left that is older than the \
+         retention window.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
@@ -159,16 +163,23 @@ pub(crate) fn register_doctor_report(
                     bus.consumer_ledger(),
                 )
                 .await;
-                let redelivery_window_ms = TRIGGER_REDELIVERY_WINDOW.as_millis() as i64;
+                // A store read like the four above, so a failure fails the
+                // report the way theirs do; only the broker probe degrades.
+                let judgement = ClaimJudgement {
+                    claimant: &worker_id,
+                    dispatching_since_ms,
+                    redelivery_window_ms: TRIGGER_REDELIVERY_WINDOW.as_millis() as i64,
+                    stream_epoch: bus.trigger_stream_epoch(),
+                    stream_max_age_ms: DEFAULT_TRIGGER_MAX_AGE.as_millis() as i64,
+                    horizon_ms: retention_ms,
+                    now_ms,
+                };
                 let trigger_claims = DoctorTriggerClaims {
-                    redelivery_window_ms,
+                    redelivery_window_ms: judgement.redelivery_window_ms,
+                    stream_max_age_ms: judgement.stream_max_age_ms,
+                    horizon_ms: judgement.horizon_ms,
                     stranded: views
-                        .stranded_trigger_claims(&ClaimJudgement {
-                            claimant: &worker_id,
-                            dispatching_since_ms,
-                            redelivery_window_ms,
-                            now_ms,
-                        })
+                        .stranded_trigger_claims(&judgement)
                         .await
                         .map_err(internal)?,
                 };

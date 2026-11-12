@@ -766,6 +766,8 @@ fn daemon_facts(
     crate::operator_surface::DaemonFacts {
         worker_id: worker_id.as_str().to_string(),
         dispatching_since_ms: chrono::Utc::now().timestamp_millis(),
+        retention_ms: (config.state.retention_days >= 0)
+            .then(|| config.state.retention_days.saturating_mul(86_400_000)),
         db_paths: Arc::new(runtime_db_paths(config)),
         legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(&config.cache.directory)),
         drain_deadline_ms: config.drain_deadline_ms,

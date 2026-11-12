@@ -774,9 +774,12 @@ fn throttled_models_are_listed_without_becoming_an_issue() {
     );
 }
 
+/// One stranded claim, claimed at 2026-01-02T03:04:05Z plus `seq`
+/// minutes, on the current stream unless the message says otherwise.
 fn stranded(
     seq: u64,
     holder: fq_ops::health::ClaimHolder,
+    message: fq_ops::health::ClaimedMessage,
     finding: fq_ops::health::StrandedClaimFinding,
     invocation_status: Option<&str>,
 ) -> fq_ops::health::StrandedTriggerClaim {
@@ -784,24 +787,33 @@ fn stranded(
         fq_ops::health::ClaimHolder::ThisDaemon => "019a0000-0000-7000-8000-00000000d0d0",
         fq_ops::health::ClaimHolder::ExitedProcess => "019a0000-0000-7000-8000-00000000dead",
     };
+    let stream_epoch = match message {
+        // 2025-12-29T09:20:00Z.
+        fq_ops::health::ClaimedMessage::EarlierIncarnation => "1767000000000000000",
+        _ => "1767323045000000000",
+    };
     fq_ops::health::StrandedTriggerClaim {
         delivery: fq_ops::views::TriggerDeliveryView {
             stream: "fq-triggers".to_string(),
-            stream_epoch: 1_767_323_045_000_000_000,
+            stream_epoch: stream_epoch.to_string(),
             stream_seq: seq,
             state: fq_ops::views::TriggerClaimState::Claimed,
             claimant: claimant.to_string(),
-            // 2026-01-02T03:04:05Z plus `seq` minutes.
             claimed_at_ms: 1_767_323_045_000 + seq as i64 * 60_000,
         },
-        invocation_id: Some(format!("1c000000-0000-7000-8000-0000000000{seq:02}")),
+        invocation_id: (finding != fq_ops::health::StrandedClaimFinding::StartUnknown)
+            .then(|| format!("1c000000-0000-7000-8000-0000000000{seq:02}")),
         holder,
+        message,
         finding,
         invocation_status: invocation_status.map(str::to_string),
     }
 }
 
-fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorReport {
+fn with_stranded_horizon(
+    claims: Vec<fq_ops::health::StrandedTriggerClaim>,
+    horizon_ms: Option<i64>,
+) -> DoctorReport {
     build_doctor_report(
         &[],
         &ExecutionsView::default(),
@@ -813,38 +825,73 @@ fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorRep
     )
     .with_trigger_claims(fq_ops::surface::DoctorTriggerClaims {
         redelivery_window_ms: 1_170_000,
+        stream_max_age_ms: 86_400_000,
+        horizon_ms,
         stranded: claims,
     })
 }
 
+fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorReport {
+    with_stranded_horizon(claims, Some(30 * 86_400_000))
+}
+
 /// The trigger-claim block (#954), whole: one line per stranded claim
-/// naming the delivery, who took it and when, and under it what the
-/// finding means. Asserted byte for byte, like the daemon's doctor
-/// goldens, because each finding's wording is a claim the report has to
-/// be able to stand behind.
+/// naming the delivery, who claimed it and when, and the invocation id it
+/// names — labelled as reserved where no run is known to exist — and
+/// under it what the finding means. Every finding, and every reason a
+/// message is gone, asserted byte for byte like the daemon's doctor
+/// goldens, because each line is a claim the report has to be able to
+/// stand behind.
 #[test]
 fn stranded_trigger_claims_render_each_finding_in_its_own_words() {
     use fq_ops::health::ClaimHolder::{ExitedProcess, ThisDaemon};
-    use fq_ops::health::StrandedClaimFinding::{AwaitingRedelivery, NeverStarted, StartedUnmarked};
+    use fq_ops::health::ClaimedMessage::{AgedOut, Deliverable, EarlierIncarnation};
+    use fq_ops::health::StrandedClaimFinding::{
+        AwaitingRedelivery, NeverStarted, StartUnknown, StartedUnmarked,
+    };
 
     let report = with_stranded(vec![
-        stranded(1, ExitedProcess, AwaitingRedelivery, None),
-        stranded(2, ExitedProcess, NeverStarted, None),
-        stranded(3, ExitedProcess, StartedUnmarked, Some("completed")),
-        stranded(4, ThisDaemon, StartedUnmarked, Some("in_flight")),
+        stranded(1, ExitedProcess, Deliverable, AwaitingRedelivery, None),
+        stranded(2, ExitedProcess, Deliverable, NeverStarted, None),
+        stranded(3, ExitedProcess, EarlierIncarnation, NeverStarted, None),
+        stranded(4, ExitedProcess, AgedOut, NeverStarted, None),
+        stranded(
+            5,
+            ExitedProcess,
+            Deliverable,
+            StartedUnmarked,
+            Some("completed"),
+        ),
+        stranded(
+            6,
+            ThisDaemon,
+            Deliverable,
+            StartedUnmarked,
+            Some("in_flight"),
+        ),
+        stranded(7, ExitedProcess, Deliverable, StartUnknown, None),
     ]);
     assert!(report.has_issues());
     let out = render_doctor_report_human(&report);
     let block = "\
-Stranded trigger claims: 4 (3 to act on) — deliveries taken off the trigger stream and not settled
-  fq-triggers seq 1: claimed 2026-01-02T03:05:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000001
-  -> not started; this daemon adopts and starts it when the broker redelivers it, which is due within 19m30s of this daemon starting
-  fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000002
-  -> never started, and not redelivered within 19m30s of this daemon starting, so it will not be: it was dead-lettered (`fq dead-letters list`) or has left the stream, and its work never ran
-  fq-triggers seq 3: claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000003
-  -> the run started (completed) but its claim was never marked started: a redelivery of it would be adopted and run the work again — `fq invocation show 1c000000-0000-7000-8000-000000000003`
-  fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000004
-  -> the run started (in_flight) but its claim was never marked started: redeliveries of it are dropped, and it will be dead-lettered as exhausted although it ran — `fq invocation show 1c000000-0000-7000-8000-000000000004`
+Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have not settled
+  fq-triggers seq 1: claimed 2026-01-02T03:05:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; id reserved for its run 1c000000-0000-7000-8000-000000000001
+  -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
+  fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; id reserved for its run 1c000000-0000-7000-8000-000000000002
+  -> this delivery never started a run and will not be redelivered: it has not been redelivered within 19m30s of this daemon starting, so its last delivery was most likely dead-lettered (`fq dead-letters list`)
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  fq-triggers seq 3 (an earlier incarnation of the stream, created 2025-12-29T09:20:00Z): claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; id reserved for its run 1c000000-0000-7000-8000-000000000003
+  -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; id reserved for its run 1c000000-0000-7000-8000-000000000004
+  -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
+  -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
+  fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006
+  -> the run started (in_flight) but its claim was never marked started: this daemon drops its redeliveries, and the trigger will be dead-lettered as exhausted although its run started; do not requeue that dead letter — `fq invocation show 1c000000-0000-7000-8000-000000000006`
+  fq-triggers seq 7: claimed 2026-01-02T03:11:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; no invocation id on the claim
+  -> the claim was written before claims named their run, so this report cannot tell whether it started one; not an issue
 ";
     assert!(out.contains(block), "got:\n{out}");
     assert!(
@@ -853,14 +900,45 @@ Stranded trigger claims: 4 (3 to act on) — deliveries taken off the trigger st
     );
 }
 
-/// A healthy table says so, and a claim still inside its redelivery
-/// window is listed without making the report one with issues: the
-/// runtime is about to repair it. A claim this daemon holds for a run
-/// that has not started never reaches the report at all — that is the
-/// daemon's judgement, pinned in `fq_runtime::views` — so there is
-/// nothing for the renderer to quiet.
+/// With retention off there is no horizon, and the line says it stays
+/// while the row does; a started run whose status the report did not
+/// learn is still named as started, without an empty status.
 #[test]
-fn a_claim_awaiting_redelivery_is_listed_without_becoming_an_issue() {
+fn stranded_trigger_claims_without_a_horizon_or_a_status() {
+    use fq_ops::health::ClaimHolder::ExitedProcess;
+    use fq_ops::health::ClaimedMessage::Deliverable;
+    use fq_ops::health::StrandedClaimFinding::{NeverStarted, StartedUnmarked};
+
+    let report = with_stranded_horizon(
+        vec![
+            stranded(1, ExitedProcess, Deliverable, NeverStarted, None),
+            stranded(2, ExitedProcess, Deliverable, StartedUnmarked, None),
+        ],
+        None,
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains("so this line stays while the claim row exists\n"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("  -> the run started but its claim was never marked started"),
+        "got:\n{out}"
+    );
+}
+
+/// A healthy table says so; a claim still inside its redelivery window,
+/// and one the report cannot judge, are listed without making the report
+/// one with issues. A claim this daemon holds for a run that has not
+/// started never reaches the report at all — that is the daemon's
+/// judgement, pinned in `fq_runtime::views` — so there is nothing for the
+/// renderer to quiet.
+#[test]
+fn claims_that_are_not_issues_are_listed_without_becoming_one() {
+    use fq_ops::health::ClaimHolder::ExitedProcess;
+    use fq_ops::health::ClaimedMessage::Deliverable;
+    use fq_ops::health::StrandedClaimFinding::{AwaitingRedelivery, StartUnknown};
+
     let quiet = with_stranded(Vec::new());
     assert!(!quiet.has_issues());
     let out = render_doctor_report_human(&quiet);
@@ -870,26 +948,25 @@ fn a_claim_awaiting_redelivery_is_listed_without_becoming_an_issue() {
         "got:\n{out}"
     );
 
-    let awaiting = with_stranded(vec![stranded(
-        9,
-        fq_ops::health::ClaimHolder::ExitedProcess,
-        fq_ops::health::StrandedClaimFinding::AwaitingRedelivery,
-        None,
-    )]);
-    assert!(
-        !awaiting.has_issues(),
-        "awaiting redelivery is not an issue"
-    );
-    let out = render_doctor_report_human(&awaiting);
+    let listed = with_stranded(vec![
+        stranded(8, ExitedProcess, Deliverable, AwaitingRedelivery, None),
+        stranded(9, ExitedProcess, Deliverable, StartUnknown, None),
+    ]);
+    assert!(!listed.has_issues(), "neither is an issue");
+    let out = render_doctor_report_human(&listed);
     assert!(out.contains("Verdict: All clear."), "got:\n{out}");
     assert!(
-        out.contains("Stranded trigger claims: 1 (0 to act on)"),
+        out.contains("Stranded trigger claims: 2 (0 issues)"),
         "got:\n{out}"
     );
 }
 
 #[test]
-fn the_redelivery_window_prints_in_minutes_and_seconds() {
-    assert_eq!(format_minutes(1_170_000), "19m30s");
-    assert_eq!(format_minutes(1_200_000), "20m");
+fn spans_print_in_the_largest_unit_that_states_them_exactly() {
+    use super::trigger_claims::format_span;
+    assert_eq!(format_span(1_170_000), "19m30s");
+    assert_eq!(format_span(1_200_000), "20m");
+    assert_eq!(format_span(86_400_000), "1d");
+    assert_eq!(format_span(30 * 86_400_000), "30d");
+    assert_eq!(format_span(7_200_000), "2h");
 }
