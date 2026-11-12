@@ -436,6 +436,16 @@ pub struct SimWorld {
 /// The tool name every [`SimWorld`] agent declares.
 pub const SIM_TOOL: &str = "sim_tool";
 
+/// The agent every [`SimWorld`] runs, before a constructor adds to it.
+fn sim_agent(budget: f64) -> crate::agent::AgentBuilder {
+    Agent::builder()
+        .id("sim-agent")
+        .model("claude-sim")
+        .system_prompt("You are the sim agent.")
+        .tools([SIM_TOOL])
+        .budget(budget)
+}
+
 impl SimWorld {
     /// Build a world with the given entropy seed and per-invocation
     /// budget. The agent declares one scripted tool ([`SIM_TOOL`]).
@@ -479,6 +489,20 @@ impl SimWorld {
         Self::build(seed, budget, pricing, None, Some(grant)).await
     }
 
+    /// Build a world whose agent is capped at `max_iterations` model
+    /// turns, so the harness itself ends the run with
+    /// `NextAction::Failed` (`MaxIterations`) on the turn that reaches
+    /// the cap: a `failed` the reducer decides (#946), not one a
+    /// mid-step failure site publishes.
+    pub async fn with_max_iterations(seed: u64, budget: f64, max_iterations: u32) -> Self {
+        let mut world = Self::new(seed, budget).await;
+        world.agent = sim_agent(budget)
+            .max_iterations(max_iterations)
+            .build()
+            .expect("sim agent");
+        world
+    }
+
     async fn build(
         seed: u64,
         budget: f64,
@@ -500,12 +524,7 @@ impl SimWorld {
                 .expect("sim worker store"),
         );
 
-        let agent = Agent::builder()
-            .id("sim-agent")
-            .model("claude-sim")
-            .system_prompt("You are the sim agent.")
-            .tools([SIM_TOOL])
-            .budget(budget);
+        let agent = sim_agent(budget);
         let agent = match sampling {
             Some(grant) => agent.sampling_grant(grant),
             None => agent,
@@ -2719,25 +2738,29 @@ mod crash_dst {
         }
     }
 
-    /// Phase 2 exit criterion, **lost `completed` publish** (#823): the
-    /// fault left a terminal row whose `completed` (or
-    /// `invocation.archived`) never reached the bus. One sweep must
-    /// re-emit exactly what was lost, after which the trace is the
-    /// uninterrupted run's — the outcome (task status, summary, totals)
-    /// survives the crash instead of being archived without it.
+    /// Phase 2 exit criterion, **lost `completed` publish** (#823), and
+    /// its twin for a `failed` the reducer decides (#946): the fault left
+    /// a terminal row whose terminal event (or `invocation.archived`)
+    /// never reached the bus. One sweep must re-emit exactly what was
+    /// lost, after which the trace is the uninterrupted run's — the
+    /// outcome (task status, summary, totals; or the failure's kind,
+    /// message and partial totals) survives the crash instead of being
+    /// archived without it.
     ///
-    /// A lost `completed` comes back as *the same event* the fault
-    /// refused, envelope and `event_id` included. Delivery is
-    /// at-least-once: had the original landed, JetStream's `Nats-Msg-Id`
-    /// dedup would drop the copy inside the stream's 120 s
-    /// `duplicate_window`, and past it a consumer idempotent on
-    /// `event_id` (the projection's upsert) would still see one event.
-    /// Once it is out, a further sweep (the ack still pending)
+    /// `lost_terminal` is the terminal event the fault index says was
+    /// refused (`"completed"` or `"failed"`), or `None` when the fault
+    /// fell on `invocation.archived` after it. A lost terminal event comes
+    /// back as *the same event* the fault refused, envelope and
+    /// `event_id` included. Delivery is at-least-once: had the original
+    /// landed, JetStream's `Nats-Msg-Id` dedup would drop the copy inside
+    /// the stream's 120 s `duplicate_window`, and past it a consumer
+    /// idempotent on `event_id` (the projection's upsert) would still see
+    /// one event. Once it is out, a further sweep (the ack still pending)
     /// republishes `invocation.archived` alone.
     async fn assert_lost_terminal_publish_heals(
         world: &SimWorld,
-        turns: usize,
         fault: usize,
+        lost_terminal: Option<&'static str>,
         reference: &RunResult,
         label: &str,
     ) {
@@ -2755,23 +2778,21 @@ mod crash_dst {
 
         sweeper.sweep_once(&mut warned).await.unwrap();
         let events = world.sink.events();
-        let completed_lost = fault == completed_idx(turns);
-        let want: &[&str] = if completed_lost {
-            &["completed", "invocation_archived"]
-        } else {
-            &["invocation_archived"]
-        };
+        let want: Vec<&str> = lost_terminal
+            .into_iter()
+            .chain(["invocation_archived"])
+            .collect();
         assert_eq!(
             kinds(&events[fault..]),
             want,
             "one sweep re-emits what the crash lost ({label})"
         );
-        if completed_lost {
-            assert_eq!(kinds(&lost), ["completed"], "({label})");
+        if let Some(terminal) = lost_terminal {
+            assert_eq!(kinds(&lost), [terminal], "({label})");
             assert_eq!(
                 serde_json::to_value(&events[fault]).unwrap(),
                 serde_json::to_value(&lost[0]).unwrap(),
-                "the republished `completed` is the lost event itself, event_id included ({label})"
+                "the republished `{terminal}` is the lost event itself, event_id included ({label})"
             );
         }
         if let Err(violations) = check_invocation_trace(&events) {
@@ -2793,6 +2814,26 @@ mod crash_dst {
             ["invocation_archived"],
             "a published outcome is never re-emitted ({label})"
         );
+    }
+
+    /// A fault on a terminal publish: the row is already terminal, so
+    /// resume refuses it. The archive hand-off is incomplete but
+    /// healable — the row is terminal and un-acked, so the sweeper must
+    /// pick it up, and must restore what was lost.
+    async fn assert_left_to_the_sweeper(world: &SimWorld, label: &str) {
+        let inv = world.invocation_id().to_string();
+        let err = world
+            .runner
+            .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
+            .await
+            .expect_err("terminal rows must refuse resume");
+        assert!(
+            err.to_string().contains("already terminal"),
+            "({label}) got: {err}"
+        );
+        let pending = world.store.list_archive_pending().await.unwrap();
+        assert_eq!(pending.len(), 1, "sweeper must see the row ({label})");
+        assert_eq!(pending[0].invocation_id, inv);
     }
 
     /// The full matrix at one fault point. Returns a short label of
@@ -2820,23 +2861,9 @@ mod crash_dst {
                 assert!(in_flight.is_empty(), "no residue expected ({label})");
             }
             Expect::AlreadyTerminal => {
-                let inv = world.invocation_id().to_string();
-                let err = world
-                    .runner
-                    .resume(&world.agent, &FixtureClient::new(), world.invocation_id())
-                    .await
-                    .expect_err("terminal rows must refuse resume");
-                assert!(
-                    err.to_string().contains("already terminal"),
-                    "({label}) got: {err}"
-                );
-                // The archive hand-off is incomplete but healable —
-                // the row is terminal and un-acked, so the sweeper
-                // must pick it up, and must restore what was lost.
-                let pending = world.store.list_archive_pending().await.unwrap();
-                assert_eq!(pending.len(), 1, "sweeper must see the row ({label})");
-                assert_eq!(pending[0].invocation_id, inv);
-                assert_lost_terminal_publish_heals(&world, turns, fault, reference, &label).await;
+                assert_left_to_the_sweeper(&world, &label).await;
+                let lost = (fault == completed_idx(turns)).then_some("completed");
+                assert_lost_terminal_publish_heals(&world, fault, lost, reference, &label).await;
             }
             Expect::Ambiguous => {
                 let inv = world.invocation_id().to_string();
@@ -2924,6 +2951,77 @@ mod crash_dst {
             check_fault_point(77, turns, completed_idx(turns), &reference).await,
             Expect::AlreadyTerminal
         );
+    }
+
+    /// `turns` scripted tool turns against an agent capped at `turns`
+    /// model turns: the harness ends the run itself on the last one
+    /// (`NextAction::Failed`, `MaxIterations`), before that turn's tool
+    /// runs, and the trace ends `failed` → `invocation.archived`.
+    async fn capped_world(seed: u64, turns: usize) -> (SimWorld, FixtureClient) {
+        let world = SimWorld::with_max_iterations(seed, 5.0, turns as u32).await;
+        queue_outputs(&world, turns);
+        let llm = FixtureClient::new();
+        load_fixture(&llm, &script(turns));
+        (world, llm)
+    }
+
+    /// The uninterrupted capped run, and the publish index of its `failed`.
+    async fn capped_reference(seed: u64, turns: usize) -> (RunResult, usize) {
+        let (world, llm) = capped_world(seed, turns).await;
+        let err = world.run(&llm).await.expect_err("the cap ends the run");
+        assert!(
+            matches!(
+                err,
+                ExecutorError::InvocationFailed {
+                    kind: crate::events::FailureKind::MaxIterations,
+                    ..
+                }
+            ),
+            "the reducer decides the failure, got {err:?}"
+        );
+        let events = world.sink.events();
+        let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
+        let failed_idx = kinds
+            .iter()
+            .position(|kind| *kind == "failed")
+            .expect("the capped run publishes failed");
+        assert_eq!(kinds[failed_idx..], ["failed", "invocation_archived"]);
+        let reference = RunResult {
+            observed: observational_trace(&events),
+            summary: None,
+            dispatches: world.tool.dispatches().lock().unwrap().clone(),
+        };
+        (reference, failed_idx)
+    }
+
+    /// The reducer-decided twin of the criterion above (#946). A `failed`
+    /// the harness decides — here the iteration ceiling — reaches the
+    /// loop's terminal upsert like `completed` does, so a crash at its
+    /// publish leaves a terminal row and nothing else that knows the
+    /// failure's kind, message, phase or partial totals. One sweep must
+    /// re-emit that `failed`, the lost event itself, then
+    /// `invocation.archived`. The fault on the `invocation.archived` after
+    /// it checks the other half: a `failed` that did go out is stamped,
+    /// and never re-emitted.
+    #[tokio::test]
+    async fn lost_failed_publish_is_healed_with_its_outcome() {
+        let (seed, turns) = (77, 2);
+        let (reference, failed_idx) = capped_reference(seed, turns).await;
+        for (fault, lost) in [(failed_idx, Some("failed")), (failed_idx + 1, None)] {
+            let label = format!("seed {seed}, turns {turns} capped, fault {fault}");
+            let (world, llm) = capped_world(seed, turns).await;
+            world.sink.fail_publish_at(fault);
+            let err = world.run(&llm).await.expect_err("must crash at the fault");
+            assert!(
+                matches!(err, ExecutorError::Bus(_)),
+                "expected the injected fault, got {err:?} ({label})"
+            );
+            let crash_events = world.sink.events();
+            assert_eq!(crash_events.len(), fault, "({label})");
+            assert_prefix_canonical(&crash_events, &label);
+            assert_left_to_the_sweeper(&world, &label).await;
+            assert_lost_terminal_publish_heals(&world, fault, lost, &reference, &label).await;
+        }
     }
 
     proptest::proptest! {
