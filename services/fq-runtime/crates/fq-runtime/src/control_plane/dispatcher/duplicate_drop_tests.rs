@@ -17,6 +17,9 @@
 //! the real `ReducerRunner` (the harness is `boundary_stop_tests`'s), and
 //! the broker's redelivery is brought forward with a NAK on a clone of the
 //! delivery.
+//!
+//! A third refusal is logged and counted in neither: a delivery whose
+//! adoption of a dead process's claim finds the row changed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,7 +31,7 @@ use super::CONSUMER_NAME;
 use super::boundary_stop_tests::{
     HeldSetup, StateDir, answers_to, next_delivery, one_answer, one_delivery, settled,
 };
-use super::tests::{ack_pending_stays, registry_with, unique_agent_id};
+use super::tests::{ack_pending_stays, registry_with, test_key, unique_agent_id};
 use crate::bus::EventBus;
 use crate::control_plane::TriggerClaim;
 use crate::test_support::nats::test_nats;
@@ -39,6 +42,9 @@ const HELD_DROP: &str = "dropping a redelivered trigger whose claim this daemon 
 const STARTED_DROP: &str = "dropping duplicate trigger delivery after durable start";
 /// The clause the held arm adds on a trigger's last delivery.
 const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
+/// The start of the line for a delivery whose adoption found the row
+/// changed.
+const ADOPTION_LOST: &str = "the claim it met changed before this daemon could adopt it";
 
 /// The warn lines emitted on this thread while a capture is installed.
 #[derive(Clone, Default)]
@@ -282,6 +288,104 @@ async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
     )
     .await;
     assert_eq!(model.requests().len(), 1, "the trigger ran once");
+}
+
+/// **A delivery whose adoption loses to a changed row is logged, left
+/// unanswered, and counted in neither count.**
+///
+/// The adoption is a compare-and-set on the row as it was read: still
+/// `claimed`, by the claimant the read found. If the row changed in
+/// between, the set changes nothing and the delivery is dropped. One
+/// daemon has nothing that changes a dead process's row in that gap, so
+/// the test stands in for the change: a SQLite trigger on the claim table
+/// makes every update skip its row, which is what the set sees when the
+/// row is no longer the one it read.
+#[tokio::test]
+async fn a_delivery_whose_adoption_loses_to_a_changed_row_is_logged() {
+    let server = test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let agent = unique_agent_id("adoption-lost");
+    let (_agents, registry) = registry_with(&agent);
+    let state = StateDir::new().await;
+    let model = one_answer();
+    let dispatcher = state
+        .dispatcher(
+            &bus,
+            &registry,
+            state.runner(&bus, "binary-2", None),
+            model.clone(),
+            "binary-2",
+        )
+        .await;
+    let (mut consumer, msg) = one_delivery(&bus, &agent).await;
+    let seq = msg.info().unwrap().stream_sequence;
+    let (claims, claim_db) = state.claim_store();
+    let left_behind = uuid::Uuid::now_v7();
+    assert_eq!(
+        claims
+            .claim_trigger(test_key(&bus, seq), "binary-1", &left_behind.to_string(), 0)
+            .await
+            .unwrap(),
+        TriggerClaim::Won,
+        "a process that has exited left the claim"
+    );
+    skip_every_claim_update(&claim_db).await;
+    let (_listener, mut answers) = answers_to(server.url(), &msg).await;
+
+    let log = Captured::default();
+    {
+        let _capture = log.install();
+        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&msg))
+            .await
+            .expect("the delivery is dropped");
+    }
+
+    assert!(model.requests().is_empty(), "nothing ran");
+    assert_eq!(drop_counts(&bus), (0, 0), "a lost adoption is not counted");
+    let lost = log.lines_with(ADOPTION_LOST);
+    assert_eq!(
+        lost.len(),
+        1,
+        "one line for the dropped delivery: {lost:#?}"
+    );
+    for field in [
+        format!("stream_seq={seq}"),
+        "delivered=1".to_string(),
+        format!("subject={}", crate::events::subjects::trigger(&agent)),
+        "claimant=binary-1".to_string(),
+        "claim_age_ms=".to_string(),
+        format!("claim_invocation_id={left_behind}"),
+    ] {
+        assert!(lost[0].contains(&field), "no `{field}` in {}", lost[0]);
+    }
+    ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
+    if let Ok(Some(answer)) = tokio::time::timeout(Duration::from_millis(300), answers.next()).await
+    {
+        panic!(
+            "the dropped delivery was answered with {:?}",
+            String::from_utf8_lossy(&answer.payload)
+        );
+    }
+}
+
+/// Make every update of a claim row skip its row from now on, through a
+/// connection of its own to the store's file: the update succeeds and
+/// changes nothing.
+async fn skip_every_claim_update(claim_db: &std::path::Path) {
+    use sqlx::{ConnectOptions, Connection};
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    sqlx::query(
+        "CREATE TRIGGER skip_claim_updates BEFORE UPDATE ON trigger_claim \
+         BEGIN SELECT RAISE(IGNORE); END",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("install the skip");
+    conn.close().await.expect("close the claim store's file");
 }
 
 /// **A copy that arrives after the durable start is counted as a copy of a

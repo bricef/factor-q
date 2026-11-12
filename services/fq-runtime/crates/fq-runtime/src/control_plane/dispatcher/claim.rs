@@ -385,7 +385,11 @@ impl TriggerDispatcher {
                     .note_held_duplicate_drop(CONSUMER_NAME);
                 ClaimVerdict::Stop
             }
-            TriggerClaim::Held { claimant, .. } => {
+            TriggerClaim::Held {
+                claimant,
+                invocation_id: claimed_for,
+                claimed_at,
+            } => {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 //
@@ -418,7 +422,22 @@ impl TriggerDispatcher {
                     .await
                 {
                     Ok(true) => proceed,
-                    Ok(false) => ClaimVerdict::Stop,
+                    // The row changed between the read above and this
+                    // compare-and-set, and is no longer `claimed` by that
+                    // claimant. What changed it is not on the row, so the
+                    // line names the claim as it was read and no cause.
+                    // Not counted: one daemon cannot reach this, and it is
+                    // not a duplicate of anything this daemon holds.
+                    Ok(false) => {
+                        warn!(stream_seq = seq, delivered, subject = %msg.subject,
+                            claimant = %claimant,
+                            claim_age_ms = now.saturating_sub(claimed_at),
+                            claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
+                            "dropping a redelivered trigger, and leaving it unacked: the claim it \
+                             met changed before this daemon could adopt it, and is no longer \
+                             `claimed` by that claimant");
+                        ClaimVerdict::Stop
+                    }
                     Err(err) => {
                         error!(error = %err, stream_seq = seq, "cannot adopt trigger claim");
                         ClaimVerdict::Stop

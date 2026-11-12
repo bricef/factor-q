@@ -233,6 +233,12 @@ impl StateDir {
         )
     }
 
+    /// The control-plane store the claims live in, and its file, for a
+    /// test that writes a claim itself or changes how the table behaves.
+    pub(super) fn claim_store(&self) -> (&Arc<ControlPlaneStore>, std::path::PathBuf) {
+        (&self.claims, self._dir.path().join("control-plane.db"))
+    }
+
     /// What the claim row for `seq` says, read by a claim that cannot win
     /// it while a row exists. On a row that exists the probe writes
     /// nothing; on a missing one it wins and writes one, so a probe that
