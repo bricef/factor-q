@@ -630,16 +630,21 @@ impl TriggerDispatcher {
         ));
 
         let mut acked = false;
+        let mut signal_resolved = false;
         let mut durable_start_observed = false;
         let result = loop {
             tokio::select! {
                 biased;
-                signal = &mut durably_started, if !acked => {
-                    // `Ok` = fired (first WAL write landed); `Err` = the
-                    // sender was dropped without firing (the invocation
-                    // returned before its first WAL write). Either way,
-                    // stop waiting on this branch; the ack below (on
-                    // return) covers the drop case.
+                signal = &mut durably_started, if !signal_resolved => {
+                    signal_resolved = true;
+                    // A resolved receiver panics if polled again (#987),
+                    // so this branch runs once, whatever the signal
+                    // resolved to. `Ok` = fired (first WAL write landed):
+                    // mark the claim and ack; if the mark fails, the
+                    // delivery stays un-acked and the invocation runs on.
+                    // `Err` = the sender was dropped without firing (the
+                    // invocation is ending before its first WAL write):
+                    // the settlement after the loop covers it.
                     if signal.is_ok() {
                         durable_start_observed = true;
                         acked = self.mark_durable_started(msg, &claim, trigger_id).await;
