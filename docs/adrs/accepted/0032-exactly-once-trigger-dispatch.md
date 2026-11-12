@@ -26,9 +26,9 @@ durable start ([#41](https://github.com/bricef/factor-q/issues/41)), the
 30-second first-delivery window
 ([#810](https://github.com/bricef/factor-q/issues/810)) and publish-side
 deduplication ([#825](https://github.com/bricef/factor-q/issues/825)).
-Two leftovers are open: the retry ladder
-([#953](https://github.com/bricef/factor-q/issues/953)) and an operator
-surface for the trigger-to-invocation link
+The retry ladder was finished on 2026-11-11
+([#953](https://github.com/bricef/factor-q/issues/953), closed), so one
+leftover is open: an operator surface for the trigger-to-invocation link
 ([#954](https://github.com/bricef/factor-q/issues/954)).
 [What this design does not close](#what-this-design-does-not-close)
 lists five gaps that are known and accepted with this record.
@@ -809,5 +809,7 @@ From the draft of 2026-07-19, still standing:
   with the adoption rule as it stands it is worse than unsupported: on a
   shared store it turns a redelivery into a duplicate. Nothing in the
   code refuses that deployment.
-- The retry ladder (`TRIGGER_RETRY_BACKOFF`, `[30s, 5s, 30s, 2m]` on
-  `main`) still describes itself as a stopgap for #327; #953 finishes it.
+- The retry ladder is finished (#953, closed 2026-11-11):
+  `TRIGGER_RETRY_BACKOFF` is `[30s, 2m, 5m, 12m]` on `main`, it is pacing
+  and not part of the safety argument, and a trigger that fails every
+  delivery dead-letters 19.5 minutes after its first.
