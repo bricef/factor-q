@@ -430,13 +430,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // (#278): the handle goes everywhere an invocation can come back
     // `Deferred`, the drain end goes to the dispatcher.
     let (deferrals, due_resumes) = fq_runtime::worker::DeferralQueue::new();
-    // How many invocations of each agent are running (#718): one value,
-    // shared by the dispatcher (which admits triggers against it), the
-    // recovery resumes and `invocation.resume` (which count into it
-    // without being gated), and the health reports. It has to be one
-    // value or a restart that resumed three builds would be joined by
-    // three more.
-    let agent_caps = fq_runtime::control_plane::agent_cap::AgentConcurrency::new();
     // Retry transient LLM errors (rate limits, transport failures) with
     // backoff instead of failing the whole invocation (issue #10). This is
     // the daemon path — the one the fleet actually runs on. The throttle
@@ -512,6 +505,17 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     )
     .await;
 
+    // What every run is admitted under: the worker permits and the
+    // per-agent counts (#718). One value, shared by the dispatcher (which
+    // admits triggers on both), the recovery resumes and
+    // `invocation.resume` (which count into the agents without being
+    // gated), and the health reports. The counts have to be one value or
+    // a restart that resumed three builds would be joined by three more.
+    // Its drain probe is the runner the dispatcher runs on.
+    let admission = fq_runtime::control_plane::dispatcher::RunAdmission::new(
+        resume_runner.clone(),
+        config.worker.max_concurrent_invocations,
+    );
     // Spawn auto-resume tasks for each safe-resume / safe-replay
     // invocation found by the recovery scan.
     let resume_handles = crate::recovery::spawn_resume_tasks(
@@ -522,7 +526,7 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         &bus,
         &worker_store,
         &deferrals,
-        &agent_caps,
+        &admission,
     );
 
     // Sweep workspaces whose invocation is no longer in flight (plan §1:
@@ -560,6 +564,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         throttle,
         deferrals,
         due_resumes,
-        agent_caps,
+        admission,
     })
 }

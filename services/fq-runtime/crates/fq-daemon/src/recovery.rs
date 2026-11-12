@@ -318,7 +318,7 @@ pub(crate) fn spawn_resume_tasks(
     // never gated: recovery exists to finish what was already started,
     // and refusing it would leave a half-done invocation unresumed while
     // still occupying the host's workspace.
-    agent_caps: &Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    admission: &fq_runtime::control_plane::dispatcher::RunAdmission,
 ) -> Vec<JoinHandle<()>> {
     let resume_count = recoverable.len();
     // Track the resume tasks' handles so a graceful drain (ADR-0027) can
@@ -367,7 +367,7 @@ pub(crate) fn spawn_resume_tasks(
         // Taken before the task is spawned, so the count is right the
         // instant `assemble` returns — the dispatcher must not admit a
         // trigger in the window before a resume task is scheduled.
-        let agent_slot = agent_caps.enter(agent.id(), agent.max_concurrent());
+        let agent_slot = admission.agents().enter(agent.id(), agent.max_concurrent());
         resume_handles.push(tokio::spawn(async move {
             let agent_slot = agent_slot;
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {

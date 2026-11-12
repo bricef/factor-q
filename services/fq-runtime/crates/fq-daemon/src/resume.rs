@@ -48,10 +48,11 @@ pub struct ResumeControl {
     /// Where a re-driven invocation goes if its model is still
     /// rate-limited when it gets there (#278).
     pub(crate) deferrals: fq_runtime::worker::DeferralQueue,
-    /// The per-agent in-flight count (#718). An operator re-drive is a
-    /// running invocation like any other, so it counts — but it is
-    /// never refused: the operator asked for this one by id.
-    pub(crate) agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    /// What the daemon admits runs under; the re-drive uses the per-agent
+    /// in-flight count (#718). An operator re-drive is a running
+    /// invocation like any other, so it counts — but it is never refused:
+    /// the operator asked for this one by id.
+    pub(crate) admission: fq_runtime::control_plane::dispatcher::RunAdmission,
 }
 
 impl ResumeControl {
@@ -70,7 +71,7 @@ impl ResumeControl {
         registry: SharedRegistry,
         llm: Arc<dyn LlmClient>,
         deferrals: fq_runtime::worker::DeferralQueue,
-        agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+        admission: fq_runtime::control_plane::dispatcher::RunAdmission,
     ) -> Self {
         ResumeControl {
             bus,
@@ -80,7 +81,7 @@ impl ResumeControl {
             registry,
             llm,
             deferrals,
-            agent_caps,
+            admission,
         }
     }
 }
@@ -250,7 +251,10 @@ pub(crate) async fn handle_resume_request(
     let runner = control.runner.clone();
     let llm = control.llm.clone();
     let deferrals = control.deferrals.clone();
-    let agent_slot = control.agent_caps.enter(agent.id(), agent.max_concurrent());
+    let agent_slot = control
+        .admission
+        .agents()
+        .enter(agent.id(), agent.max_concurrent());
     tokio::spawn(async move {
         let agent_slot = agent_slot;
         match runner.resume(&agent, llm.as_ref(), invocation_id).await {
