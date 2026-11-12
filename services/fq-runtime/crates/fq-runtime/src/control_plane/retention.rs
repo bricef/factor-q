@@ -70,7 +70,10 @@
 //! gone and that nothing can deliver again
 //! ([`crate::control_plane::store::ControlPlaneStore::sweep_started_trigger_claims`]
 //! has the argument). The config refuses a window shorter than that
-//! age plus a day ([`crate::config::trigger_claim_retention_floor_days`]).
+//! age plus a day ([`crate::config::trigger_claim_retention_floor_days`]),
+//! and the sweep skips one that reaches it some other way — a
+//! `StateConfig` built in code — with a warning naming the window and
+//! the floor.
 //!
 //! The same number is `fq doctor`'s horizon: the report stops
 //! listing a claim an exited process left once it is this old, the
@@ -415,8 +418,22 @@ impl RetentionSweeper {
         &self,
         now_ms: i64,
     ) -> Result<(u64, u64), super::store::ControlPlaneStoreError> {
-        let Some(cutoff_ms) = trigger_claim_cutoff_ms(now_ms, self.trigger_claim_retention_days)
-        else {
+        let days = self.trigger_claim_retention_days;
+        // Config load refuses a window below the floor, so only a
+        // `StateConfig` built in code can bring one here. Acting on it
+        // could delete a started claim whose message the stream can
+        // still deliver, so the window is skipped, loudly, every tick.
+        if let Some(floor_days) = crate::config::trigger_claim_retention_below_floor(days) {
+            warn!(
+                trigger_claim_retention_days = days,
+                floor_days,
+                "trigger-claim retention of {days} days is below its floor of {floor_days} \
+                 days; skipping the claim window rather than delete started claims whose \
+                 trigger messages the stream may still deliver"
+            );
+            return Ok((0, 0));
+        }
+        let Some(cutoff_ms) = trigger_claim_cutoff_ms(now_ms, days) else {
             return Ok((0, 0));
         };
         let started = self.store.sweep_started_trigger_claims(cutoff_ms).await?;

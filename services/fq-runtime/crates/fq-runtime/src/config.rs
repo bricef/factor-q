@@ -216,6 +216,15 @@ pub fn trigger_claim_retention_floor_days() -> i64 {
     claim_retention_floor_days(crate::bus::DEFAULT_TRIGGER_MAX_AGE)
 }
 
+/// The floor, when `days` is a claim window below it: one the config
+/// refuses at load, and the retention sweep refuses to act on if it
+/// arrives some other way. `None` for a window at or above the floor, and
+/// for `< 0`, which keeps claim rows for ever.
+pub fn trigger_claim_retention_below_floor(days: i64) -> Option<i64> {
+    let floor = trigger_claim_retention_floor_days();
+    (0..floor).contains(&days).then_some(floor)
+}
+
 /// `stream_max_age` rounded up to whole days, plus a day of margin.
 ///
 /// A claim is never older than its message, so a claim older than the
@@ -242,9 +251,8 @@ impl StateConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        let floor = trigger_claim_retention_floor_days();
         let days = self.trigger_claim_retention_days;
-        if (0..floor).contains(&days) {
+        if let Some(floor) = trigger_claim_retention_below_floor(days) {
             return Err(ConfigError::TriggerClaimRetentionBelowFloor { value: days, floor });
         }
         Ok(())

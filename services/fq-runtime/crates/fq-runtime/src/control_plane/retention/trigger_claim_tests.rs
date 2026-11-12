@@ -291,6 +291,67 @@ async fn a_sweeper_not_told_its_claimant_deletes_no_claimed_row() {
     assert!(!started.kept(&store).await);
 }
 
+/// The log lines a test's own code emits, captured in plain text.
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+/// A window below the floor never reaches the sweep through the config,
+/// which refuses it at load; a `StateConfig` built in code can still
+/// carry one. The sweep then deletes nothing, however old the claim, and
+/// says why with the window and the floor — every tick, since nothing
+/// else will.
+#[tokio::test]
+async fn a_window_below_the_floor_sweeps_no_claim_and_says_so() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (store, _dir) = fresh_store().await;
+    let started = Seed::started(1, 3 * MS_PER_DAY);
+    let abandoned = Seed::claimed(2, EXITED, 3 * MS_PER_DAY);
+    seed_all(&store, &[&started, &abandoned]).await;
+
+    for days in [0, 1] {
+        sweeper(&store, days).sweep_now().await.unwrap();
+        assert!(started.kept(&store).await, "window {days}: started claim");
+        assert!(
+            abandoned.kept(&store).await,
+            "window {days}: abandoned claim"
+        );
+        let log = captured.text();
+        assert!(
+            log.contains(&format!("trigger_claim_retention_days={days} floor_days=2")),
+            "window {days}: the warning names the window and the floor:\n{log}"
+        );
+    }
+
+    // At the floor the window is honoured.
+    sweeper(&store, 2).sweep_now().await.unwrap();
+    assert!(!started.kept(&store).await);
+    assert!(!abandoned.kept(&store).await);
+}
+
 // ---- The task ----
 
 /// The claim window keeps the task running on its own, with the other
