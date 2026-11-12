@@ -297,10 +297,12 @@ first WAL write has landed
 a duplicate dropped before durable start leaving no trace, is closed
 too: a copy that meets a claim this daemon holds with no start recorded
 used to be refused without a log line or a count, and is now logged at
-warn with its sequence, its attempt, the claim's age and the invocation
-id the claim names, and counted apart from copies of a started run.
-The log line does not say why the claim is still held, since nothing on
-it does: a first copy still waiting or starting, or a claim this daemon
+warn with its subject, sequence and attempt, the claim's age and the
+invocation id the claim names, and counted apart from copies of a
+started run (`fq status` and `fq doctor` name the two by whether the
+copy came before or after a start was recorded). The log line does not
+say why the claim has no start, since nothing on it does: a first copy
+still waiting or starting, or a claim this daemon
 will never settle (the third gap, open as
 [#967](https://github.com/bricef/factor-q/issues/967)). Both counts are
 kept in memory and start again with the daemon
