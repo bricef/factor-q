@@ -117,15 +117,26 @@ impl<'a> StoreRoot<'a> {
         match tokio::fs::metadata(self.path).await {
             Ok(meta) if meta.is_dir() => Ok(()),
             Ok(_) => Err(format!("the store root {root} is not a directory").into()),
-            Err(e) if e.kind() == ErrorKind::NotFound => match missing {
-                MissingRoot::Create => ensure_root_exists(self.path, &root).await,
-                MissingRoot::Refuse => Err(format!(
-                    "the store root {root} does not exist. Point --root or FQ_CAS_ROOT at an \
-                     existing store, or start a new one with `fq-cas object put` or \
-                     `fq-cas grant add`."
-                )
-                .into()),
-            },
+            // Not found may be a link to nothing, which no command can create
+            // through, so it gets no advice to start a store.
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                match tokio::fs::read_link(self.path).await {
+                    Ok(target) => Err(format!(
+                        "the store root {root} is a symbolic link to {}, which does not exist",
+                        target.display()
+                    )
+                    .into()),
+                    Err(_) => match missing {
+                        MissingRoot::Create => ensure_root_exists(self.path, &root).await,
+                        MissingRoot::Refuse => Err(format!(
+                            "the store root {root} does not exist. Point --root or FQ_CAS_ROOT at \
+                         an existing store, or start a new one with `fq-cas object put` or \
+                         `fq-cas grant add`."
+                        )
+                        .into()),
+                    },
+                }
+            }
             Err(e) => Err(format!("cannot use the store root {root}: {e}").into()),
         }
     }
