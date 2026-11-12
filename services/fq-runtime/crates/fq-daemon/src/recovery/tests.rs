@@ -3,7 +3,7 @@ use async_nats::jetstream::AckKind;
 use async_nats::jetstream::consumer::PullConsumer;
 use fq_runtime::agent::Agent;
 use fq_runtime::bus::{NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_STREAM_NAME};
-use fq_runtime::control_plane::dispatcher::CONSUMER_NAME;
+use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, Place};
 use fq_runtime::control_plane::{TriggerClaim, TriggerKey};
 use fq_runtime::llm::ChatResponse;
 use fq_runtime::llm::fixture::FixtureClient;
@@ -631,4 +631,439 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
         },
         "a claim whose invocation never reached the WAL is left for the redelivery to adopt"
     );
+}
+
+// ---- #994: recovery's resumes are admitted like dispatched work ----
+
+/// An agent declaring `max_concurrent: 1`.
+const CAPPED_AGENT: &str = "capped-recovery";
+
+/// A registry holding [`CAPPED_AGENT`], defined in `dir`.
+fn capped_agent_registry(dir: &std::path::Path) -> AgentRegistry {
+    let definition = dir.join(format!("{CAPPED_AGENT}.md"));
+    std::fs::write(
+        &definition,
+        format!(
+            "---\nname: {CAPPED_AGENT}\nmodel: claude-haiku\nbudget: 1.0\nmax_concurrent: 1\n\
+             ---\n\nTest agent."
+        ),
+    )
+    .unwrap();
+    let mut registry = AgentRegistry::new();
+    registry.load_file(&definition);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+    registry
+}
+
+/// The model a resumed run asks: its first call is held until the test
+/// lets it return, and every call then declares the invocation done.
+struct HeldModel {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl HeldModel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait until a run is inside its first model call.
+    async fn entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.acquire())
+            .await
+            .expect("the resumed run reached its model call")
+            .expect("entry semaphore open")
+            .forget();
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for HeldModel {
+    async fn chat(
+        &self,
+        _request: fq_runtime::ChatRequest,
+    ) -> Result<ChatResponse, fq_runtime::LlmError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.calls.fetch_add(1, SeqCst) == 0 {
+            self.entered.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("release semaphore open")
+                .forget();
+        }
+        Ok(ChatResponse {
+            parts: fq_runtime::events::assistant_parts(
+                None,
+                vec![fq_runtime::events::MessageToolCall {
+                    tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                    tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                    parameters: serde_json::json!({"status": "success", "summary": "done"}),
+                }],
+            ),
+            stop_reason: fq_runtime::events::StopReason::ToolUse,
+            usage: fq_runtime::events::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            reported_cost_usd: None,
+        })
+    }
+}
+
+/// The next daemon's start over what a daemon that stopped with one
+/// invocation of [`CAPPED_AGENT`] in flight left: its stores, its runner,
+/// and what startup recovery made of it.
+struct NextStart {
+    bus: EventBus,
+    cp_store: Arc<ControlPlaneStore>,
+    worker_store: Arc<WorkerStore>,
+    runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
+    model: Arc<HeldModel>,
+    worker_id: WorkerId,
+    /// The invocation in flight.
+    invocation: Uuid,
+    /// What recovery hands the resume path, taken once.
+    recoverable: Vec<ClassifiedInvocation>,
+    /// What recovery hands the dispatcher, taken once.
+    claims: Option<TriggerClaims>,
+    scratch: tempfile::TempDir,
+    _server: fq_test_support::NatsServer,
+}
+
+impl NextStart {
+    async fn over_one_run_in_flight() -> Self {
+        let server = fq_test_support::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let scratch = tempfile::tempdir().unwrap();
+        let cp_store = Arc::new(
+            ControlPlaneStore::open(&scratch.path().join("control-plane.db"))
+                .await
+                .expect("open the control-plane store"),
+        );
+        let worker_store = Arc::new(
+            WorkerStore::open(&scratch.path().join("worker.db"))
+                .await
+                .expect("open the worker store"),
+        );
+        let invocation = Uuid::now_v7();
+        let mut row = first_wal_row(&invocation.to_string());
+        row.agent_id = CAPPED_AGENT.to_string();
+        worker_store.upsert_invocation_state(&row).await.unwrap();
+
+        let runtime_id = Uuid::now_v7();
+        let worker_id = WorkerId::new(runtime_id.to_string()).unwrap();
+        let Recovered {
+            recoverable,
+            claims,
+            ..
+        } = classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
+            .await
+            .expect("startup recovery");
+        assert_eq!(
+            recoverable.len(),
+            1,
+            "the invocation in flight is recovered as a safe resume"
+        );
+
+        let mut pricing = std::collections::HashMap::new();
+        pricing.insert(
+            "claude-haiku".to_string(),
+            fq_runtime::ModelPricing {
+                input_per_million: 1.0,
+                output_per_million: 5.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+                cache_write_1h_per_million: None,
+            },
+        );
+        let runner = Arc::new(fq_runtime::ReducerRunner::new(
+            Arc::new(
+                fq_runtime::ReducerContext::builder()
+                    .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                fq_runtime::RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
+                    .store(worker_store.clone())
+                    .worker_id(worker_id.clone())
+                    .build(),
+            ),
+            fq_runtime::Harness::new(),
+        ));
+        Self {
+            bus,
+            cp_store,
+            worker_store,
+            runner,
+            model: HeldModel::new(),
+            worker_id,
+            invocation,
+            recoverable,
+            claims: Some(claims),
+            scratch,
+            _server: server,
+        }
+    }
+
+    /// Hand the recovered run to the real resume path, as `assemble` does.
+    async fn spawn_resumes(&mut self, admission: &RunAdmission) -> Vec<JoinHandle<()>> {
+        let llm: Arc<dyn LlmClient> = self.model.clone();
+        spawn_resume_tasks(
+            std::mem::take(&mut self.recoverable),
+            &capped_agent_registry(self.scratch.path()),
+            &self.runner,
+            &llm,
+            &self.bus,
+            &self.worker_store,
+            &fq_runtime::worker::DeferralQueue::new().0,
+            admission,
+        )
+        .await
+    }
+
+    /// The dispatcher the daemon starts after recovery, sharing
+    /// `admission`, over a stand-in worker that records what it starts.
+    fn start_dispatcher(
+        &mut self,
+        admission: &RunAdmission,
+        worker: Arc<RestartedWorker>,
+    ) -> (
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    ) {
+        let dispatcher = TriggerDispatcher::new(
+            self.bus.clone(),
+            shared_registry(capped_agent_registry(self.scratch.path())),
+            worker,
+            Arc::new(FixtureClient::new()),
+            admission.workers().max_concurrent(),
+        )
+        .with_caps_and_claims(
+            admission.clone(),
+            self.claims.take().expect("one dispatcher per start"),
+            self.worker_id.as_str(),
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        (shutdown, tokio::spawn(dispatcher.run(shutdown_rx)))
+    }
+
+    /// The invocation's WAL row, which nothing has written since the
+    /// daemon stopped, and which the next start must find in flight again.
+    async fn assert_left_for_the_next_start(&self) {
+        let row = self
+            .worker_store
+            .get_invocation_state(&self.invocation.to_string())
+            .await
+            .unwrap()
+            .expect("the WAL row is still there");
+        assert_eq!(row.terminal_at, None, "not ended");
+        assert_eq!(row.updated_at, 1_000, "not written: nothing resumed it");
+        let runtime_id = Uuid::now_v7();
+        let again = classify_in_flight(
+            &self.worker_store,
+            &self.cp_store,
+            &self.bus,
+            runtime_id,
+            &WorkerId::new(runtime_id.to_string()).unwrap(),
+        )
+        .await
+        .expect("the next start's recovery");
+        assert_eq!(
+            again
+                .recoverable
+                .iter()
+                .map(|c| c.state.invocation_id.clone())
+                .collect::<Vec<_>>(),
+            [self.invocation.to_string()],
+            "the next start resumes it"
+        );
+    }
+}
+
+/// How the daemon stops while a recovered run waits.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    /// `fq down` or SIGTERM: the runner drains.
+    Drain,
+    /// Ctrl-C, `fq down --now`, or a failed task: the dispatcher's loop
+    /// sees its shutdown signal, with no drain.
+    Shutdown,
+}
+
+/// **#994: a recovered run waits for a worker permit, and a stop ends the
+/// wait cleanly.** At a worker cap of 1 with the permit held, the run
+/// startup recovery found is queued, not resumed — while counting against
+/// its agent — and a drain or a shutdown ends its task within a keepalive
+/// tick, gives its agent's slot back and leaves its WAL row exactly as it
+/// was, for the next start to resume.
+async fn a_waiting_recovered_run_lets_go_on(stop: Stop) {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let (shutdown, dispatcher) =
+        start.start_dispatcher(&admission, Arc::new(RestartedWorker::default()));
+    // The worker cap is full: a run this test stands in for holds the
+    // only permit.
+    let running = match admission.workers().queue(Waiter::Trigger(None)).await {
+        Place::Admitted(permit) => permit,
+        other => panic!("the permit is free at start: {other:?}"),
+    };
+    let mut handles = start.spawn_resumes(&admission).await;
+    let resume = handles.pop().expect("one resume task");
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !resume.is_finished() && !start.runner.is_active(&start.invocation),
+        "the recovered run waits for the only permit rather than running beside its holder"
+    );
+    assert_eq!(start.model.calls(), 0, "and has not asked the model");
+    let agent = AgentId::new(CAPPED_AGENT).unwrap();
+    assert_eq!(
+        admission.agents().in_flight(&agent),
+        1,
+        "it counts against its agent while it waits"
+    );
+
+    let mut shutdown = Some(shutdown);
+    match stop {
+        Stop::Drain => {
+            start
+                .runner
+                .request_drain(DrainRequest::new(fq_runtime::worker::DrainReason::Deploy))
+                .await;
+        }
+        Stop::Shutdown => {
+            let _ = shutdown.take().expect("not sent yet").send(());
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), resume)
+        .await
+        .unwrap_or_else(|_| panic!("a {stop:?} ends the wait within a keepalive tick"))
+        .expect("the resume task joins");
+    assert_eq!(start.model.calls(), 0, "it never ran");
+    assert_eq!(
+        admission.agents().in_flight(&agent),
+        0,
+        "its agent's slot is given back"
+    );
+    start.assert_left_for_the_next_start().await;
+
+    drop(running);
+    // The stand-in worker the dispatcher runs on never drains — the
+    // runner the admission asks is the one that did — so a drained run
+    // still sends the dispatcher its shutdown here.
+    if let Some(shutdown) = shutdown {
+        let _ = shutdown.send(());
+    }
+    tokio::time::timeout(Duration::from_secs(10), dispatcher)
+        .await
+        .expect("the dispatcher exits")
+        .expect("its task joins")
+        .expect("and it exits cleanly");
+}
+
+#[tokio::test]
+async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_drain() {
+    a_waiting_recovered_run_lets_go_on(Stop::Drain).await;
+}
+
+#[tokio::test]
+async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_shutdown() {
+    a_waiting_recovered_run_lets_go_on(Stop::Shutdown).await;
+}
+
+/// **#994 with #718: the per-agent cap bounds a recovered run plus a
+/// dispatched one.** Two worker permits, so the only thing that can hold a
+/// trigger for [`CAPPED_AGENT`] (`max_concurrent: 1`) while its recovered
+/// run is in flight is that cap. The trigger is held — counted as waiting,
+/// with a worker permit free — until the recovered run ends, and then
+/// starts.
+#[tokio::test]
+async fn a_recovered_run_and_a_trigger_for_its_agent_do_not_run_at_once() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 2);
+    let mut resumes = start.spawn_resumes(&admission).await;
+    start.model.entered().await;
+    assert!(
+        start.runner.is_active(&start.invocation),
+        "the recovered run is resumed and inside its model call"
+    );
+
+    let dispatched = Arc::new(RestartedWorker::default());
+    let (shutdown, dispatcher) = start.start_dispatcher(&admission, dispatched.clone());
+    let agent = AgentId::new(CAPPED_AGENT).unwrap();
+    start
+        .bus
+        .publish_trigger(
+            &agent,
+            &serde_json::json!({ "input": "beside the recovered run" }),
+        )
+        .await
+        .expect("publish a trigger");
+    let deadline = Instant::now() + POLL * MAX_POLLS;
+    while !admission
+        .agents()
+        .snapshot()
+        .iter()
+        .any(|a| a.agent == CAPPED_AGENT && a.held == 1)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the trigger was never held at its agent's cap: {:?}",
+            admission.agents().snapshot()
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        dispatched.starts().is_empty(),
+        "a trigger for the recovered run's agent started beside it, past `max_concurrent: 1`"
+    );
+    assert_eq!(
+        admission.workers().in_flight(),
+        1,
+        "with a worker permit free: the agent's cap is what holds it"
+    );
+
+    start.model.release();
+    tokio::time::timeout(Duration::from_secs(10), resumes.pop().expect("one resume"))
+        .await
+        .expect("the recovered run finishes once its model call returns")
+        .expect("its task joins");
+    let deadline = Instant::now() + POLL * MAX_POLLS;
+    while dispatched.starts().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the held trigger never started after the recovered run ended"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    assert_eq!(dispatched.starts().len(), 1);
+
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(10), dispatcher)
+        .await
+        .expect("the dispatcher exits")
+        .expect("its task joins")
+        .expect("and it exits cleanly");
 }
