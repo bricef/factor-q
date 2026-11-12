@@ -71,8 +71,9 @@ impl InvocationStateRow {
     /// The terminal event this row still owes the bus: its stored outcome,
     /// unless `terminal_published_at` says it already went out. `None` for
     /// a row that stored none — an operator drop, a mid-step `failed`
-    /// (published before the row was marked), or a row written before v12
-    /// — whose sweep is `invocation.archived` alone.
+    /// (published before the row was marked), a reducer-decided `failed`
+    /// written by a build before #946, or a row written before v12 —
+    /// whose sweep is `invocation.archived` alone.
     /// `Err` when the stored event must not be published (see the module
     /// doc).
     pub(crate) fn unpublished_terminal_event(&self) -> Result<Option<Event>, HoldReason> {
