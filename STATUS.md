@@ -265,11 +265,17 @@ retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
 durable retries after 30 seconds, then 2, 5 and 12 minutes, and
 dead-letters a trigger that fails every delivery 19.5 minutes after its
-first. What remains of this as Phase 2 work is an operator surface for
-the trigger-to-invocation link
-([#954](https://github.com/bricef/factor-q/issues/954)); the claim
-table has no retention, which is a Phase 3 bounded-growth item, and
-ADR-0032 lists the gaps the design knowingly leaves open. The first of
+first. The trigger-to-invocation link is readable
+([#954](https://github.com/bricef/factor-q/issues/954)): `fq invocation
+show` names the delivery that started a run, and `fq doctor` lists
+claimed deliveries that never settled, by what the claim, the stores
+and the stream can show (a delivery that never started a run, a run
+whose claim was never marked), while never reporting a claim the
+running daemon holds for a run that has not started. The claim table
+has no retention or index, which is a Phase 3 bounded-growth item
+([#969](https://github.com/bricef/factor-q/issues/969)): `fq doctor`
+stops listing a dead claim at the retention window, but nothing
+deletes it. ADR-0032 lists the gaps the design knowingly leaves open. The first of
 them no longer is: a daemon that died between an invocation's first WAL
 write and its claim being marked started used to have the redelivered
 trigger run a second time beside the resumed invocation. The claim row
