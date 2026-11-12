@@ -145,8 +145,8 @@ async fn seed(cp: &ControlPlaneStore, first_seq: u64, finished: u64, unsettled: 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_operator_read_scans_the_claim_table_once_per_row() {
     let statements = Statements::default();
-    let only_statements =
-        tracing_subscriber::filter::Targets::new().with_target("sqlx::query", tracing::Level::DEBUG);
+    let only_statements = tracing_subscriber::filter::Targets::new()
+        .with_target("sqlx::query", tracing::Level::DEBUG);
     tracing::subscriber::set_global_default(
         tracing_subscriber::registry().with(statements.clone().with_filter(only_statements)),
     )
@@ -162,7 +162,10 @@ async fn no_operator_read_scans_the_claim_table_once_per_row() {
         .await
         .unwrap();
     cp.mark_trigger_started(key(1), "live").await.unwrap();
-    worker.upsert_invocation_state(&wal_row("live")).await.unwrap();
+    worker
+        .upsert_invocation_state(&wal_row("live"))
+        .await
+        .unwrap();
     seed(&cp, 2, 3, 1).await;
     let views = Views::open(&paths).await.unwrap();
     let judgement = ClaimJudgement {

@@ -2,10 +2,10 @@
 //! on its own, then both reads against real stores.
 
 use super::*;
+use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::store::{
     ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey,
 };
-use crate::control_plane::projection::ProjectionStore;
 use crate::db::RuntimeDbPaths;
 use crate::views::DEFAULT_LONG_DISPATCH_THRESHOLD_MS;
 use crate::worker::store::{InvocationStateRow, WorkerStore};
@@ -242,7 +242,12 @@ impl Seed {
             .await
             .unwrap();
         self.cp
-            .upsert_invocation_ownership(invocation_id, "worker", at + 2_000, OwnerStatus::Completed)
+            .upsert_invocation_ownership(
+                invocation_id,
+                "worker",
+                at + 2_000,
+                OwnerStatus::Completed,
+            )
             .await
             .unwrap();
     }
@@ -272,10 +277,12 @@ async fn detail(views: &Views, invocation_id: &str) -> crate::views::InvocationD
 #[tokio::test]
 async fn the_invocation_view_names_the_delivery_that_started_it() {
     let seed = Seed::new().await;
-    seed.started(41, THIS_DAEMON, "inv-live", NOW_MS - 5_000).await;
+    seed.started(41, THIS_DAEMON, "inv-live", NOW_MS - 5_000)
+        .await;
     seed.wal("inv-live", NOW_MS - 4_000, None).await;
     seed.wal("inv-direct", NOW_MS - 4_000, None).await;
-    seed.started(42, EXITED, "inv-archived", NOW_MS - HOUR_MS).await;
+    seed.started(42, EXITED, "inv-archived", NOW_MS - HOUR_MS)
+        .await;
     seed.archived("inv-archived", NOW_MS - HOUR_MS).await;
     let views = seed.views().await;
 
@@ -348,7 +355,8 @@ async fn a_healthy_table_and_a_held_trigger_report_nothing() {
 async fn stranded_claims_are_judged_from_the_stores() {
     let seed = Seed::new().await;
     // Started and marked: never listed.
-    seed.started(1, EXITED, "inv-ok", NOW_MS - 9 * HOUR_MS).await;
+    seed.started(1, EXITED, "inv-ok", NOW_MS - 9 * HOUR_MS)
+        .await;
     // Left by an exited process, nothing recorded of its run.
     seed.claimed(2, EXITED, "inv-never", NOW_MS - 8 * HOUR_MS)
         .await;
@@ -408,10 +416,7 @@ async fn stranded_claims_are_judged_from_the_stores() {
     // The same table, asked by a daemon that has only just started: the
     // claim with nothing recorded is still due its redelivery, and is
     // listed without being an issue.
-    let early = views
-        .stranded_trigger_claims(&judgement(0))
-        .await
-        .unwrap();
+    let early = views.stranded_trigger_claims(&judgement(0)).await.unwrap();
     assert_eq!(early[0].delivery.stream_seq, 2);
     assert_eq!(early[0].finding, StrandedClaimFinding::AwaitingRedelivery);
 }
