@@ -52,6 +52,7 @@ mod claim;
 mod dead_letter;
 mod deferral;
 
+use claim::Marking;
 pub use claim::TriggerClaims;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -669,7 +670,9 @@ impl TriggerDispatcher {
                     // before its first WAL write): settled after the loop.
                     if signal.is_ok() {
                         durable_start_observed = true;
-                        acked = self.mark_durable_started(msg, &claim, trigger_id).await;
+                        acked = self
+                            .mark_durable_started(msg, &claim, trigger_id, Marking::WhileRunning)
+                            .await;
                         if !acked {
                             return;
                         }
@@ -678,6 +681,18 @@ impl TriggerDispatcher {
                 outcome = &mut invocation => break outcome,
             }
         };
+
+        // An invocation can fire the signal and return in one poll, and the
+        // loop then ends on the result without seeing the signal (#966).
+        // Asked once more, a fired signal is a durable start like any other.
+        // A failed mark here has no run left to stop and settles nothing:
+        // the delivery stays un-acked and the claim `claimed` (see #967).
+        if !signal_resolved && durably_started.try_recv().is_ok() {
+            durable_start_observed = true;
+            acked = self
+                .mark_durable_started(msg, &claim, trigger_id, Marking::AfterReturn)
+                .await;
+        }
 
         // The invocation returned before the durable-start signal fired,
         // so the run left nothing durable behind: the trigger's fate is

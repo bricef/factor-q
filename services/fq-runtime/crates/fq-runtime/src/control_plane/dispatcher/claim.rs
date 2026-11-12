@@ -37,6 +37,18 @@ pub(super) struct Claimed {
     pub(super) invocation_id: uuid::Uuid,
 }
 
+/// Where the invocation is when `handle` marks its durable start, which
+/// decides what a failed mark leaves (`mark_durable_started`).
+#[derive(Clone, Copy)]
+pub(super) enum Marking {
+    /// Still running: `handle` saw the signal fire inside its loop.
+    WhileRunning,
+    /// Already returned: the invocation fired the signal and returned in
+    /// one poll, and `handle` found the signal fired only after its loop
+    /// had ended on the result (#966).
+    AfterReturn,
+}
+
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
 /// only way to get one is [`TriggerClaims::recover`], which first records
 /// the durable start of every invocation a worker reported in flight.
@@ -140,12 +152,14 @@ impl TriggerDispatcher {
     }
 
     /// Record the delivery's durable start on its claim, then ack it.
-    /// Returns whether it did. On `false`, `handle` stops driving the
-    /// invocation and returns, neither acking nor NAKing the delivery.
+    /// Returns whether it did. On `false` the delivery is neither acked
+    /// nor NAKed and the claim stays `claimed`. What becomes of the run
+    /// depends on `marking`, and the failure is logged accordingly.
     ///
-    /// Stopping is the safe answer to a failed mark. The invocation has
-    /// made its first WAL write, so dropping it leaves its WAL row in
-    /// flight: the next start's recovery marks this claim
+    /// [`Marking::WhileRunning`]: `handle` stops driving the invocation
+    /// and returns. Stopping is the safe answer to a failed mark. The
+    /// invocation has made its first WAL write, so dropping it leaves its
+    /// WAL row in flight: the next start's recovery marks this claim
     /// ([`TriggerClaims::recover`]) and resumes the run once, and the
     /// trigger's redelivery then meets a `durably_started` row and is
     /// dropped. Until that start, redeliveries meet this process's own
@@ -159,11 +173,21 @@ impl TriggerDispatcher {
     /// the trigger a second time. Whether a failed mark should instead be
     /// retried, or the run continued with recovery also marking finished
     /// runs, is for #967 to decide.
+    ///
+    /// [`Marking::AfterReturn`]: there is no run left to stop, and
+    /// `handle` settles nothing. The settlement for a run that never
+    /// started would release the claim, and NAK a transient error, so the
+    /// next delivery would win a fresh claim and start the work again.
+    /// What is left is a returned run under a claim still `claimed` and an
+    /// un-acked delivery. If the run ended at a terminal WAL row, that is
+    /// the state the paragraph above avoids for a running one, and it is
+    /// left to #967 as well.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
+        marking: Marking,
     ) -> bool {
         let Claimed {
             stream_seq,
@@ -174,9 +198,15 @@ impl TriggerDispatcher {
                 .mark_trigger_started(self.trigger_key(stream_seq), &invocation_id.to_string())
                 .await
         {
-            error!(error = %err, stream_seq, %invocation_id,
-                "failed to mark trigger durably started; stopping the run here, un-acked: \
-                 its WAL row stays in flight and the next start resumes it once");
+            match marking {
+                Marking::WhileRunning => error!(error = %err, stream_seq, %invocation_id,
+                    "failed to mark trigger durably started; stopping the run here, un-acked: \
+                     its WAL row stays in flight and the next start resumes it once"),
+                Marking::AfterReturn => error!(error = %err, stream_seq, %invocation_id,
+                    "failed to mark trigger durably started after its invocation returned; \
+                     leaving it un-acked and its claim `claimed`, because settling it as never \
+                     started would start the work again (see #967)"),
+            }
             return false;
         }
         self.ack(msg, Some(trigger_id), "durably started").await;
