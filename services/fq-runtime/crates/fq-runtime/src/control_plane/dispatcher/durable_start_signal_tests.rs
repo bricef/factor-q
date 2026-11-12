@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use super::TriggerDispatcher;
 use super::tests::{
-    canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
+    ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
     unique_consumer_name,
 };
 use crate::agent::{Agent, AgentId};
@@ -210,7 +210,7 @@ impl Pulled {
     async fn handle(&self) {
         tokio::time::timeout(Duration::from_secs(10), self.dispatcher.handle(&self.msg))
             .await
-            .expect("handle returns once the invocation has");
+            .expect("handle returns");
     }
 
     fn ran_to_end(&self) -> bool {
@@ -244,7 +244,9 @@ async fn a_dropped_signal_then_a_transient_error_naks_the_trigger() {
         TriggerClaim::Won,
         "the NAK released the claim, so a fresh claim on the delivery wins"
     );
-    let redelivery = TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(3);
+    // Only waits for a message to arrive, so a wide margin costs nothing
+    // when the test passes.
+    let redelivery = TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(10);
     let again = tokio::time::timeout(redelivery, pulled.messages.next())
         .await
         .expect("the NAKed trigger comes back for redelivery")
@@ -297,17 +299,25 @@ async fn a_dropped_signal_then_a_clean_return_acks_the_trigger() {
 }
 
 /// The signal fires and the claim store's mark fails: `handle` must not
-/// poll the spent receiver again, and the invocation, still running when
-/// the mark failed, runs to its end. What a failed mark leaves behind (a
-/// `claimed` row and an un-acked delivery) is #967's subject, not this
-/// test's; the row is read here only to show the mark did fail.
+/// poll the spent receiver again, and it stops the run there. It returns
+/// without driving the invocation any further, leaving the claim
+/// `claimed` and the delivery un-acked, so the invocation's in-flight WAL
+/// row is the next start's to resume (`mark_durable_started` says why;
+/// see #967 for the alternatives).
 #[tokio::test]
-async fn a_failed_mark_after_the_signal_fires_leaves_the_invocation_running() {
-    let pulled = Pulled::new(Resolve::FireIntoRefusedMark, Returns::Completed).await;
+async fn a_failed_mark_after_the_signal_fires_stops_the_run() {
+    let mut pulled = Pulled::new(Resolve::FireIntoRefusedMark, Returns::Completed).await;
 
     pulled.handle().await;
 
-    assert!(pulled.ran_to_end(), "the invocation ran to its end");
+    // Deterministic, not a race: the stub fires the signal and yields,
+    // and under `biased` the next turn of `handle`'s loop takes the
+    // signal branch before it polls the invocation again. The failed mark
+    // returns from that branch, so the stub never resumes past its yield.
+    assert!(
+        !pulled.ran_to_end(),
+        "the invocation was driven on after its mark failed"
+    );
     assert_eq!(
         pulled.probe_claim().await,
         TriggerClaim::Held {
@@ -315,4 +325,5 @@ async fn a_failed_mark_after_the_signal_fires_leaves_the_invocation_running() {
         },
         "the mark was refused, so the claim is still `claimed` by the dispatcher"
     );
+    ack_pending_stays(&mut pulled.consumer, 1, Duration::from_millis(300)).await;
 }
