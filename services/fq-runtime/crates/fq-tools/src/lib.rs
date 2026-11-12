@@ -12,6 +12,6 @@ pub mod output_cap;
 pub mod sandbox;
 pub mod tool;
 
-pub use output_cap::{cap_output, human_bytes};
+pub use output_cap::{cap_output, human_bytes, json_encoded_len};
 pub use sandbox::{SandboxError, ToolSandbox};
 pub use tool::{Tool, ToolCallIdentity, ToolContext, ToolError, ToolResult};
