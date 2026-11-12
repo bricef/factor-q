@@ -118,10 +118,10 @@ pub(crate) struct Assembled {
     pub deferrals: fq_runtime::worker::DeferralQueue,
     pub due_resumes: tokio::sync::mpsc::Receiver<fq_runtime::worker::DueResume>,
     /// What every run is admitted under: the worker permits and the
-    /// per-agent counts (#718). Startup recovery has already counted the
-    /// runs it resumed into the agents; the dispatcher admits triggers on
-    /// both, `invocation.resume` counts like recovery, and the health
-    /// reports read the counts.
+    /// per-agent counts (#718, #994). Startup recovery has already queued
+    /// its resumes on the permits and counted them into the agents; the
+    /// dispatcher admits triggers on both, `invocation.resume` queues
+    /// like recovery, and the health reports read the counts.
     pub admission: fq_runtime::control_plane::dispatcher::RunAdmission,
 }
 

@@ -4113,7 +4113,7 @@
         "scope": "invocation",
         "verb": "write"
       },
-      "description": "Only an invocation that crashed mid-tool-call can be resumed. A refusal is an error, not a receipt: it names which precondition failed — terminal, live, already resumed, or unknown — because those are four different things for an operator to do next. Success is a receipt; the re-drive runs detached, so the invocation is still working when this returns.",
+      "description": "Only an invocation that crashed mid-tool-call can be resumed. A refusal is an error, not a receipt: it names which precondition failed — terminal, live, already resumed, or unknown — because those are four different things for an operator to do next. Success is a receipt; the re-drive is admitted under the worker cap like any other run — at once if a worker permit is free, otherwise in its turn — and runs detached, so the invocation may still be waiting, or still working, when this returns.",
       "domain": "invocation",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

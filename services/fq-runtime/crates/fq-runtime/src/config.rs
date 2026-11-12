@@ -324,11 +324,11 @@ pub struct WorkerConfig {
     /// How many invocations one daemon runs concurrently (#70, the
     /// parallel-workers plan). Default 1 — the serial behavior — until
     /// the Phase-2 concurrent recovery/drain/shutdown gate is green.
-    /// Bounds *dispatcher-run* invocations only: startup recovery has
-    /// always resumed every recoverable invocation concurrently and is
-    /// not gated by this. Until a fleet-level cost cap lands (#42),
-    /// this is the only steady-state concurrency spend guardrail, so
-    /// raise deliberately.
+    /// Bounds every running invocation — triggered, deferred, resumed by
+    /// startup recovery or by `fq invocation resume` — because each takes
+    /// a permit from the dispatcher's one queue first (#994). Until a
+    /// fleet-level cost cap lands (#42), this is the only steady-state
+    /// concurrency spend guardrail, so raise deliberately.
     #[serde(default = "default_max_concurrent_invocations")]
     pub max_concurrent_invocations: usize,
     /// Override the derived stuck threshold (see [`Config::stuck_after`]),

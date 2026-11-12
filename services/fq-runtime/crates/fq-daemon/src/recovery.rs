@@ -7,7 +7,9 @@
 //! the points they used to occupy — the order is load-bearing. Reconciliation
 //! runs before classification so a pre-existing orphan cannot be reported
 //! ambiguous again, and the resume tasks are spawned only after the runner
-//! that drives them exists. The claim marks must land before the trigger
+//! that drives them exists, and queued for a worker permit before the
+//! dispatcher is constructed, which puts every one of them ahead of every
+//! trigger (#994). The claim marks must land before the trigger
 //! dispatcher consumes anything (#959), or it could meet the redelivery of a
 //! trigger whose invocation is in flight while its claim still read
 //! `claimed`, and start the trigger a second time. That order is held by
@@ -19,10 +21,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use fq_runtime::agent::{AgentId, AgentRegistry};
-use fq_runtime::control_plane::dispatcher::TriggerClaims;
+use fq_runtime::control_plane::dispatcher::{RunAdmission, TriggerClaims, Waiter};
 use fq_runtime::events::{Event, EventPayload};
 use fq_runtime::llm::LlmClient;
-use fq_runtime::worker::{ClassifiedInvocation, WorkerId};
+use fq_runtime::worker::{ClassifiedInvocation, ExecutorError, ResumeError, WorkerId};
 use fq_runtime::{ControlPlaneStore, EventBus, WorkerStore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -290,19 +292,27 @@ pub(crate) async fn classify_in_flight(
     })
 }
 
-/// Spawn one detached auto-resume task per safe-resume / safe-replay
-/// invocation. Ambiguous cases were already surfaced; safe cases proceed
-/// automatically, and a failure in one does not stop the others.
+/// Queue one auto-resume per safe-resume / safe-replay invocation for a
+/// worker permit, in the order the scan found them, and spawn the task
+/// that runs it once its permit comes. Ambiguous cases were already
+/// surfaced; safe cases proceed automatically, and a failure in one does
+/// not stop the others.
+///
+/// Called before the dispatcher exists, so every resume queued here is
+/// ahead of every trigger for a permit: the first
+/// `max_concurrent_invocations` start at once, the rest wait their turn,
+/// and the first trigger waits behind them all (#994).
 ///
 /// The handles come back so a graceful drain (ADR-0027) can wait for them
-/// to suspend at a step boundary before exiting. On a signal-driven
-/// shutdown they stay detached, as they always have.
+/// to suspend at a step boundary — or, still queued, to let go of their
+/// place — before exiting. On a signal-driven shutdown they stay
+/// detached, as they always have.
 // Eight shared runtime handles, each of which a resume task genuinely
 // needs; grouping them into a struct would only move the same list one
 // line up. `ResumeControl::new` next door carries the same allow for
 // the same reason.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_resume_tasks(
+pub(crate) async fn spawn_resume_tasks(
     recoverable: Vec<ClassifiedInvocation>,
     registry: &AgentRegistry,
     resume_runner: &Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
@@ -313,14 +323,13 @@ pub(crate) fn spawn_resume_tasks(
     // is still rate-limited — and goes back on the queue the dispatcher
     // drains, rather than being logged and forgotten.
     deferrals: &fq_runtime::worker::DeferralQueue,
-    // A resumed invocation is running work, so it counts against its
-    // agent's `max_concurrent` for as long as it runs (#718). Counted,
-    // never gated: recovery exists to finish what was already started,
-    // and refusing it would leave a half-done invocation unresumed while
-    // still occupying the host's workspace.
-    admission: &fq_runtime::control_plane::dispatcher::RunAdmission,
+    // The worker permit each resume queues for (#994), and the agent
+    // count it enters (#718). The count is taken at once and never gated:
+    // recovery exists to finish what was already started.
+    admission: &RunAdmission,
 ) -> Vec<JoinHandle<()>> {
     let resume_count = recoverable.len();
+    let mut waiting = 0;
     // Track the resume tasks' handles so a graceful drain (ADR-0027) can
     // wait for them to suspend at a step boundary before exiting. On a
     // signal-driven shutdown they stay detached (abandoned, as before).
@@ -366,10 +375,23 @@ pub(crate) fn spawn_resume_tasks(
         let deferrals = deferrals.clone();
         // Taken before the task is spawned, so the count is right the
         // instant `assemble` returns — the dispatcher must not admit a
-        // trigger in the window before a resume task is scheduled.
+        // trigger in the window before a resume task is scheduled. It is
+        // held while the resume waits for its permit, as a trigger's slot
+        // is: a slot is intent to run.
         let agent_slot = admission.agents().enter(agent.id(), agent.max_concurrent());
+        // Its place in the permits' queue, taken here and now rather than
+        // when the task is first polled: that is what puts it ahead of
+        // the dispatcher's first trigger by construction.
+        let place = admission.workers().queue(Waiter::Recovered(inv_id)).await;
+        waiting += usize::from(place.is_queued());
         resume_handles.push(tokio::spawn(async move {
             let agent_slot = agent_slot;
+            // `None` is a drain or shutdown before its turn came, logged
+            // by the wait itself: the WAL row is untouched, and the next
+            // start's recovery finds it in flight again.
+            let Some(_permit) = place.permit().await else {
+                return;
+            };
             match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
                 // The slot goes on the queue with the resume (#718): a
                 // recovered invocation that defers again is still one of
@@ -383,6 +405,18 @@ pub(crate) fn spawn_resume_tasks(
                     invocation_id = %inv_id,
                     ?outcome,
                     "resume completed"
+                ),
+                // Ended while it waited for its permit — an operator's
+                // `fq invocation drop` reaches a queued run, which this
+                // runner is not driving yet, and the archive hand-off may
+                // have deleted the row since. Nothing is ambiguous about
+                // it, and reporting it so would turn a dropped invocation
+                // back into one awaiting triage.
+                Err(ExecutorError::Resume(
+                    ResumeError::AlreadyTerminal { .. } | ResumeError::NoStateRow { .. },
+                )) => tracing::info!(
+                    invocation_id = %inv_id,
+                    "recovered invocation ended before its turn to resume; nothing to resume"
                 ),
                 Err(err) => {
                     let note = format!("automatic resume failed: {err}");
@@ -406,6 +440,12 @@ pub(crate) fn spawn_resume_tasks(
     }
     if resume_count > 0 {
         println!("  resume tasks:     {resume_count} spawned");
+    }
+    if waiting > 0 {
+        let cap = admission.workers().max_concurrent();
+        println!(
+            "  resumes waiting:  {waiting} for a worker permit (max_concurrent_invocations = {cap})"
+        );
     }
     resume_handles
 }
