@@ -17,7 +17,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::agent::{CapabilityValidation, ElicitationGrant, RootsGrant, SamplingGrant};
-use crate::events::ToolCallId;
+use crate::events::{EventKind, ToolCallId};
 use crate::worker::WorkerId;
 
 /// The fixed sentinel every host-notice body is wrapped in
@@ -342,6 +342,14 @@ pub struct FailedPayload {
     pub error_message: String,
     pub phase: FailurePhase,
     pub partial_totals: InvocationTotals,
+    /// The structured facts behind the failure, for the kinds that have
+    /// any ([#952](https://github.com/bricef/factor-q/issues/952)): what
+    /// `error_message` says in prose, as values a reader can use without
+    /// parsing it. The message stays, for people. Absent from the wire
+    /// when there is none, so a `failed` without one is exactly what it
+    /// was before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<FailureDetail>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -362,6 +370,35 @@ pub enum FailureKind {
     /// (`fq doctor`, the dashboard) rather than losing them in the
     /// generic bucket.
     TriggerExhausted,
+}
+
+/// The structured facts behind one failure, a variant per kind of fact
+/// ([#952](https://github.com/bricef/factor-q/issues/952)). Typed
+/// rather than a free-form map so that the compiler and the golden event
+/// corpus pin every shape a reader depends on; the cost is that a new
+/// kind of detail is a code change and a corpus exemplar.
+///
+/// Orthogonal to [`FailureKind`]: the kind is the bucket a failure is
+/// counted in, the detail is what was measured when it happened. Tagged
+/// by `kind`, like the schema's other payload enums
+/// ([`LlmCallOrigin`](super::LlmCallOrigin), [`Message`](super::Message)).
+// Adding a variant is additive for the schema and breaking for an older
+// reader: there is no `#[serde(other)]` landing pad here, so a build
+// that does not know a variant fails to read the whole `failed` event
+// rather than reading it without its detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FailureDetail {
+    /// An event was too large for the broker to accept: which event, its
+    /// serialised size, and the broker's `max_payload` it exceeded, both
+    /// in bytes (see [#828](https://github.com/bricef/factor-q/issues/828)).
+    PayloadTooLarge {
+        /// The type of the event that could not be published, spelled as
+        /// that event's own `event_type` on the wire.
+        event_type: EventKind,
+        size_bytes: u64,
+        limit_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
