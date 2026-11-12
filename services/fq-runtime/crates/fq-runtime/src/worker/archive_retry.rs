@@ -12,8 +12,9 @@
 //!
 //! Before `archived`, it republishes the row's stored terminal
 //! event (`terminal_outcome`, v12) while that is not stamped
-//! published — the healer for a `completed` publish lost after
-//! the row went terminal (#823). It is the stored event itself,
+//! published — the healer for a `completed` (#823), or a `failed`
+//! the reducer decided (#946), whose publish was lost after the
+//! row went terminal. It is the stored event itself,
 //! with the original's `event_id`, and delivery is at-least-once:
 //! if a copy did land (a lost ack, or the run loop racing this
 //! sweep), JetStream's `Nats-Msg-Id` dedup drops the republish only
@@ -24,8 +25,8 @@
 //!
 //! A stored event that must not be republished (unreadable by this
 //! build, or not this row's terminal event: see `HoldReason`) holds
-//! its row. No `completed`, no `archived`, one `error!` per daemon
-//! run, and the sweep carries on to the rows behind it. Archiving
+//! its row. Neither it nor `archived` goes out; the hold is one `error!`
+//! per daemon run, and the sweep carries on to the rows behind it. Archiving
 //! without it would discard the only copy of the outcome. No later
 //! build reads an older event version, so the hold lasts until an
 //! operator releases the row (`docs/guide/operating-the-daemon.md`,
@@ -249,7 +250,7 @@ impl ArchiveRetrySweeper {
             ))
         })?;
 
-        // The terminal event first, if its publish was lost (#823): the
+        // The terminal event first, if its publish was lost (#823, #946): the
         // stored event itself, envelope and `event_id` included, so a copy
         // that did land carries the same `event_id` as the original.
         let owed = match row.unpublished_terminal_event() {

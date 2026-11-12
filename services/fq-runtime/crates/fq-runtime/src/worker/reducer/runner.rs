@@ -39,10 +39,10 @@ use tokio_stream::{StreamExt, StreamMap};
 use crate::agent::{Agent, AgentId, EvaluatorSpec};
 use crate::bus::EventBus;
 use crate::events::{
-    self, AssistantPart, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
-    HostNoticePayload, InvocationArchivedPayload, InvocationTotals, LlmCallOrigin,
-    LlmRequestPayload, Message, RequestParams, StopReason, ToolCallPayload, ToolErrorKind,
-    ToolSchema, TriggerSource, TriggeredPayload,
+    self, AssistantPart, Event, EventPayload, FailureKind, FailurePhase, HostNoticePayload,
+    InvocationArchivedPayload, InvocationTotals, LlmCallOrigin, LlmRequestPayload, Message,
+    RequestParams, StopReason, ToolCallPayload, ToolErrorKind, ToolSchema, TriggerSource,
+    TriggeredPayload,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClient};
 use crate::mcp::{
@@ -1164,8 +1164,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // ordering violation that surfaced as a flaky test.
             let now_ms = self.config.clock.unix_now_ms();
             let (phase_label, terminal_at) = phase_and_terminal_from(&output.next_action, now_ms);
-            // `completed` rides the terminal write itself (#823; `terminal.rs`).
-            let completion = self.completion(
+            // The terminal event rides the terminal write itself (#823, #946; `terminal.rs`).
+            let terminal = self.terminal(
                 &output.next_action,
                 agent_id,
                 invocation_id,
@@ -1194,7 +1194,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
                     trigger_subject: trigger.subject.clone(),
                     trigger_payload: Some(trigger.payload.to_string()),
-                    terminal_outcome: completion.as_ref().map(Completion::outcome),
+                    terminal_outcome: terminal.as_ref().map(Terminal::outcome),
                     terminal_published_at: None,
                 })
                 .await
@@ -1208,35 +1208,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             durable_start.fire();
 
             match output.next_action {
-                NextAction::Complete { .. } => {
-                    let completion = completion.expect("a Complete step builds its completion");
-                    return self
-                        .finish_completion(
-                            cursor,
-                            agent_id,
-                            invocation_id,
-                            completion,
-                            totals.total_cost,
-                        )
-                        .await;
-                }
-                NextAction::Failed(err) => {
-                    totals.total_duration_ms = start.elapsed().as_millis() as u64;
-                    let kind = harness_error_to_failure_kind(&err);
-                    self.emit_failed(
-                        agent_id,
-                        invocation_id,
-                        kind,
-                        err.message.clone(),
-                        FailurePhase::Reducer,
-                        totals,
-                        cursor,
-                    )
-                    .await?;
-                    return Err(ExecutorError::InvocationFailed {
-                        kind,
-                        message: err.message,
-                    });
+                NextAction::Complete { .. } | NextAction::Failed(_) => {
+                    let terminal = terminal.expect("a terminal step builds its terminal event");
+                    return self.finish(cursor, agent_id, invocation_id, terminal).await;
                 }
                 NextAction::CallModel(request) => {
                     let mut ctx =
@@ -1946,31 +1920,23 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             error_kind = ?error_kind,
             "reducer invocation failed"
         );
-        self.publish_chained(
-            cursor,
-            Event::new(
-                agent_id.clone(),
-                invocation_id,
-                EventPayload::Failed(FailedPayload {
-                    error_kind,
-                    error_message,
-                    phase,
-                    partial_totals,
-                    detail: None,
-                }),
-            ),
-        )
-        .await?;
+        let failed = terminal::failed_event(
+            agent_id,
+            invocation_id,
+            error_kind,
+            error_message,
+            phase,
+            partial_totals,
+        );
+        self.publish_chained(cursor, failed).await?;
 
-        // Failure paths reach this method from several call
-        // sites — some after the run-loop's terminal upsert has
-        // already fired (NextAction::Failed / harness errors),
-        // some mid-step before any terminal write (LLM error,
-        // budget exceeded). To keep recovery and archive
-        // semantics consistent, the failure path is the
-        // authoritative point at which `invocation_state` is
-        // marked terminal. Idempotent: a no-op if the row is
-        // already terminal.
+        // Every caller arrives mid-step, before any terminal write
+        // (a `failed` the reducer decides is stored with the loop's
+        // terminal upsert instead: `terminal.rs`, #946). So this is
+        // the point at which `invocation_state` is marked terminal,
+        // after the publish: a lost `failed` leaves the row in
+        // flight for recovery. Idempotent: a no-op if the row is
+        // already terminal (an operator transition got there first).
         let terminal_at_ms = self.config.clock.unix_now_ms();
         self.ensure_terminal("failed", invocation_id, terminal_at_ms)
             .await?;
@@ -2486,7 +2452,7 @@ mod server_request;
 mod terminal;
 mod tools_changed_notice;
 use mcp::{GrantServers, triggered_event};
-use terminal::Completion;
+use terminal::Terminal;
 
 pub use config::{ReducerContext, ReducerContextBuilder, RunnerConfig, RunnerConfigBuilder};
 pub use request_caps::ServerRequestLimits;
