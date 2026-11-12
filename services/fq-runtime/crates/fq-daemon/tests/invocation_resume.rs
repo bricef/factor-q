@@ -980,6 +980,36 @@ async fn trigger_probe(nats_url: &str, payload: &str) {
     nats.flush().await.expect("flush trigger publish");
 }
 
+/// Watch for the probe agent's `tool.dispatched` events from now on. The
+/// runner publishes one only after that call's `dispatched` WAL write has
+/// committed, and then writes nothing to the WAL until the tool returns.
+/// The client comes back too, so the subscription outlives this call.
+async fn watch_tool_dispatches(nats_url: &str) -> (async_nats::Client, async_nats::Subscriber) {
+    let nats = async_nats::connect(nats_url)
+        .await
+        .expect("connect to test broker");
+    let dispatches = nats
+        .subscribe("fq.agent.resume-probe.tool.dispatched")
+        .await
+        .expect("subscribe to tool dispatches");
+    nats.flush().await.expect("flush the subscription");
+    (nats, dispatches)
+}
+
+/// Wait until the run holding the worker has its tool call recorded as
+/// dispatched, so it is inside its `sleep` and writing nothing.
+///
+/// A resume issued earlier — on the "dispatching" log line, which comes
+/// before that write — can meet the holder's write with its own and fail
+/// as `database is locked` (see #1011). This waits for the moment the
+/// holder is quiet rather than retrying the resume, which would hide that.
+async fn await_holder_inside_its_tool(dispatches: &mut async_nats::Subscriber) {
+    tokio::time::timeout(Duration::from_secs(30), dispatches.next())
+        .await
+        .expect("the holder's tool call is recorded dispatched within 30s")
+        .expect("the dispatch subscription is open");
+}
+
 /// The probe's way to end an invocation: declare it done.
 fn report_done(id: &str) -> MockResponse {
     MockResponse::tool_use(
@@ -1135,13 +1165,11 @@ async fn an_operator_resume_waits_for_the_worker_permit() {
     mock.push_response(sleep_for(&scratch, "toolu_holder", 8));
     mock.push_response(report_done("toolu_holder_done"));
     mock.push_response(report_done("toolu_resumed_done"));
+    let (_nats, mut dispatches) = watch_tool_dispatches(&nats_url).await;
     trigger_probe(&nats_url, SECOND_TRIGGER).await;
-    daemon
-        .await_log(
-            "model produced tool calls; dispatching",
-            Duration::from_secs(30),
-        )
-        .await;
+    // Not the "dispatching" log line, which precedes the holder's WAL
+    // write: see #1011, and `await_holder_inside_its_tool`.
+    await_holder_inside_its_tool(&mut dispatches).await;
 
     let resume = resume_released(&scratch, &nats_url, &invocation_id).await;
     assert!(
@@ -1186,13 +1214,11 @@ async fn an_operator_resume_left_waiting_by_a_stop_is_resumed_once_at_the_next_s
 
     let (mut daemon, invocation_id) = crash_into_ambiguous(&scratch, &nats_url, &mock).await;
     mock.push_response(sleep_for(&scratch, "toolu_holder", 6));
+    let (_nats, mut dispatches) = watch_tool_dispatches(&nats_url).await;
     trigger_probe(&nats_url, SECOND_TRIGGER).await;
-    daemon
-        .await_log(
-            "model produced tool calls; dispatching",
-            Duration::from_secs(30),
-        )
-        .await;
+    // Not the "dispatching" log line, which precedes the holder's WAL
+    // write: see #1011, and `await_holder_inside_its_tool`.
+    await_holder_inside_its_tool(&mut dispatches).await;
     let resume = resume_released(&scratch, &nats_url, &invocation_id).await;
     assert!(
         resume.status.success(),
