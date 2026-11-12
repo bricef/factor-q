@@ -22,10 +22,9 @@
 //! `after_ladder` step of [`open_store_db`], and it runs inside the same
 //! transaction, for the same reasons.
 //!
-//! A file whose version is beyond the ladder, written by a newer binary,
-//! is opened as it is and no rung runs. This crate has never refused such
-//! a file; the runtime's stores do (`data-architecture.md` §5.6, and see
-//! <https://github.com/bricef/factor-q/issues/984>).
+//! A file whose version is beyond the ladder was written by a newer
+//! binary. It is refused, not opened: see "A file a newer binary wrote",
+//! below.
 //!
 //! ## One lock, one transaction
 //!
@@ -92,6 +91,28 @@
 //! [`SCHEMA_LOCK_WAIT`]. Once a file is in WAL mode the switch only reads
 //! the header and never contends.
 //!
+//! ## A file a newer binary wrote
+//!
+//! Every open refuses a file whose version is beyond the ladder, with
+//! [`StoreError::BinaryTooOld`]: it names the file, the version the file
+//! records and the highest version this binary knows, and says the remedy,
+//! an `fq-cas` at least as new as the one that wrote it. The check is made
+//! where the version is read, inside the locked transaction and before any
+//! rung or the `after_ladder` step runs. So the refusal rolls back a
+//! transaction that has written nothing and gives the lock back: the file
+//! is left exactly as the newer binary left it, a `grants.db` projection
+//! that lags its log included, and an opener waiting on the lock goes on to
+//! be refused in its turn rather than waiting out [`SCHEMA_LOCK_WAIT`].
+//!
+//! Read-only commands are refused too (`fq-cas object ls`, `grant ls`,
+//! `grant check`). This crate has one open path, which every command that
+//! touches either database takes, and an older binary cannot know what a
+//! newer schema means even to read it: a table it reads may have changed
+//! meaning, and a column it never selects may be one the newer binary's
+//! rows depend on. The runtime's read-only opens refuse such a file as its
+//! writable ones do. Rolling a binary back is not supported (`STATUS.md`),
+//! and nothing here downgrades a file.
+//!
 //! ## The runtime's stores
 //!
 //! `fq-runtime`'s `db/schema.rs` holds its stores to the same rule, and
@@ -109,7 +130,7 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Connection, SqlitePool};
 
-use crate::Result;
+use crate::{Result, StoreError};
 
 #[cfg(test)]
 mod tests;
@@ -262,7 +283,7 @@ async fn migrate_observed(
         .connect()
         .await?;
     let outcome = in_immediate_transaction(&mut conn, async |tx: &mut SqliteConnection| {
-        apply_pending(tx, ladder, seam).await?;
+        apply_pending(tx, options.get_filename(), ladder, seam).await?;
         after_ladder(tx).await
     })
     .await;
@@ -304,8 +325,13 @@ async fn in_immediate_transaction(
 
 /// Read the recorded version and apply every rung of `ladder` above it,
 /// then record the version the last one brought the schema to.
+///
+/// A version above the ladder's length is refused with
+/// [`StoreError::BinaryTooOld`], naming `path`, before anything is written
+/// (see the module docs).
 async fn apply_pending(
     conn: &mut SqliteConnection,
+    path: &Path,
     ladder: &[&'static str],
     seam: &mut impl MigrationSeam,
 ) -> Result<()> {
@@ -313,6 +339,14 @@ async fn apply_pending(
         .fetch_one(&mut *conn)
         .await?;
     seam.version_read(recorded).await;
+    let known = ladder.len() as i64;
+    if recorded > known {
+        return Err(StoreError::BinaryTooOld {
+            path: path.to_path_buf(),
+            db_version: recorded,
+            binary_version: known,
+        });
+    }
     let mut applied = recorded;
     for (version, rung) in (1..).zip(ladder) {
         if version > recorded {
