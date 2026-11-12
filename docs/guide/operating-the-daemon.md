@@ -1059,7 +1059,7 @@ outage longer than the window, or the clock stepping forward, can call a
 deliverable claim never started before its redelivery came. A restart
 also starts the window again, so a deliverable claim (one under a day
 old) that was already reported never started reads as awaiting
-redelivery again for the first 19m30s of every daemon run; a claim whose
+redelivery again for the first window of every daemon run; a claim whose
 message is gone is reported the same way whenever the daemon started.
 
 ## Notifications and alerts
