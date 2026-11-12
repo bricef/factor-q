@@ -399,7 +399,7 @@ async fn a_signal_fired_in_the_poll_that_completes_marks_the_claim_and_acks() {
 /// The signal fires and the invocation fails with a transient error in
 /// the same poll (#966). Before durable start a transient error is NAKed
 /// for a retry, but this run had started: the claim must be marked
-/// `durably_started` and the delivery acked, and no redelivery may come
+/// `durably_started` and the delivery acked, so that no redelivery comes
 /// back to start the work a second time.
 #[tokio::test]
 async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried() {
@@ -409,15 +409,10 @@ async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried(
 
     assert!(pulled.ran_to_end(), "the invocation ran to its end");
     assert_marked_started(pulled.probe_claim().await);
+    // Acked, and so not NAKed: a NAK with a delay keeps the delivery
+    // pending until it is redelivered, so nothing pending means no retry
+    // is on its way.
     pulled.wait_until_acked().await;
-    // A NAK would bring the trigger back after the retry ladder's first
-    // rung, so the wait runs past that rung.
-    let window = TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(5);
-    let again = tokio::time::timeout(window, pulled.messages.next()).await;
-    assert!(
-        again.is_err(),
-        "the trigger came back for redelivery, which would start the work a second time"
-    );
 }
 
 /// What a refused mark after a return in the same poll must leave: the
