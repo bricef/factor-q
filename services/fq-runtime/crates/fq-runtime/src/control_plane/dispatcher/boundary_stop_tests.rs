@@ -279,7 +279,7 @@ pub(super) async fn next_delivery(consumer: &mut PullConsumer) -> async_nats::je
 /// own, so every answer anyone sends the broker for that delivery
 /// (`+ACK`, `-NAK`, `+WPI`, `+TERM`) is heard here. The client is
 /// returned with the subscription to keep the connection open.
-async fn answers_to(
+pub(super) async fn answers_to(
     server_url: &str,
     msg: &async_nats::jetstream::Message,
 ) -> (async_nats::Client, async_nats::Subscriber) {
