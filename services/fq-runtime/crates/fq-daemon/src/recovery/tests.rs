@@ -627,7 +627,9 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
     assert_eq!(
         probe(3).await.unwrap(),
         TriggerClaim::Held {
-            claimant: DEAD_DAEMON.to_string()
+            claimant: DEAD_DAEMON.to_string(),
+            invocation_id: Some(never_started.clone()),
+            claimed_at: 0,
         },
         "a claim whose invocation never reached the WAL is left for the redelivery to adopt"
     );

@@ -590,13 +590,17 @@ async fn trigger_claim_state_machine_round_trip() {
             .unwrap(),
         TriggerClaim::Won
     );
+    // A losing claim is told the row as it stands: the holder, the id the
+    // holder named and when it claimed, never the loser's own.
     assert_eq!(
         store
             .claim_trigger(key(42), "worker-a", "inv-a2", 101)
             .await
             .unwrap(),
         TriggerClaim::Held {
-            claimant: "worker-a".to_string()
+            claimant: "worker-a".to_string(),
+            invocation_id: Some("inv-a".to_string()),
+            claimed_at: 100,
         }
     );
     assert!(
@@ -762,7 +766,9 @@ async fn a_claim_is_marked_started_by_the_invocation_it_names() {
             .await
             .unwrap(),
         TriggerClaim::Held {
-            claimant: "dead-worker".to_string()
+            claimant: "dead-worker".to_string(),
+            invocation_id: Some("inv-never-started".to_string()),
+            claimed_at: 100,
         },
         "another trigger's unfinished claim is untouched"
     );

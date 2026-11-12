@@ -370,12 +370,9 @@ async fn a_failed_mark_after_the_signal_fires_stops_the_run() {
         !pulled.ran_to_end(),
         "the invocation was driven on after its mark failed"
     );
-    assert_eq!(
+    assert_held_by_the_dispatcher(
         pulled.probe_claim().await,
-        TriggerClaim::Held {
-            claimant: "worker-a".to_string()
-        },
-        "the mark was refused, so the claim is still `claimed` by the dispatcher"
+        "the mark was refused, so the claim is still `claimed` by the dispatcher",
     );
     ack_pending_stays(&mut pulled.consumer, 1, Duration::from_millis(300)).await;
 }
@@ -428,14 +425,19 @@ async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried(
 /// still says `claimed` is what is left; see #967.
 async fn assert_acked_with_the_claim_kept(pulled: &mut Pulled) {
     assert!(pulled.ran_to_end(), "the invocation ran to its end");
-    assert_eq!(
+    assert_held_by_the_dispatcher(
         pulled.probe_claim().await,
-        TriggerClaim::Held {
-            claimant: "worker-a".to_string()
-        },
-        "the claim must be left as it was, `claimed` by the dispatcher, not released"
+        "the claim must be left as it was, `claimed` by the dispatcher, not released",
     );
     pulled.wait_until_acked().await;
+}
+
+/// The claim is still `claimed`, by `worker-a`, the dispatcher's id.
+fn assert_held_by_the_dispatcher(claim: TriggerClaim, why: &str) {
+    assert!(
+        matches!(&claim, TriggerClaim::Held { claimant, .. } if claimant == "worker-a"),
+        "{why}; a fresh claim on the delivery got {claim:?}"
+    );
 }
 
 /// The signal fires and the invocation completes in the same poll, and
