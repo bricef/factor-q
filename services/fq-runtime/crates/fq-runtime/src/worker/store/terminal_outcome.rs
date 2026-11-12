@@ -1,9 +1,11 @@
 //! The terminal outcome persisted on `invocation_state` in v12 (#823).
 //!
-//! The run loop marks a row terminal *before* it publishes `completed` —
-//! the SQL-first, then-NATS order of `data-architecture.md` §5.5 — and
-//! `completed` is the only event that carries the outcome: task status,
-//! result summary, cost and totals. Before v12 a publish lost after that
+//! The run loop marks a row terminal *before* it publishes the event the
+//! run ends in — `completed`, or a `failed` the reducer itself decides
+//! (#946) — the SQL-first, then-NATS order of `data-architecture.md`
+//! §5.5. That event is the only one that carries the outcome: task
+//! status, result summary, cost and totals, or the failure's kind,
+//! message, phase and partial totals. Before v12 a publish lost after that
 //! write left a terminal row the archive sweeper could only answer with a
 //! bare `invocation.archived`, and the outcome was gone from every read
 //! model. So the terminal event rides the terminal write itself, and the
@@ -21,7 +23,7 @@
 //! same `parent_event_id`, so the chain still holds. A payload-plus-id column
 //! would have to rebuild an envelope that differs from the lost one in
 //! everything but its id. One JSON column rather than six typed ones, too,
-//! so `failed` can share it: [`EventPayload`] is the enum either terminal
+//! so `failed` shares it: [`EventPayload`] is the enum either terminal
 //! event already is.
 //!
 //! The stored event is read back through [`Event::from_wire`], as every
@@ -68,8 +70,9 @@ pub(crate) fn encode(event: &Event) -> Result<String, WorkerStoreError> {
 impl InvocationStateRow {
     /// The terminal event this row still owes the bus: its stored outcome,
     /// unless `terminal_published_at` says it already went out. `None` for
-    /// a row that stored none — an operator drop, a `failed` terminal, or a
-    /// row written before v12 — whose sweep is `invocation.archived` alone.
+    /// a row that stored none — an operator drop, a mid-step `failed`
+    /// (published before the row was marked), or a row written before v12
+    /// — whose sweep is `invocation.archived` alone.
     /// `Err` when the stored event must not be published (see the module
     /// doc).
     pub(crate) fn unpublished_terminal_event(&self) -> Result<Option<Event>, HoldReason> {
