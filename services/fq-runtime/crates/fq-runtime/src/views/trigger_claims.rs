@@ -91,7 +91,7 @@ impl Views {
     }
 
     /// Every trigger claim that has not settled and will not settle on
-    /// its own, oldest first (see [`judge`] for what qualifies).
+    /// its own, oldest first. What qualifies is this module's `judge`.
     ///
     /// One statement reads every `claimed` row with the coordination
     /// status of its invocation; a row with none is then looked up in the
