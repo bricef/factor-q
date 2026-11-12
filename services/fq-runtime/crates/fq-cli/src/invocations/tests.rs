@@ -97,3 +97,32 @@ fn invocation_summary_view_serialises_to_stable_json_shape() {
     assert_eq!(v["started_at_ms"], 41);
     assert_eq!(v["archived"], false);
 }
+
+/// The `trigger:` line (#954): the delivery that started the run, where
+/// its claim stands, and who took it when. A run nothing on the stream
+/// started says so rather than leaving the line out.
+#[test]
+fn format_trigger_delivery_names_the_delivery_or_its_absence() {
+    let mut delivery = fq_ops::views::TriggerDeliveryView {
+        stream: "fq-triggers".to_string(),
+        stream_epoch: 1_767_323_045_000_000_000,
+        stream_seq: 42,
+        state: fq_ops::views::TriggerClaimState::DurablyStarted,
+        claimant: "worker-alpha".to_string(),
+        claimed_at_ms: 1_767_323_045_000,
+    };
+    assert_eq!(
+        format_trigger_delivery(Some(&delivery)),
+        "fq-triggers seq 42 (durably started; claimed 2026-01-02T03:04:05Z by worker-alpha)"
+    );
+    delivery.state = fq_ops::views::TriggerClaimState::Claimed;
+    assert_eq!(
+        format_trigger_delivery(Some(&delivery)),
+        "fq-triggers seq 42 (claimed, start not recorded; claimed 2026-01-02T03:04:05Z by \
+         worker-alpha)"
+    );
+    assert_eq!(
+        format_trigger_delivery(None),
+        "none (not started from the trigger stream)"
+    );
+}
