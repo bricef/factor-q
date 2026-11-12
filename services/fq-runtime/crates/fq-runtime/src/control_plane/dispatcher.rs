@@ -20,9 +20,9 @@
 //!   in-flight durability is the reducer WAL's job
 //!   (`recovery::scan_in_flight`), so a crash resumes the invocation
 //!   exactly once from the WAL with no redelivered duplicate. This
-//!   closes both failure windows: a crash *before* the first WAL write
-//!   leaves the trigger unacked, so JetStream redelivers it and the
-//!   otherwise-missed run recovers; and the ack still fires at the
+//!   closes both failure windows: a crash, or a drain (#974), *before*
+//!   the first WAL write leaves the trigger unacked, so JetStream
+//!   redelivers it and the otherwise-missed run recovers; and the ack still fires at the
 //!   first WAL write (seconds in), *well before* completion, so a
 //!   long-running invocation is not redelivered and re-run past the
 //!   30s ack-wait — the redelivery storm the M0 dogfood loop found
@@ -49,6 +49,7 @@ mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
+mod unstarted;
 
 pub use claim::TriggerClaims;
 use std::sync::Arc;
@@ -114,14 +115,20 @@ enum TriggerFate {
     Retry(std::time::Duration),
     /// Transient failure on the final delivery: dead-letter, then ack.
     DeadLetter,
-    /// Permanent failure or a clean return: ack, nothing to retry.
+    /// Permanent failure, a clean return, or an operator halt before the
+    /// first WAL write, whose drop is its outcome: ack, nothing to retry.
     Consume,
+    /// A drain stopped the invocation before its first WAL write (#974):
+    /// neither ack nor NAK. This process is exiting, and the next one
+    /// adopts the claim when the broker redelivers.
+    Leave,
 }
 
 fn trigger_fate(
     result: &Result<crate::worker::InvocationOutcome, ExecutorError>,
     delivery_attempt: u32,
 ) -> TriggerFate {
+    use crate::worker::{BoundaryStop, InvocationOutcome as Outcome};
     match result {
         Err(err) if err.is_transient() && trigger_retry_exhausted(delivery_attempt) => {
             TriggerFate::DeadLetter
@@ -129,7 +136,20 @@ fn trigger_fate(
         Err(err) if err.is_transient() => {
             TriggerFate::Retry(trigger_retry_backoff(delivery_attempt))
         }
-        _ => TriggerFate::Consume,
+        Ok(Outcome::Unstarted {
+            stopped_by: BoundaryStop::Drain,
+            ..
+        }) => TriggerFate::Leave,
+        // Every outcome named, so a new one has to be decided here.
+        Err(_)
+        | Ok(Outcome::Unstarted {
+            stopped_by: BoundaryStop::Halt,
+            ..
+        })
+        | Ok(Outcome::Completed { .. })
+        | Ok(Outcome::BudgetExceeded { .. })
+        | Ok(Outcome::Suspended { .. })
+        | Ok(Outcome::Deferred { .. }) => TriggerFate::Consume,
     }
 }
 
@@ -652,52 +672,18 @@ impl TriggerDispatcher {
         };
 
         // The invocation returned before the durable-start signal fired,
-        // so the run left nothing durable behind. Decide the trigger's
-        // fate from the result:
-        //
-        // - **Transient** error (bus/store unavailable, a transient LLM
-        //   error) — the run could succeed on a retry, so NAK: JetStream
-        //   redelivers the trigger, recovering the otherwise-lost run.
-        // - **Permanent** error (a terminal `failed` outcome / poison
-        //   payload) or a clean `Ok` return — nothing to retry, so ACK.
-        //   The `Failed` event already recorded why, and redelivering a
-        //   poison trigger would loop under the consumer's unbounded
-        //   redelivery.
-        //
+        // so the run left nothing durable behind: the trigger's fate is
+        // decided from the result (`unstarted.rs`).
         if !acked && !durable_start_observed {
-            match (trigger_fate(&result, delivery_attempt), &result) {
-                (TriggerFate::DeadLetter, Err(err)) => {
-                    self.dead_letter_exhausted(
-                        &agent_id,
-                        msg.subject.as_str(),
-                        trigger_id,
-                        &trigger_payload,
-                        msg.info().map(|info| info.stream_sequence).unwrap_or(0),
-                        delivery_attempt,
-                        err,
-                    )
-                    .await;
-                    self.ack(msg, Some(trigger_id), "transient retry limit exhausted")
-                        .await;
-                }
-                (TriggerFate::Retry(delay), _) => {
-                    self.nak(
-                        msg,
-                        trigger_id,
-                        delay,
-                        "transient failure before first WAL write",
-                    )
-                    .await;
-                }
-                _ => {
-                    self.ack(
-                        msg,
-                        Some(trigger_id),
-                        "invocation returned before durable start (permanent)",
-                    )
-                    .await;
-                }
-            }
+            self.settle_unstarted(
+                msg,
+                &agent_id,
+                trigger_id,
+                &trigger_payload,
+                delivery_attempt,
+                &result,
+            )
+            .await;
         }
 
         self.conclude(agent_id, result, agent_slot);
@@ -903,7 +889,8 @@ mod tests {
 
     /// The whole pre-WAL retry policy at every boundary: transient
     /// errors retry with the escalating schedule, the final delivery
-    /// dead-letters, permanent errors and clean returns consume.
+    /// dead-letters, permanent errors and clean returns consume, and a
+    /// drain before the first WAL write leaves the trigger alone.
     #[test]
     fn trigger_fate_covers_retry_deadletter_and_consume() {
         use crate::bus::TRIGGER_RETRY_BACKOFF;
@@ -956,6 +943,28 @@ mod tests {
             ),
             TriggerFate::Consume
         );
+        // A stop before the first WAL write (#974): a drain leaves the
+        // trigger for the next binary, at any attempt; an operator halt
+        // consumes it, because the drop is its outcome.
+        let unstarted = |stopped_by| {
+            Ok(crate::worker::InvocationOutcome::Unstarted {
+                invocation_id: Uuid::now_v7(),
+                stopped_by,
+            })
+        };
+        use crate::worker::BoundaryStop;
+        for attempt in 1..=TRIGGER_MAX_DELIVER as u32 {
+            assert_eq!(
+                trigger_fate(&unstarted(BoundaryStop::Drain), attempt),
+                TriggerFate::Leave,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                trigger_fate(&unstarted(BoundaryStop::Halt), attempt),
+                TriggerFate::Consume,
+                "attempt {attempt}"
+            );
+        }
     }
 
     /// The NAK schedule escalates and saturates at the last entry.
@@ -1006,7 +1015,9 @@ mod tests {
             match trigger_fate(&transient(), delivery) {
                 TriggerFate::Retry(delay) => waited += delay,
                 TriggerFate::DeadLetter => break delivery,
-                TriggerFate::Consume => panic!("a transient failure is never consumed"),
+                TriggerFate::Consume | TriggerFate::Leave => {
+                    panic!("a transient failure is retried until it is dead-lettered")
+                }
             }
             delivery += 1;
             assert!(delivery <= 64, "the retries never ended");

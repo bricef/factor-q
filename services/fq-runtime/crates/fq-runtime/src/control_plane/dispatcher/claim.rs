@@ -250,7 +250,8 @@ impl TriggerDispatcher {
                 // case it is not.** Most paths that leave a `claimed`-by-self
                 // row with the message unacked are process-terminal — the drain
                 // check, the pause hold's `Interrupted`, a failed `requeue_held`
-                // publish — so the next delivery arrives at a new worker id and
+                // publish, a drain that stops the invocation before its first
+                // WAL write (#974) — so the next delivery arrives at a new worker id and
                 // the arm below adopts it. But a store error or a panic between
                 // the claim and the durable start leaves this *live* process
                 // holding a row for a run that will never start: every

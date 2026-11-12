@@ -86,11 +86,18 @@ use crate::trigger::Trigger;
 /// [`noop`](DurableStart::noop) is the "nobody is waiting" variant —
 /// used by the direct `ReducerRunner::run` paths (CLI, tests, sim)
 /// that claim and ack nothing, so it carries no id and the worker mints
-/// one. Firing a noop signal is a no-op.
+/// one. Firing a noop signal notifies nobody.
+///
+/// Whatever the variant, the signal also remembers whether it has
+/// fired, which is the worker's own answer to "does a WAL row exist for
+/// this invocation yet": a stop at a step boundary is
+/// [`InvocationOutcome::Suspended`] only once it has
+/// (`DurableStart::stopped_at_boundary`, #974).
 #[derive(Debug, Default)]
 pub struct DurableStart {
     invocation_id: Option<Uuid>,
     tx: Option<oneshot::Sender<()>>,
+    started: bool,
 }
 
 impl DurableStart {
@@ -102,14 +109,25 @@ impl DurableStart {
         let signal = Self {
             invocation_id: Some(invocation_id),
             tx: Some(tx),
+            started: false,
         };
         (signal, rx)
     }
 
-    /// A signal nobody is listening on — firing it does nothing. For
+    /// A signal nobody is listening on — firing it notifies nobody. For
     /// the direct-run paths that do not ack a trigger.
     pub fn noop() -> Self {
         Self::default()
+    }
+
+    /// The signal for an invocation resumed from its WAL: it durably
+    /// started in an earlier drive, so there is nothing to signal, and a
+    /// stop at any of its step boundaries leaves a row to resume.
+    pub(crate) fn resumed() -> Self {
+        Self {
+            started: true,
+            ..Self::default()
+        }
     }
 
     /// The id the invocation must run under, when the caller chose one.
@@ -118,14 +136,48 @@ impl DurableStart {
     }
 
     /// Signal that the invocation has durably started. Idempotent: the
-    /// first call notifies the waiter; later calls (and a `noop`) are
-    /// no-ops. A dropped receiver (the dispatcher already acked and
+    /// first call notifies the waiter; later calls (and a `noop`) notify
+    /// nobody. A dropped receiver (the dispatcher already acked and
     /// moved on) is ignored.
     pub fn fire(&mut self) {
+        self.started = true;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(());
         }
     }
+
+    /// What an invocation stopped at a step boundary by `stopped_by`
+    /// returns (#974). Once the signal has fired, the invocation's first
+    /// WAL write has landed and the previous step's checkpoint is on
+    /// disk, so the stop is [`InvocationOutcome::Suspended`] and recovery
+    /// resumes it. Before that nothing durable exists, so the stop is
+    /// [`InvocationOutcome::Unstarted`]: there is no row for recovery to
+    /// find, and the work is whoever handed it over's to redo or drop.
+    pub(crate) fn stopped_at_boundary(
+        &self,
+        invocation_id: Uuid,
+        stopped_by: BoundaryStop,
+    ) -> InvocationOutcome {
+        if self.started {
+            InvocationOutcome::Suspended { invocation_id }
+        } else {
+            InvocationOutcome::Unstarted {
+                invocation_id,
+                stopped_by,
+            }
+        }
+    }
+}
+
+/// What stopped an invocation at a step boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryStop {
+    /// The worker is draining (ADR-0027): this process is on its way out,
+    /// and the work is the next binary's.
+    Drain,
+    /// An operator halted the invocation (`invocation.drop --live`),
+    /// whose drop is its outcome. The process goes on running.
+    Halt,
 }
 
 /// Outcome of a successful call to [`Worker::run_invocation`].
@@ -147,8 +199,27 @@ pub enum InvocationOutcome {
     /// the next binary's recovery resumes it. No `Completed`/`Failed`
     /// event is emitted — the durable state is bit-identical to a crash
     /// at that boundary, which recovery already handles.
+    ///
+    /// Only ever returned once the invocation's first WAL write has
+    /// landed, so there is always a row to resume. A stop before that is
+    /// [`Self::Unstarted`].
     Suspended {
         invocation_id: Uuid,
+    },
+    /// The invocation stopped at its first step boundary, **before its
+    /// first WAL write** (#974): a drain or an operator halt arrived while
+    /// it was being set up. Nothing durable exists for it. No
+    /// `invocation_state` row was written, so recovery has nothing to
+    /// resume, and no durable start was signalled. Its `triggered` event
+    /// is on the stream with nothing after it.
+    ///
+    /// What happens to the work is `stopped_by`'s to decide. The trigger
+    /// dispatcher leaves a drained invocation's trigger un-acked for the
+    /// next binary, and consumes a halted one's, whose drop is its
+    /// outcome.
+    Unstarted {
+        invocation_id: Uuid,
+        stopped_by: BoundaryStop,
     },
     /// The invocation was put down because its model is rate-limited
     /// past what the retry layer waits in place (#278). **Not a terminal
@@ -298,7 +369,8 @@ pub trait Worker: Send + Sync {
     /// [`invocation_id`](DurableStart::invocation_id), the invocation
     /// runs under that id and no other: the trigger's claim already
     /// names it. Direct callers that ack nothing pass
-    /// [`DurableStart::noop`].
+    /// [`DurableStart::noop`]. An invocation stopped before that write
+    /// returns [`InvocationOutcome::Unstarted`] with the signal unfired.
     ///
     /// The trigger arrives as one [`Trigger`] value rather than as
     /// loose provenance params (issue #87): it carries its own
@@ -337,7 +409,9 @@ pub trait Worker: Send + Sync {
     /// Request that the worker drain: stop starting new steps and let
     /// each in-flight invocation suspend at its next step boundary,
     /// checkpointed to the WAL, to be resumed by the next binary's
-    /// recovery (ADR-0027). This is the only handle the control-plane
+    /// recovery (ADR-0027). One still being set up, with no WAL write
+    /// yet, stops as [`InvocationOutcome::Unstarted`] instead, for its
+    /// trigger to be redelivered. This is the only handle the control-plane
     /// has on in-flight work — in v1 an in-process flag flip, in v2 an
     /// RPC to the worker node. Idempotent; a worker does not un-drain.
     async fn request_drain(&self, req: DrainRequest);
@@ -386,6 +460,61 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
 
     fn drain_status(&self) -> DrainState {
         self.drain_signal().state()
+    }
+}
+
+#[cfg(test)]
+mod durable_start_tests {
+    use super::*;
+
+    /// A boundary stop is `Suspended` exactly when there is a WAL row to
+    /// resume, whichever variant of the signal the drive was handed
+    /// (#974).
+    #[test]
+    fn a_boundary_stop_is_suspended_only_once_the_invocation_has_durably_started() {
+        let id = Uuid::now_v7();
+        let unstarted = |signal: &DurableStart, by| {
+            matches!(
+                signal.stopped_at_boundary(id, by),
+                InvocationOutcome::Unstarted { invocation_id, stopped_by }
+                    if invocation_id == id && stopped_by == by
+            )
+        };
+        let suspended = |signal: &DurableStart| {
+            [BoundaryStop::Drain, BoundaryStop::Halt]
+                .into_iter()
+                .all(|by| {
+                    matches!(
+                        signal.stopped_at_boundary(id, by),
+                        InvocationOutcome::Suspended { invocation_id } if invocation_id == id
+                    )
+                })
+        };
+
+        // A dispatched invocation, and a direct run: unstarted until the
+        // first WAL write fires the signal, suspended after.
+        let (mut dispatched, _rx) = DurableStart::channel(id);
+        let mut direct = DurableStart::noop();
+        for signal in [&mut dispatched, &mut direct] {
+            assert!(unstarted(signal, BoundaryStop::Drain));
+            assert!(unstarted(signal, BoundaryStop::Halt));
+            signal.fire();
+            assert!(suspended(signal));
+            signal.fire();
+            assert!(suspended(signal), "firing again changes nothing");
+        }
+
+        // A resumed invocation has a row from the start.
+        assert!(suspended(&DurableStart::resumed()));
+    }
+
+    /// Firing still notifies the dispatcher's waiter, once.
+    #[test]
+    fn firing_notifies_the_waiter() {
+        let (mut signal, mut rx) = DurableStart::channel(Uuid::now_v7());
+        assert!(rx.try_recv().is_err(), "nothing yet");
+        signal.fire();
+        assert!(rx.try_recv().is_ok(), "the first fire notifies");
     }
 }
 
