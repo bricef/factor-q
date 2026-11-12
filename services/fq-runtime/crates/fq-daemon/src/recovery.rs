@@ -306,7 +306,8 @@ pub(crate) async fn classify_in_flight(
 /// The handles come back so a graceful drain (ADR-0027) can wait for them
 /// to suspend at a step boundary — or, still queued, to let go of their
 /// place — before exiting. On a signal-driven shutdown they stay
-/// detached, as they always have.
+/// detached, as they always have. So does the count the boot banner
+/// prints of the ones that wait.
 // Eight shared runtime handles, each of which a resume task genuinely
 // needs; grouping them into a struct would only move the same list one
 // line up. `ResumeControl::new` next door carries the same allow for
@@ -327,7 +328,7 @@ pub(crate) async fn spawn_resume_tasks(
     // count it enters (#718). The count is taken at once and never gated:
     // recovery exists to finish what was already started.
     admission: &RunAdmission,
-) -> Vec<JoinHandle<()>> {
+) -> ResumeTasks {
     let resume_count = recoverable.len();
     let mut waiting = 0;
     // Track the resume tasks' handles so a graceful drain (ADR-0027) can
@@ -439,16 +440,37 @@ pub(crate) async fn spawn_resume_tasks(
             }
         }));
     }
-    if resume_count > 0 {
-        println!("  resume tasks:     {resume_count} spawned");
+    let tasks = ResumeTasks {
+        handles: resume_handles,
+        waiting,
+    };
+    tasks.announce(resume_count, admission.workers().max_concurrent());
+    tasks
+}
+
+/// What [`spawn_resume_tasks`] started.
+pub(crate) struct ResumeTasks {
+    /// One per resume, for a graceful drain to wait on.
+    pub handles: Vec<JoinHandle<()>>,
+    /// How many of them were queued behind a full worker cap: the boot
+    /// banner's `resumes waiting` count.
+    pub waiting: usize,
+}
+
+impl ResumeTasks {
+    /// The boot banner's lines for them, out of `spawned` recovered runs.
+    fn announce(&self, spawned: usize, max_concurrent: usize) {
+        if spawned > 0 {
+            println!("  resume tasks:     {spawned} spawned");
+        }
+        if self.waiting > 0 {
+            println!(
+                "  resumes waiting:  {} for a worker permit (max_concurrent_invocations = \
+                 {max_concurrent})",
+                self.waiting
+            );
+        }
     }
-    if waiting > 0 {
-        let cap = admission.workers().max_concurrent();
-        println!(
-            "  resumes waiting:  {waiting} for a worker permit (max_concurrent_invocations = {cap})"
-        );
-    }
-    resume_handles
 }
 
 #[cfg(test)]

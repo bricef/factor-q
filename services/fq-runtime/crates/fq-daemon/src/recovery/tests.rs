@@ -1009,7 +1009,7 @@ impl NextStart {
     }
 
     /// Hand the recovered run to the real resume path, as `assemble` does.
-    async fn spawn_resumes(&mut self, admission: &RunAdmission) -> Vec<JoinHandle<()>> {
+    async fn spawn_resumes(&mut self, admission: &RunAdmission) -> ResumeTasks {
         let llm: Arc<dyn LlmClient> = self.model.clone();
         spawn_resume_tasks(
             std::mem::take(&mut self.recoverable),
@@ -1119,7 +1119,7 @@ async fn a_waiting_recovered_run_lets_go_on(stop: Stop) {
     // The worker cap is full: a run this test stands in for holds the
     // only permit.
     let running = hold_the_only_permit(&admission).await;
-    let mut handles = start.spawn_resumes(&admission).await;
+    let mut handles = start.spawn_resumes(&admission).await.handles;
     let resume = handles.pop().expect("one resume task");
 
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1205,7 +1205,7 @@ async fn a_recovered_run_ended_while_it_waits_is_not_reported_ambiguous() {
         .subscribe(format!("fq.agent.{CAPPED_AGENT}.invocation.ambiguous"))
         .await
         .expect("subscribe");
-    let mut resumes = start.spawn_resumes(&admission).await;
+    let mut resumes = start.spawn_resumes(&admission).await.handles;
 
     start
         .worker_store
@@ -1235,7 +1235,7 @@ async fn a_recovered_run_ended_while_it_waits_is_not_reported_ambiguous() {
 async fn a_recovered_run_and_a_trigger_for_its_agent_do_not_run_at_once() {
     let mut start = NextStart::over_one_run_in_flight().await;
     let admission = RunAdmission::new(start.runner.clone(), 2);
-    let mut resumes = start.spawn_resumes(&admission).await;
+    let mut resumes = start.spawn_resumes(&admission).await.handles;
     start.model.entered().await;
     assert!(
         start.runner.is_active(&start.invocation),
@@ -1311,6 +1311,11 @@ async fn more_recovered_runs_than_permits_run_in_turn_in_scan_order() {
     let admission = RunAdmission::new(start.runner.clone(), 1);
     let (first, second) = (start.invocations[0], start.invocations[1]);
     let resumes = start.spawn_resumes(&admission).await;
+    assert_eq!(
+        resumes.waiting, 1,
+        "the boot banner's count: one of the two waits for the only permit"
+    );
+    let resumes = resumes.handles;
     start.model.entered().await;
     assert!(
         start.runner.is_active(&first),
@@ -1377,6 +1382,7 @@ async fn a_queued_recovered_run_dropped_by_an_operator_never_starts() {
     let resume = start
         .spawn_resumes(&admission)
         .await
+        .handles
         .pop()
         .expect("one resume task");
 

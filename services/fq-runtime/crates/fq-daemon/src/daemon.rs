@@ -527,7 +527,8 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         &deferrals,
         &admission,
     )
-    .await;
+    .await
+    .handles;
 
     // Sweep workspaces whose invocation is no longer in flight (plan §1:
     // the prune belongs with the recovery scan). Safe to run while the
