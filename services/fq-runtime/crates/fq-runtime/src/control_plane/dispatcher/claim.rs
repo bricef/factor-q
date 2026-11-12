@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tracing::{error, warn};
 
-use crate::bus::TRIGGER_STREAM_NAME;
+use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
 use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
 use crate::worker::InFlightReport;
 
@@ -361,13 +361,25 @@ impl TriggerDispatcher {
                 // a drain that stops the invocation before its first WAL
                 // write, #974) leaves a row the next process meets under
                 // another worker id, and the arm below adopts it.
-                warn!(stream_seq = seq, delivered, claimant = %claimant,
+                //
+                // The subject names the agent, which is the only handle on
+                // a claim whose invocation never wrote a WAL row besides the
+                // sequence. On the last delivery the line says so: no copy
+                // follows, which is true whatever the claim is waiting on.
+                let last = if delivered >= TRIGGER_MAX_DELIVER {
+                    "; this was its last delivery, so no copy follows, and unless the delivery \
+                     is acked before its window lapses the trigger is dead-lettered as \
+                     `trigger_exhausted`"
+                } else {
+                    ""
+                };
+                warn!(stream_seq = seq, delivered, subject = %msg.subject, claimant = %claimant,
                     claim_age_ms = now.saturating_sub(claimed_at),
                     claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
                     "dropping a redelivered trigger whose claim this daemon already holds with no \
                      start recorded, and leaving it unacked: the first copy may still be waiting \
                      or starting, or this daemon may never settle the claim (see #967); the claim \
-                     does not say which");
+                     does not say which{last}");
                 self.bus
                     .consumer_ledger()
                     .note_held_duplicate_drop(CONSUMER_NAME);
