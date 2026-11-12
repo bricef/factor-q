@@ -108,8 +108,8 @@
 //! `fq-store` is a different crate, a member of the same workspace, and
 //! holds its two databases to the same rule with its own implementation
 //! (`fq-store/src/schema.rs`): one `BEGIN IMMEDIATE` transaction from the
-//! `user_version` read to the version stamp, and the same bounded retry
-//! around the WAL switch
+//! `user_version` read to the version stamp, the grant log's projection
+//! catch-up included, and the same bounded retry around the WAL switch
 //! (<https://github.com/bricef/factor-q/issues/975>). It shares no code
 //! with this module, because neither crate depends on the other.
 
