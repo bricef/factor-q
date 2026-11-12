@@ -16,31 +16,38 @@
 //! COLUMN` fails if the column is there, and `grants.db`'s first rung is
 //! a bare `CREATE TABLE`.
 //!
+//! After the ladder a store may have open-time work of its own that reads
+//! the file to decide what to do and then writes: the grant log catches
+//! its permission projection up with its event log. That is the
+//! `after_ladder` step of [`open_store_db`], and it runs inside the same
+//! transaction, for the same reasons.
+//!
 //! A file whose version is beyond the ladder, written by a newer binary,
-//! is opened as it is and nothing runs. This crate has never refused such
-//! a file; the runtime's stores do (`data-architecture.md` §5.6).
+//! is opened as it is and no rung runs. This crate has never refused such
+//! a file; the runtime's stores do (`data-architecture.md` §5.6, and see
+//! <https://github.com/bricef/factor-q/issues/984>).
 //!
 //! ## One lock, one transaction
 //!
 //! [`migrate`] runs on a connection of its own, inside one `BEGIN
 //! IMMEDIATE` transaction taken *before* the version is read, and commits
-//! only once every pending rung and the new version are written. Two
-//! properties follow:
+//! only once every pending rung, the new version and the store's
+//! `after_ladder` step are written. Two properties follow:
 //!
 //! - **Atomic.** SQLite DDL is transactional, and so is `user_version`
 //!   (it lives in the file header), so the rungs and the version that
 //!   describes them commit together or not at all. An upgrade that stops
-//!   anywhere — a failing statement, a cancelled open, a crash — leaves
-//!   the file at its old version with nothing applied, and the next open
-//!   runs the same rungs from a clean start.
+//!   anywhere — a failing statement, a cancelled open, a crash, a killed
+//!   process — leaves the file at its old version with nothing applied,
+//!   and the next open runs the same rungs from a clean start.
 //! - **Serialised.** `BEGIN IMMEDIATE` takes SQLite's write lock on the
 //!   file. That is a lock between *connections*, held through the file
 //!   itself (the `-shm` index in WAL mode), so it serialises two
 //!   processes — two `fq-cas` commands on one root — exactly as it
 //!   serialises two tasks in one. There is no in-process mutex, and
 //!   nothing here relies on one. A second opener waits for the first to
-//!   commit, then reads the version the first wrote and finds nothing to
-//!   do.
+//!   commit, then reads the version (and the projection cursor) the first
+//!   wrote and finds nothing to do.
 //!
 //! The protocol this replaced committed each rung with its own version
 //! bump, which made each rung atomic, but it read the version that chose
@@ -48,7 +55,10 @@
 //! `grants.db` both read 0, and the second failed on `table grant_events
 //! already exists`. Two openers of a fresh `index.db` failed on rung 2's
 //! copy of the old `blocks` table, and two upgrading one failed on the
-//! first `ADD COLUMN`.
+//! first `ADD COLUMN`. The grant log's catch-up ran after the migration,
+//! in a deferred transaction on the pool: two openers of a file whose
+//! projection lagged its log both read the old cursor, and the second
+//! failed with `database is locked` when it came to write.
 //!
 //! The wait for the lock is bounded by [`SCHEMA_LOCK_WAIT`], set on the
 //! migration's own connection. The pool's busy timeout,
@@ -64,7 +74,7 @@
 //! mid-transaction), `VACUUM`, `ATTACH`, another `PRAGMA` or a
 //! transaction-control statement. A rung that needed one could not be
 //! appended to a ladder; it would have to be a step of its own outside
-//! [`migrate`].
+//! [`migrate`]. The grant log's catch-up is ordinary reads and writes.
 //!
 //! ## The one step before the lock: switching a new file into WAL mode
 //!
@@ -129,14 +139,14 @@ const POOL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_RETRY_FIRST_PAUSE: Duration = Duration::from_millis(10);
 const CONNECT_RETRY_MAX_PAUSE: Duration = Duration::from_millis(250);
 
-/// Where a migration has got to, told to whoever is watching. Every method
-/// is a no-op unless a test overrides it: production passes `()`.
+/// Where an open has got to, told to whoever is watching. Every method is
+/// a no-op unless a test overrides it: production passes `()`.
 ///
 /// It exists for the tests that make a race deterministic — pause one
-/// opener after it has read the version and before it acts, start a
-/// second, and see what the second can do — and for the ones that stop a
-/// migration part-way up its ladder.
-trait MigrationSeam {
+/// opener after it has read what decides its work and before it acts,
+/// start a second, and see what the second can do — and for the ones that
+/// stop a migration part-way up its ladder.
+pub(crate) trait MigrationSeam {
     /// The recorded version has been read and nothing has been applied
     /// yet. The write lock is held.
     async fn version_read(&mut self, _version: i64) {}
@@ -144,23 +154,40 @@ trait MigrationSeam {
     /// The rung that brings the schema to `_version` has been applied,
     /// inside the migration's transaction, and not yet committed.
     async fn rung_applied(&mut self, _version: i64) {}
+
+    /// The store's `after_ladder` step has read what decides its work and
+    /// written nothing yet: for the grant log, the projection cursor. The
+    /// write lock is held.
+    async fn after_ladder_read(&mut self) {}
 }
 
 impl MigrationSeam for () {}
 
-/// Open the database at `path`, creating it if it does not exist, and
-/// bring its schema to the end of `ladder` ([`migrate`]).
+/// Open the database at `path`, creating it if it does not exist, bring
+/// its schema to the end of `ladder`, and run `after_ladder` on the same
+/// connection inside the same transaction ([`migrate`]).
 ///
-/// The pool has a single connection. Every operation on the store is
-/// then serialised through it, so the reference-counting compare-and-swaps
-/// and the multi-statement transactions linearise exactly as the verified
-/// protocols assume (SQLite's single writer), and WAL's
-/// `SQLITE_BUSY_SNAPSHOT`, which a busy timeout cannot retry away, cannot
-/// arise.
-pub(crate) async fn open_store_db(path: &Path, ladder: &[&'static str]) -> Result<SqlitePool> {
+/// The pool has a single connection. Within one process every operation
+/// on the store is then serialised through it, so the reference-counting
+/// compare-and-swaps and the multi-statement transactions linearise
+/// exactly as the verified protocols assume (SQLite's single writer), and
+/// WAL's `SQLITE_BUSY_SNAPSHOT`, which a busy timeout cannot retry away,
+/// cannot arise between them. Two processes on one file each have a pool
+/// of their own, and between them it can.
+pub(crate) async fn open_store_db(
+    path: &Path,
+    ladder: &[&'static str],
+    after_ladder: impl AsyncFnOnce(&mut SqliteConnection) -> Result<()>,
+) -> Result<SqlitePool> {
     let pool = connect_store_pool(path).await?;
-    migrate(&pool, ladder).await?;
+    migrate(&pool.connect_options(), ladder, after_ladder).await?;
     Ok(pool)
+}
+
+/// The `after_ladder` of a store with no open-time work beyond its
+/// ladder.
+pub(crate) async fn nothing_after_ladder(_conn: &mut SqliteConnection) -> Result<()> {
+    Ok(())
 }
 
 /// Connect the store's pool to `path`, creating the file if it does not
@@ -205,31 +232,40 @@ fn is_busy(err: &sqlx::Error) -> bool {
         .is_some_and(|code| code & 0xff == 5)
 }
 
-/// Apply every rung of `ladder` the file at `pool` has not yet seen,
-/// under one lock and one transaction (see the module docs).
-async fn migrate(pool: &SqlitePool, ladder: &[&'static str]) -> Result<()> {
-    migrate_observed(pool, ladder, &mut ()).await
+/// Apply every rung of `ladder` the file has not yet seen, then
+/// `after_ladder`, under one lock and one transaction (see the module
+/// docs). `options` are the store pool's, so the migration addresses the
+/// same file in the same journal mode.
+async fn migrate(
+    options: &SqliteConnectOptions,
+    ladder: &[&'static str],
+    after_ladder: impl AsyncFnOnce(&mut SqliteConnection) -> Result<()>,
+) -> Result<()> {
+    migrate_observed(options, ladder, after_ladder, &mut ()).await
 }
 
 /// [`migrate`], telling `seam` where it has got to.
 ///
-/// The connection is opened from the pool's options, so it addresses the
-/// same file in the same journal mode, but with [`SCHEMA_LOCK_WAIT`] as
+/// The connection is opened from `options` with [`SCHEMA_LOCK_WAIT`] as
 /// its busy timeout. It is closed afterwards, which also gives the lock
 /// back on every path; a future dropped part-way drops the connection,
 /// which closes it and rolls the transaction back.
 async fn migrate_observed(
-    pool: &SqlitePool,
+    options: &SqliteConnectOptions,
     ladder: &[&'static str],
+    after_ladder: impl AsyncFnOnce(&mut SqliteConnection) -> Result<()>,
     seam: &mut impl MigrationSeam,
 ) -> Result<()> {
-    let options = pool
-        .connect_options()
-        .as_ref()
+    let mut conn = options
         .clone()
-        .busy_timeout(SCHEMA_LOCK_WAIT);
-    let mut conn = options.connect().await?;
-    let outcome = apply_ladder(&mut conn, ladder, seam).await;
+        .busy_timeout(SCHEMA_LOCK_WAIT)
+        .connect()
+        .await?;
+    let outcome = in_immediate_transaction(&mut conn, async |tx: &mut SqliteConnection| {
+        apply_pending(tx, ladder, seam).await?;
+        after_ladder(tx).await
+    })
+    .await;
     // By now the migration has committed or rolled back. A close that
     // fails after a commit cannot undo it, so it is reported, not
     // returned: failing the open would claim the migration did not happen.
@@ -239,15 +275,16 @@ async fn migrate_observed(
     outcome
 }
 
-async fn apply_ladder(
+/// Run `step` on `conn` inside one `BEGIN IMMEDIATE` transaction, which
+/// commits only if `step` succeeds and is rolled back otherwise.
+async fn in_immediate_transaction(
     conn: &mut SqliteConnection,
-    ladder: &[&'static str],
-    seam: &mut impl MigrationSeam,
+    step: impl AsyncFnOnce(&mut SqliteConnection) -> Result<()>,
 ) -> Result<()> {
     // The busy timeout applies here: an opener that finds the lock held
     // waits for it rather than failing on the spot.
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
-    match apply_pending(&mut tx, ladder, seam).await {
+    match step(&mut tx).await {
         Ok(()) => {
             tx.commit().await?;
             Ok(())
@@ -265,6 +302,8 @@ async fn apply_ladder(
     }
 }
 
+/// Read the recorded version and apply every rung of `ladder` above it,
+/// then record the version the last one brought the schema to.
 async fn apply_pending(
     conn: &mut SqliteConnection,
     ladder: &[&'static str],

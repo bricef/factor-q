@@ -38,10 +38,11 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::grants::{GrantEvent, GrantId, Grantor, Principal, Scope, Verb};
 use crate::index::now_millis;
+use crate::schema::MigrationSeam;
 use crate::{Result, StoreError};
 
 /// The grants database's migration ladder: rung *n* brings the schema to
@@ -92,24 +93,24 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 ];
 
 /// The authoritative, locally-durable grant-event log (SQLite database #2).
-/// Single-connection for the same reason as the storage index: every append
-/// linearizes, and WAL's `BUSY_SNAPSHOT` cannot arise.
+/// Single-connection for the same reason as the storage index: within one
+/// process every append linearizes, and WAL's `BUSY_SNAPSHOT` cannot arise.
 pub struct SqliteGrantLog {
     pool: SqlitePool,
 }
 
 impl SqliteGrantLog {
-    /// Open (or create) the grants database at `path` and bring its schema up
-    /// to date. A second process opening the same file at the same time waits
-    /// for this one's upgrade, then finds nothing to do.
+    /// Open (or create) the grants database at `path`, bring its schema up to
+    /// date and catch its projection up with its log. A second process opening
+    /// the same file at the same time waits for this one to finish both, then
+    /// finds nothing to do.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS).await?;
-        let log = Self { pool };
-        // Catch the projection up with the log (a no-op when they are already
-        // level): idempotent recovery for a database written before the
-        // projection existed, or wiped for rebuild.
-        log.catch_up().await?;
-        Ok(log)
+        // The catch-up runs inside the migration's transaction, under its
+        // lock: it reads the projection cursor before it writes, and two
+        // openers that both read an old cursor would race to write it.
+        let after_ladder = async |conn: &mut SqliteConnection| catch_up(conn, &mut ()).await;
+        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS, after_ladder).await?;
+        Ok(Self { pool })
     }
 
     /// Append a grant, assigning its [`GrantId`] (the log sequence). Durable
@@ -839,30 +840,30 @@ impl SqliteGrantLog {
         tx.commit().await?;
         Ok(())
     }
+}
 
-    /// Apply any log events beyond the projection cursor (idempotent; a no-op
-    /// when level). Runs at `open`.
-    async fn catch_up(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let cursor: i64 =
-            sqlx::query_scalar("SELECT applied_seq FROM projection_cursor WHERE id = 1")
-                .fetch_one(&mut *tx)
-                .await?;
-        apply_events_after(&mut tx, cursor).await?;
-        tx.commit().await?;
-        Ok(())
-    }
+/// Apply any log events beyond the projection cursor (idempotent; a no-op when
+/// level): recovery for a database written before the projection existed, or
+/// one whose projection was wiped. Runs at `open`, on the migration's
+/// connection inside its transaction ([`crate::schema`]), so the cursor it
+/// reads cannot move before it writes.
+pub(crate) async fn catch_up(
+    conn: &mut SqliteConnection,
+    seam: &mut impl MigrationSeam,
+) -> Result<()> {
+    let cursor: i64 = sqlx::query_scalar("SELECT applied_seq FROM projection_cursor WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await?;
+    seam.after_ladder_read().await;
+    apply_events_after(conn, cursor).await
 }
 
 /// Fold every log event with `seq > after` into the projection tables, then
 /// recompute liveness and advance the cursor. Liveness is a pure function of
 /// the final grant/revocation sets, so one recompute after the batch is exact.
-async fn apply_events_after(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    after: i64,
-) -> Result<()> {
+async fn apply_events_after(conn: &mut SqliteConnection, after: i64) -> Result<()> {
     let max_seq: Option<i64> = sqlx::query_scalar("SELECT MAX(seq) FROM grant_events")
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *conn)
         .await?;
     let Some(max_seq) = max_seq else {
         return Ok(());
@@ -877,7 +878,7 @@ async fn apply_events_after(
          FROM grant_events WHERE seq > ? AND kind = 'granted'",
     )
     .bind(after)
-    .execute(&mut **tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT OR IGNORE INTO projected_revocations (id)
@@ -885,10 +886,10 @@ async fn apply_events_after(
          WHERE seq > ? AND kind = 'revoked' AND target_id IS NOT NULL",
     )
     .bind(after)
-    .execute(&mut **tx)
+    .execute(&mut *conn)
     .await?;
-    recompute_liveness(tx).await?;
-    set_cursor(tx, max_seq).await?;
+    recompute_liveness(conn).await?;
+    set_cursor(conn, max_seq).await?;
     Ok(())
 }
 
@@ -897,10 +898,10 @@ async fn apply_events_after(
 /// **earlier, live** grant giving the grantor `Grant` over a covering scope
 /// with superset verbs. A single forward pass in id order is exact, because a
 /// grant's liveness depends only on strictly earlier grants.
-async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
+async fn recompute_liveness(conn: &mut SqliteConnection) -> Result<()> {
     use std::collections::HashSet;
     let revoked: HashSet<i64> = sqlx::query_scalar("SELECT id FROM projected_revocations")
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *conn)
         .await?
         .into_iter()
         .collect();
@@ -910,7 +911,7 @@ async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res
         "SELECT id, grantor_agent, grantee_agent, verbs, scope_kind, scope_value, live
          FROM projected_grants ORDER BY id",
     )
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     struct Decoded {
@@ -956,7 +957,7 @@ async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res
             sqlx::query("UPDATE projected_grants SET live = ? WHERE id = ?")
                 .bind(grant.live as i64)
                 .bind(grant.id)
-                .execute(&mut **tx)
+                .execute(&mut *conn)
                 .await?;
         }
     }
@@ -964,11 +965,11 @@ async fn recompute_liveness(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res
 }
 
 /// Advance the projection cursor to `seq` (monotone: never moves backwards).
-async fn set_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, seq: i64) -> Result<()> {
+async fn set_cursor(conn: &mut SqliteConnection, seq: i64) -> Result<()> {
     sqlx::query("UPDATE projection_cursor SET applied_seq = ? WHERE id = 1 AND applied_seq < ?")
         .bind(seq)
         .bind(seq)
-        .execute(&mut **tx)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }

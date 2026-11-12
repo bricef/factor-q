@@ -336,7 +336,8 @@ impl SqliteNameIndex {
         // One connection: the two reference-counting compare-and-swaps
         // (reserve / claim) and the multi-statement transactions (bind /
         // unbind) linearize exactly as the verified protocol assumes.
-        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS).await?;
+        let after_ladder = crate::schema::nothing_after_ladder;
+        let pool = crate::schema::open_store_db(path.as_ref(), MIGRATIONS, after_ladder).await?;
         Ok(Self { pool })
     }
 }
