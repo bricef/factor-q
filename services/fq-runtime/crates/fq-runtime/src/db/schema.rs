@@ -110,7 +110,10 @@
 //! (`fq-store/src/schema.rs`): one `BEGIN IMMEDIATE` transaction from the
 //! `user_version` read to the commit, the grant log's projection catch-up
 //! included, and the same bounded retry around the WAL switch
-//! (<https://github.com/bricef/factor-q/issues/975>). It shares no code
+//! (<https://github.com/bricef/factor-q/issues/975>). It refuses a file a
+//! newer binary wrote as these stores do, inside that transaction and
+//! before any rung or the catch-up runs, read-only commands included
+//! (<https://github.com/bricef/factor-q/issues/984>). It shares no code
 //! with this module, because neither crate depends on the other.
 
 use std::time::Duration;
