@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::fs::FilesystemStore;
 use std::collections::BTreeSet;
@@ -22,6 +22,9 @@ use crate::{
     SqliteGrantLog, SqliteNameIndex, Stats, StoreError, TokenMinter, TokenVerifier,
     generate_keypair,
 };
+
+mod root;
+use root::{MissingRoot, StoreRoot};
 
 type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -61,7 +64,7 @@ The store lives under --root (env FQ_CAS_ROOT, default ./.fq-cas).";
     after_help = AFTER_HELP
 )]
 struct Cli {
-    /// Store root directory (ignored when --server is set).
+    /// Store root directory, created by put, object put and grant add (ignored with --server).
     #[arg(long, env = "FQ_CAS_ROOT", default_value = ".fq-cas", global = true)]
     root: PathBuf,
     /// Run the command against a remote `fq-cas serve` instead of local
@@ -325,9 +328,11 @@ fn init_tracing() {
 
 fn run() -> CliResult<ExitCode> {
     init_tracing();
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        let root = StoreRoot::new(&cli.root, matches.value_source("root"));
         match cli.command {
             Command::Serve { bind } => {
                 let store = std::sync::Arc::new(FilesystemStore::new(&cli.root));
@@ -345,10 +350,7 @@ fn run() -> CliResult<ExitCode> {
                                 (a remote name service is future)"
                         .into());
                 }
-                let repo = Repository::new(
-                    FilesystemStore::new(&cli.root),
-                    SqliteNameIndex::open(cli.root.join("index.db")).await?,
-                );
+                let repo = root.repository(command.missing_root().await?).await?;
                 dispatch_object(&repo, command).await
             }
             Command::Gc { grace, json } => {
@@ -357,10 +359,7 @@ fn run() -> CliResult<ExitCode> {
                                 the CID-level CAS only"
                         .into());
                 }
-                let repo = Repository::new(
-                    FilesystemStore::new(&cli.root),
-                    SqliteNameIndex::open(cli.root.join("index.db")).await?,
-                );
+                let repo = root.repository(MissingRoot::Refuse).await?;
                 run_gc(&repo, grace, json).await
             }
             Command::Key { command } => dispatch_key(command),
@@ -368,14 +367,14 @@ fn run() -> CliResult<ExitCode> {
                 if cli.server.is_some() {
                     return Err("grant management runs against the local store".into());
                 }
-                let grants = SqliteGrantLog::open(cli.root.join("grants.db")).await?;
+                let grants = root.grant_log(command.missing_root()?).await?;
                 dispatch_grant(&grants, command).await
             }
             Command::Token { command } => {
                 if cli.server.is_some() {
                     return Err("token operations run against the local store".into());
                 }
-                dispatch_token(&cli.root, command).await
+                dispatch_token(&root, command).await
             }
             command => {
                 if let Some(addr) = &cli.server {
@@ -537,14 +536,14 @@ async fn dispatch_grant(grants: &SqliteGrantLog, command: GrantCommand) -> CliRe
     }
 }
 
-async fn dispatch_token(root: &std::path::Path, command: TokenCommand) -> CliResult<ExitCode> {
+async fn dispatch_token(root: &StoreRoot<'_>, command: TokenCommand) -> CliResult<ExitCode> {
     match command {
         TokenCommand::Mint {
             agent,
             ttl,
             biscuit_private_key,
         } => {
-            let grants = SqliteGrantLog::open(root.join("grants.db")).await?;
+            let grants = root.grant_log(MissingRoot::Refuse).await?;
             let principal = principal(&agent)?;
             let minter =
                 TokenMinter::from_private_key_hex(&biscuit_private_key, Duration::from_secs(ttl))?;
