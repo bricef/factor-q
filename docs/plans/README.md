@@ -19,6 +19,11 @@ detours that the final code no longer shows. Deferred work that isn't yet
 committed to a phase is tracked as
 [GitHub issues](https://github.com/bricef/factor-q/issues), not as plans.
 
+A plan is not a milestone either: a plan sequences work, and a milestone
+is the state the project is in when that work is done, with a test that
+says so. [`MILESTONES.md`](../../MILESTONES.md) says what each milestone
+means and names the plan it comes from.
+
 A plan is not a design doc: the reasoning behind a subsystem's shape
 belongs in [`../design/`](../design/) and [`../adrs/`](../adrs/); a plan
 sequences the execution and records what happened along the way.
