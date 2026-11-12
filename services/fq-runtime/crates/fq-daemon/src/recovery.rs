@@ -391,10 +391,15 @@ pub(crate) async fn spawn_resume_tasks(
             // before its turn came — the WAL row is untouched, and the
             // next start's recovery finds it in flight again — or an
             // operator's drop of the queued run, which then never starts.
-            let Some(_permit) = place.permit().await else {
+            let Some(permit) = place.permit().await else {
                 return;
             };
-            match runner.resume(&agent, llm_arc.as_ref(), inv_id).await {
+            let resumed = runner.resume(&agent, llm_arc.as_ref(), inv_id).await;
+            // The run is over: its worker goes back now, not after the
+            // outcome is handled — the failure arm awaits a store write
+            // and a publish — and a drop no longer finds it "starting".
+            drop(permit);
+            match resumed {
                 // The slot goes on the queue with the resume (#718): a
                 // recovered invocation that defers again is still one of
                 // this agent's in-flight runs, and taking a second slot

@@ -320,10 +320,14 @@ async fn redrive(
         // `None`, logged by the admission, is a drain or shutdown before
         // its turn — the injection is durable, so the next start resumes
         // it — or an operator's drop of the queued run.
-        let Some(_permit) = place.permit().await else {
+        let Some(permit) = place.permit().await else {
             return;
         };
-        match runner.resume(&agent, llm.as_ref(), invocation_id).await {
+        let resumed = runner.resume(&agent, llm.as_ref(), invocation_id).await;
+        // The run is over: its worker goes back before the outcome is
+        // handled, and a drop no longer finds it "starting".
+        drop(permit);
+        match resumed {
             // Still rate-limited (#278): back on the queue, not lost —
             // and the cap slot goes with it (#718), so the sleeping
             // invocation still counts and its resume needs no new entry.
