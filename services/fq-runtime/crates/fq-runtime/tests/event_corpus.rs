@@ -695,21 +695,39 @@ async fn every_current_event_type_has_a_file_that_projects() {
 }
 
 /// A failure detail names an event by its [`EventKind`] (#952), and the
-/// name it writes is the one that event carries as its own `event_type`
-/// — both ways, for every type — or a reader joining the two finds
-/// nothing. Asked of the exemplars because they cover every type.
+/// name it writes must be the one a reader joins it against — or the
+/// join finds nothing. There are three spellings of an event's type, and
+/// they agree for every type, both ways: the kind's own serde name, the
+/// payload's `event_type` tag on the wire, and
+/// [`EventPayload::event_type`], which comes from the hand-written
+/// `schema_id` table and feeds the projection's `event_type` column,
+/// event filters and the corpus file names.
 #[test]
 fn every_event_kind_is_spelled_as_its_event_type_on_the_wire() {
+    let mut visited = BTreeSet::new();
     for event in exemplars() {
         let kind = EventKind::from(&event.payload);
         let tag = serde_json::to_value(&event).unwrap()["payload"]["event_type"].clone();
         assert_eq!(serde_json::to_value(kind).unwrap(), tag, "{kind:?} writes");
         assert_eq!(
-            serde_json::from_value::<EventKind>(tag).unwrap(),
+            serde_json::from_value::<EventKind>(tag.clone()).unwrap(),
             kind,
             "{kind:?} reads"
         );
+        assert_eq!(
+            tag,
+            event.payload.event_type(),
+            "{kind:?}: the wire tag and the schema_id table disagree"
+        );
+        visited.insert(kind);
     }
+    // Every type the vocabulary declares, the landing pad excepted
+    // (nothing writes it), so this test does not borrow its coverage
+    // from another one.
+    let declared: BTreeSet<EventKind> = EventKind::iter()
+        .filter(|kind| *kind != EventKind::Unknown)
+        .collect();
+    assert_eq!(visited, declared, "every event type is checked");
 }
 
 /// Every v1 and v2 file is refused for its version — never as
