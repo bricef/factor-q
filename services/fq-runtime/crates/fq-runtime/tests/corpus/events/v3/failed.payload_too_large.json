@@ -13,7 +13,7 @@
     "event_type": "failed",
     "payload": {
       "error_kind": "runtime_error",
-      "error_message": "event of 1153433 bytes exceeds the broker max_payload of 1048576 bytes",
+      "error_message": "event payload of 1153433 bytes exceeds NATS max_payload of 1048576 bytes",
       "phase": "llm_request",
       "partial_totals": {
         "total_llm_calls": 2,

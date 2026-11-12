@@ -556,7 +556,9 @@ fn variants() -> Vec<(&'static str, Event)> {
                 30,
                 EventPayload::Failed(FailedPayload {
                     error_kind: FailureKind::RuntimeError,
-                    error_message: "event of 1153433 bytes exceeds the broker max_payload of \
+                    // What `BusError::PayloadTooLarge` renders, with these
+                    // numbers.
+                    error_message: "event payload of 1153433 bytes exceeds NATS max_payload of \
                                     1048576 bytes"
                         .to_string(),
                     phase: FailurePhase::LlmRequest,
