@@ -136,7 +136,13 @@ directory = "agents"
 # also the only record of which trigger started which run (the
 # `trigger:` line of `fq invocation show`); a lower number loses that
 # link for older runs sooner, and nothing else. A claim this daemon is
-# still holding is never deleted. Set to `-1` to keep claims for ever.
+# still holding is never deleted. Set to `-1` (any negative value does
+# the same) to keep every claim row indefinitely: the sweep never deletes
+# one, so the link from a run to the trigger that started it is never
+# dropped, and the table grows by a row for every trigger that starts a
+# run, without bound. `fq doctor` then says claim rows are kept
+# indefinitely, and lists a delivery that never started a run for as
+# long as its row exists.
 # trigger_claim_retention_days = 90
 #
 # How often the retention sweep runs, in seconds. Default 1 hour,
