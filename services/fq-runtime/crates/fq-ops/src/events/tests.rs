@@ -2100,10 +2100,21 @@ fn an_archived_state_written_as_an_integer_array_still_reads() {
 
 /// A state in neither form is a malformed payload: the event fails to
 /// parse rather than reading as some other bytes.
+///
+/// The text is read strictly, as the writer writes it, so the near
+/// misses a lenient decoder would take are refused too: text without
+/// its padding, a last character whose unused bits are set (`Zh==`
+/// would read as `f`, as `Zg==` does), the URL-safe alphabet, and
+/// whitespace around the text. Each is here because a reader loosened
+/// to take it passes every other test in this file.
 #[test]
 fn an_archived_state_in_neither_form_fails_the_event() {
     for blob in [
         json!("not base64!"),
+        json!("Zg"),
+        json!("Zh=="),
+        json!("-_-_"),
+        json!("Zm9v\n"),
         json!([256]),
         json!([-1]),
         json!([1.5]),
