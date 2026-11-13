@@ -25,6 +25,10 @@
 //! the delivery without releasing its claim. The claim store is made to
 //! refuse marks through a SQLite trigger of the test's own
 //! ([`refuse_claim_marks`]), for a set number of attempts or for good.
+//! Such a refusal comes back at once, so one test also makes an attempt
+//! block, on a write lock another connection holds ([`lock_claim_store`]),
+//! which is what bounds the retries by time and what the delivery has to
+//! be kept alive through.
 //!
 //! The tests run the real `handle` against a real broker and a real
 //! control-plane store, with a stub worker.
@@ -79,6 +83,17 @@ const ACK_FAILED: &str = "failed to ack trigger message";
 /// is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`).
 const SHORT_ACK_WINDOW: Duration = Duration::from_secs(1);
 
+/// How many attempts to mark a claim a store that refuses at once gets:
+/// one, then one after each of [`MARK_RETRY_PAUSES`].
+const ATTEMPTS_IF_REFUSED_AT_ONCE: u32 = MARK_RETRY_PAUSES.len() as u32 + 1;
+
+/// How long another connection holds the claim store's write lock in
+/// [`Resolve::FireIntoLockedStore`]: longer than the retries are allowed,
+/// so the attempt that waits it out is the last one offered, and shorter
+/// than the store's busy timeout (sqlx's default, five seconds), so that
+/// attempt gets through the lock rather than failing on it.
+const LOCK_HELD: Duration = Duration::from_millis(2500);
+
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
     /// Drop it unfired. `run_loop_for` does this when `run_loop_inner`
@@ -91,6 +106,12 @@ enum Resolve {
     /// fire it: the first WAL write has landed and the claim's update is
     /// refused.
     FireIntoRefusedMarks(Refusals),
+    /// Make the claim store refuse marks, one refusal for each attempt a
+    /// store that refuses at once would get, and hold its write lock from
+    /// another connection for this long; then fire it. The first attempt
+    /// to mark the claim blocks on the lock and is refused once it gets
+    /// through.
+    FireIntoLockedStore(Duration),
 }
 
 /// Which attempts to mark the claim the store refuses.
@@ -130,7 +151,8 @@ struct ResolvesThenReturns {
     resolve: Resolve,
     turn: Turn,
     returns: Returns,
-    /// The claim store's file, for [`Resolve::FireIntoRefusedMarks`].
+    /// The claim store's file, for [`Resolve::FireIntoRefusedMarks`] and
+    /// [`Resolve::FireIntoLockedStore`].
     claim_db: PathBuf,
     ran_to_end: AtomicBool,
     /// The trigger's id and the invocation id its signal carries, as the
@@ -157,6 +179,12 @@ impl Worker for ResolvesThenReturns {
             Resolve::Fire => durable_start.fire(),
             Resolve::FireIntoRefusedMarks(refusals) => {
                 refuse_claim_marks(&self.claim_db, refusals).await;
+                durable_start.fire();
+            }
+            Resolve::FireIntoLockedStore(held_for) => {
+                let refusals = Refusals::First(ATTEMPTS_IF_REFUSED_AT_ONCE);
+                refuse_claim_marks(&self.claim_db, refusals).await;
+                lock_claim_store(&self.claim_db, held_for).await;
                 durable_start.fire();
             }
         }
@@ -227,6 +255,29 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
             .expect("install the refusal");
     }
     conn.close().await.expect("close the claim store's file");
+}
+
+/// Take the claim store's write lock through a connection of its own and
+/// hold it for `held_for`, from a task of its own. A write that needs the
+/// lock meanwhile waits in the store's busy handler rather than failing.
+async fn lock_claim_store(claim_db: &Path, held_for: Duration) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut conn)
+        .await
+        .expect("take the claim store's write lock");
+    tokio::spawn(async move {
+        tokio::time::sleep(held_for).await;
+        sqlx::query("COMMIT")
+            .execute(&mut conn)
+            .await
+            .expect("let the write lock go");
+        conn.close().await.expect("close the claim store's file");
+    });
 }
 
 /// How many of a [`Refusals::First`] count's refusals are still unspent.
@@ -673,15 +724,7 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
         sent.keepalives > 0,
         "the delivery was kept alive while its mark was retried: {sent:?}"
     );
-    let redelivered = tokio::time::timeout(SHORT_ACK_WINDOW * 3, pulled.messages.next())
-        .await
-        .ok()
-        .flatten()
-        .map(|copy| copy.map(|copy| copy.info().map(|info| info.delivered).ok()));
-    assert!(
-        redelivered.is_none(),
-        "a started run's delivery must not come back, and came back as delivery {redelivered:?}"
-    );
+    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
 
     let (trigger_id, invocation_id) = pulled.named();
     let gave_up = log.lines_with(MARK_GAVE_UP);
@@ -692,6 +735,91 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
             && line.contains(&format!("invocation_id={invocation_id}"))
             && line.contains(&format!("trigger_id={trigger_id}")),
         "logged at error, naming the invocation and the trigger: {line}"
+    );
+}
+
+/// Wait `wait` on the pull stream for a copy of the delivery, and fail if
+/// one comes back. A stream that closes fails too: it would read as
+/// nothing having come back without saying whether a copy was on its way.
+async fn assert_no_copy_comes_back(messages: &mut pull::Stream, wait: Duration) {
+    match tokio::time::timeout(wait, messages.next()).await {
+        Err(_elapsed) => {}
+        Ok(None) => panic!(
+            "the pull stream closed while waiting, so it cannot say whether a copy came back"
+        ),
+        Ok(Some(copy)) => {
+            let delivered = copy
+                .as_ref()
+                .ok()
+                .and_then(|copy| copy.info().ok())
+                .map(|info| info.delivered);
+            panic!(
+                "a started run's delivery must not come back, and came back as delivery \
+                 {delivered:?} ({:?})",
+                copy.err()
+            );
+        }
+    }
+}
+
+/// The signal fires and the first attempt to mark the claim blocks:
+/// another connection holds the claim store's write lock for
+/// [`LOCK_HELD`], longer than the retries are allowed, and the attempt is
+/// refused once it gets through. A store that refuses at once cannot show
+/// either of the two things this pins.
+///
+/// - **No attempt is offered once the time bound has passed.** The store
+///   gets the one attempt it got before there were retries, and the
+///   delivery is then acked keeping its claim: one refusal is spent, and
+///   the give-up line says one attempt.
+/// - **The delivery is kept alive alongside an attempt, not only between
+///   attempts.** There is no "between" here, and the consumer's ack
+///   window ([`SHORT_ACK_WINDOW`]) is shorter than the lock: keepalives
+///   are sent while the attempt waits, the delivery is acked once, and no
+///   copy comes back.
+#[tokio::test]
+async fn a_mark_that_blocks_past_the_time_bound_is_offered_once_with_its_delivery_kept_alive() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireIntoLockedStore(LOCK_HELD),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let log = pulled.handle_capturing().await;
+
+    assert!(
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on after its mark was refused"
+    );
+    assert_eq!(
+        refusals_left(&pulled.claim_db).await,
+        i64::from(ATTEMPTS_IF_REFUSED_AT_ONCE - 1),
+        "one attempt reached the store: none may be offered once the time bound has passed"
+    );
+    assert_held_by_the_dispatcher(
+        pulled.probe_claim().await,
+        "the mark never landed, so the claim must be left `claimed` by the dispatcher",
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert!(
+        sent.keepalives > 0,
+        "the delivery was kept alive while its one attempt waited on the lock: {sent:?}"
+    );
+    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
+    let gave_up = log.lines_with(MARK_GAVE_UP);
+    assert_eq!(gave_up.len(), 1, "the give-up is logged once: {gave_up:?}");
+    assert!(
+        gave_up[0].contains("attempts=1"),
+        "the give-up line says one attempt was offered: {}",
+        gave_up[0]
     );
 }
 
