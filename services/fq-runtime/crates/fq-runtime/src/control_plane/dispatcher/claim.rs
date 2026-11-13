@@ -84,7 +84,20 @@ impl TriggerClaims {
     ///   names. The archive hand-off writes it before the worker deletes its
     ///   WAL row, so a run that has left the WAL is here; and nothing sweeps
     ///   it, so it outlives the archive row, which retention does sweep. A
-    ///   report of ambiguity or an operator's drop writes one too.
+    ///   report of ambiguity writes one too, for a run the WAL holds.
+    ///
+    /// **An operator's drop is on record the same way, whether or not the
+    /// run started.** A drop writes the invocation's ownership row
+    /// (`failed`), and it can name a run that never made its first WAL
+    /// write: a live drop is accepted from the moment the runner takes the
+    /// run, before its workspace, its MCP servers and its `triggered`
+    /// publish, and a drop of a run whose process died resolves the run's
+    /// agent from that `triggered` event. Such a claim is marked too, so a
+    /// redelivery or a replay of its trigger does not run the work. That is
+    /// the outcome the dispatcher gives the same drop on a live daemon: an
+    /// operator halt before the first WAL write is consumed, not retried,
+    /// because the drop is the run's outcome (`TriggerFate::Consume` in the
+    /// dispatcher).
     ///
     /// These are the two records `fq doctor` reads to call a claim started
     /// and never marked (`Views::stranded_trigger_claims`), and the claims
@@ -101,7 +114,8 @@ impl TriggerClaims {
     /// is that one query, a pass over the claim table joined to the
     /// ownership table by primary key, and one primary-key write per claim
     /// marked. A claim this marks is logged at `warn`, once, with the
-    /// invocation id and where its run is on record.
+    /// invocation id and where its run is on record: in flight or finished
+    /// in the worker's WAL, or the status its ownership row holds.
     ///
     /// Run it at startup, over the report of the worker this dispatcher
     /// hands invocations to, before the dispatcher consumes anything. A test
@@ -132,9 +146,9 @@ impl TriggerClaims {
             {
                 warn!(%invocation_id, stream_seq = claim.stream_seq, claimant = %claim.claimant,
                     run = %run,
-                    "recorded a durable start missing from its trigger's claim: the process that \
-                     started the run did not mark it, so a redelivery or a replay of the trigger \
-                     will be dropped instead of starting the run again");
+                    "recorded a durable start missing from its trigger's claim: a start of the run \
+                     this claim names, or an operator's drop of it, is on record, so a redelivery \
+                     or a replay of the trigger will be dropped instead of running it again");
             }
         }
         Ok(Self { store })

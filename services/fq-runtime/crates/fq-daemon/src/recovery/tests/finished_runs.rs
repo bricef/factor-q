@@ -441,6 +441,66 @@ async fn a_replay_after_a_restart_drops_finished_runs_and_adopts_the_trigger_tha
     next.stop().await;
 }
 
+/// **A run an operator dropped before its first WAL write is not run again
+/// after a restart.** The dead daemon claimed the trigger, and an operator
+/// dropped the run before it made its first WAL write: a live drop is
+/// accepted from the moment the runner takes the run, and a drop of a run
+/// whose process died resolves it through its `triggered` event, which is
+/// published before that write. The drop leaves what the coordination
+/// consumer writes for it, an archive row and a `failed` ownership row,
+/// and no WAL row. Recovery marks the claim, so the redelivery is dropped
+/// and the work never runs: the drop is the run's outcome, as it is for
+/// the same drop on a live daemon, where the dispatcher consumes the
+/// trigger rather than retry it.
+#[tokio::test]
+async fn a_run_dropped_before_its_first_wal_write_is_not_run_after_a_restart() {
+    let mut crash = a_daemon_dies_holding_a_trigger(false).await;
+    let dropped = crash.dead_invocation.to_string();
+    // `handle_invocation_operator_recovered`'s writes, in its order. Its
+    // third, marking the WAL row terminal, finds no row.
+    crash
+        .cp_store
+        .insert_archive(&InvocationArchiveRow {
+            invocation_id: dropped.clone(),
+            agent_id: CRASH_AGENT.to_string(),
+            final_phase: "failed".to_string(),
+            final_state_blob: Vec::new(),
+            started_at: 3_000,
+            terminal_at: 3_000,
+            archived_at: 3_000,
+        })
+        .await
+        .unwrap();
+    crash
+        .cp_store
+        .upsert_invocation_ownership(&dropped, CRASH_AGENT, 3_000, OwnerStatus::Failed)
+        .await
+        .unwrap();
+    crash
+        .delivery
+        .ack_with(AckKind::Nak(None))
+        .await
+        .expect("redeliver the trigger");
+
+    let next = the_next_daemon(&crash).await;
+    wait_until_the_redelivery_is_settled(&mut crash.consumer).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        next.worker.starts(),
+        Vec::<Option<Uuid>>::new(),
+        "the redelivery ran the work an operator dropped"
+    );
+    assert_eq!(
+        claim_on(&crash).await,
+        TriggerClaim::Started {
+            invocation_id: dropped
+        },
+        "recovery marks the claim of the dropped run"
+    );
+    assert_eq!(duplicates_dropped(&crash), 1);
+    next.stop().await;
+}
+
 /// **A claim with no start on record is left exactly as it is.** The
 /// dead daemon claimed the trigger and stopped before its first WAL
 /// write; nothing of the run is on record anywhere. Recovery does not
