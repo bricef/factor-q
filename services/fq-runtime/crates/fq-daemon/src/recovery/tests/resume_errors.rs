@@ -104,7 +104,11 @@ struct Recovering {
 
 impl Recovering {
     async fn new() -> Self {
-        let start = NextStart::over_one_run_in_flight().await;
+        Self::over(Seed::Resumable(1)).await
+    }
+
+    async fn over(seed: Seed) -> Self {
+        let start = NextStart::over(seed).await;
         let events = start
             .bus
             .subscribe(format!("fq.agent.{CAPPED_AGENT}.>"))
@@ -176,6 +180,36 @@ impl Recovering {
                 .expect("the resume task ends")
                 .expect("its task joins");
         }
+        self.settle().await
+    }
+
+    /// Resume the invocation as `fq invocation resume` does, with the model
+    /// answering `reply`, and wait for the re-drive to end. Returns what was
+    /// published for the invocation meanwhile, as [`Self::resume`] does.
+    async fn operator_resume(&mut self, reply: Reply) -> Vec<fq_runtime::events::Event> {
+        let admission = RunAdmission::new(self.start.runner.clone(), 1);
+        let control = crate::resume::ResumeControl::new(
+            self.start.bus.clone(),
+            self.start.worker_store.clone(),
+            self.start.cp_store.clone(),
+            self.start.runner.clone(),
+            shared_registry(capped_agent_registry(self.start.scratch.path())),
+            Arc::new(reply),
+            fq_runtime::worker::DeferralQueue::new().0,
+            admission.clone(),
+        );
+        let answer = crate::resume::handle_resume_request(
+            &control,
+            crate::resume::InvocationResumeRequest {
+                invocation_id: self.invocation().to_string(),
+                reason: Some("test".to_string()),
+            },
+        )
+        .await;
+        assert!(answer.ok, "the resume is accepted: {}", answer.message);
+        // The re-drive runs detached; its agent's count is given back when
+        // its task ends.
+        await_in_flight(&admission, 0).await;
         self.settle().await
     }
 
@@ -384,4 +418,59 @@ async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
         "the next start's resume stops the same way and is not reported again"
     );
     recovering.stop().await;
+}
+
+/// **`fq invocation resume` makes no such report.** An operator's re-drive
+/// of an ambiguous invocation that then fails part-way through a step
+/// publishes the ending and the archive and nothing more, and the
+/// ownership row moves from `ambiguous` to failed. The operator's path
+/// logs a re-drive that returned an error and never announced one as
+/// ambiguous; this holds it there beside recovery's.
+#[tokio::test]
+async fn an_operator_resume_whose_run_ends_in_failed_is_not_reported_ambiguous() {
+    let mut recovering = Recovering::over(Seed::Ambiguous).await;
+    let events = recovering.operator_resume(Reply::Refused).await;
+    assert_ended_in_failed_and_not_reported(&recovering, &events).await;
+    recovering.stop().await;
+}
+
+/// **The worker row, not the error, says whether a resumed run ended.**
+/// Still in flight is a resume that was not carried out; terminal is a run
+/// that reached its terminal event; and gone, after a resume that ran, is
+/// a run the archive hand-off deleted once it ended. That last is the
+/// order in which the daemon's archive-ack consumer acts before the resume
+/// task reads the row, which the tests above leave to the race and which
+/// here is set out directly, with the deletion that consumer makes.
+#[tokio::test]
+async fn the_worker_row_says_whether_a_resumed_run_ended() {
+    let start = NextStart::over_one_run_in_flight().await;
+    let store = start.worker_store.as_ref();
+    let id = start.invocation.to_string();
+    assert_eq!(
+        ResumedRow::read(store, &id).await.unwrap(),
+        ResumedRow::InFlight,
+        "the row recovery found in flight"
+    );
+
+    let mut row = store
+        .get_invocation_state(&id)
+        .await
+        .unwrap()
+        .expect("the WAL row");
+    row.phase = "failed".to_string();
+    row.terminal_at = Some(2_000);
+    row.updated_at = 2_000;
+    store.upsert_invocation_state(&row).await.unwrap();
+    assert_eq!(
+        ResumedRow::read(store, &id).await.unwrap(),
+        ResumedRow::Terminal,
+        "the run's terminal write"
+    );
+
+    store.delete_invocation_state(&id).await.unwrap();
+    assert_eq!(
+        ResumedRow::read(store, &id).await.unwrap(),
+        ResumedRow::Archived,
+        "no row: the archive hand-off deleted it"
+    );
 }
