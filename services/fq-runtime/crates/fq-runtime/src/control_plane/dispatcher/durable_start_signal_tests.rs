@@ -1,6 +1,7 @@
 //! `handle` waits on two things at once: the durable-start signal and
 //! the invocation itself, in a `biased` loop that polls the signal
-//! first. Two ways that can go wrong are pinned here.
+//! first. Two ways that can go wrong are pinned here, and what a refused
+//! claim mark does once the signal has fired.
 //!
 //! **A spent signal polled again (#987).** The signal is a oneshot
 //! receiver, and polling one again after it has resolved panics with
@@ -18,16 +19,23 @@
 //! tests fire and return in one poll ([`Turn::Same`]), and `handle` must
 //! still treat the run as durably started.
 //!
+//! **A refused mark (#967).** The run has made its first WAL write, so it
+//! is never stopped and never redelivered: a mark the claim store refuses
+//! is tried again, and one refused on every attempt is answered by acking
+//! the delivery without releasing its claim. The claim store is made to
+//! refuse marks through a SQLite trigger of the test's own
+//! ([`refuse_claim_marks`]), for a set number of attempts or for good.
+//!
 //! The tests run the real `handle` against a real broker and a real
 //! control-plane store, with a stub worker.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_nats::jetstream::Message;
-use async_nats::jetstream::consumer::{PullConsumer, pull};
+use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
 use futures::StreamExt;
 use serde_json::json;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -35,12 +43,16 @@ use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use super::TriggerDispatcher;
+use super::duplicate_drop_tests::Captured;
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
     unique_consumer_name,
 };
 use crate::agent::{Agent, AgentId};
-use crate::bus::{EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_RETRY_BACKOFF};
+use crate::bus::{
+    EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_MAX_DELIVER, TRIGGER_RETRY_BACKOFF,
+    TRIGGER_STREAM_NAME,
+};
 use crate::control_plane::{ControlPlaneStore, TriggerClaim};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
@@ -50,6 +62,22 @@ use crate::worker::{
     DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
 };
 
+/// The start of the line `handle` logs, at `error`, when the claim store
+/// has refused every attempt to mark a durable start.
+const MARK_GAVE_UP: &str = "could not mark trigger durably started";
+/// The start of the line `handle` logs, at `warn`, when a mark lands
+/// after the claim store refused the attempts before it.
+const MARK_HEALED: &str = "marked trigger durably started after the claim store refused";
+/// The line a delivery's ack logs when the client cannot send it.
+const ACK_FAILED: &str = "failed to ack trigger message";
+
+/// An ack window shorter than the pauses between a refused mark's
+/// attempts (about 1.5 seconds in all), for a consumer of the test's own:
+/// a delivery that nothing kept alive while its mark was retried would be
+/// redelivered underneath it. The production window is 30 seconds
+/// (`TRIGGER_RETRY_BACKOFF[0]`).
+const SHORT_ACK_WINDOW: Duration = Duration::from_secs(1);
+
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
     /// Drop it unfired. `run_loop_for` does this when `run_loop_inner`
@@ -58,9 +86,19 @@ enum Resolve {
     Drop,
     /// Fire it: the first WAL write has landed.
     Fire,
-    /// Make the claim store refuse the mark, then fire it: the first WAL
-    /// write has landed and the claim's update fails.
-    FireIntoRefusedMark,
+    /// Make the claim store refuse marks as the [`Refusals`] say, then
+    /// fire it: the first WAL write has landed and the claim's update is
+    /// refused.
+    FireIntoRefusedMarks(Refusals),
+}
+
+/// Which attempts to mark the claim the store refuses.
+#[derive(Clone, Copy)]
+enum Refusals {
+    /// Every one, for the rest of the test.
+    Every,
+    /// The first `n`, and none after: a store that heals.
+    First(u32),
 }
 
 /// On which turn of `handle`'s loop the stub invocation returns.
@@ -91,9 +129,12 @@ struct ResolvesThenReturns {
     resolve: Resolve,
     turn: Turn,
     returns: Returns,
-    /// The claim store's file, for [`Resolve::FireIntoRefusedMark`].
+    /// The claim store's file, for [`Resolve::FireIntoRefusedMarks`].
     claim_db: PathBuf,
     ran_to_end: AtomicBool,
+    /// The trigger's id and the invocation id its signal carries, as the
+    /// dispatcher handed them over.
+    named: Mutex<Option<(Uuid, Uuid)>>,
 }
 
 #[async_trait::async_trait]
@@ -102,15 +143,19 @@ impl Worker for ResolvesThenReturns {
         &self,
         _agent: &Agent,
         _llm: &dyn LlmClient,
-        _trigger: Trigger,
+        trigger: Trigger,
         _delivery_attempt: Option<u32>,
         mut durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
+        let invocation_id = durable_start
+            .invocation_id()
+            .expect("the dispatcher names the run it starts");
+        *self.named.lock().unwrap() = Some((trigger.id, invocation_id));
         match self.resolve {
             Resolve::Drop => drop(durable_start),
             Resolve::Fire => durable_start.fire(),
-            Resolve::FireIntoRefusedMark => {
-                refuse_claim_marks(&self.claim_db).await;
+            Resolve::FireIntoRefusedMarks(refusals) => {
+                refuse_claim_marks(&self.claim_db, refusals).await;
                 durable_start.fire();
             }
         }
@@ -138,24 +183,64 @@ impl Worker for ResolvesThenReturns {
     }
 }
 
-/// Make every update of a claim row fail from now on, through a
-/// connection of its own to the store's file. The claim this delivery
-/// already holds was an insert and a release is a delete, so the mark is
-/// the one write on this path the refusal meets.
-async fn refuse_claim_marks(claim_db: &Path) {
+/// Make updates of a claim row fail from now on, as `refusals` says,
+/// through a connection of its own to the store's file. The claim this
+/// delivery already holds was an insert and a release is a delete, so the
+/// mark is the one write on this path the refusal meets.
+///
+/// A counted refusal spends one row of `injected_mark_refusals` per
+/// refused update. It raises `FAIL` rather than `ABORT` because `FAIL`
+/// keeps what the trigger did before it, the spent row, where `ABORT`
+/// would roll that back with the refused update and refuse for ever.
+async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
+    let mut statements: Vec<&'static str> = Vec::new();
+    match refusals {
+        Refusals::Every => statements.push(
+            "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
+             BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the mark'); END",
+        ),
+        Refusals::First(n) => {
+            statements.push("CREATE TABLE injected_mark_refusals (spent INTEGER)");
+            statements.extend(std::iter::repeat_n(
+                "INSERT INTO injected_mark_refusals VALUES (0)",
+                n as usize,
+            ));
+            statements.push(
+                "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
+                 WHEN EXISTS (SELECT 1 FROM injected_mark_refusals) \
+                 BEGIN DELETE FROM injected_mark_refusals \
+                 WHERE rowid = (SELECT min(rowid) FROM injected_mark_refusals); \
+                 SELECT RAISE(FAIL, 'injected: the claim store refuses the mark'); END",
+            );
+        }
+    }
     let mut conn = SqliteConnectOptions::new()
         .filename(claim_db)
         .connect()
         .await
         .expect("open the claim store's file");
-    sqlx::query(
-        "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
-         BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the mark'); END",
-    )
-    .execute(&mut conn)
-    .await
-    .expect("install the refusal");
+    for statement in statements {
+        sqlx::query(statement)
+            .execute(&mut conn)
+            .await
+            .expect("install the refusal");
+    }
     conn.close().await.expect("close the claim store's file");
+}
+
+/// How many of a [`Refusals::First`] count's refusals are still unspent.
+async fn refusals_left(claim_db: &Path) -> i64 {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    let (left,): (i64,) = sqlx::query_as("SELECT count(*) FROM injected_mark_refusals")
+        .fetch_one(&mut conn)
+        .await
+        .expect("count the refusals left");
+    conn.close().await.expect("close the claim store's file");
+    left
 }
 
 /// One trigger pulled off a real broker and not yet handled, and a
@@ -166,6 +251,8 @@ struct Pulled {
     dispatcher: TriggerDispatcher,
     worker: Arc<ResolvesThenReturns>,
     claims: Arc<ControlPlaneStore>,
+    claim_db: PathBuf,
+    url: String,
     consumer: PullConsumer,
     messages: pull::Stream,
     msg: Message,
@@ -173,9 +260,31 @@ struct Pulled {
 }
 
 impl Pulled {
+    /// On a consumer configured as the dispatcher's own is, with the
+    /// production ack window.
     async fn new(resolve: Resolve, turn: Turn, returns: Returns) -> Self {
+        Self::on(resolve, turn, returns, None).await
+    }
+
+    /// On a consumer of the test's own whose ack window is `ack_window`.
+    async fn with_ack_window(
+        resolve: Resolve,
+        turn: Turn,
+        returns: Returns,
+        ack_window: Duration,
+    ) -> Self {
+        Self::on(resolve, turn, returns, Some(ack_window)).await
+    }
+
+    async fn on(
+        resolve: Resolve,
+        turn: Turn,
+        returns: Returns,
+        ack_window: Option<Duration>,
+    ) -> Self {
         let server = test_nats();
-        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let url = server.url().to_string();
+        let bus = EventBus::connect(&url).await.expect("connect NATS");
         let agent_id = unique_agent_id("durable-start-signal");
         let (agent_dir, registry) = registry_with(&agent_id);
 
@@ -186,8 +295,9 @@ impl Pulled {
             resolve,
             turn,
             returns,
-            claim_db,
+            claim_db: claim_db.clone(),
             ran_to_end: AtomicBool::new(false),
+            named: Mutex::new(None),
         });
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -198,14 +308,32 @@ impl Pulled {
         )
         .with_trigger_claims(recovered_claims(&claims).await, "worker-a");
 
-        let consumer = bus
-            .trigger_consumer_with_filter(
-                &unique_consumer_name(),
-                &crate::events::subjects::trigger(&agent_id),
-                NATS_DEFAULT_MAX_ACK_PENDING,
-            )
-            .await
-            .expect("consumer");
+        let filter = crate::events::subjects::trigger(&agent_id);
+        let consumer = match ack_window {
+            None => bus
+                .trigger_consumer_with_filter(
+                    &unique_consumer_name(),
+                    &filter,
+                    NATS_DEFAULT_MAX_ACK_PENDING,
+                )
+                .await
+                .expect("consumer"),
+            Some(ack_wait) => bus
+                .jetstream()
+                .get_stream(TRIGGER_STREAM_NAME)
+                .await
+                .expect("the trigger stream")
+                .create_consumer(pull::Config {
+                    durable_name: Some(unique_consumer_name()),
+                    filter_subject: filter,
+                    ack_policy: AckPolicy::Explicit,
+                    ack_wait,
+                    max_deliver: TRIGGER_MAX_DELIVER,
+                    ..Default::default()
+                })
+                .await
+                .expect("consumer"),
+        };
         bus.publish_trigger(&AgentId::new(&agent_id).unwrap(), &json!({"input": "hi"}))
             .await
             .expect("publish");
@@ -221,6 +349,8 @@ impl Pulled {
             dispatcher,
             worker,
             claims,
+            claim_db,
+            url,
             consumer,
             messages,
             msg,
@@ -243,8 +373,27 @@ impl Pulled {
             .expect("handle returns");
     }
 
+    /// Hand the trigger to `handle` with a capture of what it logs at
+    /// `warn` and above installed.
+    async fn handle_capturing(&self) -> Captured {
+        let log = Captured::default();
+        let _capture = log.install();
+        self.handle().await;
+        log
+    }
+
     fn ran_to_end(&self) -> bool {
         self.worker.ran_to_end.load(Ordering::SeqCst)
+    }
+
+    /// The trigger's id and its invocation's id, once the invocation
+    /// has started.
+    fn named(&self) -> (Uuid, Uuid) {
+        self.worker
+            .named
+            .lock()
+            .unwrap()
+            .expect("the invocation started")
     }
 
     /// What a fresh claim on this delivery's identity, by another
@@ -276,6 +425,90 @@ impl Pulled {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Start reading every answer this delivery sends the broker.
+    async fn watch_answers(&self) -> Answers {
+        Answers::watch(&self.url, &self.msg).await
+    }
+
+    /// Make every answer this delivery sends fail in the client, before
+    /// it can reach the broker: the delivery answers through a connection
+    /// of its own that has been drained and closed. It still names the
+    /// same message, because `info()` reads the reply subject alone.
+    async fn refuse_acks(&mut self) {
+        let client = async_nats::connect(self.url.as_str())
+            .await
+            .expect("connect a connection to close");
+        client.drain().await.expect("drain it");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while client
+            .publish("fq.test.closed-probe", "".into())
+            .await
+            .is_ok()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the drained connection still accepts a publish after 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.msg.context = async_nats::jetstream::new(client);
+    }
+}
+
+/// Every answer one delivery sends the broker, read off its ack subject
+/// by a connection of its own. An ack is an empty body, an in-progress
+/// ack `+WPI`, a NAK `-NAK`.
+struct Answers {
+    _client: async_nats::Client,
+    subscription: async_nats::Subscriber,
+}
+
+/// What [`Answers::sent`] read, counted by kind.
+#[derive(Debug)]
+struct Sent {
+    acks: usize,
+    keepalives: usize,
+    other: Vec<String>,
+}
+
+impl Answers {
+    async fn watch(url: &str, msg: &Message) -> Self {
+        let client = async_nats::connect(url).await.expect("connect a watcher");
+        let reply = msg
+            .reply
+            .clone()
+            .expect("a JetStream delivery has an ack subject");
+        let subscription = client.subscribe(reply).await.expect("watch the answers");
+        client
+            .flush()
+            .await
+            .expect("the watch is in place before the delivery is answered");
+        Self {
+            _client: client,
+            subscription,
+        }
+    }
+
+    /// The answers sent so far, read until none has arrived for half a
+    /// second.
+    async fn sent(&mut self) -> Sent {
+        let mut sent = Sent {
+            acks: 0,
+            keepalives: 0,
+            other: Vec::new(),
+        };
+        while let Ok(Some(answer)) =
+            tokio::time::timeout(Duration::from_millis(500), self.subscription.next()).await
+        {
+            match answer.payload.as_ref() {
+                b"" | b"+ACK" => sent.acks += 1,
+                b"+WPI" => sent.keepalives += 1,
+                other => sent.other.push(String::from_utf8_lossy(other).into_owned()),
+            }
+        }
+        sent
     }
 }
 
@@ -345,36 +578,153 @@ async fn a_dropped_signal_then_a_clean_return_acks_the_trigger() {
     );
 }
 
-/// The signal fires and the claim store's mark fails: `handle` must not
-/// poll the spent receiver again, and it stops the run there. It returns
-/// without driving the invocation any further, leaving the claim
-/// `claimed` and the delivery un-acked, so the invocation's in-flight WAL
-/// row is the next start's to resume (`mark_durable_started` says why;
-/// see #967 for the alternatives).
+/// The signal fires and the claim store refuses the first two attempts
+/// to mark the claim, then takes the third: a store that heals inside the
+/// retries. Nothing else may happen. The run is not stopped, the claim
+/// ends `durably_started`, the delivery is acked once and nothing else is
+/// sent for it but keepalives, and the heal is logged once at `warn`.
+/// Before #967 the first refusal stopped the run there, un-acked.
 #[tokio::test]
-async fn a_failed_mark_after_the_signal_fires_stops_the_run() {
+async fn a_mark_refused_then_accepted_inside_its_retries_marks_the_claim_and_acks_once() {
     let mut pulled = Pulled::new(
-        Resolve::FireIntoRefusedMark,
+        Resolve::FireIntoRefusedMarks(Refusals::First(2)),
         Turn::Later,
         Returns::Completed,
     )
     .await;
+    let mut answers = pulled.watch_answers().await;
 
-    pulled.handle().await;
+    let log = pulled.handle_capturing().await;
 
-    // Deterministic, not a race: the stub fires the signal and yields,
-    // and under `biased` the next turn of `handle`'s loop takes the
-    // signal branch before it polls the invocation again. The failed mark
-    // returns from that branch, so the stub never resumes past its yield.
     assert!(
-        !pulled.ran_to_end(),
-        "the invocation was driven on after its mark failed"
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on while its mark was retried"
+    );
+    assert_eq!(
+        refusals_left(&pulled.claim_db).await,
+        0,
+        "both refusals were spent, so the mark that landed was a retry"
+    );
+    assert_marked_started(pulled.probe_claim().await);
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert_eq!(
+        log.lines_with(MARK_HEALED).len(),
+        1,
+        "the heal is logged once"
+    );
+    assert!(
+        log.lines_with(MARK_GAVE_UP).is_empty(),
+        "the mark landed, so nothing says it was given up"
+    );
+}
+
+/// The signal fires and the claim store refuses every attempt to mark the
+/// claim. The run started, so it is neither stopped nor redelivered: the
+/// delivery is acked without its claim being released, the claim stays
+/// `claimed` by the dispatcher, the run goes on to its end, and the give-up
+/// is logged once at `error`, naming the invocation and the trigger.
+///
+/// The consumer's ack window is shorter than the pauses between the
+/// attempts ([`SHORT_ACK_WINDOW`]), so this also pins the keepalive that
+/// runs alongside them: a delivery left to lapse while its mark was
+/// retried would be redelivered underneath it. No copy comes back
+/// either during the retries or for three windows after the ack, so none
+/// can be dropped as a held duplicate or end in a dead letter.
+#[tokio::test]
+async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs_on() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let log = pulled.handle_capturing().await;
+
+    assert!(
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on after its mark was refused"
     );
     assert_held_by_the_dispatcher(
         pulled.probe_claim().await,
-        "the mark was refused, so the claim is still `claimed` by the dispatcher",
+        "the mark never landed, so the claim must be left `claimed` by the dispatcher, \
+         not released",
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert!(
+        sent.keepalives > 0,
+        "the delivery was kept alive while its mark was retried: {sent:?}"
+    );
+    let redelivered = tokio::time::timeout(SHORT_ACK_WINDOW * 3, pulled.messages.next()).await;
+    assert!(
+        redelivered.is_err(),
+        "a started run's delivery must not come back: {redelivered:?}"
+    );
+
+    let (trigger_id, invocation_id) = pulled.named();
+    let gave_up = log.lines_with(MARK_GAVE_UP);
+    assert_eq!(gave_up.len(), 1, "the give-up is logged once: {gave_up:?}");
+    let line = &gave_up[0];
+    assert!(
+        line.contains("ERROR")
+            && line.contains(&format!("invocation_id={invocation_id}"))
+            && line.contains(&format!("trigger_id={trigger_id}")),
+        "logged at error, naming the invocation and the trigger: {line}"
+    );
+}
+
+/// The signal fires, the claim store refuses every attempt to mark the
+/// claim, and the ack sent in place of the mark cannot be sent either.
+/// What follows is the risk #967 accepted: the delivery is left un-acked
+/// with its claim `claimed`, so its redeliveries will meet this daemon's
+/// own claim and be dropped. The failure must be logged, naming the
+/// trigger, and the run must still go on to its end.
+#[tokio::test]
+async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_run_runs_on() {
+    let mut pulled = Pulled::new(
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    pulled.refuse_acks().await;
+
+    let log = pulled.handle_capturing().await;
+
+    assert!(
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on after its ack failed"
+    );
+    assert_held_by_the_dispatcher(
+        pulled.probe_claim().await,
+        "the claim must be left `claimed` by the dispatcher, not released",
     );
     ack_pending_stays(&mut pulled.consumer, 1, Duration::from_millis(300)).await;
+    let (trigger_id, _) = pulled.named();
+    let failed = log.lines_with(ACK_FAILED);
+    assert_eq!(failed.len(), 1, "the failed ack is logged once: {failed:?}");
+    assert!(
+        failed[0].contains("ERROR") && failed[0].contains(&format!("trigger_id={trigger_id}")),
+        "logged at error, naming the trigger: {}",
+        failed[0]
+    );
+    assert_eq!(
+        log.lines_with(MARK_GAVE_UP).len(),
+        1,
+        "the refused mark is logged once"
+    );
 }
 
 /// The signal fires and the invocation completes in the same poll, so
@@ -412,17 +762,16 @@ async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried(
     pulled.wait_until_acked().await;
 }
 
-/// What a refused mark after a return in the same poll must leave: the
-/// claim as it was, `claimed` by the dispatcher, and the delivery acked.
+/// What a mark refused on every attempt must leave: the claim as it was,
+/// `claimed` by the dispatcher, and the delivery acked.
 ///
-/// The run started and has returned, so it cannot be stopped, and a
-/// redelivery is never wanted: on this daemon the same-claimant `Held`
-/// arm would drop each one until the trigger was dead-lettered as
-/// `trigger_exhausted` although it ran, and after a restart a finished
-/// run's claim would be adopted and the work run again. So the delivery
-/// is acked. The claim is not released first: a lost ack would then let
-/// the redelivery win a fresh claim. A started run under a claim that
-/// still says `claimed` is what is left; see #967.
+/// The run started, so a redelivery is never wanted: on this daemon the
+/// same-claimant `Held` arm would drop each one until the trigger was
+/// dead-lettered as `trigger_exhausted` although it ran, and after a
+/// restart a finished run's claim would be adopted and the work run
+/// again. So the delivery is acked. The claim is not released first: a
+/// lost ack would then let the redelivery win a fresh claim. A started
+/// run under a claim that still says `claimed` is what is left (#967).
 async fn assert_acked_with_the_claim_kept(pulled: &mut Pulled) {
     assert!(pulled.ran_to_end(), "the invocation ran to its end");
     assert_held_by_the_dispatcher(
@@ -441,12 +790,16 @@ fn assert_held_by_the_dispatcher(claim: TriggerClaim, why: &str) {
 }
 
 /// The signal fires and the invocation completes in the same poll, and
-/// the claim store refuses the mark (#966): a finished run, acked with
+/// the claim store refuses every mark (#966): a finished run, acked with
 /// its claim kept ([`assert_acked_with_the_claim_kept`]).
 #[tokio::test]
 async fn a_failed_mark_after_a_completion_in_the_same_poll_acks_and_keeps_the_claim() {
-    let mut pulled =
-        Pulled::new(Resolve::FireIntoRefusedMark, Turn::Same, Returns::Completed).await;
+    let mut pulled = Pulled::new(
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
+        Turn::Same,
+        Returns::Completed,
+    )
+    .await;
 
     pulled.handle().await;
 
@@ -454,14 +807,14 @@ async fn a_failed_mark_after_a_completion_in_the_same_poll_acks_and_keeps_the_cl
 }
 
 /// The signal fires and the invocation fails with a transient error in
-/// the same poll, and the claim store refuses the mark (#966). Before
+/// the same poll, and the claim store refuses every mark (#966). Before
 /// durable start a transient error is NAKed for a retry; this run had
 /// started, so it is acked with its claim kept instead
 /// ([`assert_acked_with_the_claim_kept`]).
 #[tokio::test]
 async fn a_failed_mark_after_a_transient_error_in_the_same_poll_acks_and_keeps_the_claim() {
     let mut pulled = Pulled::new(
-        Resolve::FireIntoRefusedMark,
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
         Turn::Same,
         Returns::TransientError,
     )
