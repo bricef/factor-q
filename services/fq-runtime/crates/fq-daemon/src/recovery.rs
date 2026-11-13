@@ -425,23 +425,7 @@ pub(crate) async fn spawn_resume_tasks(
                     invocation_id = %inv_id,
                     "recovered invocation ended before its turn to resume; nothing to resume"
                 ),
-                Err(err) => {
-                    let note = format!("automatic resume failed: {err}");
-                    tracing::error!(invocation_id = %inv_id, agent_id = %agent_id, error = %err, "resume failed; emitting invocation.ambiguous");
-                    publish_ambiguous_once(
-                        wstore.as_ref(),
-                        &bus,
-                        agent_id,
-                        inv_id,
-                        &inv_id.to_string(),
-                        fq_runtime::events::InvocationAmbiguousPayload {
-                            stuck_entity: "recovery".to_string(),
-                            stuck_call_id: inv_id.to_string(),
-                            note,
-                        },
-                    )
-                    .await;
-                }
+                Err(err) => report_resume_error(wstore.as_ref(), &bus, agent_id, inv_id, err).await,
             }
         }));
     }
@@ -451,6 +435,116 @@ pub(crate) async fn spawn_resume_tasks(
     };
     tasks.announce(resume_count, admission.workers().max_concurrent());
     tasks
+}
+
+/// What the worker row says, once a resume has returned an error, about
+/// the run it resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumedRow {
+    /// Still in flight: the resume could not be carried out, and the run
+    /// did not reach a terminal event.
+    InFlight,
+    /// Terminal: the run reached its terminal event, which is stored with
+    /// the terminal write or published before it. An error after that —
+    /// the archive refused, say — does not undo the ending.
+    Terminal,
+    /// Gone: the run ended and the control plane acknowledged its archive,
+    /// which is what deletes the row.
+    Archived,
+}
+
+impl ResumedRow {
+    /// Read `invocation_id`'s row. A resume that found no row, or a
+    /// terminal one, returned before it ran (the caller's
+    /// `AlreadyTerminal` / `NoStateRow` arm), so for any other error a
+    /// missing row is one the archive hand-off deleted after the resume
+    /// ended the run.
+    async fn read(
+        worker_store: &WorkerStore,
+        invocation_id: &str,
+    ) -> Result<Self, fq_runtime::WorkerStoreError> {
+        let row = worker_store.get_invocation_state(invocation_id).await?;
+        Ok(match row {
+            None => Self::Archived,
+            Some(row) if row.terminal_at.is_some() => Self::Terminal,
+            Some(_) => Self::InFlight,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::Terminal => "terminal",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+/// Report a recovered invocation whose resume returned `err`.
+///
+/// The error alone cannot say whether the run ended (issue 1005). A run
+/// that ends in an ordinary `failed` returns `InvocationFailed` when the
+/// reducer decides it, the provider's error when a model call fails
+/// part-way through a step, and a bus error when its ending went out but
+/// its archive was refused; each has published or stored its terminal
+/// event, and its record is complete. The worker row says which it was:
+/// terminal, or deleted by the archive hand-off, means the run ended, and
+/// nothing about it is ambiguous. Reporting it as ambiguous would give it
+/// a second ending in the event log, and turn its ownership row to
+/// `ambiguous` for an operator to triage a run that needs nothing.
+///
+/// Only a resume that could not be carried out — the row still in flight,
+/// or unreadable — is `invocation.ambiguous`, at most once
+/// ([`publish_ambiguous_once`]).
+async fn report_resume_error(
+    worker_store: &WorkerStore,
+    bus: &EventBus,
+    agent_id: AgentId,
+    invocation_id: Uuid,
+    err: ExecutorError,
+) {
+    match ResumedRow::read(worker_store, &invocation_id.to_string()).await {
+        Ok(row @ (ResumedRow::Terminal | ResumedRow::Archived)) => {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                agent_id = %agent_id,
+                error = %err,
+                row = row.label(),
+                "resumed invocation ended with an error; its ending is on the record, so it is \
+                 not reported ambiguous"
+            );
+            return;
+        }
+        Ok(ResumedRow::InFlight) => {}
+        // Not knowing is not knowing it ended: report it, as
+        // `publish_ambiguous_once` does when it cannot read its stamp.
+        Err(read) => tracing::error!(
+            invocation_id = %invocation_id,
+            error = %read,
+            "could not read the worker row of an invocation whose resume failed; \
+             treating the resume as not carried out"
+        ),
+    }
+    let note = format!("automatic resume failed: {err}");
+    tracing::error!(
+        invocation_id = %invocation_id,
+        agent_id = %agent_id,
+        error = %err,
+        "resume failed; emitting invocation.ambiguous"
+    );
+    publish_ambiguous_once(
+        worker_store,
+        bus,
+        agent_id,
+        invocation_id,
+        &invocation_id.to_string(),
+        fq_runtime::events::InvocationAmbiguousPayload {
+            stuck_entity: "recovery".to_string(),
+            stuck_call_id: invocation_id.to_string(),
+            note,
+        },
+    )
+    .await;
 }
 
 /// What [`spawn_resume_tasks`] started.

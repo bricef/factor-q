@@ -390,6 +390,19 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+Startup recovery also reports an invocation `ambiguous` when it resumed
+one on its own and the resume could not be carried out, leaving the
+invocation in flight: the daemon logs `resume failed; emitting
+invocation.ambiguous`, and the event carries `stuck_entity: recovery`
+and the error in its `note`. That happens once per invocation, however
+many starts fail the same way. A resumed run that ends is not one of
+these, even when it ends in `failed` and the resume returns an error:
+its `failed` and `invocation.archived` are its record, its ownership
+row reads `failed`, and the daemon logs `resumed invocation ended with
+an error` at warn, with the error. Before
+[#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
+reported ambiguous as well, and left for an operator to triage.
+
 An invocation waiting for a worker permit is not being driven yet, even
 though every surface shows it as in flight (or, for one you resumed, as
 still ambiguous), so a plain `drop` takes it with no `--live` needed.
