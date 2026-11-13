@@ -567,6 +567,11 @@ pub struct StatusReport {
     /// `[worker.throttle] enabled = false`.
     #[serde(default)]
     pub throttled_models: Vec<crate::health::ThrottledModel>,
+    /// Every row the worker's archive sweeper is holding rather than
+    /// archiving, with why and what lifts the hold: the list
+    /// `control.doctor` judges, reported here without a verdict.
+    #[serde(default)]
+    pub archive_holds: Vec<crate::health::ArchiveHold>,
 }
 
 /// The projection's last rebuild, as `control.status` reports it.

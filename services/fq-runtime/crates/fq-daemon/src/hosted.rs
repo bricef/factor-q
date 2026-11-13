@@ -177,6 +177,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         deferrals: deferrals.clone(),
         admission: admission.clone(),
     });
+    // Built before the edge, whose health reports list the rows it holds.
+    let archive_retry_sweeper =
+        fq_runtime::ArchiveRetrySweeper::new(bus.clone(), worker_id.clone(), worker_store.clone())
+            .with_retry_interval_ms(config.worker.archive_retry_interval_ms)
+            .with_warn_after_ms(config.worker.archive_warn_after_ms);
 
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
     // Phase 2): TLS + capability tokens over tarpc
@@ -206,7 +211,8 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             bus: bus.clone(),
             projection: store.clone(),
             control_plane: cp_store.clone(),
-            facts: daemon_facts(&config, mcp.states(), &throttle, &admission, &worker_id),
+            facts: daemon_facts(&config, mcp.states(), &throttle, &admission, &worker_id)
+                .with_archive_holds(archive_retry_sweeper.holds()),
             // The same runner the dispatcher and startup recovery
             // drive invocations with — `invocation.drop` asks it
             // whether the target is live, and arms its halt.
@@ -346,15 +352,8 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let mut archive_ack_handle =
         tokio::spawn(async move { archive_ack_consumer.run(archive_ack_shutdown_rx).await });
 
-    // Spawn the archive retry sweeper. Periodically lists
-    // pending hand-offs and republishes invocation.archived
-    // until the control-plane acks. Cadence + warn threshold
-    // come from `[worker]` in fqd.toml.
+    // Spawn the archive retry sweeper built above.
     let (archive_retry_shutdown_tx, archive_retry_shutdown_rx) = tokio::sync::oneshot::channel();
-    let archive_retry_sweeper =
-        fq_runtime::ArchiveRetrySweeper::new(bus.clone(), worker_id.clone(), worker_store.clone())
-            .with_retry_interval_ms(config.worker.archive_retry_interval_ms)
-            .with_warn_after_ms(config.worker.archive_warn_after_ms);
     let mut archive_retry_handle =
         tokio::spawn(async move { archive_retry_sweeper.run(archive_retry_shutdown_rx).await });
 
@@ -758,7 +757,8 @@ async fn announce_startup(
 /// where its state lives, how long it will take to stop, and which
 /// process it is. They come from the config it was started with and the
 /// id it was given, so the reports describe the process reporting rather
-/// than the machine asking.
+/// than the machine asking. Its archive sweeper's holds are attached by
+/// the caller, which builds the sweeper (`DaemonFacts::with_archive_holds`).
 fn daemon_facts(
     config: &Config,
     mcp_servers: fq_runtime::McpServerStates,
@@ -781,5 +781,6 @@ fn daemon_facts(
         mcp_servers,
         throttle: throttle.clone(),
         agent_caps: admission.agents().clone(),
+        archive_holds: Default::default(),
     }
 }

@@ -2627,7 +2627,7 @@
   },
   {
     "report": {
-      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation that has crossed no step boundary within `stuck_after_ms`, with no tool or model call open recently enough to explain the silence. That threshold is derived from this daemon's own call deadlines — twice the longest a single step can legitimately take — so it is reported rather than assumed, and it is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one. The trigger-claim block lists claimed deliveries that were neither released nor recorded as started and will not settle without help. Two findings are issues: a run whose claim still says it has not started while its message can still be redelivered, and a delivery an exited process left that never started a run and will not be redelivered, because its message is gone or did not come back within the redelivery window. Two are listed without being issues: such a delivery still inside the window, and one whose claim names no invocation, so the report cannot tell. A claim this daemon holds for a run that has not started is never listed: it may be waiting behind a paused model or a full agent, and nothing on the claim tells that apart from one that will never start. Nor is a claim whose message is gone after its run started, or one an exited process left that is older than the retention window.",
+      "description": "A composite: the four checks are read together, at one instant, by the daemon that owns the work being reported on — which is also the cost of asking. This report cannot describe a daemon that is not running, and the absence of an answer is itself the finding rather than a transport failure to retry. The checks that count as *issues* are stale workers, stuck in-flight work, ambiguous invocations and permanent failures; in-flight work that is merely running is healthy, and the dead-letter line is informational. `stuck` means an in-flight invocation that has crossed no step boundary within `stuck_after_ms`, with no tool or model call open recently enough to explain the silence. That threshold is derived from this daemon's own call deadlines — twice the longest a single step can legitimately take — so it is reported rather than assumed, and it is not a parameter: a health report an operator can narrow is one they can narrow past the problem. The consumer lines are a probe of this daemon's broker at the instant of the call: every durable it expects, named, with a stuck verdict for any that is redelivering rather than progressing. A summariser durable is expected only where `[summary]` configures one. The trigger-claim block lists claimed deliveries that were neither released nor recorded as started and will not settle without help. Two findings are issues: a run whose claim still says it has not started while its message can still be redelivered, and a delivery an exited process left that never started a run and will not be redelivered, because its message is gone or did not come back within the redelivery window. Two are listed without being issues: such a delivery still inside the window, and one whose claim names no invocation, so the report cannot tell. A claim this daemon holds for a run that has not started is never listed: it may be waiting behind a paused model or a full agent, and nothing on the claim tells that apart from one that will never start. Nor is a claim whose message is gone after its run started, or one an exited process left that is older than the retention window. `archive_holds` lists every finished invocation's row the worker's archive sweeper is holding rather than archiving, and each is an issue: an event the row has to publish is larger than the broker accepts, or its stored terminal event must not be republished, and neither lifts on its own. Each carries the reason and the remedy. The list is the daemon's memory of this run's sweeps: a row held by an earlier run is offered again at start and listed again once it is held again.",
       "domain": "control",
       "name": "doctor",
       "output_schema": {
@@ -2665,6 +2665,97 @@
               "held"
             ],
             "type": "object"
+          },
+          "ArchiveHold": {
+            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing for a held row, neither its stored\nterminal event nor `invocation.archived`, so the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
+            "properties": {
+              "agent_id": {
+                "description": "The agent that ran it.",
+                "type": "string"
+              },
+              "invocation_id": {
+                "description": "The invocation whose row is held, in full.",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/ArchiveHoldReason",
+                "description": "Why the sweeper holds it."
+              },
+              "remedy": {
+                "description": "What lifts the hold, in the daemon's words: what to change or do,\nand where the operating guide covers it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "reason",
+              "remedy"
+            ],
+            "type": "object"
+          },
+          "ArchiveHoldReason": {
+            "description": "Why the archive sweeper holds a row. Externally tagged, for the same\nencoding reason as [`StreamHealth`].",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nso the sweeper does not offer it again until the limit has risen,\nwhich for the daemon means its next start: it reads the broker's\n`max_payload` when it connects.",
+                "properties": {
+                  "payload_too_large": {
+                    "properties": {
+                      "event_type": {
+                        "description": "The refused event's type, spelled as its own `event_type` on\nthe wire.",
+                        "type": "string"
+                      },
+                      "limit_bytes": {
+                        "description": "The broker's `max_payload` it exceeded, in bytes.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "size_bytes": {
+                        "description": "The event's serialised size, in bytes.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "event_type",
+                      "size_bytes",
+                      "limit_bytes"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "payload_too_large"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The row's stored terminal event must not be republished: this\nbuild cannot read it, or it could not be this row's outcome. The\ncase to expect is an event an older build stored and had not\npublished when the daemon was upgraded across an event-schema\nchange; republished, it would halt every durable consumer on the\nstream. No later build reads an older event version, so the hold\nlasts until an operator releases the row.",
+                "properties": {
+                  "stored_event_refused": {
+                    "properties": {
+                      "detail": {
+                        "description": "Why, verbatim: what the event failed to parse as, or what it\nturned out to be.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "detail"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "stored_event_refused"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "ClaimHolder": {
             "description": "Whose claim a stranded claim is.",
@@ -3347,6 +3438,14 @@
             "format": "int64",
             "type": "integer"
           },
+          "archive_holds": {
+            "default": [],
+            "description": "Every finished invocation's row the worker's archive sweeper is\nholding rather than archiving: an event the row has to publish is\nlarger than the broker accepts, or its stored terminal event must\nnot be republished. Each is an issue, because none lifts on its\nown: the remedy beside it says what an operator has to do. Read\nfrom the daemon's memory of its own sweeps, so a row held by an\nearlier run is listed again once this run's sweeper has held it.",
+            "items": {
+              "$ref": "#/$defs/ArchiveHold"
+            },
+            "type": "array"
+          },
           "consumers": {
             "default": [],
             "description": "Every durable consumer this daemon expects, and how each one is\ndoing. The Phase 1 exit criterion, verbatim: \"`fq doctor`\nreports every consumer\". Before this the report was a fold of\nthe stores alone, so a control-plane consumer stuck redelivering\n— the wedge finding B4 describes — left every check green.\n\nA daemon that cannot be asked answers nothing at all, which is\nwhy this is a plain list rather than an optional one: reaching\nthe report means the daemon probed its own broker.",
@@ -3421,11 +3520,102 @@
   },
   {
     "report": {
-      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call. `projection_rebuild` is the projection's last rebuild — a schema bump on start, or `control.projection_rebuild` — and whether its replay has caught up; absent on a projection that has never been rebuilt. `throttled_models` is every model the worker's provider throttle is holding back — paused after a 429, running under its in-flight ceiling, or rate-limited in the current window — read off the live throttle at the instant of the call. An empty list means no provider has said no recently.",
+      "description": "What is running and what it is running on. Answers `which build is this`, `are the streams and their consumers keeping up`, `which agent definitions did this daemon load and which did it reject`, `how far has the projection folded` and `is anything waiting on operator recovery`. It does not judge: stale workers and ambiguous invocations are reported as counts, and deciding whether they amount to a problem is `control.doctor`'s job. `stuck_after_ms` is here for the same reason as the drain deadline: it is derived from this daemon's call deadlines, so nothing outside the process can work it out, and a reader of an `invocation.stuck` event needs to know what threshold produced it. The registry census is the daemon's in-memory handle — what it would run right now, not what is on any caller's disk — so it reflects a reload without a restart. Stream figures are a probe at the instant of the call, not a fold, so two calls a second apart legitimately differ. This report cannot describe a daemon that is not running, and a caller that cannot reach one has learned the single most important thing about the machinery rather than failed to learn anything: absence is the finding. The MCP lines are every shared server a loaded agent declares and whether it is up; as with stale workers, whether that amounts to a problem is `control.doctor`'s call. `projection_rebuild` is the projection's last rebuild — a schema bump on start, or `control.projection_rebuild` — and whether its replay has caught up; absent on a projection that has never been rebuilt. `throttled_models` is every model the worker's provider throttle is holding back — paused after a 429, running under its in-flight ceiling, or rate-limited in the current window — read off the live throttle at the instant of the call. An empty list means no provider has said no recently. `archive_holds` is every finished invocation's row the worker's archive sweeper is holding rather than archiving, with the reason and what lifts the hold; as with stale workers, judging them is `control.doctor`'s call.",
       "domain": "control",
       "name": "status",
       "output_schema": {
         "$defs": {
+          "ArchiveHold": {
+            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing for a held row, neither its stored\nterminal event nor `invocation.archived`, so the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
+            "properties": {
+              "agent_id": {
+                "description": "The agent that ran it.",
+                "type": "string"
+              },
+              "invocation_id": {
+                "description": "The invocation whose row is held, in full.",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/ArchiveHoldReason",
+                "description": "Why the sweeper holds it."
+              },
+              "remedy": {
+                "description": "What lifts the hold, in the daemon's words: what to change or do,\nand where the operating guide covers it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "invocation_id",
+              "agent_id",
+              "reason",
+              "remedy"
+            ],
+            "type": "object"
+          },
+          "ArchiveHoldReason": {
+            "description": "Why the archive sweeper holds a row. Externally tagged, for the same\nencoding reason as [`StreamHealth`].",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nso the sweeper does not offer it again until the limit has risen,\nwhich for the daemon means its next start: it reads the broker's\n`max_payload` when it connects.",
+                "properties": {
+                  "payload_too_large": {
+                    "properties": {
+                      "event_type": {
+                        "description": "The refused event's type, spelled as its own `event_type` on\nthe wire.",
+                        "type": "string"
+                      },
+                      "limit_bytes": {
+                        "description": "The broker's `max_payload` it exceeded, in bytes.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "size_bytes": {
+                        "description": "The event's serialised size, in bytes.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "event_type",
+                      "size_bytes",
+                      "limit_bytes"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "payload_too_large"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The row's stored terminal event must not be republished: this\nbuild cannot read it, or it could not be this row's outcome. The\ncase to expect is an event an older build stored and had not\npublished when the daemon was upgraded across an event-schema\nchange; republished, it would halt every durable consumer on the\nstream. No later build reads an older event version, so the hold\nlasts until an operator releases the row.",
+                "properties": {
+                  "stored_event_refused": {
+                    "properties": {
+                      "detail": {
+                        "description": "Why, verbatim: what the event failed to parse as, or what it\nturned out to be.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "detail"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "stored_event_refused"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "ConsumerHealth": {
             "description": "Health of one durable consumer on a stream. Externally tagged, for\nthe same encoding reason as [`StreamHealth`].",
             "oneOf": [
@@ -4029,6 +4219,14 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`control.status`'s declared output, and what `fq status --json`\nnests under `daemon`.",
         "properties": {
+          "archive_holds": {
+            "default": [],
+            "description": "Every row the worker's archive sweeper is holding rather than\narchiving, with why and what lifts the hold: the list\n`control.doctor` judges, reported here without a verdict.",
+            "items": {
+              "$ref": "#/$defs/ArchiveHold"
+            },
+            "type": "array"
+          },
           "drain_deadline_ms": {
             "description": "How long this daemon will drain for before giving up, in\nmilliseconds.\n\nReported because a client that waits for a stop has to wait at\nleast this long, and it is the daemon's setting. A reader that\nguessed would call a successful drain a hang, or hang past a\nreal failure — and against a remote daemon it has no config to\nguess from at all.",
             "format": "uint64",

@@ -989,6 +989,7 @@ impl NextStart {
                     worker_id: self.worker_id.as_str().to_string(),
                     dispatching_since_ms: 0,
                     trigger_claim_retention_ms: None,
+                    archive_holds: Default::default(),
                 },
                 bus: self.bus.clone(),
                 projection,

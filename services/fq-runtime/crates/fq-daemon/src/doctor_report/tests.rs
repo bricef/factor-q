@@ -311,3 +311,37 @@ fn dead_letters_never_fabricates_a_count() {
     );
     assert_eq!(report.dead_letters.exhausted_triggers, 0);
 }
+
+/// A row the archive sweeper holds makes the report one with issues, and
+/// survives the wire with its reason and remedy: nothing lifts a hold but
+/// an operator, and the report is where one learns of it without reading
+/// the daemon log.
+#[test]
+fn an_archive_hold_is_an_issue_and_roundtrips() {
+    let clean = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(!clean.has_issues());
+    assert!(clean.archive_holds.is_empty(), "none until attached");
+
+    let report = clean.with_archive_holds(vec![fq_ops::health::ArchiveHold {
+        invocation_id: "019a0000-0000-7000-8000-000000000001".to_string(),
+        agent_id: "researcher".to_string(),
+        reason: fq_ops::health::ArchiveHoldReason::PayloadTooLarge {
+            event_type: "invocation_archived".to_string(),
+            size_bytes: 1_052_275,
+            limit_bytes: 1_048_576,
+        },
+        remedy: "raise the broker's max_payload".to_string(),
+    }]);
+    assert!(report.has_issues(), "a held row waits on an operator");
+    let back: DoctorReport =
+        serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+    assert_eq!(back, report);
+}

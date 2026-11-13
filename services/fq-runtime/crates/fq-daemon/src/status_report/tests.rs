@@ -64,6 +64,27 @@ fn the_report_roundtrips_through_its_declared_shape() {
             rate_limited_in_window: 3,
             waves: 1,
         }],
+        // One row held for each cause, so both tags roundtrip.
+        archive_holds: vec![
+            fq_ops::health::ArchiveHold {
+                invocation_id: "019a0000-0000-7000-8000-000000000001".to_string(),
+                agent_id: "researcher".to_string(),
+                reason: fq_ops::health::ArchiveHoldReason::PayloadTooLarge {
+                    event_type: "invocation_archived".to_string(),
+                    size_bytes: 1_052_275,
+                    limit_bytes: 1_048_576,
+                },
+                remedy: "raise the broker's max_payload".to_string(),
+            },
+            fq_ops::health::ArchiveHold {
+                invocation_id: "019a0000-0000-7000-8000-000000000002".to_string(),
+                agent_id: "researcher".to_string(),
+                reason: fq_ops::health::ArchiveHoldReason::StoredEventRefused {
+                    detail: "stored terminal event is unreadable".to_string(),
+                },
+                remedy: "release the row".to_string(),
+            },
+        ],
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
         version: "0.1.0+deadbee".to_string(),

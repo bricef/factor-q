@@ -30,4 +30,5 @@ Stranded trigger claims: 3 (2 issues) — claimed trigger deliveries that have n
   -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
   fq-triggers seq 1002: claimed <CLAIMED_AWAITING> by worker-alpha, a process that has exited; reserved invocation id 7a000000-0000-7000-8000-000000000007
   -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
+Archive holds: none
 Dead-letters: none
