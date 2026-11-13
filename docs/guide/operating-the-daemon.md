@@ -426,21 +426,69 @@ archive sweeper republishes it first
 ([#823](https://github.com/bricef/factor-q/issues/823),
 [#946](https://github.com/bricef/factor-q/issues/946)).
 
-The sweeper will not republish a stored event that this build cannot
-read, or one that could not be that row's outcome. The case to expect is
-an event an older daemon stored and had not yet published when you
-upgraded across an event-schema bump. Republished, it would halt every
-durable consumer on the stream (see
-[When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
-So the sweeper **holds** the row instead. It publishes neither the stored
-event nor `invocation.archived` for that row, and it carries on with every
-other row. The daemon log reports a held row once per daemon run, at error
-level, as `stored terminal event cannot be republished; holding the row
-unarchived until an operator releases it`, with the `invocation_id` and
-the reason (for example, the `schema_version` it found and the versions
-this build reads).
+A row the sweeper cannot publish, it **holds**, for one of the two
+reasons below. It publishes nothing more for a held row, leaves the row
+in `worker.db` exactly as it is, and carries on with every other row.
+Until the hold is lifted, the control plane sees that invocation as not
+archived. The daemon log reports a held row once per daemon run, at
+error level, and `fq doctor` and `fq status` list every held row with
+its invocation, the reason and the remedy. `fq doctor` counts each one
+as an issue, because none lifts on its own:
 
-Nothing releases a held row on its own. No later build reads an older
+```text
+Archive holds: 1 — finished runs the archive sweeper will not archive until an operator acts; the control plane sees each as not archived
+  019a7c2e-5b1d-7f30-9a4e-2c8d1e6f0a42 (researcher): `invocation_archived` is 1252461 bytes, over the broker's max_payload of 1048576
+  -> raise the broker's max_payload above 1252461 bytes, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
+```
+
+The list is the daemon's memory of its own sweeps. A row held by an
+earlier run is offered again when the daemon starts, and appears in the
+list again once the sweeper has held it again, within one
+`archive_retry_interval_ms` (10 s by default).
+
+**An event too large for the broker.** The broker refuses any message
+larger than its `max_payload`, 1 MiB on a stock NATS server, and the
+daemon checks before it sends. `invocation.archived` carries the run's
+whole state: the conversation, every tool result in it included, encoded
+as a JSON array of integers, two to four bytes on the wire per byte of
+state. A run that read a few hundred kilobytes of tool output can
+therefore finish with an archive the broker refuses, and the stored
+terminal event can be refused the same way. The sweeper used to stop its
+pass at such a row, on every pass, so no row behind it was archived
+either ([#981](https://github.com/bricef/factor-q/issues/981)). Now it
+holds the row, and the log line is `an event this row must publish is
+larger than the broker's max_payload; holding the row unarchived until it
+fits`, with the `invocation_id`, the `event_type`, its `size_bytes` and
+the `limit_bytes`.
+
+To release it, raise the broker's `max_payload` above the size the line
+reports and restart `fqd`. The daemon reads the broker's limit once,
+when it connects, so a daemon that is already running keeps refusing at
+the old limit. The restart is also what offers the row again: a held row
+is not retried during a run, because the same event would be refused the
+same way, but a new run's sweeper tries every row once. NATS accepts a
+`max_payload` up to 64 MiB; the dogfood broker runs at 16 MiB
+(`ops/dogfood/infra/nats.conf`). A planned change to the archive's
+encoding, the second half of the same issue, makes it about three times
+smaller, so after that upgrade some held rows fit under the limit they
+were held at. There is no release that archives the row without its
+state: until it fits, it stays held, and it costs its space in
+`worker.db`.
+
+**A stored event this build will not republish.** The sweeper will not
+republish a stored event that this build cannot read, or one that could
+not be that row's outcome. The case to expect is an event an older
+daemon stored and had not yet published when you upgraded across an
+event-schema bump. Republished, it would halt every durable consumer on
+the stream (see
+[When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
+So the sweeper holds the row instead, publishing neither the stored
+event nor `invocation.archived`. The log line is `stored terminal event
+cannot be republished; holding the row unarchived until an operator
+releases it`, with the `invocation_id` and the reason (for example, the
+`schema_version` it found and the versions this build reads).
+
+Nothing releases such a row on its own. No later build reads an older
 event version, so the hold lasts until you release the row. Releasing
 archives the invocation **without** its outcome, so keep a copy of the
 stored event first, because it is the only copy of the run's task status,
