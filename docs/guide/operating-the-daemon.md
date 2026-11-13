@@ -413,8 +413,8 @@ says which (see
 [Every run takes a worker permit](#when-a-provider-hangs-or-throttles)).
 The agent's own `max_concurrent` does not hold it back: the run counts
 against that limit but does not wait for a slot under it, so the agent
-may briefly run more invocations than its limit (the same section says
-why, and what to do if that matters).
+can be over its limit until one of its invocations ends (the same
+section says why, and what to do if that matters).
 A daemon that is already draining or stopping refuses the re-drive and
 says so, but the recorded results stand, so the next start resumes the
 invocation on its own.
@@ -622,8 +622,9 @@ still in flight, `fq doctor` still counts it, and it keeps the slot it
 was admitted under until it ends for real — its resume runs on that
 slot rather than taking a new one. So a persistently throttled model
 cannot turn a capped agent's queue into a burst: whatever the pause
-does to the timing, no more than `max_concurrent` of that agent's
-invocations are ever in flight at once.
+does to the timing, a deferral and its resume never take that agent past
+`max_concurrent`. (An operator's `fq invocation resume` can: see
+"An operator's resume is not held at its agent's cap" below.)
 
 **A deploy during a cap hold costs the trigger nothing.** A cap hold is
 bounded by the invocation ahead of it rather than by a pause, so it
@@ -706,16 +707,23 @@ thing it waits for is a worker permit, never a free slot for its agent.
 An ambiguous invocation holds no slot while it waits for triage, so if
 its agent is already running as many invocations as `max_concurrent`
 allows, the resumed run starts beside them as soon as a worker permit is
-free, and the agent is over its limit until one of them ends.
-`fq invocation resume` says so when it accepts. This is deliberate
+free, and the agent is over its limit until one of its invocations ends.
+That can be a long time: a slot is held for a whole run, through a
+deferral too, so an agent at `max_concurrent: 1` with a long build can
+run two builds side by side for the whole of the shorter one. Running
+more than its limit at once needs `max_concurrent_invocations` above 1:
+at the default of 1 the resumed run waits for the one worker permit, so
+`fq doctor` can show the agent at `2/1` while only one of them runs.
+`fq invocation resume` says this in its human-readable output when it
+accepts. This is deliberate
 ([#1009](https://github.com/bricef/factor-q/issues/1009)): you asked for
 that run by id, and holding it at the cap would mean giving it priority
 over the agent's held triggers, because a cap hold is a race between
 waiters, not a queue. If the limit matters for that agent, resume when
 `fq doctor` does not list it under `Agents at cap`; otherwise accept the
-brief overshoot. Startup recovery's resumes are counted the same way,
-but before the dispatcher admits anything, so no trigger joins them past
-the cap.
+overshoot. Startup recovery's resumes are counted the same way, but
+before the dispatcher admits anything, so no trigger joins them past the
+cap.
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers
