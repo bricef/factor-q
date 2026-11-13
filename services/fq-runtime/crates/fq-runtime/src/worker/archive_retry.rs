@@ -1274,11 +1274,13 @@ mod tests {
             }
         );
         assert!(
-            hold.remedy.contains("max_payload")
-                && hold.remedy.contains(&size.to_string())
+            hold.remedy
+                .contains(&format!("max_payload well above {size} bytes"))
+                && hold.remedy.contains("header")
                 && hold.remedy.contains("restart fqd")
                 && hold.remedy.contains(holds::GUIDE),
-            "the remedy says what to raise, past what, and where it is described: {hold:?}"
+            "the remedy says what to raise, past what with a margin for the header the size \
+             leaves out, and where it is described: {hold:?}"
         );
     }
 

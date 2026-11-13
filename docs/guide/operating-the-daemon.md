@@ -438,7 +438,7 @@ as an issue, because none lifts on its own:
 ```text
 Archive holds: 1 — finished runs the archive sweeper will not archive until an operator acts; the control plane sees each as not archived
   019a7c2e-5b1d-7f30-9a4e-2c8d1e6f0a42 (researcher): `invocation_archived` is 1252461 bytes, over the broker's max_payload of 1048576
-  -> raise the broker's max_payload above 1252461 bytes, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
+  -> raise the broker's max_payload well above 1252461 bytes, since the broker also counts a small message header this size leaves out, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
 ```
 
 The list is the daemon's memory of its own sweeps, so it is not known
@@ -467,8 +467,11 @@ larger than the broker's max_payload; holding the row unarchived until it
 fits`, with the `invocation_id`, the `event_type`, its `size_bytes` and
 the `limit_bytes`.
 
-To release it, raise the broker's `max_payload` above the size the line
-reports and restart `fqd`. The daemon reads the broker's limit once,
+To release it, raise the broker's `max_payload` well above the size the
+line reports and restart `fqd`. The size is the event's JSON, and the
+broker also counts a small message header, so a limit set at the size,
+or a few dozen bytes over it, still refuses the event. The daemon reads
+the broker's limit once,
 when it connects, so a daemon that is already running keeps refusing at
 the old limit. The restart is also what offers the row again: a held row
 is not retried during a run, because the same event would be refused the
