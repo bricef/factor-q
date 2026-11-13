@@ -237,8 +237,9 @@ async fn an_archive_too_large_for_the_broker_is_held_and_reported() {
     let remedy = hold["remedy"].as_str().expect("a remedy");
     assert!(
         remedy.contains(&format!(
-            "raise the broker's max_payload above {size} bytes"
-        )) && remedy.contains("restart fqd"),
+            "raise the broker's max_payload well above {size} bytes"
+        )) && remedy.contains("header")
+            && remedy.contains("restart fqd"),
         "got: {remedy}"
     );
     let parsed: fq_ops::surface::DoctorReport =
