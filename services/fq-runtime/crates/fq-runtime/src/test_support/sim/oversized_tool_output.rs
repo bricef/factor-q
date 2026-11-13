@@ -23,7 +23,7 @@
 //! before anything durable exists, on the terminal event, and on the
 //! archive after the run has already ended.
 
-use super::tests::{end_turn, sim_tool_call};
+use super::tests::{end_turn, sim_tool_call, sim_tool_calls};
 use super::*;
 use crate::events::{EventKind, FailedPayload, FailureDetail, FailureKind, FailurePhase};
 use crate::test_support::events::event_kind;
@@ -283,6 +283,69 @@ async fn a_tool_result_too_large_for_the_broker_ends_the_run_with_one_failed() {
         ]
     );
     assert_one_failed_for(&events, &refused[0], limit, FailurePhase::ToolResult);
+
+    let id = world.invocation_id();
+    assert_ended_and_reclaimed(&world, id).await;
+    assert_resume_refused(&world, id).await;
+}
+
+/// What the default configuration reaches, live: a stock broker (1 MiB)
+/// and the default tool-result cap (256 KiB), with one model turn asking
+/// for four tools whose answers are each cut at the cap. Every
+/// `tool.result` fits; the next `llm.request`, which carries all four,
+/// does not, as the operating guide warns. The
+/// run ends there with one `failed` naming that request, without asking
+/// the model again, and returns its own failure though its archive,
+/// which carries the same four answers, is refused as well (see #981).
+#[tokio::test]
+async fn four_capped_answers_in_one_turn_end_the_run_at_the_next_request() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let world = world_with_workspaces(833, root.path()).await;
+    world.sink.set_max_payload(STOCK_MAX_PAYLOAD);
+    let llm = FixtureClient::new();
+    for _ in 0..4 {
+        world
+            .tool
+            .push_output(ToolResult::ok("o".repeat(2 * STOCK_MAX_PAYLOAD)));
+    }
+    llm.push_response(sim_tool_calls(&["one", "two", "three", "four"]));
+    llm.push_response(end_turn("never asked"));
+
+    let err = world.run(&llm).await.expect_err("the request is refused");
+    assert!(
+        matches!(
+            err,
+            ExecutorError::InvocationFailed {
+                kind: FailureKind::PayloadTooLarge,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    let refused = world.sink.refused();
+    assert_eq!(kinds(&refused), ["llm_request", "invocation_archived"]);
+    let events = world.sink.events();
+    let results: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::ToolResult(_)))
+        .collect();
+    assert_eq!(results.len(), 4, "every capped answer is published");
+    for result in results {
+        assert!(wire_size(result) <= STOCK_MAX_PAYLOAD);
+    }
+    assert_eq!(kinds(&events).last(), Some(&"failed"));
+    assert_one_failed_for(
+        &events,
+        &refused[0],
+        STOCK_MAX_PAYLOAD,
+        FailurePhase::LlmRequest,
+    );
+    assert_eq!(
+        llm.requests().len(),
+        1,
+        "the second turn is never asked for"
+    );
 
     let id = world.invocation_id();
     assert_ended_and_reclaimed(&world, id).await;
