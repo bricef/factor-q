@@ -173,7 +173,7 @@ impl Views {
             status: status.as_str().to_string(),
             started_at_ms: None,
         };
-        if let Some(status) = unsettled.owner_status {
+        if let Some(status) = unsettled.owner_status()? {
             return Ok(Some(coordination(status)));
         }
         let Some(invocation_id) = unsettled.claim.invocation_id.as_deref() else {

@@ -724,7 +724,7 @@ async fn a_run_archived_between_the_two_reads_is_still_found() {
     let [unsettled] = read_before_the_archive.as_slice() else {
         panic!("one claimed row");
     };
-    assert_eq!(unsettled.owner_status, None, "read before the archive");
+    assert_eq!(unsettled.owner_row_status, None, "read before the archive");
     assert_eq!(
         views.start_record(unsettled).await.unwrap(),
         coordination_record("completed")

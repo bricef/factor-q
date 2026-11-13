@@ -130,14 +130,15 @@ impl TriggerClaims {
             let Some(invocation_id) = claim.invocation_id.as_deref() else {
                 continue;
             };
-            let run = match (starts.run(invocation_id), unsettled.owner_status) {
+            // The ownership row's presence is the record; its status is only
+            // reported, as stored, so one this build cannot read does not
+            // stop the boot.
+            let run = match (starts.run(invocation_id), &unsettled.owner_row_status) {
                 (Some(WalRun::InFlight), _) => "in flight in the worker's WAL".to_string(),
                 (Some(WalRun::Finished), _) => {
                     "finished, in the worker's WAL until its archive is acknowledged".to_string()
                 }
-                (None, Some(status)) => {
-                    format!("on the control plane's record as {}", status.as_str())
-                }
+                (None, Some(status)) => format!("on the control plane's record as {status}"),
                 (None, None) => continue,
             };
             if store
