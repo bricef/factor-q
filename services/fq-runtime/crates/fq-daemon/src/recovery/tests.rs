@@ -899,33 +899,11 @@ impl NextStart {
             ),
         }
 
-        let mut pricing = std::collections::HashMap::new();
-        pricing.insert(
-            "claude-haiku".to_string(),
-            fq_runtime::ModelPricing {
-                input_per_million: 1.0,
-                output_per_million: 5.0,
-                cache_read_per_million: None,
-                cache_write_per_million: None,
-                cache_write_1h_per_million: None,
-            },
+        let runner = runner_over(
+            Arc::new(bus.clone()),
+            worker_store.clone(),
+            worker_id.clone(),
         );
-        let runner = Arc::new(fq_runtime::ReducerRunner::new(
-            Arc::new(
-                fq_runtime::ReducerContext::builder()
-                    .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
-                    .build(),
-            ),
-            Arc::new(
-                fq_runtime::RunnerConfig::builder()
-                    .bus(bus.clone())
-                    .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
-                    .store(worker_store.clone())
-                    .worker_id(worker_id.clone())
-                    .build(),
-            ),
-            fq_runtime::Harness::new(),
-        ));
         Self {
             bus,
             cp_store,
@@ -1083,6 +1061,42 @@ impl NextStart {
             "the next start resumes it"
         );
     }
+}
+
+/// The daemon's runner over `store`, running as `worker_id` and publishing
+/// through `sink`: the bus, or something in front of it.
+fn runner_over(
+    sink: Arc<dyn fq_runtime::bus::EventSink>,
+    store: Arc<WorkerStore>,
+    worker_id: WorkerId,
+) -> Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> {
+    let mut pricing = std::collections::HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        fq_runtime::ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+            cache_write_1h_per_million: None,
+        },
+    );
+    Arc::new(fq_runtime::ReducerRunner::new(
+        Arc::new(
+            fq_runtime::ReducerContext::builder()
+                .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            fq_runtime::RunnerConfig::builder()
+                .event_sink(sink)
+                .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        fq_runtime::Harness::new(),
+    ))
 }
 
 /// Take the worker permit, at a cap of 1 the only one, for a run this test
