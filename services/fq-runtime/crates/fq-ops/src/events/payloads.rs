@@ -370,6 +370,17 @@ pub enum FailureKind {
     /// (`fq doctor`, the dashboard) rather than losing them in the
     /// generic bucket.
     TriggerExhausted,
+    /// An event of the run was larger than the broker accepts, so it
+    /// could not be recorded and the run ended there
+    /// ([#828](https://github.com/bricef/factor-q/issues/828));
+    /// [`FailureDetail::PayloadTooLarge`] says which event, its size and
+    /// the limit. Distinct from `RuntimeError` on both grounds the two
+    /// kinds above give: the broker's `max_payload` refusing an event is
+    /// a configured limit doing its job, not a defect, and a run started
+    /// again on the same work is likely to reach the same limit, so a
+    /// reader that retries by kind (the github-watcher) must be able to
+    /// tell it apart.
+    PayloadTooLarge,
 }
 
 /// The structured facts behind one failure, a variant per kind of fact

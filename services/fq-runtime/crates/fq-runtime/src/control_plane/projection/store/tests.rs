@@ -1524,6 +1524,7 @@ async fn projected_failure_kinds_match_wire_serialization() {
         FailureKind::SandboxViolation,
         FailureKind::RuntimeError,
         FailureKind::TriggerExhausted,
+        FailureKind::PayloadTooLarge,
     ];
     for kind in kinds {
         let event = sample_failed_kind("a", Uuid::now_v7(), kind);
