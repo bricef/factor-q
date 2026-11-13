@@ -1680,3 +1680,7 @@ async fn a_running_recovered_run_is_dropped_only_with_live() {
         "a halted run is not reported completed: {reported:?}"
     );
 }
+
+// What recovery reports about a resume that returned an error (issue 1005),
+// on the same next start as the tests above.
+mod resume_errors;
