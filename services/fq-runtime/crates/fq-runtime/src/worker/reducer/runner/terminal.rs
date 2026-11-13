@@ -272,15 +272,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
     }
 
-    /// End a run that fails mid-step: publish its `failed`, then mark the
-    /// row terminal, then hand off the archive.
-    ///
-    /// Every caller arrives before any terminal write (a `failed` the
-    /// reducer decides is stored with the loop's terminal upsert instead,
-    /// #946), so this is the point at which `invocation_state` is marked
-    /// terminal, after the publish: a lost `failed` leaves the row in
-    /// flight for recovery. Idempotent: a no-op on the row if it is
-    /// already terminal (an operator transition got there first).
+    /// End a run that fails mid-step: [`Self::end_mid_step`], then hand
+    /// off the archive.
     pub(super) async fn fail_mid_step(
         &self,
         cursor: &mut Option<Uuid>,
@@ -288,11 +281,29 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         invocation_id: Uuid,
         failed: Event,
     ) -> Result<(), ExecutorError> {
+        self.end_mid_step(cursor, invocation_id, failed).await?;
+        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
+            .await
+    }
+
+    /// Publish a mid-step `failed`, then mark the row terminal: the point
+    /// at which the run has ended.
+    ///
+    /// Every caller arrives before any terminal write (a `failed` the
+    /// reducer decides is stored with the loop's terminal upsert instead,
+    /// #946), so this is the point at which `invocation_state` is marked
+    /// terminal, after the publish: a lost `failed` leaves the row in
+    /// flight for recovery. Idempotent: a no-op on the row if it is
+    /// already terminal (an operator transition got there first).
+    pub(super) async fn end_mid_step(
+        &self,
+        cursor: &mut Option<Uuid>,
+        invocation_id: Uuid,
+        failed: Event,
+    ) -> Result<(), ExecutorError> {
         self.publish_chained(cursor, failed).await?;
         let terminal_at_ms = self.config.clock.unix_now_ms();
         self.ensure_terminal("failed", invocation_id, terminal_at_ms)
-            .await?;
-        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
             .await
     }
 }

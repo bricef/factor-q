@@ -1492,7 +1492,14 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // Margin for anything else still on its way to the subscription.
+    // Recovery reports the resume's error as ambiguous right after the
+    // `failed` (below); wait for it, then a margin for anything else
+    // still on its way to the subscription.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while seen_of(&seen, "invocation_ambiguous", invocation).is_empty() && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     tokio::time::sleep(Duration::from_secs(1)).await;
     first.stop();
 
@@ -1520,6 +1527,16 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         0,
         "the model is never asked"
     );
+    // Issue 1005: startup recovery reports every error a resume returns
+    // as `invocation.ambiguous`, this run's terminal failure included, so
+    // the start that ends the run also flags it ambiguous, once. That is
+    // not what this change is about and is pinned here as it stands; the
+    // change for issue 1005 turns this assertion to none.
+    assert_eq!(
+        seen_of(&seen, "invocation_ambiguous", invocation).len(),
+        1,
+        "the first start flags the failed run ambiguous once (issue 1005)"
+    );
     let row = fq_runtime::WorkerStore::open(
         &fq_runtime::RuntimeDbPaths::under(&scratch.path("cache")).worker,
     )
@@ -1528,7 +1545,7 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
     .get_invocation_state(&invocation.to_string())
     .await
     .unwrap()
-    .expect("the row stays until its archive is acknowledged");
+    .expect("the terminal row stays: its archive is too large to deliver (see #981)");
     assert!(row.terminal_at.is_some(), "the row is terminal: {row:?}");
     assert_eq!(row.phase, "failed");
 

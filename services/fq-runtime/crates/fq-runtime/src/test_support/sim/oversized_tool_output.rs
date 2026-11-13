@@ -298,8 +298,9 @@ async fn a_tool_result_too_large_for_the_broker_ends_the_run_with_one_failed() {
 /// refusal on every start.
 ///
 /// The `invocation.archived` behind the `failed` carries the conversation,
-/// answer included, and is refused too; the run returns that refusal, as
-/// every failure path does, and the archive is the sweeper's (see #981).
+/// answer included, and is refused too. The run has ended by then, so it
+/// returns its own failure rather than the archive's refusal; the row is
+/// left terminal and unarchived (see #981).
 #[tokio::test]
 async fn a_resume_whose_replay_rebuilds_an_oversized_request_ends_the_run_once() {
     let root = tempfile::tempdir().expect("workspace root");
@@ -330,12 +331,12 @@ async fn a_resume_whose_replay_rebuilds_an_oversized_request_ends_the_run_once()
     assert!(
         matches!(
             err,
-            ExecutorError::Bus(BusError::PayloadTooLarge {
-                event_type: EventKind::InvocationArchived,
+            ExecutorError::InvocationFailed {
+                kind: FailureKind::PayloadTooLarge,
                 ..
-            })
+            }
         ),
-        "{err:?}"
+        "the run's own failure, not the archive's refusal: {err:?}"
     );
 
     let refused = world.sink.refused();
@@ -349,6 +350,13 @@ async fn a_resume_whose_replay_rebuilds_an_oversized_request_ends_the_run_once()
     assert!(resume_llm.requests().is_empty(), "the model is never asked");
 
     assert_ended_and_reclaimed(&world, id).await;
+    let row = world
+        .store
+        .get_invocation_state(&id.to_string())
+        .await
+        .unwrap()
+        .expect("the row stays");
+    assert_eq!(row.archive_status, None, "its archive was never handed off");
     assert_resume_refused(&world, id).await;
 }
 

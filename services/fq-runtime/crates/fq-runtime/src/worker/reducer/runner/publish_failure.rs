@@ -109,6 +109,14 @@ impl Refused {
         )
     }
 
+    /// What the run returns once its `failed` is out.
+    fn failure(&self) -> ExecutorError {
+        ExecutorError::InvocationFailed {
+            kind: FailureKind::PayloadTooLarge,
+            message: self.message(),
+        }
+    }
+
     /// The `failed` this refusal ends the run with.
     pub(super) fn failed_event(
         &self,
@@ -116,6 +124,14 @@ impl Refused {
         invocation_id: Uuid,
         partial_totals: InvocationTotals,
     ) -> Event {
+        warn!(
+            agent_id = %agent_id,
+            invocation_id = %invocation_id,
+            event_type = ?self.event_type,
+            size = self.size,
+            limit = self.limit,
+            "an event is too large for the broker; ending the invocation"
+        );
         terminal::failed_event(
             agent_id,
             invocation_id,
@@ -185,12 +201,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// dispatcher redelivers, and after it the row stays in flight for
     /// recovery.
     ///
-    /// The close's own errors are returned as every failure path returns
-    /// them. One of them is common here: the `invocation.archived` behind
-    /// the `failed` carries the conversation the refused event was built
-    /// from, so it is often too large as well. The `failed` is out and the
-    /// row terminal by then, the run returns that refusal, and the archive
-    /// is the sweeper's (see #981).
+    /// An error before the `failed` is out and the row marked terminal is
+    /// returned as it is: the run has not ended, and recovery finds the
+    /// row in flight. From that point the run has ended, and it returns
+    /// its own failure whatever happens to the `invocation.archived` that
+    /// follows. That one is often refused too, since it carries the
+    /// conversation the refused event was built from; the error is logged
+    /// and the row is left terminal and unarchived (see the module doc).
     pub(super) async fn end_on_refused_publish(
         &self,
         outcome: Result<InvocationOutcome, ExecutorError>,
@@ -213,27 +230,25 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if row.as_ref().is_some_and(|row| row.terminal_at.is_some()) {
             return outcome;
         }
-        warn!(
-            agent_id = %agent_id,
-            invocation_id = %invocation_id,
-            event_type = ?refused.event_type,
-            size = refused.size,
-            limit = refused.limit,
-            "an event is too large for the broker; ending the invocation"
-        );
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
         let failed = refused.failed_event(agent_id, invocation_id, totals);
-        match row {
+        if row.is_none() {
             // Nothing durable: no row to mark, nothing to archive.
-            None => self.publish_chained(cursor, failed).await?,
-            Some(_) => {
-                self.fail_mid_step(cursor, agent_id, invocation_id, failed)
-                    .await?
-            }
+            self.publish_chained(cursor, failed).await?;
+            return Err(refused.failure());
         }
-        Err(ExecutorError::InvocationFailed {
-            kind: FailureKind::PayloadTooLarge,
-            message: refused.message(),
-        })
+        self.end_mid_step(cursor, invocation_id, failed).await?;
+        if let Err(err) = self
+            .publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
+            .await
+        {
+            warn!(
+                invocation_id = %invocation_id,
+                error = %err,
+                "the run ended, but its invocation.archived was not published; \
+                 the terminal row is left for the archive sweeper"
+            );
+        }
+        Err(refused.failure())
     }
 }
