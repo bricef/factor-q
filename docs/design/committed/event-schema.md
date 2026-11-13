@@ -218,7 +218,7 @@ Concrete subjects:
 | `fq.agent.{agent_id}.tool.call` | Agent is invoking a tool |
 | `fq.agent.{agent_id}.tool.dispatched` | Tool has returned to the runtime (WAL middle-state) |
 | `fq.agent.{agent_id}.tool.result` | Tool invocation has completed (success or failure) |
-| `fq.agent.{agent_id}.invocation.ambiguous` | An invocation is in recovery limbo — an ambiguous WAL row on restart, or a failed automatic resume — and needs operator attention |
+| `fq.agent.{agent_id}.invocation.ambiguous` | An invocation is in recovery limbo — an ambiguous WAL row on restart, or an automatic resume that could not be carried out — and needs operator attention |
 | `fq.agent.{agent_id}.invocation.stuck` | An in-flight invocation has crossed no step boundary within the daemon's derived stuck threshold — emitted by the control-plane sweep, once per crossing (#37) |
 | `fq.agent.{agent_id}.invocation.archived` | Worker → control-plane: invocation reached terminal; hand off the final state |
 | `fq.agent.{agent_id}.invocation.operator_recovered` | Operator → control-plane: operator-issued terminal transition (`fq invocation drop`) |
@@ -512,7 +512,7 @@ Published by the runner when a queued host notice is drained into the conversati
 Published by the worker on startup for an invocation in recovery limbo (#64), in either of two modes:
 
 1. **Ambiguous WAL categorisation** — a `dispatched`-without-`completed` row. See `docs/design/committed/data-architecture.md` §3.4.
-2. **Failed automatic resume** — a safe-resume/safe-replay invocation whose `resume()` errored. `stuck_entity` is the sentinel `"recovery"`, `stuck_call_id` carries the invocation id, and `note` carries the resume error.
+2. **Automatic resume not carried out** — a safe-resume/safe-replay invocation whose resume could not be carried out and left the invocation in flight (or its row unreadable). A resume that returns an error after the run reached its terminal event is not one: the worker row, not the error, decides ([#1005](https://github.com/bricef/factor-q/issues/1005)). `stuck_entity` is the sentinel `"recovery"`, `stuck_call_id` carries the invocation id, and `note` carries the resume error.
 
 ```json
 {
@@ -524,9 +524,9 @@ Published by the worker on startup for an invocation in recovery limbo (#64), in
 
 **Design notes:**
 
-- **Operator-triage event.** The control-plane consumes it and marks the ownership row `ambiguous`, which is what `fq invocation list --status=ambiguous` surfaces; `fq invocation resume` and `fq invocation drop` are the two ways out. The github-watcher treats it as a failed, operator-attention outcome.
+- **Operator-triage event.** The control-plane consumes it and marks the ownership row `ambiguous`, which is what `fq invocation list --status=ambiguous` surfaces. `fq invocation drop` is the way out of both modes; `fq invocation resume` only of the first, since it reconciles a stuck dispatch and the second has none. The github-watcher treats it as a failed, operator-attention outcome.
 - **Full context lives in the worker's WAL**, not on the wire. This payload is the minimum needed for an operator to find the row.
-- **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart.
+- **Once per invocation, across restarts.** Emission is guarded by the worker store's `ambiguous_reported_at` stamp, so a persistently-broken invocation does not re-fire on every daemon restart. In the second mode that also means the ownership row reads `ambiguous` only until the next start: that start's recovery restores it to `in_flight` before resuming the invocation again, and the stamp stops the event that would turn it back ([#1025](https://github.com/bricef/factor-q/issues/1025)).
 
 ### `invocation.stuck`
 
@@ -959,7 +959,7 @@ The following invariants hold across the event stream and are assumed by consume
    unknown, so `total_cost IS NULL` continues to mean "no known spend"
    rather than "zero spend". There is no separate cost event.
 6. **`config_snapshot` in `triggered` is immutable for the invocation.** Config changes during an invocation are ignored; they apply to the next invocation.
-7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous" — or whose automatic resume fails (`stuck_entity: "recovery"`). It fires at most once per invocation across restarts (the worker store's `ambiguous_reported_at` stamp). The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
+7. **`invocation.ambiguous` is emitted by the worker on startup** for any invocation whose WAL classification returns "ambiguous" — or whose automatic resume could not be carried out, leaving it in flight or its row unreadable (`stuck_entity: "recovery"`). A resume that returns an error after the run reached its terminal event does not emit it. It fires at most once per invocation across restarts (the worker store's `ambiguous_reported_at` stamp). The chain root for that emission is the new event itself (`parent_event_id` absent — recovery starts a fresh chain; see the recovery rationale in `data-architecture.md` §3.4).
 8. **`invocation.archived` immediately follows the terminal lifecycle event** (`completed` or `failed`) in the same invocation chain. The worker's retry sweeper may republish `invocation.archived` if the control-plane ack does not arrive; republishes keep the same `invocation_id` and the control-plane's insert is idempotent on it. If the terminal event's publish itself was lost — a `completed`, or a `failed` the reducer decided rather than one published mid-step — the sweeper republishes it first, from the copy the worker stored with the terminal row: the same event, `event_id` and `timestamp` included, so a consumer deduplicating on `event_id` sees it once. `invocation.archive_acked` is the control-plane's reply on the worker-scoped subject and closes the hand-off.
 9. **`invocation.operator_recovered` is operator-initiated** and rooted on its own envelope (the operator's `fq` process is not the original worker, so the chain is fresh). Terminal status set by this event is sticky — the coordination consumer's `invocation.archived` handler will not downgrade an already-terminal owner status if a still-alive worker emits `archived` after the operator's drop.
 10. **`worker.orphaned` fires exactly once per alive→stale transition** — the coordination sweep's conditional store update consumes the transition, and a publish failure after that is logged, not retried (at-most-once; the stale row remains visible via `fq workers list --stale-only`). The row is not kept forever: the daemon's retention sweep deletes stale registrations older than `state.stale_worker_retention_days` (default 7 days), but never one that still owns `in_flight` or `ambiguous` invocations.

@@ -392,14 +392,36 @@ you would rather start from a summary.
 
 Startup recovery also reports an invocation `ambiguous` when it resumed
 one on its own and the resume could not be carried out, leaving the
-invocation in flight: the daemon logs `resume failed; emitting
-invocation.ambiguous`, and the event carries `stuck_entity: recovery`
-and the error in its `note`. That happens once per invocation, however
-many starts fail the same way. A resumed run that ends is not one of
-these, even when it ends in `failed` and the resume returns an error:
-its `failed` and `invocation.archived` are its record, its ownership
-row reads `failed`, and the daemon logs `resumed invocation ended with
-an error` at warn, with the error. Before
+invocation in flight (or its worker row unreadable). The event carries
+`stuck_entity: recovery` and the error in its `note`, and the daemon
+logs `resume failed; emitted invocation.ambiguous`. The event goes out
+once per invocation, however many starts fail the same way: on each
+later start the line ends `invocation.ambiguous was reported on an
+earlier start and is not emitted again`. Two things differ from a stuck
+tool dispatch:
+
+- **It reads `ambiguous` only until the next start.** That start's
+  recovery puts the ownership row back to `in_flight` before it resumes
+  the invocation again, and the event that would turn it back is not
+  sent a second time, so the invocation leaves `fq invocation list
+  --status=ambiguous` and `fq doctor`'s ambiguous count while still
+  unsettled ([#1025](https://github.com/bricef/factor-q/issues/1025)).
+  The daemon log line above is what still says so, on every start.
+- **`resume` cannot settle it.** There is no stuck dispatch to
+  reconcile, so `fq invocation resume` refuses it: as `is not Ambiguous
+  (it may already have been resumed)` while the row reads `ambiguous`,
+  and as `is live; only Ambiguous invocations can be resumed` once it
+  reads `in_flight`. `fq invocation drop` ends it. So does removing the
+  cause and restarting, since every start resumes it again.
+
+A resumed run that ends is not one of these, even when it ends in
+`failed` and the resume returns an error. Its `failed` is published,
+and the daemon logs `resume returned an error, but the invocation has
+ended; not reporting it ambiguous` at warn, with the error. Its
+ownership row reads `failed` once its `invocation.archived` is
+acknowledged, and `in_flight` until then, which for a run whose archive
+the broker refuses is for as long as it is refused
+([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
 [#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
 reported ambiguous as well, and left for an operator to triage.
 
