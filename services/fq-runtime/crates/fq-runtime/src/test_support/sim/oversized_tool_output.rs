@@ -102,12 +102,17 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
 
 /// What a broker counts against its `max_payload` for `event`: its JSON
 /// and the message-id header the bus publishes with it.
+///
+/// Measured from the JSON, not from `wire_size`, which counts the
+/// body alone today: adding the header to whatever `wire_size` returns
+/// would count it twice once `wire_size` counts it too.
 fn counted_by_the_broker(event: &Event) -> usize {
+    let body = serde_json::to_vec(event).expect("the event serialises");
     let header = format!(
         "NATS/1.0\r\nNats-Msg-Id: {}\r\n\r\n",
         event.envelope.event_id
     );
-    wire_size(event) + header.len()
+    body.len() + header.len()
 }
 
 /// Where a stock broker stops taking the archive, counted in capped
@@ -151,7 +156,8 @@ async fn two_capped_answers_archive_on_a_stock_broker_and_three_do_not() {
     };
     assert!(
         one <= 360 * 1000,
-        "one capped answer archives in {one} bytes, more than the 351 KB the operating guide quotes"
+        "one capped answer archives in {one} bytes, more than the about 351 KB this test's \
+         documentation records"
     );
     assert!(
         two <= STOCK_MAX_PAYLOAD,
