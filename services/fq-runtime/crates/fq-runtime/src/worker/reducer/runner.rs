@@ -1927,22 +1927,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             error_message,
             phase,
             partial_totals,
+            None,
         );
-        self.publish_chained(cursor, failed).await?;
-
-        // Every caller arrives mid-step, before any terminal write
-        // (a `failed` the reducer decides is stored with the loop's
-        // terminal upsert instead: `terminal.rs`, #946). So this is
-        // the point at which `invocation_state` is marked terminal,
-        // after the publish: a lost `failed` leaves the row in
-        // flight for recovery. Idempotent: a no-op if the row is
-        // already terminal (an operator transition got there first).
-        let terminal_at_ms = self.config.clock.unix_now_ms();
-        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
-            .await?;
-        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
-            .await?;
-        Ok(())
+        self.fail_mid_step(cursor, agent_id, invocation_id, failed)
+            .await
     }
 
     /// Set `terminal_at` (and update `phase`) on the worker's

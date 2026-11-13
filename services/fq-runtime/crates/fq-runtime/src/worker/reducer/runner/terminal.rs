@@ -34,7 +34,7 @@ use uuid::Uuid;
 use super::{ReducerRunner, harness_error_to_failure_kind, map_store_err};
 use crate::agent::AgentId;
 use crate::events::{
-    CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    CompletedPayload, Event, EventPayload, FailedPayload, FailureDetail, FailureKind, FailurePhase,
     InvocationTotals,
 };
 use crate::llm::ChatResponse;
@@ -77,7 +77,8 @@ impl Terminal {
 /// the run loop's stored terminal here, and `emit_failed`'s mid-step
 /// publish. A third writer does not use it: `refuse_for_unavailable_mcp`
 /// (`mcp.rs`) builds its `Setup`-phase `failed` by hand, before any row
-/// exists.
+/// exists. `detail` is the typed fact behind the failure, for a kind
+/// that has one (#952); both writers here pass none.
 pub(super) fn failed_event(
     agent_id: &AgentId,
     invocation_id: Uuid,
@@ -85,6 +86,7 @@ pub(super) fn failed_event(
     error_message: String,
     phase: FailurePhase,
     partial_totals: InvocationTotals,
+    detail: Option<FailureDetail>,
 ) -> Event {
     Event::new(
         agent_id.clone(),
@@ -94,7 +96,7 @@ pub(super) fn failed_event(
             error_message,
             phase,
             partial_totals,
-            detail: None,
+            detail,
         }),
     )
 }
@@ -157,6 +159,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     err.message.clone(),
                     FailurePhase::Reducer,
                     *totals,
+                    None,
                 );
                 let ending = Ending::Failed {
                     kind,
@@ -238,5 +241,29 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Err(ExecutorError::InvocationFailed { kind, message })
             }
         }
+    }
+
+    /// End a run that fails mid-step: publish its `failed`, then mark the
+    /// row terminal, then hand off the archive.
+    ///
+    /// Every caller arrives before any terminal write (a `failed` the
+    /// reducer decides is stored with the loop's terminal upsert instead,
+    /// #946), so this is the point at which `invocation_state` is marked
+    /// terminal, after the publish: a lost `failed` leaves the row in
+    /// flight for recovery. Idempotent: a no-op on the row if it is
+    /// already terminal (an operator transition got there first).
+    pub(super) async fn fail_mid_step(
+        &self,
+        cursor: &mut Option<Uuid>,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        failed: Event,
+    ) -> Result<(), ExecutorError> {
+        self.publish_chained(cursor, failed).await?;
+        let terminal_at_ms = self.config.clock.unix_now_ms();
+        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
+            .await?;
+        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
+            .await
     }
 }
