@@ -571,7 +571,12 @@ effort: high            # reasoning effort for each request
   agent's invocations ends — still as its first delivery, with no retry
   consumed. A held trigger **occupies no worker permit**: the worker cap
   bounds running invocations, so an agent waiting on its own cap never
-  stops another agent from starting. `fq doctor` names the agents at
+  stops another agent from starting. An invocation an operator resumes
+  with `fq invocation resume` is not held: it counts against the cap but
+  does not wait for a slot, so the agent can briefly run more than
+  `max_concurrent` (see
+  [Operating the daemon](operating-the-daemon.md#when-a-provider-hangs-or-throttles)).
+  `fq doctor` names the agents at
   their cap and how many triggers are waiting ("Agents at cap"), so the
   wait is visible rather than a queue that appears to have stalled. `fq
   reload` picks up a changed cap, including for a trigger that is already

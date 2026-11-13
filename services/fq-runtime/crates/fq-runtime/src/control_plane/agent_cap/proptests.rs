@@ -1,17 +1,19 @@
 //! The cap invariant as a property, not as seven examples (#718).
 //!
 //! The unit tests beside this file are seven points in a space; this is
-//! the space. A random sequence of the five things that can happen to an
+//! the space. A random sequence of the six things that can happen to an
 //! agent's invocations — a trigger arrives, one finishes, one defers,
-//! one wakes, the daemon restarts — is played against the real
-//! [`AgentConcurrency`], and the invariant is checked after **every**
-//! step:
+//! one wakes, the daemon restarts, an operator resumes one — is played
+//! against the real [`AgentConcurrency`], and the invariant is checked
+//! after **every** step:
 //!
 //! 1. `admitted(agent) ≤ max_concurrent(agent)` — the headline. What
 //!    this daemon *admits* never exceeds the cap.
-//! 2. `in_flight(agent) ≤ max(cap, recovered(agent))` — the honest
-//!    total, including the one over-cap path: a restart resumes what it
-//!    finds and admits nothing new until it is back under cap.
+//! 2. `in_flight(agent) ≤ max(cap, recovered(agent)) +
+//!    operator_resumed(agent)` — the honest total, including the two
+//!    over-cap paths: a restart resumes what it finds and admits nothing
+//!    new until it is back under cap, and an operator's resume is counted
+//!    but never held, at any time (issue 1009).
 //! 3. The count agrees with the model on every agent, every step, so
 //!    neither assertion above can be satisfied by a count that has
 //!    quietly lost track.
@@ -28,6 +30,7 @@
 //! | defer | `dispatcher::conclude` → `DeferralQueue::defer` | move the slot into the queue |
 //! | resume | `dispatcher::resume_deferred` | run on the slot the queue carried — **no entry** |
 //! | restart | process death, then `recovery::spawn_resume_tasks` | drop everything, then `enter(...)` per recovered row |
+//! | operator resume | `fq-daemon`'s `resume::redrive` | `enter(agent, cap)` — counted, never refused |
 //!
 //! The `defer`/`resume` pair is the one this file exists for. Before the
 //! review of <https://github.com/bricef/factor-q/pull/731>, `defer`
@@ -61,9 +64,19 @@ struct Claim {
     /// Held only for its `Drop`: giving the slot back *is* the
     /// invocation ending, so the field is never read.
     _slot: AgentSlot,
-    /// `true` for a slot taken by startup recovery — the one entry that
-    /// is counted rather than gated.
-    recovered: bool,
+    /// Which entry took the slot.
+    entry: Entry,
+}
+
+/// The way a claim came in: gated, or counted without being refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// A trigger's `try_enter`: the cap agreed to it.
+    Admitted,
+    /// Startup recovery's `enter`, at a restart.
+    Recovered,
+    /// `fq invocation resume`'s `enter`, at any time (issue 1009).
+    OperatorResumed,
 }
 
 /// What can happen to an agent's invocations. `usize` fields are
@@ -76,6 +89,9 @@ enum Step {
     Defer(usize, usize),
     Resume(usize, usize),
     Restart,
+    /// An operator resumes one of the agent's ambiguous invocations,
+    /// which held no slot while it waited for triage.
+    OperatorResume(usize),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -85,6 +101,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => ((0usize..FLEET.len()), 0usize..8).prop_map(|(a, i)| Step::Defer(a, i)),
         3 => ((0usize..FLEET.len()), 0usize..8).prop_map(|(a, i)| Step::Resume(a, i)),
         1 => Just(Step::Restart),
+        1 => (0usize..FLEET.len()).prop_map(Step::OperatorResume),
     ]
 }
 
@@ -109,17 +126,18 @@ impl Fleet {
         self.running.get(&agent).map_or(0, Vec::len) + self.sleeping.get(&agent).map_or(0, Vec::len)
     }
 
-    fn count(&self, agent: usize, recovered: bool) -> usize {
+    fn count(&self, agent: usize, entry: Entry) -> usize {
         let of = |pool: &HashMap<usize, Vec<Claim>>| {
             pool.get(&agent)
-                .map_or(0, |c| c.iter().filter(|c| c.recovered == recovered).count())
+                .map_or(0, |c| c.iter().filter(|c| c.entry == entry).count())
         };
         of(&self.running) + of(&self.sleeping)
     }
 
     /// Everything this process was holding dies with it; recovery then
-    /// counts back in what the WAL says is still in flight. Counted,
-    /// never gated — the documented over-cap path.
+    /// counts back in what the WAL says is still in flight — an operator's
+    /// resume included, which is an invocation in flight like any other.
+    /// Counted, never gated — the documented over-cap path at a restart.
     fn restart(&mut self, counts: &std::sync::Arc<AgentConcurrency>) {
         let mut found: Vec<(usize, usize)> = Vec::new();
         for agent in 0..FLEET.len() {
@@ -132,7 +150,7 @@ impl Fleet {
             for _ in 0..in_flight {
                 self.running.entry(agent).or_default().push(Claim {
                     _slot: counts.enter(&id, cap),
-                    recovered: true,
+                    entry: Entry::Recovered,
                 });
             }
         }
@@ -150,15 +168,17 @@ fn check(fleet: &Fleet, counts: &AgentConcurrency) -> Result<(), TestCaseError> 
             id
         );
         let Some(cap) = *cap else { continue };
-        let recovered = fleet.count(agent, true);
-        let admitted = fleet.count(agent, false);
+        let recovered = fleet.count(agent, Entry::Recovered);
+        let operator_resumed = fleet.count(agent, Entry::OperatorResumed);
+        let admitted = fleet.count(agent, Entry::Admitted);
         prop_assert!(
             admitted <= cap as usize,
             "{id} admitted {admitted} invocations past a cap of {cap}"
         );
         prop_assert!(
-            live <= (cap as usize).max(recovered),
-            "{id} has {live} in flight against a cap of {cap} with only {recovered} recovered"
+            live <= (cap as usize).max(recovered) + operator_resumed,
+            "{id} has {live} in flight against a cap of {cap} with only {recovered} recovered \
+             and {operator_resumed} resumed by an operator"
         );
     }
     Ok(())
@@ -167,9 +187,10 @@ fn check(fleet: &Fleet, counts: &AgentConcurrency) -> Result<(), TestCaseError> 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Never more than `max_concurrent` in flight per agent, across any
-    /// sequence of triggers, deferrals, resumes, completions and
-    /// restarts.
+    /// Never more than `max_concurrent` admitted per agent, and never more
+    /// in flight than the module doc's bound, across any sequence of
+    /// triggers, deferrals, resumes, completions, restarts and operator
+    /// resumes.
     #[test]
     fn the_cap_holds_across_triggers_deferrals_resumes_and_restarts(
         steps in prop::collection::vec(step(), 1..40)
@@ -182,7 +203,7 @@ proptest! {
                 Step::Trigger(agent) => {
                     let (id, cap) = (agent_id(agent), FLEET[agent].1);
                     if let Some(slot) = counts.try_enter(&id, cap) {
-                        fleet.running.entry(agent).or_default().push(Claim { _slot: slot, recovered: false });
+                        fleet.running.entry(agent).or_default().push(Claim { _slot: slot, entry: Entry::Admitted });
                     }
                 }
                 // `handle` returns: completed, failed, drained, dropped
@@ -204,6 +225,14 @@ proptest! {
                     }
                 }
                 Step::Restart => fleet.restart(&counts),
+                // `redrive`: counted at once, whatever the cap says.
+                Step::OperatorResume(agent) => {
+                    let (id, cap) = (agent_id(agent), FLEET[agent].1);
+                    fleet.running.entry(agent).or_default().push(Claim {
+                        _slot: counts.enter(&id, cap),
+                        entry: Entry::OperatorResumed,
+                    });
+                }
             }
             check(&fleet, &counts)?;
         }

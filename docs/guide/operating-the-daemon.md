@@ -411,6 +411,10 @@ them. The command answers once the interrupted results are recorded, so
 `Resume accepted` means running or waiting its turn, and the daemon log
 says which (see
 [Every run takes a worker permit](#when-a-provider-hangs-or-throttles)).
+The agent's own `max_concurrent` does not hold it back: the run counts
+against that limit but does not wait for a slot under it, so the agent
+may briefly run more invocations than its limit (the same section says
+why, and what to do if that matters).
 A daemon that is already draining or stopping refuses the re-drive and
 says so, but the recorded results stand, so the next start resumes the
 invocation on its own.
@@ -695,6 +699,23 @@ Either way, while it waits it counts against its agent's
 `max_concurrent`, so that agent's triggers are held behind it. And
 either way it is not being driven, so a plain `fq invocation drop` takes
 it (see [Triaging unresolved invocations](#triaging-unresolved-invocations)).
+
+**An operator's resume is not held at its agent's cap.** It counts
+against `max_concurrent` from the moment it is accepted, but the only
+thing it waits for is a worker permit, never a free slot for its agent.
+An ambiguous invocation holds no slot while it waits for triage, so if
+its agent is already running as many invocations as `max_concurrent`
+allows, the resumed run starts beside them as soon as a worker permit is
+free, and the agent is over its limit until one of them ends.
+`fq invocation resume` says so when it accepts. This is deliberate
+([#1009](https://github.com/bricef/factor-q/issues/1009)): you asked for
+that run by id, and holding it at the cap would mean giving it priority
+over the agent's held triggers, because a cap hold is a race between
+waiters, not a queue. If the limit matters for that agent, resume when
+`fq doctor` does not list it under `Agents at cap`; otherwise accept the
+brief overshoot. Startup recovery's resumes are counted the same way,
+but before the dispatcher admits anything, so no trigger joins them past
+the cap.
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers
