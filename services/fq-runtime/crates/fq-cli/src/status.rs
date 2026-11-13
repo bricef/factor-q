@@ -169,6 +169,7 @@ fn render_status_human(doc: &StatusDocument) -> String {
     out.push_str(&render_stores_human(&report.stores));
     out.push_str(&render_mcp_servers_human(&report.mcp_servers));
     out.push_str(&render_throttled_models_human(&report.throttled_models));
+    out.push_str(&render_archive_holds_human(&report.archive_holds));
 
     // Recovery state: points the operator at the commands they'd need
     // if anything is off; renders "All clear." otherwise.
@@ -268,6 +269,22 @@ fn render_throttled_models_human(models: &[fq_ops::health::ThrottledModel]) -> S
         out.push_str(&format!("  {}\n", throttled_model_line(model)));
     }
     out
+}
+
+/// Pure: the finished runs whose rows the archive sweeper is holding
+/// rather than archiving, with the count, and each row's reason and remedy
+/// as `fq doctor` prints them. Absent entirely when nothing is held, like
+/// the MCP and throttle blocks; whether a hold is an issue is `fq
+/// doctor`'s call, and it says yes.
+fn render_archive_holds_human(holds: &[fq_ops::health::ArchiveHold]) -> String {
+    if holds.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nArchive holds: {} (not archived until an operator acts)\n{}",
+        holds.len(),
+        crate::doctor::archive_hold_lines(holds)
+    )
 }
 
 /// One throttled model as a phrase, shared by the human report and its

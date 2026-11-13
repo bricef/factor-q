@@ -885,6 +885,77 @@ fn throttled_models_are_listed_without_becoming_an_issue() {
     );
 }
 
+/// One row held for each cause, as a daemon would report them.
+fn archive_holds() -> Vec<fq_ops::health::ArchiveHold> {
+    use fq_ops::health::{ArchiveHold, ArchiveHoldReason};
+    vec![
+        ArchiveHold {
+            invocation_id: "019a0000-0000-7000-8000-00000000000a".to_string(),
+            agent_id: "researcher".to_string(),
+            reason: ArchiveHoldReason::PayloadTooLarge {
+                event_type: "invocation_archived".to_string(),
+                size_bytes: 1_052_275,
+                limit_bytes: 1_048_576,
+            },
+            remedy: "raise the broker's max_payload above 1052275 bytes, then restart fqd"
+                .to_string(),
+        },
+        ArchiveHold {
+            invocation_id: "019a0000-0000-7000-8000-00000000000b".to_string(),
+            agent_id: "triager".to_string(),
+            reason: ArchiveHoldReason::StoredEventRefused {
+                detail: "stored event is `host_notice`, not `completed` or `failed`".to_string(),
+            },
+            remedy: "keep a copy of the row's terminal_outcome, then release the row".to_string(),
+        },
+    ]
+}
+
+/// A held row is an issue, unlike a throttled model: nothing lifts it but
+/// an operator. Each is named with its agent, its reason and the remedy
+/// the daemon reported, and an empty list says "none" so the block is
+/// always on the page.
+#[test]
+fn archive_holds_are_listed_with_their_remedies_and_are_an_issue() {
+    let quiet = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(!quiet.has_issues());
+    let out = render_doctor_report_human(&quiet);
+    assert!(out.contains("Archive holds: none\n"), "got:\n{out}");
+
+    let report = quiet.with_archive_holds(archive_holds());
+    assert!(report.has_issues(), "a held row waits on an operator");
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("Verdict: issues found"), "got:\n{out}");
+    assert!(
+        out.contains("Archive holds: 2 — finished runs the archive sweeper will not archive"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "  019a0000-0000-7000-8000-00000000000a (researcher): `invocation_archived` is \
+             1052275 bytes, over the broker's max_payload of 1048576\n  -> raise the broker's \
+             max_payload above 1052275 bytes, then restart fqd\n"
+        ),
+        "the size hold, its reason and its remedy: {out}"
+    );
+    assert!(
+        out.contains(
+            "  019a0000-0000-7000-8000-00000000000b (triager): stored event is `host_notice`, \
+             not `completed` or `failed`\n  -> keep a copy of the row's terminal_outcome, then \
+             release the row\n"
+        ),
+        "the stored-event hold, in its own words: {out}"
+    );
+}
+
 /// One stranded claim, claimed at 2026-01-02T03:04:05Z plus `seq`
 /// minutes, on the current stream unless the message says otherwise.
 fn stranded(
