@@ -595,8 +595,9 @@ Crash semantics:
   worker-scoped subject and the local row is deleted.
 
 The retry sweeper's "correctness over cleanup" rule (never
-delete a held row automatically — see `archive_retry.rs`) means
-a control-plane outage holds the row indefinitely on the worker
+delete a row that has not been acked, held or not — see
+`archive_retry.rs`) means a control-plane outage keeps the row
+indefinitely on the worker
 rather than risking silent data loss.
 
 ### 5.6 Schema evolution — DECIDED, MINIMAL

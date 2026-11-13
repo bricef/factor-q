@@ -267,11 +267,12 @@ models = ["claude-haiku-4-5"]
 # archive_retry_interval_ms = 10000
 #
 # How long after `terminal_at` (in ms) the sweeper logs one
-# warning per held row. The sweeper *keeps republishing* past
-# this point — the warn is the operator-visible signal that the
-# control-plane isn't acknowledging in a reasonable time. The
-# local row is never deleted automatically (correctness over
-# cleanup); operator action is required for held rows.
+# warning per row still awaiting its ack. The sweeper *keeps
+# republishing* such a row past this point — the warn is the
+# operator-visible signal that the control-plane isn't
+# acknowledging in a reasonable time. The local row is never
+# deleted automatically (correctness over cleanup); a row whose
+# ack never comes needs an operator.
 # A row the sweeper cannot publish at all, because an event it
 # owes is larger than the broker's max_payload, its stored
 # terminal event is one this build will not republish, or its

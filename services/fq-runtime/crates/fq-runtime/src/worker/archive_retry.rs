@@ -65,9 +65,11 @@
 //!
 //! - `warn_after_ms` — how long after `terminal_at` to log a
 //!   warning once per pending row. Default 60s. The sweeper
-//!   keeps republishing indefinitely after the warn point —
-//!   the plan's "correctness over cleanup" rule says the row
-//!   must be held, not deleted, even if the CP never acks.
+//!   keeps republishing a row the control plane has not acked,
+//!   indefinitely, after the warn point; a row it holds is the
+//!   exception, and nothing more goes out for it. Either way the
+//!   plan's "correctness over cleanup" rule says the row is kept,
+//!   not deleted, even if the CP never acks.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -94,9 +96,10 @@ pub use holds::ArchiveHolds;
 pub const DEFAULT_RETRY_INTERVAL_MS: u64 = 10_000;
 
 /// Default age (since terminal) at which to log a warning once
-/// per pending row. The sweeper keeps republishing past this
-/// point; the warn is the operator-visible signal that the
-/// control-plane has not acknowledged for an unusually long
+/// per pending row. The sweeper keeps republishing a row the
+/// control plane has not acknowledged past this point (a row it
+/// holds excepted); the warn is the operator-visible signal that
+/// the control-plane has not acknowledged for an unusually long
 /// time.
 pub const DEFAULT_WARN_AFTER_MS: i64 = 60_000;
 
@@ -258,7 +261,8 @@ impl ArchiveRetrySweeper {
             invocation_id = %row.invocation_id,
             agent_id = %row.agent_id,
             terminal_age_ms = now_ms - terminal_at_ms,
-            "archive hand-off pending past warn threshold; row will be held"
+            "archive hand-off unacknowledged past the warn threshold; the row is kept \
+             until the control plane acks it"
         );
         warned.insert(row.invocation_id.clone());
     }
