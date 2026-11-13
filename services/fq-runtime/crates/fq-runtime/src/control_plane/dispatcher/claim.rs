@@ -222,31 +222,33 @@ impl TriggerDispatcher {
     ///
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
-    /// run continues. Without the ack, on this daemon the same-claimant
-    /// `Held` arm would drop each redelivery until the trigger was
-    /// dead-lettered as `trigger_exhausted` although it ran, and after a
-    /// restart following the run's end, recovery, which marks only
-    /// in-flight runs, would leave the claim to be adopted and the work
-    /// started a second time. The claim is not released first, as
-    /// [`Self::ack`] would: a lost ack would then let the redelivery win a
-    /// fresh claim. What stays behind is a `claimed` row for a run that
-    /// started. `fq doctor` lists it as started and never marked, and the
-    /// retention sweep deletes it once this daemon has exited and the row
-    /// is older than `[state] trigger_claim_retention_days`.
+    /// run continues. Without the ack, the same-claimant `Held` arm would
+    /// drop each redelivery until the trigger was dead-lettered as
+    /// `trigger_exhausted` although it ran. The claim is not released
+    /// first, as [`Self::ack`] would: a copy that came back would then win a
+    /// fresh claim and start the work again.
     ///
-    /// **If that ack fails too**, the run still carries on to its end. An
-    /// ack is published without waiting for the broker, so only an ack the
-    /// client refuses to send is seen here, and `ack_keeping_claim` logs
-    /// it; one lost on its way shows only when the delivery comes back.
-    /// The delivery is redelivered when its ack window lapses, and every
-    /// copy meets this daemon's own `claimed` row and is dropped, logged
-    /// and counted as a duplicate dropped before a start was recorded,
-    /// until the trigger is dead-lettered as `trigger_exhausted` although
-    /// its run started. A restart inside that ladder after the run has
-    /// finished starts the trigger a second time, because recovery does
-    /// not mark the claims of finished runs. #967 accepted that risk, which
-    /// needs the mark refused past its retries, the ack lost and the
-    /// restart all together.
+    /// What stays behind is a `claimed` row for a run that started, and
+    /// only until this daemon next starts. Startup recovery records the
+    /// start on the claim of every run that has one on record, finished
+    /// runs included, before the dispatcher consumes anything
+    /// ([`TriggerClaims::recover`]). So after a restart neither a
+    /// redelivery nor a copy the stream replays (it keeps a message for a
+    /// day, acked or not, and a recreated durable reads it again) starts
+    /// the trigger a second time. Until then `fq doctor` lists the row as
+    /// started and never marked.
+    ///
+    /// **What is left is on a live daemon only.** An ack is published
+    /// without waiting for the broker, so only an ack the client refuses
+    /// to send is seen here, and `ack_keeping_claim` logs it; one lost on
+    /// its way shows only when the delivery comes back. Either way the run
+    /// carries on to its end. A copy that reaches this daemon before it
+    /// next starts, such as the redelivery of a lost ack, meets its own
+    /// `claimed` row and is dropped, logged and counted as a duplicate
+    /// dropped before a start was recorded, and the trigger ends as a
+    /// `trigger_exhausted` dead letter although its run started; requeuing
+    /// that dead letter would run the work twice. Settling such a copy by
+    /// the start on record is the last of #967's pull requests.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -287,9 +289,8 @@ impl TriggerDispatcher {
                     "could not mark trigger durably started: the claim store refused every \
                      attempt. Acking the delivery anyway, keeping its claim, and letting the run \
                      continue, so it is not redelivered. The claim stays `claimed` for a run that \
-                     started: `fq doctor` lists it as started and never marked, and the retention \
-                     sweep deletes it once this daemon has exited and the claim is older than \
-                     `[state] trigger_claim_retention_days`");
+                     started until this daemon next starts, when recovery records the start on \
+                     it; until then `fq doctor` lists it as started and never marked");
                 self.ack_keeping_claim(msg, Some(trigger_id), "durably started, mark failed")
                     .await;
             }
