@@ -2948,7 +2948,7 @@
             "properties": {
               "horizon_ms": {
                 "default": null,
-                "description": "How old a claim an exited process left may be and still be\nreported, in milliseconds: the trigger-claim retention window, the\nage at which the daemon's retention sweep deletes such a claim.\nAbsent when claim retention is turned off, and then such a claim\nis reported for as long as its row exists.",
+                "description": "How old a claim an exited process left may be and still be\nreported, in milliseconds: the trigger-claim retention window, the\nage at which the daemon's retention sweep deletes such a claim.\nAbsent when claim rows are kept indefinitely (a negative\n`[state] trigger_claim_retention_days`): the sweep never deletes\none, and such a claim is reported for as long as its row exists.",
                 "format": "int64",
                 "type": [
                   "integer",

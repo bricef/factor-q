@@ -158,9 +158,12 @@ pub struct StateConfig {
     pub stale_worker_retention_days: i64,
     /// How long a trigger claim row is kept before the retention sweep
     /// deletes it, in days, counted from when it was claimed. Default 90.
-    /// Set to `-1` to keep claim rows for ever. A value below
-    /// [`trigger_claim_retention_floor_days`] (two days) is refused at
-    /// load.
+    /// Any negative value (`-1` by convention) keeps every claim row
+    /// indefinitely: the sweep never deletes one, so the link from a run
+    /// to the trigger that started it is never dropped, and the table
+    /// grows by a row for every trigger that starts a run, without bound.
+    /// A non-negative value below [`trigger_claim_retention_floor_days`]
+    /// (two days) is refused at load.
     ///
     /// The dispatcher claims every trigger delivery before it does
     /// anything else with it, and marks the claim `durably_started` when
@@ -1148,7 +1151,8 @@ api_key_env = "MY_ANTHROPIC_KEY"
     }
 
     /// The sweep's bound and the doctor's horizon are one number, and the
-    /// `-1` that keeps rows for ever is no horizon at all.
+    /// `-1` that keeps rows for ever is no horizon at all — as is any other
+    /// negative value.
     #[test]
     fn trigger_claim_retention_in_milliseconds() {
         let state = |trigger_claim_retention_days| StateConfig {
@@ -1161,6 +1165,7 @@ api_key_env = "MY_ANTHROPIC_KEY"
         );
         assert_eq!(state(2).trigger_claim_retention_ms(), Some(2 * 86_400_000));
         assert_eq!(state(-1).trigger_claim_retention_ms(), None);
+        assert_eq!(state(-30).trigger_claim_retention_ms(), None);
     }
 
     /// The default worker-retention window must stay orders of

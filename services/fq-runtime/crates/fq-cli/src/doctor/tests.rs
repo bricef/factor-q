@@ -1011,9 +1011,12 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
     );
 }
 
-/// With retention off there is no horizon, and the line says it stays
-/// while the row does; a started run whose status the report did not
-/// learn is still named as started, without an empty status.
+/// With claim rows kept indefinitely (a negative
+/// `[state] trigger_claim_retention_days`) there is no horizon, and the
+/// line says so in those words: it stays while the row does, and the row
+/// is never swept. No day count stands in for the missing horizon. A
+/// started run whose status the report did not learn is still named as
+/// started, without an empty status.
 #[test]
 fn stranded_trigger_claims_without_a_horizon_or_a_status() {
     use fq_ops::health::ClaimHolder::ExitedProcess;
@@ -1029,8 +1032,15 @@ fn stranded_trigger_claims_without_a_horizon_or_a_status() {
     );
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("so this line stays while the claim row exists\n"),
+        out.contains(
+            "so this line stays while the claim row exists, and claim rows are kept \
+             indefinitely (`[state] trigger_claim_retention_days` is negative)\n"
+        ),
         "got:\n{out}"
+    );
+    assert!(
+        !out.contains("d old"),
+        "no day count stands in for a horizon there is not:\n{out}"
     );
     assert!(
         out.contains("  -> the run started but its claim was never marked started"),

@@ -1097,7 +1097,8 @@ nothing ([ADR-0032](../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
 That row is the only record linking a delivery to the run it started.
 The worker's WAL row is deleted once the run is archived, and the archive
 row is swept after `[state] retention_days`; the claim row is kept for
-`[state] trigger_claim_retention_days`, 90 days by default (see
+`[state] trigger_claim_retention_days`, 90 days by default, or
+indefinitely when that is negative (see
 [How long a claim is kept](#how-long-a-claim-is-kept)).
 
 `fq invocation show <id>` reads it:
@@ -1160,7 +1161,9 @@ never older than its message, so an older claim names a message the
 broker has dropped. The **redelivery window** is the sum of the trigger
 retry ladder (19m30s today), counted from when this daemon started. The
 **horizon** is `[state] trigger_claim_retention_days`, the age at which
-the retention sweep deletes a claim an exited process left.
+the retention sweep deletes a claim an exited process left. There is
+none when that setting is negative: claim rows are then kept
+indefinitely, and the report says so where it would name the horizon.
 
 - **Not started, awaiting redelivery** (not an issue). A process that has
   exited claimed a deliverable message, nothing records a run, and this
@@ -1237,7 +1240,7 @@ stale-worker windows:
 
 ```toml
 [state]
-trigger_claim_retention_days = 90 # the default; -1 keeps claim rows for ever
+trigger_claim_retention_days = 90 # the default; -1 keeps every claim row indefinitely
 ```
 
 The sweep deletes a claim marked started once it is older than the
@@ -1279,10 +1282,19 @@ that look a claim up by its run scan the rows the window keeps. Raising
 the number keeps rows from then on; it does not bring back a claim a
 shorter window has already deleted.
 
-**`-1` and `fq doctor`.** With claim rows kept for ever the report has
-no horizon. A never-started line stays for as long as its row exists,
-which is for ever, so `fq doctor --fail-on-issues` stays non-zero, and
-no command clears it.
+**Keeping claims indefinitely.** Set the window to `-1` (any negative
+value does the same) and the sweep never deletes a claim row. The link
+from every run to the trigger delivery that started it is then never
+dropped, and the table grows by a row for every trigger that starts a
+run, without bound: the reads that look a claim up by its run slow down
+as it grows, since the table has no index yet. The floor does not come
+into it, because nothing is deleted.
+
+`fq doctor` has no horizon then, and says so. Its never-started line
+says `this line stays while the claim row exists, and claim rows are
+kept indefinitely`, and in `--json` the block's `horizon_ms` is `null`.
+Since the row is never swept, that line never leaves the report:
+`fq doctor --fail-on-issues` stays non-zero, and no command clears it.
 
 **The first sweep after an upgrade.** One sweep interval after a daemon
 that has this window starts (an hour by default), its first sweep

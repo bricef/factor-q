@@ -163,8 +163,9 @@ pub struct DoctorTriggerClaims {
     /// How old a claim an exited process left may be and still be
     /// reported, in milliseconds: the trigger-claim retention window, the
     /// age at which the daemon's retention sweep deletes such a claim.
-    /// Absent when claim retention is turned off, and then such a claim
-    /// is reported for as long as its row exists.
+    /// Absent when claim rows are kept indefinitely (a negative
+    /// `[state] trigger_claim_retention_days`): the sweep never deletes
+    /// one, and such a claim is reported for as long as its row exists.
     #[serde(default)]
     pub horizon_ms: Option<i64>,
     /// Every stranded claim, oldest first. Empty on a healthy table.
