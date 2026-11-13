@@ -390,6 +390,31 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+An invocation waiting for a worker permit is not being driven yet, even
+though every surface shows it as in flight (or, for one you resumed, as
+still ambiguous), so a plain `drop` takes it with no `--live` needed.
+For a run startup recovery queued and a `resume` waiting its turn, by
+the time `drop` returns the run can no longer start in this daemon, and
+a drop that fails leaves it waiting as before. A drop that errors or is
+cut off (a timeout, a cancelled client) may still have published its
+event, and then the run, left waiting, can start before the event is
+folded. A deferred invocation waiting out a provider's rate limit has no
+such guarantee yet: a drop can still lose to its permit. In the instant
+a queued run's permit arrives it is starting rather than waiting, and
+`drop` refuses it like a live run (`starting to run; retry with
+--live`).
+
+An accepted `resume` re-drives the invocation under the worker cap like
+any other run: if `max_concurrent_invocations` runs are already in
+flight, it waits for one of them to end rather than starting beside
+them. The command answers once the interrupted results are recorded, so
+`Resume accepted` means running or waiting its turn, and the daemon log
+says which (see
+[Every run takes a worker permit](#when-a-provider-hangs-or-throttles)).
+A daemon that is already draining or stopping refuses the re-drive and
+says so, but the recorded results stand, so the next start resumes the
+invocation on its own.
+
 ### When the archive sweeper holds a terminal row
 
 A finished invocation's row stays in `worker.db` until the control plane
@@ -549,6 +574,56 @@ If every permit is busy when a parked trigger becomes ready, it waits
 for one the same way it waited for the pause — kept alive, still its
 first delivery — and the permits are handed out in the order the
 triggers began waiting.
+
+**Every run takes a worker permit, resumes included.**
+`max_concurrent_invocations` bounds everything the daemon runs, not only
+what the dispatcher pulls: a deferred invocation's resume, the resumes
+startup recovery queues, and `fq invocation resume` all wait for a
+permit in the same queue as triggers
+([#994](https://github.com/bricef/factor-q/issues/994)). After a
+restart, recovery queues every invocation it found before the dispatcher
+pulls its first trigger, so they go first: the first
+`max_concurrent_invocations` of them resume at once, the rest wait in
+turn, and a new trigger waits behind all of them. At the default cap of
+1 that also means a resumed run and a new one never share the one
+workspace directory at the same time.
+
+A resume that has to wait is not silent. The boot banner counts the
+recovered ones (`resumes waiting:  N for a worker permit`), and the
+daemon log names each one by `invocation_id`, with `resume=recovered` or
+`resume=operator`, at each of these points:
+
+- when an operator's resume is accepted (`resume accepted; it is
+  running`, or `… so it waits for one`);
+- when a resume starts waiting (`worker permits exhausted; the resume
+  waits for one`);
+- when it gets its permit;
+- if a drain or stop comes first (`left in flight for the next start's
+  recovery`);
+- if an operator drops it first (`it is not resumed`).
+
+No other surface yet tells a waiting run from a running one, and the two
+kinds show differently:
+
+- **A recovered run** is in flight everywhere. Recovery restored its
+  ownership row and its WAL row is in flight, so `fq invocation list
+  --status=in_flight`, `fq invocation show` and `fq doctor`'s in-flight
+  count all show it. Its last step is from before the restart, so if it
+  waits past the stuck threshold `fq doctor` counts it stuck and
+  `invocation.stuck` is published once, exactly as for a deferred
+  invocation that waits that long.
+- **A run `fq invocation resume` queued** still shows as `ambiguous`:
+  under `fq invocation list --status=ambiguous`, in `fq invocation show`,
+  and among `fq doctor`'s ambiguous invocations. That lasts for the whole
+  wait, and the whole run, until it ends, because nothing moves its
+  ownership row on a resume yet. `fq doctor` counts it in flight as well.
+  Resuming it again is refused as `not Ambiguous (it may already have
+  been resumed)`, which is the truth: it has been.
+
+Either way, while it waits it counts against its agent's
+`max_concurrent`, so that agent's triggers are held behind it. And
+either way it is not being driven, so a plain `fq invocation drop` takes
+it (see [Triaging unresolved invocations](#triaging-unresolved-invocations)).
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers

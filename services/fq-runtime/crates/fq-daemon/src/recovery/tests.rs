@@ -634,3 +634,1044 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
         "a claim whose invocation never reached the WAL is left for the redelivery to adopt"
     );
 }
+
+// ---- #994: recovery's resumes are admitted like dispatched work ----
+
+/// An agent declaring `max_concurrent: 1`, granted the one tool a crashed
+/// invocation of it was calling (see [`seed_a_crashed_tool_call`]).
+const CAPPED_AGENT: &str = "capped-recovery";
+
+/// A registry holding [`CAPPED_AGENT`], defined in `dir`.
+fn capped_agent_registry(dir: &std::path::Path) -> AgentRegistry {
+    let definition = dir.join(format!("{CAPPED_AGENT}.md"));
+    std::fs::write(
+        &definition,
+        format!(
+            "---\nname: {CAPPED_AGENT}\nmodel: claude-haiku\nbudget: 1.0\nmax_concurrent: 1\n\
+             tools:\n  - builtin__self_inspect\n---\n\nTest agent."
+        ),
+    )
+    .unwrap();
+    let mut registry = AgentRegistry::new();
+    registry.load_file(&definition);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+    registry
+}
+
+/// The model a resumed run asks: its first call is held until the test
+/// lets it return, and every call then declares the invocation done.
+struct HeldModel {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl HeldModel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait until a run is inside its first model call.
+    async fn entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.acquire())
+            .await
+            .expect("the resumed run reached its model call")
+            .expect("entry semaphore open")
+            .forget();
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for HeldModel {
+    async fn chat(
+        &self,
+        _request: fq_runtime::ChatRequest,
+    ) -> Result<ChatResponse, fq_runtime::LlmError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.calls.fetch_add(1, SeqCst) == 0 {
+            self.entered.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("release semaphore open")
+                .forget();
+        }
+        Ok(ChatResponse {
+            parts: fq_runtime::events::assistant_parts(
+                None,
+                vec![fq_runtime::events::MessageToolCall {
+                    tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                    tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                    parameters: serde_json::json!({"status": "success", "summary": "done"}),
+                }],
+            ),
+            stop_reason: fq_runtime::events::StopReason::ToolUse,
+            usage: fq_runtime::events::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
+                reasoning_tokens: None,
+            },
+            reported_cost_usd: None,
+        })
+    }
+}
+
+/// What the daemon that stopped left in flight.
+#[derive(Clone, Copy, Debug)]
+enum Seed {
+    /// This many invocations of [`CAPPED_AGENT`], each a safe resume, in
+    /// the order the scan finds them.
+    Resumable(usize),
+    /// One invocation killed mid-tool-call: ambiguous, for an operator.
+    Ambiguous,
+}
+
+/// What a daemon killed mid-tool-call leaves in the WAL: a model turn that
+/// asked for a tool, and the tool handed off with no result.
+async fn seed_a_crashed_tool_call(store: &WorkerStore, invocation: &str) {
+    let tool_use = ChatResponse {
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("tc-0").unwrap(),
+                tool_name: "builtin__self_inspect".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+        ),
+        stop_reason: fq_runtime::events::StopReason::ToolUse,
+        usage: fq_runtime::events::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
+        },
+        reported_cost_usd: None,
+    };
+    let origin = fq_runtime::events::LlmCallOrigin::AgentTurn;
+    store
+        .write_llm_intent(invocation, "req-0", "claude-haiku", "{}", &origin, 1_001)
+        .await
+        .unwrap();
+    store
+        .write_llm_dispatched(invocation, "req-0", 1_002)
+        .await
+        .unwrap();
+    let response = serde_json::to_string(&tool_use).unwrap();
+    store
+        .write_llm_completed(invocation, "req-0", &response, false, 0.0001, 1_003)
+        .await
+        .unwrap();
+    store
+        .write_tool_intent(invocation, "tc-0", "builtin__self_inspect", "{}", 1_004)
+        .await
+        .unwrap();
+    store
+        .write_tool_dispatched(invocation, "tc-0", 1_005)
+        .await
+        .unwrap();
+}
+
+/// Issue `op` through the operator surface exactly as the edge dispatches
+/// it: the declared op name, the wire input shape.
+async fn invoke(
+    surface: &fq_edge::EdgeRegistry,
+    op: fq_ops::Invocation,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, fq_edge::wire::WireError> {
+    let op = fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(op));
+    let handler = surface
+        .handler(&op.to_string())
+        .expect("the op is registered on the operator surface");
+    handler(input).await
+}
+
+/// The next daemon's start over what a daemon that stopped with
+/// invocations of [`CAPPED_AGENT`] in flight left: its stores, its runner,
+/// and what startup recovery made of them.
+struct NextStart {
+    bus: EventBus,
+    cp_store: Arc<ControlPlaneStore>,
+    worker_store: Arc<WorkerStore>,
+    runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
+    model: Arc<HeldModel>,
+    worker_id: WorkerId,
+    /// The invocation in flight — the first, in scan order.
+    invocation: Uuid,
+    /// Every invocation in flight, in scan order.
+    invocations: Vec<Uuid>,
+    /// What recovery hands the resume path, taken once.
+    recoverable: Vec<ClassifiedInvocation>,
+    /// What recovery hands the dispatcher, taken once.
+    claims: Option<TriggerClaims>,
+    scratch: tempfile::TempDir,
+    _server: fq_test_support::NatsServer,
+}
+
+impl NextStart {
+    async fn over_one_run_in_flight() -> Self {
+        Self::over(Seed::Resumable(1)).await
+    }
+
+    async fn over(seed: Seed) -> Self {
+        let server = fq_test_support::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let scratch = tempfile::tempdir().unwrap();
+        let cp_store = Arc::new(
+            ControlPlaneStore::open(&scratch.path().join("control-plane.db"))
+                .await
+                .expect("open the control-plane store"),
+        );
+        let worker_store = Arc::new(
+            WorkerStore::open(&scratch.path().join("worker.db"))
+                .await
+                .expect("open the worker store"),
+        );
+        let count = match seed {
+            Seed::Resumable(n) => n,
+            Seed::Ambiguous => 1,
+        };
+        let invocations: Vec<Uuid> = (0..count).map(|_| Uuid::now_v7()).collect();
+        for (n, invocation) in invocations.iter().enumerate() {
+            let mut row = first_wal_row(&invocation.to_string());
+            row.agent_id = CAPPED_AGENT.to_string();
+            // The scan orders by start, so this is the order it finds them.
+            row.started_at += n as i64;
+            worker_store.upsert_invocation_state(&row).await.unwrap();
+        }
+        let invocation = invocations[0];
+        if let Seed::Ambiguous = seed {
+            seed_a_crashed_tool_call(&worker_store, &invocation.to_string()).await;
+            // What the coordination consumer folds from the
+            // `invocation.ambiguous` recovery publishes below; no consumer
+            // runs in these tests.
+            cp_store
+                .upsert_invocation_ownership(
+                    &invocation.to_string(),
+                    DEAD_DAEMON,
+                    1_000,
+                    fq_runtime::control_plane::OwnerStatus::Ambiguous,
+                )
+                .await
+                .unwrap();
+        }
+
+        let runtime_id = Uuid::now_v7();
+        let worker_id = WorkerId::new(runtime_id.to_string()).unwrap();
+        let Recovered {
+            recoverable,
+            claims,
+            ..
+        } = classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
+            .await
+            .expect("startup recovery");
+        let recovered: Vec<String> = recoverable
+            .iter()
+            .map(|c| c.state.invocation_id.clone())
+            .collect();
+        match seed {
+            Seed::Resumable(_) => assert_eq!(
+                recovered,
+                invocations.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                "every invocation in flight is recovered as a safe resume, in start order"
+            ),
+            Seed::Ambiguous => assert!(
+                recovered.is_empty(),
+                "a crashed tool call is ambiguous: held for an operator, not resumed"
+            ),
+        }
+
+        let mut pricing = std::collections::HashMap::new();
+        pricing.insert(
+            "claude-haiku".to_string(),
+            fq_runtime::ModelPricing {
+                input_per_million: 1.0,
+                output_per_million: 5.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+                cache_write_1h_per_million: None,
+            },
+        );
+        let runner = Arc::new(fq_runtime::ReducerRunner::new(
+            Arc::new(
+                fq_runtime::ReducerContext::builder()
+                    .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                fq_runtime::RunnerConfig::builder()
+                    .bus(bus.clone())
+                    .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
+                    .store(worker_store.clone())
+                    .worker_id(worker_id.clone())
+                    .build(),
+            ),
+            fq_runtime::Harness::new(),
+        ));
+        Self {
+            bus,
+            cp_store,
+            worker_store,
+            runner,
+            model: HeldModel::new(),
+            worker_id,
+            invocation,
+            invocations,
+            recoverable,
+            claims: Some(claims),
+            scratch,
+            _server: server,
+        }
+    }
+
+    /// The daemon's operator surface over these stores and this runner, as
+    /// `run_hosted` assembles it, sharing `admission`. No consumer folds
+    /// anything here, so a drop's WAL mark is never written while a test
+    /// runs: the coordination consumer lagging, held for as long as it
+    /// takes rather than raced.
+    async fn operator_surface(&self, admission: &RunAdmission) -> fq_edge::EdgeRegistry {
+        let paths = fq_runtime::db::RuntimeDbPaths::under(self.scratch.path());
+        let projection = Arc::new(
+            fq_runtime::control_plane::projection::store::ProjectionStore::open(&paths.projection)
+                .await
+                .expect("open the projection store"),
+        );
+        let views = Arc::new(
+            fq_runtime::views::Views::open(&paths)
+                .await
+                .expect("open the views"),
+        );
+        let agents = shared_registry(capped_agent_registry(self.scratch.path()));
+        let llm: Arc<dyn LlmClient> = self.model.clone();
+        let resume = Arc::new(crate::resume::ResumeControl::new(
+            self.bus.clone(),
+            self.worker_store.clone(),
+            self.cp_store.clone(),
+            self.runner.clone(),
+            agents.clone(),
+            llm,
+            fq_runtime::worker::DeferralQueue::new().0,
+            admission.clone(),
+        ));
+        let (_watermark_tx, watermark) = fq_runtime::watermark::channel();
+        crate::operator_surface::operator_registry(
+            views,
+            fq_runtime::watermark::Horizon::new(vec![watermark]),
+            Duration::from_millis(1),
+            crate::operator_surface::OperatorDeps {
+                facts: crate::operator_surface::DaemonFacts {
+                    db_paths: Arc::new(paths.clone()),
+                    legacy_events_db: Arc::new(fq_runtime::db::legacy_db_path(self.scratch.path())),
+                    drain_deadline_ms: 180_000,
+                    stuck_after_ms: 4_210_000,
+                    enabled_consumers: Default::default(),
+                    mcp_servers: Default::default(),
+                    throttle: Arc::new(fq_runtime::llm::ModelThrottle::inert()),
+                    agent_caps: admission.agents().clone(),
+                    worker_id: self.worker_id.as_str().to_string(),
+                    dispatching_since_ms: 0,
+                    trigger_claim_retention_ms: None,
+                },
+                bus: self.bus.clone(),
+                projection,
+                control_plane: self.cp_store.clone(),
+                runner: self.runner.clone(),
+                resume,
+                agents: agents.clone(),
+                machinery: crate::control_commands::MachineryDeps {
+                    agents,
+                    agents_dir: self.scratch.path().to_path_buf(),
+                    default_model: None,
+                    worker: self.runner.clone(),
+                    down: crate::control_commands::DownSignal::new(),
+                    projection_rebuild:
+                        fq_runtime::control_plane::projection::ProjectionRebuildHandle::detached(),
+                },
+            },
+        )
+        .expect("assemble the operator surface")
+    }
+
+    /// Hand the recovered run to the real resume path, as `assemble` does.
+    async fn spawn_resumes(&mut self, admission: &RunAdmission) -> ResumeTasks {
+        let llm: Arc<dyn LlmClient> = self.model.clone();
+        spawn_resume_tasks(
+            std::mem::take(&mut self.recoverable),
+            &capped_agent_registry(self.scratch.path()),
+            &self.runner,
+            &llm,
+            &self.bus,
+            &self.worker_store,
+            &fq_runtime::worker::DeferralQueue::new().0,
+            admission,
+        )
+        .await
+    }
+
+    /// The dispatcher the daemon starts after recovery, sharing
+    /// `admission`, over a stand-in worker that records what it starts.
+    fn start_dispatcher(
+        &mut self,
+        admission: &RunAdmission,
+        worker: Arc<RestartedWorker>,
+    ) -> (
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    ) {
+        let dispatcher = TriggerDispatcher::new(
+            self.bus.clone(),
+            shared_registry(capped_agent_registry(self.scratch.path())),
+            worker,
+            Arc::new(FixtureClient::new()),
+            admission.workers().max_concurrent(),
+        )
+        .with_caps_and_claims(
+            admission.clone(),
+            self.claims.take().expect("one dispatcher per start"),
+            self.worker_id.as_str(),
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        (shutdown, tokio::spawn(dispatcher.run(shutdown_rx)))
+    }
+
+    /// The invocation's WAL row, which nothing has written since the
+    /// daemon stopped, and which the next start must find in flight again.
+    async fn assert_left_for_the_next_start(&self) {
+        let row = self
+            .worker_store
+            .get_invocation_state(&self.invocation.to_string())
+            .await
+            .unwrap()
+            .expect("the WAL row is still there");
+        assert_eq!(row.terminal_at, None, "not ended");
+        assert_eq!(row.updated_at, 1_000, "not written: nothing resumed it");
+        let runtime_id = Uuid::now_v7();
+        let again = classify_in_flight(
+            &self.worker_store,
+            &self.cp_store,
+            &self.bus,
+            runtime_id,
+            &WorkerId::new(runtime_id.to_string()).unwrap(),
+        )
+        .await
+        .expect("the next start's recovery");
+        assert_eq!(
+            again
+                .recoverable
+                .iter()
+                .map(|c| c.state.invocation_id.clone())
+                .collect::<Vec<_>>(),
+            [self.invocation.to_string()],
+            "the next start resumes it"
+        );
+    }
+}
+
+/// Take the worker permit, at a cap of 1 the only one, for a run this test
+/// stands in for.
+async fn hold_the_only_permit(admission: &RunAdmission) -> impl Sized + use<> {
+    admission
+        .workers()
+        .queue(Waiter::Trigger(None))
+        .await
+        .permit()
+        .await
+        .expect("the permit is free at start")
+}
+
+/// How the daemon stops while a recovered run waits.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    /// `fq down` or SIGTERM: the runner drains.
+    Drain,
+    /// Ctrl-C, `fq down --now`, or a failed task: the dispatcher's loop
+    /// sees its shutdown signal, with no drain.
+    Shutdown,
+}
+
+/// **#994: a recovered run waits for a worker permit, and a stop ends the
+/// wait cleanly.** At a worker cap of 1 with the permit held, the run
+/// startup recovery found is queued, not resumed — while counting against
+/// its agent — and a drain or a shutdown ends its task within a keepalive
+/// tick, gives its agent's slot back and leaves its WAL row exactly as it
+/// was, for the next start to resume.
+async fn a_waiting_recovered_run_lets_go_on(stop: Stop) {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let (shutdown, dispatcher) =
+        start.start_dispatcher(&admission, Arc::new(RestartedWorker::default()));
+    // The worker cap is full: a run this test stands in for holds the
+    // only permit.
+    let running = hold_the_only_permit(&admission).await;
+    let mut handles = start.spawn_resumes(&admission).await.handles;
+    let resume = handles.pop().expect("one resume task");
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !resume.is_finished() && !start.runner.is_active(&start.invocation),
+        "the recovered run waits for the only permit rather than running beside its holder"
+    );
+    assert_eq!(start.model.calls(), 0, "and has not asked the model");
+    let agent = AgentId::new(CAPPED_AGENT).unwrap();
+    assert_eq!(
+        admission.agents().in_flight(&agent),
+        1,
+        "it counts against its agent while it waits"
+    );
+
+    let mut shutdown = Some(shutdown);
+    match stop {
+        Stop::Drain => {
+            start
+                .runner
+                .request_drain(DrainRequest::new(fq_runtime::worker::DrainReason::Deploy))
+                .await;
+        }
+        Stop::Shutdown => {
+            let _ = shutdown.take().expect("not sent yet").send(());
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), resume)
+        .await
+        .unwrap_or_else(|_| panic!("a {stop:?} ends the wait within a keepalive tick"))
+        .expect("the resume task joins");
+    assert_eq!(start.model.calls(), 0, "it never ran");
+    assert_eq!(
+        admission.agents().in_flight(&agent),
+        0,
+        "its agent's slot is given back"
+    );
+    start.assert_left_for_the_next_start().await;
+
+    drop(running);
+    // The stand-in worker the dispatcher runs on never drains — the
+    // runner the admission asks is the one that did — so a drained run
+    // still sends the dispatcher its shutdown here.
+    if let Some(shutdown) = shutdown {
+        let _ = shutdown.send(());
+    }
+    tokio::time::timeout(Duration::from_secs(10), dispatcher)
+        .await
+        .expect("the dispatcher exits")
+        .expect("its task joins")
+        .expect("and it exits cleanly");
+}
+
+#[tokio::test]
+async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_drain() {
+    a_waiting_recovered_run_lets_go_on(Stop::Drain).await;
+}
+
+#[tokio::test]
+async fn a_recovered_run_waiting_for_a_permit_lets_go_on_a_shutdown() {
+    a_waiting_recovered_run_lets_go_on(Stop::Shutdown).await;
+}
+
+/// **#994: a recovered run whose row turns terminal while it waits is not
+/// reported ambiguous.** An `fq invocation drop` of a queued run does not
+/// get this far — the drop holds the run, and it never starts (see
+/// `a_queued_recovered_run_dropped_by_an_operator_never_starts`) — but the
+/// row can still be ended by another route while the run waits, as the
+/// coordination consumer does here, and the resume then finds it ended.
+/// Reporting that as `invocation.ambiguous` would flip the ended
+/// invocation's owner row back to awaiting triage.
+///
+/// (A row the archive hand-off has already deleted is not reported
+/// either, but not because of this: `publish_ambiguous_once` finds no row
+/// to stamp and publishes nothing.)
+#[tokio::test]
+async fn a_recovered_run_ended_while_it_waits_is_not_reported_ambiguous() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let running = hold_the_only_permit(&admission).await;
+    let mut ambiguous = start
+        .bus
+        .subscribe(format!("fq.agent.{CAPPED_AGENT}.invocation.ambiguous"))
+        .await
+        .expect("subscribe");
+    let mut resumes = start.spawn_resumes(&admission).await.handles;
+
+    start
+        .worker_store
+        .mark_invocation_operator_terminal(&start.invocation.to_string(), "failed", 2_000)
+        .await
+        .unwrap();
+    drop(running);
+    tokio::time::timeout(Duration::from_secs(10), resumes.pop().expect("one resume"))
+        .await
+        .expect("the resume of a dropped invocation ends")
+        .expect("its task joins");
+    assert_eq!(start.model.calls(), 0, "nothing ran");
+    let quiet = tokio::time::timeout(Duration::from_millis(750), ambiguous.next()).await;
+    assert!(
+        quiet.is_err(),
+        "a dropped invocation was reported ambiguous: {quiet:?}"
+    );
+}
+
+/// **#994 with #718: the per-agent cap bounds a recovered run plus a
+/// dispatched one.** Two worker permits, so the only thing that can hold a
+/// trigger for [`CAPPED_AGENT`] (`max_concurrent: 1`) while its recovered
+/// run is in flight is that cap. The trigger is held — counted as waiting,
+/// with a worker permit free — until the recovered run ends, and then
+/// starts.
+#[tokio::test]
+async fn a_recovered_run_and_a_trigger_for_its_agent_do_not_run_at_once() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 2);
+    let mut resumes = start.spawn_resumes(&admission).await.handles;
+    start.model.entered().await;
+    assert!(
+        start.runner.is_active(&start.invocation),
+        "the recovered run is resumed and inside its model call"
+    );
+
+    let dispatched = Arc::new(RestartedWorker::default());
+    let (shutdown, dispatcher) = start.start_dispatcher(&admission, dispatched.clone());
+    let agent = AgentId::new(CAPPED_AGENT).unwrap();
+    start
+        .bus
+        .publish_trigger(
+            &agent,
+            &serde_json::json!({ "input": "beside the recovered run" }),
+        )
+        .await
+        .expect("publish a trigger");
+    let deadline = Instant::now() + POLL * MAX_POLLS;
+    while !admission
+        .agents()
+        .snapshot()
+        .iter()
+        .any(|a| a.agent == CAPPED_AGENT && a.held == 1)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the trigger was never held at its agent's cap: {:?}",
+            admission.agents().snapshot()
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        dispatched.starts().is_empty(),
+        "a trigger for the recovered run's agent started beside it, past `max_concurrent: 1`"
+    );
+    assert_eq!(
+        admission.workers().in_flight(),
+        1,
+        "with a worker permit free: the agent's cap is what holds it"
+    );
+
+    start.model.release();
+    tokio::time::timeout(Duration::from_secs(10), resumes.pop().expect("one resume"))
+        .await
+        .expect("the recovered run finishes once its model call returns")
+        .expect("its task joins");
+    let deadline = Instant::now() + POLL * MAX_POLLS;
+    while dispatched.starts().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the held trigger never started after the recovered run ended"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    assert_eq!(dispatched.starts().len(), 1);
+
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(10), dispatcher)
+        .await
+        .expect("the dispatcher exits")
+        .expect("its task joins")
+        .expect("and it exits cleanly");
+}
+
+/// **More recovered runs than permits run in turn, in scan order.** Two
+/// invocations in flight at a worker cap of 1: the first the scan found
+/// is resumed and holds the permit through its model call, the second
+/// waits, and runs once the first has finished.
+#[tokio::test]
+async fn more_recovered_runs_than_permits_run_in_turn_in_scan_order() {
+    let mut start = NextStart::over(Seed::Resumable(2)).await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let (first, second) = (start.invocations[0], start.invocations[1]);
+    let resumes = start.spawn_resumes(&admission).await;
+    assert_eq!(
+        resumes.waiting, 1,
+        "the boot banner's count: one of the two waits for the only permit"
+    );
+    let resumes = resumes.handles;
+    start.model.entered().await;
+    assert!(
+        start.runner.is_active(&first),
+        "the first the scan found is the one running"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !start.runner.is_active(&second),
+        "the second waits for the only permit"
+    );
+    assert_eq!(start.model.calls(), 1, "so one model call is open, not two");
+
+    start.model.release();
+    for resume in resumes {
+        tokio::time::timeout(Duration::from_secs(10), resume)
+            .await
+            .expect("each recovered run finishes")
+            .expect("its task joins");
+    }
+    assert_eq!(
+        start.model.calls(),
+        2,
+        "the second ran once the first had given the permit back"
+    );
+}
+
+// ---- #994: an operator's drop and resume of queued runs, through the
+// daemon's own operator surface ----
+
+/// The agent every run here belongs to.
+fn capped_agent() -> AgentId {
+    AgentId::new(CAPPED_AGENT).unwrap()
+}
+
+/// Wait until `agent`'s in-flight count is `n`: how a test sees a
+/// detached resume task end, since the count is released when it does.
+async fn await_in_flight(admission: &RunAdmission, n: u32) {
+    let deadline = Instant::now() + POLL * MAX_POLLS;
+    while admission.agents().in_flight(&capped_agent()) != n {
+        assert!(
+            Instant::now() < deadline,
+            "{} in flight, waiting for {n}",
+            admission.agents().in_flight(&capped_agent())
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// **A drop of a queued recovered run takes effect at once.** The run is
+/// waiting for the only worker permit, so the runner is not driving it and
+/// a plain `fq invocation drop` takes it. No coordination consumer runs
+/// here, so its WAL row is never marked terminal — the consumer lagging,
+/// held — and the permit is then freed. The run must not start: not ask the
+/// model, not be driven, not keep its agent's slot.
+///
+/// Before the drop could reach a queued run, the freed permit started it,
+/// and it ran to its model call regardless of the receipt.
+#[tokio::test]
+async fn a_queued_recovered_run_dropped_by_an_operator_never_starts() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let running = hold_the_only_permit(&admission).await;
+    let resume = start
+        .spawn_resumes(&admission)
+        .await
+        .handles
+        .pop()
+        .expect("one resume task");
+
+    let dropped = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": start.invocation.to_string(), "reason": "test" }),
+    )
+    .await;
+    assert!(
+        dropped.is_ok(),
+        "a queued run is not live, so a plain drop takes it: {dropped:?}"
+    );
+    drop(running);
+    tokio::time::timeout(Duration::from_secs(5), resume)
+        .await
+        .expect("the dropped run's task ends without starting it")
+        .expect("its task joins");
+    assert_eq!(start.model.calls(), 0, "a dropped run never asks the model");
+    assert!(!start.runner.is_active(&start.invocation));
+    assert_eq!(admission.agents().in_flight(&capped_agent()), 0);
+}
+
+/// **A drop of a queued operator resume takes effect at once**, the same
+/// way: `fq invocation resume` records the interrupted result and queues
+/// the re-drive behind the run holding the only permit; a plain drop takes
+/// it; the permit is freed; the re-drive never starts.
+#[tokio::test]
+async fn a_queued_operator_resume_dropped_by_an_operator_never_starts() {
+    let start = NextStart::over(Seed::Ambiguous).await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let running = hold_the_only_permit(&admission).await;
+    let id = start.invocation.to_string();
+
+    let resumed = invoke(
+        &surface,
+        fq_ops::Invocation::Resume,
+        serde_json::json!({ "invocation_id": id, "reason": "test" }),
+    )
+    .await;
+    assert!(resumed.is_ok(), "the resume is accepted: {resumed:?}");
+    assert_eq!(
+        admission.agents().in_flight(&capped_agent()),
+        1,
+        "and its re-drive is queued, counted against its agent"
+    );
+    let dropped = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": id, "reason": "test" }),
+    )
+    .await;
+    assert!(
+        dropped.is_ok(),
+        "a queued re-drive is not live, so a plain drop takes it: {dropped:?}"
+    );
+    drop(running);
+    await_in_flight(&admission, 0).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        start.model.calls(),
+        0,
+        "a dropped re-drive never asks the model"
+    );
+    assert!(!start.runner.is_active(&start.invocation));
+}
+
+/// **`fq invocation resume` on a daemon already draining** is refused,
+/// saying so, after the interrupted result is recorded: the re-drive does
+/// not start, the slot it entered is given back at once, and the
+/// invocation is no longer ambiguous, so the next start's recovery resumes
+/// it on its own.
+#[tokio::test]
+async fn an_operator_resume_on_a_draining_daemon_is_refused_and_left_to_the_next_start() {
+    let start = NextStart::over(Seed::Ambiguous).await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let id = start.invocation.to_string();
+    start
+        .runner
+        .request_drain(DrainRequest::new(fq_runtime::worker::DrainReason::Deploy))
+        .await;
+
+    let refused = invoke(
+        &surface,
+        fq_ops::Invocation::Resume,
+        serde_json::json!({ "invocation_id": id, "reason": "test" }),
+    )
+    .await;
+    let Err(fq_edge::wire::WireError::InvalidInput { message, .. }) = refused else {
+        panic!("a draining daemon refuses the re-drive: {refused:?}");
+    };
+    assert!(
+        message.contains("draining or stopping") && message.contains("next start"),
+        "the refusal says why, and what happens next: {message}"
+    );
+    let tool = start
+        .worker_store
+        .get_tool_dispatch(&id, "tc-0")
+        .await
+        .unwrap()
+        .expect("the tool row");
+    assert_eq!(
+        tool.status,
+        fq_runtime::worker::DispatchStatus::Completed,
+        "the interrupted result is recorded"
+    );
+    assert!(
+        tool.result.unwrap_or_default().contains("interrupted"),
+        "as an interrupted result"
+    );
+    assert_eq!(
+        admission.agents().in_flight(&capped_agent()),
+        0,
+        "the slot it entered is given back with the refusal"
+    );
+    assert_eq!(start.model.calls(), 0, "nothing ran");
+    let runtime_id = Uuid::now_v7();
+    let next = classify_in_flight(
+        &start.worker_store,
+        &start.cp_store,
+        &start.bus,
+        runtime_id,
+        &WorkerId::new(runtime_id.to_string()).unwrap(),
+    )
+    .await
+    .expect("the next start's recovery");
+    assert_eq!(
+        next.recoverable
+            .iter()
+            .map(|c| c.state.invocation_id.clone())
+            .collect::<Vec<_>>(),
+        [id],
+        "no longer ambiguous: the next start resumes it"
+    );
+}
+
+/// Subscribe to every `invocation.operator_recovered`, whichever agent a
+/// drop publishes it under.
+async fn drops_published(
+    bus: &EventBus,
+) -> std::pin::Pin<
+    Box<
+        dyn futures::Stream<Item = Result<fq_runtime::events::Event, fq_runtime::bus::BusError>>
+            + Send,
+    >,
+> {
+    let drops = bus
+        .subscribe("fq.agent.*.invocation.operator_recovered".to_string())
+        .await
+        .expect("subscribe");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drops
+}
+
+/// A drop refused with `InvalidInput`, and its message.
+fn refusal(answer: Result<serde_json::Value, fq_edge::wire::WireError>) -> String {
+    match answer {
+        Err(fq_edge::wire::WireError::InvalidInput { message, .. }) => message,
+        other => panic!("expected the drop to be refused, got {other:?}"),
+    }
+}
+
+/// **A queued run whose permit has come is refused like a live one.** In
+/// the instant between taking its permit and the runner registering it,
+/// a listed run is starting: not driven yet, but no longer waiting. A drop
+/// then — plain or `--live` — is refused with "starting to run" and
+/// publishes nothing; once that permit is given back, the next drop goes
+/// through.
+///
+/// The instant is held open here by taking the recovered invocation's
+/// place and permit exactly as recovery's task does, and not calling
+/// `resume`.
+#[tokio::test]
+async fn a_queued_run_whose_permit_has_come_is_refused_like_a_live_one() {
+    let start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let mut drops = drops_published(&start.bus).await;
+    let id = start.invocation.to_string();
+    let permit = admission
+        .workers()
+        .queue(Waiter::Recovered(start.invocation))
+        .await
+        .permit()
+        .await
+        .expect("the only permit is free");
+
+    for live in [false, true] {
+        let message = refusal(
+            invoke(
+                &surface,
+                fq_ops::Invocation::Drop,
+                serde_json::json!({ "invocation_id": id, "live": live }),
+            )
+            .await,
+        );
+        assert!(
+            message.contains("starting to run"),
+            "live: {live}: {message}"
+        );
+    }
+    let published = tokio::time::timeout(Duration::from_millis(500), drops.next()).await;
+    assert!(
+        published.is_err(),
+        "a refused drop publishes nothing: {published:?}"
+    );
+
+    drop(permit);
+    let dropped = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": id }),
+    )
+    .await;
+    assert!(
+        dropped.is_ok(),
+        "with the permit given back the run is neither starting nor live: {dropped:?}"
+    );
+}
+
+/// **A listed run that is running is dropped as a live one.** A recovered
+/// run keeps its listing for its whole life, so a drop of it while the
+/// runner drives it must take the runner's path, not the queue's: a plain
+/// drop is refused as currently running, and `--live` halts it. The
+/// witness is the run's end: halted at its next step boundary, its row is
+/// not terminal and nothing reports it completed — whereas the model's
+/// reply, left alone, would have completed it.
+#[tokio::test]
+async fn a_running_recovered_run_is_dropped_only_with_live() {
+    let mut start = NextStart::over_one_run_in_flight().await;
+    let admission = RunAdmission::new(start.runner.clone(), 1);
+    let surface = start.operator_surface(&admission).await;
+    let mut completed = start
+        .bus
+        .subscribe(format!("fq.agent.{CAPPED_AGENT}.completed"))
+        .await
+        .expect("subscribe");
+    let id = start.invocation.to_string();
+    let resume = start
+        .spawn_resumes(&admission)
+        .await
+        .handles
+        .pop()
+        .expect("one resume task");
+    start.model.entered().await;
+    assert!(start.runner.is_active(&start.invocation));
+
+    let message = refusal(
+        invoke(
+            &surface,
+            fq_ops::Invocation::Drop,
+            serde_json::json!({ "invocation_id": id }),
+        )
+        .await,
+    );
+    assert!(message.contains("currently running"), "{message}");
+    let live = invoke(
+        &surface,
+        fq_ops::Invocation::Drop,
+        serde_json::json!({ "invocation_id": id, "live": true }),
+    )
+    .await;
+    assert!(
+        live.is_ok(),
+        "a live drop of a running listed run: {live:?}"
+    );
+
+    start.model.release();
+    tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("the halted run's task ends")
+        .expect("its task joins");
+    let row = start
+        .worker_store
+        .get_invocation_state(&id)
+        .await
+        .unwrap()
+        .expect("the WAL row is still there");
+    assert_eq!(
+        row.terminal_at, None,
+        "halted at its step boundary, not run to its end"
+    );
+    let reported = tokio::time::timeout(Duration::from_millis(500), completed.next()).await;
+    assert!(
+        reported.is_err(),
+        "a halted run is not reported completed: {reported:?}"
+    );
+}

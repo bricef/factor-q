@@ -56,19 +56,22 @@
 //!
 //! The permit wait itself is the third user of [`HOLD_KEEPALIVE`]: a
 //! trigger waiting for a permit is held exactly as one waiting on a
-//! pause is, and lets go on the same `stopping` flag.
+//! pause is, and lets go on the same `stopping` flag. The wait lives with
+//! the permits in [`super::run_admission`], because the daemon's resumes
+//! queue on the same permits without a dispatcher task of their own
+//! (#994).
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
+use super::run_admission::Waiter;
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
-use crate::worker::{DrainState, DueResume};
+use crate::worker::DueResume;
 
 /// How often a held delivery is kept alive — and, because the check
 /// follows the ack, how often the hold asks whether it can stop.
@@ -122,19 +125,12 @@ impl TriggerDispatcher {
     ///
     /// A resume queues like everything else, with no delivery to keep
     /// alive — its trigger was acked at the first WAL write — so it can
-    /// neither jump the triggers already waiting nor be jumped by them.
+    /// neither jump the triggers already waiting nor be jumped by them. A
+    /// drain or shutdown during the wait is logged by the wait itself, by
+    /// invocation id, and leaves the WAL row for the next start.
     pub(super) async fn resume_when_permitted(self: Arc<Self>, resume: DueResume) {
-        let Some(_permit) = self.acquire_run_permit(None, None).await else {
-            // Named at `info`, because this is the one abandoned wait
-            // with no trigger to name in its place: there is no delivery
-            // to requeue and nothing on the broker to point at, only a
-            // WAL row that the next start's recovery picks up. Without
-            // this the invocation just stops appearing in the log.
-            info!(
-                invocation_id = %resume.invocation_id,
-                "drain or shutdown before a due resume took a worker permit; \
-                 deferred resume left for the next binary"
-            );
+        let waiter = Waiter::Deferred(resume.invocation_id);
+        let Some(_permit) = self.workers.wait(None, waiter).await else {
             return;
         };
         self.resume_deferred(resume).await;
@@ -210,27 +206,9 @@ impl TriggerDispatcher {
             );
             return false;
         }
-        self.keep_alive(msg, trigger_id).await;
+        keep_alive(msg, trigger_id).await;
         tokio::time::sleep(HOLD_KEEPALIVE).await;
         true
-    }
-
-    /// Reset the delivery's ack window without counting as a delivery.
-    /// A failure keeps the hold going: the worst case is the window
-    /// expiring and JetStream redelivering, which is where we would be
-    /// without the hold at all.
-    async fn keep_alive(
-        &self,
-        msg: &async_nats::jetstream::Message,
-        trigger_id: Option<uuid::Uuid>,
-    ) {
-        if let Err(err) = msg.ack_with(AckKind::Progress).await {
-            warn!(
-                error = %err,
-                trigger_id = %trigger_name(trigger_id),
-                "failed to keep a held trigger alive"
-            );
-        }
     }
 
     /// Hold `msg` while `model` is paused. Returns at once for an
@@ -272,103 +250,55 @@ impl TriggerDispatcher {
     }
 
     /// Wait for the worker-cap permit a trigger runs under, keeping its
-    /// delivery alive meanwhile (#733). The last gate in `handle`, and
-    /// the only place a permit is taken.
+    /// delivery alive meanwhile (#733). The last gate in `handle`.
     ///
-    /// `msg` is the delivery to keep alive, and `None` is the one caller
-    /// that has nothing to keep alive: a **due resume**, whose trigger
-    /// was acked at its first WAL write and whose row is the WAL's. It
-    /// queues for a permit like everything else, so a resume cannot jump
-    /// the triggers already waiting, nor they it.
+    /// The wait is the permits' own, the one every run takes its permit
+    /// through — a trigger here, a deferred resume in
+    /// [`Self::resume_when_permitted`], and the daemon's recovered and
+    /// operator resumes through [`WorkerPermits::queue`] — so a trigger
+    /// cannot jump a waiting resume, nor a resume it (#994).
     ///
-    /// `None` back is a drain or shutdown during the wait. The trigger
-    /// caller answers it the way the *cap* hold does — with
+    /// `None` back is a drain or shutdown during the wait. The caller
+    /// answers it the way the *cap* hold does — with
     /// [`TriggerDispatcher::requeue_held`](super::TriggerDispatcher),
     /// not by returning un-acked — because this wait is bounded by the
     /// invocation ahead of it and so reaches the same arithmetic (#718,
-    /// #733). **Both** arms answer it, because a
-    /// drain is also how a permit comes free: suspending runners release
-    /// theirs, so a waiter can be handed one by the very drain that
-    /// should have stopped it.
+    /// #733). A drain is also how a permit comes free: suspending runners
+    /// release theirs, so the wait asks on both of its arms rather than
+    /// start a trigger on the permit the drain itself freed.
     ///
-    /// **One waiter, registered once.** The acquire future is created
-    /// before the loop and polled through the whole wait, so the trigger
-    /// keeps its place in the semaphore's FIFO and the longest-parked
-    /// one runs first; re-creating it each tick — which is what a naive
-    /// `select!` in a loop does — would send it to the back of the queue
-    /// every [`HOLD_KEEPALIVE`]. `biased` puts the permit first, so the
-    /// fast path (a permit already free) takes it on the first poll and
-    /// never arms the timer, never logs and never acks.
+    /// [`WorkerPermits::queue`]: super::WorkerPermits::queue
     pub(super) async fn acquire_run_permit(
         &self,
         msg: Option<&async_nats::jetstream::Message>,
         trigger_id: Option<uuid::Uuid>,
     ) -> Option<OwnedSemaphorePermit> {
-        let acquire = Arc::clone(&self.permits).acquire_owned();
-        tokio::pin!(acquire);
-        let mut waited = false;
-        loop {
-            tokio::select! {
-                biased;
-                permit = &mut acquire => {
-                    let permit = permit.expect("dispatcher semaphore is never closed");
-                    // The drain frees permits too. Every runner releases
-                    // its own as it suspends, and that release wakes the
-                    // head of this FIFO — whose first-polled arm, under
-                    // `biased`, is this one. Without the check a trigger
-                    // would be started *into a draining worker* by the
-                    // very drain that was meant to stop it. Dropping the
-                    // permit here hands it back to a semaphore nothing
-                    // will take from again: the exit is process-terminal.
-                    if self.stopping() {
-                        drop(permit);
-                        debug!(
-                            trigger_id = %trigger_name(trigger_id),
-                            "a worker permit freed during a drain or shutdown; \
-                             nothing is started"
-                        );
-                        return None;
-                    }
-                    if waited {
-                        debug!(
-                            trigger_id = %trigger_name(trigger_id),
-                            "a worker permit freed; starting the waiting trigger"
-                        );
-                    }
-                    return Some(permit);
-                }
-                _ = tokio::time::sleep(HOLD_KEEPALIVE) => {
-                    if self.stopping() {
-                        debug!(
-                            trigger_id = %trigger_name(trigger_id),
-                            "drain or shutdown while waiting for a worker permit; \
-                             nothing is started"
-                        );
-                        return None;
-                    }
-                    if !waited {
-                        waited = true;
-                        info!(
-                            trigger_id = %trigger_name(trigger_id),
-                            available_permits = self.permits.available_permits(),
-                            in_flight = self.max_concurrent
-                                - self.permits.available_permits(),
-                            "worker permits exhausted; holding the trigger un-started"
-                        );
-                    }
-                    if let Some(msg) = msg {
-                        self.keep_alive(msg, trigger_id).await;
-                    }
-                }
-            }
-        }
+        self.workers.wait(msg, Waiter::Trigger(trigger_id)).await
     }
 
     /// Whether this dispatcher is on its way out: the worker is draining
     /// or the loop has seen its shutdown signal. Every wait — a paused
     /// model's hold, a full agent's (#718), and the wait for a worker
-    /// permit (#733) — lets go on it.
+    /// permit (#733) — lets go on it. It is the permits' answer, so the
+    /// daemon's queued resumes let go on exactly the same thing (#994).
     pub(super) fn stopping(&self) -> bool {
-        self.worker.drain_status() == DrainState::Draining || self.stopping.load(Ordering::SeqCst)
+        self.workers.stopping()
+    }
+}
+
+/// Reset the delivery's ack window without counting as a delivery.
+/// A failure keeps the hold going: the worst case is the window
+/// expiring and JetStream redelivering, which is where we would be
+/// without the hold at all.
+pub(super) async fn keep_alive(
+    msg: &async_nats::jetstream::Message,
+    trigger_id: Option<uuid::Uuid>,
+) {
+    if let Err(err) = msg.ack_with(AckKind::Progress).await {
+        warn!(
+            error = %err,
+            trigger_id = %trigger_name(trigger_id),
+            "failed to keep a held trigger alive"
+        );
     }
 }

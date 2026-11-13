@@ -242,7 +242,7 @@ impl Surface {
             agents.clone(),
             ParkedLlm::new(),
             fq_runtime::worker::DeferralQueue::new().0,
-            fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
+            fq_runtime::control_plane::dispatcher::RunAdmission::new(runner.clone(), 1),
         ));
         let registry = fq_daemon::operator_registry(
             views,

@@ -3,7 +3,34 @@
 
 use std::sync::Arc;
 
+use fq_runtime::worker::{
+    DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome,
+};
+
 use super::daemon_facts;
+
+/// The admission's drain probe, and nothing else: the facts run nothing.
+struct IdleWorker;
+
+#[async_trait::async_trait]
+impl fq_runtime::Worker for IdleWorker {
+    async fn run_invocation(
+        &self,
+        _agent: &fq_runtime::Agent,
+        _llm: &dyn fq_runtime::llm::LlmClient,
+        _trigger: fq_runtime::trigger::Trigger,
+        _delivery_attempt: Option<u32>,
+        _durable_start: DurableStart,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        unreachable!("reading the daemon's facts runs no invocation")
+    }
+
+    async fn request_drain(&self, _req: DrainRequest) {}
+
+    fn drain_status(&self) -> DrainState {
+        DrainState::Running
+    }
+}
 
 fn facts_for(toml: &str) -> crate::operator_surface::DaemonFacts {
     let config = fq_runtime::Config::from_toml_str(toml).expect("a valid config");
@@ -11,7 +38,7 @@ fn facts_for(toml: &str) -> crate::operator_surface::DaemonFacts {
         &config,
         Default::default(),
         &Arc::new(fq_runtime::llm::ModelThrottle::inert()),
-        &fq_runtime::control_plane::agent_cap::AgentConcurrency::new(),
+        &fq_runtime::control_plane::dispatcher::RunAdmission::new(Arc::new(IdleWorker), 1),
         &fq_runtime::worker::WorkerId::new("hosted-test").expect("a valid worker id"),
     )
 }

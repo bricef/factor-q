@@ -306,7 +306,13 @@ still waiting or starting, or a claim this daemon
 will never settle (the third gap, open as
 [#967](https://github.com/bricef/factor-q/issues/967)). Both counts are
 kept in memory and start again with the daemon
-([#968](https://github.com/bricef/factor-q/issues/968)). The M0
+([#968](https://github.com/bricef/factor-q/issues/968)). Outside
+ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
+for a `max_concurrent_invocations` permit like every other run, as a
+deferred resume already did, so a restart no longer runs its recovered
+invocations on top of the cap, and they start ahead of any new trigger
+(the review's finding C5,
+[#994](https://github.com/bricef/factor-q/issues/994)). The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the

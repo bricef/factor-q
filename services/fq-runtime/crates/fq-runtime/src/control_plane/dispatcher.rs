@@ -51,14 +51,15 @@ mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
+mod run_admission;
 
 use claim::Marking;
 pub use claim::TriggerClaims;
+pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -184,9 +185,6 @@ pub struct TriggerDispatcher {
     registry: SharedRegistry,
     worker: Arc<dyn Worker>,
     llm: Arc<dyn LlmClient>,
-    /// In-executor fan-out bound (#70): how many invocations this
-    /// dispatcher runs concurrently. `1` is the serial behavior.
-    max_concurrent: usize,
     /// The worker's provider throttle (#278): asked before every
     /// invocation starts, so a paused model's trigger is held rather
     /// than run. Inert unless [`Self::with_throttle`] hands in the
@@ -203,16 +201,14 @@ pub struct TriggerDispatcher {
     /// next trigger held rather than run. Shared with the daemon's
     /// resume paths, which count without being gated.
     agent_caps: Arc<AgentConcurrency>,
-    /// The worker-cap permits (#70). Owned here rather than created by
-    /// the consume loop because the loop is not the one that takes them
-    /// (#733): a permit is taken in `handle`, after both admission
-    /// rules, by a trigger that is ready to run, and by a due resume.
-    /// The worker cap bounds *running* invocations; waiting — on a
-    /// pause, on an agent's cap, on a permit itself — is free.
-    permits: Arc<Semaphore>,
-    /// Set once the loop has seen its shutdown signal, so a trigger held
-    /// for a paused model lets go rather than blocking the stop.
-    stopping: AtomicBool,
+    /// The worker cap, `max_concurrent_invocations` (#70), and the flag
+    /// every wait lets go on. Not the consume loop's (#733): a permit is
+    /// taken in `handle`, after both admission rules, by a trigger that
+    /// is ready to run, and by a due resume. Shared with the daemon's
+    /// recovered and operator resumes, which queue on it too (#994). The
+    /// worker cap bounds *running* invocations; waiting — on a pause, on
+    /// an agent's cap, on a permit itself — is free.
+    workers: Arc<WorkerPermits>,
     /// Durable stream-sequence arbiter, installed by the daemon.
     claim_store: Option<claim::ClaimStore>,
 }
@@ -226,19 +222,16 @@ impl TriggerDispatcher {
         max_concurrent: usize,
     ) -> Self {
         let (deferrals, due) = DeferralQueue::new();
-        let max_concurrent = max_concurrent.max(1);
         Self {
             bus,
             registry,
+            workers: WorkerPermits::new(Arc::clone(&worker), max_concurrent),
             worker,
             llm,
-            permits: Arc::new(Semaphore::new(max_concurrent)),
-            max_concurrent,
             throttle: Arc::new(ModelThrottle::inert()),
             deferrals,
             due: std::sync::Mutex::new(Some(due)),
             agent_caps: AgentConcurrency::new(),
-            stopping: AtomicBool::new(false),
             claim_store: None,
         }
     }
@@ -286,7 +279,7 @@ impl TriggerDispatcher {
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), DispatcherError> {
         info!(
-            max_concurrent = self.max_concurrent,
+            max_concurrent = self.workers.max_concurrent(),
             "trigger dispatcher starting"
         );
         self.bus.consumer_ledger().start(consumer_name);
@@ -296,8 +289,8 @@ impl TriggerDispatcher {
         // never set *below* the server default: running deployments'
         // durable consumers already carry that effective value, and
         // `get_or_create` won't rewrite an existing consumer's config.
-        let max_ack_pending =
-            (self.max_concurrent as i64 * 2).max(crate::bus::NATS_DEFAULT_MAX_ACK_PENDING);
+        let max_ack_pending = (self.workers.max_concurrent() as i64 * 2)
+            .max(crate::bus::NATS_DEFAULT_MAX_ACK_PENDING);
         let consumer = match filter_subject {
             Some(filter) => {
                 self.bus
@@ -419,7 +412,7 @@ impl TriggerDispatcher {
         // Stop pulling first: an interrupted hold requeues its trigger
         // (#718) and an open pull request would swallow the fresh copy.
         drop(messages);
-        this.stopping.store(true, Ordering::SeqCst);
+        this.workers.shut_down();
         while let Some(joined) = in_flight.join_next().await {
             log_invocation_task(joined);
         }
@@ -845,7 +838,7 @@ mod tests {
     /// takes one until a trigger is ready to run (#733), so this is how
     /// a test puts a dispatcher at its cap without running anything.
     async fn a_permit(d: &TriggerDispatcher) -> OwnedSemaphorePermit {
-        Arc::clone(&d.permits)
+        Arc::clone(&d.workers.permits)
             .acquire_owned()
             .await
             .expect("dispatcher semaphore is never closed")
@@ -2928,7 +2921,8 @@ You are a test agent."#
         let agent_id_str = unique_agent_id("redelivered-hold");
         let (_agents, registry) = registry_with_cap(&agent_id_str, 1);
         let worker = CappedWorker::new();
-        let caps = crate::control_plane::agent_cap::AgentConcurrency::new();
+        let admission = RunAdmission::new(worker.clone(), 4);
+        let caps = Arc::clone(admission.agents());
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(
             crate::control_plane::ControlPlaneStore::open(&store_dir.path().join("cp.db"))
@@ -2944,7 +2938,7 @@ You are a test agent."#
                 4,
             )
             .with_caps_and_claims(
-                caps.clone(),
+                admission,
                 recovered_claims(&store).await,
                 "worker-a",
             ),
@@ -3569,7 +3563,7 @@ You are a test agent."#
             )
             .with_throttle(throttle),
         );
-        let permits = Arc::clone(&dispatcher.permits);
+        let permits = Arc::clone(&dispatcher.workers.permits);
         let filter = crate::events::subjects::trigger(&paused);
         let consumer = bus
             .trigger_consumer_with_filter(
@@ -3781,7 +3775,7 @@ You are a test agent."#
     /// only direct evidence a cap was honoured. `RecordingWorker`
     /// returns instantly, so under it two invocations never overlap
     /// whether the cap works or not.
-    struct CappedWorker {
+    pub(super) struct CappedWorker {
         starts: std::sync::Mutex<Vec<(std::time::Instant, Option<u32>, String)>>,
         open: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
@@ -3795,7 +3789,7 @@ You are a test agent."#
     }
 
     impl CappedWorker {
-        fn new() -> Arc<Self> {
+        pub(super) fn new() -> Arc<Self> {
             Arc::new(CappedWorker {
                 starts: std::sync::Mutex::new(Vec::new()),
                 open: std::sync::atomic::AtomicUsize::new(0),
@@ -3806,10 +3800,10 @@ You are a test agent."#
             })
         }
         /// Let `n` more invocations finish.
-        fn let_finish(&self, n: usize) {
+        pub(super) fn let_finish(&self, n: usize) {
             self.finish.add_permits(n);
         }
-        fn started(&self) -> usize {
+        pub(super) fn started(&self) -> usize {
             self.starts.lock().unwrap().len()
         }
         fn peak(&self) -> usize {
@@ -3838,7 +3832,7 @@ You are a test agent."#
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
-        async fn wait_for_starts(&self, n: usize, within: Duration) {
+        pub(super) async fn wait_for_starts(&self, n: usize, within: Duration) {
             let deadline = std::time::Instant::now() + within;
             while self.started() < n {
                 assert!(
@@ -3950,7 +3944,7 @@ You are a test agent."#
         (shutdown_tx, run)
     }
 
-    async fn publish_triggers(bus: &EventBus, agent_id_str: &str, n: usize) {
+    pub(super) async fn publish_triggers(bus: &EventBus, agent_id_str: &str, n: usize) {
         let agent = AgentId::new(agent_id_str).unwrap();
         for i in 0..n {
             bus.publish_trigger(&agent, &json!({"input": i}))
@@ -3959,7 +3953,7 @@ You are a test agent."#
         }
     }
 
-    async fn stop(
+    pub(super) async fn stop(
         shutdown_tx: oneshot::Sender<()>,
         run: tokio::task::JoinHandle<Result<(), DispatcherError>>,
     ) {

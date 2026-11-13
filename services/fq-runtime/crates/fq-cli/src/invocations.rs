@@ -220,7 +220,14 @@ pub(crate) async fn invocation_resume(
     if json {
         println!("{}", serde_json::to_string_pretty(&receipt)?);
     } else {
-        println!("Resumed invocation {id}.");
+        // A receipt says what was done, not where the run stands, so the
+        // line says what the daemon does with it (#994) rather than
+        // claiming it is already running.
+        println!("Resume accepted for invocation {id}.");
+        println!(
+            "It runs under [worker] max_concurrent_invocations like any other invocation: \
+             at once if a worker is free, otherwise when one frees."
+        );
         println!("Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.");
     }
     Ok(())

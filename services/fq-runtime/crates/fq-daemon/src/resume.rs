@@ -16,8 +16,10 @@ use std::sync::Arc;
 use fq_edge::wire::WireError;
 pub(crate) use fq_ops::surface::{InvocationResumeRequest, InvocationResumeResponse};
 use fq_runtime::agent::AgentId;
+use fq_runtime::control_plane::dispatcher::{RunAdmission, Waiter};
 use fq_runtime::events::{Event, EventPayload};
 use fq_runtime::llm::LlmClient;
+use fq_runtime::worker::{ExecutorError, ResumeError};
 use fq_runtime::{ControlPlaneStore, EventBus, SharedRegistry};
 use uuid::Uuid;
 
@@ -48,10 +50,11 @@ pub struct ResumeControl {
     /// Where a re-driven invocation goes if its model is still
     /// rate-limited when it gets there (#278).
     pub(crate) deferrals: fq_runtime::worker::DeferralQueue,
-    /// The per-agent in-flight count (#718). An operator re-drive is a
-    /// running invocation like any other, so it counts — but it is
-    /// never refused: the operator asked for this one by id.
-    pub(crate) agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    /// What the re-drive is admitted under (#994): it queues for a worker
+    /// permit like every other run, and counts into its agent's
+    /// in-flight number (#718) without being held by it — the operator
+    /// asked for this one by id.
+    pub(crate) admission: RunAdmission,
 }
 
 impl ResumeControl {
@@ -70,7 +73,7 @@ impl ResumeControl {
         registry: SharedRegistry,
         llm: Arc<dyn LlmClient>,
         deferrals: fq_runtime::worker::DeferralQueue,
-        agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+        admission: RunAdmission,
     ) -> Self {
         ResumeControl {
             bus,
@@ -80,7 +83,7 @@ impl ResumeControl {
             registry,
             llm,
             deferrals,
-            agent_caps,
+            admission,
         }
     }
 }
@@ -90,9 +93,19 @@ impl ResumeControl {
 /// publish the `invocation.operator_resumed` audit event, and re-drive the
 /// invocation through the existing SafeReplay recovery path (#373).
 ///
+/// The re-drive queues for a worker permit like every other run (#994)
+/// rather than starting beside them: an explicit request is still a run on
+/// a host sized for `max_concurrent_invocations`, and nothing about being
+/// asked for by id makes it urgent enough to exceed that. Whether it
+/// started or is waiting is logged by invocation id when it is decided;
+/// on the edge a success is a receipt, which carries no such state.
+///
 /// Every refusal returns a distinct message because the CLI surfaces it
 /// verbatim — the operator must be able to tell terminal / live /
-/// already-resumed / unknown apart without reading daemon logs.
+/// already-resumed / unknown apart without reading daemon logs, and, once
+/// the interrupted results are recorded, a daemon too far into stopping to
+/// re-drive anything, or an invocation a concurrent request is already
+/// re-driving.
 pub(crate) async fn handle_resume_request(
     control: &ResumeControl,
     req: InvocationResumeRequest,
@@ -245,15 +258,86 @@ pub(crate) async fn handle_resume_request(
             completed_call_ids: ids,
         };
     };
+    let (ok, message) = match redrive(control, agent, agent_id, invocation_id).await {
+        Ok(admitted) => (true, admitted),
+        Err(stopping) => (false, stopping),
+    };
+    InvocationResumeResponse {
+        ok,
+        message,
+        completed_call_ids: ids,
+    }
+}
+
+/// Re-drive `invocation_id`, whose interrupted results are recorded: admit
+/// it like every other run (#994) and run it, detached, once its turn
+/// comes. `Ok` is the receipt's message, also logged here, saying whether
+/// it started or is waiting; `Err` is a daemon on its way out, which
+/// re-drives nothing.
+///
+/// Its agent's count is entered at once, and its place in the worker
+/// permits' queue taken at once, before this returns — so a trigger
+/// pulled after this request cannot overtake it, and a drop of the
+/// queued run reaches it (`WorkerPermits::hold_for_drop`).
+async fn redrive(
+    control: &ResumeControl,
+    agent: fq_runtime::Agent,
+    agent_id: AgentId,
+    invocation_id: Uuid,
+) -> Result<String, String> {
+    let agent_slot = control
+        .admission
+        .agents()
+        .enter(agent.id(), agent.max_concurrent());
+    let workers = control.admission.workers();
+    let place = workers.queue(Waiter::Operator(invocation_id)).await;
+    // The injection stands, so the invocation is no longer ambiguous and
+    // the next start's recovery resumes it on its own.
+    if place.is_stopping() {
+        return Err(format!(
+            "invocation {invocation_id}: the interrupted result is recorded, but this daemon \
+             is draining or stopping, so it was not re-driven here; the next start's \
+             recovery resumes it"
+        ));
+    }
+    // Two requests for one invocation that both passed the preconditions
+    // before either recorded anything: the first re-drives it, and this
+    // one must not run it a second time beside it.
+    if place.is_already_listed() {
+        return Err(format!(
+            "invocation {invocation_id} is already being resumed by this daemon; \
+             it is not re-driven a second time"
+        ));
+    }
+    let message = if place.is_queued() {
+        format!(
+            "resume accepted; every worker permit is held ({} of max_concurrent_invocations = {}), \
+             so it waits for one",
+            workers.in_flight(),
+            workers.max_concurrent()
+        )
+    } else {
+        "resume accepted; it is running".to_string()
+    };
+    tracing::info!(%invocation_id, "{message}");
     // Detached like startup recovery: the reply must not wait on the
-    // re-driven invocation, which can run for minutes.
+    // re-driven invocation, which can run for minutes, nor on its turn.
     let runner = control.runner.clone();
     let llm = control.llm.clone();
     let deferrals = control.deferrals.clone();
-    let agent_slot = control.agent_caps.enter(agent.id(), agent.max_concurrent());
     tokio::spawn(async move {
         let agent_slot = agent_slot;
-        match runner.resume(&agent, llm.as_ref(), invocation_id).await {
+        // `None`, logged by the admission, is a drain or shutdown before
+        // its turn — the injection is durable, so the next start resumes
+        // it — or an operator's drop of the queued run.
+        let Some(permit) = place.permit().await else {
+            return;
+        };
+        let resumed = runner.resume(&agent, llm.as_ref(), invocation_id).await;
+        // The run is over: its worker goes back before the outcome is
+        // handled, and a drop no longer finds it "starting".
+        drop(permit);
+        match resumed {
             // Still rate-limited (#278): back on the queue, not lost —
             // and the cap slot goes with it (#718), so the sleeping
             // invocation still counts and its resume needs no new entry.
@@ -262,16 +346,20 @@ pub(crate) async fn handle_resume_request(
                 resume_after,
             }) => deferrals.defer(invocation_id, agent_id, resume_after, agent_slot),
             Ok(_) => {}
+            // Ended by some other route while it waited, as recovery's
+            // resumes can be: nothing failed, so nothing is an error.
+            Err(ExecutorError::Resume(
+                ResumeError::AlreadyTerminal { .. } | ResumeError::NoStateRow { .. },
+            )) => tracing::info!(
+                %invocation_id,
+                "operator-resumed invocation ended before its turn to resume; nothing to resume"
+            ),
             Err(err) => {
                 tracing::error!(error = %err, %invocation_id, "operator resume failed");
             }
         }
     });
-    InvocationResumeResponse {
-        ok: true,
-        message: "resume accepted".into(),
-        completed_call_ids: ids,
-    }
+    Ok(message)
 }
 
 /// Declare `invocation.resume` on the edge.
@@ -296,11 +384,18 @@ pub(crate) fn register_resume_command(
     )
     .description(
         "Only an invocation that crashed mid-tool-call can be resumed. A \
-         refusal is an error, not a receipt: it names which precondition \
-         failed — terminal, live, already resumed, or unknown — because \
-         those are four different things for an operator to do next. \
-         Success is a receipt; the re-drive runs detached, so the invocation \
-         is still working when this returns.",
+         refusal is an error, not a receipt. Before anything is recorded it \
+         names which precondition failed — terminal, live, already resumed, \
+         or unknown — because those are four different things for an \
+         operator to do next. After the interrupted results are recorded it \
+         can still refuse the re-drive: because this daemon is draining or \
+         stopping, when the recorded results stand and the next start resumes \
+         the invocation on its own; or because a concurrent request for the \
+         same invocation is already re-driving it here. Success is a \
+         receipt; the re-drive is admitted under the worker cap like any \
+         other run — at once if a worker permit is free, otherwise in its \
+         turn — and runs detached, so the invocation may still be waiting, \
+         or still working, when this returns.",
     );
     registry
         .command::<fq_ops::surface::InvocationResumeRequest, _, _>(

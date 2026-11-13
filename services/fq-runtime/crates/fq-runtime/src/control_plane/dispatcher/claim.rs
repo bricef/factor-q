@@ -122,8 +122,11 @@ impl TriggerDispatcher {
         self
     }
 
-    /// Share daemon concurrency state and install durable trigger claims,
-    /// claiming as `worker_id`.
+    /// Share the daemon's admission — its per-agent counts (#718) and its
+    /// worker permits, which startup recovery and `fq invocation resume`
+    /// queue on too (#994) — and install durable trigger claims, claiming
+    /// as `worker_id`. The admission's worker cap replaces the one
+    /// [`Self::new`] was given; the daemon builds both from one setting.
     ///
     /// **Precondition, enforced by the argument's type:** the claims come
     /// from [`TriggerClaims::recover`] over the worker's in-flight report,
@@ -134,11 +137,12 @@ impl TriggerDispatcher {
     /// adopted and started again (#959).
     pub fn with_caps_and_claims(
         mut self,
-        caps: Arc<crate::control_plane::agent_cap::AgentConcurrency>,
+        admission: super::RunAdmission,
         claims: TriggerClaims,
         worker_id: impl Into<String>,
     ) -> Self {
-        self.agent_caps = caps;
+        self.agent_caps = Arc::clone(admission.agents());
+        self.workers = Arc::clone(admission.workers());
         self.claim_store = Some((claims.store, worker_id.into()));
         self
     }

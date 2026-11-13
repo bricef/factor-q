@@ -200,13 +200,12 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
                 )
             })?,
     );
-    // Pool ceiling scales with the fan-out bound (#70): each
-    // dispatcher-run invocation is WAL-chatty, plus headroom for the
-    // sweepers. Startup recovery is NOT covered — it spawns one resume
-    // per recoverable invocation, unbounded, sharing this pool — so a
-    // large post-crash backlog queues on pool acquisition (sqlx queues
-    // rather than errors up to its acquire timeout). SQLite serialises
-    // the writes regardless; the ceiling only bounds waiting.
+    // Pool ceiling scales with the fan-out bound (#70): each running
+    // invocation is WAL-chatty, plus headroom for the sweepers. Startup
+    // recovery's resumes are covered too since they run under the same
+    // worker permits (#994): a large post-crash backlog waits for a
+    // permit, not on pool acquisition. SQLite serialises the writes
+    // regardless; the ceiling only bounds waiting.
     let pool_ceiling = (config.worker.max_concurrent_invocations as u32 + 3).max(4);
     let worker_store = Arc::new(
         // allow-direct-store-open: run_daemon owns the worker WAL (writer).
@@ -430,13 +429,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // (#278): the handle goes everywhere an invocation can come back
     // `Deferred`, the drain end goes to the dispatcher.
     let (deferrals, due_resumes) = fq_runtime::worker::DeferralQueue::new();
-    // How many invocations of each agent are running (#718): one value,
-    // shared by the dispatcher (which admits triggers against it), the
-    // recovery resumes and `invocation.resume` (which count into it
-    // without being gated), and the health reports. It has to be one
-    // value or a restart that resumed three builds would be joined by
-    // three more.
-    let agent_caps = fq_runtime::control_plane::agent_cap::AgentConcurrency::new();
     // Retry transient LLM errors (rate limits, transport failures) with
     // backoff instead of failing the whole invocation (issue #10). This is
     // the daemon path — the one the fleet actually runs on. The throttle
@@ -512,8 +504,19 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     )
     .await;
 
-    // Spawn auto-resume tasks for each safe-resume / safe-replay
-    // invocation found by the recovery scan.
+    // What every run is admitted under: the worker permits and the
+    // per-agent counts (#718, #994). One value, shared by the dispatcher,
+    // the recovery resumes below, `invocation.resume` and the health
+    // reports; it has to be one or a restart that resumed three builds
+    // would be joined by three more. Its drain probe is the runner the
+    // dispatcher runs on.
+    let admission = fq_runtime::control_plane::dispatcher::RunAdmission::new(
+        resume_runner.clone(),
+        config.worker.max_concurrent_invocations,
+    );
+    // Queue an auto-resume for each safe-resume / safe-replay invocation
+    // found by the recovery scan. Here, before the dispatcher exists, so
+    // they are ahead of every trigger for a worker permit.
     let resume_handles = crate::recovery::spawn_resume_tasks(
         recoverable,
         &registry,
@@ -522,8 +525,10 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         &bus,
         &worker_store,
         &deferrals,
-        &agent_caps,
-    );
+        &admission,
+    )
+    .await
+    .handles;
 
     // Sweep workspaces whose invocation is no longer in flight (plan §1:
     // the prune belongs with the recovery scan). Safe to run while the
@@ -560,6 +565,6 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         throttle,
         deferrals,
         due_resumes,
-        agent_caps,
+        admission,
     })
 }

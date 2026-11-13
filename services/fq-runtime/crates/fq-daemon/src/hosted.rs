@@ -117,11 +117,12 @@ pub(crate) struct Assembled {
     /// end is the dispatcher's.
     pub deferrals: fq_runtime::worker::DeferralQueue,
     pub due_resumes: tokio::sync::mpsc::Receiver<fq_runtime::worker::DueResume>,
-    /// How many invocations of each agent are running (#718). Startup
-    /// recovery has already counted the runs it resumed into it; the
-    /// dispatcher admits new triggers against it and the health reports
-    /// read it.
-    pub agent_caps: Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    /// What every run is admitted under: the worker permits and the
+    /// per-agent counts (#718, #994). Startup recovery has already queued
+    /// its resumes on the permits and counted them into the agents; the
+    /// dispatcher admits triggers on both, `invocation.resume` queues
+    /// like recovery, and the health reports read the counts.
+    pub admission: fq_runtime::control_plane::dispatcher::RunAdmission,
 }
 
 /// Start the hosted tasks, wait for a stop, and shut them down.
@@ -151,7 +152,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         throttle,
         deferrals,
         due_resumes,
-        agent_caps,
+        admission,
     } = a;
     let startup = startup_event(runtime_id, version, &config, agents_loaded, &pricing_load);
     announce_startup(&bus, runtime_id, &startup, pricing_load.signals).await?;
@@ -174,7 +175,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         registry: shared_registry.clone(),
         llm: llm.clone(),
         deferrals: deferrals.clone(),
-        agent_caps: agent_caps.clone(),
+        admission: admission.clone(),
     });
 
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
@@ -205,7 +206,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             bus: bus.clone(),
             projection: store.clone(),
             control_plane: cp_store.clone(),
-            facts: daemon_facts(&config, mcp.states(), &throttle, &agent_caps, &worker_id),
+            facts: daemon_facts(&config, mcp.states(), &throttle, &admission, &worker_id),
             // The same runner the dispatcher and startup recovery
             // drive invocations with — `invocation.drop` asks it
             // whether the target is live, and arms its halt.
@@ -408,7 +409,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         config.worker.max_concurrent_invocations,
     )
     .with_throttle(throttle)
-    .with_caps_and_claims(agent_caps.clone(), claims, worker_id.as_str())
+    .with_caps_and_claims(admission, claims, worker_id.as_str())
     .with_deferrals(deferrals, due_resumes);
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
     // Set by the select's own dispatcher arm, which consumes the handle.
@@ -762,7 +763,7 @@ fn daemon_facts(
     config: &Config,
     mcp_servers: fq_runtime::McpServerStates,
     throttle: &Arc<fq_runtime::llm::ModelThrottle>,
-    agent_caps: &Arc<fq_runtime::control_plane::agent_cap::AgentConcurrency>,
+    admission: &fq_runtime::control_plane::dispatcher::RunAdmission,
     worker_id: &fq_runtime::worker::WorkerId,
 ) -> crate::operator_surface::DaemonFacts {
     crate::operator_surface::DaemonFacts {
@@ -779,6 +780,6 @@ fn daemon_facts(
         },
         mcp_servers,
         throttle: throttle.clone(),
-        agent_caps: agent_caps.clone(),
+        agent_caps: admission.agents().clone(),
     }
 }
