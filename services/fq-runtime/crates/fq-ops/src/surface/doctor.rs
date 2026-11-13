@@ -146,8 +146,9 @@ pub struct DoctorReport {
     pub trigger_claims: DoctorTriggerClaims,
     /// Every finished invocation's row the worker's archive sweeper is
     /// holding rather than archiving: an event the row has to publish is
-    /// larger than the broker accepts, or its stored terminal event must
-    /// not be republished. Each is an issue, because none lifts on its
+    /// larger than the broker accepts, its stored terminal event must not
+    /// be republished, or its ids cannot go on an event. Each is an issue,
+    /// because none lifts on its
     /// own: the remedy beside it says what an operator has to do. Read
     /// from the daemon's memory of its own sweeps, so a row held by an
     /// earlier run is listed again once this run's sweeper has held it.

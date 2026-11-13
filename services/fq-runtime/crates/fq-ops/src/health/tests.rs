@@ -205,4 +205,15 @@ fn an_archive_hold_reads_back_with_its_reason_tagged() {
         "stored terminal event is unreadable: bad envelope",
         "its own words, verbatim"
     );
+
+    let malformed = ArchiveHoldReason::MalformedRow {
+        detail: "agent_id \"a b\" is not an agent id".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&malformed).unwrap(),
+        serde_json::json!({"malformed_row": {
+            "detail": "agent_id \"a b\" is not an agent id",
+        }})
+    );
+    assert_eq!(malformed.summary(), "agent_id \"a b\" is not an agent id");
 }

@@ -117,8 +117,9 @@ pub(crate) fn register_doctor_report(
          retention window. \
          `archive_holds` lists every finished invocation's row the worker's archive sweeper \
          is holding rather than archiving, and each is an issue: an event the row has to \
-         publish is larger than the broker accepts, or its stored terminal event must not be \
-         republished, and neither lifts on its own. Each carries the reason and the remedy. \
+         publish is larger than the broker accepts, its stored terminal event must not be \
+         republished, or its ids cannot go on an event, and none lifts on its own. Each \
+         carries the reason and the remedy. \
          The list is the daemon's memory of this run's sweeps: a row held by an earlier run \
          is offered again at start and listed again once it is held again.",
     );

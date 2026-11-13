@@ -28,10 +28,14 @@
 //! carries on to the rows behind it. A hold is one `error!` per daemon run,
 //! and [`ArchiveHolds`] lists it for `control.status` and `control.doctor`
 //! with the reason and what lifts it. While a row is held, the control
-//! plane sees that invocation as not archived. Two causes hold a row
+//! plane sees that invocation as not archived. Three causes hold a row
 //! (`docs/guide/operating-the-daemon.md`, "When the archive sweeper holds a
 //! terminal row"):
 //!
+//! - Ids that cannot go on an event: an `agent_id` that is not a subject
+//!   token, or an `invocation_id` that is not a UUID. The runtime never
+//!   writes either, so the row was edited by hand or written by a build
+//!   with other rules, and it waits for an operator to correct it.
 //! - A stored event that must not be republished (unreadable by this
 //!   build, or not this row's terminal event: see `HoldReason`). Archiving
 //!   without it would discard the only copy of the outcome, and no later
@@ -290,6 +294,13 @@ impl ArchiveRetrySweeper {
                  holding the row unarchived until it fits: {}",
                 holds::remedy(&reason)
             ),
+            ArchiveHoldReason::MalformedRow { detail } => error!(
+                invocation_id,
+                reason = %detail,
+                "this row's ids cannot go on an event; holding the row unarchived until an \
+                 operator corrects it: {}",
+                holds::remedy(&reason)
+            ),
         }
     }
 
@@ -312,18 +323,13 @@ impl ArchiveRetrySweeper {
             );
             return Ok(None);
         };
-        let agent_id = AgentId::new(&row.agent_id).map_err(|err| {
-            ArchiveRetryError::InvalidAgentId(format!(
-                "agent_id {:?} from invocation_state: {err}",
-                row.agent_id
-            ))
-        })?;
-        let invocation_id = uuid::Uuid::parse_str(&row.invocation_id).map_err(|err| {
-            ArchiveRetryError::InvalidInvocationId(format!(
-                "invocation_id {:?} from invocation_state: {err}",
-                row.invocation_id
-            ))
-        })?;
+        // A row whose ids cannot go on an event can never be published, so
+        // it is held like any other row that cannot go out, rather than
+        // ending the pass for every row behind it.
+        let (agent_id, invocation_id) = match event_ids(row) {
+            Ok(ids) => ids,
+            Err(detail) => return Ok(Some(ArchiveHoldReason::MalformedRow { detail })),
+        };
 
         // The terminal event first, if its publish was lost (#823, #946): the
         // stored event itself, envelope and `event_id` included, so a copy
@@ -405,6 +411,20 @@ impl ArchiveRetrySweeper {
     }
 }
 
+/// The ids `row`'s events are published under, or why it has none: an
+/// `agent_id` that is not a subject token, or an `invocation_id` that is
+/// not a UUID. The runtime never writes either.
+fn event_ids(row: &InvocationStateRow) -> Result<(AgentId, uuid::Uuid), String> {
+    let agent_id = AgentId::new(&row.agent_id)
+        .map_err(|err| format!("agent_id {:?} is not an agent id: {err}", row.agent_id))?;
+    let invocation_id = uuid::Uuid::parse_str(&row.invocation_id)
+        .map_err(|err| format!("invocation_id {:?} is not a UUID: {err}", row.invocation_id))?;
+    Ok((agent_id, invocation_id))
+}
+
+/// A failure that ends a pass: the store's or the bus's, the same for
+/// every row. A row that cannot go out for a reason of its own is held
+/// instead (`ArchiveHoldReason`).
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveRetryError {
     #[error("worker store error: {0}")]
@@ -412,12 +432,6 @@ pub enum ArchiveRetryError {
 
     #[error("bus publish error: {0}")]
     Publish(String),
-
-    #[error("invalid agent_id on persisted row: {0}")]
-    InvalidAgentId(String),
-
-    #[error("invalid invocation_id on persisted row: {0}")]
-    InvalidInvocationId(String),
 }
 
 #[cfg(test)]
@@ -1452,6 +1466,106 @@ mod tests {
             "only the archive is offered again"
         );
         assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
+    }
+
+    /// A row whose ids cannot go on an event can never be published. It
+    /// used to end the pass for every row behind it; it is held with its
+    /// own reason, kept as it is, and the rows behind it are swept. Once an
+    /// operator corrects the field, the next pass archives it.
+    #[tokio::test]
+    async fn a_row_whose_ids_cannot_go_on_an_event_is_held_and_the_pass_goes_on() {
+        let ok_id = Uuid::now_v7().to_string();
+        for (agent, inv, field) in [
+            ("not a token", ok_id.as_str(), "agent_id"),
+            ("sweep-agent", "not-a-uuid", "invocation_id"),
+        ] {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            store
+                .upsert_invocation_state(&terminal_row(inv, agent, 1_000))
+                .await
+                .unwrap();
+            let healthy = Uuid::now_v7().to_string();
+            store
+                .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&healthy, 1_000).await.unwrap();
+            let sink = Arc::new(RecordingSink::new());
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+
+            sweeper
+                .sweep_once(&mut HashSet::new())
+                .await
+                .expect("a malformed row does not end the pass");
+            assert_eq!(
+                trail(&sink.events()),
+                [(healthy.clone(), "invocation_archived")],
+                "{field}: the row behind it is swept"
+            );
+            let holds = sweeper.holds().snapshot();
+            assert!(
+                matches!(
+                    &holds[..],
+                    [ArchiveHold {
+                        reason: ArchiveHoldReason::MalformedRow { detail },
+                        ..
+                    }] if detail.starts_with(field)
+                ),
+                "{field}: held with its own reason: {holds:?}"
+            );
+            assert_eq!(holds[0].invocation_id, inv);
+            assert!(holds[0].remedy.contains("correct the field"), "{holds:?}");
+            let kept = store.get_invocation_state(inv).await.unwrap();
+            assert_eq!(kept.expect("kept").archive_status, None, "{field}");
+        }
+
+        // The documented remedy: correct the field, and the next pass
+        // archives the row.
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .expect("worker store"),
+        );
+        store
+            .upsert_invocation_state(&terminal_row(&ok_id, "not a token", 1_000))
+            .await
+            .unwrap();
+        let sink = Arc::new(RecordingSink::new());
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&store),
+        );
+        sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(sweeper.holds().snapshot().len(), 1);
+        let operator = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(dir.path().join("worker.db")))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE invocation_state SET agent_id = 'sweep-agent' WHERE invocation_id = ?")
+            .bind(&ok_id)
+            .execute(&operator)
+            .await
+            .unwrap();
+        operator.close().await;
+        sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(
+            trail(&sink.events()),
+            [(ok_id.clone(), "invocation_archived")]
+        );
+        assert!(sweeper.holds().snapshot().is_empty(), "no longer held");
     }
 
     /// A held row that leaves the store (an operator deleted it, or an ack
