@@ -775,6 +775,20 @@ the history. The cap bounds each result, not a turn: a turn of four
 parallel `file_read` calls on large files still produces a request the
 stock broker refuses. A value under 1024 is refused at startup.
 
+An event the broker refuses anyway ends the invocation
+([#828](https://github.com/bricef/factor-q/issues/828)): that turn's
+request, a result under a cap set above the broker's `max_payload`, or
+a `triggered` whose trigger payload and system prompt together pass it.
+Nothing is truncated. The run ends with one `failed` of kind
+`payload_too_large`, whose `detail` names the event refused, its size
+and the limit, and the github-watcher does not retry it, since the same
+work would build the same event. The worker's row is marked terminal
+and the workspace reclaimed, so a restart has nothing to resume. Before
+this the refusal left the row in flight, and every restart resumed the
+run into the same refusal and reported it ambiguous until an operator
+dropped it. The run's `invocation.archived` carries the conversation,
+and is often refused as well; see the archive event below.
+
 The default also sits above `exec`'s own cap of 100 KiB per stream,
 whose note names `max_lines` and `tail_lines`, so ordinary `exec`
 output is cut there, once. Output with many invalid bytes or control
