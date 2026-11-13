@@ -43,6 +43,8 @@ use uuid::Uuid;
 /// (store unavailable) publishes anyway — it doesn't prove the event
 /// was already sent, and a possible duplicate beats re-silencing the
 /// failure mode #64 exists to make loud.
+///
+/// Returns what it did, so a caller's own log line can say so.
 async fn publish_ambiguous_once(
     worker_store: &fq_runtime::WorkerStore,
     bus: &EventBus,
@@ -50,7 +52,7 @@ async fn publish_ambiguous_once(
     invocation_id: Uuid,
     stamp_key: &str,
     payload: fq_runtime::events::InvocationAmbiguousPayload,
-) {
+) -> AmbiguousReport {
     let now_ms = chrono::Utc::now().timestamp_millis();
     match worker_store
         .mark_ambiguous_reported(stamp_key, now_ms)
@@ -62,7 +64,7 @@ async fn publish_ambiguous_once(
                 invocation_id = %invocation_id,
                 "invocation.ambiguous already reported for this invocation; not re-firing"
             );
-            return;
+            return AmbiguousReport::AlreadyReported;
         }
         Err(err) => {
             tracing::error!(
@@ -83,6 +85,32 @@ async fn publish_ambiguous_once(
             error = %err,
             "failed to publish invocation.ambiguous (stamp already claimed; will not retry)"
         );
+        return AmbiguousReport::PublishFailed;
+    }
+    AmbiguousReport::Published
+}
+
+/// What [`publish_ambiguous_once`] did for one invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AmbiguousReport {
+    /// It published `invocation.ambiguous`.
+    Published,
+    /// An earlier start reported the invocation, so nothing was published.
+    AlreadyReported,
+    /// It went to publish, and the publish failed. Logged, not retried.
+    PublishFailed,
+}
+
+impl AmbiguousReport {
+    /// The end of a log line saying what happened to the report.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Published => "emitted invocation.ambiguous",
+            Self::AlreadyReported => {
+                "invocation.ambiguous was reported on an earlier start and is not emitted again"
+            }
+            Self::PublishFailed => "invocation.ambiguous could not be published",
+        }
     }
 }
 
@@ -225,8 +253,9 @@ pub(crate) async fn classify_in_flight(
                 )
                 .await;
                 // The coordination consumer (spawned below)
-                // picks up the `invocation.ambiguous` event we
-                // just published and upserts the
+                // picks up the `invocation.ambiguous` event, when
+                // this start published one rather than an earlier
+                // start, and upserts the
                 // coordination_invocation_owner row. v1
                 // collapsed-process used to write directly
                 // here; that's now the consumer's job, which
@@ -425,7 +454,10 @@ pub(crate) async fn spawn_resume_tasks(
                     invocation_id = %inv_id,
                     "recovered invocation ended before its turn to resume; nothing to resume"
                 ),
-                Err(err) => report_resume_error(wstore.as_ref(), &bus, agent_id, inv_id, err).await,
+                Err(err) => {
+                    let row = ResumedRow::read(wstore.as_ref(), &inv_id.to_string()).await;
+                    report_resume_error(row, wstore.as_ref(), &bus, agent_id, inv_id, err).await;
+                }
             }
         }));
     }
@@ -438,27 +470,28 @@ pub(crate) async fn spawn_resume_tasks(
 }
 
 /// What the worker row says, once a resume has returned an error, about
-/// the run it resumed.
+/// the invocation it resumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResumedRow {
     /// Still in flight: the resume could not be carried out, and the run
     /// did not reach a terminal event.
     InFlight,
-    /// Terminal: the run reached its terminal event, which is stored with
-    /// the terminal write or published before it. An error after that —
-    /// the archive refused, say — does not undo the ending.
+    /// Terminal: the invocation has ended. Usually the run reached its
+    /// terminal event, stored with the terminal write or published before
+    /// it, and the error came after (its archive refused, say). It can
+    /// also be an operator's drop, which marks the row terminal while the
+    /// run is going. Either way the error does not undo the ending.
     Terminal,
-    /// Gone: the run ended and the control plane acknowledged its archive,
-    /// which is what deletes the row.
+    /// Gone: the invocation has ended. Only the archive hand-off deletes
+    /// a row, once the control plane has acknowledged an archive, and an
+    /// archive goes out only for a terminal row. Usually this resume
+    /// ended the run; if the resume failed reading the row, whatever
+    /// ended it came first.
     Archived,
 }
 
 impl ResumedRow {
-    /// Read `invocation_id`'s row. A resume that found no row, or a
-    /// terminal one, returned before it ran (the caller's
-    /// `AlreadyTerminal` / `NoStateRow` arm), so for any other error a
-    /// missing row is one the archive hand-off deleted after the resume
-    /// ended the run.
+    /// Read `invocation_id`'s row.
     async fn read(
         worker_store: &WorkerStore,
         invocation_id: &str,
@@ -480,38 +513,44 @@ impl ResumedRow {
     }
 }
 
-/// Report a recovered invocation whose resume returned `err`.
+/// Report a recovered invocation whose resume returned `err`, given what
+/// its worker row said afterwards (`row`, read by [`ResumedRow::read`]).
 ///
 /// The error alone cannot say whether the run ended (issue 1005). A run
 /// that ends in an ordinary `failed` returns `InvocationFailed` when the
 /// reducer decides it, the provider's error when a model call fails
-/// part-way through a step, and a bus error when its ending went out but
-/// its archive was refused; each has published or stored its terminal
-/// event, and its record is complete. The worker row says which it was:
-/// terminal, or deleted by the archive hand-off, means the run ended, and
-/// nothing about it is ambiguous. Reporting it as ambiguous would give it
-/// a second ending in the event log, and turn its ownership row to
-/// `ambiguous` for an operator to triage a run that needs nothing.
+/// part-way through a step, and a bus error when its `failed` went out
+/// but its `invocation.archived` was refused; each has published or
+/// stored its terminal event. The worker row says whether the invocation
+/// ended: terminal, or deleted by the archive hand-off, means it did, and
+/// nothing about it is ambiguous. Reporting it would give it a second
+/// ending in the event log, and turn its ownership row to `ambiguous` for
+/// an operator to triage a run that needs nothing. Not reported, its
+/// ownership row reads `failed` once its archive is acknowledged, and
+/// `in_flight` until then: for as long as the archive is refused (issue
+/// 1024).
 ///
 /// Only a resume that could not be carried out — the row still in flight,
 /// or unreadable — is `invocation.ambiguous`, at most once
-/// ([`publish_ambiguous_once`]).
+/// ([`publish_ambiguous_once`]); the log line says whether this start
+/// published it or an earlier one already had.
 async fn report_resume_error(
+    row: Result<ResumedRow, fq_runtime::WorkerStoreError>,
     worker_store: &WorkerStore,
     bus: &EventBus,
     agent_id: AgentId,
     invocation_id: Uuid,
     err: ExecutorError,
 ) {
-    match ResumedRow::read(worker_store, &invocation_id.to_string()).await {
+    match row {
         Ok(row @ (ResumedRow::Terminal | ResumedRow::Archived)) => {
             tracing::warn!(
                 invocation_id = %invocation_id,
                 agent_id = %agent_id,
                 error = %err,
                 row = row.label(),
-                "resumed invocation ended with an error; its ending is on the record, so it is \
-                 not reported ambiguous"
+                "resume returned an error, but the invocation has ended; not reporting it \
+                 ambiguous"
             );
             return;
         }
@@ -525,26 +564,26 @@ async fn report_resume_error(
              treating the resume as not carried out"
         ),
     }
-    let note = format!("automatic resume failed: {err}");
-    tracing::error!(
-        invocation_id = %invocation_id,
-        agent_id = %agent_id,
-        error = %err,
-        "resume failed; emitting invocation.ambiguous"
-    );
-    publish_ambiguous_once(
+    let report = publish_ambiguous_once(
         worker_store,
         bus,
-        agent_id,
+        agent_id.clone(),
         invocation_id,
         &invocation_id.to_string(),
         fq_runtime::events::InvocationAmbiguousPayload {
             stuck_entity: "recovery".to_string(),
             stuck_call_id: invocation_id.to_string(),
-            note,
+            note: format!("automatic resume failed: {err}"),
         },
     )
     .await;
+    tracing::error!(
+        invocation_id = %invocation_id,
+        agent_id = %agent_id,
+        error = %err,
+        "resume failed; {}",
+        report.describe()
+    );
 }
 
 /// What [`spawn_resume_tasks`] started.
