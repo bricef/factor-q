@@ -4,11 +4,12 @@
 //!
 //! The private broker is a stock `nats-server`, whose `max_payload` is
 //! 1 MiB, and the bus refuses any event over it before it reaches the
-//! wire. `invocation.archived` carries the run's state as a JSON array of
-//! integers, four bytes on the wire for each byte of state written `200`,
-//! so a terminal row with 300 KB of state has an archive of about 1.2 MB.
-//! Before this change the sweeper's pass ended at that row, every pass,
-//! and the row written behind it was never archived.
+//! wire. `invocation.archived` carries the run's whole state, so a terminal
+//! row with 1.1 MB of state has an archive over that limit however the
+//! state is written: as a JSON array of integers (about 4.4 MB) or as
+//! base64 (about 1.5 MB). The test does not depend on the encoding. Before
+//! this change the sweeper's pass ended at that row, every pass, and the
+//! row written behind it was never archived.
 //!
 //! Isolation follows `trigger_claim_retention.rs`: a private broker, a
 //! scratch config and stores under the scratch cache directory, and no
@@ -29,8 +30,10 @@ use fq_test_support::TestChild;
 const OVERSIZED: &str = "019a0000-0000-7000-8000-000000000981";
 /// The row behind it: archived once already, awaiting its ack.
 const HEALTHY: &str = "019a0000-0000-7000-8000-000000000982";
-/// Bytes of state in the oversized row.
-const STATE: usize = 300_000;
+/// Bytes of state in the oversized row: over a stock `max_payload` even
+/// one byte for one, so its archive is over it whether the state travels
+/// as an integer array or as base64.
+const STATE: usize = 1_100_000;
 /// A stock broker's `max_payload`.
 const STOCK_MAX_PAYLOAD: u64 = 1024 * 1024;
 /// The start of the line the daemon logs when it holds a row for size.
@@ -233,7 +236,10 @@ async fn an_archive_too_large_for_the_broker_is_held_and_reported() {
     assert_eq!(too_large["event_type"], "invocation_archived", "{hold}");
     assert_eq!(too_large["limit_bytes"], STOCK_MAX_PAYLOAD, "{hold}");
     let size = too_large["size_bytes"].as_u64().expect("a size");
-    assert!(size > 4 * STATE as u64, "the state's integer array: {hold}");
+    assert!(
+        size > STATE as u64 && size > STOCK_MAX_PAYLOAD,
+        "the archive carries the whole state, over the limit: {hold}"
+    );
     let remedy = hold["remedy"].as_str().expect("a remedy");
     assert!(
         remedy.contains(&format!(

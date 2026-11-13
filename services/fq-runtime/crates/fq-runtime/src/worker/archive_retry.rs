@@ -1014,10 +1014,18 @@ mod tests {
     /// down so the test rows stay small.
     const LIMIT: usize = 64 * 1024;
 
-    /// A state blob whose `invocation.archived` is over twice [`LIMIT`]:
-    /// the blob is a JSON array of integers on the wire, and `200,` is four
-    /// bytes per byte of state.
-    const OVERSIZED_STATE: usize = LIMIT / 2;
+    /// A state blob whose `invocation.archived` is over [`LIMIT`] however
+    /// the blob is written on the wire: as a JSON array of integers (`200,`
+    /// is four bytes per byte of state) or as base64 (four bytes per three),
+    /// so these tests do not depend on the archive's encoding. At twice the
+    /// limit in raw bytes, it is over it even if the wire carried the state
+    /// one byte for one.
+    const OVERSIZED_STATE: usize = 2 * LIMIT;
+
+    /// A limit the oversized archive fits under however the blob is
+    /// written: over four bytes per byte of state, with room for the
+    /// envelope. What an operator raises the broker's `max_payload` to.
+    const ROOMY_LIMIT: usize = 5 * OVERSIZED_STATE;
 
     /// `(invocation, event type)` for each event, in order.
     fn trail(events: &[Event]) -> Vec<(String, &'static str)> {
@@ -1331,7 +1339,7 @@ mod tests {
         assert_eq!(world.refusals(), 2, "offered again, refused again");
         assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
 
-        world.sink.set_limit(4 * LIMIT);
+        world.sink.set_limit(ROOMY_LIMIT);
         let restarted = world.fresh_sweeper();
         restarted.sweep_once(&mut HashSet::new()).await.unwrap();
         assert_eq!(world.refusals(), 2);
