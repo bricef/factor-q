@@ -14,8 +14,12 @@ license.workspace = true
 
 [dependencies]
 # A reducer state blob goes on the wire as base64 text (#981): see
-# `events/payloads/state_blob.rs`.
-base64 = { workspace = true }
+# `events/payloads/state_blob.rs`. Declared here, not in the workspace
+# table, because fq-ops is its only member user. Already in the thin
+# client's tree at this version (through `rcgen`'s `pem`) with these
+# features, so linking it adds nothing to `fq`; no default features,
+# which would add the unsafe SIMD path.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 # Timestamps on the wire (events and the DeadLetter atom) and the
 # `since` grammar's parsing. `serde` because a shape here is one both
 # ends (de)serialise; `clock` comes with the workspace default and is
