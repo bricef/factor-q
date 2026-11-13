@@ -195,9 +195,15 @@ async fn publishing_the_same_named_trigger_twice_is_deduplicated() {
 /// so it needs no live server.
 #[test]
 fn payload_guard_rejects_oversized_and_accepts_within_limit() {
-    // Strictly over the limit -> rejected with size and limit.
-    match check_payload_size(1_048_577, 1_048_576) {
-        Err(BusError::PayloadTooLarge { size, limit }) => {
+    // Strictly over the limit -> rejected with the event's type, size
+    // and limit.
+    match check_payload_size(EventKind::LlmRequest, 1_048_577, 1_048_576) {
+        Err(BusError::PayloadTooLarge {
+            event_type,
+            size,
+            limit,
+        }) => {
+            assert_eq!(event_type, EventKind::LlmRequest);
             assert_eq!(size, 1_048_577);
             assert_eq!(limit, 1_048_576);
         }
@@ -206,8 +212,8 @@ fn payload_guard_rejects_oversized_and_accepts_within_limit() {
     // Exactly at the limit and below are accepted (NATS accepts a
     // body equal to max_payload; only strictly-greater is a
     // violation).
-    assert!(check_payload_size(1_048_576, 1_048_576).is_ok());
-    assert!(check_payload_size(0, 1_048_576).is_ok());
+    assert!(check_payload_size(EventKind::LlmRequest, 1_048_576, 1_048_576).is_ok());
+    assert!(check_payload_size(EventKind::LlmRequest, 0, 1_048_576).is_ok());
 }
 
 /// End-to-end at the serialisation boundary: a real oversized
@@ -228,8 +234,13 @@ fn oversized_event_is_rejected_by_the_guard() {
         payload.len() > limit,
         "test event must exceed the limit to be meaningful"
     );
-    match check_payload_size(payload.len(), limit) {
-        Err(BusError::PayloadTooLarge { size, limit: l }) => {
+    match check_payload_size(EventKind::from(&event.payload), payload.len(), limit) {
+        Err(BusError::PayloadTooLarge {
+            event_type,
+            size,
+            limit: l,
+        }) => {
+            assert_eq!(event_type, EventKind::Triggered);
             assert_eq!(size, payload.len());
             assert_eq!(l, limit);
         }

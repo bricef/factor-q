@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::events::Event;
 use crate::events::subjects::{ALL_MAINTENANCE, ALL_TRIGGERS};
+use crate::events::{Event, EventKind};
 
 mod consumers;
 mod ledger;
@@ -38,12 +38,23 @@ pub trait EventSink: Send + Sync {
     /// Publish one event; returns its sequence on the event stream —
     /// the coordinate receipts and the projection watermark speak.
     async fn publish(&self, event: &Event) -> Result<u64, BusError>;
+
+    /// The largest serialised event [`Self::publish`] accepts, if limited:
+    /// for a caller that must not commit to an event the sink would
+    /// refuse, such as a terminal event about to be stored (#828).
+    fn max_payload(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
 impl EventSink for EventBus {
     async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         EventBus::publish(self, event).await
+    }
+
+    fn max_payload(&self) -> Option<usize> {
+        Some(self.max_payload)
     }
 }
 
@@ -269,9 +280,14 @@ pub enum BusError {
     /// `max_payload`. Returned by the pre-flight guard in
     /// [`EventBus::publish`] *before* any bytes reach the wire, so an
     /// oversized event never trips a NATS "Maximum Payload Violation"
-    /// nor poisons the archive-retry sweep. See issue #4.
+    /// nor poisons the archive-retry sweep. See issue #4. Names the
+    /// refused event's type, which nothing past the publish knows (#828).
     #[error("event payload of {size} bytes exceeds NATS max_payload of {limit} bytes")]
-    PayloadTooLarge { size: usize, limit: usize },
+    PayloadTooLarge {
+        event_type: EventKind,
+        size: usize,
+        limit: usize,
+    },
 
     /// The trigger body exceeds
     /// [`crate::trigger::MAX_TRIGGER_PAYLOAD_BYTES`]. A domain limit,
@@ -364,15 +380,24 @@ fn connect_options(token: Option<&str>) -> async_nats::ConnectOptions {
 
 /// Pre-flight payload size check: the pure heart of the publish
 /// guard, factored out so it can be tested without a live NATS
-/// server. Returns [`BusError::PayloadTooLarge`] when the serialised
-/// event would exceed the server's advertised `max_payload`.
+/// server, and shared with the sim's sink. Returns
+/// [`BusError::PayloadTooLarge`] when the serialised event would exceed
+/// the server's advertised `max_payload`.
 ///
 /// NATS rejects a publish whose body is strictly greater than
 /// `max_payload`; a body exactly equal to the limit is accepted, so
 /// the guard uses a strict `>` comparison to mirror the server.
-fn check_payload_size(size: usize, limit: usize) -> Result<(), BusError> {
+pub(crate) fn check_payload_size(
+    event_type: EventKind,
+    size: usize,
+    limit: usize,
+) -> Result<(), BusError> {
     if size > limit {
-        return Err(BusError::PayloadTooLarge { size, limit });
+        return Err(BusError::PayloadTooLarge {
+            event_type,
+            size,
+            limit,
+        });
     }
     Ok(())
 }
@@ -684,7 +709,8 @@ impl EventBus {
         // error *before* the bytes reach NATS, rather than tripping a
         // "Maximum Payload Violation" that errors the invocation and
         // poisons the retry loop.
-        check_payload_size(payload.len(), self.max_payload)?;
+        let kind = EventKind::from(&event.payload);
+        check_payload_size(kind, payload.len(), self.max_payload)?;
 
         let mut headers = async_nats::HeaderMap::new();
         headers.insert(
