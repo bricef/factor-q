@@ -183,10 +183,13 @@ impl Recovering {
         self.settle().await
     }
 
-    /// Resume the invocation as `fq invocation resume` does, with the model
-    /// answering `reply`, and wait for the re-drive to end. Returns what was
-    /// published for the invocation meanwhile, as [`Self::resume`] does.
-    async fn operator_resume(&mut self, reply: Reply) -> Vec<fq_runtime::events::Event> {
+    /// Ask for the invocation as `fq invocation resume` does, with the
+    /// model answering `reply` if it is re-driven. Returns the answer and
+    /// the admission any re-drive runs under.
+    async fn ask_operator_resume(
+        &self,
+        reply: Reply,
+    ) -> (crate::resume::InvocationResumeResponse, RunAdmission) {
         let admission = RunAdmission::new(self.start.runner.clone(), 1);
         let control = crate::resume::ResumeControl::new(
             self.start.bus.clone(),
@@ -206,11 +209,62 @@ impl Recovering {
             },
         )
         .await;
+        (answer, admission)
+    }
+
+    /// Resume the invocation as `fq invocation resume` does, with the model
+    /// answering `reply`, and wait for the re-drive to end. Returns what was
+    /// published for the invocation meanwhile, as [`Self::resume`] does.
+    async fn operator_resume(&mut self, reply: Reply) -> Vec<fq_runtime::events::Event> {
+        let (answer, admission) = self.ask_operator_resume(reply).await;
         assert!(answer.ok, "the resume is accepted: {}", answer.message);
         // The re-drive runs detached; its agent's count is given back when
         // its task ends.
         await_in_flight(&admission, 0).await;
         self.settle().await
+    }
+
+    /// `fq invocation resume` for the invocation, which must be refused:
+    /// returns the refusal's message.
+    async fn operator_resume_refused(&self) -> String {
+        let (answer, admission) = self.ask_operator_resume(Reply::Text).await;
+        assert!(
+            !answer.ok,
+            "the resume is refused, not accepted: {}",
+            answer.message
+        );
+        assert_eq!(
+            admission.agents().in_flight(&capped_agent()),
+            0,
+            "and nothing is re-driven"
+        );
+        answer.message
+    }
+
+    /// Drop the invocation as `fq invocation drop` does, through the
+    /// daemon's operator surface, and wait for the coordination consumer
+    /// to apply what it published.
+    async fn operator_drop(&mut self) {
+        let admission = RunAdmission::new(self.start.runner.clone(), 1);
+        let surface = self.start.operator_surface(&admission).await;
+        let dropped = invoke(
+            &surface,
+            fq_ops::Invocation::Drop,
+            serde_json::json!({ "invocation_id": self.invocation().to_string(), "reason": "test" }),
+        )
+        .await;
+        assert!(dropped.is_ok(), "the drop is accepted: {dropped:?}");
+        self.settle().await;
+    }
+
+    /// From here on, the runner publishes through `sink` in front of the
+    /// bus. Recovery itself still publishes on the bus.
+    fn publish_through(&mut self, sink: Arc<dyn fq_runtime::bus::EventSink>) {
+        self.start.runner = runner_over(
+            sink,
+            self.start.worker_store.clone(),
+            self.start.worker_id.clone(),
+        );
     }
 
     /// Publish a barrier event after everything the resume published, wait
@@ -256,6 +310,17 @@ impl Recovering {
     /// The next start's recovery over the same stores: what it finds in
     /// flight, it hands the next [`Self::resume`].
     async fn restart(&mut self) {
+        let recovered = self.next_start_recovers().await;
+        assert_eq!(
+            recovered,
+            [self.invocation().to_string()],
+            "the next start finds the invocation in flight and resumes it"
+        );
+    }
+
+    /// The next start's recovery over the same stores. Returns the ids it
+    /// would resume, and keeps them for the next [`Self::resume`].
+    async fn next_start_recovers(&mut self) -> Vec<String> {
         let runtime_id = Uuid::now_v7();
         let recovered = classify_in_flight(
             &self.start.worker_store,
@@ -266,16 +331,20 @@ impl Recovering {
         )
         .await
         .expect("the next start's recovery");
-        assert_eq!(
-            recovered
-                .recoverable
-                .iter()
-                .map(|c| c.state.invocation_id.clone())
-                .collect::<Vec<_>>(),
-            [self.invocation().to_string()],
-            "the next start finds the invocation in flight and resumes it"
-        );
+        let ids = recovered
+            .recoverable
+            .iter()
+            .map(|c| c.state.invocation_id.clone())
+            .collect();
         self.start.recoverable = recovered.recoverable;
+        ids
+    }
+
+    /// What the invocation's worker row says now.
+    async fn row(&self) -> ResumedRow {
+        ResumedRow::read(&self.start.worker_store, &self.invocation().to_string())
+            .await
+            .expect("read the worker row")
     }
 
     /// The invocation's ownership status, as `fq invocation list` and
@@ -302,31 +371,68 @@ impl Recovering {
     }
 }
 
-/// The lifecycle events among `events`, by name, in publish order.
-fn lifecycle(events: &[fq_runtime::events::Event]) -> Vec<&'static str> {
+/// The bus, refusing every `invocation.archived` as the broker refuses one
+/// larger than its `max_payload`, and passing everything else through.
+struct RefusesArchives(EventBus);
+
+#[async_trait::async_trait]
+impl fq_runtime::bus::EventSink for RefusesArchives {
+    async fn publish(
+        &self,
+        event: &fq_runtime::events::Event,
+    ) -> Result<u64, fq_runtime::bus::BusError> {
+        if matches!(event.payload, EventPayload::InvocationArchived(_)) {
+            return Err(fq_runtime::bus::BusError::Publish(
+                "the broker refuses this archive (test)".to_string(),
+            ));
+        }
+        self.0.publish(event).await
+    }
+}
+
+/// `value` as it is written on the wire: a snake_case name.
+fn wire(value: impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .expect("serialises")
+        .as_str()
+        .expect("a name")
+        .to_string()
+}
+
+/// The lifecycle events among `events`, by name, in publish order. A
+/// `failed` carries its kind and phase, which say which path ended the
+/// run: `failed (max_iterations, reducer)` is the reducer deciding it,
+/// `failed (llm_error, llm_request)` a model call failing mid-step.
+fn lifecycle(events: &[fq_runtime::events::Event]) -> Vec<String> {
     events
         .iter()
-        .filter_map(|event| match event.payload {
-            EventPayload::Completed(_) => Some("completed"),
-            EventPayload::Failed(_) => Some("failed"),
-            EventPayload::InvocationArchived(_) => Some("invocation.archived"),
-            EventPayload::InvocationAmbiguous(_) => Some("invocation.ambiguous"),
+        .filter_map(|event| match &event.payload {
+            EventPayload::Completed(_) => Some("completed".to_string()),
+            EventPayload::Failed(failed) => Some(format!(
+                "failed ({}, {})",
+                wire(failed.error_kind),
+                wire(failed.phase)
+            )),
+            EventPayload::InvocationArchived(_) => Some("invocation.archived".to_string()),
+            EventPayload::InvocationAmbiguous(_) => Some("invocation.ambiguous".to_string()),
             _ => None,
         })
         .collect()
 }
 
-/// A resumed run that ends in `failed` published `failed` and
-/// `invocation.archived`, and its ownership row says it failed: it is not
-/// reported ambiguous. Both are asserted at once, so a failure shows both.
+/// A resumed run that ends in `failed` published `failed` (as `failed`
+/// names it, see [`lifecycle`]) and `invocation.archived`, and its
+/// ownership row says it failed: it is not reported ambiguous. Both are
+/// asserted at once, so a failure shows both.
 async fn assert_ended_in_failed_and_not_reported(
     recovering: &Recovering,
     events: &[fq_runtime::events::Event],
+    failed: &str,
 ) {
     assert_eq!(
         (lifecycle(events), recovering.owner().await),
         (
-            vec!["failed", "invocation.archived"],
+            vec![failed.to_string(), "invocation.archived".to_string()],
             Some(OwnerStatus::Failed)
         ),
         "a resumed run that ended in `failed` publishes its ending and its archive and is \
@@ -344,7 +450,12 @@ async fn assert_ended_in_failed_and_not_reported(
 async fn a_resumed_run_the_reducer_ends_in_failed_is_not_reported_ambiguous() {
     let mut recovering = Recovering::new().await;
     let events = recovering.resume(Reply::Text).await;
-    assert_ended_in_failed_and_not_reported(&recovering, &events).await;
+    assert_ended_in_failed_and_not_reported(
+        &recovering,
+        &events,
+        "failed (max_iterations, reducer)",
+    )
+    .await;
     recovering.stop().await;
 }
 
@@ -358,20 +469,54 @@ async fn a_resumed_run_the_reducer_ends_in_failed_is_not_reported_ambiguous() {
 async fn a_resumed_run_that_fails_mid_step_is_not_reported_ambiguous() {
     let mut recovering = Recovering::new().await;
     let events = recovering.resume(Reply::Refused).await;
-    assert_ended_in_failed_and_not_reported(&recovering, &events).await;
+    assert_ended_in_failed_and_not_reported(
+        &recovering,
+        &events,
+        "failed (llm_error, llm_request)",
+    )
+    .await;
     recovering.stop().await;
 }
 
-/// **A resume that cannot proceed is reported ambiguous, once.** The WAL
-/// holds a completed model call whose stored reply this build cannot read
-/// back, so the resume stops while it rebuilds the run, before any step:
-/// the run does not end, its row stays in flight, and only an operator can
-/// settle it. Recovery says so with `invocation.ambiguous`, and the
-/// ownership row turns `ambiguous`. The next start finds it in flight
-/// again, its resume stops the same way, and it is not reported a second
-/// time.
+/// **A resumed run whose archive is refused is not reported ambiguous
+/// either.** The run fails part-way through a step and publishes `failed`,
+/// its row goes terminal, and then the broker refuses its
+/// `invocation.archived`, so the resume returns that bus error. The run
+/// has ended, and recovery does not report it.
+///
+/// Its ownership row reads `in_flight`, as recovery restored it at
+/// startup. The coordination consumer moves that row on
+/// `invocation.archived`, never on `failed`, so it reads `failed` only
+/// once the archive is delivered, and until then the run is counted in
+/// flight (issue 1024). Before issue 1005 it read `ambiguous` instead.
 #[tokio::test]
-async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
+async fn a_resumed_run_whose_archive_is_refused_is_not_reported_ambiguous() {
+    let mut recovering = Recovering::new().await;
+    let bus = recovering.start.bus.clone();
+    recovering.publish_through(Arc::new(RefusesArchives(bus)));
+    let events = recovering.resume(Reply::Refused).await;
+    assert_eq!(
+        (
+            lifecycle(&events),
+            recovering.owner().await,
+            recovering.row().await
+        ),
+        (
+            vec!["failed (llm_error, llm_request)".to_string()],
+            Some(OwnerStatus::InFlight),
+            ResumedRow::Terminal
+        ),
+        "the run ended in `failed`, its archive refused: no `invocation.ambiguous`, and the \
+         ownership row is left `in_flight` until an archive is delivered (issue 1024)"
+    );
+    recovering.stop().await;
+}
+
+/// A next start over a WAL holding a completed model call whose stored
+/// reply this build cannot read back. Its resume stops while it rebuilds
+/// the run, before any step: the run does not end and its row stays in
+/// flight.
+async fn a_start_over_an_unreadable_reply() -> Recovering {
     let mut recovering = Recovering::new().await;
     let id = recovering.invocation().to_string();
     let store = recovering.start.worker_store.clone();
@@ -395,6 +540,24 @@ async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
         .await
         .unwrap();
     recovering.restart().await;
+    recovering
+}
+
+/// **A resume that cannot proceed is reported ambiguous, once.** Only an
+/// operator can settle the invocation, and recovery says so with
+/// `invocation.ambiguous`: the ownership row turns `ambiguous`. The next
+/// start finds it in flight again, its resume stops the same way, and it
+/// is not reported a second time.
+///
+/// From that next start on, the ownership row reads `in_flight` (issue
+/// 1025): startup recovery restores every invocation it resumes to
+/// `in_flight` before the resume runs, and the one-shot stamp stops the
+/// report that would have turned it back. So the invocation leaves
+/// `fq invocation list --status=ambiguous` and `fq doctor`'s ambiguous
+/// count at the second start, still unsettled.
+#[tokio::test]
+async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
+    let mut recovering = a_start_over_an_unreadable_reply().await;
 
     let first = recovering.resume(Reply::Text).await;
     assert_eq!(
@@ -403,19 +566,101 @@ async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
         "a resume that cannot proceed is reported ambiguous"
     );
     assert_eq!(recovering.owner().await, Some(OwnerStatus::Ambiguous));
-    let row = store
-        .get_invocation_state(&id)
-        .await
-        .unwrap()
-        .expect("the WAL row is still there");
-    assert_eq!(row.terminal_at, None, "the run did not end");
+    assert_eq!(recovering.row().await, ResumedRow::InFlight, "not ended");
 
     recovering.restart().await;
+    // Issue 1025: what this start's recovery does to the ownership row.
+    assert_eq!(
+        recovering.owner().await,
+        Some(OwnerStatus::InFlight),
+        "recovery restores a resumed invocation to `in_flight`, ambiguous or not"
+    );
     let second = recovering.resume(Reply::Text).await;
     assert_eq!(
         lifecycle(&second),
         Vec::<&str>::new(),
         "the next start's resume stops the same way and is not reported again"
+    );
+    assert_eq!(
+        recovering.owner().await,
+        Some(OwnerStatus::InFlight),
+        "so the row stays `in_flight` (issue 1025)"
+    );
+    recovering.stop().await;
+}
+
+/// **An invocation recovery reported ambiguous is settled by a drop, not
+/// a resume.** `fq invocation resume` reconciles a stuck dispatch, and
+/// this invocation has none, so it is refused on both sides of the next
+/// start: while the ownership row reads `ambiguous`, as not ambiguous in
+/// its WAL, and once recovery has put the row back to `in_flight`, as
+/// live. `fq invocation drop` ends it, and the next start has nothing to
+/// resume.
+#[tokio::test]
+async fn an_invocation_recovery_reported_ambiguous_is_settled_by_a_drop() {
+    let mut recovering = a_start_over_an_unreadable_reply().await;
+    let first = recovering.resume(Reply::Text).await;
+    assert_eq!(lifecycle(&first), ["invocation.ambiguous"]);
+
+    let refused = recovering.operator_resume_refused().await;
+    assert!(
+        refused.contains("is not Ambiguous (it may already have been resumed)"),
+        "{refused}"
+    );
+
+    recovering.restart().await;
+    let second = recovering.resume(Reply::Text).await;
+    assert_eq!(lifecycle(&second), Vec::<&str>::new());
+    let refused = recovering.operator_resume_refused().await;
+    assert!(
+        refused.contains("is live; only Ambiguous invocations can be resumed"),
+        "{refused}"
+    );
+
+    // The drop's own event may go out under another agent id than this
+    // subscription's (see `drops_published`); what it did is read off the
+    // two rows it moves instead.
+    recovering.operator_drop().await;
+    assert_eq!(
+        (recovering.owner().await, recovering.row().await),
+        (Some(OwnerStatus::Failed), ResumedRow::Terminal),
+        "the drop ends it: owned as failed, and its worker row terminal"
+    );
+    assert_eq!(
+        recovering.next_start_recovers().await,
+        Vec::<String>::new(),
+        "and the next start has nothing to resume"
+    );
+    recovering.stop().await;
+}
+
+/// **A resume whose row cannot be read afterwards is reported
+/// ambiguous.** Not knowing whether the run ended is not knowing that it
+/// did, so recovery reports it, as `publish_ambiguous_once` does when it
+/// cannot read its stamp. The store gives no way to make its read fail
+/// here, so the resume task's read result is handed in directly.
+#[tokio::test]
+async fn a_resume_whose_row_cannot_be_read_is_reported_ambiguous() {
+    let mut recovering = Recovering::new().await;
+    report_resume_error(
+        Err(fq_runtime::WorkerStoreError::Backend(
+            "disk I/O error (test)".to_string(),
+        )),
+        &recovering.start.worker_store,
+        &recovering.start.bus,
+        AgentId::new(CAPPED_AGENT).unwrap(),
+        recovering.invocation(),
+        ExecutorError::WorkerStore("disk I/O error (test)".to_string()),
+    )
+    .await;
+    let events = recovering.settle().await;
+    assert_eq!(
+        (lifecycle(&events), recovering.owner().await),
+        (
+            vec!["invocation.ambiguous".to_string()],
+            Some(OwnerStatus::Ambiguous)
+        ),
+        "an unreadable row is reported"
     );
     recovering.stop().await;
 }
@@ -430,7 +675,12 @@ async fn a_resume_that_cannot_proceed_is_reported_ambiguous_once() {
 async fn an_operator_resume_whose_run_ends_in_failed_is_not_reported_ambiguous() {
     let mut recovering = Recovering::over(Seed::Ambiguous).await;
     let events = recovering.operator_resume(Reply::Refused).await;
-    assert_ended_in_failed_and_not_reported(&recovering, &events).await;
+    assert_ended_in_failed_and_not_reported(
+        &recovering,
+        &events,
+        "failed (llm_error, llm_request)",
+    )
+    .await;
     recovering.stop().await;
 }
 
