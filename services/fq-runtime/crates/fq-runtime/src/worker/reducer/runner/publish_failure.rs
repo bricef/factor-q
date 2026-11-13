@@ -55,7 +55,7 @@ use uuid::Uuid;
 
 use super::{ReducerRunner, map_store_err, terminal};
 use crate::agent::{Agent, AgentId};
-use crate::bus::BusError;
+use crate::bus::{BusError, EventSink};
 use crate::events::{Event, EventKind, FailureDetail, FailureKind, FailurePhase, InvocationTotals};
 use crate::worker::reducer::types::Reducer;
 use crate::worker::{ExecutorError, InvocationOutcome};
@@ -93,12 +93,11 @@ impl Refused {
         }
     }
 
-    /// `event`, serialised to `size` bytes, measured against a sink's
-    /// `limit`: refused when over it, by the bus's own rule.
-    pub(super) fn measure(event: &Event, size: usize, limit: Option<usize>) -> Option<Self> {
-        let kind = EventKind::from(&event.payload);
-        let refusal = crate::bus::check_payload_size(kind, size, limit?).err()?;
-        Self::from_error(&refusal)
+    /// Whether `sink` would refuse `event`, whose JSON is `body_len`
+    /// bytes, for its size: the sink's own answer, so this cannot count
+    /// differently from its publish.
+    pub(super) fn measure(sink: &dyn EventSink, event: &Event, body_len: usize) -> Option<Self> {
+        Self::from_error(&sink.check_size(event, body_len).err()?)
     }
 
     /// The `error_message` of the `failed`, for people reading it; the

@@ -655,7 +655,7 @@ With a detail ([#952](https://github.com/bricef/factor-q/issues/952)):
 
 | `kind` | Fields | Meaning |
 |---|---|---|
-| `payload_too_large` | `event_type`, `size_bytes`, `limit_bytes` | An event was too large for the broker to accept. `event_type` is that event's own `event_type`, the real name (`llm_request`, `tool_result`, …); a reader built on `fq-ops` that lacks the type holds it as `EventKind::Unknown`, and writes `unknown` only if it re-serialises the event. `size_bytes` is the event's serialised size and `limit_bytes` the broker's `max_payload`, both in bytes. |
+| `payload_too_large` | `event_type`, `size_bytes`, `limit_bytes` | An event was too large for the broker to accept. `event_type` is that event's own `event_type`, the real name (`llm_request`, `tool_result`, …); a reader built on `fq-ops` that lacks the type holds it as `EventKind::Unknown`, and writes `unknown` only if it re-serialises the event. `size_bytes` is the event's size on the wire, its JSON and the `Nats-Msg-Id` header sent with it, which is what the broker measures, and `limit_bytes` the broker's `max_payload`, both in bytes. |
 | `unknown` | none | Never written by the runtime. It is what a reader built on `fq-ops` holds for a detail whose `kind` it does not know — one a newer build added — with that kind's fields discarded on the way in. Re-serialised, it writes `{"kind": "unknown"}`. |
 
 **Design notes:**

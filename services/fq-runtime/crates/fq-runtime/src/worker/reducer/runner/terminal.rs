@@ -193,8 +193,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // row would be terminal with its outcome nowhere. The run ends on
         // the refusal's `failed` instead, decided while nothing is yet
         // terminal (#828; `publish_failure.rs`).
-        let limit = self.config.sink.max_payload();
-        if let Some(refused) = Refused::measure(&event, encoded.len(), limit) {
+        if let Some(refused) = Refused::measure(&*self.config.sink, &event, encoded.len()) {
             event = refused.failed_event(agent_id, invocation_id, *totals);
             event.envelope.parent_event_id = cursor;
             encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;

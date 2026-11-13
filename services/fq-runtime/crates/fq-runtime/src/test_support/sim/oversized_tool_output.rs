@@ -50,11 +50,11 @@ pub(super) fn load_tool_answer(world: &SimWorld, llm: &FixtureClient, answer: St
     llm.push_response(end_turn("read the large answer"));
 }
 
-/// The bytes `event` takes on the wire, as the bus serialises it.
+/// The bytes `event` takes on the wire, as the bus sends it: its JSON
+/// and the message-id header with it, which the broker counts too.
 fn wire_size(event: &Event) -> usize {
-    serde_json::to_vec(event)
-        .expect("the event serialises")
-        .len()
+    let body = serde_json::to_vec(event).expect("the event serialises");
+    crate::bus::size::wire_len(event, body.len())
 }
 
 /// A tool answering twice a stock `max_payload` used to put a 2 MiB

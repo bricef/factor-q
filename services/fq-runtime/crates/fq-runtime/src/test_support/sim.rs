@@ -124,7 +124,7 @@ pub const SIM_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
 /// In-memory [`EventSink`] that records every published event and can
 /// inject a publish fault at a chosen operation index. Like the bus, it
-/// refuses an event that serialises to more than its `max_payload`
+/// refuses an event larger on the wire than its `max_payload`
 /// ([`SIM_MAX_PAYLOAD`] unless set), by the bus's own rule (#828).
 pub struct RecordingSink {
     events: Mutex<Vec<Event>>,
@@ -232,13 +232,12 @@ impl EventSink for RecordingSink {
             self.refused.lock().unwrap().push(event.clone());
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
         }
-        // The bus's size guard, measured as the bus measures it.
-        let size = serde_json::to_vec(event)
+        // The bus's size guard, by the bus's own rule: the JSON and the
+        // header the bus would send with it.
+        let body_len = serde_json::to_vec(event)
             .map_err(BusError::Serialise)?
             .len();
-        let kind = crate::events::EventKind::from(&event.payload);
-        let limit = self.max_payload.load(Ordering::SeqCst);
-        if let Err(refusal) = crate::bus::check_payload_size(kind, size, limit) {
+        if let Err(refusal) = self.check_size(event, body_len) {
             self.refused.lock().unwrap().push(event.clone());
             return Err(refusal);
         }
@@ -277,8 +276,9 @@ impl EventSink for RecordingSink {
         Ok(events.len() as u64)
     }
 
-    fn max_payload(&self) -> Option<usize> {
-        Some(self.max_payload.load(Ordering::SeqCst))
+    fn check_size(&self, event: &Event, body_len: usize) -> Result<(), BusError> {
+        let limit = self.max_payload.load(Ordering::SeqCst);
+        crate::bus::size::check_event_size(event, body_len, limit)
     }
 }
 
