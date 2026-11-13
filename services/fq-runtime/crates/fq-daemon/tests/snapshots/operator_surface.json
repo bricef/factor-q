@@ -2667,7 +2667,7 @@
             "type": "object"
           },
           "ArchiveHold": {
-            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing for a held row, neither its stored\nterminal event nor `invocation.archived`, so the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
+            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing more for a held row: whatever it owed\nthe bus and could publish before the hold, such as a terminal event\nwhose first publish was lost, has gone out, and what it could not,\n`invocation.archived` above all, does not. So the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
             "properties": {
               "agent_id": {
                 "description": "The agent that ran it.",
@@ -2699,7 +2699,7 @@
             "oneOf": [
               {
                 "additionalProperties": false,
-                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nso the sweeper does not offer it again until the limit has risen,\nwhich for the daemon means its next start: it reads the broker's\n`max_payload` when it connects.",
+                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nand the daemon reads the broker's `max_payload` once, when it\nconnects, so the sweeper does not offer the row again in this run;\nthe next start offers it again.",
                 "properties": {
                   "payload_too_large": {
                     "properties": {
@@ -3526,7 +3526,7 @@
       "output_schema": {
         "$defs": {
           "ArchiveHold": {
-            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing for a held row, neither its stored\nterminal event nor `invocation.archived`, so the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
+            "description": "A finished invocation's row the worker's archive sweeper is holding\nrather than archiving, as every operator surface reads it.\n\nThe sweeper publishes nothing more for a held row: whatever it owed\nthe bus and could publish before the hold, such as a terminal event\nwhose first publish was lost, has gone out, and what it could not,\n`invocation.archived` above all, does not. So the control plane sees\nthe invocation as not archived. The row stays in the worker's store,\nwhole, and every other row is archived as usual. The list is the\ndaemon's memory of its own sweeps: a row held by an earlier run is\noffered again when the daemon starts, and is listed again once this\nrun's sweeper has held it.",
             "properties": {
               "agent_id": {
                 "description": "The agent that ran it.",
@@ -3558,7 +3558,7 @@
             "oneOf": [
               {
                 "additionalProperties": false,
-                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nso the sweeper does not offer it again until the limit has risen,\nwhich for the daemon means its next start: it reads the broker's\n`max_payload` when it connects.",
+                "description": "An event the row has to publish is larger than the broker accepts:\nits stored terminal event, or `invocation.archived`, which carries\nthe run's whole state. The same event is refused on every attempt,\nand the daemon reads the broker's `max_payload` once, when it\nconnects, so the sweeper does not offer the row again in this run;\nthe next start offers it again.",
                 "properties": {
                   "payload_too_large": {
                     "properties": {

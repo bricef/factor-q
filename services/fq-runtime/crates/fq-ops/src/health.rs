@@ -439,8 +439,10 @@ impl AgentAtCap {
 /// A finished invocation's row the worker's archive sweeper is holding
 /// rather than archiving, as every operator surface reads it.
 ///
-/// The sweeper publishes nothing for a held row, neither its stored
-/// terminal event nor `invocation.archived`, so the control plane sees
+/// The sweeper publishes nothing more for a held row: whatever it owed
+/// the bus and could publish before the hold, such as a terminal event
+/// whose first publish was lost, has gone out, and what it could not,
+/// `invocation.archived` above all, does not. So the control plane sees
 /// the invocation as not archived. The row stays in the worker's store,
 /// whole, and every other row is archived as usual. The list is the
 /// daemon's memory of its own sweeps: a row held by an earlier run is
@@ -467,9 +469,9 @@ pub enum ArchiveHoldReason {
     /// An event the row has to publish is larger than the broker accepts:
     /// its stored terminal event, or `invocation.archived`, which carries
     /// the run's whole state. The same event is refused on every attempt,
-    /// so the sweeper does not offer it again until the limit has risen,
-    /// which for the daemon means its next start: it reads the broker's
-    /// `max_payload` when it connects.
+    /// and the daemon reads the broker's `max_payload` once, when it
+    /// connects, so the sweeper does not offer the row again in this run;
+    /// the next start offers it again.
     PayloadTooLarge {
         /// The refused event's type, spelled as its own `event_type` on
         /// the wire.
