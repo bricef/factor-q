@@ -712,16 +712,17 @@ async fn a_claim_names_its_invocation_from_claim_time() {
     );
 }
 
-/// **Startup recovery finds a claim by the invocation it names (#959).**
-/// An in-flight WAL row proves a durable start the dispatcher may not have
-/// lived to record. Marking by invocation id turns that row's `claimed`
-/// claim into `durably_started`, once, and touches nothing else: not an id
-/// no claim names, not a row already started, not another trigger's claim.
+/// **Startup recovery marks a claim by its key, and only while it still
+/// names the run recovery found on record (#959, #967).** The mark turns
+/// the `claimed` row into `durably_started`, once, keeping the id it
+/// names, and touches nothing else: not a row naming another invocation
+/// (adopted since it was read), not a row already started, not a key with
+/// no row, not another trigger's claim.
 #[tokio::test]
-async fn a_claim_is_marked_started_by_the_invocation_it_names() {
+async fn a_claim_is_marked_started_by_its_key_while_it_names_the_run() {
     let (store, _dir) = open_fresh().await;
     store
-        .claim_trigger(key(1), "dead-worker", "inv-in-flight", 100)
+        .claim_trigger(key(1), "dead-worker", "inv-on-record", 100)
         .await
         .unwrap();
     store
@@ -730,11 +731,18 @@ async fn a_claim_is_marked_started_by_the_invocation_it_names() {
         .unwrap();
 
     assert!(
-        store
-            .mark_trigger_started_by_invocation("inv-in-flight")
+        !store
+            .mark_unsettled_trigger_started(key(1), "inv-adopted-since")
             .await
             .unwrap(),
-        "the claim naming the invocation is marked"
+        "a claim that names another invocation is left as it is"
+    );
+    assert!(
+        store
+            .mark_unsettled_trigger_started(key(1), "inv-on-record")
+            .await
+            .unwrap(),
+        "the claim naming the run is marked"
     );
     assert_eq!(
         store
@@ -742,23 +750,23 @@ async fn a_claim_is_marked_started_by_the_invocation_it_names() {
             .await
             .unwrap(),
         TriggerClaim::Started {
-            invocation_id: "inv-in-flight".to_string()
+            invocation_id: "inv-on-record".to_string()
         },
         "the redelivery now meets a started claim and is dropped"
     );
     assert!(
         !store
-            .mark_trigger_started_by_invocation("inv-in-flight")
+            .mark_unsettled_trigger_started(key(1), "inv-on-record")
             .await
             .unwrap(),
         "a row already started is left as it is"
     );
     assert!(
         !store
-            .mark_trigger_started_by_invocation("inv-of-a-direct-run")
+            .mark_unsettled_trigger_started(key(3), "inv-on-record")
             .await
             .unwrap(),
-        "an invocation no claim names changes nothing"
+        "a key with no row changes nothing"
     );
     assert_eq!(
         store

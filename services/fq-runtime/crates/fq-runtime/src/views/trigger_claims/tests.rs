@@ -821,7 +821,7 @@ async fn a_restarts_recovery_marks_every_claim_this_report_calls_started_and_nev
             .await
             .unwrap(),
     );
-    let wal_report = crate::worker::InFlightReport::scan(&seed.worker)
+    let wal_report = crate::worker::DurableStartReport::scan(&seed.worker)
         .await
         .unwrap();
     crate::control_plane::dispatcher::TriggerClaims::recover(store, &wal_report)
