@@ -739,8 +739,8 @@ async fn a_run_archived_between_the_two_reads_is_still_found() {
 
 // ---- The report and startup recovery agree (issue 967) ----
 
-/// **What a restart's recovery marks is exactly what this report calls
-/// started and never marked.**
+/// **A restart's recovery marks every claim this report calls started and
+/// never marked.**
 ///
 /// Startup recovery marks a `claimed` row's start when its run is on
 /// record, by the same two records this report reads: the worker's WAL row,
@@ -748,7 +748,10 @@ async fn a_run_archived_between_the_two_reads_is_still_found() {
 /// WAL has let the run go (`TriggerClaims::recover`). So every claim the
 /// report lists as started and never marked before a restart is marked by
 /// it, the report lists none after it, and every other line stays as it
-/// was, its row untouched. The table holds a run of each kind the report
+/// was, its row untouched. Recovery marks more than the report lists: it
+/// does not ask whether the claim's message can still be delivered, so a
+/// claim on record whose message is gone, which the report leaves out, is
+/// marked too. This test shows the report's side. The table holds a run of each kind the report
 /// can see: archived, finished and not yet archived, in flight, archived
 /// with its archive since swept, and ambiguous (in flight, with the
 /// ownership row its recovery publish folds into), beside a claim with
