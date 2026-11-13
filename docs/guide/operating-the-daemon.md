@@ -839,11 +839,12 @@ byte of state. A state blob of roughly 262,000 to 350,000 bytes,
 depending on the text, therefore makes the archive event larger than a
 stock 1 MiB `max_payload`, and one result at the default cap is most
 of the way there. When that happens the invocation completes, the
-archive publish fails, and every pass of the archive retry sweep stops
-at that row with `archive retry sweep failed; will retry next tick`,
-so rows after it in the pass are not archived either. A broker serving
-agents that read large outputs still needs a `max_payload` above the
-stock 1 MiB
+archive publish fails, and the archive sweeper holds that row
+unarchived, lists it in `fq doctor` and `fq status`, and goes on to the
+rows behind it (see
+[When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)).
+A broker serving agents that read large outputs still needs a
+`max_payload` above the stock 1 MiB
 ([see #981](https://github.com/bricef/factor-q/issues/981)).
 
 ## When an invocation stops making progress
