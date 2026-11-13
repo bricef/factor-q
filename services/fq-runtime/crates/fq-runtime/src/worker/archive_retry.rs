@@ -221,6 +221,9 @@ impl ArchiveRetrySweeper {
                 None => self.holds.release(&row.invocation_id),
             }
         }
+        // Only a pass that reached every row says what is held; one the
+        // bus or the store ended early returned above.
+        self.holds.pass_finished(Utc::now().timestamp_millis());
         Ok(())
     }
 
@@ -1566,6 +1569,41 @@ mod tests {
             [(ok_id.clone(), "invocation_archived")]
         );
         assert!(sweeper.holds().snapshot().is_empty(), "no longer held");
+    }
+
+    /// The holds are known only once a pass has reached every row: not
+    /// before the first pass, and not after a pass the bus ended early,
+    /// which may have stopped short of a row it would have held.
+    #[tokio::test]
+    async fn the_holds_are_known_only_after_a_pass_reaches_every_row() {
+        let world = Oversized::new().await;
+        let before = world.sweeper.holds().report();
+        assert_eq!(before.last_pass_at_ms, None, "not looked yet");
+        assert!(before.holds.is_empty());
+
+        let sink = Arc::new(RecordingSink::new());
+        sink.fail_publish_at(0);
+        let ended_early = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&world.store),
+        );
+        assert!(ended_early.sweep_once(&mut HashSet::new()).await.is_err());
+        assert_eq!(
+            ended_early.holds().report().last_pass_at_ms,
+            None,
+            "a pass the bus ended does not count"
+        );
+
+        let at = Utc::now().timestamp_millis();
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        let after = world.sweeper.holds().report();
+        assert!(
+            after.last_pass_at_ms.is_some_and(|t| t >= at),
+            "got: {after:?}"
+        );
+        assert_eq!(after.holds, world.sweeper.holds().snapshot());
+        assert_eq!(after.holds.len(), 1, "the oversized row");
     }
 
     /// A held row that leaves the store (an operator deleted it, or an ack

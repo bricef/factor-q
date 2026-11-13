@@ -147,13 +147,13 @@ pub struct DoctorReport {
     /// Every finished invocation's row the worker's archive sweeper is
     /// holding rather than archiving: an event the row has to publish is
     /// larger than the broker accepts, its stored terminal event must not
-    /// be republished, or its ids cannot go on an event. Each is an issue,
-    /// because none lifts on its
-    /// own: the remedy beside it says what an operator has to do. Read
-    /// from the daemon's memory of its own sweeps, so a row held by an
-    /// earlier run is listed again once this run's sweeper has held it.
+    /// be republished, or its ids cannot go on an event. Each held row is
+    /// an issue, because none lifts on its own: the remedy beside it says
+    /// what an operator has to do. Read from the daemon's memory of its own
+    /// sweeps, so until the sweeper has finished a pass this start the
+    /// holds are not yet known, which is not an issue.
     #[serde(default)]
-    pub archive_holds: Vec<crate::health::ArchiveHold>,
+    pub archive_sweep: crate::health::ArchiveSweep,
 }
 
 /// `control.doctor`'s trigger-claim block, with the bounds its claims were
@@ -208,11 +208,11 @@ impl DoctorReport {
         self
     }
 
-    /// Attach the rows the archive sweeper holds. Separate from
-    /// [`build_doctor_report`] because the list is the sweeper's live
-    /// state, like the throttle's, rather than a fold of the stores.
-    pub fn with_archive_holds(mut self, holds: Vec<crate::health::ArchiveHold>) -> Self {
-        self.archive_holds = holds;
+    /// Attach the archive sweeper's state. Separate from
+    /// [`build_doctor_report`] because it is the sweeper's live state, like
+    /// the throttle's, rather than a fold of the stores.
+    pub fn with_archive_sweep(mut self, sweep: crate::health::ArchiveSweep) -> Self {
+        self.archive_sweep = sweep;
         self
     }
 
@@ -249,7 +249,8 @@ impl DoctorReport {
     /// making progress, a stranded trigger claim, or a row the archive
     /// sweeper holds. In-flight work that is merely running (not stuck) is
     /// healthy, not an issue, and so is a consumer that is merely behind,
-    /// a claim awaiting redelivery, or a claim the report cannot judge.
+    /// a claim awaiting redelivery, a claim the report cannot judge, or an
+    /// archive sweeper that has not finished a pass yet.
     pub fn has_issues(&self) -> bool {
         self.workers.stale > 0
             || self.executions.stuck > 0
@@ -258,7 +259,7 @@ impl DoctorReport {
             || self.faulty_consumers().next().is_some()
             || self.unavailable_mcp_servers().next().is_some()
             || self.stranded_claim_issues().next().is_some()
-            || !self.archive_holds.is_empty()
+            || !self.archive_sweep.holds.is_empty()
     }
 }
 
@@ -342,6 +343,6 @@ pub fn build_doctor_report(
         throttled_models: Vec::new(),
         agents_at_cap: Vec::new(),
         trigger_claims: DoctorTriggerClaims::default(),
-        archive_holds: Vec::new(),
+        archive_sweep: Default::default(),
     }
 }

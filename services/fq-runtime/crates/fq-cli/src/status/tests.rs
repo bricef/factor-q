@@ -22,7 +22,11 @@ fn report() -> StatusReport {
     StatusReport {
         mcp_servers: Vec::new(),
         throttled_models: Vec::new(),
-        archive_holds: Vec::new(),
+        // Swept, nothing held: the steady state, which says nothing.
+        archive_sweep: fq_ops::health::ArchiveSweep {
+            last_pass_at_ms: Some(1_700_000_000_000),
+            holds: Vec::new(),
+        },
         version: "0.1.0+deadbee".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
@@ -688,7 +692,7 @@ fn throttled_models_render_their_pause_and_permits() {
 
 /// The rows the archive sweeper holds are a section of their own: how
 /// many, and for each the invocation, the reason and the remedy, as `fq
-/// doctor` prints them. Nothing held, no section.
+/// doctor` prints them. Swept and nothing held, no section.
 #[test]
 fn archive_holds_render_with_their_reason_and_remedy() {
     let held = fq_ops::health::ArchiveHold {
@@ -703,7 +707,10 @@ fn archive_holds_render_with_their_reason_and_remedy() {
     };
     let doc = StatusDocument {
         daemon: Some(StatusReport {
-            archive_holds: vec![held],
+            archive_sweep: fq_ops::health::ArchiveSweep {
+                last_pass_at_ms: Some(1_700_000_000_000),
+                holds: vec![held],
+            },
             ..report()
         }),
         ..answered()
@@ -722,6 +729,28 @@ fn archive_holds_render_with_their_reason_and_remedy() {
     let quiet = render_status_human(&answered());
     assert!(
         !quiet.contains("Archive holds"),
-        "nothing held, nothing said: {quiet}"
+        "swept, nothing held, nothing said: {quiet}"
+    );
+}
+
+/// Before the sweeper's first pass this start, an empty list is not none:
+/// status says the holds are not yet known rather than saying nothing,
+/// which would read as none.
+#[test]
+fn archive_holds_before_the_first_pass_are_not_yet_known() {
+    let doc = StatusDocument {
+        daemon: Some(StatusReport {
+            archive_sweep: fq_ops::health::ArchiveSweep::default(),
+            ..report()
+        }),
+        ..answered()
+    };
+    let out = render_status_human(&doc);
+    assert!(
+        out.contains(
+            "\nArchive holds: not yet known — the archive sweeper has not finished a pass since \
+             this daemon started"
+        ),
+        "got:\n{out}"
     );
 }

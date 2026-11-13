@@ -211,8 +211,20 @@ async fn an_archive_too_large_for_the_broker_is_held_and_reported() {
     .await
     .expect("connect edge");
 
-    let doctor = report(&client, ControlReport::Doctor).await;
-    let holds = doctor["archive_holds"].as_array().expect("archive_holds");
+    // The pass that archived the row behind has finished, or finishes the
+    // instant after; the report says when.
+    let client = &client;
+    let doctor = daemon
+        .wait_for("a finished sweep in control.doctor", move || async move {
+            let doctor = report(client, ControlReport::Doctor).await;
+            doctor["archive_sweep"]["last_pass_at_ms"]
+                .is_i64()
+                .then_some(doctor)
+        })
+        .await;
+    let holds = doctor["archive_sweep"]["holds"]
+        .as_array()
+        .expect("archive_sweep.holds");
     assert_eq!(holds.len(), 1, "the oversized row alone: {doctor}");
     let hold = &holds[0];
     assert_eq!(hold["invocation_id"], OVERSIZED);
@@ -233,10 +245,14 @@ async fn an_archive_too_large_for_the_broker_is_held_and_reported() {
         serde_json::from_value(doctor.clone()).expect("the declared shape");
     assert!(parsed.has_issues(), "a held row is an issue: {doctor}");
 
-    let status = report(&client, ControlReport::Status).await;
+    let status = report(client, ControlReport::Status).await;
     assert_eq!(
-        status["archive_holds"], doctor["archive_holds"],
+        status["archive_sweep"]["holds"], doctor["archive_sweep"]["holds"],
         "the same rows, without a verdict"
+    );
+    assert!(
+        status["archive_sweep"]["last_pass_at_ms"].is_i64(),
+        "{status}"
     );
 
     // ---- The row is kept whole. ----

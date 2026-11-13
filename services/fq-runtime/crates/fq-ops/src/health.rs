@@ -521,6 +521,35 @@ impl ArchiveHoldReason {
     }
 }
 
+/// The worker's archive sweeper as both health reports read it: whether
+/// it has looked yet, and the rows it holds.
+///
+/// The holds are known only once the sweeper has finished a pass over
+/// every pending row since the daemon started. Its first pass comes one
+/// `[worker] archive_retry_interval_ms` after start, and a pass the bus
+/// ends early does not count, so until then an empty list means not yet
+/// known, not none. Not yet known is not an issue: it is the absence of a
+/// finding, and every start goes through it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, schemars::JsonSchema)]
+pub struct ArchiveSweep {
+    /// When the sweeper last finished a pass, epoch milliseconds on the
+    /// daemon's clock. Absent until its first finished pass of this start;
+    /// a report from a daemon that does not send it reads the same way.
+    #[serde(default)]
+    pub last_pass_at_ms: Option<i64>,
+    /// Every row held now, in invocation-id order.
+    #[serde(default)]
+    pub holds: Vec<ArchiveHold>,
+}
+
+impl ArchiveSweep {
+    /// Whether the holds are known: the sweeper has finished a pass since
+    /// the daemon started.
+    pub fn has_swept(&self) -> bool {
+        self.last_pass_at_ms.is_some()
+    }
+}
+
 /// A trigger claim that has not settled and will not settle on its own,
 /// as `control.doctor` reports it: a claimed delivery that has neither
 /// been released nor recorded as started.

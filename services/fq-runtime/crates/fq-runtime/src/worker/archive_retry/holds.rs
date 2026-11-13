@@ -5,31 +5,55 @@
 //! also what offers a held row again at the next start: a new run begins
 //! with no holds, and its sweeper tries every pending row once before
 //! holding any. The store keeps nothing of a hold; the row itself is left
-//! exactly as it was.
+//! exactly as it was. For the same reason the holds are not known at all
+//! until the sweeper has finished a pass this run, and the reports say so.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
-use fq_ops::health::{ArchiveHold, ArchiveHoldReason};
+use fq_ops::health::{ArchiveHold, ArchiveHoldReason, ArchiveSweep};
 
 /// Where the operating guide says what to do about a held row.
 pub(super) const GUIDE: &str =
     "docs/guide/operating-the-daemon.md, \"When the archive sweeper holds a terminal row\"";
 
-/// The terminal rows the archive sweeper is holding, by invocation id.
+/// The terminal rows the archive sweeper is holding, by invocation id, and
+/// when it last finished a pass.
 ///
 /// Shared between the sweeper, which writes it, and `control.status` and
-/// `control.doctor`, which list it ([`Self::snapshot`]).
+/// `control.doctor`, which report it ([`Self::report`]).
 #[derive(Debug, Default)]
 pub struct ArchiveHolds {
-    rows: Mutex<BTreeMap<String, ArchiveHold>>,
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    rows: BTreeMap<String, ArchiveHold>,
+    last_pass_at_ms: Option<i64>,
 }
 
 impl ArchiveHolds {
+    /// What the health reports say of the sweeper: when it last finished a
+    /// pass, and the rows held now. One lock, so the two agree.
+    pub fn report(&self) -> ArchiveSweep {
+        let state = self.lock();
+        ArchiveSweep {
+            last_pass_at_ms: state.last_pass_at_ms,
+            holds: state.rows.values().cloned().collect(),
+        }
+    }
+
     /// Every row held now, in invocation-id order (start order, for the
     /// time-ordered ids the runtime mints).
     pub fn snapshot(&self) -> Vec<ArchiveHold> {
-        self.lock().values().cloned().collect()
+        self.lock().rows.values().cloned().collect()
+    }
+
+    /// The sweeper has offered every pending row it could this pass: from
+    /// now on an empty list means none held, not not yet looked.
+    pub(super) fn pass_finished(&self, at_ms: i64) {
+        self.lock().last_pass_at_ms = Some(at_ms);
     }
 
     /// Hold `row` for `reason`. True when that is news: the row was not
@@ -44,7 +68,7 @@ impl ArchiveHolds {
         reason: ArchiveHoldReason,
     ) -> bool {
         let remedy = remedy(&reason);
-        let mut rows = self.lock();
+        let rows = &mut self.lock().rows;
         let news = rows
             .get(invocation_id)
             .is_none_or(|held| held.reason != reason);
@@ -62,27 +86,29 @@ impl ArchiveHolds {
 
     /// The row is no longer held: it went out this pass.
     pub(super) fn release(&self, invocation_id: &str) {
-        self.lock().remove(invocation_id);
+        self.lock().rows.remove(invocation_id);
     }
 
     /// Forget every row the store no longer lists as awaiting its archive:
     /// acked and deleted, or removed by an operator.
     pub(super) fn retain_pending(&self, pending: &HashSet<&str>) {
-        self.lock().retain(|id, _| pending.contains(id.as_str()));
+        self.lock()
+            .rows
+            .retain(|id, _| pending.contains(id.as_str()));
     }
 
     /// The `max_payload` the row was refused under, when it is held for an
     /// event too large for the broker.
     pub(super) fn too_large_under(&self, invocation_id: &str) -> Option<u64> {
-        match self.lock().get(invocation_id)?.reason {
+        match self.lock().rows.get(invocation_id)?.reason {
             ArchiveHoldReason::PayloadTooLarge { limit_bytes, .. } => Some(limit_bytes),
             ArchiveHoldReason::StoredEventRefused { .. }
             | ArchiveHoldReason::MalformedRow { .. } => None,
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ArchiveHold>> {
-        self.rows.lock().expect("archive holds lock poisoned")
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().expect("archive holds lock poisoned")
     }
 }
 
