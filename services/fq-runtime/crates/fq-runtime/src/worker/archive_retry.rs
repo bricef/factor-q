@@ -1377,6 +1377,83 @@ mod tests {
         );
     }
 
+    /// A row owed a lost `completed` whose archive is too large: the
+    /// outcome goes out before the hold, and is stamped, so the hold is on
+    /// `invocation.archived` alone. The next start offers only the archive,
+    /// never the `completed` again.
+    #[tokio::test]
+    async fn the_outcome_goes_out_before_the_archive_is_held() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            WorkerStore::open(&dir.path().join("worker.db"))
+                .await
+                .expect("worker store"),
+        );
+        let id = Uuid::now_v7();
+        let inv = id.to_string();
+        let stored = completed_event(id);
+        let mut row = terminal_row(&inv, "sweep-agent", 1_000);
+        row.state_blob = vec![200; OVERSIZED_STATE];
+        row.terminal_outcome = Some(terminal_outcome::encode(&stored).unwrap());
+        store.upsert_invocation_state(&row).await.unwrap();
+        let sink = SizeLimitedSink::new(LIMIT);
+        let sweeper = |store: &Arc<WorkerStore>| {
+            ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(store),
+            )
+        };
+
+        let first = sweeper(&store);
+        first.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(
+            trail(&sink.events()),
+            [(inv.clone(), "completed")],
+            "the outcome went out"
+        );
+        assert_eq!(
+            serde_json::to_value(&sink.events()[0]).unwrap(),
+            serde_json::to_value(&stored).unwrap(),
+            "the stored event itself"
+        );
+        assert_eq!(
+            trail(&sink.too_large()),
+            [(inv.clone(), "invocation_archived")]
+        );
+        let kept = store.get_invocation_state(&inv).await.unwrap().unwrap();
+        assert!(kept.terminal_published_at.is_some(), "stamped published");
+        assert_eq!(kept.archive_status, None, "not archived");
+        let holds = first.holds().snapshot();
+        assert!(
+            matches!(
+                &holds[..],
+                [ArchiveHold {
+                    reason: ArchiveHoldReason::PayloadTooLarge { event_type, .. },
+                    ..
+                }] if event_type == "invocation_archived"
+            ),
+            "held on the archive: {holds:?}"
+        );
+
+        let restarted = sweeper(&store);
+        restarted.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(
+            trail(&sink.events()),
+            [(inv.clone(), "completed")],
+            "the completed is not republished"
+        );
+        assert_eq!(
+            trail(&sink.too_large()),
+            [
+                (inv.clone(), "invocation_archived"),
+                (inv.clone(), "invocation_archived")
+            ],
+            "only the archive is offered again"
+        );
+        assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
+    }
+
     /// A held row that leaves the store (an operator deleted it, or an ack
     /// for an earlier archive arrived) is no longer listed.
     #[tokio::test]
