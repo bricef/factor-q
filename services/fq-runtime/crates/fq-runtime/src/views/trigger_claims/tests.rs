@@ -856,3 +856,52 @@ async fn a_restarts_recovery_marks_every_claim_this_report_calls_started_and_nev
         "a claim with nothing on record is left exactly as it was"
     );
 }
+
+/// **An ownership row whose status this build cannot read does not stop a
+/// restart, and its claim is marked.** Startup recovery needs only to know
+/// that the row exists: it says the run is on record. No writer stores
+/// any status but the four this build knows, but a row from a later build
+/// read by an earlier one would hold one, and a boot stopped by a word it
+/// does not need would leave the daemon down. Written through a raw
+/// connection, because no store method can write one.
+#[tokio::test]
+async fn a_restarts_recovery_marks_a_claim_whose_ownership_row_has_an_unknown_status() {
+    let seed = Seed::new().await;
+    seed.claimed(1, EXITED, "inv-from-a-later-build", NOW_MS - HOUR_MS)
+        .await;
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(&seed.paths.control_plane),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner (invocation_id, worker_id, assigned_at, status) \
+         VALUES ('inv-from-a-later-build', 'worker', 0, 'handed_over')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let store = std::sync::Arc::new(
+        ControlPlaneStore::open(&seed.paths.control_plane)
+            .await
+            .unwrap(),
+    );
+    let wal_report = crate::worker::DurableStartReport::scan(&seed.worker)
+        .await
+        .unwrap();
+    crate::control_plane::dispatcher::TriggerClaims::recover(store, &wal_report)
+        .await
+        .expect("an ownership status this build cannot read does not stop startup recovery");
+    assert_eq!(
+        seed.cp
+            .claim_trigger(Seed::key(1), "probe", "probe", NOW_MS)
+            .await
+            .unwrap(),
+        crate::control_plane::TriggerClaim::Started {
+            invocation_id: "inv-from-a-later-build".into()
+        },
+        "the run is on record, so its claim is marked"
+    );
+}
