@@ -29,11 +29,37 @@
 //! - **After the run has ended**: the row is terminal, so the refused
 //!   event came after the outcome (`invocation.archived` behind
 //!   `completed` or `failed`). That is not a failure of the invocation,
-//!   and the error is passed on exactly as before; the archive is the
-//!   sweeper's (see #981). The row is the test, not which event went out.
+//!   and the error is passed on exactly as before. The row is the test,
+//!   not which event went out.
 //! - **The terminal event itself** never gets here: the run loop measures
 //!   it before the row goes terminal (`terminal.rs`) and ends the run on
 //!   this `failed` instead.
+//!
+//! **What becomes of the archive.** A run ended by an oversized
+//! `llm.request` goes terminal holding the conversation that made the
+//! request too large, and its `invocation.archived` carries that state at
+//! about four times its size, so the broker refuses the archive as well.
+//! Nothing here delivers it, and until the change for #981 lands the
+//! archive sweeper cannot either: it meets the row first on every pass
+//! (rows never published come first), fails on it, and ends the pass, so
+//! no row behind it is archived or healed. Nothing an operator does from
+//! the client clears that; the remedy is to raise the broker's
+//! `max_payload` and restart the daemon, which reads the limit at
+//! connect. A run ended at a `tool.result` does not hold the refused text
+//! in its state, so its archive is refused only if the conversation before
+//! it was already large; one ended at `triggered` has no row to archive.
+//! The start that resumes such a run also reports it `invocation.ambiguous`
+//! once, after its `failed`, because startup recovery reports every resume
+//! error that way (#1005); `fq invocation drop` clears that flag.
+//!
+//! **Two resume paths do not come here.** `resume` returns early for a
+//! budget found exceeded on resume and for a provider failure whose
+//! terminal was lost to a crash, both through `emit_failed`, before the
+//! loop runs. Routing them here would grow `resume` past its size budget.
+//! The first `failed` is a short fixed message; the second carries the
+//! provider's error text, and if that alone were over the broker's limit
+//! the refusal would leave the row in flight for every start to resume
+//! into again, as before #828.
 //!
 //! The `failed` always fits. It shares nothing with the event refused:
 //! no history, no output, no state. It is a fixed set of short fields —

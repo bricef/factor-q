@@ -781,13 +781,36 @@ request, a result under a cap set above the broker's `max_payload`, or
 a `triggered` whose trigger payload and system prompt together pass it.
 Nothing is truncated. The run ends with one `failed` of kind
 `payload_too_large`, whose `detail` names the event refused, its size
-and the limit, and the github-watcher does not retry it, since the same
-work would build the same event. The worker's row is marked terminal
-and the workspace reclaimed, so a restart has nothing to resume. Before
-this the refusal left the row in flight, and every restart resumed the
-run into the same refusal and reported it ambiguous until an operator
-dropped it. The run's `invocation.archived` carries the conversation,
-and is often refused as well; see the archive event below.
+on the wire and the limit.
+
+Once the run has started, the worker's row is marked terminal and the
+workspace reclaimed, so a restart has nothing to resume, and the
+github-watcher does not retry the issue, since the same work would
+build the same event. Before this the refusal left the row in flight,
+and every restart resumed the run into the same refusal. A run that
+ends this way on a resume, rather than live, is still reported
+ambiguous once by the start that resumed it, because startup recovery
+reports every error a resume returns that way
+([see #1005](https://github.com/bricef/factor-q/issues/1005)); `fq
+invocation drop` clears the flag.
+
+A refused `triggered` leaves no row and no `triggered` event, so the
+`failed` is the only record, and it names the trigger in its
+`trigger_id` and `trigger_subject` annotations. The dispatcher consumes
+the trigger. The github-watcher binds a run to its issue through
+`triggered`, so it never sees this failure: the issue stays in progress
+until the watcher's reconcile timeout re-queues it, without counting an
+attempt, so this repeats until the trigger, the agent's prompt or the
+broker's limit changes.
+
+A run that ends at a request has its archive refused too:
+`invocation.archived` carries the same conversation at about four
+times its size. Until the archive sweeper changes
+([see #981](https://github.com/bricef/factor-q/issues/981)), that row
+stops every pass of the sweep as the archive event below describes, so
+no row behind it is archived, and nothing from the client clears it.
+Raise the broker's `max_payload` above the archive and restart the
+daemon, which reads the limit when it connects.
 
 The default also sits above `exec`'s own cap of 100 KiB per stream,
 whose note names `max_lines` and `tail_lines`, so ordinary `exec`
