@@ -98,3 +98,6 @@ pub(super) fn remedy(reason: &ArchiveHoldReason) -> String {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests;

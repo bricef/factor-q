@@ -1231,44 +1231,6 @@ mod tests {
         world.assert_kept_whole().await;
     }
 
-    /// The error lines emitted on this thread while a capture is installed.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Captured {
-        /// Install the capture on this thread until the guard drops. A
-        /// `#[tokio::test]` runtime is single-threaded, so every sweep the
-        /// test awaits logs here.
-        fn install(&self) -> tracing::subscriber::DefaultGuard {
-            let writer = self.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::ERROR)
-                .finish();
-            tracing::subscriber::set_default(subscriber)
-        }
-
-        /// The captured lines that name `invocation_id`.
-        fn lines_naming(&self, invocation_id: &str) -> Vec<String> {
-            String::from_utf8_lossy(&self.0.lock().unwrap())
-                .lines()
-                .filter(|line| line.contains(invocation_id))
-                .map(str::to_string)
-                .collect()
-        }
-    }
-
     impl Oversized {
         /// A sweeper over the same store and sink that reads the sink's
         /// limit before each pass, as `with_payload_limit` lets it.
@@ -1331,31 +1293,33 @@ mod tests {
         );
     }
 
-    /// One error line per daemon run, not one per tick, and the held row is
-    /// not serialised again while nothing that could let it fit has
-    /// changed: the daemon's bus reads its limit once, at connect.
+    /// The held row is not serialised again while nothing that could let
+    /// it fit has changed (the daemon's bus reads its limit once, at
+    /// connect), and it stays one hold, recorded once: holding it again for
+    /// the same reason is not news, so it is not logged again. Whether the
+    /// line is written is `ArchiveHolds::hold`'s answer (`holds/tests.rs`);
+    /// the line itself is read off the real daemon's log in
+    /// `fq-daemon/tests/archive_holds.rs`. A thread-local log capture here
+    /// is unreliable: a callsite's interest is cached process-wide, so a
+    /// non-capturing test that reaches the same `error!` first silences it.
     #[tokio::test]
-    async fn a_row_held_for_size_is_reported_once_and_not_offered_again_this_run() {
+    async fn a_row_held_for_size_is_not_offered_again_this_run() {
         let world = Oversized::new().await;
-        let log = Captured::default();
-        let _guard = log.install();
         let mut warned = HashSet::new();
         for _ in 0..3 {
             world.sweeper.sweep_once(&mut warned).await.unwrap();
         }
 
         assert_eq!(world.refusals(), 1, "offered once, then left alone");
-        let lines = log.lines_naming(&world.big);
-        assert_eq!(lines.len(), 1, "one error line: {lines:#?}");
-        for needle in ["invocation_archived", "max_payload", "restart fqd"] {
-            assert!(lines[0].contains(needle), "{needle:?} in {:?}", lines[0]);
-        }
+        let holds = world.sweeper.holds().snapshot();
+        assert_eq!(holds.len(), 1, "still held, once: {holds:?}");
         assert!(
-            lines[0].contains(&format!("limit_bytes={LIMIT}")),
-            "the limit it was refused under: {:?}",
-            lines[0]
+            !world
+                .sweeper
+                .holds()
+                .hold(&world.big, "sweep-agent", holds[0].reason.clone()),
+            "the same hold again is not news"
         );
-        assert_eq!(world.sweeper.holds().snapshot().len(), 1, "still held");
         world.assert_kept_whole().await;
     }
 
@@ -1468,21 +1432,23 @@ mod tests {
 
     /// A stored event this build will not republish is judged afresh on
     /// every pass (it is small, and an operator's release must be seen on
-    /// the next one), and still reported once per run.
+    /// the next one), and stays one hold for one reason, so later passes
+    /// hold it again without news: one error line per run.
     #[tokio::test]
-    async fn a_stored_event_hold_is_reported_once_per_run() {
-        let log = Captured::default();
-        let _guard = log.install();
+    async fn a_stored_event_hold_stays_one_hold_across_passes() {
         let world = Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+        let first = world.sweeper.holds().snapshot();
         for _ in 0..2 {
             world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         }
-        let lines = log.lines_naming(&world.bad);
-        assert_eq!(lines.len(), 1, "one error line: {lines:#?}");
+        let holds = world.sweeper.holds().snapshot();
+        assert_eq!(holds, first, "the same hold, for the same reason");
         assert!(
-            lines[0].contains("stored terminal event cannot be republished"),
-            "the line the guide quotes: {:?}",
-            lines[0]
+            !world
+                .sweeper
+                .holds()
+                .hold(&world.bad, "sweep-agent", holds[0].reason.clone()),
+            "the same hold again is not news"
         );
     }
 
