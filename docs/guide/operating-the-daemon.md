@@ -475,9 +475,11 @@ the broker's limit once,
 when it connects, so a daemon that is already running keeps refusing at
 the old limit. The restart is also what offers the row again: a held row
 is not retried during a run, because the same event would be refused the
-same way, but a new run's sweeper tries every row once. NATS accepts a
-`max_payload` up to 64 MiB; the dogfood broker runs at 16 MiB
-(`ops/dogfood/infra/nats.conf`). A planned change to the archive's
+same way, but a new run's sweeper tries every row once. With its other
+settings at their defaults, `nats-server` will not take a `max_payload`
+above 64 MiB, because the limit may not exceed `max_pending`, which is
+64 MiB by default; going higher means raising that too. The dogfood
+broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A planned change to the archive's
 encoding, the second half of the same issue, makes it about three times
 smaller, so after that upgrade some held rows fit under the limit they
 were held at. There is no release that archives the row without its

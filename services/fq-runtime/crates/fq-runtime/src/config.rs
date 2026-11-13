@@ -289,9 +289,11 @@ pub struct WorkerConfig {
     pub archive_retry_interval_ms: u64,
     /// How long after `terminal_at` (in ms) the sweeper logs a
     /// warning once per pending row. Default 60_000 (60s). The
-    /// sweeper keeps republishing past this point — the warn is
-    /// the operator-visible signal that the control-plane is
-    /// not acknowledging in a reasonable time.
+    /// sweeper keeps republishing a row the control plane has not
+    /// acknowledged past this point — the warn is the
+    /// operator-visible signal that the control plane is not
+    /// acknowledging in a reasonable time. A row the sweeper holds
+    /// instead (`worker::archive_retry`) is not republished at all.
     #[serde(default = "default_archive_warn_after_ms")]
     pub archive_warn_after_ms: i64,
     /// Retry policy for transient LLM API errors (rate limits, transport

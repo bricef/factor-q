@@ -86,13 +86,16 @@ pub(crate) fn register_doctor_report(
         fq_ops::Stability::Experimental,
     )
     .description(
-        "A composite: the four checks are read together, at one instant, by the daemon \
+        "A composite: its checks are read together, at one instant, by the daemon \
          that owns the work being reported on — which is also the cost of asking. This \
          report cannot describe a daemon that is not running, and the absence of an \
          answer is itself the finding rather than a transport failure to retry. \
          The checks that count as *issues* are stale workers, stuck in-flight work, \
-         ambiguous invocations and permanent failures; in-flight work that is merely \
-         running is healthy, and the dead-letter line is informational. `stuck` means an \
+         ambiguous invocations, permanent failures (dead-lettered triggers among them), a \
+         consumer that is missing, unreadable, stuck or halted, an unavailable MCP server, \
+         a stranded trigger claim whose finding is an issue, and a row the archive sweeper \
+         holds; in-flight work that is merely running is healthy, and the throttled-model \
+         and agents-at-cap lines are informational. `stuck` means an \
          in-flight invocation that has crossed no step boundary within `stuck_after_ms`, \
          with no tool or model call open recently enough to explain the silence. That \
          threshold is derived from this daemon's own call deadlines — twice the longest \
