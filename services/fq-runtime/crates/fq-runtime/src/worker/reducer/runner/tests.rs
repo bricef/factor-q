@@ -433,6 +433,21 @@ async fn a_refusal_whose_triggered_is_too_large_ends_on_the_size_refusal() {
             ..
         }) if limit_bytes == limit as u64
     ));
+    // With no `triggered` on the stream, the `failed` names the trigger.
+    // A trigger minted for a direct run has no subject to name.
+    let EventPayload::Triggered(triggered) = &refused[0].payload else {
+        unreachable!("checked above");
+    };
+    let trigger_id = triggered.trigger_id.expect("a minted trigger is named");
+    let annotations = &events[0].annotations.0;
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY),
+        Some(&json!(trigger_id.to_string()))
+    );
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_SUBJECT_KEY),
+        None
+    );
 }
 
 /// A server mid-dial refuses too. `Starting` covers the whole of a

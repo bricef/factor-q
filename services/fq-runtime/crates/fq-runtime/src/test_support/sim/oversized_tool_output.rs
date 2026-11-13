@@ -367,6 +367,11 @@ async fn a_resume_whose_replay_rebuilds_an_oversized_request_ends_the_run_once()
 /// transient, so the dispatcher consumes the trigger rather than
 /// redelivering it into the same refusal until it is dead-lettered as
 /// `trigger_exhausted`.
+///
+/// With no `triggered` on the stream, the `failed` is what says which
+/// trigger the run answered: it carries the trigger's id and subject
+/// under the dead letter's keys, and is not read as a dead letter or a
+/// trigger record for it.
 #[tokio::test]
 async fn a_triggered_too_large_for_the_broker_is_recorded_by_its_failed_alone() {
     let root = tempfile::tempdir().expect("workspace root");
@@ -376,14 +381,21 @@ async fn a_triggered_too_large_for_the_broker_is_recorded_by_its_failed_alone() 
     let llm = FixtureClient::new();
     llm.push_response(end_turn("never asked"));
 
+    let trigger = crate::trigger::Trigger::named(
+        uuid::Uuid::now_v7(),
+        TriggerSource::Subject,
+        Some("fq.trigger.sim-agent".to_string()),
+        json!({ "brief": "b".repeat(4 * limit) }),
+    );
+    let trigger_id = trigger.id;
     let err = world
         .runner
-        .run(
+        .run_signalling(
             &world.agent,
             &llm,
-            TriggerSource::Manual,
-            None,
-            json!({ "brief": "b".repeat(4 * limit) }),
+            trigger,
+            Some(1),
+            crate::worker::DurableStart::noop(),
         )
         .await
         .expect_err("the refusal ends the run");
@@ -407,6 +419,21 @@ async fn a_triggered_too_large_for_the_broker_is_recorded_by_its_failed_alone() 
     let id = refused[0].envelope.invocation_id;
     assert_eq!(events[0].envelope.invocation_id, id);
     assert_eq!(events[0].envelope.parent_event_id, None);
+    let annotations = &events[0].annotations.0;
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY),
+        Some(&json!(trigger_id.to_string())),
+        "the failed names the trigger"
+    );
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_SUBJECT_KEY),
+        Some(&json!("fq.trigger.sim-agent"))
+    );
+    assert!(
+        crate::dead_letter::from_event(&events[0]).is_none()
+            && crate::trigger::from_event(&events[0]).is_none(),
+        "it is not read as a dead letter, nor as a trigger record"
+    );
 
     assert!(
         world

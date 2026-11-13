@@ -17,8 +17,10 @@
 //!
 //! - **Before the first WAL write** (the `triggered` event, on the
 //!   ordinary path or ahead of a refusal for an unavailable MCP server):
-//!   there is no row, so the `failed` is the whole record. The error is
-//!   not transient, so the dispatcher consumes the trigger.
+//!   there is no row, so the `failed` is the whole record, and it names
+//!   the trigger (`trigger_id`, `trigger_subject`), since nothing else on
+//!   the stream would. The error is not transient, so the dispatcher
+//!   consumes the trigger.
 //! - **Mid-run**, live or after a resume's replay (every event from the
 //!   first `llm.request` on, which follows the first WAL write): the
 //!   `failed` is published, then the row is marked terminal and the
@@ -44,19 +46,24 @@
 //! Split from `runner.rs`, as `failure.rs` and `terminal.rs` were, to
 //! keep that file and the frozen `run`/`resume` paths inside their size
 //! budgets. [`ReducerRunner::end_on_refused_publish`] is called where a
-//! run's result is handled: once in `resume`, and in the fresh path once
-//! for the loop (whose result includes a refused `triggered`) and once
-//! for the unavailable-MCP refusal that returns before it.
+//! run's result is handled, once in `resume` and once for the fresh
+//! path's loop; [`ReducerRunner::end_unstarted_on_refusal`] at the fresh
+//! path's two points before its first WAL write, its own `triggered` and
+//! the unavailable-MCP refusal's, where the trigger is in hand.
 
 use std::time::Instant;
 
 use tracing::warn;
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::{ReducerRunner, map_store_err, terminal};
 use crate::agent::{Agent, AgentId};
 use crate::bus::{BusError, EventSink};
+use crate::dead_letter::{DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY};
 use crate::events::{Event, EventKind, FailureDetail, FailureKind, FailurePhase, InvocationTotals};
+use crate::trigger::Trigger;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::{ExecutorError, InvocationOutcome};
 
@@ -233,7 +240,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
         let failed = refused.failed_event(agent_id, invocation_id, totals);
         if row.is_none() {
-            // Nothing durable: no row to mark, nothing to archive.
+            // Nothing durable, so nothing to mark or archive. No path
+            // reaches this today: the fresh path's `triggered` ends in
+            // `end_unstarted_on_refusal`, which also names the trigger.
             self.publish_chained(cursor, failed).await?;
             return Err(refused.failure());
         }
@@ -249,6 +258,41 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                  the terminal row is left for the archive sweeper"
             );
         }
+        Err(refused.failure())
+    }
+
+    /// The same, for a refusal before the first WAL write: the fresh
+    /// path's `triggered`, on its own or ahead of a refusal for an
+    /// unavailable MCP server. There is no row, so the `failed` is the
+    /// whole record, and with no `triggered` on the stream nothing else
+    /// would say which trigger this run answered. The `failed` names it
+    /// with the dead letter's keys, `trigger_id` and `trigger_subject`;
+    /// both readers of those keys (`dead_letter::from_event` and
+    /// `trigger::from_event`) take only a `trigger_exhausted` failure, so
+    /// this one is never mistaken for a dead letter. The payload is not
+    /// copied: it may be what made `triggered` too large.
+    pub(super) async fn end_unstarted_on_refusal(
+        &self,
+        outcome: Result<InvocationOutcome, ExecutorError>,
+        agent: &Agent,
+        trigger: &Trigger,
+        invocation_id: Uuid,
+        start: Instant,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        let Some(refused) = Refused::of(&outcome) else {
+            return outcome;
+        };
+        let totals = InvocationTotals {
+            total_duration_ms: start.elapsed().as_millis() as u64,
+            ..InvocationTotals::default()
+        };
+        let mut failed = refused
+            .failed_event(agent.id(), invocation_id, totals)
+            .annotate(DEAD_LETTER_TRIGGER_ID_KEY, json!(trigger.id.to_string()));
+        if let Some(subject) = &trigger.subject {
+            failed = failed.annotate(DEAD_LETTER_SUBJECT_KEY, json!(subject));
+        }
+        self.publish_chained(&mut None, failed).await?;
         Err(refused.failure())
     }
 }

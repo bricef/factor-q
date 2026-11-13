@@ -425,7 +425,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 .refuse_for_unavailable_mcp(agent, invocation_id, &trigger, why, totals)
                 .await;
             return self
-                .end_on_refused_publish(refused, agent, invocation_id, totals, start, &mut cursor)
+                .end_unstarted_on_refusal(refused, agent, &trigger, invocation_id, start)
                 .await;
         }
 
@@ -543,7 +543,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // clock sequence.
 
         let outcome = match published {
-            Err(err) => Err(err),
+            Err(err) => {
+                self.end_unstarted_on_refusal(Err(err), agent, &trigger, invocation_id, start)
+                    .await
+            }
             Ok(()) => {
                 self.run_loop_inner(
                     agent,
