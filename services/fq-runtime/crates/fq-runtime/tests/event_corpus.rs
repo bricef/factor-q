@@ -685,8 +685,10 @@ async fn every_current_event_type_has_a_file_that_projects() {
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
             committed,
-            "{path:?} no longer round-trips through the current serialisers; a deliberate \
-             shape change needs a schema version bump, and then UPDATE_CORPUS=1"
+            "{path:?} no longer round-trips through the current serialisers. A deliberate \
+             shape change takes one of two routes: a schema version bump, when events \
+             already written stop reading; or, when every event already written still reads, \
+             the committed file moved as it is to v3/superseded/. Then UPDATE_CORPUS=1"
         );
         assert_eq!(event.envelope.schema_version, SCHEMA_VERSION);
         assert_eq!(
