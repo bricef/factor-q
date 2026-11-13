@@ -128,7 +128,7 @@ directory = "agents"
 # stale_worker_retention_days = 7
 #
 # How long a trigger claim is kept, in days from when it was claimed.
-# Default 30. The dispatcher claims every trigger delivery before it
+# Default 90. The dispatcher claims every trigger delivery before it
 # runs anything, and a claim marked started is what stops a redelivered
 # or replayed copy of that trigger from starting the run twice — so it
 # has to outlive the trigger stream's messages (kept for a day). The
@@ -137,7 +137,7 @@ directory = "agents"
 # `trigger:` line of `fq invocation show`); a lower number loses that
 # link for older runs sooner, and nothing else. A claim this daemon is
 # still holding is never deleted. Set to `-1` to keep claims for ever.
-# trigger_claim_retention_days = 30
+# trigger_claim_retention_days = 90
 #
 # How often the retention sweep runs, in seconds. Default 1 hour,
 # shared by every window above. Production doesn't need faster: the

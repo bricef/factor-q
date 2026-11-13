@@ -1064,7 +1064,7 @@ fn with_stranded_horizon(
 }
 
 fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorReport {
-    with_stranded_horizon(claims, Some(30 * 86_400_000))
+    with_stranded_horizon(claims, Some(90 * 86_400_000))
 }
 
 /// The trigger-claim block (#954), whole: one line per stranded claim
@@ -1111,13 +1111,13 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
   -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
   fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000002
   -> this delivery never started a run and will not be redelivered: it has not been redelivered within 19m30s of this daemon starting, so its last delivery was most likely dead-lettered (`fq dead-letters list`)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 3 (an earlier incarnation of the stream, created 2025-12-29T09:20:00Z): claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000003
   -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000004
   -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
   -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
   fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006

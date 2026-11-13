@@ -270,6 +270,53 @@ async fn minus_one_sweeps_no_claim() {
     }
 }
 
+/// With every `[state]` default, as a daemon with no `[state]` section
+/// sweeps, a claim more than a month old is kept, started or left by an
+/// exited process: the default keeps the link from a run to its trigger
+/// for ninety days, three times the archive's thirty. Past ninety days the
+/// claim goes, so the default is a window and not a keep-for-ever.
+#[tokio::test]
+async fn at_defaults_a_claim_is_kept_past_thirty_days_and_swept_past_ninety() {
+    let (store, _dir) = fresh_store().await;
+    let hour = 3_600_000;
+    let month_started = Seed::started(1, 31 * MS_PER_DAY);
+    let month_abandoned = Seed::claimed(2, EXITED, 31 * MS_PER_DAY);
+    let quarter_started = Seed::started(3, 90 * MS_PER_DAY - hour);
+    let quarter_abandoned = Seed::claimed(4, EXITED, 90 * MS_PER_DAY - hour);
+    let past_started = Seed::started(5, 90 * MS_PER_DAY + hour);
+    let past_abandoned = Seed::claimed(6, EXITED, 90 * MS_PER_DAY + hour);
+    let kept = [
+        &month_started,
+        &month_abandoned,
+        &quarter_started,
+        &quarter_abandoned,
+    ];
+    let swept = [&past_started, &past_abandoned];
+    seed_all(&store, &kept).await;
+    seed_all(&store, &swept).await;
+
+    RetentionSweeper::new(store.clone(), &StateConfig::default())
+        .with_claimant(THIS_DAEMON)
+        .sweep_now()
+        .await
+        .unwrap();
+
+    for seed in kept {
+        assert!(
+            seed.kept(&store).await,
+            "seq {}: inside the default window",
+            seed.seq
+        );
+    }
+    for seed in swept {
+        assert!(
+            !seed.kept(&store).await,
+            "seq {}: past the default window",
+            seed.seq
+        );
+    }
+}
+
 /// A sweeper that has not been told its daemon's claimant cannot tell a
 /// live `claimed` row from an abandoned one, so it deletes none — and
 /// still sweeps started rows, which are never live.
