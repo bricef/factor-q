@@ -1299,7 +1299,8 @@ retry ladder (19m30s today), counted from when this daemon started. The
 **horizon** is `[state] trigger_claim_retention_days`, the age at which
 the retention sweep deletes a claim an exited process left. There is
 none when that setting is negative: claim rows are then kept
-indefinitely, and the report says so where it would name the horizon.
+indefinitely, and a never-started claim's line says so where it would
+name the horizon.
 
 - **Not started, awaiting redelivery** (not an issue). A process that has
   exited claimed a deliverable message, nothing records a run, and this
@@ -1387,10 +1388,11 @@ may be a trigger it is still holding behind a paused model or a full
 agent. Age is counted from when the delivery was claimed (or adopted).
 
 **The floor is the stream's message age plus a day, two days today, and
-a smaller value is refused at startup.** The trigger stream keeps a
-message for a day after it was published, whether or not it has been
-acked: a trigger held for ten hours and then acked stays fourteen
-hours more. So a durable consumer that is deleted and recreated, or
+a non-negative value below it is refused at startup.** A negative value
+is not a window at all: it keeps every claim, as described below. The
+trigger stream keeps a message for a day after it was published,
+whether or not it has been acked: a trigger held for ten hours and then
+acked stays fourteen hours more. So a durable consumer that is deleted and recreated, or
 whose state is lost in a broker restore, replays the triggers published
 in the last day, and the started claims are what keep those from
 running twice. A claim is never older than its message, so a claim
@@ -1411,12 +1413,25 @@ window runs from when the delivery was claimed, the archive's from when
 the finished run was archived. The difference is the run's length plus
 the archive's lag, so a run that sat parked for three days reads
 `trigger: none recorded` for the last three days of its archived life.
-A higher number keeps the link longer at the cost of a larger table;
-the claim table has no index yet
+A higher number keeps the link longer, at two costs. The table is
+larger, and it has no index yet
 ([#989](https://github.com/bricef/factor-q/issues/989)), so the reads
-that look a claim up by its run scan the rows the window keeps. Raising
-the number keeps rows from then on; it does not bring back a claim a
-shorter window has already deleted.
+that look a claim up by its run scan the rows the window keeps. And a
+claim that never started a run (a delivery that died with a daemon)
+stays on the `fq doctor` report for longer: its line, and the non-zero
+exit of `fq doctor --fail-on-issues`, last until the claim is as old as
+the window, 90 days at the default where it was 30 before
+[#1014](https://github.com/bricef/factor-q/issues/1014). No command
+clears such a claim sooner. Requeuing its dead letter or publishing the
+work again runs it under a new claim and leaves this one where it is,
+and no verb deletes a claim row: only the sweep does. What an operator
+can do is lower the window, to no less than the floor, and restart the
+daemon, which reads the window only when it starts (`fq reload` does
+not). The report stops listing such claims older than the new window as
+soon as the daemon is up, and its first sweep, one interval later,
+deletes them, taking with them the trigger link of every run whose claim
+is older than the new window. Raising the number keeps rows from then on;
+it does not bring back a claim a shorter window has already deleted.
 
 **Keeping claims indefinitely.** Set the window to `-1` (any negative
 value does the same) and the sweep never deletes a claim row. The link
@@ -1426,11 +1441,15 @@ run, without bound: the reads that look a claim up by its run slow down
 as it grows, since the table has no index yet. The floor does not come
 into it, because nothing is deleted.
 
-`fq doctor` has no horizon then, and says so. Its never-started line
-says `this line stays while the claim row exists, and claim rows are
-kept indefinitely`, and in `--json` the block's `horizon_ms` is `null`.
-Since the row is never swept, that line never leaves the report:
-`fq doctor --fail-on-issues` stays non-zero, and no command clears it.
+`fq doctor` has no horizon then. It says so on the line of a claim that
+never started a run, which reads `this line stays while the claim row
+exists, and claim rows are kept indefinitely`. With no such claim the
+report says nothing about retention: on a healthy table it prints
+`Stranded trigger claims: none`. `fq doctor --json` always carries the
+block's `horizon_ms`, as `null`. Since the row is never swept, a
+never-started line never leaves the report: `fq doctor --fail-on-issues`
+stays non-zero until the window is set to a number again and the daemon
+restarted, as above.
 
 **The first sweep after an upgrade.** One sweep interval after a daemon
 that has this window starts (an hour by default), its first sweep
