@@ -83,8 +83,8 @@ invocation to its issue via the `triggered` event's payload, and reacts:
 - **failed, transient** (e.g. `llm_error`) → `in-progress` → `ready`, up to
   `--max-retries` times — a **bounded** auto-retry, not infinite;
 - **failed, terminal** (`budget_exceeded`, `max_iterations`,
-  `sandbox_violation`) or retries exhausted → `in-progress` → `failed` for
-  operator attention.
+  `sandbox_violation`, `payload_too_large`) or retries exhausted →
+  `in-progress` → `failed` for operator attention.
 
 Every poll also reconciles all pre-existing `in-progress` issues from durable ground truth. An open closing PR moves the issue to `in-review`; otherwise retained `fq-events` lifecycle events drive the same completed/failed retry policy. A run with neither fact stays in flight for `--reconcile-after`, then is re-queued without exceeding the historical trigger budget. This makes restarts recoverable without changing the deliberately ephemeral live subscription. Durable consumption and deploy ordering are therefore unnecessary and are not part of this change.
 
