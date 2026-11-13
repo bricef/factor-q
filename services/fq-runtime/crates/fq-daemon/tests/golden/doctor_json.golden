@@ -168,5 +168,8 @@
       }
     ]
   },
-  "archive_holds": []
+  "archive_sweep": {
+    "last_pass_at_ms": null,
+    "holds": []
+  }
 }

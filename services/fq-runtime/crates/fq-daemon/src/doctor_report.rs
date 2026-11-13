@@ -115,13 +115,15 @@ pub(crate) fn register_doctor_report(
          tells that apart from one that will never start. Nor is a claim whose message is \
          gone after its run started, or one an exited process left that is older than the \
          retention window. \
-         `archive_holds` lists every finished invocation's row the worker's archive sweeper \
-         is holding rather than archiving, and each is an issue: an event the row has to \
-         publish is larger than the broker accepts, its stored terminal event must not be \
-         republished, or its ids cannot go on an event, and none lifts on its own. Each \
-         carries the reason and the remedy. \
-         The list is the daemon's memory of this run's sweeps: a row held by an earlier run \
-         is offered again at start and listed again once it is held again.",
+         `archive_sweep.holds` lists every finished invocation's row the worker's archive \
+         sweeper is holding rather than archiving, and each is an issue: an event the row \
+         has to publish is larger than the broker accepts, its stored terminal event must \
+         not be republished, or its ids cannot go on an event, and none lifts on its own. \
+         Each carries the reason and the remedy. The list is the daemon's memory of this \
+         run's sweeps: a row held by an earlier run is offered again at start and listed \
+         again once it is held again. Until the sweeper has finished its first pass of this \
+         start, `archive_sweep.last_pass_at_ms` is absent and the holds are not yet known; \
+         that is not an issue, since it is the absence of a finding, not a finding.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
@@ -210,7 +212,7 @@ pub(crate) fn register_doctor_report(
                 // no store fold carries.
                 .with_trigger_claims(trigger_claims)
                 // The archive sweeper's live state, like the throttle's.
-                .with_archive_holds(archive_holds.snapshot()))
+                .with_archive_sweep(archive_holds.report()))
             }
         })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;

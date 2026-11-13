@@ -441,10 +441,16 @@ Archive holds: 1 — finished runs the archive sweeper will not archive until an
   -> raise the broker's max_payload above 1252461 bytes, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
 ```
 
-The list is the daemon's memory of its own sweeps. A row held by an
-earlier run is offered again when the daemon starts, and appears in the
-list again once the sweeper has held it again, within one
-`archive_retry_interval_ms` (10 s by default).
+The list is the daemon's memory of its own sweeps, so it is not known
+until the sweeper has finished its first pass after a start, one
+`archive_retry_interval_ms` (10 s by default) after it. Until then both
+verbs say `Archive holds: not yet known` rather than none, and in
+`--json` the `archive_sweep` block has no `last_pass_at_ms`. `fq doctor`
+does not count not yet known as an issue, so a `fq doctor
+--fail-on-issues` straight after a restart passes before any hold can
+have been found; wait one interval if the gate is meant to catch them. A
+row held by an earlier run is offered again when the daemon starts, and
+is listed again once that first pass has held it again.
 
 **An event too large for the broker.** The broker refuses any message
 larger than its `max_payload`, 1 MiB on a stock NATS server, and the

@@ -911,10 +911,59 @@ fn archive_holds() -> Vec<fq_ops::health::ArchiveHold> {
     ]
 }
 
+/// The sweeper's state as a daemon reports it after a pass.
+fn swept(holds: Vec<fq_ops::health::ArchiveHold>) -> fq_ops::health::ArchiveSweep {
+    fq_ops::health::ArchiveSweep {
+        last_pass_at_ms: Some(1_700_000_000_000),
+        holds,
+    }
+}
+
+/// Before the sweeper's first pass this start the holds are not known, and
+/// the block says so instead of "none", which would be a finding the daemon
+/// has not made. Unknown is not an issue either: every start goes through
+/// it, and `--fail-on-issues` must not fail on a daemon that just started.
+#[test]
+fn archive_holds_before_the_first_pass_are_not_yet_known_and_not_an_issue() {
+    let fresh = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(!fresh.archive_sweep.has_swept(), "not swept until attached");
+    assert!(!fresh.has_issues(), "unknown is not a finding");
+    let out = render_doctor_report_human(&fresh);
+    assert!(out.contains("Verdict: All clear."), "got:\n{out}");
+    assert!(
+        out.contains(
+            "Archive holds: not yet known — the archive sweeper has not finished a pass since \
+             this daemon started (its first comes one `[worker] archive_retry_interval_ms` \
+             after start)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("Archive holds: none"), "got:\n{out}");
+
+    // A hold found by a first pass the bus then ended is listed, and is an
+    // issue, with a note that the list may be short.
+    let partial = fresh.with_archive_sweep(fq_ops::health::ArchiveSweep {
+        last_pass_at_ms: None,
+        holds: archive_holds(),
+    });
+    assert!(partial.has_issues());
+    let out = render_doctor_report_human(&partial);
+    assert!(out.contains("Archive holds: 2 — "), "got:\n{out}");
+    assert!(out.contains(", so there may be more)\n"), "got:\n{out}");
+}
+
 /// A held row is an issue, unlike a throttled model: nothing lifts it but
 /// an operator. Each is named with its agent, its reason and the remedy
-/// the daemon reported, and an empty list says "none" so the block is
-/// always on the page.
+/// the daemon reported, and a swept daemon holding nothing says "none" so
+/// the block is always on the page.
 #[test]
 fn archive_holds_are_listed_with_their_remedies_and_are_an_issue() {
     let quiet = build_doctor_report(
@@ -925,12 +974,13 @@ fn archive_holds_are_listed_with_their_remedies_and_are_an_issue() {
         &[],
         Vec::new(),
         Vec::new(),
-    );
+    )
+    .with_archive_sweep(swept(Vec::new()));
     assert!(!quiet.has_issues());
     let out = render_doctor_report_human(&quiet);
     assert!(out.contains("Archive holds: none\n"), "got:\n{out}");
 
-    let report = quiet.with_archive_holds(archive_holds());
+    let report = quiet.with_archive_sweep(swept(archive_holds()));
     assert!(report.has_issues(), "a held row waits on an operator");
     let out = render_doctor_report_human(&report);
     assert!(out.contains("Verdict: issues found"), "got:\n{out}");

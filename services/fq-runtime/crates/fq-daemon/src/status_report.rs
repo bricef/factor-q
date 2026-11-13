@@ -106,9 +106,12 @@ pub(crate) fn register_status_report(
          back — paused after a 429, running under its in-flight ceiling, or rate-limited \
          in the current window — read off the live throttle at the instant of the call. \
          An empty list means no provider has said no recently. \
-         `archive_holds` is every finished invocation's row the worker's archive sweeper \
-         is holding rather than archiving, with the reason and what lifts the hold; as \
-         with stale workers, judging them is `control.doctor`'s call.",
+         `archive_sweep.holds` is every finished invocation's row the worker's archive \
+         sweeper is holding rather than archiving, with the reason and what lifts the \
+         hold; as with stale workers, judging them is `control.doctor`'s call. \
+         `archive_sweep.last_pass_at_ms` is when the sweeper last finished a pass, and is \
+         absent until its first of this start: until then the holds are not yet known, \
+         and an empty list does not mean none.",
     );
     registry
         .report::<StatusParams, StatusReport, _, _>(decl, move |_params: StatusParams| {
@@ -174,7 +177,7 @@ pub(crate) fn register_status_report(
                     recovery,
                     mcp_servers: fq_runtime::health::mcp_server_health(&mcp_servers),
                     throttled_models: throttle.snapshot(now_ms),
-                    archive_holds: archive_holds.snapshot(),
+                    archive_sweep: archive_holds.report(),
                 })
             }
         })

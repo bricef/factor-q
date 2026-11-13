@@ -39,7 +39,7 @@ pub(crate) fn status_report() -> StatusReport {
             waves: 1,
         }],
         // The health page does not render the archive sweeper's holds.
-        archive_holds: Vec::new(),
+        archive_sweep: Default::default(),
         version: "0.1.0+abc123def456".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
@@ -143,7 +143,7 @@ pub(crate) fn doctor_report() -> DoctorReport {
         throttled_models: Vec::new(),
         agents_at_cap: Vec::new(),
         trigger_claims: Default::default(),
-        archive_holds: Vec::new(),
+        archive_sweep: Default::default(),
         workers: DoctorWorkers {
             alive: 1,
             stale: 2,
