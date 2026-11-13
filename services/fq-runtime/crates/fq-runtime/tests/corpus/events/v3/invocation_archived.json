@@ -14,10 +14,7 @@
     "payload": {
       "worker_id": "corpus-worker",
       "final_phase": "completed",
-      "final_state_blob": [
-        123,
-        125
-      ],
+      "final_state_blob": "e30=",
       "started_at_ms": 1788000000000,
       "terminal_at_ms": 1788000004200
     }
