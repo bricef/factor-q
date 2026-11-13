@@ -368,10 +368,10 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
     // Worker recovery: scan in-flight invocations from the worker store,
     // classify each, restore ownership for auto-resumed cases, and emit
     // `invocation.ambiguous` events for cases that cannot be recovered.
-    // It also marks each in-flight invocation's trigger claim started, and
-    // `claims`, which the dispatcher cannot arbitrate without, is what that
-    // marking returns (#959). `in_flight_ids` is the keep set the startup
-    // workspace prune reads.
+    // It also marks started the claim of every trigger whose run is on
+    // record, in flight or finished (#959, #967), and `claims`, which the
+    // dispatcher cannot arbitrate without, is what that marking returns.
+    // `in_flight_ids` is the keep set the startup workspace prune reads.
     let crate::recovery::Recovered {
         recoverable,
         in_flight_ids,

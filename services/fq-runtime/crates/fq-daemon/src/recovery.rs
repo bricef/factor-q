@@ -1,7 +1,8 @@
 //! The daemon's startup recovery: reconciling worker rows against operator
 //! terminal decisions, classifying what was in flight when the last process
-//! stopped, recording on each one's trigger claim that it durably started,
-//! restoring coordination ownership, and re-driving the safe cases.
+//! stopped, recording on the trigger claim of every run with a start on
+//! record that it durably started, restoring coordination ownership, and
+//! re-driving the safe cases.
 //!
 //! Split out of `run_daemon` (#189) as three straight lifts, called at exactly
 //! the points they used to occupy — the order is load-bearing. Reconciliation
@@ -10,11 +11,12 @@
 //! that drives them exists, and queued for a worker permit before the
 //! dispatcher is constructed, which puts every one of them ahead of every
 //! trigger (#994). The claim marks must land before the trigger
-//! dispatcher consumes anything (#959), or it could meet the redelivery of a
-//! trigger whose invocation is in flight while its claim still read
-//! `claimed`, and start the trigger a second time. That order is held by
-//! type rather than by call order: the [`TriggerClaims`] a dispatcher needs
-//! to arbitrate exist only as what the recording returns.
+//! dispatcher consumes anything (#959, #967), or it could meet the
+//! redelivery or replay of a trigger whose run is in flight or finished
+//! while its claim still read `claimed`, and start the trigger a second
+//! time. That order is held by type rather than by call order: the
+//! [`TriggerClaims`] a dispatcher needs to arbitrate exist only as what the
+//! recording returns.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -131,16 +133,17 @@ pub(crate) struct Recovered {
     /// continues from its workspace and triage may need to inspect it.
     pub in_flight_ids: HashSet<String>,
     /// The trigger claims the dispatcher arbitrates on. They exist only as
-    /// the result of recording every in-flight invocation's durable start
-    /// on its claim, so no dispatcher can arbitrate before that (#959).
+    /// the result of recording on its claim the durable start of every run
+    /// with a start on record, in flight or finished, so no dispatcher can
+    /// arbitrate before that (#959, #967).
     pub claims: TriggerClaims,
 }
 
 /// Classify what was in flight when the last process stopped, publish the
 /// `system.recovery` roll-up, surface the cases that cannot be recovered as
-/// `invocation.ambiguous`, report every in-flight invocation to the control
-/// plane as durably started, and restore coordination ownership for the
-/// ones that can be recovered.
+/// `invocation.ambiguous`, report every run the worker's WAL holds to the
+/// control plane as durably started, and restore coordination ownership for
+/// the ones that can be recovered.
 pub(crate) async fn classify_in_flight(
     worker_store: &Arc<WorkerStore>,
     cp_store: &Arc<ControlPlaneStore>,
@@ -245,23 +248,28 @@ pub(crate) async fn classify_in_flight(
         .map(|c| c.state.invocation_id.clone())
         .collect();
 
-    // Every in-flight invocation made its first WAL write, so its trigger
-    // has durably started, whether or not the process that ran it lived to
-    // record that on the trigger's claim. The worker reports its in-flight
-    // set and the control plane records it on the claims, so the redelivery
-    // of such a still-unacked trigger is dropped rather than started a
-    // second time (#959). Ambiguous invocations count: an operator decides
-    // their fate, not a redelivery. In this process the report is not a
-    // message but a direct write into the control-plane store, and it must
-    // land before the dispatcher consumes a trigger: the claims the
+    // Every run the worker's WAL holds made its first WAL write, in flight
+    // or finished and not yet archived, so its trigger has durably started,
+    // whether or not the process that ran it recorded that on the trigger's
+    // claim; so has every run the control plane holds an ownership row for
+    // once the WAL has let it go. The worker reports what its WAL holds and
+    // the control plane marks each such claim still `claimed`, so a
+    // redelivery or a replay of its trigger is dropped rather than adopted
+    // and started a second time (#959 for a run in flight, #967 for one that
+    // finished). Ambiguous invocations count: an operator decides their
+    // fate, not a redelivery. The WAL is read first: a run archived after
+    // that read has its ownership row written before its WAL row goes, so
+    // the control plane's read finds it. In this process the report is not
+    // a message but a direct write into the control-plane store, and it
+    // must land before the dispatcher consumes a trigger: the claims the
     // dispatcher needs are what the recording returns, and an error here
     // stops the boot.
-    let in_flight = fq_runtime::worker::InFlightReport::scan(worker_store.as_ref())
+    let starts = fq_runtime::worker::DurableStartReport::scan(worker_store.as_ref())
         .await
-        .context("failed to read the in-flight invocations to report")?;
-    let claims = TriggerClaims::recover(cp_store.clone(), &in_flight)
+        .context("failed to read the runs the worker's WAL holds, to report")?;
+    let claims = TriggerClaims::recover(cp_store.clone(), &starts)
         .await
-        .context("failed to record a recovered invocation's durable start on its claim")?;
+        .context("failed to record a recovered run's durable start on its claim")?;
 
     // Restore the coordination rows before spawning resumes. A row can be
     // absent after a daemon crash, but the list/dashboard projection keys on

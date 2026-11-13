@@ -66,6 +66,17 @@ pub struct TriggerClaimRow {
     pub claimed_at: i64,
 }
 
+impl TriggerClaimRow {
+    /// The row's key in the claim table.
+    pub fn key(&self) -> TriggerKey<'_> {
+        TriggerKey {
+            stream: &self.stream,
+            stream_epoch: self.stream_epoch,
+            stream_seq: self.stream_seq,
+        }
+    }
+}
+
 /// A `claimed` row, with the coordination status of the invocation it
 /// names when the control plane records one. An ownership row is written
 /// when an invocation is archived, found ambiguous or dropped, and is
@@ -94,11 +105,11 @@ impl ControlPlaneStore {
     ///
     /// The row names `invocation_id`, the id the claimant will start the
     /// invocation under, from the moment it is written rather than from
-    /// the durable start. That is what lets startup recovery find this row
-    /// from an in-flight WAL row and mark it started, through
-    /// [`Self::mark_trigger_started_by_invocation`], when the process that
-    /// made the WAL write died before marking it (#959). A losing claim's
-    /// id is never written.
+    /// the durable start. That is what lets startup recovery match this row
+    /// to its run's WAL row or ownership row and mark it started, through
+    /// [`Self::mark_unsettled_trigger_started`], when the process that
+    /// started the run did not mark it (#959, #967). A losing claim's id is
+    /// never written.
     pub async fn claim_trigger(
         &self,
         key: TriggerKey<'_>,
@@ -192,31 +203,39 @@ impl ControlPlaneStore {
         Ok(())
     }
 
-    /// Record that the invocation a `claimed` row names has durably
-    /// started, finding the row by that invocation's id rather than by the
-    /// trigger's key.
+    /// Record that the run a `claimed` row names has durably started, if
+    /// the row is still `claimed` and still names `invocation_id`. Returns
+    /// whether the row changed.
     ///
-    /// Startup recovery calls this for every invocation it finds in flight,
+    /// Startup recovery calls this for each row of
+    /// [`Self::unsettled_trigger_claims`] whose run has a start on record,
     /// through `TriggerClaims::recover`, whose result is what a dispatcher
-    /// needs before it can arbitrate at all: an in-flight WAL row is proof
-    /// of a durable start whose claim update a crash may have prevented, and
-    /// a redelivered trigger that meets the marked row is dropped instead of
-    /// started a second time (#959). Returns whether a row changed. An
-    /// invocation no claim names (a direct run) changes nothing, and neither
-    /// does a row already `durably_started`.
-    pub async fn mark_trigger_started_by_invocation(
+    /// needs before it can arbitrate at all: a redelivered or replayed
+    /// trigger that meets the marked row is dropped instead of started a
+    /// second time (#959, #967). The row is found by its key, so each mark
+    /// is one primary-key write; finding it by the invocation id instead
+    /// would read the whole table, which has no index on that column
+    /// (#989). The id in the condition leaves alone a row that changed
+    /// after it was read: adopted under another id, released, or marked
+    /// already.
+    pub async fn mark_unsettled_trigger_started(
         &self,
+        key: TriggerKey<'_>,
         invocation_id: &str,
     ) -> Result<bool, ControlPlaneStoreError> {
         Ok(sqlx::query(
             "UPDATE trigger_claim SET state = 'durably_started' \
-             WHERE invocation_id = ? AND state = 'claimed'",
+             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? \
+             AND state = 'claimed' AND invocation_id = ?",
         )
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
         .bind(invocation_id)
         .execute(&self.pool)
         .await?
         .rows_affected()
-            > 0)
+            == 1)
     }
 
     /// Release only unfinished claims; durable-start rows are the dedupe record.
@@ -375,6 +394,11 @@ impl ControlPlaneStore {
     /// triggers some process has in hand, plus any left behind, so the
     /// answer stays small while the table grows by one `durably_started`
     /// row per trigger.
+    ///
+    /// `fq doctor`'s stranded-claim check reads the claims it judges
+    /// through this, and so does startup recovery (`TriggerClaims::recover`)
+    /// for the ones it marks, so the two see the same rows and the same
+    /// ownership rows.
     pub async fn unsettled_trigger_claims(
         &self,
     ) -> Result<Vec<UnsettledTriggerClaim>, ControlPlaneStoreError> {
