@@ -1022,11 +1022,12 @@ a trigger waiting in an admission hold, which is something else.)
   never settle that claim
   ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
   task panicked before its first durable write, giving the claim back
-  failed before a retry, or recording the run's start failed, which
-  stops the run for the next start's recovery to resume. Every delivery
-  of that trigger is then dropped the same way until its deliveries run
-  out and it is dead-lettered as `trigger_exhausted`. Nothing on the
-  claim tells these apart, so neither does the count.
+  failed before a retry, or recording the run's start was refused on
+  every attempt and the ack the daemon sent in its place was lost (the
+  run itself carries on; see "Started, never marked" below). Every
+  delivery of that trigger is then dropped the same way until its
+  deliveries run out and it is dead-lettered as `trigger_exhausted`.
+  Nothing on the claim tells these apart, so neither does the count.
 
 The two warn lines are `dropping duplicate trigger delivery after
 durable start` and `dropping a redelivered trigger whose claim this
@@ -1182,18 +1183,27 @@ the retention sweep deletes a claim an exited process left.
   retention sweep deletes the row on its next tick after that.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
-  still be redelivered. If this daemon holds the claim, every redelivery
-  is dropped (and counted as a duplicate dropped before a start was
-  recorded) and the trigger ends as a `trigger_exhausted` dead letter
-  although its run started: that dead letter is false, and requeuing it
-  starts the work twice. If an exited process left it, a redelivery would
-  be adopted and start the work again, and a false dead letter may
-  already exist. Neither happens when the mark failed after the run had
-  already returned: the dispatcher acked that delivery anyway, so no
-  redelivery comes, though the report cannot tell that case from the
-  others ([#967](https://github.com/bricef/factor-q/issues/967)). There
-  is nothing to repair from the CLI: read the run with
-  `fq invocation show`, and do not requeue its dead letter.
+  still be redelivered. The usual cause is the claim store refusing to
+  record the run's start. The dispatcher tries again for a second or
+  two, and when every attempt is refused it acks the delivery without
+  releasing the claim and lets the run continue, logging `could not mark
+  trigger durably started` at error with the invocation and the trigger
+  ([#967](https://github.com/bricef/factor-q/issues/967)). With that
+  ack delivered, no redelivery comes and the row is only stale: the
+  report lists it until its message is older than the stream keeps
+  messages (a day), and the retention sweep deletes it once the daemon
+  that holds it has exited and it is older than the horizon. If the ack
+  was lost, the delivery comes back. If this daemon holds the claim,
+  every redelivery is dropped (and counted as a duplicate dropped before
+  a start was recorded) and the trigger ends as a `trigger_exhausted`
+  dead letter although its run started: that dead letter is false, and
+  requeuing it starts the work twice. If an exited process left it, a
+  redelivery would be adopted and start the work again, and a false dead
+  letter may already exist. The report cannot tell an acked delivery
+  from a lost ack, because it judges a message deliverable by its age and
+  stream incarnation, not by the consumer's ack state. There is nothing
+  to repair from the CLI: read the run with `fq invocation show`, and do
+  not requeue its dead letter.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
   cannot look for a run.
