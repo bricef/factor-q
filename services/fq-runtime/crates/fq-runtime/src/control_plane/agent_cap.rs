@@ -37,10 +37,18 @@
 //! run by id, and holding it at the cap would need a priority rule among
 //! the waiters, because a cap hold is a race between them, not a queue.
 //! `fq invocation resume` says so when it accepts, and the operator guide
-//! says what to do about it. So the property that holds unconditionally
-//! is `in_flight(agent) ≤ max(cap, invocations recovered at start) +
-//! operator resumes in flight`, and `control_plane::agent_cap::proptests`
-//! is that sentence as a test.
+//! says what to do about it. Such a resume still counts against the cap:
+//! while it is in flight the agent's triggers are held behind it.
+//!
+//! So, for a cap that does not change, what holds is
+//! `in_flight(agent) ≤ max(cap, invocations recovered at start) +
+//! operator resumes in flight`, and a trigger is admitted exactly when
+//! fewer than `cap` of the agent's invocations are in flight, however
+//! they came in. `control_plane::agent_cap::proptests` is those two
+//! sentences as a test. A cap that changes is the other way past it: a
+//! `fq reload` that lowers an agent's cap leaves the invocations already
+//! admitted under the old one running, over the new cap until enough of
+//! them end. Nothing is stopped to make room.
 //!
 //! # Why a count here and not a query of the WAL
 //!
@@ -144,8 +152,10 @@ impl AgentConcurrency {
 
     /// Count an invocation this process did not admit — a resume of
     /// work that was in flight before this daemon (or this operator
-    /// command) reached it. Never refused, and the **only** way the
-    /// count can exceed a cap.
+    /// command) reached it. Never refused, and, for a cap that does not
+    /// change, the **only** way the count can exceed it. (A `fq reload`
+    /// that lowers a cap leaves the invocations already admitted over the
+    /// new one; see the module doc.)
     ///
     /// Its two callers are startup recovery (`recovery::spawn_resume
     /// _tasks`) and `fq invocation resume`. Both are finishing an
