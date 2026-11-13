@@ -109,6 +109,64 @@ async fn publish_and_subscribe_round_trip() {
     assert_eq!(received.envelope.agent_id.as_str(), agent_id);
 }
 
+/// The broker's limit is on what crosses the wire: the event's JSON and
+/// the `Nats-Msg-Id` header the bus adds to it, which async-nats and the
+/// server both count (#828). A guard that measured the JSON alone let an
+/// event within the header's size of the limit through, to be refused by
+/// the client as a generic, transient publish error: the run it belonged
+/// to was left in flight to be resumed into the same refusal on every
+/// start.
+///
+/// Against a private broker: an event whose JSON is exactly the limit,
+/// one a few bytes under it, and one a single byte too large once the
+/// header is counted are all refused as too large, naming their size on
+/// the wire; the largest that fits is accepted.
+#[tokio::test]
+async fn the_size_guard_counts_the_header_the_bus_adds() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url())
+        .await
+        .expect("connect to NATS");
+    let limit = bus.max_payload;
+    // `NATS/1.0\r\n`, `Nats-Msg-Id: <the 36-character event id>\r\n`, and
+    // the blank line that closes the block. Counted here independently
+    // of the code under test.
+    let header = "NATS/1.0\r\n".len() + "Nats-Msg-Id: ".len() + 36 + 2 + 2;
+    let agent_id = format!("bus-size-{}", Uuid::now_v7().simple());
+    // An event whose JSON is exactly `body` bytes: the prompt is all
+    // `x`, one byte each on the wire.
+    let sized = |body: usize| {
+        let mut event = sample_event(&agent_id);
+        let set_prompt = |event: &mut Event, prompt: String| match &mut event.payload {
+            EventPayload::Triggered(p) => p.config_snapshot.system_prompt = prompt,
+            _ => unreachable!("sample_event is a triggered event"),
+        };
+        set_prompt(&mut event, String::new());
+        let bare = serde_json::to_vec(&event).unwrap().len();
+        set_prompt(&mut event, "x".repeat(body - bare));
+        assert_eq!(serde_json::to_vec(&event).unwrap().len(), body);
+        event
+    };
+
+    for body in [limit, limit - 5, limit - header + 1] {
+        match bus.publish(&sized(body)).await {
+            Err(BusError::PayloadTooLarge {
+                event_type,
+                size,
+                limit: l,
+            }) => {
+                assert_eq!(event_type, EventKind::Triggered, "body {body}");
+                assert_eq!(size, body + header, "the size on the wire, body {body}");
+                assert_eq!(l, limit);
+            }
+            other => panic!("a {body}-byte event must be refused as too large, got {other:?}"),
+        }
+    }
+    bus.publish(&sized(limit - header))
+        .await
+        .expect("the largest event that fits is accepted");
+}
+
 /// Repeating an event publish is acknowledged as a duplicate and leaves one
 /// stream entry because the envelope identity is the JetStream message id.
 #[tokio::test]
