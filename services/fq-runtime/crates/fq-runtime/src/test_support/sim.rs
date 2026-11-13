@@ -116,14 +116,23 @@ impl Clock for SimClock {
     }
 }
 
+/// The largest `max_payload` a NATS server can be configured with
+/// (64 MiB): the limit a [`RecordingSink`] enforces until a test sets its
+/// own. High enough that no sim script reaches it, so every sim run goes
+/// through the bus's size guard without any of them being refused by it.
+pub const SIM_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
+
 /// In-memory [`EventSink`] that records every published event and can
-/// inject a publish fault at a chosen operation index.
-#[derive(Default)]
+/// inject a publish fault at a chosen operation index. Like the bus, it
+/// refuses an event that serialises to more than its `max_payload`
+/// ([`SIM_MAX_PAYLOAD`] unless set), by the bus's own rule (#828).
 pub struct RecordingSink {
     events: Mutex<Vec<Event>>,
-    /// What the injected faults refused, in order — the events a crash
-    /// lost, so a heal can be compared against the event itself.
+    /// What the sink refused, in order: the events an injected crash
+    /// lost, so a heal can be compared against the event itself, and the
+    /// events too large for `max_payload`.
     refused: Mutex<Vec<Event>>,
+    max_payload: AtomicUsize,
     fail_at: AtomicUsize,
     /// One-shot fault keyed by per-invocation publish count (see
     /// [`Self::fail_publish_at_invocation_count`]); the per-invocation
@@ -137,16 +146,30 @@ pub struct RecordingSink {
     drain_arm: Mutex<Option<(usize, DrainSignal)>>,
 }
 
+impl Default for RecordingSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecordingSink {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
             refused: Mutex::new(Vec::new()),
+            max_payload: AtomicUsize::new(SIM_MAX_PAYLOAD),
             fail_at: AtomicUsize::new(usize::MAX),
             fail_at_invocation_count: Mutex::new(None),
             per_invocation_published: Mutex::new(std::collections::HashMap::new()),
             drain_arm: Mutex::new(None),
         }
+    }
+
+    /// Set the largest serialised event the sink accepts, as a broker's
+    /// `max_payload` does. Takes effect from the next publish, so a test
+    /// can run under one limit and resume under another.
+    pub fn set_max_payload(&self, limit: usize) {
+        self.max_payload.store(limit, Ordering::SeqCst);
     }
 
     /// Inject a fault: the publish with this zero-based index (over
@@ -192,9 +215,10 @@ impl RecordingSink {
         self.events.lock().unwrap().clone()
     }
 
-    /// Every event an injected fault refused, from either
+    /// Every event the sink refused: an injected fault's, from either
     /// [`Self::fail_publish_at`] or
-    /// [`Self::fail_publish_at_invocation_count`].
+    /// [`Self::fail_publish_at_invocation_count`], or one larger than its
+    /// `max_payload`.
     pub fn refused(&self) -> Vec<Event> {
         self.refused.lock().unwrap().clone()
     }
@@ -207,6 +231,16 @@ impl EventSink for RecordingSink {
         if events.len() >= self.fail_at.load(Ordering::SeqCst) {
             self.refused.lock().unwrap().push(event.clone());
             return Err(BusError::Publish("sim: injected publish fault".to_string()));
+        }
+        // The bus's size guard, measured as the bus measures it.
+        let size = serde_json::to_vec(event)
+            .map_err(BusError::Serialise)?
+            .len();
+        let kind = crate::events::EventKind::from(&event.payload);
+        let limit = self.max_payload.load(Ordering::SeqCst);
+        if let Err(refusal) = crate::bus::check_payload_size(kind, size, limit) {
+            self.refused.lock().unwrap().push(event.clone());
+            return Err(refusal);
         }
         // Per-invocation-count fault (Phase 2): fire once, on the first
         // invocation whose own publish count reaches the armed value.
@@ -241,6 +275,10 @@ impl EventSink for RecordingSink {
         // log — deterministic, monotonic, exactly what JetStream would
         // hand back.
         Ok(events.len() as u64)
+    }
+
+    fn max_payload(&self) -> Option<usize> {
+        Some(self.max_payload.load(Ordering::SeqCst))
     }
 }
 
