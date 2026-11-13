@@ -144,7 +144,7 @@ fn format_resume_accepted_names_the_worker_cap_and_the_agent_cap_it_is_not_held_
          It runs under [worker] max_concurrent_invocations like any other invocation: at once \
          if a worker is free, otherwise when one frees.\n\
          If its agent sets max_concurrent, this run counts against that limit but is not held \
-         back by it, so the agent may briefly run more invocations than its limit.\n\
+         back by it, so the agent can be over its limit until one of its invocations ends.\n\
          Follow with `fq invocation show 019a2b3c-0000-7000-8000-000000000001` or \
          `fq invocation transcript 019a2b3c-0000-7000-8000-000000000001`.\n"
     );

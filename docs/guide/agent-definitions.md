@@ -571,12 +571,7 @@ effort: high            # reasoning effort for each request
   agent's invocations ends — still as its first delivery, with no retry
   consumed. A held trigger **occupies no worker permit**: the worker cap
   bounds running invocations, so an agent waiting on its own cap never
-  stops another agent from starting. An invocation an operator resumes
-  with `fq invocation resume` is not held: it counts against the cap but
-  does not wait for a slot, so the agent can briefly run more than
-  `max_concurrent` (see
-  [Operating the daemon](operating-the-daemon.md#when-a-provider-hangs-or-throttles)).
-  `fq doctor` names the agents at
+  stops another agent from starting. `fq doctor` names the agents at
   their cap and how many triggers are waiting ("Agents at cap"), so the
   wait is visible rather than a queue that appears to have stalled. `fq
   reload` picks up a changed cap, including for a trigger that is already
@@ -584,7 +579,11 @@ effort: high            # reasoning effort for each request
   other limits — `fq agent validate` prints it whether or not it is set,
   and the dashboard's agent page has a row for it — so the question "what
   did I set on this agent?" has an answer that does not depend on the
-  agent being full at the time.
+  agent being full at the time. An invocation an operator resumes with
+  `fq invocation resume` is not held: it counts against the cap but does
+  not wait for a slot, so the agent can be over `max_concurrent` until
+  one of its invocations ends (see
+  [Operating the daemon](operating-the-daemon.md#when-a-provider-hangs-or-throttles)).
 - **`effort`** sets the model's reasoning effort per request: `minimal`,
   `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
   default. `minimal` exists for a real failure mode rather than for

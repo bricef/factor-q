@@ -240,7 +240,7 @@ fn format_resume_accepted(id: &str) -> String {
          It runs under [worker] max_concurrent_invocations like any other invocation: \
          at once if a worker is free, otherwise when one frees.\n\
          If its agent sets max_concurrent, this run counts against that limit but is not held \
-         back by it, so the agent may briefly run more invocations than its limit.\n\
+         back by it, so the agent can be over its limit until one of its invocations ends.\n\
          Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.\n"
     )
 }
