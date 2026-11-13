@@ -13,8 +13,14 @@ impl WorkerStore {
     /// acknowledged, so this is every run of this worker that has durably
     /// started and that the WAL has not yet let go.
     ///
-    /// Two columns, not the row: what is asked is which runs exist, and a
-    /// finished run's state blob can be large.
+    /// Two columns, not the row, so no state blob is copied out. The read
+    /// still walks each blob's pages: `terminal_at` sits after
+    /// `state_blob` in the row, and SQLite follows a large blob's overflow
+    /// chain to reach it. The review of PR 1030 measured fifty rows of
+    /// 2 MB blobs at 12.8 ms this way, against 66.7 ms for the whole rows.
+    /// It runs once, at startup, over the runs in flight and the finished
+    /// ones awaiting their archive's acknowledgement, which is normally a
+    /// handful.
     pub async fn list_durable_starts(&self) -> Result<Vec<(String, bool)>, WorkerStoreError> {
         let rows = sqlx::query(
             "SELECT invocation_id, terminal_at IS NOT NULL AS terminal FROM invocation_state",
