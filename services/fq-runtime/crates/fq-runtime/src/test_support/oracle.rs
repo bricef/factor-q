@@ -491,25 +491,6 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
                 for key in VOLATILE_KEYS {
                     map.remove(*key);
                 }
-                // The final state blob is the serialized reducer state
-                // (JSON bytes); injected notices live inside its
-                // persisted conversation, so the modulo-host-notices
-                // comparison must reach through the encoding. Compare
-                // the parsed form; a blob that isn't JSON (a foreign
-                // reducer) is kept as-is.
-                if let Some(decoded) = map
-                    .get("final_state_blob")
-                    .and_then(|blob| blob.as_array())
-                    .and_then(|bytes| {
-                        bytes
-                            .iter()
-                            .map(|b| u8::try_from(b.as_u64()?).ok())
-                            .collect::<Option<Vec<u8>>>()
-                    })
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                {
-                    map.insert("final_state_blob".to_string(), decoded);
-                }
                 for child in map.values_mut() {
                     strip(child);
                 }
@@ -529,6 +510,19 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
         .filter(|event| !matches!(event.payload, EventPayload::HostNotice(_)))
         .map(|event| {
             let mut value = serde_json::to_value(&event.payload).expect("event payload serialises");
+            // The final state blob is the serialized reducer state (JSON
+            // bytes); injected notices live inside its persisted
+            // conversation, so the modulo-host-notices comparison must
+            // reach through it. It is read from the payload's bytes, not
+            // from the wire's encoding of them (base64 text since #981),
+            // and compared in its parsed form; a blob that isn't JSON (a
+            // foreign reducer) is kept as it is written.
+            if let EventPayload::InvocationArchived(archived) = &event.payload
+                && let Ok(state) =
+                    serde_json::from_slice::<serde_json::Value>(&archived.final_state_blob)
+            {
+                value["payload"]["final_state_blob"] = state;
+            }
             strip(&mut value);
             value
         })

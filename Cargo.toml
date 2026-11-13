@@ -63,6 +63,11 @@ anyhow = "1"
 async-nats = "0.52"
 async-trait = "0.1"
 axum = "0.8"
+# The text form of a reducer state blob on the wire (#981). Already in
+# the thin client's tree at this version (through `rcgen`'s `pem`), with
+# these features, so linking it from fq-ops adds nothing to `fq`; no
+# default features, which would add the unsafe SIMD path.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 biscuit-auth = "6"
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }

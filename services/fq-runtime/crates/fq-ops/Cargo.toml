@@ -13,6 +13,9 @@ license.workspace = true
 # tests/forbidden_dependency_gate.rs enforces the list.
 
 [dependencies]
+# A reducer state blob goes on the wire as base64 text (#981): see
+# `events/payloads/state_blob.rs`.
+base64 = { workspace = true }
 # Timestamps on the wire (events and the DeadLetter atom) and the
 # `since` grammar's parsing. `serde` because a shape here is one both
 # ends (de)serialise; `clock` comes with the workspace default and is
