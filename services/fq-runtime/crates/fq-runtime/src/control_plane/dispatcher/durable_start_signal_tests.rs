@@ -47,7 +47,7 @@ use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use super::TriggerDispatcher;
-use super::claim::MARK_RETRY_PAUSES;
+use super::claim::{MARK_RETRY_BUDGET, MARK_RETRY_PAUSES};
 use super::duplicate_drop_tests::Captured;
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
@@ -739,26 +739,23 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
 }
 
 /// Wait `wait` on the pull stream for a copy of the delivery, and fail if
-/// one comes back. A stream that closes fails too: it would read as
-/// nothing having come back without saying whether a copy was on its way.
+/// one comes back. A stream that closes or fails fails too: it would read
+/// as nothing having come back without saying whether a copy was on its
+/// way.
 async fn assert_no_copy_comes_back(messages: &mut pull::Stream, wait: Duration) {
     match tokio::time::timeout(wait, messages.next()).await {
         Err(_elapsed) => {}
         Ok(None) => panic!(
             "the pull stream closed while waiting, so it cannot say whether a copy came back"
         ),
-        Ok(Some(copy)) => {
-            let delivered = copy
-                .as_ref()
-                .ok()
-                .and_then(|copy| copy.info().ok())
-                .map(|info| info.delivered);
-            panic!(
-                "a started run's delivery must not come back, and came back as delivery \
-                 {delivered:?} ({:?})",
-                copy.err()
-            );
-        }
+        Ok(Some(Err(err))) => panic!(
+            "the pull stream failed while waiting, so it cannot say whether a copy came back: \
+             {err}"
+        ),
+        Ok(Some(Ok(copy))) => panic!(
+            "a started run's delivery must not come back, and came back as delivery {:?}",
+            copy.info().map(|info| info.delivered).ok()
+        ),
     }
 }
 
@@ -779,6 +776,10 @@ async fn assert_no_copy_comes_back(messages: &mut pull::Stream, wait: Duration) 
 ///   copy comes back.
 #[tokio::test]
 async fn a_mark_that_blocks_past_the_time_bound_is_offered_once_with_its_delivery_kept_alive() {
+    assert!(
+        LOCK_HELD > MARK_RETRY_BUDGET && LOCK_HELD > SHORT_ACK_WINDOW,
+        "the lock must outlast the retry budget and the ack window, or this test pins neither"
+    );
     let mut pulled = Pulled::with_ack_window(
         Resolve::FireIntoLockedStore(LOCK_HELD),
         Turn::Later,

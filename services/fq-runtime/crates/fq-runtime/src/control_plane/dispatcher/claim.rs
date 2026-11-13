@@ -40,38 +40,49 @@ pub(super) struct Claimed {
 }
 
 /// The pauses before each retry of a durable-start mark the claim store
-/// refused: four attempts in all, with 1.5 seconds of pauses between the
-/// first and the last (#967).
+/// refused (#967), within [`MARK_RETRY_BUDGET`]. A store that refuses at
+/// once gets four attempts, the last 1.5 seconds after the first.
 ///
-/// One attempt already waits out a locked database for as long as the
-/// store's busy timeout (sqlx's default, five seconds), so a refusal that
-/// reaches a retry was not a short lock wait: it is a lock held for
-/// longer than that, an I/O error, or a connection the pool could not
-/// hand out. A retry is for the ones that clear in a moment. The first
-/// pause is short for those, and the later ones give a slower fault more
-/// time.
+/// The schedule is sized against store faults that come back at once and
+/// clear in a moment, such as an I/O error or a pooled connection that had
+/// to be replaced: a short first pause, and longer ones for a fault that
+/// takes a little longer. It is not what governs a store that blocks. One
+/// attempt waits for a write lock another connection holds for as long as
+/// the store's busy timeout, which `ControlPlaneStore::open` does not set,
+/// so it is sqlx's default of five seconds; before that, with every pooled
+/// connection taken, it waits for one for up to the pool's acquire
+/// timeout, sqlx's default of thirty seconds. The budget is what keeps
+/// those from multiplying.
 ///
-/// It stays at a second or two, as #967 decided, for two reasons. The
-/// run waits on it, because `handle` does not poll the invocation while
-/// it marks. And what follows a mark that is still refused is safe: the
-/// delivery is acked keeping its claim, which leaves a stale `claimed`
-/// row and no second run, so a longer wait would buy a tidier row at the
-/// price of a longer stall.
-///
-/// A constant, not configuration (Design Principle 8), because no
-/// workload wants another value: the fallback is safe whatever the
-/// schedule, and its bounds are the code's own, a stall short enough not
-/// to matter and far inside the trigger's 30-second ack window. Like
-/// [`super::admission::HOLD_KEEPALIVE`], it is sized against that window
-/// and not against anything an operator runs.
+/// Design Principle 8 names a retry interval as configuration, and this
+/// is a constant anyway, on precedent: `HOLD_KEEPALIVE`, the trigger
+/// retry ladder (`TRIGGER_RETRY_BACKOFF`) and the store's own connect
+/// retry (`CONNECT_RETRY_FIRST_PAUSE` in `db/schema.rs`) are constants
+/// too, each sized against the fault it waits out. The trigger's 30-second
+/// ack window does not bound it: `mark_durable_started` keeps the delivery
+/// alive while the attempts run.
 pub(super) const MARK_RETRY_PAUSES: [Duration; 3] = [
     Duration::from_millis(100),
     Duration::from_millis(400),
     Duration::from_millis(1000),
 ];
 
-/// How many times a durable start is offered to the claim store.
-const MARK_ATTEMPTS: usize = MARK_RETRY_PAUSES.len() + 1;
+/// How long after the first attempt to mark a durable start began a
+/// further attempt may still be offered: after a refusal, the next one is
+/// offered only if it would begin, its pause included, less than this
+/// after the first began. This is the "second or two in all" #967
+/// decided.
+///
+/// A store that refuses at once keeps its four attempts. A store whose
+/// first attempt blocks past this gets that one attempt, as it did before
+/// there were retries, and the delivery falls through to the ack. The
+/// worst case is an attempt begun just inside the budget that then
+/// blocks: a little under two seconds plus one attempt's longest wait,
+/// which is the busy timeout (about seven seconds in all) or, with every
+/// pooled connection taken, the acquire timeout and then the busy timeout
+/// (about thirty-seven). `handle` does not poll the invocation for that
+/// long; one blocking attempt cost the same before there were retries.
+pub(super) const MARK_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
 /// only way to get one is [`TriggerClaims::recover`], which first records
@@ -188,18 +199,26 @@ impl TriggerDispatcher {
     /// that started must not be redelivered.
     ///
     /// **A refused mark is offered again** after each of
-    /// [`MARK_RETRY_PAUSES`], so a claim store that refuses for a moment
-    /// heals with nothing else happening. The run waits for the mark, since
-    /// `handle` does not poll the invocation meanwhile: on a healthy day
-    /// for one statement, and when every attempt is refused for 1.5
-    /// seconds of pauses plus whatever each attempt waits in the store.
+    /// [`MARK_RETRY_PAUSES`], for as long as [`MARK_RETRY_BUDGET`] allows,
+    /// so a claim store that refuses for a moment heals with nothing else
+    /// happening. The run waits for the mark, since `handle` does not poll
+    /// the invocation meanwhile: on a healthy day for one statement; when
+    /// every attempt is refused at once, for 1.5 seconds of pauses; when an
+    /// attempt blocks, for as long as it waits in the store, which the
+    /// budget's own documentation bounds.
+    ///
     /// Nothing keeps a delivery alive between its worker permit and this
-    /// point, so its ack window may be nearly spent when the first attempt
-    /// starts, and one attempt can wait out the store's busy timeout or
-    /// its pool. An in-progress ack every [`HOLD_KEEPALIVE`] therefore runs
-    /// alongside the attempts, not only between them, so the delivery
-    /// cannot lapse and be redelivered underneath its own run while they
-    /// go on.
+    /// point, so its ack window may be partly spent when the first attempt
+    /// starts, and one attempt can wait out the store's busy timeout or its
+    /// pool. An in-progress ack every [`HOLD_KEEPALIVE`] therefore runs
+    /// alongside the attempts, not only between them. The first goes out a
+    /// tick after the mark starts, so the healthy path sends none; a
+    /// delivery whose window had less than a tick left by then can still
+    /// lapse once. Its copy meets this daemon's own claim and is dropped,
+    /// counted as a duplicate dropped before a start was recorded, or,
+    /// once the mark has landed, acked as a duplicate of a started run:
+    /// either way nothing starts twice, and every window after the first
+    /// tick is renewed.
     ///
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
@@ -258,9 +277,13 @@ impl TriggerDispatcher {
                 }
                 self.ack(msg, Some(trigger_id), "durably started").await;
             }
-            Err(last) => {
-                error!(error = %last, attempts = MARK_ATTEMPTS, stream_seq, %invocation_id,
-                    %trigger_id, subject = %msg.subject,
+            Err(MarkRefused {
+                attempts,
+                elapsed,
+                last,
+            }) => {
+                error!(error = %last, attempts, elapsed_ms = elapsed.as_millis() as u64,
+                    stream_seq, %invocation_id, %trigger_id, subject = %msg.subject,
                     "could not mark trigger durably started: the claim store refused every \
                      attempt. Acking the delivery anyway, keeping its claim, and letting the run \
                      continue, so it is not redelivered. The claim stays `claimed` for a run that \
@@ -547,17 +570,29 @@ impl TriggerDispatcher {
     }
 }
 
+/// Every attempt `mark_with_retries` offered was refused.
+struct MarkRefused {
+    /// How many attempts were offered.
+    attempts: usize,
+    /// How long they took, from the start of the first.
+    elapsed: Duration,
+    /// The last refusal.
+    last: ControlPlaneStoreError,
+}
+
 /// Offer a durable start to the claim store, and again after each of
-/// [`MARK_RETRY_PAUSES`] while it refuses. `Ok` once a mark lands, with
-/// the refusals before it (none on a healthy day); `Err` with the last
-/// refusal once every attempt has been refused. Each refusal is logged at
-/// `debug`; `mark_durable_started` logs the outcome, once.
+/// [`MARK_RETRY_PAUSES`] while it refuses, as long as the next attempt
+/// would begin within [`MARK_RETRY_BUDGET`] of the first. `Ok` once a
+/// mark lands, with the refusals before it (none on a healthy day); `Err`
+/// once the store has refused every attempt offered. Each refusal is
+/// logged at `debug`; `mark_durable_started` logs the outcome, once.
 async fn mark_with_retries(
     store: &ControlPlaneStore,
     key: TriggerKey<'_>,
     invocation_id: uuid::Uuid,
-) -> Result<Vec<ControlPlaneStoreError>, ControlPlaneStoreError> {
+) -> Result<Vec<ControlPlaneStoreError>, MarkRefused> {
     let named = invocation_id.to_string();
+    let began = tokio::time::Instant::now();
     let mut refused = Vec::new();
     let mut pauses = MARK_RETRY_PAUSES.iter();
     loop {
@@ -565,8 +600,13 @@ async fn mark_with_retries(
             Ok(()) => return Ok(refused),
             Err(err) => err,
         };
-        let Some(pause) = pauses.next() else {
-            return Err(err);
+        let in_budget = |pause: &&Duration| began.elapsed() + **pause < MARK_RETRY_BUDGET;
+        let Some(pause) = pauses.next().filter(in_budget) else {
+            return Err(MarkRefused {
+                attempts: refused.len() + 1,
+                elapsed: began.elapsed(),
+                last: err,
+            });
         };
         debug!(error = %err, attempt = refused.len() + 1, stream_seq = key.stream_seq,
             %invocation_id, retry_in_ms = pause.as_millis() as u64,
@@ -578,7 +618,10 @@ async fn mark_with_retries(
 
 /// Drive `work` to its end while keeping `msg`'s delivery alive with an
 /// in-progress ack every [`HOLD_KEEPALIVE`], the cadence every hold
-/// keeps. Work that ends inside the first tick sends none.
+/// keeps. The first goes out a tick after `work` starts, not at once as a
+/// hold's does: work that ends inside the first tick, which is every mark
+/// on a healthy day, sends none, at the price of a window with less than
+/// a tick left lapsing once (`mark_durable_started` says what follows).
 async fn keeping_alive<T>(
     msg: &async_nats::jetstream::Message,
     trigger_id: uuid::Uuid,
