@@ -577,8 +577,10 @@ Crash semantics:
   pass, since a broker that is down refuses every row alike. The
   held row is not serialised again in that run, because the bus
   reads the limit only at connect; the next start offers it
-  again. `fq doctor` and `fq status` list every held row, for
-  either cause, with the reason and the remedy
+  again. A row whose `agent_id` or `invocation_id` cannot go on
+  an event (the runtime never writes one) is held too, until an
+  operator corrects it. `fq doctor` and `fq status` list every
+  held row, whatever the cause, with the reason and the remedy
   ([#981](https://github.com/bricef/factor-q/issues/981)).
 - The mid-step failure sites publish `failed` *before*
   `ensure_terminal` marks the row, and store no copy, so a lost

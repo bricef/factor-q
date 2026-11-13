@@ -493,6 +493,14 @@ pub enum ArchiveHoldReason {
         /// turned out to be.
         detail: String,
     },
+    /// The row's ids cannot go on an event: its `agent_id` is not a valid
+    /// agent id, or its `invocation_id` is not a UUID. The runtime never
+    /// writes either, so the row was edited by hand or written by a build
+    /// with other rules. The hold lasts until an operator corrects it.
+    MalformedRow {
+        /// Which field, its value, and what is wrong with it.
+        detail: String,
+    },
 }
 
 impl ArchiveHoldReason {
@@ -507,7 +515,8 @@ impl ArchiveHoldReason {
                 "`{event_type}` is {size_bytes} bytes, over the broker's max_payload of \
                  {limit_bytes}"
             ),
-            ArchiveHoldReason::StoredEventRefused { detail } => detail.clone(),
+            ArchiveHoldReason::StoredEventRefused { detail }
+            | ArchiveHoldReason::MalformedRow { detail } => detail.clone(),
         }
     }
 }

@@ -273,10 +273,10 @@ models = ["claude-haiku-4-5"]
 # local row is never deleted automatically (correctness over
 # cleanup); operator action is required for held rows.
 # A row the sweeper cannot publish at all, because an event it
-# owes is larger than the broker's max_payload or its stored
-# terminal event is one this build will not republish, is not
-# republished: the sweeper holds it, and `fq doctor` lists it
-# with what to do.
+# owes is larger than the broker's max_payload, its stored
+# terminal event is one this build will not republish, or its
+# ids cannot go on an event, is not republished: the sweeper
+# holds it, and `fq doctor` lists it with what to do.
 # archive_warn_after_ms = 60000
 
 # Retry policy for transient model-call failures: a 429, a 5xx, a

@@ -426,7 +426,7 @@ archive sweeper republishes it first
 ([#823](https://github.com/bricef/factor-q/issues/823),
 [#946](https://github.com/bricef/factor-q/issues/946)).
 
-A row the sweeper cannot publish, it **holds**, for one of the two
+A row the sweeper cannot publish, it **holds**, for one of the three
 reasons below. It publishes nothing more for a held row, leaves the row
 in `worker.db` exactly as it is, and carries on with every other row.
 Until the hold is lifted, the control plane sees that invocation as not
@@ -512,6 +512,18 @@ sqlite3 -cmd '.timeout 5000' "$db" \
 The sweeper reads every row afresh on each pass (every 10 s by default),
 so the next pass archives the released row, and the control plane's ack
 deletes it as usual.
+
+**A row whose ids cannot go on an event.** Every event names its agent
+and its invocation, so nothing can be published for a row whose
+`agent_id` is not a valid agent id (non-empty, with no dots, wildcards
+or whitespace) or whose `invocation_id` is not a UUID. The runtime never
+writes either, so such a row was edited by hand or written by a build
+with other rules. It used to end the sweeper's pass on every pass, as an
+oversized archive did; now it is held, and the log line is `this row's
+ids cannot go on an event; holding the row unarchived until an operator
+corrects it`, with the `invocation_id` and a reason that names the field
+and its value. Keep a copy of the row, then correct the field in
+`worker.db` with `sqlite3`, as above; the next pass archives the row.
 
 ## When a provider hangs or throttles
 

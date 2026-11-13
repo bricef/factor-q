@@ -76,7 +76,8 @@ impl ArchiveHolds {
     pub(super) fn too_large_under(&self, invocation_id: &str) -> Option<u64> {
         match self.lock().get(invocation_id)?.reason {
             ArchiveHoldReason::PayloadTooLarge { limit_bytes, .. } => Some(limit_bytes),
-            ArchiveHoldReason::StoredEventRefused { .. } => None,
+            ArchiveHoldReason::StoredEventRefused { .. }
+            | ArchiveHoldReason::MalformedRow { .. } => None,
         }
     }
 
@@ -95,6 +96,11 @@ pub(super) fn remedy(reason: &ArchiveHoldReason) -> String {
         ArchiveHoldReason::StoredEventRefused { .. } => format!(
             "keep a copy of the row's terminal_outcome, then release the row by setting it to \
              NULL; the next pass archives the invocation without its outcome ({GUIDE})"
+        ),
+        ArchiveHoldReason::MalformedRow { .. } => format!(
+            "the runtime never writes such a field, so the row was edited by hand or written by \
+             a build with other rules: keep a copy of the row, then correct the field named; \
+             the next pass archives it ({GUIDE})"
         ),
     }
 }
