@@ -42,6 +42,7 @@ fn report() -> StatusReport {
                 stuck: false,
                 malformed_acked: 0,
                 duplicate_dropped: 0,
+                held_duplicate_dropped: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -265,6 +266,7 @@ fn active(num_pending: u64) -> StreamHealth {
             stuck: false,
             malformed_acked: 0,
             duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
         }],
     }
 }
@@ -391,6 +393,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             stuck: false,
             malformed_acked: 0,
             duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
         }],
     });
     assert!(
@@ -406,7 +409,9 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
 /// The dispatcher's duplicate drops (#809) reach `fq status` too: the
 /// refused redelivery starts no invocation and mints no id, so a
 /// counter beside the consumer is the only place an operator can see
-/// that the broker is redelivering held triggers (#327).
+/// it. A copy of a run that has started is one line; a copy dropped
+/// before a start was recorded is another (#968), and a consumer that dropped only the
+/// first kind says nothing of the second.
 #[test]
 fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
     let out = render_stream_health_human(&StreamHealth::Available {
@@ -425,12 +430,51 @@ fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
             stuck: false,
             malformed_acked: 0,
             duplicate_dropped: 5,
+            held_duplicate_dropped: 0,
         }],
     });
     assert!(
         out.contains(
-            "duplicate dropped: 5 (redelivered after the invocation had durably started; \
-             refused, not re-run)"
+            "    duplicate dropped after its run started: 5 since this daemon started (refused \
+             and acked, not re-run)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("before a start was recorded"), "got:\n{out}");
+}
+
+/// A redelivery that arrived before a start was recorded on its claim,
+/// which this daemon holds, is counted on a line of its own (#968),
+/// under the line for copies of a started run. It is named by when it
+/// arrived, not as "held", the word the admission holds use, and says it
+/// was left unacked rather than guessing why the claim has no start.
+#[test]
+fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-triggers".to_string(),
+        messages: 258,
+        bytes: 4096,
+        first_seq: 1,
+        last_seq: 258,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-dispatcher".to_string(),
+            delivered: 258,
+            ack_pending: 1,
+            num_pending: 0,
+            num_redelivered: 1,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 5,
+            held_duplicate_dropped: 2,
+        }],
+    });
+    assert!(
+        out.contains(
+            "    duplicate dropped after its run started: 5 since this daemon started (refused \
+             and acked, not re-run)\n    duplicate dropped before a start was recorded: 2 since \
+             this daemon started (its claim is this daemon's; refused and left unacked, not \
+             run)\n"
         ),
         "got:\n{out}"
     );
@@ -481,6 +525,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             stuck: false,
             malformed_acked: 0,
             duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
         }],
     });
     assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");

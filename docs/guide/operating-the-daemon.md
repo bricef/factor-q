@@ -419,10 +419,12 @@ invocation on its own.
 
 A finished invocation's row stays in `worker.db` until the control plane
 acknowledges its `invocation.archived`. Since worker schema v12 the row
-also keeps the invocation's `completed` event until that event is known to
-have reached the bus. If the publish was lost, the archive sweeper
-republishes it first
-([#823](https://github.com/bricef/factor-q/issues/823)).
+also keeps the event the invocation ended in — `completed`, or for some
+failures (such as reaching the iteration limit) `failed` — until that
+event is known to have reached the bus. If the publish was lost, the
+archive sweeper republishes it first
+([#823](https://github.com/bricef/factor-q/issues/823),
+[#946](https://github.com/bricef/factor-q/issues/946)).
 
 The sweeper will not republish a stored event that this build cannot
 read, or one that could not be that row's outcome. The case to expect is
@@ -430,9 +432,9 @@ an event an older daemon stored and had not yet published when you
 upgraded across an event-schema bump. Republished, it would halt every
 durable consumer on the stream (see
 [When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
-So the sweeper **holds** the row instead. It publishes neither `completed`
-nor `invocation.archived` for that row, and it carries on with every other
-row. The daemon log reports a held row once per daemon run, at error
+So the sweeper **holds** the row instead. It publishes neither the stored
+event nor `invocation.archived` for that row, and it carries on with every
+other row. The daemon log reports a held row once per daemon run, at error
 level, as `stored terminal event cannot be republished; holding the row
 unarchived until an operator releases it`, with the `invocation_id` and
 the reason (for example, the `schema_version` it found and the versions
@@ -442,7 +444,8 @@ Nothing releases a held row on its own. No later build reads an older
 event version, so the hold lasts until you release the row. Releasing
 archives the invocation **without** its outcome, so keep a copy of the
 stored event first, because it is the only copy of the run's task status,
-summary and cost:
+summary and cost (or, for a `failed`, of why it failed and what it had
+spent):
 
 ```sh
 db=~/.cache/factor-q/worker.db   # the `worker db:` line fqd prints at startup
@@ -980,6 +983,78 @@ issue on its own; it says poison was skipped, not that history was
 lost. A halt and a malformed count never read as one thing, because
 they call for opposite responses.
 
+**The dispatcher counts the copies of a trigger it refuses, two kinds
+apart.** It arbitrates every delivery against the trigger's claim (see
+[Which trigger started a run](#which-trigger-started-a-run-and-claimed-deliveries-that-never-settled)),
+and a copy the claim refuses starts nothing: the count and its warn
+line in the daemon log are all it leaves. `fq doctor` names both counts
+on the dispatcher's line, and `fq status` prints each on a line of its
+own under the consumer. They are named by when the copy arrived,
+against the start recorded on its claim. (On the same page "held" means
+a trigger waiting in an admission hold, which is something else.)
+
+```text
+  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon
+     started: 5 after their run started, 2 before a start was recorded)
+  -> "before a start was recorded" is a copy that met a claim this
+     daemon holds with no start on it, left unacked: its first copy was
+     still waiting or starting, or this daemon will never settle that
+     claim, and the claim does not say which; the daemon log has a warn
+     line for each with its subject, sequence, attempt and the claim's
+     age, and such a claim whose run is on record is listed under
+     "Stranded trigger claims" below
+```
+
+- **After their run started.** The claim records the run's first
+  durable write, so the copy is acked and dropped: a redelivery that
+  crossed the run's start, the redelivery of a run a previous process
+  began and this one's recovery resumed, or a replay of the stream.
+- **Before a start was recorded.** The claim is this daemon's and
+  records no start, so the copy is dropped and left unacked for the
+  copy that took the claim. That first copy may be waiting behind a
+  paused model, a full agent or the worker cap, where an in-progress ack
+  every 250 ms keeps it alive and it is redelivered only if those stop
+  landing for a whole ack window. It may be starting: nothing keeps a
+  delivery alive between its worker permit and its first durable write
+  (its workspace, its MCP servers, its first step), so a start slower
+  than the window (30 seconds on a first delivery) is redelivered
+  underneath it. Either way it still starts once. Or this daemon may
+  never settle that claim
+  ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
+  task panicked before its first durable write, giving the claim back
+  failed before a retry, or recording the run's start failed, which
+  stops the run for the next start's recovery to resume. Every delivery
+  of that trigger is then dropped the same way until its deliveries run
+  out and it is dead-lettered as `trigger_exhausted`. Nothing on the
+  claim tells these apart, so neither does the count.
+
+The two warn lines are `dropping duplicate trigger delivery after
+durable start` and `dropping a redelivered trigger whose claim this
+daemon already holds`. Both carry the stream sequence and the attempt
+(`delivered`). The second adds the subject, which names the agent, the
+claimant, the claim's age (`claim_age_ms`) and the invocation id the
+claim names (`claim_invocation_id`), and on the trigger's fifth and
+last delivery it says that no copy follows. A single drop before a
+start was recorded is most often a trigger waiting in a hold, or a slow
+start, redelivered underneath its first copy; but the first redelivery
+of a claim this daemon will never settle looks the same. Either way it
+costs the trigger one of its five deliveries. The same sequence dropped
+again on a later delivery means its claim still records no start. If
+the claim's invocation id has a run (`fq invocation show <id>`), that
+run started and its start never reached the claim, and the
+stranded-claims block of `fq doctor` lists it as started and never
+marked once a minute has passed. If it has none, the first copy is
+still waiting or starting, or will never start, and a trigger that runs
+out of deliveries that way is dead-lettered. Neither count is a doctor
+issue. Both are kept in the daemon's memory and start again at zero
+when it restarts; the log lines are the lasting record.
+
+A third refusal is logged and counted in neither: a delivery that meets
+a claim left by a process that has exited, and finds the claim changed
+as it adopts it (`the claim it met changed before this daemon could
+adopt it`). The same fields name it. One daemon has nothing that
+changes such a row in that moment, so the line is not expected.
+
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
 rows below that point as they were (see
@@ -1108,7 +1183,8 @@ the retention sweep deletes a claim an exited process left.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
   still be redelivered. If this daemon holds the claim, every redelivery
-  is dropped and the trigger ends as a `trigger_exhausted` dead letter
+  is dropped (and counted as a duplicate dropped before a start was
+  recorded) and the trigger ends as a `trigger_exhausted` dead letter
   although its run started: that dead letter is false, and requeuing it
   starts the work twice. If an exited process left it, a redelivery would
   be adopted and start the work again, and a false dead letter may
@@ -1131,7 +1207,12 @@ model, a full agent or the worker cap for hours (`Throttled models` and
 daemon holding it is still going to start it. A claim this daemon holds
 and will never settle — a run that panicked before its first durable
 write — looks the same, and is not reported until a restart makes its
-holder a process that has exited. A started run whose message is gone,
+holder a process that has exited. Until then its redeliveries are what
+show it: each is dropped, counted on the `fq-dispatcher` line as a
+duplicate dropped before a start was recorded, and logged with its
+subject, its sequence and the claim's age (see
+[the dispatcher's duplicate counts](#when-a-consumer-stops-making-progress)).
+A started run whose message is gone,
 since no redelivery can follow. And a claim an exited process left that
 is older than the horizon.
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tracing::{error, warn};
 
-use crate::bus::TRIGGER_STREAM_NAME;
+use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
 use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
 use crate::worker::InFlightReport;
 
@@ -326,28 +326,74 @@ impl TriggerDispatcher {
                 }
                 ClaimVerdict::Stop
             }
-            TriggerClaim::Held { claimant } if claimant == *worker_id => {
-                // The original task still owns this message. An ack or NAK from
-                // the duplicate would resolve its delivery underneath that task.
+            TriggerClaim::Held {
+                claimant,
+                invocation_id: claimed_for,
+                claimed_at,
+            } if claimant == *worker_id => {
+                // This process's own claim, with no start on it. The copy
+                // that took it owns the delivery: an ack or NAK from this
+                // one would resolve that delivery underneath it, so this one
+                // is dropped unanswered. It is logged and counted, apart
+                // from the `Started` drops above (#968), because a refused
+                // copy writes nothing anywhere else.
                 //
-                // **This arm assumes the first copy is still alive, and in one
-                // case it is not.** Most paths that leave a `claimed`-by-self
-                // row with the message unacked are process-terminal — the drain
-                // check, the pause hold's `Interrupted`, a failed `requeue_held`
-                // publish, a drain that stops the invocation before its first
-                // WAL write (#974) — so the next delivery arrives at a new worker id and
-                // the arm below adopts it. But a store error or a panic between
-                // the claim and the durable start leaves this *live* process
-                // holding a row for a run that will never start: every
-                // redelivery then lands here and is dropped, until `max_deliver`
-                // is reached and the trigger is dead-lettered as
-                // `trigger_exhausted` — a verdict that would be false, since
-                // nothing ever ran. Adopting a claim older than some multiple of
-                // the longest legitimate hold is the follow-up that closes it;
-                // ADR-0032's liveness-and-CAS protocol is where it belongs.
+                // **Nothing on the row says whether the first copy will
+                // settle it,** so the line says what the row shows and does
+                // not guess. A copy lands here in two kinds of case:
+                //
+                // - The first copy is alive. A hold keeps its delivery alive
+                //   with an in-progress ack every `HOLD_KEEPALIVE`, so it is
+                //   redelivered only if those acks stop landing for a whole
+                //   ack window; from its worker permit to its first WAL
+                //   write (workspace, MCP servers, the first step) nothing
+                //   keeps it alive, so a start slower than the window is
+                //   redelivered too. The first copy still starts once, and
+                //   its durable start acks the message.
+                // - This process will never settle the claim (#967): the
+                //   invocation task panicked before its durable start, a
+                //   release failed before a NAK, or `mark_trigger_started`
+                //   failed, which stops a running invocation un-acked and
+                //   leaves its WAL row for the next start to resume
+                //   (`mark_durable_started`). Every redelivery then lands
+                //   here until `max_deliver` is reached and the trigger is
+                //   dead-lettered as `trigger_exhausted`: false where the run
+                //   started, and after a panic nothing ran.
+                //
+                // A process that exits holding a claim (the drain check, the
+                // pause hold's `Interrupted`, a failed `requeue_held` publish,
+                // a drain that stops the invocation before its first WAL
+                // write, #974) leaves a row the next process meets under
+                // another worker id, and the arm below adopts it.
+                //
+                // The subject names the agent, which is the only handle on
+                // a claim whose invocation never wrote a WAL row besides the
+                // sequence. On the last delivery the line says so: no copy
+                // follows, which is true whatever the claim is waiting on.
+                let last = if delivered >= TRIGGER_MAX_DELIVER {
+                    "; this was its last delivery, so no copy follows, and unless the delivery \
+                     is acked before its window lapses the trigger is dead-lettered as \
+                     `trigger_exhausted`"
+                } else {
+                    ""
+                };
+                warn!(stream_seq = seq, delivered, subject = %msg.subject, claimant = %claimant,
+                    claim_age_ms = now.saturating_sub(claimed_at),
+                    claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
+                    "dropping a redelivered trigger whose claim this daemon already holds with no \
+                     start recorded, and leaving it unacked: the first copy may still be waiting \
+                     or starting, or this daemon may never settle the claim (see #967); the claim \
+                     does not say which{last}");
+                self.bus
+                    .consumer_ledger()
+                    .note_held_duplicate_drop(CONSUMER_NAME);
                 ClaimVerdict::Stop
             }
-            TriggerClaim::Held { claimant } => {
+            TriggerClaim::Held {
+                claimant,
+                invocation_id: claimed_for,
+                claimed_at,
+            } => {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 //
@@ -380,7 +426,22 @@ impl TriggerDispatcher {
                     .await
                 {
                     Ok(true) => proceed,
-                    Ok(false) => ClaimVerdict::Stop,
+                    // The row changed between the read above and this
+                    // compare-and-set, and is no longer `claimed` by that
+                    // claimant. What changed it is not on the row, so the
+                    // line names the claim as it was read and no cause.
+                    // Not counted: one daemon cannot reach this, and it is
+                    // not a duplicate of anything this daemon holds.
+                    Ok(false) => {
+                        warn!(stream_seq = seq, delivered, subject = %msg.subject,
+                            claimant = %claimant,
+                            claim_age_ms = now.saturating_sub(claimed_at),
+                            claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
+                            "dropping a redelivered trigger, and leaving it unacked: the claim it \
+                             met changed before this daemon could adopt it, and is no longer \
+                             `claimed` by that claimant");
+                        ClaimVerdict::Stop
+                    }
                     Err(err) => {
                         error!(error = %err, stream_seq = seq, "cannot adopt trigger claim");
                         ClaimVerdict::Stop

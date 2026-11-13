@@ -420,6 +420,7 @@ fn durable_wait_requires_the_complete_active_roster() {
             stuck: false,
             malformed_acked: 0,
             duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
         })
     }
     let roster = |consumers: &[serde_json::Value]| durables_ready(consumers, &EXPECTED_DURABLES);

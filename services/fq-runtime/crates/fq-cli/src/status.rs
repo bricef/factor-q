@@ -390,6 +390,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             stuck,
             malformed_acked,
             duplicate_dropped,
+            held_duplicate_dropped,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -423,14 +424,28 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                      skipped)\n"
                 ));
             }
-            // A redelivery of a trigger whose invocation is already
-            // durably running is acked and dropped by the claim (#809):
-            // it starts nothing and mints no id, so this line is the
-            // only trace it leaves.
+            // The dispatcher's claim refuses a redelivered trigger in two
+            // cases (#809, #968), and a refused copy starts nothing and
+            // mints no id, so these lines and its warn line in the daemon
+            // log are its only trace. They are told apart by when the
+            // copy arrived. After its run's start was recorded, it is
+            // acked. Before a start was recorded on its claim, which this
+            // daemon holds, it is left unacked, and nothing says whether
+            // that claim's first copy is still coming or never will. (Not
+            // "held": that word is the admission holds' on this report.)
+            // Both counts live in the daemon's memory, which each line
+            // says.
             if *duplicate_dropped > 0 {
                 out.push_str(&format!(
-                    "    duplicate dropped: {duplicate_dropped} (redelivered after the \
-                     invocation had durably started; refused, not re-run)\n"
+                    "    duplicate dropped after its run started: {duplicate_dropped} since this \
+                     daemon started (refused and acked, not re-run)\n"
+                ));
+            }
+            if *held_duplicate_dropped > 0 {
+                out.push_str(&format!(
+                    "    duplicate dropped before a start was recorded: {held_duplicate_dropped} \
+                     since this daemon started (its claim is this daemon's; refused and left \
+                     unacked, not run)\n"
                 ));
             }
             out

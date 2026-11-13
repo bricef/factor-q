@@ -305,6 +305,28 @@ impl World {
             .expect("read the claim")
     }
 
+    /// The dispatcher's two duplicate counts, as
+    /// `(duplicate_dropped, held_duplicate_dropped)`: copies dropped after
+    /// their run's start was recorded, and before.
+    fn drop_counts(&self) -> (u64, u64) {
+        let record = self.bus.consumer_ledger().record(CONSUMER_NAME);
+        (record.duplicate_dropped, record.held_duplicate_dropped)
+    }
+
+    /// Wait until the dispatcher has dropped `held` copies before a start
+    /// was recorded.
+    async fn wait_for_held_drops(&self, held: u64, within: Duration, otherwise: &str) {
+        let deadline = Instant::now() + within;
+        while self.drop_counts().1 < held {
+            assert!(
+                Instant::now() < deadline,
+                "{otherwise} (counts {:?} after {within:?})",
+                self.drop_counts()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     async fn stop(self) {
         let _ = self.shutdown.send(());
         tokio::time::timeout(Duration::from_secs(10), self.run)
@@ -433,6 +455,16 @@ async fn a_trigger_redelivered_before_its_first_wal_write_starts_once() {
         }],
         "only the stalled invocation has started: it holds the one worker permit"
     );
+    // The redelivered copy reaches the claim and is dropped there, before
+    // a start was recorded, and counted as such (#968). The broker has
+    // sent it; the consume loop pulls and refuses it within moments.
+    world
+        .wait_for_held_drops(
+            1,
+            Duration::from_secs(10),
+            "the redelivered copy was not counted as dropped before a start was recorded",
+        )
+        .await;
 
     // Let everything that is going to run, run.
     world.worker.first_wal_write.add_permits(8);
@@ -476,6 +508,12 @@ async fn a_trigger_redelivered_before_its_first_wal_write_starts_once() {
             "the {name} trigger's claim must record its durable start"
         );
     }
+    assert_eq!(
+        world.drop_counts(),
+        (0, 1),
+        "one copy refused, before a start was recorded, and none after: the queued trigger \
+         waited with its delivery kept alive, and the stalled one's start acked it"
+    );
 
     world.stop().await;
 }

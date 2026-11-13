@@ -180,37 +180,46 @@ fn render_consumers(
                 stuck: true,
                 malformed_acked,
                 duplicate_dropped,
+                held_duplicate_dropped,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
                      pending {num_pending}{}{}\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
                 ));
+                // The held-copy count does not choose this step. It only
+                // ever grows while the daemon runs, so one slow start in
+                // the morning would make a store failure in the afternoon
+                // read as a duplicate delivery and drop the step that
+                // points at the store. Its own note follows either way.
                 if name == "fq-dispatcher"
                     && (dispatcher_has_held_triggers || *duplicate_dropped > 0)
                 {
-                    out.push_str("  -> redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice; the durable claim drops the duplicate (see the \"duplicate deliveries dropped\" count) — check fq invocation list and the transcripts' attempt: field if the count is 0\n");
+                    out.push_str("  -> redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice; the durable claim drops the duplicate (see the duplicates-dropped counts) — check fq invocation list and the transcripts' attempt: field if none is counted\n");
                 } else {
                     out.push_str(&format!(
                         "  -> its handler keeps failing; check the daemon log for `consumer={name}` \
                          and free whatever it is blocked on (disk, store, broker)\n"
                     ));
                 }
+                out.push_str(&held_duplicate_note(*held_duplicate_dropped));
             }
             ConsumerHealth::Active {
                 name,
                 num_pending,
                 malformed_acked,
                 duplicate_dropped,
+                held_duplicate_dropped,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ok (pending {num_pending}{}{})\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
                 ));
+                out.push_str(&held_duplicate_note(*held_duplicate_dropped));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -270,20 +279,62 @@ fn malformed_suffix(malformed_acked: u64) -> String {
     }
 }
 
-/// `, N duplicate deliveries dropped` when any were, else nothing.
+/// `, duplicates dropped since this daemon started: N after their run
+/// started, M before a start was recorded` (either part alone when the
+/// other is zero), or nothing when neither count is.
 ///
-/// A redelivery of a trigger whose invocation is already durably
-/// running is acked and dropped by the dispatcher's claim (#809), so it
-/// starts nothing and mints no id — and therefore leaves no trace
-/// anywhere else. Shown beside the consumer because a figure that
-/// climbs says the broker is redelivering held triggers, which is the
-/// #327 incident being arbitrated rather than duplicated.
-fn duplicate_suffix(duplicate_dropped: u64) -> String {
-    if duplicate_dropped == 0 {
+/// The dispatcher's claim refuses a redelivered trigger in two cases
+/// (#809, #968), and a refused copy starts nothing and mints no id, so
+/// this and its warn line in the daemon log are its only trace. The two
+/// are told apart by when the copy arrived, because they are different
+/// facts: a copy that came after its run's start was recorded was
+/// acked, while one that came before a start was recorded on a claim
+/// this daemon holds was left unacked for a first copy that may or may
+/// not settle it ([`held_duplicate_note`]). The second is not called
+/// "held": on this report that word is the admission holds' (`Agents at
+/// cap`). Both counts are in the daemon's memory, which the phrase says.
+fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> String {
+    let parts: Vec<String> = [
+        (duplicate_dropped, "after their run started"),
+        (held_duplicate_dropped, "before a start was recorded"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, when)| format!("{count} {when}"))
+    .collect();
+    if parts.is_empty() {
         String::new()
     } else {
-        format!(", {duplicate_dropped} duplicate deliveries dropped")
+        format!(
+            ", duplicates dropped since this daemon started: {}",
+            parts.join(", ")
+        )
     }
+}
+
+/// The line under a consumer that dropped copies before a start was
+/// recorded, saying what that count can and cannot tell, or nothing when
+/// it is zero.
+///
+/// It does not say whether anything is wrong, because the claim does
+/// not. The claim's first copy may still be waiting or starting: a
+/// delivery is redelivered under it when its keepalive stops landing,
+/// or when its start outlasts the ack window. Or this daemon may never
+/// settle the claim, and every delivery of that trigger is dropped the
+/// same way until it is dead-lettered. The stranded-claims block of the
+/// same report lists such a claim once a run is on record for it, which
+/// the line points at; one with no run on record is not listed at all,
+/// so this line and the log are where it shows.
+fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
+    if held_duplicate_dropped == 0 {
+        return String::new();
+    }
+    "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
+     start on it, left unacked: its first copy was still waiting or starting, or this daemon \
+     will never settle that claim, and the claim does not say which; the daemon log has a warn \
+     line for each with its subject, sequence, attempt and the claim's age, and such a claim \
+     whose run is on record is listed under \"Stranded trigger claims\" below\n"
+        .to_string()
 }
 
 /// Pure: the MCP block of `fq doctor`. Silent when no agent declares a

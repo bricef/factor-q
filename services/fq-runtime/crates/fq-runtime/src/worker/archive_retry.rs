@@ -12,8 +12,9 @@
 //!
 //! Before `archived`, it republishes the row's stored terminal
 //! event (`terminal_outcome`, v12) while that is not stamped
-//! published — the healer for a `completed` publish lost after
-//! the row went terminal (#823). It is the stored event itself,
+//! published — the healer for a `completed` (#823), or a `failed`
+//! the reducer decided (#946), whose publish was lost after the
+//! row went terminal. It is the stored event itself,
 //! with the original's `event_id`, and delivery is at-least-once:
 //! if a copy did land (a lost ack, or the run loop racing this
 //! sweep), JetStream's `Nats-Msg-Id` dedup drops the republish only
@@ -24,8 +25,8 @@
 //!
 //! A stored event that must not be republished (unreadable by this
 //! build, or not this row's terminal event: see `HoldReason`) holds
-//! its row. No `completed`, no `archived`, one `error!` per daemon
-//! run, and the sweep carries on to the rows behind it. Archiving
+//! its row. Neither it nor `archived` goes out; the hold is one `error!`
+//! per daemon run, and the sweep carries on to the rows behind it. Archiving
 //! without it would discard the only copy of the outcome. No later
 //! build reads an older event version, so the hold lasts until an
 //! operator releases the row (`docs/guide/operating-the-daemon.md`,
@@ -249,7 +250,7 @@ impl ArchiveRetrySweeper {
             ))
         })?;
 
-        // The terminal event first, if its publish was lost (#823): the
+        // The terminal event first, if its publish was lost (#823, #946): the
         // stored event itself, envelope and `event_id` included, so a copy
         // that did land carries the same `event_id` as the original.
         let owed = match row.unpublished_terminal_event() {
@@ -327,7 +328,10 @@ pub enum ArchiveRetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{CompletedPayload, EventPayload, TaskStatus};
+    use crate::events::{
+        CompletedPayload, EventKind, EventPayload, FailedPayload, FailureDetail, FailureKind,
+        FailurePhase, InvocationTotals, TaskStatus,
+    };
     use crate::test_support::events::event_kind_of;
     use crate::test_support::sim::RecordingSink;
     use crate::worker::store::{InvocationStateRow, terminal_outcome};
@@ -419,19 +423,27 @@ mod tests {
         );
     }
 
-    /// A terminal row holding the `completed` event a crash lost (#823),
-    /// written the way the run loop's terminal upsert writes it, and a
-    /// hermetic sweeper over a recording sink.
-    struct LostCompletion {
+    /// A terminal row holding the terminal event a crash lost — the
+    /// `completed` of #823, or a reducer-decided `failed` (#946) — written
+    /// the way the run loop's terminal upsert writes it, and a hermetic
+    /// sweeper over a recording sink.
+    struct LostTerminal {
         _dir: tempfile::TempDir,
         store: Arc<WorkerStore>,
         sink: Arc<RecordingSink>,
         sweeper: ArchiveRetrySweeper,
-        completed: Event,
+        stored: Event,
     }
 
-    impl LostCompletion {
+    impl LostTerminal {
+        /// A lost `completed`.
         async fn new() -> Self {
+            Self::storing("completed", completed_event).await
+        }
+
+        /// A row in `phase` whose stored terminal event is
+        /// `event(invocation_id)`.
+        async fn storing(phase: &str, event: impl FnOnce(Uuid) -> Event) -> Self {
             let dir = tempdir().unwrap();
             let store = Arc::new(
                 WorkerStore::open(&dir.path().join("worker.db"))
@@ -439,10 +451,11 @@ mod tests {
                     .expect("worker store"),
             );
             let invocation_id = Uuid::now_v7();
-            let mut completed = completed_event(invocation_id);
-            completed.envelope.parent_event_id = Some(Uuid::now_v7());
+            let mut stored = event(invocation_id);
+            stored.envelope.parent_event_id = Some(Uuid::now_v7());
             let mut row = terminal_row(&invocation_id.to_string(), "sweep-agent", 1_000);
-            row.terminal_outcome = Some(terminal_outcome::encode(&completed).unwrap());
+            row.phase = phase.to_string();
+            row.terminal_outcome = Some(terminal_outcome::encode(&stored).unwrap());
             store.upsert_invocation_state(&row).await.unwrap();
             let sink = Arc::new(RecordingSink::new());
             let sweeper = ArchiveRetrySweeper::new_with_sink(
@@ -455,12 +468,12 @@ mod tests {
                 store,
                 sink,
                 sweeper,
-                completed,
+                stored,
             }
         }
 
         fn inv(&self) -> String {
-            self.completed.envelope.invocation_id.to_string()
+            self.stored.envelope.invocation_id.to_string()
         }
 
         fn kinds(&self) -> Vec<&'static str> {
@@ -479,14 +492,14 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_republishes_a_lost_terminal_event_before_archiving() {
-        let world = LostCompletion::new().await;
+        let world = LostTerminal::new().await;
         let mut warned = HashSet::new();
         world.sweeper.sweep_once(&mut warned).await.unwrap();
 
         assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
         assert_eq!(
             serde_json::to_value(&world.sink.events()[0]).unwrap(),
-            serde_json::to_value(&world.completed).unwrap(),
+            serde_json::to_value(&world.stored).unwrap(),
             "the stored event itself, envelope and event_id included"
         );
         assert!(world.published_at().await.is_some(), "stamped once out");
@@ -502,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_leaves_a_published_terminal_event_alone() {
-        let world = LostCompletion::new().await;
+        let world = LostTerminal::new().await;
         let stamped = world
             .store
             .mark_terminal_published(&world.inv(), 1_001)
@@ -516,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_republish_leaves_the_terminal_event_owed() {
-        let world = LostCompletion::new().await;
+        let world = LostTerminal::new().await;
         world.sink.fail_publish_at(0);
         assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
         assert_eq!(world.published_at().await, None, "stamped only once out");
@@ -541,7 +554,7 @@ mod tests {
     /// row's turn in that pass, with nothing else published for it.
     #[tokio::test]
     async fn a_completed_republish_that_fails_once_is_not_followed_by_archived() {
-        let world = LostCompletion::new().await;
+        let world = LostTerminal::new().await;
         world.sink.fail_publish_at_invocation_count(0);
         assert!(world.sweeper.sweep_once(&mut HashSet::new()).await.is_err());
         let refused: Vec<_> = world
@@ -567,6 +580,69 @@ mod tests {
 
         world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         assert_eq!(world.kinds(), ["completed", "invocation_archived"]);
+    }
+
+    /// A `failed` the reducer decided (#946) is healed exactly as
+    /// `completed` is: the stored event itself goes out first, its
+    /// `detail` with it, then `invocation.archived` for the row's `failed`
+    /// phase; once stamped it is not re-emitted.
+    #[tokio::test]
+    async fn sweep_republishes_a_lost_failed_event_before_archiving() {
+        let world = LostTerminal::storing("failed", failed_event).await;
+        let mut warned = HashSet::new();
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+
+        assert_eq!(world.kinds(), ["failed", "invocation_archived"]);
+        let events = world.sink.events();
+        let republished = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(
+            republished,
+            serde_json::to_value(&world.stored).unwrap(),
+            "the stored event itself, envelope, event_id and detail included"
+        );
+        assert_eq!(
+            republished["payload"]["payload"]["detail"]["kind"], "payload_too_large",
+            "the comparison above covers a detail, not an absent one"
+        );
+        match &events[1].payload {
+            EventPayload::InvocationArchived(p) => assert_eq!(p.final_phase, "failed"),
+            other => panic!("wrong payload variant: {other:?}"),
+        }
+        assert!(world.published_at().await.is_some(), "stamped once out");
+
+        world.sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(
+            world.kinds(),
+            ["failed", "invocation_archived", "invocation_archived"]
+        );
+    }
+
+    /// A `failed` this invocation's reducer could have decided. Nothing
+    /// emits a `detail` yet, but a stored one must survive the round trip,
+    /// so this one carries the only kind of detail there is; the pairing
+    /// with `MaxIterations` is arbitrary, since the two are orthogonal.
+    fn failed_event(invocation_id: Uuid) -> Event {
+        Event::new(
+            AgentId::new("sweep-agent").unwrap(),
+            invocation_id,
+            EventPayload::Failed(FailedPayload {
+                error_kind: FailureKind::MaxIterations,
+                error_message: "exceeded max iterations (2)".to_string(),
+                phase: FailurePhase::Reducer,
+                partial_totals: InvocationTotals {
+                    total_llm_calls: 2,
+                    total_tool_calls: 1,
+                    total_cost: 0.125,
+                    total_duration_ms: 987,
+                    ..InvocationTotals::default()
+                },
+                detail: Some(FailureDetail::PayloadTooLarge {
+                    event_type: EventKind::LlmRequest,
+                    size_bytes: 2_000_000,
+                    limit_bytes: 1_048_576,
+                }),
+            }),
+        )
     }
 
     /// A `completed` this invocation could have stored.

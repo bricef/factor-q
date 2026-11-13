@@ -11,6 +11,9 @@
 //! step loop and the first WAL write; [`ParkedModel`] parks it in its
 //! first model call, which comes after that write. The test lands the
 //! drain or the halt while the invocation is parked, then lets it go.
+//!
+//! `duplicate_drop_tests` parks an invocation in its setup the same way,
+//! and borrows this file's harness to do it.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,7 +67,7 @@ async fn wait_until(what: &str, mut ready: impl AsyncFnMut() -> bool) {
 /// invocations it provisioned and which it reclaimed. The directories
 /// are real, so "kept" and "reclaimed" are facts about the disk.
 #[derive(Debug)]
-struct HeldSetup {
+pub(super) struct HeldSetup {
     inner: PerInvocationWorkspace,
     _root: tempfile::TempDir,
     gate: Semaphore,
@@ -74,7 +77,7 @@ struct HeldSetup {
 
 impl HeldSetup {
     /// `open`: how many invocations may provision without waiting.
-    fn new(open: usize) -> Arc<Self> {
+    pub(super) fn new(open: usize) -> Arc<Self> {
         let root = tempfile::tempdir().expect("workspace root");
         Arc::new(Self {
             inner: PerInvocationWorkspace::new(root.path().to_path_buf()),
@@ -87,7 +90,7 @@ impl HeldSetup {
 
     /// The invocation parked in its setup, once there is one: the id
     /// the dispatcher named on the trigger's claim.
-    async fn parked(&self) -> Uuid {
+    pub(super) async fn parked(&self) -> Uuid {
         wait_until("an invocation to enter its setup", async || {
             !self.provisioned.lock().unwrap().is_empty()
         })
@@ -95,7 +98,7 @@ impl HeldSetup {
         self.provisioned.lock().unwrap()[0]
     }
 
-    fn let_through(&self) {
+    pub(super) fn let_through(&self) {
         self.gate.add_permits(1);
     }
 
@@ -153,7 +156,7 @@ impl LlmClient for ParkedModel {
 
 /// A model with one answer, the outcome report, for an invocation that
 /// is meant to run to completion.
-fn one_answer() -> Arc<FixtureClient> {
+pub(super) fn one_answer() -> Arc<FixtureClient> {
     let model = FixtureClient::new();
     model.push_response(canned_response());
     Arc::new(model)
@@ -162,14 +165,14 @@ fn one_answer() -> Arc<FixtureClient> {
 /// One binary's worth of state directory: the control-plane store the
 /// claims live in and the worker's WAL. A restarted daemon opens the
 /// same two files, so the binaries in a test share them.
-struct StateDir {
+pub(super) struct StateDir {
     _dir: tempfile::TempDir,
     claims: Arc<ControlPlaneStore>,
     wal: Arc<WorkerStore>,
 }
 
 impl StateDir {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let dir = tempfile::tempdir().expect("state dir");
         let claims = Arc::new(
             ControlPlaneStore::open(&dir.path().join("control-plane.db"))
@@ -189,7 +192,7 @@ impl StateDir {
     }
 
     /// The real runner, claiming as `binary`, over this WAL.
-    fn runner(
+    pub(super) fn runner(
         &self,
         bus: &EventBus,
         binary: &str,
@@ -212,7 +215,7 @@ impl StateDir {
 
     /// A dispatcher for one binary, built the way the daemon builds it:
     /// startup recovery over this WAL first, then the claims it returns.
-    async fn dispatcher(
+    pub(super) async fn dispatcher(
         &self,
         bus: &EventBus,
         registry: &SharedRegistry,
@@ -230,11 +233,17 @@ impl StateDir {
         )
     }
 
+    /// The control-plane store the claims live in, and its file, for a
+    /// test that writes a claim itself or changes how the table behaves.
+    pub(super) fn claim_store(&self) -> (&Arc<ControlPlaneStore>, std::path::PathBuf) {
+        (&self.claims, self._dir.path().join("control-plane.db"))
+    }
+
     /// What the claim row for `seq` says, read by a claim that cannot win
     /// it while a row exists. On a row that exists the probe writes
     /// nothing; on a missing one it wins and writes one, so a probe that
     /// finds no row is the last thing a test can learn about the claim.
-    async fn claim(&self, bus: &EventBus, seq: u64) -> TriggerClaim {
+    pub(super) async fn claim(&self, bus: &EventBus, seq: u64) -> TriggerClaim {
         self.claims
             .claim_trigger(test_key(bus, seq), "probe", "probe", 0)
             .await
@@ -244,7 +253,7 @@ impl StateDir {
 
 /// A consumer of `agent`'s triggers, a published trigger, and its first
 /// delivery.
-async fn one_delivery(
+pub(super) async fn one_delivery(
     bus: &EventBus,
     agent: &str,
 ) -> (PullConsumer, async_nats::jetstream::Message) {
@@ -263,7 +272,7 @@ async fn one_delivery(
     (consumer, msg)
 }
 
-async fn next_delivery(consumer: &mut PullConsumer) -> async_nats::jetstream::Message {
+pub(super) async fn next_delivery(consumer: &mut PullConsumer) -> async_nats::jetstream::Message {
     let mut messages = consumer.messages().await.expect("messages");
     tokio::time::timeout(Duration::from_secs(20), messages.next())
         .await
@@ -276,7 +285,7 @@ async fn next_delivery(consumer: &mut PullConsumer) -> async_nats::jetstream::Me
 /// own, so every answer anyone sends the broker for that delivery
 /// (`+ACK`, `-NAK`, `+WPI`, `+TERM`) is heard here. The client is
 /// returned with the subscription to keep the connection open.
-async fn answers_to(
+pub(super) async fn answers_to(
     server_url: &str,
     msg: &async_nats::jetstream::Message,
 ) -> (async_nats::Client, async_nats::Subscriber) {
@@ -293,7 +302,7 @@ async fn answers_to(
 /// Wait until the broker has nothing unacked on `consumer`, and then
 /// check it has nothing queued either: the trigger was consumed, not
 /// handed back.
-async fn settled(consumer: &mut PullConsumer, what: &str) {
+pub(super) async fn settled(consumer: &mut PullConsumer, what: &str) {
     wait_until(what, async || {
         consumer.info().await.expect("info").num_ack_pending == 0
     })
@@ -369,12 +378,15 @@ async fn a_drain_during_setup_leaves_the_trigger_for_the_next_binary_which_runs_
     // a row existed, recovery would have marked this claim started and
     // the redelivery would be dropped instead. A released claim would
     // lose that: the redelivery would win a fresh one either way.
-    assert_eq!(
-        state.claim(&bus, seq).await,
-        TriggerClaim::Held {
-            claimant: "binary-1".to_string()
-        },
-        "the drained trigger's claim must stay held for the next binary to adopt"
+    let held = state.claim(&bus, seq).await;
+    assert!(
+        matches!(
+            &held,
+            TriggerClaim::Held { claimant, invocation_id: Some(named), .. }
+                if claimant == "binary-1" && *named == drained.to_string()
+        ),
+        "the drained trigger's claim must stay held for the next binary to adopt, still \
+         naming the invocation that wrote nothing; got {held:?}"
     );
     assert_eq!(
         setup.reclaimed(),

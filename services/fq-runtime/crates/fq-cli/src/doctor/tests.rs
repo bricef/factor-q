@@ -268,6 +268,7 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         stuck,
         malformed_acked: 0,
         duplicate_dropped: 0,
+        held_duplicate_dropped: 0,
     }
 }
 
@@ -322,12 +323,60 @@ fn stuck_dispatcher_with_dropped_duplicates_explains_duplicate_dispatch() {
 
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("2 duplicate deliveries dropped"),
+        out.contains("duplicates dropped since this daemon started: 2 after their run started"),
         "got:\n{out}"
     );
     assert!(
         out.contains("redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice"),
         "got:\n{out}"
+    );
+}
+
+/// The held-copy count does not choose a stuck dispatcher's next step.
+/// It only grows while the daemon runs: a slow start that was
+/// redelivered hours ago leaves it at 1 when the worker store fails and
+/// every trigger is NAKed before its first WAL write. With no trigger
+/// held at a cap and no copy of a started run, the step stays the one
+/// that points at the handler and the store, and the count's own note
+/// follows it, saying what the count cannot tell.
+#[test]
+fn stuck_dispatcher_with_only_held_duplicates_keeps_the_handler_step() {
+    let mut dispatcher = active("fq-dispatcher", true, 5);
+    if let fq_ops::health::ConsumerHealth::Active {
+        held_duplicate_dropped,
+        ..
+    } = &mut dispatcher
+    {
+        *held_duplicate_dropped = 1;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![dispatcher],
+        Vec::new(),
+    );
+
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "duplicates dropped since this daemon started: 1 before a start was recorded\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "  -> its handler keeps failing; check the daemon log for `consumer=fq-dispatcher` \
+             and free whatever it is blocked on (disk, store, broker)\n  -> \"before a start was \
+             recorded\" is a copy"
+        ),
+        "the handler step, then the count's note:\n{out}"
+    );
+    assert!(
+        !out.contains("may have been delivered twice"),
+        "a count that only grows must not name the cause of a stall:\n{out}"
     );
 }
 
@@ -506,7 +555,67 @@ fn duplicate_deliveries_dropped_are_counted_beside_the_consumer() {
     );
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("fq-dispatcher: ok (pending 0, 5 duplicate deliveries dropped)"),
+        out.contains(
+            "fq-dispatcher: ok (pending 0, duplicates dropped since this daemon started: \
+             5 after their run started)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        !out.contains("before a start was recorded"),
+        "copies of a started run are not copies dropped before a start was recorded:\n{out}"
+    );
+}
+
+/// The two drops are told apart on the consumer's line (#968), by when
+/// the copy arrived: after its run's start was recorded, or before a
+/// start was recorded on a claim this daemon holds. The second is not
+/// called "held", which on this report means an admission hold. It gets
+/// a line saying what it can and cannot tell, because nothing on the
+/// claim says whether the first copy is still coming, and pointing at
+/// the stranded-claims block where such a claim with a run on record is
+/// listed. Neither is a fault, and the line names no verdict.
+#[test]
+fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
+    let mut counted = active("fq-dispatcher", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        duplicate_dropped,
+        held_duplicate_dropped,
+        ..
+    } = &mut counted
+    {
+        *duplicate_dropped = 5;
+        *held_duplicate_dropped = 2;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "a refused copy, before or after a recorded start, is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon started: \
+             5 after their run started, 2 before a start was recorded)\n  -> \"before a start \
+             was recorded\" is a copy that met a claim this daemon holds with no start on it, \
+             left unacked: its first copy was still waiting or starting, or this daemon will \
+             never settle that claim, and the claim does not say which; the daemon log has a \
+             warn line for each with its subject, sequence, attempt and the claim's age, and \
+             such a claim whose run is on record is listed under \"Stranded trigger claims\" \
+             below\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains("Consumers: 1 checked, 0 unhealthy"),
         "got:\n{out}"
     );
 }
@@ -526,6 +635,7 @@ fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
     );
     let out = render_doctor_report_human(&report);
     assert!(!out.contains("duplicate"), "got:\n{out}");
+    assert!(!out.contains("before a start was recorded"), "got:\n{out}");
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
@@ -616,6 +726,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         stuck: false,
         malformed_acked: 0,
         duplicate_dropped: 0,
+        held_duplicate_dropped: 0,
     };
     let report = build_doctor_report(
         &[],

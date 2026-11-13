@@ -2768,7 +2768,14 @@
                         "type": "integer"
                       },
                       "duplicate_dropped": {
-                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started is already running: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Zero on a consumer that was never\noffered a message it had already begun. A climbing figure\nsays the broker is redelivering triggers the dispatcher is\nholding — and that the second copy was refused rather than\nrun a second time. Reported because it is the only trace\nsuch a delivery leaves: no invocation is created for it, so\nnothing downstream records it.",
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Copies of a run that has started. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "held_duplicate_dropped": {
+                        "default": 0,
+                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, and\nthe claim is the daemon's own. \"Held\" in the name is the\nclaim's state: the daemon holds the durable claim on that\ndelivery's stream sequence, and it records no start. It is\nnot an admission hold (a paused model, an agent at its cap,\na wait for a worker permit), though a trigger in one is a\ncommon first copy. Copies of a trigger still in hand. The\nfirst copy may be waiting or still starting (nothing renews\na delivery's ack window between its worker permit and its\nfirst WAL write), or the daemon may never settle that claim;\nnothing on the claim says which, and neither does this\ncount. The daemon logs each one at warn with its subject, its\nsequence, its attempt and the claim's age. Counted in memory\nsince the daemon started, like `duplicate_dropped`. A report\nfrom a daemon that does not send it reads as zero.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -3486,7 +3493,14 @@
                         "type": "integer"
                       },
                       "duplicate_dropped": {
-                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started is already running: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Zero on a consumer that was never\noffered a message it had already begun. A climbing figure\nsays the broker is redelivering triggers the dispatcher is\nholding — and that the second copy was refused rather than\nrun a second time. Reported because it is the only trace\nsuch a delivery leaves: no invocation is created for it, so\nnothing downstream records it.",
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Copies of a run that has started. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "held_duplicate_dropped": {
+                        "default": 0,
+                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, and\nthe claim is the daemon's own. \"Held\" in the name is the\nclaim's state: the daemon holds the durable claim on that\ndelivery's stream sequence, and it records no start. It is\nnot an admission hold (a paused model, an agent at its cap,\na wait for a worker permit), though a trigger in one is a\ncommon first copy. Copies of a trigger still in hand. The\nfirst copy may be waiting or still starting (nothing renews\na delivery's ack window between its worker permit and its\nfirst WAL write), or the daemon may never settle that claim;\nnothing on the claim says which, and neither does this\ncount. The daemon logs each one at warn with its subject, its\nsequence, its attempt and the claim's age. Counted in memory\nsince the daemon started, like `duplicate_dropped`. A report\nfrom a daemon that does not send it reads as zero.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"

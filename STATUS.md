@@ -244,7 +244,7 @@ stream, the epoch of the stream incarnation it connected to, and the
 sequence — before it drains, routes, or parses anything: a copy of a
 trigger this daemon is already holding is dropped, and a copy of one
 whose invocation has durably started is acked and dropped (`fq status`
-and `fq doctor` count the second kind). The trigger is still acked at
+and `fq doctor` count both kinds, apart). The trigger is still acked at
 the invocation's first WAL write (`DurableStart`, #41), which is what
 bounds the older failure, a long invocation outliving its ack deadline
 and being re-run. The design is correct for one daemon and assumes one.
@@ -293,10 +293,23 @@ started, its claim released and a transient error NAKed for a second
 run. The dispatcher now asks the signal once more when an invocation
 returns, and tests pin that the runner fires the signal only once its
 first WAL write has landed
-([#966](https://github.com/bricef/factor-q/issues/966)). Startup
-recovery's resumes and `fq invocation resume` now wait for a
-`max_concurrent_invocations` permit like every other run, as a deferred
-resume already did, so a restart no longer runs its recovered
+([#966](https://github.com/bricef/factor-q/issues/966)). The fourth,
+a duplicate dropped before durable start leaving no trace, is closed
+too: a copy that meets a claim this daemon holds with no start recorded
+used to be refused without a log line or a count, and is now logged at
+warn with its subject, sequence and attempt, the claim's age and the
+invocation id the claim names, and counted apart from copies of a
+started run (`fq status` and `fq doctor` name the two by whether the
+copy came before or after a start was recorded). The log line does not
+say why the claim has no start, since nothing on it does: a first copy
+still waiting or starting, or a claim this daemon
+will never settle (the third gap, open as
+[#967](https://github.com/bricef/factor-q/issues/967)). Both counts are
+kept in memory and start again with the daemon
+([#968](https://github.com/bricef/factor-q/issues/968)). Outside
+ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
+for a `max_concurrent_invocations` permit like every other run, as a
+deferred resume already did, so a restart no longer runs its recovered
 invocations on top of the cap, and they start ahead of any new trigger
 (the review's finding C5,
 [#994](https://github.com/bricef/factor-q/issues/994)). The M0
