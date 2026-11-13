@@ -3121,7 +3121,7 @@
               },
               {
                 "const": "started_unmarked",
-                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. The dispatcher acks a\ndelivery whose start the claim store refused to record, keeping its\nclaim, so normally no redelivery follows. If that ack was lost:\nheld by this daemon, every redelivery is dropped and the trigger\nends as a `trigger_exhausted` dead letter although its run started;\nleft by a process that has exited, a redelivery would be adopted\nand start the work again, and a false dead letter may already\nexist.",
+                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. Held by this daemon,\none of two things happened, and only the daemon log tells which:\nthe claim store refused the mark and the dispatcher acked the\ndelivery anyway, keeping its claim; or the run's task panicked in\nthe step that made its first durable write, and nothing was acked.\nWhere nothing was acked, or the ack was lost, every redelivery is\ndropped and the trigger ends as a `trigger_exhausted` dead letter\nalthough its run started. Left by a process that has exited, a\nredelivery would be adopted and start the work again, and a false\ndead letter may already exist.",
                 "type": "string"
               },
               {

@@ -114,11 +114,11 @@ fn finding_lines(claim: &StrandedTriggerClaim, claims: &DoctorTriggerClaims) -> 
             )
         }
         (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ThisDaemon) => format!(
-            "  -> {started} but its claim was never marked started: this daemon acked the \
-             delivery when it could not mark it, so no redelivery should follow; if that ack was \
-             lost, this daemon drops each redelivery and the trigger will be dead-lettered as \
-             exhausted although its run started; do not requeue that dead letter — \
-             `fq invocation show {invocation}`\n"
+            "  -> {started} but its claim was never marked started: if this daemon logged \
+             `could not mark trigger durably started` for invocation {invocation}, it acked the \
+             delivery; otherwise, or if that ack was lost, this daemon drops each redelivery and \
+             the trigger will be dead-lettered as exhausted although its run started; do not \
+             requeue that dead letter — `fq invocation show {invocation}`\n"
         ),
         (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ExitedProcess) => format!(
             "  -> {started} but its claim was never marked started: a redelivery would be adopted \
