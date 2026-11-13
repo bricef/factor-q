@@ -23,15 +23,31 @@
 //! consumer idempotent on `event_id` (the projection's upsert)
 //! still reads as one event.
 //!
-//! A stored event that must not be republished (unreadable by this
-//! build, or not this row's terminal event: see `HoldReason`) holds
-//! its row. Neither it nor `archived` goes out; the hold is one `error!`
-//! per daemon run, and the sweep carries on to the rows behind it. Archiving
-//! without it would discard the only copy of the outcome. No later
-//! build reads an older event version, so the hold lasts until an
-//! operator releases the row (`docs/guide/operating-the-daemon.md`,
-//! "When the archive sweeper holds a terminal row"); until then the
-//! control plane sees that invocation as not archived.
+//! Some rows cannot go out, and the sweeper **holds** them: it publishes
+//! nothing more for the row, leaves it in the store exactly as it was, and
+//! carries on to the rows behind it. A hold is one `error!` per daemon run,
+//! and [`ArchiveHolds`] lists it for `control.status` and `control.doctor`
+//! with the reason and what lifts it. While a row is held, the control
+//! plane sees that invocation as not archived. Two causes hold a row
+//! (`docs/guide/operating-the-daemon.md`, "When the archive sweeper holds a
+//! terminal row"):
+//!
+//! - A stored event that must not be republished (unreadable by this
+//!   build, or not this row's terminal event: see `HoldReason`). Archiving
+//!   without it would discard the only copy of the outcome, and no later
+//!   build reads an older event version, so the hold lasts until an
+//!   operator releases the row.
+//! - An event the broker refuses for its size: the stored terminal event,
+//!   or `invocation.archived`, which carries the run's whole state (#981).
+//!   The same event is refused on every attempt, so the row is not
+//!   serialised again until it could fit: at the next start, when a new
+//!   run's sweeper begins with no holds, or when the sink reports a limit
+//!   above the one the row was refused under (see
+//!   [`ArchiveRetrySweeper::with_payload_limit`]).
+//!
+//! A size refusal is the only publish error treated per row. Any other is
+//! the bus's, and a broker that is down refuses every row the same way, so
+//! it ends the pass, as it always has, and the next tick starts again.
 //!
 //! Two configurable timings:
 //!
@@ -48,20 +64,27 @@
 //!   must be held, not deleted, even if the CP never acks.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use fq_ops::health::ArchiveHoldReason;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::AgentId;
-use crate::bus::{EventBus, EventSink};
+use crate::bus::{BusError, EventBus, EventSink};
 use crate::events::{Event, EventPayload, InvocationArchivedPayload};
 
 use super::WorkerId;
-use super::store::terminal_outcome::HoldReason;
 use super::store::{InvocationStateRow, WorkerStore};
+
+mod holds;
+pub use holds::ArchiveHolds;
+
+/// Reads a sink's `max_payload` now: how a sweeper over a sink whose
+/// limit can change while it runs learns that a row held for size may fit.
+pub type PayloadLimit = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
 
 /// Default cadence between sweeps (10 seconds). Pair this with
 /// the heartbeat producer's cadence — the two share the same
@@ -83,8 +106,12 @@ pub struct ArchiveRetrySweeper {
     store: Arc<WorkerStore>,
     retry_interval_ms: u64,
     warn_after_ms: i64,
-    /// Rows this process has already reported held (see `report_held`).
-    held: Mutex<HashSet<String>>,
+    /// The rows this sweeper holds (see `report_held`), shared with the
+    /// health reports.
+    holds: Arc<ArchiveHolds>,
+    /// The sink's current `max_payload`, when it can change under a
+    /// running sweeper (see [`Self::with_payload_limit`]).
+    payload_limit: Option<PayloadLimit>,
 }
 
 impl ArchiveRetrySweeper {
@@ -105,7 +132,8 @@ impl ArchiveRetrySweeper {
             store,
             retry_interval_ms: DEFAULT_RETRY_INTERVAL_MS,
             warn_after_ms: DEFAULT_WARN_AFTER_MS,
-            held: Mutex::new(HashSet::new()),
+            holds: Arc::new(ArchiveHolds::default()),
+            payload_limit: None,
         }
     }
 
@@ -121,6 +149,23 @@ impl ArchiveRetrySweeper {
     pub fn with_warn_after_ms(mut self, ms: i64) -> Self {
         self.warn_after_ms = ms;
         self
+    }
+
+    /// Read the sink's `max_payload` before each pass, so a row held for
+    /// size is offered again as soon as the limit rises above the one it
+    /// was refused under. For a sink whose limit can change while the
+    /// sweeper runs. The daemon sets none: the bus reads the broker's
+    /// limit once, when it connects, so a running daemon's never changes,
+    /// and a held row waits for the next start.
+    pub fn with_payload_limit(mut self, limit: PayloadLimit) -> Self {
+        self.payload_limit = Some(limit);
+        self
+    }
+
+    /// The rows this sweeper holds: what `control.status` and
+    /// `control.doctor` list.
+    pub fn holds(&self) -> Arc<ArchiveHolds> {
+        Arc::clone(&self.holds)
     }
 
     /// Run the sweep loop until `shutdown` fires.
@@ -176,12 +221,40 @@ impl ArchiveRetrySweeper {
             .list_archive_pending()
             .await
             .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+        self.holds
+            .retain_pending(&rows.iter().map(|r| r.invocation_id.as_str()).collect());
+        let limit_now = self.payload_limit.as_ref().and_then(|limit| limit());
         let now_ms = Utc::now().timestamp_millis();
         for row in rows {
             self.maybe_warn_once(&row, now_ms, warned);
-            self.republish(&row).await?;
+            if self.waits_for_a_higher_limit(&row, limit_now) {
+                continue;
+            }
+            match self.republish(&row).await? {
+                Some(reason) => self.report_held(&row, reason),
+                None => self.holds.release(&row.invocation_id),
+            }
         }
         Ok(())
+    }
+
+    /// Whether `row` sits this pass out: held for an event the broker
+    /// refused for size, under a limit that has not risen since. The row
+    /// cannot have changed (a terminal row's state is final), so offering
+    /// it again would serialise the same event to be refused the same way.
+    fn waits_for_a_higher_limit(&self, row: &InvocationStateRow, limit_now: Option<usize>) -> bool {
+        let Some(held_under) = self.holds.too_large_under(&row.invocation_id) else {
+            return false;
+        };
+        let waits = limit_now.is_none_or(|now| now as u64 <= held_under);
+        if waits {
+            debug!(
+                invocation_id = %row.invocation_id,
+                limit_bytes = held_under,
+                "terminal row still held: the broker's max_payload has not risen"
+            );
+        }
+        waits
     }
 
     fn maybe_warn_once(&self, row: &InvocationStateRow, now_ms: i64, warned: &mut HashSet<String>) {
@@ -203,29 +276,51 @@ impl ArchiveRetrySweeper {
         warned.insert(row.invocation_id.clone());
     }
 
-    /// Say a row is held: `error!` the first time this process holds it,
-    /// with the release it needs; `debug!` on every later sweep, so a held
-    /// row is one loud line per daemon run rather than one per tick.
-    fn report_held(&self, invocation_id: &str, reason: &HoldReason) {
-        let first = self
-            .held
-            .lock()
-            .expect("held set lock poisoned")
-            .insert(invocation_id.to_string());
-        if first {
-            error!(
+    /// Hold a row and say so: `error!` when that is news (the row was not
+    /// held, or was held for something else), with what lifts the hold;
+    /// `debug!` on every later sweep, so a held row is one loud line per
+    /// daemon run rather than one per tick.
+    fn report_held(&self, row: &InvocationStateRow, reason: ArchiveHoldReason) {
+        let invocation_id = row.invocation_id.as_str();
+        if !self
+            .holds
+            .hold(invocation_id, &row.agent_id, reason.clone())
+        {
+            debug!(invocation_id, reason = %reason.summary(), "terminal row still held");
+            return;
+        }
+        match &reason {
+            ArchiveHoldReason::StoredEventRefused { detail } => error!(
                 invocation_id,
-                %reason,
+                reason = %detail,
                 "stored terminal event cannot be republished; holding the row unarchived \
-                 until an operator releases it (docs/guide/operating-the-daemon.md, \
-                 \"When the archive sweeper holds a terminal row\")"
-            );
-        } else {
-            debug!(invocation_id, %reason, "terminal row still held");
+                 until an operator releases it ({})",
+                holds::GUIDE
+            ),
+            ArchiveHoldReason::PayloadTooLarge {
+                event_type,
+                size_bytes,
+                limit_bytes,
+            } => error!(
+                invocation_id,
+                event_type = event_type.as_str(),
+                size_bytes = *size_bytes,
+                limit_bytes = *limit_bytes,
+                "an event this row must publish is larger than the broker's max_payload; \
+                 holding the row unarchived until it fits: {}",
+                holds::remedy(&reason)
+            ),
         }
     }
 
-    async fn republish(&self, row: &InvocationStateRow) -> Result<(), ArchiveRetryError> {
+    /// Publish what `row` still owes the bus: its stored terminal event,
+    /// while that is not stamped published, then `invocation.archived`.
+    /// `Ok(Some(reason))` when the row is held instead, `Ok(None)` when
+    /// nothing held it, and `Err` for a failure that ends the pass.
+    async fn republish(
+        &self,
+        row: &InvocationStateRow,
+    ) -> Result<Option<ArchiveHoldReason>, ArchiveRetryError> {
         let Some(terminal_at_ms) = row.terminal_at else {
             // list_archive_pending filters to terminal rows, so
             // this branch is unreachable in practice. Treat as
@@ -235,7 +330,7 @@ impl ArchiveRetrySweeper {
                 invocation_id = %row.invocation_id,
                 "list_archive_pending returned a non-terminal row; skipping"
             );
-            return Ok(());
+            return Ok(None);
         };
         let agent_id = AgentId::new(&row.agent_id).map_err(|err| {
             ArchiveRetryError::InvalidAgentId(format!(
@@ -263,15 +358,15 @@ impl ArchiveRetrySweeper {
             // bump, not corruption. Like the non-terminal branch above, it
             // must not end the pass.
             Err(reason) => {
-                self.report_held(&row.invocation_id, &reason);
-                return Ok(());
+                return Ok(Some(ArchiveHoldReason::StoredEventRefused {
+                    detail: reason.to_string(),
+                }));
             }
         };
         if let Some(terminal) = owed {
-            self.sink
-                .publish(&terminal)
-                .await
-                .map_err(|err| ArchiveRetryError::Publish(err.to_string()))?;
+            if let Some(held) = self.publish_for_row(&terminal).await? {
+                return Ok(Some(held));
+            }
             self.store
                 .mark_terminal_published(&row.invocation_id, Utc::now().timestamp_millis())
                 .await
@@ -294,10 +389,9 @@ impl ArchiveRetrySweeper {
                 terminal_at_ms,
             }),
         );
-        self.sink
-            .publish(&event)
-            .await
-            .map_err(|err| ArchiveRetryError::Publish(err.to_string()))?;
+        if let Some(held) = self.publish_for_row(&event).await? {
+            return Ok(Some(held));
+        }
         debug!(
             invocation_id = %row.invocation_id,
             "republished invocation.archived"
@@ -306,7 +400,28 @@ impl ArchiveRetrySweeper {
             .set_archive_pending(&row.invocation_id, Utc::now().timestamp_millis())
             .await
             .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
-        Ok(())
+        Ok(None)
+    }
+
+    /// Publish one of a row's events. A refusal for size is the row's own:
+    /// the event it names is refused on every attempt, so it holds the row
+    /// (`Ok(Some)`) and the pass goes on. Any other failure is the bus's,
+    /// the same for every row, and ends the pass.
+    async fn publish_for_row(
+        &self,
+        event: &Event,
+    ) -> Result<Option<ArchiveHoldReason>, ArchiveRetryError> {
+        match self.sink.publish(event).await {
+            Ok(_) => Ok(None),
+            Err(BusError::PayloadTooLarge { size, limit, .. }) => {
+                Ok(Some(ArchiveHoldReason::PayloadTooLarge {
+                    event_type: event.payload.event_type().to_string(),
+                    size_bytes: size as u64,
+                    limit_bytes: limit as u64,
+                }))
+            }
+            Err(err) => Err(ArchiveRetryError::Publish(err.to_string())),
+        }
     }
 }
 
@@ -328,7 +443,6 @@ pub enum ArchiveRetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::BusError;
     use crate::events::{
         CompletedPayload, EventKind, EventPayload, FailedPayload, FailureDetail, FailureKind,
         FailurePhase, InvocationTotals, TaskStatus,
@@ -336,6 +450,7 @@ mod tests {
     use crate::test_support::events::event_kind_of;
     use crate::test_support::sim::RecordingSink;
     use crate::worker::store::{InvocationStateRow, terminal_outcome};
+    use fq_ops::health::ArchiveHold;
     use futures::StreamExt;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -736,6 +851,25 @@ mod tests {
             assert_eq!(held.archive_status, None, "not archived without it");
             assert_eq!(held.archive_published_at, None);
             assert_eq!(held.terminal_outcome.as_deref(), Some(self.stored.as_str()));
+
+            // Listed for the health reports, with its reason and the release
+            // the guide describes.
+            let holds = self.sweeper.holds().snapshot();
+            assert_eq!(holds.len(), 1, "the held row alone: {holds:?}");
+            assert_eq!(holds[0].invocation_id, self.bad);
+            assert_eq!(holds[0].agent_id, "sweep-agent");
+            assert!(
+                matches!(
+                    holds[0].reason,
+                    ArchiveHoldReason::StoredEventRefused { .. }
+                ),
+                "got: {holds:?}"
+            );
+            assert!(
+                holds[0].remedy.contains("terminal_outcome")
+                    && holds[0].remedy.contains(holds::GUIDE),
+                "the remedy names the release and where it is described: {holds:?}"
+            );
         }
     }
 
@@ -817,6 +951,11 @@ mod tests {
         assert_eq!(released, ["invocation_archived"], "archived, no completed");
         let row = world.store.get_invocation_state(&world.bad).await.unwrap();
         assert_eq!(row.unwrap().archive_status.as_deref(), Some("pending"));
+        let holds = world.sweeper.holds().snapshot();
+        assert!(
+            holds.is_empty(),
+            "a released row is no longer listed: {holds:?}"
+        );
     }
 
     /// A [`RecordingSink`] behind a broker's size guard: an event that
@@ -838,6 +977,10 @@ mod tests {
                 limit: Arc::new(AtomicUsize::new(limit)),
                 too_large: Mutex::new(Vec::new()),
             })
+        }
+
+        fn set_limit(&self, limit: usize) {
+            self.limit.store(limit, Ordering::SeqCst);
         }
 
         /// What was published, in order.
@@ -1086,6 +1229,279 @@ mod tests {
             "nothing offered after the failure"
         );
         world.assert_kept_whole().await;
+    }
+
+    /// The error lines emitted on this thread while a capture is installed.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        /// Install the capture on this thread until the guard drops. A
+        /// `#[tokio::test]` runtime is single-threaded, so every sweep the
+        /// test awaits logs here.
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::ERROR)
+                .finish();
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        /// The captured lines that name `invocation_id`.
+        fn lines_naming(&self, invocation_id: &str) -> Vec<String> {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .lines()
+                .filter(|line| line.contains(invocation_id))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl Oversized {
+        /// A sweeper over the same store and sink that reads the sink's
+        /// limit before each pass, as `with_payload_limit` lets it.
+        fn sweeper_reading_the_limit(&self) -> ArchiveRetrySweeper {
+            let limit = Arc::clone(&self.sink.limit);
+            self.fresh_sweeper()
+                .with_payload_limit(Arc::new(move || Some(limit.load(Ordering::SeqCst))))
+        }
+
+        /// A sweeper over the same store and sink with nothing carried over:
+        /// what the next daemon start runs.
+        fn fresh_sweeper(&self) -> ArchiveRetrySweeper {
+            ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&self.sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&self.store),
+            )
+        }
+
+        /// How many times the oversized row's `invocation.archived` was
+        /// offered and refused.
+        fn refusals(&self) -> usize {
+            self.sink
+                .too_large()
+                .iter()
+                .filter(|e| e.envelope.invocation_id.to_string() == self.big)
+                .count()
+        }
+    }
+
+    /// What `control.status` and `control.doctor` list for a row held for
+    /// size: the invocation, the event refused with its size and the limit,
+    /// and the remedy.
+    #[tokio::test]
+    async fn a_row_held_for_size_is_listed_with_its_reason_and_what_lifts_it() {
+        let world = Oversized::new().await;
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+
+        let holds = world.sweeper.holds().snapshot();
+        assert_eq!(holds.len(), 1, "the oversized row alone: {holds:?}");
+        let hold = &holds[0];
+        assert_eq!(hold.invocation_id, world.big);
+        assert_eq!(hold.agent_id, "sweep-agent");
+        let refused = &world.sink.too_large()[0];
+        let size = serde_json::to_vec(refused).unwrap().len() as u64;
+        assert_eq!(
+            hold.reason,
+            ArchiveHoldReason::PayloadTooLarge {
+                event_type: "invocation_archived".to_string(),
+                size_bytes: size,
+                limit_bytes: LIMIT as u64,
+            }
+        );
+        assert!(
+            hold.remedy.contains("max_payload")
+                && hold.remedy.contains(&size.to_string())
+                && hold.remedy.contains("restart fqd")
+                && hold.remedy.contains(holds::GUIDE),
+            "the remedy says what to raise, past what, and where it is described: {hold:?}"
+        );
+    }
+
+    /// One error line per daemon run, not one per tick, and the held row is
+    /// not serialised again while nothing that could let it fit has
+    /// changed: the daemon's bus reads its limit once, at connect.
+    #[tokio::test]
+    async fn a_row_held_for_size_is_reported_once_and_not_offered_again_this_run() {
+        let world = Oversized::new().await;
+        let log = Captured::default();
+        let _guard = log.install();
+        let mut warned = HashSet::new();
+        for _ in 0..3 {
+            world.sweeper.sweep_once(&mut warned).await.unwrap();
+        }
+
+        assert_eq!(world.refusals(), 1, "offered once, then left alone");
+        let lines = log.lines_naming(&world.big);
+        assert_eq!(lines.len(), 1, "one error line: {lines:#?}");
+        for needle in ["invocation_archived", "max_payload", "restart fqd"] {
+            assert!(lines[0].contains(needle), "{needle:?} in {:?}", lines[0]);
+        }
+        assert!(
+            lines[0].contains(&format!("limit_bytes={LIMIT}")),
+            "the limit it was refused under: {:?}",
+            lines[0]
+        );
+        assert_eq!(world.sweeper.holds().snapshot().len(), 1, "still held");
+        world.assert_kept_whole().await;
+    }
+
+    /// A sink whose limit can change under a running sweeper says so, and
+    /// a held row is offered again once the limit rises above the one it
+    /// was refused under: refused and held anew while still too small,
+    /// archived once it fits.
+    #[tokio::test]
+    async fn a_row_held_for_size_is_archived_once_the_limit_allows() {
+        let world = Oversized::new().await;
+        let sweeper = world.sweeper_reading_the_limit();
+        let mut warned = HashSet::new();
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(world.refusals(), 1, "an unchanged limit is not tried again");
+
+        world.sink.set_limit(LIMIT + 1024);
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(world.refusals(), 2, "tried once under the new limit");
+        let holds = sweeper.holds().snapshot();
+        assert!(
+            matches!(
+                holds[..],
+                [ArchiveHold {
+                    reason: ArchiveHoldReason::PayloadTooLarge { limit_bytes, .. },
+                    ..
+                }] if limit_bytes == (LIMIT + 1024) as u64
+            ),
+            "held under the limit it was last refused under: {holds:?}"
+        );
+
+        world.sink.set_limit(4 * LIMIT);
+        sweeper.sweep_once(&mut warned).await.unwrap();
+        assert_eq!(world.refusals(), 2);
+        let archived: Vec<_> = trail(&world.sink.events())
+            .into_iter()
+            .filter(|(inv, _)| *inv == world.big)
+            .collect();
+        assert_eq!(archived, [(world.big.clone(), "invocation_archived")]);
+        let row = world.row(&world.big).await;
+        assert_eq!(row.archive_status.as_deref(), Some("pending"));
+        assert_eq!(
+            row.state_blob,
+            vec![200; OVERSIZED_STATE],
+            "the state it held"
+        );
+        assert!(sweeper.holds().snapshot().is_empty(), "no longer held");
+    }
+
+    /// The next daemon start offers a held row again: its sweeper begins
+    /// with no holds. Still too large, it is held again; once the broker
+    /// takes it, it is archived.
+    #[tokio::test]
+    async fn the_next_start_offers_a_held_row_again() {
+        let world = Oversized::new().await;
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+
+        let restarted = world.fresh_sweeper();
+        restarted.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.refusals(), 2, "offered again, refused again");
+        assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
+
+        world.sink.set_limit(4 * LIMIT);
+        let restarted = world.fresh_sweeper();
+        restarted.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.refusals(), 2);
+        assert_eq!(
+            world.row(&world.big).await.archive_status.as_deref(),
+            Some("pending"),
+            "archived once the broker takes it"
+        );
+        assert!(restarted.holds().snapshot().is_empty());
+    }
+
+    /// The stored terminal event refused for size is listed under its own
+    /// type, which is what the operator raises the limit for.
+    #[tokio::test]
+    async fn a_terminal_event_held_for_size_is_listed_under_its_own_type() {
+        let world = LostTerminal::storing("completed", |inv| {
+            let mut event = completed_event(inv);
+            if let EventPayload::Completed(p) = &mut event.payload {
+                p.result_summary = Some("x".repeat(2 * LIMIT));
+            }
+            event
+        })
+        .await;
+        let sink = SizeLimitedSink::new(LIMIT);
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&world.store),
+        );
+        sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+
+        assert_eq!(sink.too_large().len(), 1, "not offered again");
+        let holds = sweeper.holds().snapshot();
+        assert!(
+            matches!(
+                &holds[..],
+                [ArchiveHold {
+                    reason: ArchiveHoldReason::PayloadTooLarge { event_type, .. },
+                    ..
+                }] if event_type == "completed"
+            ),
+            "got: {holds:?}"
+        );
+    }
+
+    /// A stored event this build will not republish is judged afresh on
+    /// every pass (it is small, and an operator's release must be seen on
+    /// the next one), and still reported once per run.
+    #[tokio::test]
+    async fn a_stored_event_hold_is_reported_once_per_run() {
+        let log = Captured::default();
+        let _guard = log.install();
+        let world = Held::sweep(|_| r#"{"not": "an event"}"#.to_string()).await;
+        for _ in 0..2 {
+            world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        }
+        let lines = log.lines_naming(&world.bad);
+        assert_eq!(lines.len(), 1, "one error line: {lines:#?}");
+        assert!(
+            lines[0].contains("stored terminal event cannot be republished"),
+            "the line the guide quotes: {:?}",
+            lines[0]
+        );
+    }
+
+    /// A held row that leaves the store (an operator deleted it, or an ack
+    /// for an earlier archive arrived) is no longer listed.
+    #[tokio::test]
+    async fn a_held_row_gone_from_the_store_is_no_longer_listed() {
+        let world = Oversized::new().await;
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        assert_eq!(world.sweeper.holds().snapshot().len(), 1);
+
+        world
+            .store
+            .delete_invocation_state(&world.big)
+            .await
+            .unwrap();
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        let holds = world.sweeper.holds().snapshot();
+        assert!(holds.is_empty(), "got: {holds:?}");
     }
 
     #[tokio::test]

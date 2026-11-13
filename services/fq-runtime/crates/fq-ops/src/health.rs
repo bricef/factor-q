@@ -436,6 +436,80 @@ impl AgentAtCap {
     }
 }
 
+/// A finished invocation's row the worker's archive sweeper is holding
+/// rather than archiving, as every operator surface reads it.
+///
+/// The sweeper publishes nothing for a held row, neither its stored
+/// terminal event nor `invocation.archived`, so the control plane sees
+/// the invocation as not archived. The row stays in the worker's store,
+/// whole, and every other row is archived as usual. The list is the
+/// daemon's memory of its own sweeps: a row held by an earlier run is
+/// offered again when the daemon starts, and is listed again once this
+/// run's sweeper has held it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ArchiveHold {
+    /// The invocation whose row is held, in full.
+    pub invocation_id: String,
+    /// The agent that ran it.
+    pub agent_id: String,
+    /// Why the sweeper holds it.
+    pub reason: ArchiveHoldReason,
+    /// What lifts the hold, in the daemon's words: what to change or do,
+    /// and where the operating guide covers it.
+    pub remedy: String,
+}
+
+/// Why the archive sweeper holds a row. Externally tagged, for the same
+/// encoding reason as [`StreamHealth`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveHoldReason {
+    /// An event the row has to publish is larger than the broker accepts:
+    /// its stored terminal event, or `invocation.archived`, which carries
+    /// the run's whole state. The same event is refused on every attempt,
+    /// so the sweeper does not offer it again until the limit has risen,
+    /// which for the daemon means its next start: it reads the broker's
+    /// `max_payload` when it connects.
+    PayloadTooLarge {
+        /// The refused event's type, spelled as its own `event_type` on
+        /// the wire.
+        event_type: String,
+        /// The event's serialised size, in bytes.
+        size_bytes: u64,
+        /// The broker's `max_payload` it exceeded, in bytes.
+        limit_bytes: u64,
+    },
+    /// The row's stored terminal event must not be republished: this
+    /// build cannot read it, or it could not be this row's outcome. The
+    /// case to expect is an event an older build stored and had not
+    /// published when the daemon was upgraded across an event-schema
+    /// change; republished, it would halt every durable consumer on the
+    /// stream. No later build reads an older event version, so the hold
+    /// lasts until an operator releases the row.
+    StoredEventRefused {
+        /// Why, verbatim: what the event failed to parse as, or what it
+        /// turned out to be.
+        detail: String,
+    },
+}
+
+impl ArchiveHoldReason {
+    /// The reason as one phrase, for every surface that renders it.
+    pub fn summary(&self) -> String {
+        match self {
+            ArchiveHoldReason::PayloadTooLarge {
+                event_type,
+                size_bytes,
+                limit_bytes,
+            } => format!(
+                "`{event_type}` is {size_bytes} bytes, over the broker's max_payload of \
+                 {limit_bytes}"
+            ),
+            ArchiveHoldReason::StoredEventRefused { detail } => detail.clone(),
+        }
+    }
+}
+
 /// A trigger claim that has not settled and will not settle on its own,
 /// as `control.doctor` reports it: a claimed delivery that has neither
 /// been released nor recorded as started.
