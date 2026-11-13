@@ -1323,14 +1323,20 @@ those runs reads `none recorded` from then on. An instance that set
 `retention_days = -1` to keep its history also needs
 `trigger_claim_retention_days = -1` to keep this link.
 
-**One constraint for later work.** `fq doctor` tells a claim whose run
-finished from one that never started by the run's row in the control
-plane's ownership table (`coordination_invocation_owner`), which has no
-retention today. If that table ever gains a window shorter than this
-one, an old claim whose run finished loses its record of the run, and
-the report would turn "started, never marked" into "never started". Keep
-any such window at or above this one, or give the claim its own record
-of the start.
+**One constraint for later work.** Two things here depend on the control
+plane's ownership table (`coordination_invocation_owner`) having no
+retention, which it has none of today. `fq doctor` tells a claim whose
+run finished from one that never started by the run's row there: if
+that table ever gains a window shorter than this one, an old claim whose
+run finished loses its record of the run, and the report would turn
+"started, never marked" into "never started". And once a finished run's
+archive row is swept, `fq invocation show` finds the run by that same
+row (or by its cost rows, if it made a model call), which is what lets
+it show the trigger this window keeps past the archive's window: a
+shorter window on the ownership table could leave such a run unfindable
+while its claim, and so its trigger link, is still kept. Keep any such
+window at or above this one; for the report, the alternative is to give
+the claim its own record of the start.
 
 ## Notifications and alerts
 
