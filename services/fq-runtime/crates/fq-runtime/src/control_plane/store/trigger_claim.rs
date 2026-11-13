@@ -84,7 +84,27 @@ impl TriggerClaimRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsettledTriggerClaim {
     pub claim: TriggerClaimRow,
-    pub owner_status: Option<OwnerStatus>,
+    /// The status the ownership row holds, as stored, when there is a row.
+    /// Left unparsed here: startup recovery needs only to know the row
+    /// exists, so a status this build cannot read must not stop a boot
+    /// (`TriggerClaims::recover`). A reader that uses the status itself
+    /// parses it with [`Self::owner_status`].
+    pub owner_row_status: Option<String>,
+}
+
+impl UnsettledTriggerClaim {
+    /// The ownership row's status, parsed: `None` when there is no row, an
+    /// error when the row holds a status this build does not know.
+    pub fn owner_status(&self) -> Result<Option<OwnerStatus>, ControlPlaneStoreError> {
+        self.owner_row_status
+            .as_deref()
+            .map(|status| {
+                OwnerStatus::parse(status).ok_or_else(|| {
+                    ControlPlaneStoreError::Malformed(format!("unknown owner status `{status}`"))
+                })
+            })
+            .transpose()
+    }
 }
 
 fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> TriggerClaimRow {
@@ -398,7 +418,8 @@ impl ControlPlaneStore {
     /// `fq doctor`'s stranded-claim check reads the claims it judges
     /// through this, and so does startup recovery (`TriggerClaims::recover`)
     /// for the ones it marks, so the two see the same rows and the same
-    /// ownership rows.
+    /// ownership rows. The ownership status comes back as stored; the
+    /// check parses it, recovery needs only to know a row exists.
     pub async fn unsettled_trigger_claims(
         &self,
     ) -> Result<Vec<UnsettledTriggerClaim>, ControlPlaneStoreError> {
@@ -414,21 +435,12 @@ impl ControlPlaneStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|row| {
-                let owner_status = row
-                    .get::<Option<String>, _>("owner_status")
-                    .map(|s| {
-                        OwnerStatus::parse(&s).ok_or_else(|| {
-                            ControlPlaneStoreError::Malformed(format!("unknown owner status `{s}`"))
-                        })
-                    })
-                    .transpose()?;
-                Ok(UnsettledTriggerClaim {
-                    claim: row_to_claim(row),
-                    owner_status,
-                })
+        Ok(rows
+            .iter()
+            .map(|row| UnsettledTriggerClaim {
+                claim: row_to_claim(row),
+                owner_row_status: row.get("owner_status"),
             })
-            .collect()
+            .collect())
     }
 }
