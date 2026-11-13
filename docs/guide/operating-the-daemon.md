@@ -1097,7 +1097,7 @@ nothing ([ADR-0032](../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
 That row is the only record linking a delivery to the run it started.
 The worker's WAL row is deleted once the run is archived, and the archive
 row is swept after `[state] retention_days`; the claim row is kept for
-`[state] trigger_claim_retention_days`, 30 days by default (see
+`[state] trigger_claim_retention_days`, 90 days by default (see
 [How long a claim is kept](#how-long-a-claim-is-kept)).
 
 `fq invocation show <id>` reads it:
@@ -1143,10 +1143,10 @@ help:
 Stranded trigger claims: 3 (2 issues) — claimed trigger deliveries that have not settled
   fq-triggers seq 1003: claimed 2026-11-10T09:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 8b000000-…
   -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 7 (an earlier incarnation of the stream, created 2026-01-02T03:03:05Z): claimed 2026-11-12T06:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 9c000000-…
   -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 1002: claimed 2026-11-12T08:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 7a000000-…
   -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
 ```
@@ -1237,7 +1237,7 @@ stale-worker windows:
 
 ```toml
 [state]
-trigger_claim_retention_days = 30 # the default; -1 keeps claim rows for ever
+trigger_claim_retention_days = 90 # the default; -1 keeps claim rows for ever
 ```
 
 The sweep deletes a claim marked started once it is older than the
@@ -1263,15 +1263,21 @@ argument reads.
 is at or above the floor. It shortens how long a finished run can show
 the delivery that started it: past the window, `fq invocation show`
 reads `none recorded` for a run that did come from the trigger stream.
-The default keeps the link about as long as `retention_days` keeps the
-archived run, but the claim always goes first: its window runs from
-when the delivery was claimed, the archive's from when the finished run
-was archived. The difference is the run's length plus the archive's
-lag, so a run that sat parked for three days reads `trigger: none
-recorded` for the last three days of its archived life. A higher number
-keeps the link longer at the cost of a larger table; the claim table
-has no index yet, so the reads that look a claim up by its run scan the
-rows the window keeps.
+The default, 90 days, keeps the link three times as long as the default
+`retention_days` keeps the archived run: once the archive row is swept,
+`fq invocation show` still finds the run by its row in the ownership
+table, which no window sweeps, and names its trigger until the claim
+goes. Set the two windows equal and the claim always goes first: its
+window runs from when the delivery was claimed, the archive's from when
+the finished run was archived. The difference is the run's length plus
+the archive's lag, so a run that sat parked for three days reads
+`trigger: none recorded` for the last three days of its archived life.
+A higher number keeps the link longer at the cost of a larger table;
+the claim table has no index yet
+([#989](https://github.com/bricef/factor-q/issues/989)), so the reads
+that look a claim up by its run scan the rows the window keeps. Raising
+the number keeps rows from then on; it does not bring back a claim a
+shorter window has already deleted.
 
 **`-1` and `fq doctor`.** With claim rows kept for ever the report has
 no horizon. A never-started line stays for as long as its row exists,

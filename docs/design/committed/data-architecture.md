@@ -409,7 +409,7 @@ convenience with no correctness implication.
 which defaults to 7 and bounds a different table: how long a
 `coordination_worker` row that has already gone *stale* is kept
 before collection, **or with `state.trigger_claim_retention_days`**,
-which defaults to 30 and bounds the dispatcher's `trigger_claim`
+which defaults to 90 and bounds the dispatcher's `trigger_claim`
 table, counted from each claim and never shorter than the trigger
 stream's message age plus a day
 ([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
