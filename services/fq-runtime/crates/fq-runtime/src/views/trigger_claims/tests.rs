@@ -736,3 +736,129 @@ async fn a_run_archived_between_the_two_reads_is_still_found() {
         coordination_record("completed")
     );
 }
+
+// ---- The report and startup recovery agree (issue 967) ----
+
+/// **What a restart's recovery marks is exactly what this report calls
+/// started and never marked.**
+///
+/// Startup recovery marks a `claimed` row's start when its run is on
+/// record, by the same two records this report reads: the worker's WAL row,
+/// in flight or finished, and the control plane's ownership row once the
+/// WAL has let the run go (`TriggerClaims::recover`). So every claim the
+/// report lists as started and never marked before a restart is marked by
+/// it, the report lists none after it, and every other line stays as it
+/// was, its row untouched. The table holds a run of each kind the report
+/// can see: archived, finished and not yet archived, in flight, archived
+/// with its archive since swept, and ambiguous (in flight, with the
+/// ownership row its recovery publish folds into), beside a claim with
+/// nothing on record and one with no invocation id.
+#[tokio::test]
+async fn a_restarts_recovery_marks_every_claim_this_report_calls_started_and_never_marked() {
+    let seed = Seed::new().await;
+    seed.started(1, EXITED, "inv-ok", NOW_MS - 9 * HOUR_MS)
+        .await;
+    seed.claimed(2, EXITED, "inv-never", NOW_MS - 8 * HOUR_MS)
+        .await;
+    seed.claimed(3, EXITED, "inv-archived", NOW_MS - 7 * HOUR_MS)
+        .await;
+    seed.archived("inv-archived", NOW_MS - 7 * HOUR_MS).await;
+    seed.claimed(4, EXITED, "inv-terminal", NOW_MS - 6 * HOUR_MS)
+        .await;
+    seed.wal("inv-terminal", NOW_MS - 6 * HOUR_MS, Some("failed"))
+        .await;
+    seed.claimed(5, EXITED, "inv-in-flight", NOW_MS - 5 * HOUR_MS)
+        .await;
+    seed.wal("inv-in-flight", NOW_MS - 5 * HOUR_MS, None).await;
+    seed.claimed(6, EXITED, "inv-swept", NOW_MS - 4 * HOUR_MS)
+        .await;
+    seed.archived("inv-swept", NOW_MS - 40 * DAY_MS).await;
+    assert_eq!(seed.cp.sweep_archive(NOW_MS - HORIZON_MS).await.unwrap(), 1);
+    seed.claimed_without_id(7, EXITED, NOW_MS - 3 * HOUR_MS)
+        .await;
+    seed.claimed(8, EXITED, "inv-ambiguous", NOW_MS - 2 * HOUR_MS)
+        .await;
+    seed.wal("inv-ambiguous", NOW_MS - 2 * HOUR_MS, None).await;
+    seed.cp
+        .upsert_invocation_ownership(
+            "inv-ambiguous",
+            "agent-a",
+            NOW_MS - HOUR_MS,
+            OwnerStatus::Ambiguous,
+        )
+        .await
+        .unwrap();
+    let views = seed.views().await;
+    let summary = |stranded: &[StrandedTriggerClaim]| {
+        stranded
+            .iter()
+            .map(|s| (s.delivery.stream_seq, s.finding))
+            .collect::<Vec<_>>()
+    };
+
+    let before = views
+        .stranded_trigger_claims(&judgement(window_ms()))
+        .await
+        .unwrap();
+    let unmarked: Vec<(u64, String)> = before
+        .iter()
+        .filter(|s| s.finding == StrandedClaimFinding::StartedUnmarked)
+        .map(|s| {
+            (
+                s.delivery.stream_seq,
+                s.invocation_id.clone().expect("a run on record is named"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        unmarked.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        vec![3, 4, 5, 6, 8],
+        "before the restart, the report lists each run on record as started and never marked"
+    );
+
+    let store = std::sync::Arc::new(
+        ControlPlaneStore::open(&seed.paths.control_plane)
+            .await
+            .unwrap(),
+    );
+    let wal_report = crate::worker::InFlightReport::scan(&seed.worker)
+        .await
+        .unwrap();
+    crate::control_plane::dispatcher::TriggerClaims::recover(store, &wal_report)
+        .await
+        .expect("startup recovery");
+
+    let after = views
+        .stranded_trigger_claims(&judgement(window_ms()))
+        .await
+        .unwrap();
+    assert_eq!(
+        summary(&after),
+        summary(&before)
+            .into_iter()
+            .filter(|(_, finding)| *finding != StrandedClaimFinding::StartedUnmarked)
+            .collect::<Vec<_>>(),
+        "after the restart's recovery the report lists no claim as started and never marked, \
+         and every other line as it was"
+    );
+    let probe = |seq| {
+        seed.cp
+            .claim_trigger(Seed::key(seq), "probe", "probe", NOW_MS)
+    };
+    for (seq, invocation_id) in unmarked {
+        assert_eq!(
+            probe(seq).await.unwrap(),
+            crate::control_plane::TriggerClaim::Started { invocation_id },
+            "recovery marked seq {seq} under the id it names"
+        );
+    }
+    assert_eq!(
+        probe(2).await.unwrap(),
+        crate::control_plane::TriggerClaim::Held {
+            claimant: EXITED.into(),
+            invocation_id: Some("inv-never".into()),
+            claimed_at: NOW_MS - 8 * HOUR_MS,
+        },
+        "a claim with nothing on record is left exactly as it was"
+    );
+}

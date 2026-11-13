@@ -635,6 +635,10 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
     );
 }
 
+// A trigger whose run finished while its claim still read `claimed`, and
+// the next daemon's start (issue 967), over the same crash as the tests above.
+mod finished_runs;
+
 // ---- #994: recovery's resumes are admitted like dispatched work ----
 
 /// An agent declaring `max_concurrent: 1`, granted the one tool a crashed
