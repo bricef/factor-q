@@ -328,6 +328,7 @@ pub enum ArchiveRetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::BusError;
     use crate::events::{
         CompletedPayload, EventKind, EventPayload, FailedPayload, FailureDetail, FailureKind,
         FailurePhase, InvocationTotals, TaskStatus,
@@ -336,6 +337,8 @@ mod tests {
     use crate::test_support::sim::RecordingSink;
     use crate::worker::store::{InvocationStateRow, terminal_outcome};
     use futures::StreamExt;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -814,6 +817,275 @@ mod tests {
         assert_eq!(released, ["invocation_archived"], "archived, no completed");
         let row = world.store.get_invocation_state(&world.bad).await.unwrap();
         assert_eq!(row.unwrap().archive_status.as_deref(), Some("pending"));
+    }
+
+    /// A [`RecordingSink`] behind a broker's size guard: an event that
+    /// serialises to more than the limit is refused with
+    /// `BusError::PayloadTooLarge`, measured as the bus measures it (the
+    /// serialised event, against a strict `>`), and kept in `too_large`.
+    /// The limit is shared so a test can raise it between passes, as an
+    /// operator raises a broker's.
+    struct SizeLimitedSink {
+        recorded: RecordingSink,
+        limit: Arc<AtomicUsize>,
+        too_large: Mutex<Vec<Event>>,
+    }
+
+    impl SizeLimitedSink {
+        fn new(limit: usize) -> Arc<Self> {
+            Arc::new(Self {
+                recorded: RecordingSink::new(),
+                limit: Arc::new(AtomicUsize::new(limit)),
+                too_large: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// What was published, in order.
+        fn events(&self) -> Vec<Event> {
+            self.recorded.events()
+        }
+
+        /// What was refused for its size, in order.
+        fn too_large(&self) -> Vec<Event> {
+            self.too_large.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventSink for SizeLimitedSink {
+        async fn publish(&self, event: &Event) -> Result<u64, BusError> {
+            let size = serde_json::to_vec(event)
+                .expect("the event serialises")
+                .len();
+            let limit = self.limit.load(Ordering::SeqCst);
+            if size > limit {
+                self.too_large.lock().unwrap().push(event.clone());
+                return Err(BusError::PayloadTooLarge { size, limit });
+            }
+            self.recorded.publish(event).await
+        }
+    }
+
+    /// The size guard of the sinks below: a stock broker's 1 MiB, scaled
+    /// down so the test rows stay small.
+    const LIMIT: usize = 64 * 1024;
+
+    /// A state blob whose `invocation.archived` is over twice [`LIMIT`]:
+    /// the blob is a JSON array of integers on the wire, and `200,` is four
+    /// bytes per byte of state.
+    const OVERSIZED_STATE: usize = LIMIT / 2;
+
+    /// `(invocation, event type)` for each event, in order.
+    fn trail(events: &[Event]) -> Vec<(String, &'static str)> {
+        events
+            .iter()
+            .map(|e| {
+                let inv = e.envelope.invocation_id.to_string();
+                (inv, event_kind_of(&e.payload))
+            })
+            .collect()
+    }
+
+    /// A pass over three rows, in the order the store lists them: one whose
+    /// `invocation.archived` is larger than the sink accepts, one owed the
+    /// `completed` a crash lost, and one awaiting its ack. The first is the
+    /// row that used to end every pass.
+    struct Oversized {
+        _dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sink: Arc<SizeLimitedSink>,
+        sweeper: ArchiveRetrySweeper,
+        big: String,
+        owed: String,
+        healthy: String,
+    }
+
+    impl Oversized {
+        async fn new() -> Self {
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+            let [big, owed, healthy] = [0, 1, 2].map(|i| ids[i].to_string());
+
+            let mut row = terminal_row(&big, "sweep-agent", 1_000);
+            row.state_blob = vec![200; OVERSIZED_STATE];
+            store.upsert_invocation_state(&row).await.unwrap();
+
+            let mut row = terminal_row(&owed, "sweep-agent", 1_000);
+            row.terminal_outcome =
+                Some(terminal_outcome::encode(&completed_event(ids[1])).unwrap());
+            store.upsert_invocation_state(&row).await.unwrap();
+
+            store
+                .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&healthy, 1_000).await.unwrap();
+
+            let order: Vec<String> = store
+                .list_archive_pending()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.invocation_id)
+                .collect();
+            assert_eq!(
+                order,
+                [big.clone(), owed.clone(), healthy.clone()],
+                "the oversized row first"
+            );
+
+            let sink = SizeLimitedSink::new(LIMIT);
+            let sweeper = ArchiveRetrySweeper::new_with_sink(
+                Arc::clone(&sink) as Arc<dyn EventSink>,
+                WorkerId::new("sweep-worker").unwrap(),
+                Arc::clone(&store),
+            );
+            Self {
+                _dir: dir,
+                store,
+                sink,
+                sweeper,
+                big,
+                owed,
+                healthy,
+            }
+        }
+
+        async fn row(&self, inv: &str) -> InvocationStateRow {
+            let row = self.store.get_invocation_state(inv).await.unwrap();
+            row.expect("the row is kept")
+        }
+
+        /// The oversized row is in the store as it was written: its state
+        /// whole, not stamped archive-pending.
+        async fn assert_kept_whole(&self) {
+            let row = self.row(&self.big).await;
+            assert_eq!(row.state_blob, vec![200; OVERSIZED_STATE], "not truncated");
+            assert_eq!(row.archive_status, None, "not marked archived");
+            assert_eq!(row.archive_published_at, None);
+        }
+    }
+
+    /// The defect this pins: the first row whose `invocation.archived` the
+    /// broker refuses for its size used to end the pass, every pass, so no
+    /// row behind it was archived and none was owed its terminal event.
+    #[tokio::test]
+    async fn an_archive_too_large_for_the_sink_does_not_end_the_pass() {
+        let world = Oversized::new().await;
+        world
+            .sweeper
+            .sweep_once(&mut HashSet::new())
+            .await
+            .expect("a refusal for size does not end the pass");
+
+        assert_eq!(
+            trail(&world.sink.too_large()),
+            [(world.big.clone(), "invocation_archived")],
+            "the oversized archive was offered and refused"
+        );
+        assert_eq!(
+            trail(&world.sink.events()),
+            [
+                (world.owed.clone(), "completed"),
+                (world.owed.clone(), "invocation_archived"),
+                (world.healthy.clone(), "invocation_archived"),
+            ],
+            "every row behind it was swept"
+        );
+        world.assert_kept_whole().await;
+        assert_eq!(
+            world.row(&world.owed).await.archive_status.as_deref(),
+            Some("pending")
+        );
+    }
+
+    /// A stored terminal event too large for the broker is held the same
+    /// way: not stamped published, `invocation.archived` not attempted
+    /// without it, and the rows behind it swept.
+    #[tokio::test]
+    async fn a_stored_terminal_event_too_large_is_held_and_the_pass_goes_on() {
+        let world = LostTerminal::storing("completed", |inv| {
+            let mut event = completed_event(inv);
+            if let EventPayload::Completed(p) = &mut event.payload {
+                p.result_summary = Some("x".repeat(2 * LIMIT));
+            }
+            event
+        })
+        .await;
+        let healthy = Uuid::now_v7().to_string();
+        world
+            .store
+            .upsert_invocation_state(&terminal_row(&healthy, "sweep-agent", 1_000))
+            .await
+            .unwrap();
+        world
+            .store
+            .set_archive_pending(&healthy, 1_000)
+            .await
+            .unwrap();
+        let sink = SizeLimitedSink::new(LIMIT);
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&world.store),
+        );
+
+        sweeper
+            .sweep_once(&mut HashSet::new())
+            .await
+            .expect("a refusal for size does not end the pass");
+
+        assert_eq!(trail(&sink.too_large()), [(world.inv(), "completed")]);
+        assert_eq!(
+            trail(&sink.events()),
+            [(healthy, "invocation_archived")],
+            "no `invocation_archived` without the outcome; the row behind is swept"
+        );
+        let row = world
+            .store
+            .get_invocation_state(&world.inv())
+            .await
+            .unwrap();
+        let row = row.expect("held, not dropped");
+        assert_eq!(row.terminal_published_at, None, "still owed");
+        assert_eq!(row.archive_status, None);
+        assert!(row.terminal_outcome.is_some(), "its only copy is kept");
+    }
+
+    /// A broker that is down refuses every row the same way, so any
+    /// publish error but a size refusal still ends the pass: the next row
+    /// is not even offered, rather than each row waiting out its own
+    /// failure.
+    #[tokio::test]
+    async fn a_publish_error_that_is_not_a_size_refusal_still_ends_the_pass() {
+        let world = Oversized::new().await;
+        let sink = Arc::new(RecordingSink::new());
+        sink.fail_publish_at(0);
+        let sweeper = ArchiveRetrySweeper::new_with_sink(
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            WorkerId::new("sweep-worker").unwrap(),
+            Arc::clone(&world.store),
+        );
+
+        let err = sweeper
+            .sweep_once(&mut HashSet::new())
+            .await
+            .expect_err("the pass ends");
+        assert!(
+            matches!(err, ArchiveRetryError::Publish(_)),
+            "a bus failure, not a hold: {err:?}"
+        );
+        assert_eq!(
+            trail(&sink.refused()),
+            [(world.big.clone(), "invocation_archived")],
+            "nothing offered after the failure"
+        );
+        world.assert_kept_whole().await;
     }
 
     #[tokio::test]
