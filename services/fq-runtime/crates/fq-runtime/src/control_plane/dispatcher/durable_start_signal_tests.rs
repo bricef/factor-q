@@ -43,6 +43,7 @@ use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use super::TriggerDispatcher;
+use super::claim::MARK_RETRY_PAUSES;
 use super::duplicate_drop_tests::Captured;
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
@@ -72,10 +73,10 @@ const MARK_HEALED: &str = "marked trigger durably started after the claim store 
 const ACK_FAILED: &str = "failed to ack trigger message";
 
 /// An ack window shorter than the pauses between a refused mark's
-/// attempts (about 1.5 seconds in all), for a consumer of the test's own:
-/// a delivery that nothing kept alive while its mark was retried would be
-/// redelivered underneath it. The production window is 30 seconds
-/// (`TRIGGER_RETRY_BACKOFF[0]`).
+/// attempts ([`MARK_RETRY_PAUSES`], 1.5 seconds in all), for a consumer
+/// of the test's own: a delivery that nothing kept alive while its mark
+/// was retried would be redelivered underneath it. The production window
+/// is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`).
 const SHORT_ACK_WINDOW: Duration = Duration::from_secs(1);
 
 /// What the stub invocation does with its durable-start signal.
@@ -637,6 +638,11 @@ async fn a_mark_refused_then_accepted_inside_its_retries_marks_the_claim_and_ack
 /// can be dropped as a held duplicate or end in a dead letter.
 #[tokio::test]
 async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs_on() {
+    assert!(
+        SHORT_ACK_WINDOW < MARK_RETRY_PAUSES.iter().sum::<Duration>(),
+        "the window must lapse during the retries' pauses, or this test cannot see a missing \
+         keepalive"
+    );
     let mut pulled = Pulled::with_ack_window(
         Resolve::FireIntoRefusedMarks(Refusals::Every),
         Turn::Later,
@@ -667,10 +673,14 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
         sent.keepalives > 0,
         "the delivery was kept alive while its mark was retried: {sent:?}"
     );
-    let redelivered = tokio::time::timeout(SHORT_ACK_WINDOW * 3, pulled.messages.next()).await;
+    let redelivered = tokio::time::timeout(SHORT_ACK_WINDOW * 3, pulled.messages.next())
+        .await
+        .ok()
+        .flatten()
+        .map(|copy| copy.map(|copy| copy.info().map(|info| info.delivered).ok()));
     assert!(
-        redelivered.is_err(),
-        "a started run's delivery must not come back: {redelivered:?}"
+        redelivered.is_none(),
+        "a started run's delivery must not come back, and came back as delivery {redelivered:?}"
     );
 
     let (trigger_id, invocation_id) = pulled.named();

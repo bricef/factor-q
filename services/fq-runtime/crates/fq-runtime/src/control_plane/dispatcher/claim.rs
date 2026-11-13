@@ -1,13 +1,15 @@
 //! Durable arbitration for trigger redeliveries.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
-use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
+use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
 use crate::worker::InFlightReport;
 
+use super::admission::{HOLD_KEEPALIVE, keep_alive};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
 /// What the durable claim says about one delivery.
@@ -37,19 +39,39 @@ pub(super) struct Claimed {
     pub(super) invocation_id: uuid::Uuid,
 }
 
-/// Where the invocation is when `handle` marks its durable start, which
-/// decides what a failed mark does (`mark_durable_started`).
-#[derive(Clone, Copy)]
-pub(super) enum Marking {
-    /// Still running: `handle` saw the signal fire inside its loop. A
-    /// failed mark stops the run, un-acked.
-    WhileRunning,
-    /// Already returned: the invocation fired the signal and returned in
-    /// one poll, and `handle` found the signal fired only after its loop
-    /// had ended on the result (#966). A failed mark is acked anyway,
-    /// keeping the claim.
-    AfterReturn,
-}
+/// The pauses before each retry of a durable-start mark the claim store
+/// refused: four attempts in all, with 1.5 seconds of pauses between the
+/// first and the last (#967).
+///
+/// One attempt already waits out a locked database for as long as the
+/// store's busy timeout (sqlx's default, five seconds), so a refusal that
+/// reaches a retry was not a short lock wait: it is a lock held for
+/// longer than that, an I/O error, or a connection the pool could not
+/// hand out. A retry is for the ones that clear in a moment. The first
+/// pause is short for those, and the later ones give a slower fault more
+/// time.
+///
+/// It stays at a second or two, as #967 decided, for two reasons. The
+/// run waits on it, because `handle` does not poll the invocation while
+/// it marks. And what follows a mark that is still refused is safe: the
+/// delivery is acked keeping its claim, which leaves a stale `claimed`
+/// row and no second run, so a longer wait would buy a tidier row at the
+/// price of a longer stall.
+///
+/// A constant, not configuration (Design Principle 8), because no
+/// workload wants another value: the fallback is safe whatever the
+/// schedule, and its bounds are the code's own, a stall short enough not
+/// to matter and far inside the trigger's 30-second ack window. Like
+/// [`super::admission::HOLD_KEEPALIVE`], it is sized against that window
+/// and not against anything an operator runs.
+pub(super) const MARK_RETRY_PAUSES: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(400),
+    Duration::from_millis(1000),
+];
+
+/// How many times a durable start is offered to the claim store.
+const MARK_ATTEMPTS: usize = MARK_RETRY_PAUSES.len() + 1;
 
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
 /// only way to get one is [`TriggerClaims::recover`], which first records
@@ -158,92 +180,97 @@ impl TriggerDispatcher {
     }
 
     /// Record the delivery's durable start on its claim, then ack it.
-    /// Returns whether the delivery was acked, which it is unless the mark
-    /// fails while the invocation is still running. A failed mark leaves
-    /// the claim `claimed` either way; `marking` decides the rest, and the
-    /// failure is logged accordingly.
     ///
-    /// [`Marking::WhileRunning`]: the delivery is neither acked nor NAKed,
-    /// and `handle` stops driving the invocation and returns. Stopping is
-    /// the safe answer to a failed mark. The invocation has made its first
-    /// WAL write, so dropping it leaves its WAL row in flight: the next
-    /// start's recovery marks this claim
-    /// ([`TriggerClaims::recover`]) and resumes the run once, and the
-    /// trigger's redelivery then meets a `durably_started` row and is
-    /// dropped. Until that start, redeliveries meet this process's own
-    /// `claimed` row and are dropped too, and if they run out first the
-    /// trigger is dead-lettered as `trigger_exhausted`.
+    /// `handle` calls this once the invocation has made its first WAL
+    /// write: while it is still running, or just after it returned when it
+    /// fired the signal and returned in one poll (#966). Either way the
+    /// delivery is acked here and the run is never stopped, because a run
+    /// that started must not be redelivered.
     ///
-    /// Letting the invocation run on would end it at a terminal WAL row
-    /// under a claim still `claimed`, with the delivery un-acked. Recovery
-    /// marks only in-flight invocations, so after a restart inside the
-    /// redelivery ladder the next process would adopt that claim and start
-    /// the trigger a second time. Whether a failed mark should instead be
-    /// retried, or the run continued with recovery also marking finished
-    /// runs, is for #967 to decide.
+    /// **A refused mark is offered again** after each of
+    /// [`MARK_RETRY_PAUSES`], so a claim store that refuses for a moment
+    /// heals with nothing else happening. The run waits for the mark, since
+    /// `handle` does not poll the invocation meanwhile: on a healthy day
+    /// for one statement, and when every attempt is refused for 1.5
+    /// seconds of pauses plus whatever each attempt waits in the store.
+    /// Nothing keeps a delivery alive between its worker permit and this
+    /// point, so its ack window may be nearly spent when the first attempt
+    /// starts, and one attempt can wait out the store's busy timeout or
+    /// its pool. An in-progress ack every [`HOLD_KEEPALIVE`] therefore runs
+    /// alongside the attempts, not only between them, so the delivery
+    /// cannot lapse and be redelivered underneath its own run while they
+    /// go on.
     ///
-    /// [`Marking::AfterReturn`]: the invocation fired the signal and
-    /// returned in the same poll, so `handle` cannot stop it. The
-    /// delivery is acked anyway, because a run that started must not be
-    /// redelivered. What a redelivery would come to depends on how the run
-    /// returned:
+    /// **A mark refused on every attempt** is answered with an ack that
+    /// does not release the claim ([`Self::ack_keeping_claim`]), and the
+    /// run continues. Without the ack, on this daemon the same-claimant
+    /// `Held` arm would drop each redelivery until the trigger was
+    /// dead-lettered as `trigger_exhausted` although it ran, and after a
+    /// restart following the run's end, recovery, which marks only
+    /// in-flight runs, would leave the claim to be adopted and the work
+    /// started a second time. The claim is not released first, as
+    /// [`Self::ack`] would: a lost ack would then let the redelivery win a
+    /// fresh claim. What stays behind is a `claimed` row for a run that
+    /// started. `fq doctor` lists it as started and never marked, and the
+    /// retention sweep deletes it once this daemon has exited and the row
+    /// is older than `[state] trigger_claim_retention_days`.
     ///
-    /// - **Finished** (`Completed`, `BudgetExceeded`, a permanent
-    ///   failure), its WAL row terminal: on this daemon the same-claimant
-    ///   `Held` arm would drop each redelivery until the trigger was
-    ///   dead-lettered as `trigger_exhausted` although it ran. After a
-    ///   restart inside the retry ladder, recovery, which marks only
-    ///   in-flight rows, would leave the claim to be adopted and the work
-    ///   run a second time.
-    /// - **`Deferred`**: the run continues. `conclude` queues its resume
-    ///   and this process runs it on, under the unmarked claim, and a
-    ///   redelivery would meet the same `Held` arm.
-    /// - **A transient error or `Suspended`**, its WAL row in flight: a
-    ///   restart's recovery marks the claim and resumes the run, but on a
-    ///   live daemon the redeliveries would still end in a false dead
-    ///   letter.
-    ///
-    /// The ack does not release the claim, as [`Self::ack`] would: with the
-    /// claim released, a lost ack would let the redelivery win a fresh
-    /// claim and start the work again, while a lost ack that kept the
-    /// claim leaves what not acking would have. What stays behind is a
-    /// `claimed` row for a run that started; see #967.
+    /// **If that ack fails too**, the run still carries on to its end. An
+    /// ack is published without waiting for the broker, so only an ack the
+    /// client refuses to send is seen here, and `ack_keeping_claim` logs
+    /// it; one lost on its way shows only when the delivery comes back.
+    /// The delivery is redelivered when its ack window lapses, and every
+    /// copy meets this daemon's own `claimed` row and is dropped, logged
+    /// and counted as a duplicate dropped before a start was recorded,
+    /// until the trigger is dead-lettered as `trigger_exhausted` although
+    /// its run started. A restart inside that ladder after the run has
+    /// finished starts the trigger a second time, because recovery does
+    /// not mark the claims of finished runs. #967 accepted that risk, which
+    /// needs the mark refused past its retries, the ack lost and the
+    /// restart all together.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
-        marking: Marking,
-    ) -> bool {
+    ) {
+        let Some((store, _)) = self.claim_store.as_ref() else {
+            self.ack(msg, Some(trigger_id), "durably started").await;
+            return;
+        };
         let Claimed {
             stream_seq,
             invocation_id,
         } = *claim;
-        if let Some((store, _)) = self.claim_store.as_ref()
-            && let Err(err) = store
-                .mark_trigger_started(self.trigger_key(stream_seq), &invocation_id.to_string())
-                .await
-        {
-            match marking {
-                Marking::WhileRunning => {
-                    error!(error = %err, stream_seq, %invocation_id,
-                        "failed to mark trigger durably started; stopping the run here, un-acked: \
-                         its WAL row stays in flight and the next start resumes it once");
-                    return false;
+        let marked = keeping_alive(
+            msg,
+            trigger_id,
+            mark_with_retries(store, self.trigger_key(stream_seq), invocation_id),
+        )
+        .await;
+        match marked {
+            Ok(refused) => {
+                if let Some(last) = refused.last() {
+                    warn!(error = %last, refused = refused.len(), stream_seq, %invocation_id,
+                        %trigger_id, subject = %msg.subject,
+                        "marked trigger durably started after the claim store refused the \
+                         attempts before it; the run carried on");
                 }
-                Marking::AfterReturn => {
-                    error!(error = %err, stream_seq, %invocation_id,
-                        "failed to mark trigger durably started after its invocation returned; \
-                         acking it anyway and leaving its claim `claimed`: a run that started \
-                         must not be redelivered (see #967)");
-                    self.ack_keeping_claim(msg, Some(trigger_id), "durably started, mark failed")
-                        .await;
-                    return true;
-                }
+                self.ack(msg, Some(trigger_id), "durably started").await;
+            }
+            Err(last) => {
+                error!(error = %last, attempts = MARK_ATTEMPTS, stream_seq, %invocation_id,
+                    %trigger_id, subject = %msg.subject,
+                    "could not mark trigger durably started: the claim store refused every \
+                     attempt. Acking the delivery anyway, keeping its claim, and letting the run \
+                     continue, so it is not redelivered. The claim stays `claimed` for a run that \
+                     started: `fq doctor` lists it as started and never marked, and the retention \
+                     sweep deletes it once this daemon has exited and the claim is older than \
+                     `[state] trigger_claim_retention_days`");
+                self.ack_keeping_claim(msg, Some(trigger_id), "durably started, mark failed")
+                    .await;
             }
         }
-        self.ack(msg, Some(trigger_id), "durably started").await;
-        true
     }
 
     pub(super) async fn release_unstarted_claim(&self, msg: &async_nats::jetstream::Message) {
@@ -353,12 +380,12 @@ impl TriggerDispatcher {
                 // - This process will never settle the claim (#967): the
                 //   invocation task panicked before its durable start, a
                 //   release failed before a NAK, or `mark_trigger_started`
-                //   failed, which stops a running invocation un-acked and
-                //   leaves its WAL row for the next start to resume
-                //   (`mark_durable_started`). Every redelivery then lands
-                //   here until `max_deliver` is reached and the trigger is
-                //   dead-lettered as `trigger_exhausted`: false where the run
-                //   started, and after a panic nothing ran.
+                //   was refused on every attempt and the ack sent in its
+                //   place was lost (`mark_durable_started`), in which case
+                //   the run went on. Every redelivery then lands here until
+                //   `max_deliver` is reached and the trigger is
+                //   dead-lettered as `trigger_exhausted`: false where the
+                //   run started, and after a panic nothing ran.
                 //
                 // A process that exits holding a claim (the drain check, the
                 // pause hold's `Interrupted`, a failed `requeue_held` publish,
@@ -516,6 +543,53 @@ impl TriggerDispatcher {
                 retry_in_ms = delay.as_millis() as u64,
                 "NAK'd trigger for redelivery"
             );
+        }
+    }
+}
+
+/// Offer a durable start to the claim store, and again after each of
+/// [`MARK_RETRY_PAUSES`] while it refuses. `Ok` once a mark lands, with
+/// the refusals before it (none on a healthy day); `Err` with the last
+/// refusal once every attempt has been refused. Each refusal is logged at
+/// `debug`; `mark_durable_started` logs the outcome, once.
+async fn mark_with_retries(
+    store: &ControlPlaneStore,
+    key: TriggerKey<'_>,
+    invocation_id: uuid::Uuid,
+) -> Result<Vec<ControlPlaneStoreError>, ControlPlaneStoreError> {
+    let named = invocation_id.to_string();
+    let mut refused = Vec::new();
+    let mut pauses = MARK_RETRY_PAUSES.iter();
+    loop {
+        let err = match store.mark_trigger_started(key, &named).await {
+            Ok(()) => return Ok(refused),
+            Err(err) => err,
+        };
+        let Some(pause) = pauses.next() else {
+            return Err(err);
+        };
+        debug!(error = %err, attempt = refused.len() + 1, stream_seq = key.stream_seq,
+            %invocation_id, retry_in_ms = pause.as_millis() as u64,
+            "the claim store refused to mark a trigger durably started; offering it again");
+        refused.push(err);
+        tokio::time::sleep(*pause).await;
+    }
+}
+
+/// Drive `work` to its end while keeping `msg`'s delivery alive with an
+/// in-progress ack every [`HOLD_KEEPALIVE`], the cadence every hold
+/// keeps. Work that ends inside the first tick sends none.
+async fn keeping_alive<T>(
+    msg: &async_nats::jetstream::Message,
+    trigger_id: uuid::Uuid,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let mut work = std::pin::pin!(work);
+    loop {
+        tokio::select! {
+            biased;
+            done = &mut work => return done,
+            () = tokio::time::sleep(HOLD_KEEPALIVE) => keep_alive(msg, Some(trigger_id)).await,
         }
     }
 }
