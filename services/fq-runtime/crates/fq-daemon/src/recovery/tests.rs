@@ -1523,6 +1523,10 @@ async fn an_operator_resume_on_a_draining_daemon_is_refused_and_left_to_the_next
     );
 }
 
+// An operator's resume is counted against its agent's `max_concurrent` but
+// not held at it (issue 1009), on the same next start as the tests above.
+mod operator_resume_cap;
+
 /// Subscribe to every `invocation.operator_recovered`, whichever agent a
 /// drop publishes it under.
 async fn drops_published(
