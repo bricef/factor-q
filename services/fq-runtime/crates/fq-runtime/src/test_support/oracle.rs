@@ -975,6 +975,55 @@ mod tests {
         );
     }
 
+    /// An archived payload from one fixed worker whose final state holds
+    /// `messages`, serialised as the reducer serialises its conversation.
+    fn archived_holding(messages: &[crate::events::Message]) -> EventPayload {
+        EventPayload::InvocationArchived(crate::events::InvocationArchivedPayload {
+            worker_id: crate::worker::WorkerId::new("oracle-worker").unwrap(),
+            final_phase: "completed".to_string(),
+            final_state_blob: serde_json::to_vec(&json!({
+                "phase": "completed",
+                "messages": messages,
+            }))
+            .unwrap(),
+            started_at_ms: 1,
+            terminal_at_ms: 2,
+        })
+    }
+
+    /// The comparison reaches into the archived state, whatever encoding
+    /// the event gives it on the wire (#981): a resumed run's final
+    /// conversation holds the notice the resume injected, and that
+    /// difference alone is invisible, while any other difference in the
+    /// state is not.
+    #[test]
+    fn observational_trace_compares_the_archived_state_modulo_host_notices() {
+        let ending_with = |messages: &[crate::events::Message]| {
+            let mut t = Trace::new();
+            t.push(triggered())
+                .push(llm_request_with(vec![user_message("hi")]))
+                .push(llm_dispatched())
+                .push(llm_response())
+                .push(completed())
+                .push(archived_holding(messages));
+            observational_trace(&t.events)
+        };
+        let reference = ending_with(&[user_message("hi")]);
+        assert_eq!(
+            reference,
+            ending_with(&[
+                user_message("hi"),
+                user_message("<host-notice>resumed</host-notice>"),
+            ]),
+            "a notice inside the archived state is invisible to the comparison"
+        );
+        assert_ne!(
+            reference,
+            ending_with(&[user_message("hi"), user_message("not a notice")]),
+            "anything else inside the archived state is load-bearing"
+        );
+    }
+
     /// The strip is sentinel-keyed, not user-role-keyed: an ordinary
     /// user message must never be silently dropped from the comparison.
     #[test]
