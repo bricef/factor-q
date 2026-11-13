@@ -382,14 +382,11 @@ the incidents, and none has its own issue yet.
 3. **A live process can hold a claim it will never settle.** The
    same-claimant `Held` arm assumes the first copy is still going to
    settle the delivery. After a panic in the invocation task, or a
-   `mark_trigger_started` that is refused on every retry when the ack
-   the dispatcher sends in its place is then lost
-   ([#967](https://github.com/bricef/factor-q/issues/967)), it never
-   will: the row stays `claimed`, the message stays unacked, and every
-   redelivery is dropped by that arm until `TRIGGER_MAX_DELIVER` (5) is
-   reached and the advisory watch dead-letters the trigger as
-   `trigger_exhausted`. In the second case the invocation is running, so
-   the verdict is false.
+   `mark_trigger_started` that fails, it never will: the row stays
+   `claimed`, the message stays unacked, and every redelivery is dropped
+   by that arm until `TRIGGER_MAX_DELIVER` (5) is reached and the
+   advisory watch dead-letters the trigger as `trigger_exhausted`. In
+   the second case the invocation is running, so the verdict is false.
    The same happens to a start that takes longer than the whole retry
    ladder to reach its first WAL write. Derived from the code, and the
    comment on that arm in `claim.rs` describes the hazard; not
