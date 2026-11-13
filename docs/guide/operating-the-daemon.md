@@ -785,11 +785,16 @@ can exceed the runtime cap and be cut again from the end, losing
 ([see #985](https://github.com/bricef/factor-q/issues/985)).
 
 One event is outside the cap. `invocation.archived` carries the
-reducer's state blob, which holds the whole conversation and is
-encoded as a JSON array of integers, two to four bytes on the wire per
-byte of state. A state blob of roughly 262,000 to 350,000 bytes,
-depending on the text, therefore makes the archive event larger than a
-stock 1 MiB `max_payload`, and one result at the default cap is most
+reducer's state blob, which holds the whole conversation, as base64
+text: four bytes on the wire for every three bytes of state
+([#981](https://github.com/bricef/factor-q/issues/981); before that it
+was a JSON array of integers, about four bytes for each one). A state
+blob of more than about 786,000 bytes therefore makes the archive
+event larger than a stock 1 MiB `max_payload`, and more than about
+12,580,000 bytes makes it larger than the dogfood broker's 16 MiB. A
+run that read three results at the default cap cannot archive on a
+stock broker, since base64 makes them a whole 1 MiB before the rest of
+the conversation is counted, and a run that read two is most
 of the way there. When that happens the invocation completes, the
 archive publish fails, and every pass of the archive retry sweep stops
 at that row with `archive retry sweep failed; will retry next tick`,
