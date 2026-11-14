@@ -31,10 +31,12 @@ pub struct ConsumerRecord {
     /// start: a copy of a run that has started. Acked.
     pub duplicate_dropped: u64,
     /// Trigger redeliveries dropped because this process already holds
-    /// their claim and it records no start: a copy of a trigger still in
-    /// hand. Left unacked. Nothing on the claim says whether the first
-    /// copy is waiting, starting, or will never settle it, so the count
-    /// says only that the copy was refused.
+    /// their claim and it records no start, while a copy of the trigger is
+    /// still handling it: waiting, setting up or marking its start. Left
+    /// unacked. A copy whose claim no copy is handling is settled by what
+    /// is on record instead (counted as `duplicate_dropped` or
+    /// `abandoned_claim_retaken`), unless that cannot be read, when it is
+    /// dropped and counted here too.
     pub held_duplicate_dropped: u64,
     /// Trigger redeliveries that took again a claim this process holds,
     /// which no copy was handling any more and whose run had no start on

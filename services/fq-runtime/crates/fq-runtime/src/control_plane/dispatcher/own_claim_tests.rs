@@ -46,7 +46,7 @@ use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 use super::tests::{canned_response, registry_with, unique_agent_id};
-use super::{TriggerClaims, TriggerDispatcher};
+use super::{CONSUMER_NAME, TriggerClaims, TriggerDispatcher};
 use crate::agent::Agent;
 use crate::bus::{EventBus, TRIGGER_STREAM_NAME};
 use crate::control_plane::ControlPlaneStore;
@@ -554,6 +554,17 @@ impl Arena {
         out
     }
 
+    /// The dispatcher's three counts of copies that met a claim, as
+    /// `(duplicate_dropped, held_duplicate_dropped, abandoned_claim_retaken)`.
+    fn counts(&self) -> (u64, u64, u64) {
+        let record = self.bus.consumer_ledger().record(CONSUMER_NAME);
+        (
+            record.duplicate_dropped,
+            record.held_duplicate_dropped,
+            record.abandoned_claim_retaken,
+        )
+    }
+
     /// The claim row for the trigger at `seq`, read without writing.
     async fn claim(&self, seq: u64) -> Option<ClaimRow> {
         let mut conn = SqliteConnectOptions::new()
@@ -699,6 +710,11 @@ async fn a_panic_before_the_durable_start_is_taken_again_and_runs_once() {
     );
     assert_eq!((again.acks, again.naks), (1, 0), "{again:?}");
     assert!(arena.worker.started_over_a_start.lock().unwrap().is_empty());
+    assert_eq!(
+        arena.counts(),
+        (0, 0, 1),
+        "counted as an abandoned claim taken again, and as no duplicate"
+    );
 }
 
 /// **A delivery whose claim release failed before its NAK is taken again
@@ -737,6 +753,7 @@ async fn a_nak_whose_release_failed_is_taken_again_and_runs_once() {
         Some((true, Some(starts[1].0.to_string())))
     );
     assert_eq!((again.acks, again.naks), (1, 0), "{again:?}");
+    assert_eq!(arena.counts(), (0, 0, 1));
 }
 
 /// **A run whose mark was refused and whose ack was lost is not run
@@ -784,6 +801,11 @@ async fn a_mark_refused_whose_ack_was_lost_is_acked_and_marked_and_not_run_again
         "the claim is marked, naming the run that started"
     );
     assert_eq!((again.acks, again.naks), (1, 0), "{again:?}");
+    assert_eq!(
+        arena.counts(),
+        (1, 0, 0),
+        "counted as a copy of a run that started"
+    );
 }
 
 /// **A run whose task died in the very poll that made its first WAL write
@@ -829,6 +851,11 @@ async fn a_panic_after_the_first_wal_write_is_acked_and_marked_and_not_run_again
         vec![(first_run.to_string(), WalRun::InFlight)],
         "the run is left in flight for a resume"
     );
+    assert_eq!(
+        arena.counts(),
+        (1, 0, 0),
+        "counted as a copy of a run that started"
+    );
 }
 
 /// **A copy that meets a claim whose first copy is still setting up is
@@ -848,6 +875,11 @@ async fn a_copy_that_meets_a_first_copy_still_setting_up_is_dropped() {
 
     assert_eq!(copy, Answered::default(), "the copy is dropped, unanswered");
     assert_eq!(arena.worker.starts().len(), 1);
+    assert_eq!(
+        arena.counts(),
+        (0, 1, 0),
+        "counted as a copy of a claim in hand"
+    );
     arena.worker.setup_gate.add_permits(1);
     let first = arena.finish(first).await;
     assert_eq!(first.acks, 1, "{first:?}");
@@ -873,6 +905,11 @@ async fn a_copy_that_meets_a_first_copy_whose_mark_is_pending_is_dropped() {
 
     assert_eq!(copy, Answered::default(), "the copy is dropped, unanswered");
     assert_eq!(arena.claim(SEQ).await.map(|row| row.started), Some(false));
+    assert_eq!(
+        arena.counts(),
+        (0, 1, 0),
+        "counted as a copy of a claim in hand"
+    );
     arena.worker.run_gate.add_permits(1);
     let first = arena.finish(first).await;
     assert_eq!(first.acks, 1, "{first:?}");
@@ -913,6 +950,11 @@ async fn a_copy_that_meets_a_first_copy_waiting_for_a_permit_is_dropped() {
         arena.worker.starts().len(),
         1,
         "only the other trigger runs"
+    );
+    assert_eq!(
+        arena.counts(),
+        (0, 1, 0),
+        "counted as a copy of a claim in hand"
     );
     arena.worker.setup_gate.add_permits(1);
     arena.finish(other).await;
