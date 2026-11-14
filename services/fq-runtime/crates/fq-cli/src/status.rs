@@ -456,11 +456,10 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             // log are its only trace. They are told apart by when the
             // copy arrived. After its run's start was recorded, it is
             // acked. Before a start was recorded on its claim, which this
-            // daemon holds, it is left unacked, and nothing says whether
-            // that claim's first copy is still coming or never will. (Not
-            // "held": that word is the admission holds' on this report.)
-            // Both counts live in the daemon's memory, which each line
-            // says.
+            // daemon holds, it is left unacked for the copy of the trigger
+            // still handling it. (Not "held": that word is the admission
+            // holds' on this report.) Both counts live in the daemon's
+            // memory, which each line says.
             if *duplicate_dropped > 0 {
                 out.push_str(&format!(
                     "    duplicate dropped after its run started: {duplicate_dropped} since this \

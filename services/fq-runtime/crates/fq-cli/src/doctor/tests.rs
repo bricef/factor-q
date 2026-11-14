@@ -606,12 +606,12 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
         out.contains(
             "  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon started: \
              5 after their run started, 2 before a start was recorded)\n  -> \"before a start \
-             was recorded\" is a copy that met a claim this daemon holds with no start on it, \
-             left unacked: its first copy was still waiting or starting, or this daemon will \
-             never settle that claim, and the claim does not say which; the daemon log has a \
-             warn line for each with its subject, sequence, attempt and the claim's age, and \
-             such a claim whose run is on record is listed under \"Stranded trigger claims\" \
-             below\n"
+             was recorded\" is a copy that met a claim this daemon holds with no start on it \
+             while a copy of the trigger was still handling it, left unacked for that copy to \
+             settle, or one that came when whether the claim's run is on record could not be \
+             read; the daemon log has a warn line for each with its subject, sequence, attempt, \
+             the claim's age and why, and such a claim whose run is on record is listed under \
+             \"Stranded trigger claims\" below\n"
         ),
         "got:\n{out}"
     );
@@ -1166,7 +1166,7 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
   fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
   -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
   fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006
-  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, this daemon drops each redelivery until it next starts and its recovery marks the claim, and a trigger whose deliveries run out first is dead-lettered as exhausted although its run started; do not requeue that dead letter — `fq invocation show 1c000000-0000-7000-8000-000000000006`
+  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, the next redelivery is acked and marks the claim without starting the work again, and this daemon's next start marks it if none comes; a run in flight whose task died after its first durable write waits for that start to resume it — `fq invocation show 1c000000-0000-7000-8000-000000000006`
   fq-triggers seq 7: claimed 2026-01-02T03:11:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; no invocation id on the claim
   -> the claim was written before claims named their run, so this report cannot tell whether it started one; not an issue
 ";
