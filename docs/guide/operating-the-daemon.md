@@ -1338,16 +1338,19 @@ name the horizon.
   first durable write, before the dispatcher saw it start: then nothing
   was marked and nothing acked.
 
-  Either way the row lasts only until the daemon next starts. Startup
-  recovery records the start on the claim of every run that has one on
-  record, finished runs included, before the dispatcher consumes
-  anything, so after a restart neither a redelivery nor a copy the
-  stream replays starts the trigger again. Until then, a copy that
+  Either way the row lasts only until the daemon next starts. Before the
+  dispatcher consumes anything, startup recovery records the start on
+  every `claimed` row whose run is on record, in the worker's WAL (in
+  flight or finished) or in the control plane's ownership table, and
+  logs `recorded a durable start missing from its trigger's claim` at
+  warn for each one; so after a restart neither a redelivery nor a copy
+  the stream replays starts the trigger again. Until then, a copy that
   reaches the running daemon (a redelivery, when nothing acked the
-  delivery or its ack was lost) is dropped and counted as a
-  duplicate dropped before a start was recorded, and the trigger ends as
-  a `trigger_exhausted` dead letter although its run started: that dead
-  letter is false, and requeuing it starts the work twice. The report
+  delivery or its ack was lost) is dropped and counted as a duplicate
+  dropped before a start was recorded. If the trigger's deliveries run
+  out before that restart, it ends as a `trigger_exhausted` dead letter
+  although its run started: that dead letter is false, and requeuing it
+  starts the work twice. The report
   cannot tell whether the delivery was acked, because it judges a
   message deliverable by its age and stream incarnation, not by the
   consumer's ack state; the daemon log can, by the line above for that

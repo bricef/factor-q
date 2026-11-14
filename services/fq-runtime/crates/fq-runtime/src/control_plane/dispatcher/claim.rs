@@ -283,14 +283,12 @@ impl TriggerDispatcher {
     /// fresh claim and start the work again.
     ///
     /// What stays behind is a `claimed` row for a run that started, and
-    /// only until this daemon next starts. Startup recovery records the
-    /// start on the claim of every run that has one on record, finished
-    /// runs included, before the dispatcher consumes anything
-    /// ([`TriggerClaims::recover`]). So after a restart neither a
-    /// redelivery nor a copy the stream replays (it keeps a message for a
-    /// day, acked or not, and a recreated durable reads it again) starts
-    /// the trigger a second time. Until then `fq doctor` lists the row as
-    /// started and never marked.
+    /// only until this daemon next starts: [`TriggerClaims::recover`]
+    /// records the start on it before the dispatcher consumes anything, as
+    /// it does for every run with a start on record, and its documentation
+    /// says why neither a redelivery nor a replay of the trigger can then
+    /// start it again. Until then `fq doctor` lists the row as started and
+    /// never marked, once a minute has passed.
     ///
     /// **What is left is on a live daemon only.** An ack is published
     /// without waiting for the broker, so only an ack the client refuses
@@ -299,10 +297,11 @@ impl TriggerDispatcher {
     /// carries on to its end. A copy that reaches this daemon before it
     /// next starts, such as the redelivery of a lost ack, meets its own
     /// `claimed` row and is dropped, logged and counted as a duplicate
-    /// dropped before a start was recorded, and the trigger ends as a
-    /// `trigger_exhausted` dead letter although its run started; requeuing
-    /// that dead letter would run the work twice. Settling such a copy by
-    /// the start on record is the last of #967's pull requests.
+    /// dropped before a start was recorded. If the trigger's deliveries run
+    /// out before that start, it ends as a `trigger_exhausted` dead letter
+    /// although its run started, and requeuing that dead letter would run
+    /// the work twice. Settling such a copy by the start on record is the
+    /// last of #967's pull requests.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -456,14 +455,17 @@ impl TriggerDispatcher {
                 //   redelivered too. The first copy still starts once, and
                 //   its durable start acks the message.
                 // - This process will never settle the claim (#967): the
-                //   invocation task panicked before its durable start, a
-                //   release failed before a NAK, or `mark_trigger_started`
-                //   was refused on every attempt and the ack sent in its
-                //   place was lost (`mark_durable_started`), in which case
-                //   the run went on. Every redelivery then lands here until
-                //   `max_deliver` is reached and the trigger is
-                //   dead-lettered as `trigger_exhausted`: false where the
-                //   run started, and after a panic nothing ran.
+                //   invocation task panicked before its durable start or in
+                //   the poll that made it, a release failed before a NAK, or
+                //   `mark_trigger_started` was refused on every attempt and
+                //   the ack sent in its place was lost
+                //   (`mark_durable_started`), in which case the run went on.
+                //   Every redelivery then lands here until `max_deliver` is
+                //   reached and the trigger is dead-lettered as
+                //   `trigger_exhausted`, falsely where the run started,
+                //   unless this daemon restarts first: where the run has a
+                //   start on record, the restart's recovery marks the claim
+                //   and the next copy is dropped as one of a started run.
                 //
                 // A process that exits holding a claim (the drain check, the
                 // pause hold's `Interrupted`, a failed `requeue_held` publish,
