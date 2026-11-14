@@ -398,8 +398,9 @@ impl ArchiveRetrySweeper {
 
     /// Publish one of a row's events. A refusal for size is the row's own:
     /// the event it names is refused on every attempt, so it holds the row
-    /// (`Ok(Some)`) and the pass goes on. Any other failure is the bus's,
-    /// the same for every row, and ends the pass.
+    /// (`Ok(Some)`) and the pass goes on; its size is the size on the wire,
+    /// header included, as the bus counts it. Any other failure is the
+    /// bus's, the same for every row, and ends the pass.
     async fn publish_for_row(
         &self,
         event: &Event,
@@ -1246,13 +1247,12 @@ mod tests {
             }
         );
         assert!(
-            hold.remedy
-                .contains(&format!("max_payload well above {size} bytes"))
-                && hold.remedy.contains("header")
-                && hold.remedy.contains("restart fqd")
+            hold.remedy.contains(&format!(
+                "raise the broker's max_payload above {size} bytes"
+            )) && hold.remedy.contains("restart fqd")
                 && hold.remedy.contains(holds::GUIDE),
-            "the remedy says what to raise, past what with a margin for the header the size \
-             leaves out, and where it is described: {hold:?}"
+            "the remedy says what to raise, past the size on the wire the reason gives, and \
+             where it is described: {hold:?}"
         );
     }
 

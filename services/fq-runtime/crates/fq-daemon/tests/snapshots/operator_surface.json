@@ -2714,7 +2714,7 @@
                         "type": "integer"
                       },
                       "size_bytes": {
-                        "description": "The event's serialised size, in bytes.",
+                        "description": "The event's size on the wire, in bytes: its JSON and the\nmessage-id header sent with it, which is what the broker counts.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -3618,7 +3618,7 @@
                         "type": "integer"
                       },
                       "size_bytes": {
-                        "description": "The event's serialised size, in bytes.",
+                        "description": "The event's size on the wire, in bytes: its JSON and the\nmessage-id header sent with it, which is what the broker counts.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
