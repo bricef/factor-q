@@ -28,7 +28,9 @@
 //! Such a refusal comes back at once, so one test also makes an attempt
 //! block, on a write lock another connection holds ([`lock_claim_store`]),
 //! which is what bounds the retries by time and what the delivery has to
-//! be kept alive through.
+//! be kept alive through. One test follows a refused mark through a
+//! restart to a replayed copy of its trigger, where startup recovery's
+//! marking of finished runs takes over.
 //!
 //! The tests run the real `handle` against a real broker and a real
 //! control-plane store, with a stub worker.
@@ -46,23 +48,23 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
-use super::TriggerDispatcher;
 use super::claim::{MARK_RETRY_BUDGET, MARK_RETRY_PAUSES};
 use super::duplicate_drop_tests::Captured;
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
     unique_consumer_name,
 };
+use super::{CONSUMER_NAME, TriggerDispatcher};
 use crate::agent::{Agent, AgentId};
 use crate::bus::{
     EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_MAX_DELIVER, TRIGGER_RETRY_BACKOFF,
     TRIGGER_STREAM_NAME,
 };
-use crate::control_plane::{ControlPlaneStore, TriggerClaim};
+use crate::control_plane::{ControlPlaneStore, OwnerStatus, TriggerClaim};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
 use crate::test_support::nats::{NatsServer, test_nats};
-use crate::trigger::Trigger;
+use crate::trigger::{Trigger, agent_id_from_subject};
 use crate::worker::{
     DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
 };
@@ -278,6 +280,21 @@ async fn lock_claim_store(claim_db: &Path, held_for: Duration) {
             .expect("let the write lock go");
         conn.close().await.expect("close the claim store's file");
     });
+}
+
+/// Let the claim store take marks again: drop the refusal
+/// [`refuse_claim_marks`] installed.
+async fn heal_claim_marks(claim_db: &Path) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    sqlx::query("DROP TRIGGER refuse_claim_marks")
+        .execute(&mut conn)
+        .await
+        .expect("drop the refusal");
+    conn.close().await.expect("close the claim store's file");
 }
 
 /// How many of a [`Refusals::First`] count's refusals are still unspent.
@@ -821,6 +838,109 @@ async fn a_mark_that_blocks_past_the_time_bound_is_offered_once_with_its_deliver
         gave_up[0].contains("attempts=1"),
         "the give-up line says one attempt was offered: {}",
         gave_up[0]
+    );
+}
+
+/// A refused mark through a restart, end to end: the two halves of #967
+/// together. The claim store refuses every attempt to mark the run's
+/// start, so the delivery is acked keeping its claim and the run goes on
+/// to its end. Then the store heals, the run is archived (the archive
+/// hand-off's ownership row stands in for it), and the daemon restarts
+/// under a new claimant id, its claims recovered over the worker's report
+/// as the daemon recovers them. A copy of the trigger comes back as a
+/// replay, from a durable recreated on the stream, which keeps the
+/// message for a day whether or not it was acked.
+///
+/// Nothing may start a second time. Recovery has recorded the start on
+/// the claim, so the replayed copy meets a started claim and is dropped as
+/// a copy of a started run, and the claim reads `durably_started` under
+/// the first run's invocation id. Before startup recovery marked finished
+/// runs, the copy adopted the `claimed` row and ran the trigger again.
+#[tokio::test]
+async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_restart() {
+    let mut pulled = Pulled::new(
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    pulled.handle().await;
+    assert!(pulled.ran_to_end(), "the first run went on to its end");
+    pulled.wait_until_acked().await;
+    assert_held_by_the_dispatcher(
+        pulled.probe_claim().await,
+        "the mark never landed, so the first daemon left the claim `claimed`",
+    );
+    let invocation_id = pulled.named().1.to_string();
+
+    heal_claim_marks(&pulled.claim_db).await;
+    pulled
+        .claims
+        .upsert_invocation_ownership(&invocation_id, "worker-a", 2_000, OwnerStatus::Completed)
+        .await
+        .expect("the archive hand-off's ownership row");
+
+    let agent_id = agent_id_from_subject(&pulled.msg.subject)
+        .expect("a trigger subject")
+        .to_string();
+    let (_agent_dir, registry) = registry_with(&agent_id);
+    let restarted = Arc::new(ResolvesThenReturns {
+        resolve: Resolve::Fire,
+        turn: Turn::Later,
+        returns: Returns::Completed,
+        claim_db: pulled.claim_db.clone(),
+        ran_to_end: AtomicBool::new(false),
+        named: Mutex::new(None),
+    });
+    let dispatcher = TriggerDispatcher::new(
+        pulled.bus.clone(),
+        registry,
+        restarted.clone() as Arc<dyn Worker>,
+        Arc::new(FixtureClient::new()) as Arc<dyn LlmClient>,
+        1,
+    )
+    .with_trigger_claims(recovered_claims(&pulled.claims).await, "worker-b");
+
+    let replayer = pulled
+        .bus
+        .trigger_consumer_with_filter(
+            &unique_consumer_name(),
+            pulled.msg.subject.as_str(),
+            NATS_DEFAULT_MAX_ACK_PENDING,
+        )
+        .await
+        .expect("a recreated durable");
+    let mut replayed = replayer.messages().await.expect("messages");
+    let copy = tokio::time::timeout(Duration::from_secs(5), replayed.next())
+        .await
+        .expect("the stream still holds the acked message, and replays it")
+        .expect("stream open")
+        .expect("message ok");
+    assert_eq!(
+        copy.info().expect("a JetStream delivery").stream_sequence,
+        pulled.stream_seq(),
+        "the same message, replayed"
+    );
+    tokio::time::timeout(Duration::from_secs(10), dispatcher.handle(&copy))
+        .await
+        .expect("handle returns");
+
+    assert!(
+        restarted.named.lock().unwrap().is_none(),
+        "the replayed copy started the trigger a second time"
+    );
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: invocation_id.clone()
+        },
+        "recovery recorded the first run's start on the claim"
+    );
+    let ledger = pulled.bus.consumer_ledger().record(CONSUMER_NAME);
+    assert_eq!(
+        (ledger.duplicate_dropped, ledger.held_duplicate_dropped),
+        (1, 0),
+        "the copy was dropped as one of a started run, not as one this daemon still holds"
     );
 }
 
