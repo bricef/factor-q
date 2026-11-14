@@ -632,9 +632,15 @@ pub enum StrandedClaimFinding {
     NeverStarted,
     /// The run the claim names has started, the claim still says it has
     /// not, and its message is still deliverable. Held by this daemon,
-    /// every redelivery is dropped and the trigger ends as a
-    /// `trigger_exhausted` dead letter although its run started; left by
-    /// a process that has exited, a redelivery would be adopted and start
+    /// one of two things happened, and only the daemon log tells which:
+    /// the claim store refused the mark and the dispatcher acked the
+    /// delivery anyway, keeping its claim; or the run's task panicked in
+    /// the step that made its first durable write, and nothing was acked.
+    /// Where nothing was acked, or the ack was lost, every redelivery is
+    /// dropped until this daemon next starts and its recovery marks the
+    /// claim, and a trigger whose deliveries run out first ends as a
+    /// `trigger_exhausted` dead letter although its run started. Left by a
+    /// process that has exited, a redelivery would be adopted and start
     /// the work again, and a false dead letter may already exist.
     StartedUnmarked,
     /// Left by a process that has exited, by a build that did not name the

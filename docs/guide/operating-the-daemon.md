@@ -1170,12 +1170,15 @@ a trigger waiting in an admission hold, which is something else.)
   underneath it. Either way it still starts once. Or this daemon may
   never settle that claim
   ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
-  task panicked before its first durable write, giving the claim back
-  failed before a retry, or recording the run's start failed, which
-  stops the run for the next start's recovery to resume. Every delivery
-  of that trigger is then dropped the same way until its deliveries run
-  out and it is dead-lettered as `trigger_exhausted`. Nothing on the
-  claim tells these apart, so neither does the count.
+  task panicked before its first durable write or in the step that made
+  it, giving the claim back failed before a retry, or recording the
+  run's start was refused on every attempt and the ack the daemon sent
+  in its place was lost (the run itself carries on; see "Started, never
+  marked" below). Every delivery of that trigger is then dropped the
+  same way until its deliveries run out and it is dead-lettered as
+  `trigger_exhausted`, or until the daemon next starts, if the run made
+  its first durable write. Nothing on the claim tells these apart, so
+  neither does the count.
 
 The two warn lines are `dropping duplicate trigger delivery after
 durable start` and `dropping a redelivered trigger whose claim this
@@ -1335,17 +1338,36 @@ name the horizon.
   retention sweep deletes the row on its next tick after that.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
-  still be redelivered. If this daemon holds the claim, every redelivery
-  is dropped (and counted as a duplicate dropped before a start was
-  recorded) and the trigger ends as a `trigger_exhausted` dead letter
+  still be redelivered. The usual cause is the claim store refusing to
+  record the run's start. The dispatcher offers the mark again for up to
+  two seconds (one attempt can take longer: it waits up to the store's
+  five-second busy timeout for a lock, and longer still for a connection
+  when every one is in use). When every attempt is refused it acks the
+  delivery without releasing the claim and lets the run continue,
+  logging `could not mark trigger durably started` at error with the
+  invocation and the trigger
+  ([#967](https://github.com/bricef/factor-q/issues/967)). The other
+  cause is a run whose task panicked in the very step that made its
+  first durable write, before the dispatcher saw it start: then nothing
+  was marked and nothing acked.
+
+  Either way the row lasts only until the daemon next starts. Before the
+  dispatcher consumes anything, startup recovery records the start on
+  every `claimed` row whose run is on record, in the worker's WAL (in
+  flight or finished) or in the control plane's ownership table, and
+  logs `recorded a durable start missing from its trigger's claim` at
+  warn for each one; so after a restart neither a redelivery nor a copy
+  the stream replays starts the trigger again. Until then, a copy that
+  reaches the running daemon (a redelivery, when nothing acked the
+  delivery or its ack was lost) is dropped and counted as a duplicate
+  dropped before a start was recorded. If the trigger's deliveries run
+  out before that restart, it ends as a `trigger_exhausted` dead letter
   although its run started: that dead letter is false, and requeuing it
-  starts the work twice. If an exited process left it, a redelivery would
-  be adopted and start the work again, and a false dead letter may
-  already exist. Neither happens when the mark failed after the run had
-  already returned: the dispatcher acked that delivery anyway, so no
-  redelivery comes, though the report cannot tell that case from the
-  others ([#967](https://github.com/bricef/factor-q/issues/967)). There
-  is nothing to repair from the CLI: read the run with
+  starts the work twice. The report
+  cannot tell whether the delivery was acked, because it judges a
+  message deliverable by its age and stream incarnation, not by the
+  consumer's ack state; the daemon log can, by the line above for that
+  invocation. There is nothing to repair from the CLI: read the run with
   `fq invocation show`, and do not requeue its dead letter.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
