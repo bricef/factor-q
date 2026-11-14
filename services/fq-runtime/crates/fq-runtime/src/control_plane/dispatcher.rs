@@ -1584,11 +1584,13 @@ You are a test agent."#
 
     /// Issue #41: the trigger is acked only *after* the invocation's
     /// first durable (WAL) write, signalled through the `Worker` seam.
-    /// A worker that blocks in-flight *without* firing the durable-start
-    /// signal models a crash in the ack->first-WAL-write window: the
-    /// trigger must stay unacked (`num_ack_pending` stuck at 1) so
-    /// JetStream can redeliver it. With the old ack-on-dispatch
-    /// behaviour this would drop to 0 immediately — the missed-run gap.
+    /// A worker that stays in flight *without* firing the durable-start
+    /// signal is a run still before its first WAL write: the trigger must
+    /// stay unacked (`num_ack_pending` stuck at 1). A live dispatcher
+    /// keeps such a delivery alive (#967); it is the unacked delivery
+    /// that lets JetStream redeliver it if the process dies there. With
+    /// the old ack-on-dispatch behaviour this would drop to 0
+    /// immediately — the missed-run gap.
     #[tokio::test]
     async fn trigger_is_not_acked_before_the_first_wal_write() {
         let server = crate::test_support::nats::test_nats();

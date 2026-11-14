@@ -1229,10 +1229,11 @@ daemon already holds`. Both carry the stream sequence and the attempt
 claimant, the claim's age (`claim_age_ms`) and the invocation id the
 claim names (`claim_invocation_id`), and on the trigger's fifth and
 last delivery it says that no copy follows. A single drop before a
-start was recorded is most often a trigger waiting in a hold or still
-starting, redelivered underneath its first copy because its in-progress
-acks stopped landing for a whole window; but the first redelivery
-of a claim this daemon will never settle looks the same. Either way it
+start was recorded is one of two things, and they look the same: a
+trigger waiting in a hold or still starting, redelivered underneath its
+first copy because its in-progress acks stopped landing for a whole
+window, or the first redelivery of a claim this daemon will never
+settle. Either way it
 costs the trigger one of its five deliveries. The same sequence dropped
 again on a later delivery means its claim still records no start. If
 the claim's invocation id has a run (`fq invocation show <id>`), that
