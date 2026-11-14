@@ -1598,6 +1598,181 @@ mod tests {
         assert!(holds.is_empty(), "got: {holds:?}");
     }
 
+    /// The `max_payload` a private broker from `test_nats` serves: a stock
+    /// server's.
+    const STOCK_MAX_PAYLOAD: usize = 1024 * 1024;
+
+    /// The bytes the bus sends with every event besides its JSON: the
+    /// `Nats-Msg-Id` header block (`NATS/1.0\r\n`, the id line, a closing
+    /// `\r\n`). Counted here apart from the code under test.
+    const HEADER: usize = "NATS/1.0\r\n".len() + "Nats-Msg-Id: ".len() + 36 + 4;
+
+    /// How far under the limit the banded events' JSON is: inside the
+    /// header's size, with room either side for an envelope timestamp
+    /// written with fewer digits.
+    const UNDER_BY: usize = 31;
+
+    /// A pass over a real broker in which the first row owes an event in
+    /// the band the bus's guard once missed: its JSON under the broker's
+    /// limit, but not by the size of the header sent with it. Behind it, a
+    /// row awaiting its ack.
+    ///
+    /// Before #828 counted the header, the guard passed such an event, the
+    /// client refused it as a generic publish error, and that ended every
+    /// pass at this row, so the row behind was never archived (the first
+    /// change for issue 981 left this case to #828).
+    struct InTheBand {
+        _server: fq_test_support::NatsServer,
+        _dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sweeper: ArchiveRetrySweeper,
+        banded: String,
+        behind: String,
+    }
+
+    impl InTheBand {
+        /// `first` shapes the banded row from a small terminal row.
+        async fn new(first: impl FnOnce(&mut InvocationStateRow, &WorkerId)) -> Self {
+            let server = crate::test_support::nats::test_nats();
+            let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let worker = WorkerId::new("band-worker").unwrap();
+            let [banded, behind] = [0, 1].map(|_| Uuid::now_v7().to_string());
+
+            let mut row = terminal_row(&banded, "band-agent", 1_000);
+            first(&mut row, &worker);
+            store.upsert_invocation_state(&row).await.unwrap();
+            store
+                .upsert_invocation_state(&terminal_row(&behind, "band-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&behind, 1_000).await.unwrap();
+
+            let sweeper = ArchiveRetrySweeper::new(bus, worker, Arc::clone(&store));
+            Self {
+                _server: server,
+                _dir: dir,
+                store,
+                sweeper,
+                banded,
+                behind,
+            }
+        }
+
+        /// One pass: it must reach the row behind, and hold the banded row
+        /// for its `event_type`, over the stock limit on the wire.
+        async fn assert_held_and_the_pass_goes_on(&self, event_type: &str) {
+            let before = self.store.get_invocation_state(&self.behind).await.unwrap();
+            let before = before.unwrap().archive_published_at;
+            self.sweeper
+                .sweep_once(&mut HashSet::new())
+                .await
+                .expect("a refusal for size does not end the pass");
+
+            let holds = self.sweeper.holds().snapshot();
+            assert_eq!(holds.len(), 1, "the banded row alone: {holds:?}");
+            assert_eq!(holds[0].invocation_id, self.banded);
+            let ArchiveHoldReason::PayloadTooLarge {
+                event_type: refused,
+                size_bytes,
+                limit_bytes,
+            } = &holds[0].reason
+            else {
+                panic!("held for size: {holds:?}");
+            };
+            assert_eq!(refused, event_type);
+            assert_eq!(*limit_bytes, STOCK_MAX_PAYLOAD as u64);
+            assert!(
+                *size_bytes > *limit_bytes,
+                "the size on the wire, header included, is over the limit: {holds:?}"
+            );
+
+            let row = self.store.get_invocation_state(&self.banded).await.unwrap();
+            let row = row.expect("held, not dropped");
+            assert_eq!(row.archive_status, None, "not archived");
+            let behind = self.store.get_invocation_state(&self.behind).await.unwrap();
+            assert!(
+                behind.unwrap().archive_published_at > before,
+                "the row behind was archived in the same pass"
+            );
+        }
+    }
+
+    /// `row`'s `invocation.archived` as the sweeper builds it, measured.
+    fn archived_json_len(row: &InvocationStateRow, worker: &WorkerId) -> usize {
+        let event = Event::new(
+            AgentId::new(&row.agent_id).unwrap(),
+            row.invocation_id.parse().unwrap(),
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker.clone(),
+                final_phase: row.phase.clone(),
+                final_state_blob: row.state_blob.clone(),
+                started_at_ms: row.started_at,
+                terminal_at_ms: row.terminal_at.unwrap(),
+            }),
+        );
+        serde_json::to_vec(&event).unwrap().len()
+    }
+
+    /// An `invocation.archived` whose JSON is 31 bytes under a stock
+    /// broker's limit, sent with a 63-byte header: refused for its size,
+    /// so the row is held and the row behind it archived in the same pass.
+    #[tokio::test]
+    async fn an_archive_under_the_limit_by_less_than_its_header_is_held() {
+        let world = InTheBand::new(|row, worker| {
+            // Each byte of state is `200,` on the wire, four bytes.
+            row.state_blob = vec![200];
+            let one = archived_json_len(row, worker);
+            row.state_blob = vec![200; 1 + (STOCK_MAX_PAYLOAD - UNDER_BY - one) / 4];
+            let body = archived_json_len(row, worker);
+            assert!(
+                body < STOCK_MAX_PAYLOAD && body + HEADER > STOCK_MAX_PAYLOAD,
+                "in the band: {body}"
+            );
+        })
+        .await;
+        world
+            .assert_held_and_the_pass_goes_on("invocation_archived")
+            .await;
+    }
+
+    /// The same for a stored terminal event in the band: the `completed`
+    /// a crash lost, its JSON 31 bytes under the limit. Held without its
+    /// archive being tried, and the row behind archived.
+    #[tokio::test]
+    async fn a_stored_event_under_the_limit_by_less_than_its_header_is_held() {
+        let world = InTheBand::new(|row, _| {
+            let id: Uuid = row.invocation_id.parse().unwrap();
+            let mut event = completed_event(id);
+            let set_summary = |event: &mut Event, summary: String| {
+                if let EventPayload::Completed(p) = &mut event.payload {
+                    p.result_summary = Some(summary);
+                }
+            };
+            set_summary(&mut event, String::new());
+            let bare = serde_json::to_vec(&event).unwrap().len();
+            set_summary(&mut event, "x".repeat(STOCK_MAX_PAYLOAD - UNDER_BY - bare));
+            let body = serde_json::to_vec(&event).unwrap().len();
+            assert_eq!(body, STOCK_MAX_PAYLOAD - UNDER_BY);
+            row.terminal_outcome = Some(terminal_outcome::encode(&event).unwrap());
+        })
+        .await;
+        world.assert_held_and_the_pass_goes_on("completed").await;
+        let row = world
+            .store
+            .get_invocation_state(&world.banded)
+            .await
+            .unwrap();
+        let row = row.unwrap();
+        assert_eq!(row.terminal_published_at, None, "still owed");
+        assert!(row.terminal_outcome.is_some(), "its only copy is kept");
+    }
+
     #[tokio::test]
     async fn sweep_warns_once_after_threshold() {
         // Pure unit test against the warn-once gate; no bus,
