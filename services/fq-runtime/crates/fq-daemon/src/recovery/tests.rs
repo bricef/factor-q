@@ -525,14 +525,15 @@ async fn a_daemon_that_dies_before_the_first_wal_write_leaves_the_trigger_to_run
 }
 
 /// **Startup recovery marks the claim of every invocation it finds in
-/// flight, ambiguous ones included, and nothing else (#959).**
+/// flight, ambiguous ones included, and not a claim with nothing on record
+/// (#959).** Finished runs are marked too, in `finished_runs`.
 ///
 /// An ambiguous invocation is not resumed: it waits for an operator. It
 /// did make its first WAL write, so its trigger has durably started, and a
 /// redelivery must not run it again behind the operator's back. A claim
-/// whose invocation left no WAL row stays `claimed`, for the redelivery to
-/// adopt. An in-flight invocation that no claim names, such as a direct
-/// run, is not an error.
+/// whose invocation left no WAL row, and no other record, stays `claimed`,
+/// for the redelivery to adopt. An in-flight invocation that no claim
+/// names, such as a direct run, is not an error.
 #[tokio::test]
 async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
     let server = fq_test_support::test_nats();
