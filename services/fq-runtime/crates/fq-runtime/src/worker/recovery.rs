@@ -192,34 +192,58 @@ impl CategoryCounts {
 }
 
 /// What a worker's startup recovery reports to the control plane: every
-/// invocation its WAL holds in flight, whatever its category. Each one
-/// made its first WAL write, so each has durably started, and the control
-/// plane records that on the trigger claim that names it
-/// (`TriggerClaims::recover`, #959).
+/// invocation its WAL holds a row for, in flight whatever its category, or
+/// finished and not yet archived. Each one made its first WAL write, so
+/// each has durably started, and the control plane records that on the
+/// trigger claim that names it (`TriggerClaims::recover`; #959 for a run in
+/// flight, #967 for one that finished).
 ///
-/// Only [`InFlightReport::scan`] makes one, so a report is a statement
+/// A finished run leaves the report only when its row is deleted, on the
+/// control plane's acknowledgement of its archive, and the control plane
+/// writes the run's ownership row before it acknowledges. So a run that
+/// has left the report is on the control plane's own record, which is
+/// where `recover` looks for it then.
+///
+/// Only [`DurableStartReport::scan`] makes one, so a report is a statement
 /// about a real WAL rather than a list someone wrote down. The control
 /// plane reads the report, never the worker's store.
 #[derive(Debug)]
-pub struct InFlightReport {
-    invocation_ids: Vec<String>,
+pub struct DurableStartReport {
+    runs: std::collections::HashMap<String, WalRun>,
 }
 
-impl InFlightReport {
-    /// Read the in-flight set off `store`'s WAL.
+/// Where a run the worker's WAL holds stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalRun {
+    /// Its row is not terminal.
+    InFlight,
+    /// Its row is terminal, and the control plane has not yet acknowledged
+    /// its archive.
+    Finished,
+}
+
+impl DurableStartReport {
+    /// Read the runs `store`'s WAL holds.
     pub async fn scan(store: &WorkerStore) -> Result<Self, WorkerStoreError> {
-        let invocation_ids = store
-            .find_in_flight_invocations()
+        let runs = store
+            .list_durable_starts()
             .await?
             .into_iter()
-            .map(|row| row.invocation_id)
+            .map(|(invocation_id, terminal)| {
+                let run = if terminal {
+                    WalRun::Finished
+                } else {
+                    WalRun::InFlight
+                };
+                (invocation_id, run)
+            })
             .collect();
-        Ok(Self { invocation_ids })
+        Ok(Self { runs })
     }
 
-    /// The ids of the invocations in flight.
-    pub fn invocation_ids(&self) -> impl Iterator<Item = &str> {
-        self.invocation_ids.iter().map(String::as_str)
+    /// Where the WAL holds `invocation_id`'s run, if it holds it.
+    pub fn run(&self, invocation_id: &str) -> Option<WalRun> {
+        self.runs.get(invocation_id).copied()
     }
 }
 

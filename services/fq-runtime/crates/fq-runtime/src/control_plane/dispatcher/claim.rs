@@ -1,13 +1,15 @@
 //! Durable arbitration for trigger redeliveries.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
-use crate::control_plane::{ControlPlaneStore, TriggerClaim, TriggerKey};
-use crate::worker::InFlightReport;
+use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
+use crate::worker::{DurableStartReport, WalRun};
 
+use super::admission::{HOLD_KEEPALIVE, keep_alive};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
 /// What the durable claim says about one delivery.
@@ -37,48 +39,116 @@ pub(super) struct Claimed {
     pub(super) invocation_id: uuid::Uuid,
 }
 
-/// Where the invocation is when `handle` marks its durable start, which
-/// decides what a failed mark does (`mark_durable_started`).
-#[derive(Clone, Copy)]
-pub(super) enum Marking {
-    /// Still running: `handle` saw the signal fire inside its loop. A
-    /// failed mark stops the run, un-acked.
-    WhileRunning,
-    /// Already returned: the invocation fired the signal and returned in
-    /// one poll, and `handle` found the signal fired only after its loop
-    /// had ended on the result (#966). A failed mark is acked anyway,
-    /// keeping the claim.
-    AfterReturn,
-}
+/// The pauses before each retry of a durable-start mark the claim store
+/// refused (#967), within [`MARK_RETRY_BUDGET`]. A store that refuses at
+/// once gets four attempts, the last 1.5 seconds after the first.
+///
+/// The schedule is sized against store faults that come back at once and
+/// clear in a moment, such as an I/O error or a pooled connection that had
+/// to be replaced: a short first pause, and longer ones for a fault that
+/// takes a little longer. It is not what governs a store that blocks. One
+/// attempt waits for a write lock another connection holds for as long as
+/// the store's busy timeout, which `ControlPlaneStore::open` does not set,
+/// so it is sqlx's default of five seconds; before that, with every pooled
+/// connection taken, it waits for one for up to the pool's acquire
+/// timeout, sqlx's default of thirty seconds. The budget is what keeps
+/// those from multiplying.
+///
+/// Design Principle 8 names a retry interval as configuration, and this
+/// is a constant anyway, on precedent: `HOLD_KEEPALIVE`, the trigger
+/// retry ladder (`TRIGGER_RETRY_BACKOFF`) and the store's own connect
+/// retry (`CONNECT_RETRY_FIRST_PAUSE` in `db/schema.rs`) are constants
+/// too, each sized against the fault it waits out. The trigger's 30-second
+/// ack window does not bound it: `mark_durable_started` keeps the delivery
+/// alive while the attempts run.
+pub(super) const MARK_RETRY_PAUSES: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(400),
+    Duration::from_millis(1000),
+];
+
+/// How long after the first attempt to mark a durable start began a
+/// further attempt may still be offered: after a refusal, the next one is
+/// offered only if it would begin, its pause included, less than this
+/// after the first began. This is the "second or two in all" #967
+/// decided.
+///
+/// A store that refuses at once keeps its four attempts. A store whose
+/// first attempt blocks past this gets that one attempt, as it did before
+/// there were retries, and the delivery falls through to the ack. The
+/// worst case is an attempt begun just inside the budget that then
+/// blocks: a little under two seconds plus one attempt's longest wait,
+/// which is the busy timeout (about seven seconds in all) or, with every
+/// pooled connection taken, the acquire timeout and then the busy timeout
+/// (about thirty-seven). `handle` does not poll the invocation for that
+/// long; one blocking attempt cost the same before there were retries.
+pub(super) const MARK_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
 /// only way to get one is [`TriggerClaims::recover`], which first records
-/// the durable start of every invocation a worker reported in flight.
+/// on its claim the durable start of every run that has one on record.
 ///
 /// The adoption arm of `claim_delivery` reads a `claimed` row under
 /// another claimant's id as "nothing durable has started for this
-/// trigger". That is true only once those durable starts are on their
-/// claims. A process that died between an invocation's first WAL write
+/// trigger". That is true only once every start on record is on its
+/// claim. A process that died between an invocation's first WAL write
 /// and its claim being marked left a `claimed` row whose invocation is in
-/// flight, and adopting that row would start the trigger a second time
-/// (#959). The claim-installing constructors take this value and nothing
-/// else, so a claim-arbitrating dispatcher cannot be built before the
-/// recording has run.
+/// flight (#959). A run whose mark failed can go on to finish under a
+/// `claimed` row, its delivery acked with the claim kept (#967). Adopting
+/// either row would start the trigger a second time, on a redelivery or on
+/// a replay of the stream. The claim-installing constructors take this
+/// value and nothing else, so a claim-arbitrating dispatcher cannot be
+/// built before the recording has run.
 pub struct TriggerClaims {
     store: Arc<ControlPlaneStore>,
 }
 
 impl TriggerClaims {
-    /// Record on its claim the durable start of every invocation in
-    /// `in_flight`, then hand `store` over as a claim arbiter.
+    /// Record on its claim the durable start of every run that has one on
+    /// record while its claim still reads `claimed`, then hand `store` over
+    /// as a claim arbiter.
     ///
-    /// The report is the worker's: its WAL's in-flight invocations, each
-    /// of which made its first WAL write and so has durably started,
-    /// whatever its claim says. Ambiguous invocations count. Each claim is
-    /// found by the invocation id it has named since claim time
-    /// ([`ControlPlaneStore::mark_trigger_started_by_invocation`]). A claim
-    /// this marks is that crash window, hit and repaired, and is logged
-    /// with the invocation id.
+    /// A run has a start on record when either of two records holds it:
+    ///
+    /// - **The worker's WAL**, as `starts` reports it: the run made its
+    ///   first WAL write and its row is still there, in flight whatever its
+    ///   category, ambiguous included, or finished and not yet archived.
+    /// - **The control plane's ownership row** for the invocation the claim
+    ///   names. The archive hand-off writes it before the worker deletes its
+    ///   WAL row, so a run that has left the WAL is here; and nothing sweeps
+    ///   it, so it outlives the archive row, which retention does sweep. A
+    ///   report of ambiguity writes one too, for a run the WAL holds.
+    ///
+    /// **An operator's drop is on record the same way, whether or not the
+    /// run started.** A drop writes the invocation's ownership row
+    /// (`failed`), and it can name a run that never made its first WAL
+    /// write: a live drop is accepted from the moment the runner takes the
+    /// run, before its workspace, its MCP servers and its `triggered`
+    /// publish, and a drop of a run whose process died resolves the run's
+    /// agent from that `triggered` event. Such a claim is marked too, so a
+    /// redelivery or a replay of its trigger does not run the work. That is
+    /// the outcome the dispatcher gives the same drop on a live daemon: an
+    /// operator halt before the first WAL write is consumed, not retried,
+    /// because the drop is the run's outcome (`TriggerFate::Consume` in the
+    /// dispatcher).
+    ///
+    /// These are the two records `fq doctor` reads to call a claim started
+    /// and never marked (`Views::stranded_trigger_claims`), and the claims
+    /// are read through the same query
+    /// ([`ControlPlaneStore::unsettled_trigger_claims`]), so a claim the
+    /// report would list that way is one this marks. A `claimed` row with
+    /// neither record, or with no invocation id, is left exactly as it is:
+    /// it may be a delivery that never started, and the adoption arm is
+    /// right to take it.
+    ///
+    /// Each claim is matched to its run by the invocation id it has named
+    /// since claim time and marked by its key
+    /// ([`ControlPlaneStore::mark_unsettled_trigger_started`]), so the cost
+    /// is that one query, a pass over the claim table joined to the
+    /// ownership table by primary key, and one primary-key write per claim
+    /// marked. A claim this marks is logged at `warn`, once, with the
+    /// invocation id and where its run is on record: in flight or finished
+    /// in the worker's WAL, or the status its ownership row holds.
     ///
     /// Run it at startup, over the report of the worker this dispatcher
     /// hands invocations to, before the dispatcher consumes anything. A test
@@ -86,16 +156,33 @@ impl TriggerClaims {
     /// WAL, empty or not: there is no other way to obtain the claims.
     pub async fn recover(
         store: Arc<ControlPlaneStore>,
-        in_flight: &InFlightReport,
+        starts: &DurableStartReport,
     ) -> Result<Self, crate::control_plane::ControlPlaneStoreError> {
-        for invocation_id in in_flight.invocation_ids() {
+        for unsettled in store.unsettled_trigger_claims().await? {
+            let claim = &unsettled.claim;
+            let Some(invocation_id) = claim.invocation_id.as_deref() else {
+                continue;
+            };
+            // The ownership row's presence is the record; its status is only
+            // reported, as stored, so one this build cannot read does not
+            // stop the boot.
+            let run = match (starts.run(invocation_id), &unsettled.owner_row_status) {
+                (Some(WalRun::InFlight), _) => "in flight in the worker's WAL".to_string(),
+                (Some(WalRun::Finished), _) => {
+                    "finished, in the worker's WAL until its archive is acknowledged".to_string()
+                }
+                (None, Some(status)) => format!("on the control plane's record as {status}"),
+                (None, None) => continue,
+            };
             if store
-                .mark_trigger_started_by_invocation(invocation_id)
+                .mark_unsettled_trigger_started(claim.key(), invocation_id)
                 .await?
             {
-                warn!(%invocation_id,
-                    "recorded a durable start missing from its trigger's claim: the process that \
-                     started it died before marking it, so the trigger's redelivery will be dropped");
+                warn!(%invocation_id, stream_seq = claim.stream_seq, claimant = %claim.claimant,
+                    run = %run,
+                    "recorded a durable start missing from its trigger's claim: a start of the run \
+                     this claim names, or an operator's drop of it, is on record, so a redelivery \
+                     or a replay of the trigger will be dropped instead of running it again");
             }
         }
         Ok(Self { store })
@@ -108,11 +195,11 @@ impl TriggerDispatcher {
     /// [`Self::with_caps_and_claims`].
     ///
     /// **Precondition, enforced by the argument's type:** the claims come
-    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
-    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
-    /// for every invocation in flight. Without that, a trigger whose last
-    /// process died between its first WAL write and its claim's update is
-    /// adopted and started again (#959).
+    /// from [`TriggerClaims::recover`] over the worker's report of the runs
+    /// its WAL holds, which marks the claim of every run with a start on
+    /// record. Without that, a trigger whose run started under a process
+    /// that did not mark its claim, in flight (#959) or finished (#967), is
+    /// adopted and started again.
     pub fn with_trigger_claims(
         mut self,
         claims: TriggerClaims,
@@ -129,12 +216,12 @@ impl TriggerDispatcher {
     /// [`Self::new`] was given; the daemon builds both from one setting.
     ///
     /// **Precondition, enforced by the argument's type:** the claims come
-    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
-    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
-    /// for every invocation in flight, and so has run before this
-    /// dispatcher consumes a trigger. Without that, a trigger whose last
-    /// process died between its first WAL write and its claim's update is
-    /// adopted and started again (#959).
+    /// from [`TriggerClaims::recover`] over the worker's report of the runs
+    /// its WAL holds, which marks the claim of every run with a start on
+    /// record, and so has run before this dispatcher consumes a trigger.
+    /// Without that, a trigger whose run started under a process that did
+    /// not mark its claim, in flight (#959) or finished (#967), is adopted
+    /// and started again.
     pub fn with_caps_and_claims(
         mut self,
         admission: super::RunAdmission,
@@ -158,92 +245,109 @@ impl TriggerDispatcher {
     }
 
     /// Record the delivery's durable start on its claim, then ack it.
-    /// Returns whether the delivery was acked, which it is unless the mark
-    /// fails while the invocation is still running. A failed mark leaves
-    /// the claim `claimed` either way; `marking` decides the rest, and the
-    /// failure is logged accordingly.
     ///
-    /// [`Marking::WhileRunning`]: the delivery is neither acked nor NAKed,
-    /// and `handle` stops driving the invocation and returns. Stopping is
-    /// the safe answer to a failed mark. The invocation has made its first
-    /// WAL write, so dropping it leaves its WAL row in flight: the next
-    /// start's recovery marks this claim
-    /// ([`TriggerClaims::recover`]) and resumes the run once, and the
-    /// trigger's redelivery then meets a `durably_started` row and is
-    /// dropped. Until that start, redeliveries meet this process's own
-    /// `claimed` row and are dropped too, and if they run out first the
-    /// trigger is dead-lettered as `trigger_exhausted`.
+    /// `handle` calls this once the invocation has made its first WAL
+    /// write: while it is still running, or just after it returned when it
+    /// fired the signal and returned in one poll (#966). Either way the
+    /// delivery is acked here and the run is never stopped, because a run
+    /// that started must not be redelivered.
     ///
-    /// Letting the invocation run on would end it at a terminal WAL row
-    /// under a claim still `claimed`, with the delivery un-acked. Recovery
-    /// marks only in-flight invocations, so after a restart inside the
-    /// redelivery ladder the next process would adopt that claim and start
-    /// the trigger a second time. Whether a failed mark should instead be
-    /// retried, or the run continued with recovery also marking finished
-    /// runs, is for #967 to decide.
+    /// **A refused mark is offered again** after each of
+    /// [`MARK_RETRY_PAUSES`], for as long as [`MARK_RETRY_BUDGET`] allows,
+    /// so a claim store that refuses for a moment heals with nothing else
+    /// happening. The run waits for the mark, since `handle` does not poll
+    /// the invocation meanwhile: on a healthy day for one statement; when
+    /// every attempt is refused at once, for 1.5 seconds of pauses; when an
+    /// attempt blocks, for as long as it waits in the store, which the
+    /// budget's own documentation bounds.
     ///
-    /// [`Marking::AfterReturn`]: the invocation fired the signal and
-    /// returned in the same poll, so `handle` cannot stop it. The
-    /// delivery is acked anyway, because a run that started must not be
-    /// redelivered. What a redelivery would come to depends on how the run
-    /// returned:
+    /// Nothing keeps a delivery alive between its worker permit and this
+    /// point, so its ack window may be partly spent when the first attempt
+    /// starts, and one attempt can wait out the store's busy timeout or its
+    /// pool. An in-progress ack every [`HOLD_KEEPALIVE`] therefore runs
+    /// alongside the attempts, not only between them. The first goes out a
+    /// tick after the mark starts, so the healthy path sends none; a
+    /// delivery whose window had less than a tick left by then can still
+    /// lapse once. Its copy meets this daemon's own claim and is dropped,
+    /// counted as a duplicate dropped before a start was recorded, or,
+    /// once the mark has landed, acked as a duplicate of a started run:
+    /// either way nothing starts twice, and every window after the first
+    /// tick is renewed.
     ///
-    /// - **Finished** (`Completed`, `BudgetExceeded`, a permanent
-    ///   failure), its WAL row terminal: on this daemon the same-claimant
-    ///   `Held` arm would drop each redelivery until the trigger was
-    ///   dead-lettered as `trigger_exhausted` although it ran. After a
-    ///   restart inside the retry ladder, recovery, which marks only
-    ///   in-flight rows, would leave the claim to be adopted and the work
-    ///   run a second time.
-    /// - **`Deferred`**: the run continues. `conclude` queues its resume
-    ///   and this process runs it on, under the unmarked claim, and a
-    ///   redelivery would meet the same `Held` arm.
-    /// - **A transient error or `Suspended`**, its WAL row in flight: a
-    ///   restart's recovery marks the claim and resumes the run, but on a
-    ///   live daemon the redeliveries would still end in a false dead
-    ///   letter.
+    /// **A mark refused on every attempt** is answered with an ack that
+    /// does not release the claim ([`Self::ack_keeping_claim`]), and the
+    /// run continues. Without the ack, the same-claimant `Held` arm would
+    /// drop each redelivery until the trigger was dead-lettered as
+    /// `trigger_exhausted` although it ran. The claim is not released
+    /// first, as [`Self::ack`] would: a copy that came back would then win a
+    /// fresh claim and start the work again.
     ///
-    /// The ack does not release the claim, as [`Self::ack`] would: with the
-    /// claim released, a lost ack would let the redelivery win a fresh
-    /// claim and start the work again, while a lost ack that kept the
-    /// claim leaves what not acking would have. What stays behind is a
-    /// `claimed` row for a run that started; see #967.
+    /// What stays behind is a `claimed` row for a run that started, and
+    /// only until this daemon next starts: [`TriggerClaims::recover`]
+    /// records the start on it before the dispatcher consumes anything, as
+    /// it does for every run with a start on record, and its documentation
+    /// says why neither a redelivery nor a replay of the trigger can then
+    /// start it again. Until then `fq doctor` lists the row as started and
+    /// never marked, once a minute has passed.
+    ///
+    /// **What is left is on a live daemon only.** An ack is published
+    /// without waiting for the broker, so only an ack the client refuses
+    /// to send is seen here, and `ack_keeping_claim` logs it; one lost on
+    /// its way shows only when the delivery comes back. Either way the run
+    /// carries on to its end. A copy that reaches this daemon before it
+    /// next starts, such as the redelivery of a lost ack, meets its own
+    /// `claimed` row and is dropped, logged and counted as a duplicate
+    /// dropped before a start was recorded. If the trigger's deliveries run
+    /// out before that start, it ends as a `trigger_exhausted` dead letter
+    /// although its run started, and requeuing that dead letter would run
+    /// the work twice. Settling such a copy by the start on record is the
+    /// last of #967's pull requests.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
-        marking: Marking,
-    ) -> bool {
+    ) {
+        let Some((store, _)) = self.claim_store.as_ref() else {
+            self.ack(msg, Some(trigger_id), "durably started").await;
+            return;
+        };
         let Claimed {
             stream_seq,
             invocation_id,
         } = *claim;
-        if let Some((store, _)) = self.claim_store.as_ref()
-            && let Err(err) = store
-                .mark_trigger_started(self.trigger_key(stream_seq), &invocation_id.to_string())
-                .await
-        {
-            match marking {
-                Marking::WhileRunning => {
-                    error!(error = %err, stream_seq, %invocation_id,
-                        "failed to mark trigger durably started; stopping the run here, un-acked: \
-                         its WAL row stays in flight and the next start resumes it once");
-                    return false;
+        let marked = keeping_alive(
+            msg,
+            trigger_id,
+            mark_with_retries(store, self.trigger_key(stream_seq), invocation_id),
+        )
+        .await;
+        match marked {
+            Ok(refused) => {
+                if let Some(last) = refused.last() {
+                    warn!(error = %last, refused = refused.len(), stream_seq, %invocation_id,
+                        %trigger_id, subject = %msg.subject,
+                        "marked trigger durably started after the claim store refused the \
+                         attempts before it; the run carried on");
                 }
-                Marking::AfterReturn => {
-                    error!(error = %err, stream_seq, %invocation_id,
-                        "failed to mark trigger durably started after its invocation returned; \
-                         acking it anyway and leaving its claim `claimed`: a run that started \
-                         must not be redelivered (see #967)");
-                    self.ack_keeping_claim(msg, Some(trigger_id), "durably started, mark failed")
-                        .await;
-                    return true;
-                }
+                self.ack(msg, Some(trigger_id), "durably started").await;
+            }
+            Err(MarkRefused {
+                attempts,
+                elapsed,
+                last,
+            }) => {
+                error!(error = %last, attempts, elapsed_ms = elapsed.as_millis() as u64,
+                    stream_seq, %invocation_id, %trigger_id, subject = %msg.subject,
+                    "could not mark trigger durably started: the claim store refused every \
+                     attempt. Acking the delivery anyway, keeping its claim, and letting the run \
+                     continue, so it is not redelivered. The claim stays `claimed` for a run that \
+                     started until this daemon next starts, when recovery records the start on \
+                     it; until then `fq doctor` lists it as started and never marked");
+                self.ack_keeping_claim(msg, Some(trigger_id), "durably started, mark failed")
+                    .await;
             }
         }
-        self.ack(msg, Some(trigger_id), "durably started").await;
-        true
     }
 
     pub(super) async fn release_unstarted_claim(&self, msg: &async_nats::jetstream::Message) {
@@ -351,14 +455,17 @@ impl TriggerDispatcher {
                 //   redelivered too. The first copy still starts once, and
                 //   its durable start acks the message.
                 // - This process will never settle the claim (#967): the
-                //   invocation task panicked before its durable start, a
-                //   release failed before a NAK, or `mark_trigger_started`
-                //   failed, which stops a running invocation un-acked and
-                //   leaves its WAL row for the next start to resume
-                //   (`mark_durable_started`). Every redelivery then lands
-                //   here until `max_deliver` is reached and the trigger is
-                //   dead-lettered as `trigger_exhausted`: false where the run
-                //   started, and after a panic nothing ran.
+                //   invocation task panicked before its durable start or in
+                //   the poll that made it, a release failed before a NAK, or
+                //   `mark_trigger_started` was refused on every attempt and
+                //   the ack sent in its place was lost
+                //   (`mark_durable_started`), in which case the run went on.
+                //   Every redelivery then lands here until `max_deliver` is
+                //   reached and the trigger is dead-lettered as
+                //   `trigger_exhausted`, falsely where the run started,
+                //   unless this daemon restarts first: where the run has a
+                //   start on record, the restart's recovery marks the claim
+                //   and the next copy is dropped as one of a started run.
                 //
                 // A process that exits holding a claim (the drain check, the
                 // pause hold's `Interrupted`, a failed `requeue_held` publish,
@@ -397,16 +504,18 @@ impl TriggerDispatcher {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 //
-                // That process may have reached its invocation's first WAL
-                // write and died before marking this row. Startup recovery has
-                // already answered for that case: it marks the claim of every
-                // invocation it finds in flight, by the id the row has named
-                // since claim time, and this dispatcher holds claims only as
-                // what that marking returned (`TriggerClaims::recover`, #959).
-                // A row still `claimed` here therefore names an invocation
-                // with no in-flight WAL row, and this start is its trigger's
-                // first, unless the earlier invocation already reached a
-                // terminal row (see #967).
+                // That process may have started the run and not marked this
+                // row: it died after the run's first WAL write (#959), or its
+                // mark failed and the run went on to finish (#967). Startup
+                // recovery has already answered for both: it marks the claim
+                // of every run with a start on record, in the worker's WAL or
+                // in the control plane's ownership table, by the id the row
+                // has named since claim time, and this dispatcher holds
+                // claims only as what that marking returned
+                // (`TriggerClaims::recover`). A row still `claimed` here
+                // therefore names an invocation with no start on record, and
+                // this start is, as far as any record shows, its trigger's
+                // first.
                 //
                 // The adopted claim runs under this copy's own id, written over
                 // the dead process's by the same compare-and-set. Reusing that
@@ -516,6 +625,73 @@ impl TriggerDispatcher {
                 retry_in_ms = delay.as_millis() as u64,
                 "NAK'd trigger for redelivery"
             );
+        }
+    }
+}
+
+/// Every attempt `mark_with_retries` offered was refused.
+struct MarkRefused {
+    /// How many attempts were offered.
+    attempts: usize,
+    /// How long they took, from the start of the first.
+    elapsed: Duration,
+    /// The last refusal.
+    last: ControlPlaneStoreError,
+}
+
+/// Offer a durable start to the claim store, and again after each of
+/// [`MARK_RETRY_PAUSES`] while it refuses, as long as the next attempt
+/// would begin within [`MARK_RETRY_BUDGET`] of the first. `Ok` once a
+/// mark lands, with the refusals before it (none on a healthy day); `Err`
+/// once the store has refused every attempt offered. Each refusal is
+/// logged at `debug`; `mark_durable_started` logs the outcome, once.
+async fn mark_with_retries(
+    store: &ControlPlaneStore,
+    key: TriggerKey<'_>,
+    invocation_id: uuid::Uuid,
+) -> Result<Vec<ControlPlaneStoreError>, MarkRefused> {
+    let named = invocation_id.to_string();
+    let began = tokio::time::Instant::now();
+    let mut refused = Vec::new();
+    let mut pauses = MARK_RETRY_PAUSES.iter();
+    loop {
+        let err = match store.mark_trigger_started(key, &named).await {
+            Ok(()) => return Ok(refused),
+            Err(err) => err,
+        };
+        let in_budget = |pause: &&Duration| began.elapsed() + **pause < MARK_RETRY_BUDGET;
+        let Some(pause) = pauses.next().filter(in_budget) else {
+            return Err(MarkRefused {
+                attempts: refused.len() + 1,
+                elapsed: began.elapsed(),
+                last: err,
+            });
+        };
+        debug!(error = %err, attempt = refused.len() + 1, stream_seq = key.stream_seq,
+            %invocation_id, retry_in_ms = pause.as_millis() as u64,
+            "the claim store refused to mark a trigger durably started; offering it again");
+        refused.push(err);
+        tokio::time::sleep(*pause).await;
+    }
+}
+
+/// Drive `work` to its end while keeping `msg`'s delivery alive with an
+/// in-progress ack every [`HOLD_KEEPALIVE`], the cadence every hold
+/// keeps. The first goes out a tick after `work` starts, not at once as a
+/// hold's does: work that ends inside the first tick, which is every mark
+/// on a healthy day, sends none, at the price of a window with less than
+/// a tick left lapsing once (`mark_durable_started` says what follows).
+async fn keeping_alive<T>(
+    msg: &async_nats::jetstream::Message,
+    trigger_id: uuid::Uuid,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let mut work = std::pin::pin!(work);
+    loop {
+        tokio::select! {
+            biased;
+            done = &mut work => return done,
+            () = tokio::time::sleep(HOLD_KEEPALIVE) => keep_alive(msg, Some(trigger_id)).await,
         }
     }
 }

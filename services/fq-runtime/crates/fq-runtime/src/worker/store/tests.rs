@@ -936,6 +936,46 @@ fn terminal_state_row(id: &str, terminal_at_ms: i64) -> InvocationStateRow {
     }
 }
 
+/// **The report startup recovery hands the control plane holds every run
+/// the WAL holds, finished ones included (#967).** A run in flight and a
+/// finished run whose archive is pending are both durable starts; a run
+/// whose archive was acknowledged has left the WAL, and the report, for
+/// the control plane's own record.
+#[tokio::test]
+async fn the_durable_start_report_holds_every_run_the_wal_holds() {
+    use crate::worker::{DurableStartReport, WalRun};
+    let (store, _dir) = open_fresh().await;
+    let mut in_flight = terminal_state_row("in-flight", 0);
+    in_flight.phase = "awaiting_model".to_string();
+    in_flight.terminal_at = None;
+    store.upsert_invocation_state(&in_flight).await.unwrap();
+    store
+        .upsert_invocation_state(&terminal_state_row("finished", 2))
+        .await
+        .unwrap();
+    store.set_archive_pending("finished", 3).await.unwrap();
+    store
+        .upsert_invocation_state(&terminal_state_row("archived", 2))
+        .await
+        .unwrap();
+    store.delete_invocation_state("archived").await.unwrap();
+
+    let mut starts = store.list_durable_starts().await.unwrap();
+    starts.sort();
+    assert_eq!(
+        starts,
+        vec![
+            ("finished".to_string(), true),
+            ("in-flight".to_string(), false)
+        ]
+    );
+    let report = DurableStartReport::scan(&store).await.unwrap();
+    assert_eq!(report.run("in-flight"), Some(WalRun::InFlight));
+    assert_eq!(report.run("finished"), Some(WalRun::Finished));
+    assert_eq!(report.run("archived"), None);
+    assert_eq!(report.run("never-written"), None);
+}
+
 #[tokio::test]
 async fn set_archive_pending_marks_terminal_row_pending() {
     let (store, _dir) = open_fresh().await;

@@ -491,25 +491,6 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
                 for key in VOLATILE_KEYS {
                     map.remove(*key);
                 }
-                // The final state blob is the serialized reducer state
-                // (JSON bytes); injected notices live inside its
-                // persisted conversation, so the modulo-host-notices
-                // comparison must reach through the encoding. Compare
-                // the parsed form; a blob that isn't JSON (a foreign
-                // reducer) is kept as-is.
-                if let Some(decoded) = map
-                    .get("final_state_blob")
-                    .and_then(|blob| blob.as_array())
-                    .and_then(|bytes| {
-                        bytes
-                            .iter()
-                            .map(|b| u8::try_from(b.as_u64()?).ok())
-                            .collect::<Option<Vec<u8>>>()
-                    })
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                {
-                    map.insert("final_state_blob".to_string(), decoded);
-                }
                 for child in map.values_mut() {
                     strip(child);
                 }
@@ -529,6 +510,19 @@ pub fn observational_trace(events: &[Event]) -> Vec<serde_json::Value> {
         .filter(|event| !matches!(event.payload, EventPayload::HostNotice(_)))
         .map(|event| {
             let mut value = serde_json::to_value(&event.payload).expect("event payload serialises");
+            // The final state blob is the serialized reducer state (JSON
+            // bytes); injected notices live inside its persisted
+            // conversation, so the modulo-host-notices comparison must
+            // reach through it. It is read from the payload's bytes, not
+            // from the wire's encoding of them (base64 text since #981),
+            // and compared in its parsed form; a blob that isn't JSON (a
+            // foreign reducer) is kept as it is written.
+            if let EventPayload::InvocationArchived(archived) = &event.payload
+                && let Ok(state) =
+                    serde_json::from_slice::<serde_json::Value>(&archived.final_state_blob)
+            {
+                value["payload"]["final_state_blob"] = state;
+            }
             strip(&mut value);
             value
         })
@@ -972,6 +966,55 @@ mod tests {
             observational_trace(&reference.events),
             observational_trace(&resumed.events),
             "host notices are invisible to the equivalence comparison"
+        );
+    }
+
+    /// An archived payload from one fixed worker whose final state holds
+    /// `messages`, serialised as the reducer serialises its conversation.
+    fn archived_holding(messages: &[crate::events::Message]) -> EventPayload {
+        EventPayload::InvocationArchived(crate::events::InvocationArchivedPayload {
+            worker_id: crate::worker::WorkerId::new("oracle-worker").unwrap(),
+            final_phase: "completed".to_string(),
+            final_state_blob: serde_json::to_vec(&json!({
+                "phase": "completed",
+                "messages": messages,
+            }))
+            .unwrap(),
+            started_at_ms: 1,
+            terminal_at_ms: 2,
+        })
+    }
+
+    /// The comparison reaches into the archived state, whatever encoding
+    /// the event gives it on the wire (#981): a resumed run's final
+    /// conversation holds the notice the resume injected, and that
+    /// difference alone is invisible, while any other difference in the
+    /// state is not.
+    #[test]
+    fn observational_trace_compares_the_archived_state_modulo_host_notices() {
+        let ending_with = |messages: &[crate::events::Message]| {
+            let mut t = Trace::new();
+            t.push(triggered())
+                .push(llm_request_with(vec![user_message("hi")]))
+                .push(llm_dispatched())
+                .push(llm_response())
+                .push(completed())
+                .push(archived_holding(messages));
+            observational_trace(&t.events)
+        };
+        let reference = ending_with(&[user_message("hi")]);
+        assert_eq!(
+            reference,
+            ending_with(&[
+                user_message("hi"),
+                user_message("<host-notice>resumed</host-notice>"),
+            ]),
+            "a notice inside the archived state is invisible to the comparison"
+        );
+        assert_ne!(
+            reference,
+            ending_with(&[user_message("hi"), user_message("not a notice")]),
+            "anything else inside the archived state is load-bearing"
         );
     }
 

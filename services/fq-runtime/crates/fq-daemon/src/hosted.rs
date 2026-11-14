@@ -86,8 +86,8 @@ pub(crate) struct Assembled {
     /// recovered invocations alike.
     pub resume_runner: Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>>,
     /// The trigger claims the dispatcher arbitrates on, which startup
-    /// recovery returned once it had recorded every in-flight invocation's
-    /// durable start on its claim (#959).
+    /// recovery returned once it had marked started the claim of every run
+    /// on record, in flight or finished (#959, #967).
     pub claims: fq_runtime::control_plane::dispatcher::TriggerClaims,
     pub worker_id: fq_runtime::worker::WorkerId,
     /// The daemon's worker row, armed at registration. This teardown

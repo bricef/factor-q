@@ -47,8 +47,9 @@ const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
 const ADOPTION_LOST: &str = "the claim it met changed before this daemon could adopt it";
 
 /// The warn lines emitted on this thread while a capture is installed.
+/// `durable_start_signal_tests` reads its error lines through it too.
 #[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Captured(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -64,7 +65,7 @@ impl Captured {
     /// Install the capture on this thread until the guard drops. A
     /// `#[tokio::test]` runtime is single-threaded, so `handle` and every
     /// task it awaits log here.
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
+    pub(super) fn install(&self) -> tracing::subscriber::DefaultGuard {
         let writer = self.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
@@ -75,7 +76,7 @@ impl Captured {
     }
 
     /// The captured lines that contain `needle`.
-    fn lines_with(&self, needle: &str) -> Vec<String> {
+    pub(super) fn lines_with(&self, needle: &str) -> Vec<String> {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .lines()
             .filter(|line| line.contains(needle))

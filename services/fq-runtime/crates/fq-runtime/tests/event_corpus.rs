@@ -4,25 +4,32 @@
 //! exemplar cannot pin, a named variant filed as
 //! `<event_type>.<variant>.json` — serialised by the real serialisers
 //! and committed under `tests/corpus/events/v3/`, plus hand-written v1
-//! and v2 envelopes under `v1/` and `v2/`, taken from the schema changelog.
-//! Replayed through the projection consumer's parse boundary on every
-//! CI run.
+//! and v2 envelopes under `v1/` and `v2/`, taken from the schema changelog,
+//! and under `v3/superseded/` the v3 events an earlier build wrote in a
+//! shape this build no longer writes but still reads. Replayed through
+//! the projection consumer's parse boundary on every CI run.
 //!
-//! Two properties. **Every current file projects**: it is admitted at
+//! Three properties. **Every current file projects**: it is admitted at
 //! the boundary, inserts into a projection store, and re-serialises to
 //! the committed JSON value — so a breaking change to a payload shape
 //! without a version bump fails here, which is exactly what passed CI
 //! before, because every other test constructs events with the current
-//! serialisers on both sides. **Every older file halts**: it is refused
-//! for its version, never as malformed, and never admitted — so a reader
-//! that stopped checking the version, or a loop that went back to acking
-//! what it could not read, goes red on committed history rather than on
-//! a rebuild in production.
+//! serialisers on both sides. **Every superseded file reads as today's**:
+//! it is admitted and projects, and reads as exactly the event its
+//! current twin holds — so a reader that stops accepting a shape the
+//! stream still carries goes red here, not on a replay. **Every older
+//! file halts**: it is refused for its version, never as malformed, and
+//! never admitted — so a reader that stopped checking the version, or a
+//! loop that went back to acking what it could not read, goes red on
+//! committed history rather than on a rebuild in production.
 //!
 //! `UPDATE_CORPUS=1 cargo test -p fq-runtime --test event_corpus`
 //! rewrites the v3 files from the exemplars below and is the one way to
-//! add or change one; the v1 and v2 files are hand-written history and
-//! are never regenerated.
+//! add or change one; the v1, v2 and superseded files are history and
+//! are never regenerated. A file becomes superseded when a change to
+//! what the writers emit keeps the old shape readable: it moves, as
+//! committed, to `v3/superseded/` under its own name before the
+//! regeneration writes the new shape in its place.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -677,14 +684,74 @@ async fn every_current_event_type_has_a_file_that_projects() {
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
             committed,
-            "{path:?} no longer round-trips through the current serialisers; a deliberate \
-             shape change needs a schema version bump, and then UPDATE_CORPUS=1"
+            "{path:?} no longer round-trips through the current serialisers. A deliberate \
+             shape change takes one of two routes: a schema version bump, when events \
+             already written stop reading; or, when every event already written still reads, \
+             the committed file moved as it is to v3/superseded/. Then UPDATE_CORPUS=1"
         );
         assert_eq!(event.envelope.schema_version, SCHEMA_VERSION);
         assert_eq!(
             EventKind::from(&event.payload),
             EventKind::from(&exemplar.payload),
             "{path:?} reads back as the type it was written as"
+        );
+        store
+            .insert_event(&event, Some(seq))
+            .await
+            .unwrap_or_else(|e| panic!("{path:?} must project: {e}"));
+    }
+}
+
+/// Every superseded v3 file is admitted, projects, and reads as the
+/// event its current twin holds.
+///
+/// A superseded file is what an earlier build of the current version
+/// wrote, in a shape this build no longer writes and must still read for
+/// as long as a stream can hold it: today, the `invocation.archived` whose
+/// `final_state_blob` was a JSON array of integers before #981. Each is
+/// named after the current file it must read as, and holds the same
+/// event, so reading it must give exactly what the serialisers write
+/// today; it must also differ from that file, or it is not a superseded
+/// shape at all.
+#[tokio::test]
+async fn every_superseded_file_reads_as_the_event_this_build_writes() {
+    let dir = corpus_dir("v3").join("superseded");
+    let files = json_files(&dir);
+    assert!(!files.is_empty(), "the superseded corpus is empty");
+
+    let scratch = tempfile::tempdir().unwrap();
+    let store = ProjectionStore::open(&scratch.path().join("projection.db"))
+        .await
+        .expect("open a projection store");
+    for (i, path) in files.iter().enumerate() {
+        let seq = i as u64 + 1;
+        let twin = corpus_dir("v3").join(path.file_name().unwrap());
+        let current: Value = serde_json::from_slice(
+            &std::fs::read(&twin)
+                .unwrap_or_else(|e| panic!("{path:?} has no current twin at {twin:?}: {e}")),
+        )
+        .unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let superseded: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(
+            superseded, current,
+            "{path:?} is the shape this build writes, so it is not superseded"
+        );
+
+        let subject = serde_json::from_value::<Event>(current.clone())
+            .unwrap()
+            .subject();
+        let event = match admit(&bytes, &subject, Some(seq)) {
+            Admission::Accept(event) => *event,
+            other => {
+                panic!("{path:?} must be admitted by the consumer's parse boundary, got {other:?}")
+            }
+        };
+        assert_eq!(event.envelope.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            current,
+            "{path:?} must read as {twin:?}, the event this build writes"
         );
         store
             .insert_event(&event, Some(seq))

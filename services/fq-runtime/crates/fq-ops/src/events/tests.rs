@@ -1965,3 +1965,255 @@ fn only_an_unknown_detail_kind_degrades_to_unknown() {
         json!({"kind": "unknown"})
     );
 }
+
+// ------------------------------------------------------------------
+// The archived state on the wire (#981): written as padded standard
+// base64, and the integer array every earlier build wrote still read.
+// ------------------------------------------------------------------
+
+/// An archived payload carrying `state`.
+fn archived_carrying(state: Vec<u8>) -> InvocationArchivedPayload {
+    InvocationArchivedPayload {
+        worker_id: crate::worker::WorkerId::new("worker-007").unwrap(),
+        final_phase: "completed".to_string(),
+        final_state_blob: state,
+        started_at_ms: 1_700_000_000_000,
+        terminal_at_ms: 1_700_000_001_000,
+    }
+}
+
+/// An `invocation.archived` event carrying `state`.
+fn archived_event_carrying(state: Vec<u8>) -> Event {
+    Event::new(
+        AgentId::new("researcher").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::InvocationArchived(archived_carrying(state)),
+    )
+}
+
+/// The payload's JSON with `blob` where the state goes, as a reader
+/// can meet it on the wire.
+fn archived_wire_with(blob: Value) -> Value {
+    let mut wire = serde_json::to_value(archived_carrying(Vec::new())).unwrap();
+    wire["final_state_blob"] = blob;
+    wire
+}
+
+/// Every byte value once: 256 bytes, one more than a multiple of three,
+/// so the text ends in two padding characters.
+fn every_byte() -> Vec<u8> {
+    (0..=u8::MAX).collect()
+}
+
+/// RFC 4648 section 4: the standard alphabet, with `+` and `/` for the
+/// last two values, and `=` padding to a whole group of four.
+#[test]
+fn the_archived_state_is_written_as_padded_standard_base64() {
+    for (state, text) in [
+        (Vec::new(), ""),
+        (b"f".to_vec(), "Zg=="),
+        (b"fo".to_vec(), "Zm8="),
+        (b"foo".to_vec(), "Zm9v"),
+        (b"{}".to_vec(), "e30="),
+        (vec![0xfb, 0xff, 0xbf], "+/+/"),
+    ] {
+        let wire = serde_json::to_value(archived_carrying(state.clone())).unwrap();
+        assert_eq!(wire["final_state_blob"], json!(text), "{state:?}");
+    }
+}
+
+/// The integer array is what builds before #981 wrote. This build
+/// reads it and never writes it, whatever the state holds.
+#[test]
+fn the_writer_never_emits_the_integer_array() {
+    for len in [0usize, 1, 2, 3, 255, 256, 4096] {
+        let state: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+        let wire = serde_json::to_value(archived_event_carrying(state)).unwrap();
+        let blob = &wire["payload"]["payload"]["final_state_blob"];
+        assert!(blob.is_string(), "{len} bytes of state written as {blob}");
+    }
+}
+
+#[test]
+fn an_archived_state_written_by_this_build_reads_back_identical() {
+    for state in [
+        Vec::new(),
+        b"{}".to_vec(),
+        every_byte(),
+        every_byte()[1..].to_vec(),
+        every_byte()[2..].to_vec(),
+        vec![0u8; 3 * 1024 + 2],
+    ] {
+        let bytes = serde_json::to_vec(&archived_event_carrying(state.clone())).unwrap();
+        let event = Event::from_wire(&bytes).expect("this build reads what it writes");
+        let EventPayload::InvocationArchived(read) = event.payload else {
+            panic!("an archived event reads back as one");
+        };
+        assert_eq!(read.final_state_blob, state);
+    }
+}
+
+proptest::proptest! {
+    /// Any state at all, of any length: the bytes a reader gets back are
+    /// the bytes the writer was given.
+    #[test]
+    fn any_archived_state_round_trips_through_the_wire(
+        state in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)
+    ) {
+        let bytes = serde_json::to_vec(&archived_event_carrying(state.clone())).unwrap();
+        let event = Event::from_wire(&bytes).unwrap();
+        let EventPayload::InvocationArchived(read) = event.payload else {
+            panic!("an archived event reads back as one");
+        };
+        proptest::prop_assert_eq!(read.final_state_blob, state);
+    }
+}
+
+/// What builds before #981 wrote, and what the event stream keeps for
+/// its retention window (30 days by default) after an upgrade: the
+/// state as a JSON array of integers. It reads as the same bytes, and
+/// the event written again is the one this build would have written.
+#[test]
+fn an_archived_state_written_as_an_integer_array_still_reads() {
+    let state = br#"{"phase":"completed"}"#.to_vec();
+    for old in [state.clone(), Vec::new(), every_byte()] {
+        let read: InvocationArchivedPayload =
+            serde_json::from_value(archived_wire_with(json!(old))).expect("the old form reads");
+        assert_eq!(read.final_state_blob, old);
+    }
+
+    let event = archived_event_carrying(state.clone());
+    let mut wire = serde_json::to_value(&event).unwrap();
+    wire["payload"]["payload"]["final_state_blob"] = json!(state);
+    let read = Event::from_wire(&serde_json::to_vec(&wire).unwrap())
+        .expect("the wire boundary admits the old form");
+    let EventPayload::InvocationArchived(payload) = &read.payload else {
+        panic!("the old form reads as an archived event");
+    };
+    assert_eq!(payload.final_state_blob, state);
+    assert_eq!(
+        serde_json::to_value(&read).unwrap(),
+        serde_json::to_value(&event).unwrap(),
+        "written again, the old form is the event this build writes"
+    );
+}
+
+/// A state in neither form is a malformed payload: the event fails to
+/// parse rather than reading as some other bytes.
+///
+/// The text is read strictly, as the writer writes it, so the near
+/// misses a lenient decoder would take are refused too: text without
+/// its padding, a last character whose unused bits are set (`Zh==`
+/// would read as `f`, as `Zg==` does), the URL-safe alphabet, and
+/// whitespace around the text. Each is here because a reader loosened
+/// to take it passes every other test in this file.
+#[test]
+fn an_archived_state_in_neither_form_fails_the_event() {
+    for blob in [
+        json!("not base64!"),
+        json!("Zg"),
+        json!("Zh=="),
+        json!("-_-_"),
+        json!("Zm9v\n"),
+        json!([256]),
+        json!([-1]),
+        json!([1.5]),
+        json!(["1"]),
+        json!(null),
+        json!(7),
+        json!({"bytes": [1]}),
+    ] {
+        let read =
+            serde_json::from_value::<InvocationArchivedPayload>(archived_wire_with(blob.clone()));
+        assert!(read.is_err(), "{blob} read as {:?}", read.unwrap());
+
+        let mut wire = serde_json::to_value(archived_event_carrying(Vec::new())).unwrap();
+        wire["payload"]["payload"]["final_state_blob"] = blob.clone();
+        assert!(
+            matches!(
+                Event::from_wire(&serde_json::to_vec(&wire).unwrap()),
+                Err(EventParseError::Malformed(_))
+            ),
+            "{blob}: a state in neither form is malformed"
+        );
+    }
+    let err = serde_json::from_value::<InvocationArchivedPayload>(archived_wire_with(json!(7)))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("base64"),
+        "the error names what was expected: {err}"
+    );
+}
+
+/// An `invocation.archived` as a production daemon writes it: the worker
+/// id a UUID, as the daemon mints it, a parent event, and a timestamp to
+/// the nanosecond, so every field that varies in length is at its
+/// longest.
+fn production_archive(state: Vec<u8>) -> Event {
+    use chrono::TimeZone;
+    let mut event = Event::new(
+        AgentId::new("issue-fixer").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::InvocationArchived(InvocationArchivedPayload {
+            worker_id: crate::worker::WorkerId::new(Uuid::now_v7().to_string()).unwrap(),
+            final_phase: "completed".to_string(),
+            final_state_blob: state,
+            started_at_ms: 1_788_000_000_000,
+            terminal_at_ms: 1_788_000_004_200,
+        }),
+    )
+    .with_parent(Uuid::now_v7());
+    event.envelope.timestamp = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap()
+        + chrono::Duration::nanoseconds(123_456_789);
+    event
+}
+
+/// What a broker counts against its `max_payload` for `event`: the JSON
+/// the bus publishes, and the message-id header published with it
+/// (`NATS/1.0`, `Nats-Msg-Id: <event id>`, and the blank line that ends
+/// the headers).
+fn counted_by_the_broker(event: &Event) -> usize {
+    let header = format!(
+        "NATS/1.0\r\nNats-Msg-Id: {}\r\n\r\n",
+        event.envelope.event_id
+    );
+    serde_json::to_vec(event).unwrap().len() + header.len()
+}
+
+/// An archive's size is a fixed overhead and four bytes for every three
+/// bytes of state, or part of three, whatever the bytes are. The integer
+/// array it replaced took two to four bytes for each byte, depending on
+/// the value, so a threshold could only be estimated; this one is exact.
+#[test]
+fn an_archive_grows_by_four_bytes_for_every_three_of_state() {
+    let overhead = counted_by_the_broker(&production_archive(Vec::new()));
+    for len in [1usize, 2, 3, 4, 1000, 262_144] {
+        for fill in [0u8, b'o', b'"', 0xff] {
+            assert_eq!(
+                counted_by_the_broker(&production_archive(vec![fill; len])),
+                overhead + 4 * len.div_ceil(3),
+                "{len} bytes of {fill:#04x}"
+            );
+        }
+    }
+}
+
+/// The largest state whose archive a broker accepts, measured: an
+/// archive holding that many bytes fits, and one holding a byte more
+/// does not. For a stock broker (1 MiB) and for the dogfood broker
+/// (16 MiB, `ops/dogfood/infra/nats.conf`); the operating guide quotes
+/// both.
+#[test]
+fn the_largest_state_a_stock_broker_and_the_dogfood_broker_archive() {
+    let overhead = counted_by_the_broker(&production_archive(Vec::new()));
+    for (max_payload, largest) in [(1usize << 20, 785_949usize), (16 << 20, 12_582_429)] {
+        assert_eq!(
+            3 * ((max_payload - overhead) / 4),
+            largest,
+            "the largest state under {max_payload} bytes, from an overhead of {overhead}"
+        );
+        assert!(counted_by_the_broker(&production_archive(vec![b'o'; largest])) <= max_payload);
+        assert!(counted_by_the_broker(&production_archive(vec![b'o'; largest + 1])) > max_payload);
+    }
+}

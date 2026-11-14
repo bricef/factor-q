@@ -59,16 +59,16 @@ fn wire_size(event: &Event) -> usize {
 
 /// A tool answering twice a stock `max_payload` used to put a 2 MiB
 /// `tool.result` on the bus, and the same text into every later
-/// `llm.request`. Capped, the run completes and every event the cap
-/// governs would fit a stock broker.
+/// `llm.request`. Capped, the run completes and every event it
+/// publishes would fit a stock broker.
 ///
-/// `invocation.archived` is not among them. It carries the reducer's
-/// state blob — the conversation, this answer included — encoded as a
-/// JSON array of integers, roughly four bytes on the wire per byte of
-/// state, so one answer at the 256 KiB cap makes the archive about
-/// 1 MiB. State-blob sizing is outside #827, which names it out of
-/// scope (see #981); the archive is left out of the check below rather
-/// than the check being weakened for every event.
+/// `invocation.archived` included. The cap does not govern it: it
+/// carries the reducer's state blob, the conversation with this answer
+/// in it, about 263,000 bytes. As a JSON array of integers, about four
+/// bytes on the wire for each byte of state, this archive was about
+/// 1,052,000 bytes, over the limit; as base64 (#981), four bytes for
+/// every three, it is about 351,000, with room for a second capped
+/// answer (see the next test).
 #[tokio::test]
 async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
     let world = SimWorld::new(827, 5.0).await;
@@ -99,10 +99,7 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
         answer.contains(&format!("of {} bytes", 2 * STOCK_MAX_PAYLOAD)),
         "the marker counts what the tool produced"
     );
-    let governed = events
-        .iter()
-        .filter(|e| !matches!(e.payload, EventPayload::InvocationArchived(_)));
-    for event in governed {
+    for event in &events {
         let size = wire_size(event);
         assert!(
             size <= STOCK_MAX_PAYLOAD,
@@ -110,6 +107,76 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
             event_kind(event)
         );
     }
+}
+
+/// What a broker counts against its `max_payload` for `event`: its JSON
+/// and the message-id header the bus publishes with it.
+///
+/// Measured from the JSON, not from `wire_size`, which counts the
+/// body alone today: adding the header to whatever `wire_size` returns
+/// would count it twice once `wire_size` counts it too.
+fn counted_by_the_broker(event: &Event) -> usize {
+    let body = serde_json::to_vec(event).expect("the event serialises");
+    let header = format!(
+        "NATS/1.0\r\nNats-Msg-Id: {}\r\n\r\n",
+        event.envelope.event_id
+    );
+    body.len() + header.len()
+}
+
+/// Where a stock broker stops taking the archive, counted in capped
+/// answers (#981). The archive writes the run's state as base64, four
+/// bytes for every three, and the default cap is a quarter of a stock
+/// `max_payload`, so three capped answers are a whole 1 MiB of base64
+/// before the rest of the conversation is counted. A run that read one
+/// capped answer archives in about 351 KB, about 697 KB under the
+/// limit, which is room for a second; a run that read three cannot
+/// archive on a stock broker.
+#[tokio::test]
+async fn two_capped_answers_archive_on_a_stock_broker_and_three_do_not() {
+    let mut archives = Vec::new();
+    for answers in 1..=3 {
+        let world = SimWorld::new(981, 5.0).await;
+        let llm = FixtureClient::new();
+        for i in 0..answers {
+            world
+                .tool
+                .push_output(ToolResult::ok("o".repeat(2 * STOCK_MAX_PAYLOAD)));
+            llm.push_response(sim_tool_call(&format!("read-{i}")));
+        }
+        llm.push_response(end_turn("read the large answers"));
+
+        let outcome = world.run(&llm).await.expect("the run completes");
+        assert!(
+            matches!(outcome, InvocationOutcome::Completed { .. }),
+            "{answers} answers: expected Completed, got {outcome:?}"
+        );
+        let archive = world
+            .sink
+            .events()
+            .into_iter()
+            .find(|e| matches!(e.payload, EventPayload::InvocationArchived(_)))
+            .expect("the run publishes its archive");
+        archives.push(counted_by_the_broker(&archive));
+    }
+
+    let [one, two, three] = archives[..] else {
+        unreachable!("three runs");
+    };
+    assert!(
+        one <= 360 * 1000,
+        "one capped answer archives in {one} bytes, more than the about 351 KB this test's \
+         documentation records"
+    );
+    assert!(
+        two <= STOCK_MAX_PAYLOAD,
+        "two capped answers archive in {two} bytes, over a stock max_payload"
+    );
+    assert!(
+        three > STOCK_MAX_PAYLOAD,
+        "three capped answers archive in {three} bytes, under a stock max_payload; the \
+         operating guide says they do not fit"
+    );
 }
 
 /// The same answer made of NUL bytes — what most of an uncompressed tar

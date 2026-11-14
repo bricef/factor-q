@@ -53,7 +53,6 @@ mod dead_letter;
 mod deferral;
 mod run_admission;
 
-use claim::Marking;
 pub use claim::TriggerClaims;
 pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
 use std::sync::Arc;
@@ -647,7 +646,6 @@ impl TriggerDispatcher {
             durable_start,
         ));
 
-        let mut acked = false;
         let mut signal_resolved = false;
         let mut durable_start_observed = false;
         let result = loop {
@@ -657,18 +655,14 @@ impl TriggerDispatcher {
                     signal_resolved = true;
                     // A resolved receiver panics if polled again (#987),
                     // so this branch runs once. `Ok` = fired (first WAL
-                    // write landed): mark the claim and ack, or stop the
-                    // run if the mark fails (see `mark_durable_started`).
-                    // `Err` = dropped unfired (the invocation is ending
-                    // before its first WAL write): settled after the loop.
+                    // write landed): mark the claim and ack. The run waits
+                    // for that and then carries on whether or not the mark
+                    // landed (`mark_durable_started`, #967). `Err` =
+                    // dropped unfired (the invocation is ending before its
+                    // first WAL write): settled after the loop.
                     if signal.is_ok() {
                         durable_start_observed = true;
-                        acked = self
-                            .mark_durable_started(msg, &claim, trigger_id, Marking::WhileRunning)
-                            .await;
-                        if !acked {
-                            return;
-                        }
+                        self.mark_durable_started(msg, &claim, trigger_id).await;
                     }
                 }
                 outcome = &mut invocation => break outcome,
@@ -677,22 +671,17 @@ impl TriggerDispatcher {
 
         // An invocation can fire the signal and return in one poll, and the
         // loop then ends on the result without seeing the signal (#966).
-        // Asked once more, a fired signal is a durable start like any other.
-        // A failed mark here cannot stop the run (a `Deferred` one runs on),
-        // so the delivery is acked anyway, keeping its claim: a run that
-        // started must not be redelivered (`mark_durable_started`, by kind
-        // of return; see #967).
+        // Asked once more, a fired signal is a durable start like any other,
+        // marked and acked the same way.
         if !signal_resolved && durably_started.try_recv().is_ok() {
             durable_start_observed = true;
-            acked = self
-                .mark_durable_started(msg, &claim, trigger_id, Marking::AfterReturn)
-                .await;
+            self.mark_durable_started(msg, &claim, trigger_id).await;
         }
 
         // The invocation returned before the durable-start signal fired,
         // so the run left nothing durable behind: the trigger's fate is
         // decided from the result (`before_durable_start.rs`).
-        if !acked && !durable_start_observed {
+        if !durable_start_observed {
             self.settle_before_durable_start(
                 msg,
                 &agent_id,
@@ -866,8 +855,8 @@ mod tests {
 
     /// The claims a dispatcher under test arbitrates on, got the only way
     /// there is: recovery over its worker's WAL. These tests' workers have
-    /// a fresh WAL with nothing in flight, so there is nothing to record,
-    /// and saying so is the honest version of skipping the step.
+    /// a fresh WAL holding no run, so there is nothing to record, and
+    /// saying so is the honest version of skipping the step.
     pub(super) async fn recovered_claims(
         store: &Arc<crate::control_plane::ControlPlaneStore>,
     ) -> TriggerClaims {
@@ -875,8 +864,8 @@ mod tests {
         let wal = WorkerStore::open(&dir.path().join("worker.db"))
             .await
             .unwrap();
-        let in_flight = crate::worker::InFlightReport::scan(&wal).await.unwrap();
-        TriggerClaims::recover(store.clone(), &in_flight)
+        let starts = crate::worker::DurableStartReport::scan(&wal).await.unwrap();
+        TriggerClaims::recover(store.clone(), &starts)
             .await
             .expect("recover claims over an empty WAL")
     }
@@ -2747,11 +2736,11 @@ You are a test agent."#
                 1,
             )
             // The process that is about to die booted on this same WAL,
-            // which held nothing in flight then.
+            // which held no run then.
             .with_trigger_claims(
                 TriggerClaims::recover(
                     claims.clone(),
-                    &crate::worker::InFlightReport::scan(&wal).await.unwrap(),
+                    &crate::worker::DurableStartReport::scan(&wal).await.unwrap(),
                 )
                 .await
                 .unwrap(),
@@ -2819,13 +2808,15 @@ You are a test agent."#
             ),
             "nothing marked the claim: this is the window #959 is about; got {held:?}"
         );
-        assert!(
-            claims
-                .mark_trigger_started_by_invocation(&in_flight[0].invocation_id)
-                .await
-                .unwrap(),
-            "the claim must name the invocation the WAL row carries, or recovery cannot find it"
-        );
+        // The next start's recovery over the same two stores. It matches
+        // the claim to the WAL row by the invocation id the claim names, so
+        // it marks the claim only if that is the id the WAL row carries.
+        TriggerClaims::recover(
+            claims.clone(),
+            &crate::worker::DurableStartReport::scan(&wal).await.unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             claims
                 .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
@@ -2833,7 +2824,8 @@ You are a test agent."#
                 .unwrap(),
             crate::control_plane::TriggerClaim::Started {
                 invocation_id: in_flight[0].invocation_id.clone()
-            }
+            },
+            "the claim must name the invocation the WAL row carries, or recovery cannot find it"
         );
     }
 

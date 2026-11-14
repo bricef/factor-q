@@ -1279,4 +1279,200 @@ mod tests {
 
         rt.shutdown().await;
     }
+
+    /// The archive hand-off end to end with the state as base64 text
+    /// (#981). The worker runs an invocation to terminal while the
+    /// control plane is down, so its terminal row and the state in it can
+    /// be read before the ack deletes them; the control plane then comes
+    /// up, takes the sweeper's republish off the stream, and stores the
+    /// state. What it stores is exactly what the worker held, and the
+    /// event that carried it wrote the state as text, not as an array.
+    #[tokio::test]
+    async fn an_archived_run_s_stored_state_is_the_worker_s() {
+        use crate::Agent;
+        use crate::bus::STREAM_NAME;
+        use crate::events::{TriggerSource, subjects};
+        use crate::test_support::mock_anthropic::MockResponse;
+        use crate::test_support::runtime::TestRuntime;
+        use crate::worker::InvocationOutcome;
+        use crate::worker::reducer::Harness;
+        use crate::{PricingTable, ReducerContext, ReducerRunner, RunnerConfig, ToolRegistry};
+
+        let mut rt = TestRuntime::builder()
+            .with_coordination(false)
+            .archive_retry_interval_ms(300)
+            .start()
+            .await
+            .expect("harness");
+        rt.push_llm_response(MockResponse::report_success("done.", 12, 4));
+        let agent = Agent::builder()
+            .id(rt.agent_id().as_str())
+            .model("claude-haiku-4-5")
+            .system_prompt("be brief")
+            .budget(1.0)
+            .build()
+            .unwrap();
+        let runner = ReducerRunner::new(
+            Arc::new(
+                ReducerContext::builder()
+                    .tools(Arc::new(ToolRegistry::with_builtins()))
+                    .build(),
+            ),
+            Arc::new(
+                RunnerConfig::builder()
+                    .bus(rt.bus().clone())
+                    .pricing(Arc::new(PricingTable::empty()))
+                    .store(rt.worker_store().clone())
+                    .worker_id(rt.worker_id().clone())
+                    .build(),
+            ),
+            Harness::new(),
+        );
+        let outcome = runner
+            .run(
+                &agent,
+                &rt.llm_client(),
+                TriggerSource::Manual,
+                None,
+                serde_json::json!({"input": "go"}),
+            )
+            .await
+            .expect("run completes");
+        let InvocationOutcome::Completed { invocation_id, .. } = outcome else {
+            panic!("expected Completed, got {outcome:?}");
+        };
+        let inv_str = invocation_id.to_string();
+
+        let worker_row = rt
+            .worker_store()
+            .get_invocation_state(&inv_str)
+            .await
+            .unwrap()
+            .expect("the terminal row waits for the control plane");
+        assert!(
+            !worker_row.state_blob.is_empty(),
+            "the worker holds the run's final state"
+        );
+
+        let raw = rt
+            .bus()
+            .jetstream()
+            .get_stream(STREAM_NAME)
+            .await
+            .expect("the event stream")
+            .get_last_raw_message_by_subject(&subjects::agent_invocation_archived(
+                rt.agent_id().as_str(),
+            ))
+            .await
+            .expect("the archive event is on the stream");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&raw.payload).expect("the archive event is JSON");
+        assert!(
+            wire["payload"]["payload"]["final_state_blob"].is_string(),
+            "the state goes on the wire as text: {}",
+            wire["payload"]["payload"]["final_state_blob"]
+        );
+
+        rt.start_coordination().await.expect("start coordination");
+        rt.wait_for_archive(invocation_id, Duration::from_secs(15))
+            .await
+            .expect("the control plane archives the sweeper's republish");
+        let archive = rt.cp_store().get_archive(&inv_str).await.unwrap().unwrap();
+        assert_eq!(
+            archive.final_state_blob, worker_row.state_blob,
+            "the archived state is the worker's, byte for byte"
+        );
+        rt.wait_for_local_cleanup(invocation_id, Duration::from_secs(15))
+            .await
+            .expect("the ack closes the hand-off");
+
+        rt.shutdown().await;
+    }
+
+    /// An `invocation.archived` an earlier build wrote, with the state as
+    /// a JSON array of integers, is still taken off the stream and
+    /// archived with those bytes (#981): the stream keeps such events for
+    /// its retention window after an upgrade, and the control plane must
+    /// not lose a run's state, or the ack, because of its encoding.
+    #[tokio::test]
+    async fn an_archive_in_the_integer_array_form_is_still_archived() {
+        use crate::events::subjects;
+        use crate::worker::WorkerId;
+        use tempfile::tempdir;
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
+                .await
+                .unwrap(),
+        );
+        let agent_id = AgentId::new(format!("old-form-{}", Uuid::now_v7().simple())).unwrap();
+        let worker_id = WorkerId::new(Uuid::now_v7().to_string()).expect("worker id");
+        let invocation_id = Uuid::now_v7();
+
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone())
+            .with_test_consumer_name(format!("fq-coordination-test-{}", Uuid::now_v7().simple()))
+            .with_test_filter_subject(format!("fq.agent.{}.invocation.*", agent_id.as_str()));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(consumer.run(shutdown_rx));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut ack_sub = bus
+            .subscribe(format!(
+                "fq.worker.{}.invocation.archive_acked",
+                worker_id.as_str()
+            ))
+            .await
+            .expect("subscribe to the ack");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The event as a build before #981 published it.
+        let state = br#"{"phase":"completed","messages":[]}"#.to_vec();
+        let event = Event::new(
+            agent_id.clone(),
+            invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker_id.clone(),
+                final_phase: "completed".to_string(),
+                final_state_blob: state.clone(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        );
+        let mut wire = serde_json::to_value(&event).unwrap();
+        wire["payload"]["payload"]["final_state_blob"] = serde_json::json!(state);
+        bus.jetstream()
+            .publish(
+                subjects::agent_invocation_archived(agent_id.as_str()),
+                serde_json::to_vec(&wire).unwrap().into(),
+            )
+            .await
+            .expect("publish the old form")
+            .await
+            .expect("the old form is stored");
+
+        let inv_str = invocation_id.to_string();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let archive = loop {
+            if let Some(archive) = store.get_archive(&inv_str).await.unwrap() {
+                break archive;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the old form was never archived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(archive.final_state_blob, state);
+        let ack = tokio::time::timeout(Duration::from_secs(2), ack_sub.next())
+            .await
+            .expect("an ack for the old form")
+            .expect("ack stream open")
+            .expect("the ack reads");
+        assert_eq!(ack.envelope.invocation_id, invocation_id);
+
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
 }

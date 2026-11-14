@@ -20,6 +20,11 @@ use crate::agent::{CapabilityValidation, ElicitationGrant, RootsGrant, SamplingG
 use crate::events::{EventKind, ToolCallId};
 use crate::worker::WorkerId;
 
+/// How a reducer state blob is written on the wire (base64 text) and
+/// read (that, or the integer array earlier builds wrote): the serde
+/// `with` module for [`InvocationArchivedPayload::final_state_blob`].
+mod state_blob;
+
 /// The fixed sentinel every host-notice body is wrapped in
 /// (`<host-notice>…</host-notice>`) — one marker for every producer,
 /// forever (#88). It separates "runtime ambient info" from "principal
@@ -212,11 +217,15 @@ pub struct InvocationArchivedPayload {
     /// reducer harness, not the events layer.
     pub final_phase: String,
     /// Reducer state at the time of terminal. Opaque blob; the
-    /// control-plane stores it as-is. Default serde encoding
-    /// (JSON array of integers) is used to keep parity with the
-    /// worker store's `state_blob` shape; if blob sizes start to
-    /// strain the wire format, swap in `serde_bytes` here and
-    /// in `InvocationStateRow`.
+    /// control-plane stores it as-is. On the wire it is padded
+    /// standard base64 text, four bytes for every three of state;
+    /// builds before #981 wrote a JSON array of integers, about four
+    /// bytes for each one, and that form is still read (the
+    /// `state_blob` module at the top of this file). The worker
+    /// store's `InvocationStateRow::state_blob` and the archive
+    /// table hold the bytes as a SQLite BLOB and never as JSON, so
+    /// neither changed with it.
+    #[serde(with = "state_blob")]
     pub final_state_blob: Vec<u8>,
     /// `invocation_state.started_at` (unix ms).
     pub started_at_ms: i64,

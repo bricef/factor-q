@@ -494,12 +494,18 @@ is listed again once that first pass has held it again.
 **An event too large for the broker.** The broker refuses any message
 larger than its `max_payload`, 1 MiB on a stock NATS server, and the
 daemon checks before it sends. `invocation.archived` carries the run's
-whole state: the conversation, every tool result in it included, encoded
-as a JSON array of integers, two to four bytes on the wire per byte of
-state. A run that read a few hundred kilobytes of tool output can
-therefore finish with an archive the broker refuses, and the stored
-terminal event can be refused the same way. The sweeper used to stop its
-pass at such a row, on every pass, so no row behind it was archived
+whole state: the conversation, every tool result in it included, as
+base64 text, four bytes on the wire for every three bytes of state. A
+state of more than 785,949 bytes makes the archive larger than a stock
+broker's 1 MiB, and one of more than 12,582,429 bytes larger than the
+dogfood broker's 16 MiB. Both figures count the message header the
+broker counts, and are for an agent id of eleven characters; a longer
+id lowers them slightly. In tool output that means a run that read two
+results at the default 256 KiB cap archives on a stock broker and one
+that read three does not (see
+[When a tool returns too much](#when-a-tool-returns-too-much)). The
+stored terminal event can be refused the same way. The sweeper used to
+stop its pass at such a row, on every pass, so no row behind it was archived
 either ([#981](https://github.com/bricef/factor-q/issues/981)). Now it
 holds the row, and the log line is `an event this row must publish is
 larger than the broker's max_payload; holding the row unarchived until it
@@ -518,10 +524,12 @@ same way, but a new run's sweeper tries every row once. With its other
 settings at their defaults, `nats-server` will not take a `max_payload`
 above 64 MiB, because the limit may not exceed `max_pending`, which is
 64 MiB by default; going higher means raising that too. The dogfood
-broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A planned change to the archive's
-encoding, the second half of the same issue, makes it about three times
-smaller, so after that upgrade some held rows fit under the limit they
-were held at. There is no release that archives the row without its
+broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A row held by a
+build from before the archive's state became base64, which wrote it as a
+JSON array of integers at about four bytes for each byte, may fit after
+an upgrade without any change to the broker: the same archive is about
+three times smaller, and the upgraded daemon offers the row again when
+it starts. There is no release that archives the row without its
 state: until it fits, it stays held, and it costs its space in
 `worker.db`.
 
@@ -960,13 +968,18 @@ can exceed the runtime cap and be cut again from the end, losing
 ([see #985](https://github.com/bricef/factor-q/issues/985)).
 
 One event is outside the cap. `invocation.archived` carries the
-reducer's state blob, which holds the whole conversation and is
-encoded as a JSON array of integers, two to four bytes on the wire per
-byte of state. A state blob of roughly 262,000 to 350,000 bytes,
-depending on the text, therefore makes the archive event larger than a
-stock 1 MiB `max_payload`, and one result at the default cap is most
-of the way there. When that happens the invocation completes, the
-archive publish fails, and the archive sweeper holds that row
+reducer's state blob, which holds the whole conversation, as base64
+text: four bytes on the wire for every three bytes of state
+([#981](https://github.com/bricef/factor-q/issues/981); before that it
+was a JSON array of integers, about four bytes for each one). A state
+blob of more than about 786,000 bytes therefore makes the archive
+event larger than a stock 1 MiB `max_payload`, and more than about
+12,580,000 bytes makes it larger than the dogfood broker's 16 MiB. A
+run that read three results at the default cap cannot archive on a
+stock broker, since base64 makes them a whole 1 MiB before the rest of
+the conversation is counted, and a run that read two is most
+of the way there. When the archive is over the limit, the invocation
+completes, the archive publish fails, and the archive sweeper holds that row
 unarchived, lists it in `fq doctor` and `fq status`, and goes on to the
 rows behind it (see
 [When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)).
@@ -1197,12 +1210,15 @@ a trigger waiting in an admission hold, which is something else.)
   underneath it. Either way it still starts once. Or this daemon may
   never settle that claim
   ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
-  task panicked before its first durable write, giving the claim back
-  failed before a retry, or recording the run's start failed, which
-  stops the run for the next start's recovery to resume. Every delivery
-  of that trigger is then dropped the same way until its deliveries run
-  out and it is dead-lettered as `trigger_exhausted`. Nothing on the
-  claim tells these apart, so neither does the count.
+  task panicked before its first durable write or in the step that made
+  it, giving the claim back failed before a retry, or recording the
+  run's start was refused on every attempt and the ack the daemon sent
+  in its place was lost (the run itself carries on; see "Started, never
+  marked" below). Every delivery of that trigger is then dropped the
+  same way until its deliveries run out and it is dead-lettered as
+  `trigger_exhausted`, or until the daemon next starts, if the run made
+  its first durable write. Nothing on the claim tells these apart, so
+  neither does the count.
 
 The two warn lines are `dropping duplicate trigger delivery after
 durable start` and `dropping a redelivered trigger whose claim this
@@ -1362,17 +1378,36 @@ name the horizon.
   retention sweep deletes the row on its next tick after that.
 - **Started, never marked** (an issue). The run the claim names is on
   record, the claim still says it has not started, and its message can
-  still be redelivered. If this daemon holds the claim, every redelivery
-  is dropped (and counted as a duplicate dropped before a start was
-  recorded) and the trigger ends as a `trigger_exhausted` dead letter
+  still be redelivered. The usual cause is the claim store refusing to
+  record the run's start. The dispatcher offers the mark again for up to
+  two seconds (one attempt can take longer: it waits up to the store's
+  five-second busy timeout for a lock, and longer still for a connection
+  when every one is in use). When every attempt is refused it acks the
+  delivery without releasing the claim and lets the run continue,
+  logging `could not mark trigger durably started` at error with the
+  invocation and the trigger
+  ([#967](https://github.com/bricef/factor-q/issues/967)). The other
+  cause is a run whose task panicked in the very step that made its
+  first durable write, before the dispatcher saw it start: then nothing
+  was marked and nothing acked.
+
+  Either way the row lasts only until the daemon next starts. Before the
+  dispatcher consumes anything, startup recovery records the start on
+  every `claimed` row whose run is on record, in the worker's WAL (in
+  flight or finished) or in the control plane's ownership table, and
+  logs `recorded a durable start missing from its trigger's claim` at
+  warn for each one; so after a restart neither a redelivery nor a copy
+  the stream replays starts the trigger again. Until then, a copy that
+  reaches the running daemon (a redelivery, when nothing acked the
+  delivery or its ack was lost) is dropped and counted as a duplicate
+  dropped before a start was recorded. If the trigger's deliveries run
+  out before that restart, it ends as a `trigger_exhausted` dead letter
   although its run started: that dead letter is false, and requeuing it
-  starts the work twice. If an exited process left it, a redelivery would
-  be adopted and start the work again, and a false dead letter may
-  already exist. Neither happens when the mark failed after the run had
-  already returned: the dispatcher acked that delivery anyway, so no
-  redelivery comes, though the report cannot tell that case from the
-  others ([#967](https://github.com/bricef/factor-q/issues/967)). There
-  is nothing to repair from the CLI: read the run with
+  starts the work twice. The report
+  cannot tell whether the delivery was acked, because it judges a
+  message deliverable by its age and stream incarnation, not by the
+  consumer's ack state; the daemon log can, by the line above for that
+  invocation. There is nothing to repair from the CLI: read the run with
   `fq invocation show`, and do not requeue its dead letter.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
@@ -1499,20 +1534,29 @@ those runs reads `none recorded` from then on. An instance that set
 `retention_days = -1` to keep its history also needs
 `trigger_claim_retention_days = -1` to keep this link.
 
-**One constraint for later work.** Two things here depend on the control
-plane's ownership table (`coordination_invocation_owner`) having no
-retention, which it has none of today. `fq doctor` tells a claim whose
-run finished from one that never started by the run's row there: if
-that table ever gains a window shorter than this one, an old claim whose
-run finished loses its record of the run, and the report would turn
-"started, never marked" into "never started". And once a finished run's
-archive row is swept, `fq invocation show` finds the run by that same
-row (or by its cost rows, if it made a model call), which is what lets
-it show the trigger this window keeps past the archive's window: a
-shorter window on the ownership table could leave such a run unfindable
-while its claim, and so its trigger link, is still kept. Keep any such
-window at or above this one; for the report, the alternative is to give
-the claim its own record of the start.
+**One constraint for later work.** Three things here depend on the
+control plane's ownership table (`coordination_invocation_owner`)
+having no retention, which it has none of today. The first is the
+serious one, because what breaks is a run, not a report. Startup
+recovery marks the claim of a run that finished while its claim still
+said `claimed`, and once the run is archived and its WAL row deleted,
+the run's row in that table is the only record recovery finds it by
+([#967](https://github.com/bricef/factor-q/issues/967)). If that table
+ever gains a window shorter than this one, such a claim is no longer
+marked at the next start once the run's row is gone, and a redelivered
+or replayed copy of its trigger, while the stream still holds the
+message, is adopted and runs the work a second time. `fq doctor` tells
+a claim whose run finished from one that never started by the same
+row: with it gone, an old claim whose run finished loses its record of
+the run, and the report would turn "started, never marked" into "never
+started". And once a finished run's archive row is swept,
+`fq invocation show` finds the run by that same row (or by its cost
+rows, if it made a model call), which is what lets it show the trigger
+this window keeps past the archive's window: a shorter window on the
+ownership table could leave such a run unfindable while its claim, and
+so its trigger link, is still kept. Keep any such window at or above
+this one; for startup recovery and the report, the alternative is to
+give the claim its own record of the start.
 
 ## Notifications and alerts
 
