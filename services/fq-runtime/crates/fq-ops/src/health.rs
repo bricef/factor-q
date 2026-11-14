@@ -133,14 +133,15 @@ pub enum ConsumerHealth {
         /// not an admission hold (a paused model, an agent at its cap,
         /// a wait for a worker permit), though a trigger in one is a
         /// common first copy. Copies of a trigger still in hand. The
-        /// first copy may be waiting or still starting (nothing renews
-        /// a delivery's ack window between its worker permit and its
-        /// first WAL write), or the daemon may never settle that claim;
-        /// nothing on the claim says which, and neither does this
-        /// count. The daemon logs each one at warn with its subject, its
-        /// sequence, its attempt and the claim's age. Counted in memory
-        /// since the daemon started, like `duplicate_dropped`. A report
-        /// from a daemon that does not send it reads as zero.
+        /// first copy may be waiting or still starting (its holds and
+        /// its setup renew its ack window, so a copy arrives under it
+        /// only when those renewals stop landing for a whole window),
+        /// or the daemon may never settle that claim; nothing on the
+        /// claim says which, and neither does this count. The daemon
+        /// logs each one at warn with its subject, its sequence, its
+        /// attempt and the claim's age. Counted in memory since the
+        /// daemon started, like `duplicate_dropped`. A report from a
+        /// daemon that does not send it reads as zero.
         #[serde(default)]
         held_duplicate_dropped: u64,
     },

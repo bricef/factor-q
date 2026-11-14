@@ -1163,11 +1163,11 @@ a trigger waiting in an admission hold, which is something else.)
   copy that took the claim. That first copy may be waiting behind a
   paused model, a full agent or the worker cap, where an in-progress ack
   every 250 ms keeps it alive and it is redelivered only if those stop
-  landing for a whole ack window. It may be starting: nothing keeps a
-  delivery alive between its worker permit and its first durable write
-  (its workspace, its MCP servers, its first step), so a start slower
-  than the window (30 seconds on a first delivery) is redelivered
-  underneath it. Either way it still starts once. Or this daemon may
+  landing for a whole ack window. It may be starting: from its worker
+  permit to its first durable write (its workspace, its MCP servers, its
+  first step) the same in-progress acks keep it alive, so a slow start
+  is not redelivered either unless they stop landing. Either way it
+  still starts once. Or this daemon may
   never settle that claim
   ([#967](https://github.com/bricef/factor-q/issues/967)): the run's
   task panicked before its first durable write or in the step that made
@@ -1187,8 +1187,9 @@ daemon already holds`. Both carry the stream sequence and the attempt
 claimant, the claim's age (`claim_age_ms`) and the invocation id the
 claim names (`claim_invocation_id`), and on the trigger's fifth and
 last delivery it says that no copy follows. A single drop before a
-start was recorded is most often a trigger waiting in a hold, or a slow
-start, redelivered underneath its first copy; but the first redelivery
+start was recorded is most often a trigger waiting in a hold or still
+starting, redelivered underneath its first copy because its in-progress
+acks stopped landing for a whole window; but the first redelivery
 of a claim this daemon will never settle looks the same. Either way it
 costs the trigger one of its five deliveries. The same sequence dropped
 again on a later delivery means its claim still records no start. If
