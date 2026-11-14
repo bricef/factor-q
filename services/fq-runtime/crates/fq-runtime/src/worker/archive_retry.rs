@@ -453,8 +453,6 @@ mod tests {
     use crate::worker::store::{InvocationStateRow, terminal_outcome};
     use fq_ops::health::ArchiveHold;
     use futures::StreamExt;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -959,55 +957,16 @@ mod tests {
         );
     }
 
-    /// A [`RecordingSink`] behind a broker's size guard: an event that
-    /// serialises to more than the limit is refused with
-    /// `BusError::PayloadTooLarge`, measured as the bus measures it (the
-    /// serialised event, against a strict `>`), and kept in `too_large`.
-    /// A test can raise the limit between sweepers, as an operator raises a
-    /// broker's before restarting `fqd`.
-    struct SizeLimitedSink {
-        recorded: RecordingSink,
-        limit: AtomicUsize,
-        too_large: Mutex<Vec<Event>>,
-    }
-
-    impl SizeLimitedSink {
-        fn new(limit: usize) -> Arc<Self> {
-            Arc::new(Self {
-                recorded: RecordingSink::new(),
-                limit: AtomicUsize::new(limit),
-                too_large: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn set_limit(&self, limit: usize) {
-            self.limit.store(limit, Ordering::SeqCst);
-        }
-
-        /// What was published, in order.
-        fn events(&self) -> Vec<Event> {
-            self.recorded.events()
-        }
-
-        /// What was refused for its size, in order.
-        fn too_large(&self) -> Vec<Event> {
-            self.too_large.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EventSink for SizeLimitedSink {
-        async fn publish(&self, event: &Event) -> Result<u64, BusError> {
-            let size = serde_json::to_vec(event)
-                .expect("the event serialises")
-                .len();
-            let limit = self.limit.load(Ordering::SeqCst);
-            if size > limit {
-                self.too_large.lock().unwrap().push(event.clone());
-                return Err(BusError::PayloadTooLarge { size, limit });
-            }
-            self.recorded.publish(event).await
-        }
+    /// A [`RecordingSink`] behind a broker's size guard of `limit`. It
+    /// refuses what the bus would refuse, by the bus's own rule (the
+    /// event's JSON and the message-id header sent with it, against a
+    /// strict `>`: `bus/size.rs`), keeps each event it refused for its size
+    /// in `refused()`, and lets a test raise the limit between sweepers, as
+    /// an operator raises a broker's before restarting `fqd`.
+    fn size_limited(limit: usize) -> Arc<RecordingSink> {
+        let sink = Arc::new(RecordingSink::new());
+        sink.set_max_payload(limit);
+        sink
     }
 
     /// The size guard of the sinks below: a stock broker's 1 MiB, scaled
@@ -1045,7 +1004,7 @@ mod tests {
     struct Oversized {
         _dir: tempfile::TempDir,
         store: Arc<WorkerStore>,
-        sink: Arc<SizeLimitedSink>,
+        sink: Arc<RecordingSink>,
         sweeper: ArchiveRetrySweeper,
         big: String,
         owed: String,
@@ -1091,7 +1050,7 @@ mod tests {
                 "the oversized row first"
             );
 
-            let sink = SizeLimitedSink::new(LIMIT);
+            let sink = size_limited(LIMIT);
             let sweeper = ArchiveRetrySweeper::new_with_sink(
                 Arc::clone(&sink) as Arc<dyn EventSink>,
                 WorkerId::new("sweep-worker").unwrap(),
@@ -1136,7 +1095,7 @@ mod tests {
             .expect("a refusal for size does not end the pass");
 
         assert_eq!(
-            trail(&world.sink.too_large()),
+            trail(&world.sink.refused()),
             [(world.big.clone(), "invocation_archived")],
             "the oversized archive was offered and refused"
         );
@@ -1180,7 +1139,7 @@ mod tests {
             .set_archive_pending(&healthy, 1_000)
             .await
             .unwrap();
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = ArchiveRetrySweeper::new_with_sink(
             Arc::clone(&sink) as Arc<dyn EventSink>,
             WorkerId::new("sweep-worker").unwrap(),
@@ -1192,7 +1151,7 @@ mod tests {
             .await
             .expect("a refusal for size does not end the pass");
 
-        assert_eq!(trail(&sink.too_large()), [(world.inv(), "completed")]);
+        assert_eq!(trail(&sink.refused()), [(world.inv(), "completed")]);
         assert_eq!(
             trail(&sink.events()),
             [(healthy, "invocation_archived")],
@@ -1255,7 +1214,7 @@ mod tests {
         /// offered and refused.
         fn refusals(&self) -> usize {
             self.sink
-                .too_large()
+                .refused()
                 .iter()
                 .filter(|e| e.envelope.invocation_id.to_string() == self.big)
                 .count()
@@ -1275,8 +1234,9 @@ mod tests {
         let hold = &holds[0];
         assert_eq!(hold.invocation_id, world.big);
         assert_eq!(hold.agent_id, "sweep-agent");
-        let refused = &world.sink.too_large()[0];
-        let size = serde_json::to_vec(refused).unwrap().len() as u64;
+        let refused = &world.sink.refused()[0];
+        let body = serde_json::to_vec(refused).unwrap().len();
+        let size = crate::bus::size::wire_len(refused, body) as u64;
         assert_eq!(
             hold.reason,
             ArchiveHoldReason::PayloadTooLarge {
@@ -1339,7 +1299,7 @@ mod tests {
         assert_eq!(world.refusals(), 2, "offered again, refused again");
         assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
 
-        world.sink.set_limit(ROOMY_LIMIT);
+        world.sink.set_max_payload(ROOMY_LIMIT);
         let restarted = world.fresh_sweeper();
         restarted.sweep_once(&mut HashSet::new()).await.unwrap();
         assert_eq!(world.refusals(), 2);
@@ -1363,7 +1323,7 @@ mod tests {
             event
         })
         .await;
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = ArchiveRetrySweeper::new_with_sink(
             Arc::clone(&sink) as Arc<dyn EventSink>,
             WorkerId::new("sweep-worker").unwrap(),
@@ -1372,7 +1332,7 @@ mod tests {
         sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
 
-        assert_eq!(sink.too_large().len(), 1, "not offered again");
+        assert_eq!(sink.refused().len(), 1, "not offered again");
         let holds = sweeper.holds().snapshot();
         assert!(
             matches!(
@@ -1427,7 +1387,7 @@ mod tests {
         row.state_blob = vec![200; OVERSIZED_STATE];
         row.terminal_outcome = Some(terminal_outcome::encode(&stored).unwrap());
         store.upsert_invocation_state(&row).await.unwrap();
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = |store: &Arc<WorkerStore>| {
             ArchiveRetrySweeper::new_with_sink(
                 Arc::clone(&sink) as Arc<dyn EventSink>,
@@ -1449,7 +1409,7 @@ mod tests {
             "the stored event itself"
         );
         assert_eq!(
-            trail(&sink.too_large()),
+            trail(&sink.refused()),
             [(inv.clone(), "invocation_archived")]
         );
         let kept = store.get_invocation_state(&inv).await.unwrap().unwrap();
@@ -1475,7 +1435,7 @@ mod tests {
             "the completed is not republished"
         );
         assert_eq!(
-            trail(&sink.too_large()),
+            trail(&sink.refused()),
             [
                 (inv.clone(), "invocation_archived"),
                 (inv.clone(), "invocation_archived")
