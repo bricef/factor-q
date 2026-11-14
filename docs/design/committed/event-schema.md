@@ -623,7 +623,7 @@ Projection `error_kind` values use this same snake_case wire vocabulary. Rebuild
 
 ```json
 {
-  "error_kind": "budget_exceeded | llm_error | max_iterations | tool_error | sandbox_violation | runtime_error | trigger_exhausted",
+  "error_kind": "budget_exceeded | llm_error | max_iterations | tool_error | sandbox_violation | runtime_error | trigger_exhausted | payload_too_large",
   "error_message": "Agent budget of $0.50 exceeded after 5 LLM calls",
   "phase": "llm_request | llm_response | tool_call | tool_result | setup | reducer | host_step_budget | budget",
   "partial_totals": {
@@ -635,12 +635,23 @@ Projection `error_kind` values use this same snake_case wire vocabulary. Rebuild
 }
 ```
 
+**`payload_too_large`** ([#828](https://github.com/bricef/factor-q/issues/828)): an event of the run was larger than the broker's `max_payload`, so the bus refused it and the run ended there. The event is never truncated, since the record would then say something other than what the model saw. The run ends with one `failed` of this kind, carrying the detail below; its `phase` is that of the refused event (`setup` for `triggered`, `reducer` for the run's own terminal event). Where the refusal lands decides the rest:
+
+- **`triggered`**, before anything durable exists: the `failed` is the whole record, with no `triggered` before it, so it names the trigger itself in the annotations `trigger_id` and `trigger_subject`, the keys a dead letter uses (it is not one: those are read as a dead letter only on a `trigger_exhausted` failure). The dispatcher consumes the trigger rather than redelivering it, since every attempt would build the same event. The github-watcher binds a run to its issue through `triggered`, so it never sees this failure.
+- **Any event during the run**, live or rebuilt by a resume's replay: the `failed` is published and the worker's row is marked terminal, so the workspace is reclaimed and the next start has nothing to resume; `invocation.archived` follows. When the run ends on a resume, the resume returns an error, and startup recovery reads the worker row, finds the run ended, logs that at warn and publishes no `invocation.ambiguous` ([#1005](https://github.com/bricef/factor-q/issues/1005)).
+- **`completed`**, or a `failed` the reducer decided: measured before the row goes terminal, and replaced by this `failed`, which is stored and published in its place.
+- **`invocation.archived`**, after the outcome is out: not a failure of the invocation, and no second terminal event follows.
+
+The archive is where this does not end cleanly. `invocation.archived` carries the run's state as base64, four bytes for every three (see [`invocation.archived`](#invocationarchived)). A run that ends at an `llm.request` holds that request's messages in its state, so its archive is over the limit too, unless what the request carries besides its messages, its tool definitions mostly, is more than a quarter of the limit. A run that ends at a `tool.result` or at its own terminal event does not hold the refused event in its state, so its archive is refused only if the conversation before it was already that large, and one that ends at `triggered` has no row to archive. The archive sweeper holds a row whose archive is refused: it publishes nothing more for it, keeps it whole, says so once per daemon run, offers it again at the next start, and goes on to the rows behind it, and `fq doctor` and `fq status` list the hold with its reason and remedy under `archive_sweep` (see [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row)). Until the archive is acknowledged, the control plane's ownership row for the run reads `in_flight`, which for a held row is until an operator acts ([#1024](https://github.com/bricef/factor-q/issues/1024), open); the held row in `fq doctor` is how an operator finds the run.
+
+It is not `runtime_error` for the reasons `max_iterations` and `trigger_exhausted` are not: a configured limit doing its job is not a defect, and a reader that retries by kind has to tell it apart, because the same work is likely to build the same event. The github-watcher treats it as final.
+
 With a detail ([#952](https://github.com/bricef/factor-q/issues/952)):
 
 ```json
 {
-  "error_kind": "runtime_error",
-  "error_message": "event payload of 1153433 bytes exceeds NATS max_payload of 1048576 bytes",
+  "error_kind": "payload_too_large",
+  "error_message": "event of 1153433 bytes exceeds the broker max_payload of 1048576 bytes",
   "phase": "llm_request",
   "partial_totals": { "total_llm_calls": 2, "total_tool_calls": 1, "total_cost": 0.000216, "total_duration_ms": 4200 },
   "detail": {
@@ -652,11 +663,11 @@ With a detail ([#952](https://github.com/bricef/factor-q/issues/952)):
 }
 ```
 
-`detail` is optional and absent from the wire when a failure has none. Nothing emits one yet: [#828](https://github.com/bricef/factor-q/issues/828) is the first producer. It is one of these, tagged by `kind`:
+`detail` is optional and absent from the wire when a failure has none. Only a `payload_too_large` failure carries one today. It is one of these, tagged by `kind`:
 
 | `kind` | Fields | Meaning |
 |---|---|---|
-| `payload_too_large` | `event_type`, `size_bytes`, `limit_bytes` | An event was too large for the broker to accept. `event_type` is that event's own `event_type`, the real name (`llm_request`, `tool_result`, …); a reader built on `fq-ops` that lacks the type holds it as `EventKind::Unknown`, and writes `unknown` only if it re-serialises the event. `size_bytes` is the event's serialised size and `limit_bytes` the broker's `max_payload`, both in bytes. |
+| `payload_too_large` | `event_type`, `size_bytes`, `limit_bytes` | An event was too large for the broker to accept. `event_type` is that event's own `event_type`, the real name (`llm_request`, `tool_result`, …); a reader built on `fq-ops` that lacks the type holds it as `EventKind::Unknown`, and writes `unknown` only if it re-serialises the event. `size_bytes` is the event's size on the wire, its JSON and the `Nats-Msg-Id` header sent with it, which is what the broker measures, and `limit_bytes` the broker's `max_payload`, both in bytes. |
 | `unknown` | none | Never written by the runtime. It is what a reader built on `fq-ops` holds for a detail whose `kind` it does not know — one a newer build added — with that kind's fields discarded on the way in. Re-serialised, it writes `{"kind": "unknown"}`. |
 
 **Design notes:**
@@ -664,6 +675,7 @@ With a detail ([#952](https://github.com/bricef/factor-q/issues/952)):
 - **Typed, not a map.** Each kind of detail is a declared shape, pinned by the compiler and by the golden corpus like every other payload; a map of free keys would bypass both, and its names would drift. The cost accepted is that a new kind is a code change and a corpus exemplar. `error_message` keeps the same facts in prose, for people.
 - **Orthogonal to `error_kind`.** The kind is the bucket a failure is counted in; the detail is what was measured when it happened.
 - **Older readers.** No reader of the schema refuses a key it does not know, so one built before `detail` existed ignores it, and adding the field needed no version bump. A reader built on `fq-ops` that does not know a detail's `kind` reads it as `unknown` and keeps the rest of the event — kind, phase, message, totals — since an optional enrichment must not cost it the record of why a run ended. Only an unknown `kind` degrades: a known kind with a malformed body fails the event, as a malformed known payload does. The Go github-watcher and `fq-metrics` decode named fields and never read `detail`.
+- **An older reader cannot read a `payload_too_large` failure at all.** `error_kind` has no fallback value, unlike `detail`, so a reader built on `fq-ops` before [#828](https://github.com/bricef/factor-q/issues/828) fails to parse the whole `failed` event: its durable consumers ack it as malformed, so its projection never records that run's terminal row, and the readers that parse the tail (`turn.list`, the dead-letter list) fail on it. The version does not move for that (see [When the version moves](#when-the-version-moves)); a fallback for kinds added after this one is [#1012](https://github.com/bricef/factor-q/issues/1012). The Go github-watcher and `fq-metrics` read `error_kind` as a string and are not affected.
 
 ### `invocation.archived`
 
@@ -1062,6 +1074,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-09-10, [#278](https://github.com/bricef/factor-q/issues/278))* A new event type, `invocation.deferred`, on `fq.agent.{agent_id}.invocation.deferred`, with `{ reason, model, retry_after_ms }` | Additive, like `invocation.stuck`; `schema_version` stays at 3. A rate limit the retry layer gave up on used to end the invocation in `failed` (`llm_error`); it now ends the *attempt* in this event, with the row left in flight for a resume. A consumer folding `llm.failure` into "the invocation failed" sees a rate-limited failure that is followed by this rather than by `failed`. |
 | *(2026-11-12, [#952](https://github.com/bricef/factor-q/issues/952))* `failed` gains an optional typed `detail`, tagged by `kind`; its first kind is `payload_too_large`, with `{ event_type, size_bytes, limit_bytes }` | The facts behind a failure — which event, how big, what limit — existed only as numbers inside `error_message`, so a reader that wanted them had to parse prose. Additive, so `schema_version` stays at 3: the key is absent when there is no detail, an older reader ignores it when there is, and a reader that does not know a detail's `kind` reads it as `unknown` rather than failing the event. Nothing emits one yet; [#828](https://github.com/bricef/factor-q/issues/828) is the first producer. |
 | *(2026-11-13, [#981](https://github.com/bricef/factor-q/issues/981))* `invocation.archived` writes `final_state_blob` as padded standard base64 text instead of a JSON array of integers; readers accept both | The array took about four bytes on the wire for each byte of state, so the archive of a run that read one tool result at the 256 KiB cap was larger than a stock broker's 1 MiB `max_payload`. Base64 takes four for every three. `schema_version` stays at 3, by the rule in [When the version moves](#when-the-version-moves): every event already on the stream still reads, because the readers take the array as before, and the corpus keeps an archive in that form under `v3/superseded/` to hold them to it. It is the first v3 change that replaces what a writer emits rather than adding to it. The reverse does not hold: a reader built before this cannot parse an archive in the new form (see [`invocation.archived`](#invocationarchived)). |
+| *(2026-11-13, [#828](https://github.com/bricef/factor-q/issues/828))* `failed.error_kind` gains `payload_too_large`, the first producer of the `payload_too_large` detail: a run that publishes an event over the broker's `max_payload` ends with one `failed` of this kind instead of leaving its row in flight | The refusal used to be a transient bus error with no terminal event. The trigger had been acked, so nothing redelivered it, and every start resumed the run into the same refusal and reported it ambiguous. A value added to a closed set, so `schema_version` stays at 3, by the rule in [When the version moves](#when-the-version-moves). A reader built before this cannot parse a `failed` of the new kind, since `error_kind` has no fallback (see [`failed`](#failed)). |
 
 ## Changelog: v1 → v2
 

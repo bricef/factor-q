@@ -398,8 +398,9 @@ impl ArchiveRetrySweeper {
 
     /// Publish one of a row's events. A refusal for size is the row's own:
     /// the event it names is refused on every attempt, so it holds the row
-    /// (`Ok(Some)`) and the pass goes on. Any other failure is the bus's,
-    /// the same for every row, and ends the pass.
+    /// (`Ok(Some)`) and the pass goes on; its size is the size on the wire,
+    /// header included, as the bus counts it. Any other failure is the
+    /// bus's, the same for every row, and ends the pass.
     async fn publish_for_row(
         &self,
         event: &Event,
@@ -453,8 +454,6 @@ mod tests {
     use crate::worker::store::{InvocationStateRow, terminal_outcome};
     use fq_ops::health::ArchiveHold;
     use futures::StreamExt;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -959,55 +958,16 @@ mod tests {
         );
     }
 
-    /// A [`RecordingSink`] behind a broker's size guard: an event that
-    /// serialises to more than the limit is refused with
-    /// `BusError::PayloadTooLarge`, measured as the bus measures it (the
-    /// serialised event, against a strict `>`), and kept in `too_large`.
-    /// A test can raise the limit between sweepers, as an operator raises a
-    /// broker's before restarting `fqd`.
-    struct SizeLimitedSink {
-        recorded: RecordingSink,
-        limit: AtomicUsize,
-        too_large: Mutex<Vec<Event>>,
-    }
-
-    impl SizeLimitedSink {
-        fn new(limit: usize) -> Arc<Self> {
-            Arc::new(Self {
-                recorded: RecordingSink::new(),
-                limit: AtomicUsize::new(limit),
-                too_large: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn set_limit(&self, limit: usize) {
-            self.limit.store(limit, Ordering::SeqCst);
-        }
-
-        /// What was published, in order.
-        fn events(&self) -> Vec<Event> {
-            self.recorded.events()
-        }
-
-        /// What was refused for its size, in order.
-        fn too_large(&self) -> Vec<Event> {
-            self.too_large.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EventSink for SizeLimitedSink {
-        async fn publish(&self, event: &Event) -> Result<u64, BusError> {
-            let size = serde_json::to_vec(event)
-                .expect("the event serialises")
-                .len();
-            let limit = self.limit.load(Ordering::SeqCst);
-            if size > limit {
-                self.too_large.lock().unwrap().push(event.clone());
-                return Err(BusError::PayloadTooLarge { size, limit });
-            }
-            self.recorded.publish(event).await
-        }
+    /// A [`RecordingSink`] behind a broker's size guard of `limit`. It
+    /// refuses what the bus would refuse, by the bus's own rule (the
+    /// event's JSON and the message-id header sent with it, against a
+    /// strict `>`: `bus/size.rs`), keeps each event it refused for its size
+    /// in `refused()`, and lets a test raise the limit between sweepers, as
+    /// an operator raises a broker's before restarting `fqd`.
+    fn size_limited(limit: usize) -> Arc<RecordingSink> {
+        let sink = Arc::new(RecordingSink::new());
+        sink.set_max_payload(limit);
+        sink
     }
 
     /// The size guard of the sinks below: a stock broker's 1 MiB, scaled
@@ -1045,7 +1005,7 @@ mod tests {
     struct Oversized {
         _dir: tempfile::TempDir,
         store: Arc<WorkerStore>,
-        sink: Arc<SizeLimitedSink>,
+        sink: Arc<RecordingSink>,
         sweeper: ArchiveRetrySweeper,
         big: String,
         owed: String,
@@ -1091,7 +1051,7 @@ mod tests {
                 "the oversized row first"
             );
 
-            let sink = SizeLimitedSink::new(LIMIT);
+            let sink = size_limited(LIMIT);
             let sweeper = ArchiveRetrySweeper::new_with_sink(
                 Arc::clone(&sink) as Arc<dyn EventSink>,
                 WorkerId::new("sweep-worker").unwrap(),
@@ -1136,7 +1096,7 @@ mod tests {
             .expect("a refusal for size does not end the pass");
 
         assert_eq!(
-            trail(&world.sink.too_large()),
+            trail(&world.sink.refused()),
             [(world.big.clone(), "invocation_archived")],
             "the oversized archive was offered and refused"
         );
@@ -1180,7 +1140,7 @@ mod tests {
             .set_archive_pending(&healthy, 1_000)
             .await
             .unwrap();
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = ArchiveRetrySweeper::new_with_sink(
             Arc::clone(&sink) as Arc<dyn EventSink>,
             WorkerId::new("sweep-worker").unwrap(),
@@ -1192,7 +1152,7 @@ mod tests {
             .await
             .expect("a refusal for size does not end the pass");
 
-        assert_eq!(trail(&sink.too_large()), [(world.inv(), "completed")]);
+        assert_eq!(trail(&sink.refused()), [(world.inv(), "completed")]);
         assert_eq!(
             trail(&sink.events()),
             [(healthy, "invocation_archived")],
@@ -1255,7 +1215,7 @@ mod tests {
         /// offered and refused.
         fn refusals(&self) -> usize {
             self.sink
-                .too_large()
+                .refused()
                 .iter()
                 .filter(|e| e.envelope.invocation_id.to_string() == self.big)
                 .count()
@@ -1275,8 +1235,9 @@ mod tests {
         let hold = &holds[0];
         assert_eq!(hold.invocation_id, world.big);
         assert_eq!(hold.agent_id, "sweep-agent");
-        let refused = &world.sink.too_large()[0];
-        let size = serde_json::to_vec(refused).unwrap().len() as u64;
+        let refused = &world.sink.refused()[0];
+        let body = serde_json::to_vec(refused).unwrap().len();
+        let size = crate::bus::size::wire_len(refused, body) as u64;
         assert_eq!(
             hold.reason,
             ArchiveHoldReason::PayloadTooLarge {
@@ -1286,13 +1247,12 @@ mod tests {
             }
         );
         assert!(
-            hold.remedy
-                .contains(&format!("max_payload well above {size} bytes"))
-                && hold.remedy.contains("header")
-                && hold.remedy.contains("restart fqd")
+            hold.remedy.contains(&format!(
+                "raise the broker's max_payload above {size} bytes"
+            )) && hold.remedy.contains("restart fqd")
                 && hold.remedy.contains(holds::GUIDE),
-            "the remedy says what to raise, past what with a margin for the header the size \
-             leaves out, and where it is described: {hold:?}"
+            "the remedy says what to raise, past the size on the wire the reason gives, and \
+             where it is described: {hold:?}"
         );
     }
 
@@ -1339,7 +1299,7 @@ mod tests {
         assert_eq!(world.refusals(), 2, "offered again, refused again");
         assert_eq!(restarted.holds().snapshot().len(), 1, "and held again");
 
-        world.sink.set_limit(ROOMY_LIMIT);
+        world.sink.set_max_payload(ROOMY_LIMIT);
         let restarted = world.fresh_sweeper();
         restarted.sweep_once(&mut HashSet::new()).await.unwrap();
         assert_eq!(world.refusals(), 2);
@@ -1363,7 +1323,7 @@ mod tests {
             event
         })
         .await;
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = ArchiveRetrySweeper::new_with_sink(
             Arc::clone(&sink) as Arc<dyn EventSink>,
             WorkerId::new("sweep-worker").unwrap(),
@@ -1372,7 +1332,7 @@ mod tests {
         sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
 
-        assert_eq!(sink.too_large().len(), 1, "not offered again");
+        assert_eq!(sink.refused().len(), 1, "not offered again");
         let holds = sweeper.holds().snapshot();
         assert!(
             matches!(
@@ -1427,7 +1387,7 @@ mod tests {
         row.state_blob = vec![200; OVERSIZED_STATE];
         row.terminal_outcome = Some(terminal_outcome::encode(&stored).unwrap());
         store.upsert_invocation_state(&row).await.unwrap();
-        let sink = SizeLimitedSink::new(LIMIT);
+        let sink = size_limited(LIMIT);
         let sweeper = |store: &Arc<WorkerStore>| {
             ArchiveRetrySweeper::new_with_sink(
                 Arc::clone(&sink) as Arc<dyn EventSink>,
@@ -1449,7 +1409,7 @@ mod tests {
             "the stored event itself"
         );
         assert_eq!(
-            trail(&sink.too_large()),
+            trail(&sink.refused()),
             [(inv.clone(), "invocation_archived")]
         );
         let kept = store.get_invocation_state(&inv).await.unwrap().unwrap();
@@ -1475,7 +1435,7 @@ mod tests {
             "the completed is not republished"
         );
         assert_eq!(
-            trail(&sink.too_large()),
+            trail(&sink.refused()),
             [
                 (inv.clone(), "invocation_archived"),
                 (inv.clone(), "invocation_archived")
@@ -1636,6 +1596,183 @@ mod tests {
         world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
         let holds = world.sweeper.holds().snapshot();
         assert!(holds.is_empty(), "got: {holds:?}");
+    }
+
+    /// The `max_payload` a private broker from `test_nats` serves: a stock
+    /// server's.
+    const STOCK_MAX_PAYLOAD: usize = 1024 * 1024;
+
+    /// The bytes the bus sends with every event besides its JSON: the
+    /// `Nats-Msg-Id` header block (`NATS/1.0\r\n`, the id line, a closing
+    /// `\r\n`). Counted here apart from the code under test.
+    const HEADER: usize = "NATS/1.0\r\n".len() + "Nats-Msg-Id: ".len() + 36 + 4;
+
+    /// How far under the limit the banded events' JSON is: inside the
+    /// header's size, with room either side for an envelope timestamp
+    /// written with fewer digits.
+    const UNDER_BY: usize = 31;
+
+    /// A pass over a real broker in which the first row owes an event in
+    /// the band the bus's guard once missed: its JSON under the broker's
+    /// limit, but not by the size of the header sent with it. Behind it, a
+    /// row awaiting its ack.
+    ///
+    /// Before #828 counted the header, the guard passed such an event, the
+    /// client refused it as a generic publish error, and that ended every
+    /// pass at this row, so the row behind was never archived (the first
+    /// change for issue 981 left this case to #828).
+    struct InTheBand {
+        _server: fq_test_support::NatsServer,
+        _dir: tempfile::TempDir,
+        store: Arc<WorkerStore>,
+        sweeper: ArchiveRetrySweeper,
+        banded: String,
+        behind: String,
+    }
+
+    impl InTheBand {
+        /// `first` shapes the banded row from a small terminal row.
+        async fn new(first: impl FnOnce(&mut InvocationStateRow, &WorkerId)) -> Self {
+            let server = crate::test_support::nats::test_nats();
+            let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+            let dir = tempdir().unwrap();
+            let store = Arc::new(
+                WorkerStore::open(&dir.path().join("worker.db"))
+                    .await
+                    .expect("worker store"),
+            );
+            let worker = WorkerId::new("band-worker").unwrap();
+            let [banded, behind] = [0, 1].map(|_| Uuid::now_v7().to_string());
+
+            let mut row = terminal_row(&banded, "band-agent", 1_000);
+            first(&mut row, &worker);
+            store.upsert_invocation_state(&row).await.unwrap();
+            store
+                .upsert_invocation_state(&terminal_row(&behind, "band-agent", 1_000))
+                .await
+                .unwrap();
+            store.set_archive_pending(&behind, 1_000).await.unwrap();
+
+            let sweeper = ArchiveRetrySweeper::new(bus, worker, Arc::clone(&store));
+            Self {
+                _server: server,
+                _dir: dir,
+                store,
+                sweeper,
+                banded,
+                behind,
+            }
+        }
+
+        /// One pass: it must reach the row behind, and hold the banded row
+        /// for its `event_type`, over the stock limit on the wire.
+        async fn assert_held_and_the_pass_goes_on(&self, event_type: &str) {
+            let before = self.store.get_invocation_state(&self.behind).await.unwrap();
+            let before = before.unwrap().archive_published_at;
+            self.sweeper
+                .sweep_once(&mut HashSet::new())
+                .await
+                .expect("a refusal for size does not end the pass");
+
+            let holds = self.sweeper.holds().snapshot();
+            assert_eq!(holds.len(), 1, "the banded row alone: {holds:?}");
+            assert_eq!(holds[0].invocation_id, self.banded);
+            let ArchiveHoldReason::PayloadTooLarge {
+                event_type: refused,
+                size_bytes,
+                limit_bytes,
+            } = &holds[0].reason
+            else {
+                panic!("held for size: {holds:?}");
+            };
+            assert_eq!(refused, event_type);
+            assert_eq!(*limit_bytes, STOCK_MAX_PAYLOAD as u64);
+            assert!(
+                *size_bytes > *limit_bytes,
+                "the size on the wire, header included, is over the limit: {holds:?}"
+            );
+
+            let row = self.store.get_invocation_state(&self.banded).await.unwrap();
+            let row = row.expect("held, not dropped");
+            assert_eq!(row.archive_status, None, "not archived");
+            let behind = self.store.get_invocation_state(&self.behind).await.unwrap();
+            assert!(
+                behind.unwrap().archive_published_at > before,
+                "the row behind was archived in the same pass"
+            );
+        }
+    }
+
+    /// `row`'s `invocation.archived` as the sweeper builds it, measured.
+    fn archived_json_len(row: &InvocationStateRow, worker: &WorkerId) -> usize {
+        let event = Event::new(
+            AgentId::new(&row.agent_id).unwrap(),
+            row.invocation_id.parse().unwrap(),
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: worker.clone(),
+                final_phase: row.phase.clone(),
+                final_state_blob: row.state_blob.clone(),
+                started_at_ms: row.started_at,
+                terminal_at_ms: row.terminal_at.unwrap(),
+            }),
+        );
+        serde_json::to_vec(&event).unwrap().len()
+    }
+
+    /// An `invocation.archived` whose JSON is 31 to 34 bytes under a stock
+    /// broker's limit, sent with a 63-byte header: refused for its size,
+    /// so the row is held and the row behind it archived in the same pass.
+    #[tokio::test]
+    async fn an_archive_under_the_limit_by_less_than_its_header_is_held() {
+        let world = InTheBand::new(|row, worker| {
+            // The state is base64 on the wire, four bytes for every three,
+            // so the JSON grows four bytes at a time and lands up to three
+            // short of the mark.
+            row.state_blob = Vec::new();
+            let empty = archived_json_len(row, worker);
+            row.state_blob = vec![200; 3 * ((STOCK_MAX_PAYLOAD - UNDER_BY - empty) / 4)];
+            let body = archived_json_len(row, worker);
+            assert!(
+                body < STOCK_MAX_PAYLOAD && body + HEADER > STOCK_MAX_PAYLOAD,
+                "in the band: {body}"
+            );
+        })
+        .await;
+        world
+            .assert_held_and_the_pass_goes_on("invocation_archived")
+            .await;
+    }
+
+    /// The same for a stored terminal event in the band: the `completed`
+    /// a crash lost, its JSON 31 bytes under the limit. Held without its
+    /// archive being tried, and the row behind archived.
+    #[tokio::test]
+    async fn a_stored_event_under_the_limit_by_less_than_its_header_is_held() {
+        let world = InTheBand::new(|row, _| {
+            let id: Uuid = row.invocation_id.parse().unwrap();
+            let mut event = completed_event(id);
+            let set_summary = |event: &mut Event, summary: String| {
+                if let EventPayload::Completed(p) = &mut event.payload {
+                    p.result_summary = Some(summary);
+                }
+            };
+            set_summary(&mut event, String::new());
+            let bare = serde_json::to_vec(&event).unwrap().len();
+            set_summary(&mut event, "x".repeat(STOCK_MAX_PAYLOAD - UNDER_BY - bare));
+            let body = serde_json::to_vec(&event).unwrap().len();
+            assert_eq!(body, STOCK_MAX_PAYLOAD - UNDER_BY);
+            row.terminal_outcome = Some(terminal_outcome::encode(&event).unwrap());
+        })
+        .await;
+        world.assert_held_and_the_pass_goes_on("completed").await;
+        let row = world
+            .store
+            .get_invocation_state(&world.banded)
+            .await
+            .unwrap();
+        let row = row.unwrap();
+        assert_eq!(row.terminal_published_at, None, "still owed");
+        assert!(row.terminal_outcome.is_some(), "its only copy is kept");
     }
 
     #[tokio::test]

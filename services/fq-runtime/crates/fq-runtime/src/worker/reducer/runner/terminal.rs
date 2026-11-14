@@ -18,7 +18,9 @@
 //! row is terminal and the outcome exists only in memory. A publish lost
 //! after the write is the archive sweeper's to repeat, from the row, as
 //! the same event (see `store/terminal_outcome.rs` for why the whole event
-//! is kept).
+//! is kept). An event the sink would refuse for its size could never be
+//! repeated, so it is measured before it is stored, and the run ends on
+//! a `payload_too_large` `failed` in its place (#828).
 //!
 //! Every caller of `emit_failed` (an LLM error, a budget stop, a run of
 //! tool timeouts, a reducer step that errors, the host step budget) is
@@ -31,10 +33,11 @@ use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::publish_failure::Refused;
 use super::{ReducerRunner, harness_error_to_failure_kind, map_store_err};
 use crate::agent::AgentId;
 use crate::events::{
-    CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    CompletedPayload, Event, EventPayload, FailedPayload, FailureDetail, FailureKind, FailurePhase,
     InvocationTotals,
 };
 use crate::llm::ChatResponse;
@@ -71,11 +74,24 @@ impl Terminal {
     pub(super) fn outcome(&self) -> String {
         self.encoded.clone()
     }
+
+    /// The `phase` the terminal upsert records: the outcome's, which is
+    /// not always the action's, since a `completed` too large for the
+    /// broker ends the run `failed` (#828). The sweeper archives a row
+    /// under its phase, so the two must agree.
+    pub(super) fn phase(&self) -> &'static str {
+        match self.ending {
+            Ending::Completed { .. } => "completed",
+            Ending::Failed { .. } => "failed",
+        }
+    }
 }
 
-/// A `failed` event, shared by the two writers that end a started run:
-/// the run loop's stored terminal here, and `emit_failed`'s mid-step
-/// publish. A third writer does not use it: `refuse_for_unavailable_mcp`
+/// A `failed` event, shared by the writers that end a run: the run
+/// loop's stored terminal here, `emit_failed`'s mid-step publish, and
+/// the `failed` an event too large for the broker ends a run with
+/// (`publish_failure.rs`), the only one that passes a `detail` (#952).
+/// A fourth writer does not use it: `refuse_for_unavailable_mcp`
 /// (`mcp.rs`) builds its `Setup`-phase `failed` by hand, before any row
 /// exists.
 pub(super) fn failed_event(
@@ -85,6 +101,7 @@ pub(super) fn failed_event(
     error_message: String,
     phase: FailurePhase,
     partial_totals: InvocationTotals,
+    detail: Option<FailureDetail>,
 ) -> Event {
     Event::new(
         agent_id.clone(),
@@ -94,7 +111,7 @@ pub(super) fn failed_event(
             error_message,
             phase,
             partial_totals,
-            detail: None,
+            detail,
         }),
     )
 }
@@ -124,7 +141,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         start: Instant,
         cursor: Option<Uuid>,
     ) -> Result<Option<Terminal>, ExecutorError> {
-        let (mut event, ending) = match action {
+        let (mut event, mut ending) = match action {
             NextAction::Complete { text, task_status } => {
                 let duration_ms = stamp_duration(totals, start);
                 let summary = (!text.is_empty()).then(|| text.clone());
@@ -157,6 +174,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     err.message.clone(),
                     FailurePhase::Reducer,
                     *totals,
+                    None,
                 );
                 let ending = Ending::Failed {
                     kind,
@@ -169,7 +187,21 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             | NextAction::CallToolsParallel(_) => return Ok(None),
         };
         event.envelope.parent_event_id = cursor;
-        let encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
+        let mut encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
+        // A terminal event the sink would refuse must not be the one the
+        // row stores: no publish or sweep could ever deliver it, and the
+        // row would be terminal with its outcome nowhere. The run ends on
+        // the refusal's `failed` instead, decided while nothing is yet
+        // terminal (#828; `publish_failure.rs`).
+        if let Some(refused) = Refused::measure(&*self.config.sink, &event, encoded.len()) {
+            event = refused.failed_event(agent_id, invocation_id, *totals);
+            event.envelope.parent_event_id = cursor;
+            encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
+            ending = Ending::Failed {
+                kind: FailureKind::PayloadTooLarge,
+                message: refused.message(),
+            };
+        }
         Ok(Some(Terminal {
             event,
             encoded,
@@ -238,5 +270,40 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 Err(ExecutorError::InvocationFailed { kind, message })
             }
         }
+    }
+
+    /// End a run that fails mid-step: [`Self::end_mid_step`], then hand
+    /// off the archive.
+    pub(super) async fn fail_mid_step(
+        &self,
+        cursor: &mut Option<Uuid>,
+        agent_id: &AgentId,
+        invocation_id: Uuid,
+        failed: Event,
+    ) -> Result<(), ExecutorError> {
+        self.end_mid_step(cursor, invocation_id, failed).await?;
+        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
+            .await
+    }
+
+    /// Publish a mid-step `failed`, then mark the row terminal: the point
+    /// at which the run has ended.
+    ///
+    /// Every caller arrives before any terminal write (a `failed` the
+    /// reducer decides is stored with the loop's terminal upsert instead,
+    /// #946), so this is the point at which `invocation_state` is marked
+    /// terminal, after the publish: a lost `failed` leaves the row in
+    /// flight for recovery. Idempotent: a no-op on the row if it is
+    /// already terminal (an operator transition got there first).
+    pub(super) async fn end_mid_step(
+        &self,
+        cursor: &mut Option<Uuid>,
+        invocation_id: Uuid,
+        failed: Event,
+    ) -> Result<(), ExecutorError> {
+        self.publish_chained(cursor, failed).await?;
+        let terminal_at_ms = self.config.clock.unix_now_ms();
+        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
+            .await
     }
 }

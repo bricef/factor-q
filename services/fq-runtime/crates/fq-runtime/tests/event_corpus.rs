@@ -555,17 +555,16 @@ fn variants() -> Vec<(&'static str, Event)> {
             // A `failed` carrying its typed detail (#952). The exemplar
             // above has none, which is the shape most failures have and
             // the one it must keep; this pins the other half, the facts a
-            // reader uses instead of parsing `error_message`. The kind is
-            // `runtime_error` only because no kind of its own exists yet:
-            // see #828, which adds one and is the detail's first producer.
+            // reader uses instead of parsing `error_message`: a run ended
+            // by an event too large for the broker, with that failure's
+            // own kind (#828).
             "payload_too_large",
             chained(
                 30,
                 EventPayload::Failed(FailedPayload {
-                    error_kind: FailureKind::RuntimeError,
-                    // What `BusError::PayloadTooLarge` renders, with these
-                    // numbers.
-                    error_message: "event payload of 1153433 bytes exceeds NATS max_payload of \
+                    error_kind: FailureKind::PayloadTooLarge,
+                    // What the runner writes for these numbers.
+                    error_message: "event of 1153433 bytes exceeds the broker max_payload of \
                                     1048576 bytes"
                         .to_string(),
                     phase: FailurePhase::LlmRequest,

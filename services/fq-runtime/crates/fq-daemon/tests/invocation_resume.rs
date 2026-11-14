@@ -1282,6 +1282,316 @@ async fn an_operator_resume_left_waiting_by_a_stop_is_resumed_once_at_the_next_s
     mock.shutdown().await;
 }
 
+/// The agent whose WAL replays into an event too large for the broker.
+const OVERSIZED_AGENT: &str = "oversized-probe";
+
+/// The bus of the daemon that left the WAL behind: it takes every event
+/// of the run and dies at the `tool.result`, which it never publishes.
+/// The tool's answer is already in the WAL by then (the completed row is
+/// written first), so the run is left in flight with the answer recorded.
+struct DiesAtTheToolResult;
+
+#[async_trait::async_trait]
+impl fq_runtime::bus::EventSink for DiesAtTheToolResult {
+    async fn publish(
+        &self,
+        event: &fq_runtime::events::Event,
+    ) -> Result<u64, fq_runtime::bus::BusError> {
+        match event.payload {
+            fq_runtime::events::EventPayload::ToolResult(_) => Err(
+                fq_runtime::bus::BusError::Publish("the daemon died here".to_string()),
+            ),
+            _ => Ok(0),
+        }
+    }
+}
+
+/// Leave the WAL a daemon that died mid-run would: `OVERSIZED_AGENT` asked
+/// to read `file`, the read answered with all of it, and the daemon died
+/// before publishing the answer. Run on the real runner, with a tool-result
+/// cap raised past the file so the whole answer is recorded, as it would
+/// be on a daemon configured with a cap above its broker's `max_payload`.
+/// Returns the invocation left in flight.
+async fn leave_a_wal_with_a_large_answer(scratch: &Scratch, file: &std::path::Path) -> uuid::Uuid {
+    use fq_runtime::events::{MessageToolCall, StopReason, TokenUsage, ToolCallId};
+    use fq_runtime::{
+        ChatResponse, Harness, ModelPricing, PricingTable, ReducerContext, ReducerRunner,
+        RunnerConfig, RuntimeDbPaths, ToolRegistry, WorkerStore,
+    };
+
+    let wal = std::sync::Arc::new(
+        WorkerStore::open(&RuntimeDbPaths::under(&scratch.path("cache")).worker)
+            .await
+            .expect("open the worker store"),
+    );
+    let mut prices = std::collections::HashMap::new();
+    prices.insert(
+        "claude-haiku-4-5".to_string(),
+        ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+            cache_write_1h_per_million: None,
+        },
+    );
+    let runner = ReducerRunner::new(
+        std::sync::Arc::new(
+            ReducerContext::builder()
+                .tools(std::sync::Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        std::sync::Arc::new(
+            RunnerConfig::builder()
+                .event_sink(std::sync::Arc::new(DiesAtTheToolResult))
+                .pricing(std::sync::Arc::new(PricingTable::from_map(prices)))
+                .store(wal.clone())
+                .worker_id(fq_runtime::worker::WorkerId::new("daemon-that-died").unwrap())
+                .tool_limits(fq_runtime::tools::ToolCallLimits {
+                    max_result_bytes: 8 * 1024 * 1024,
+                    ..Default::default()
+                })
+                .build(),
+        ),
+        Harness::new(),
+    );
+    let mut registry = fq_runtime::agent::AgentRegistry::new();
+    registry.load_file(&scratch.path("agents").join(format!("{OVERSIZED_AGENT}.md")));
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+    let agent = registry
+        .get_loaded(&fq_runtime::agent::AgentId::new(OVERSIZED_AGENT).unwrap())
+        .expect("the probe agent is loaded")
+        .agent
+        .clone();
+
+    let llm = fq_runtime::llm::fixture::FixtureClient::new();
+    llm.push_response(ChatResponse {
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![MessageToolCall {
+                tool_call_id: ToolCallId::new("toolu_read_big").unwrap(),
+                tool_name: "builtin__file_read".to_string(),
+                parameters: json!({ "path": file }),
+            }],
+        ),
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
+        },
+        reported_cost_usd: None,
+    });
+    let died = runner
+        .run(
+            &agent,
+            &llm,
+            fq_runtime::events::TriggerSource::Manual,
+            None,
+            json!("read the big file"),
+        )
+        .await;
+    assert!(
+        matches!(died, Err(fq_runtime::ExecutorError::Bus(_))),
+        "the daemon dies at the tool.result: {died:?}"
+    );
+    let in_flight = wal.find_in_flight_invocations().await.unwrap();
+    assert_eq!(in_flight.len(), 1, "one run left in flight");
+    in_flight[0].invocation_id.parse().unwrap()
+}
+
+/// Every `failed` and `invocation.ambiguous` published for
+/// `OVERSIZED_AGENT` since the subscription, as `(event_type, invocation
+/// id, event)`.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, uuid::Uuid, serde_json::Value)>>>;
+
+async fn record_outcomes(nats_url: &str) -> Seen {
+    let bus = fq_runtime::EventBus::connect(nats_url)
+        .await
+        .expect("connect to the test broker");
+    let mut stream = bus
+        .subscribe(format!("fq.agent.{OVERSIZED_AGENT}.>"))
+        .await
+        .expect("subscribe to the probe's events");
+    let seen: Seen = Default::default();
+    let sink = seen.clone();
+    tokio::spawn(async move {
+        let _bus = bus;
+        while let Some(event) = stream.next().await {
+            let Ok(event) = event else { continue };
+            let kind = match event.payload {
+                fq_runtime::events::EventPayload::Failed(_) => "failed",
+                fq_runtime::events::EventPayload::InvocationAmbiguous(_) => "invocation_ambiguous",
+                fq_runtime::events::EventPayload::LlmRequest(_) => "llm_request",
+                _ => continue,
+            };
+            let value = serde_json::to_value(&event).unwrap();
+            sink.lock()
+                .unwrap()
+                .push((kind, event.envelope.invocation_id, value));
+        }
+    });
+    seen
+}
+
+fn seen_of(seen: &Seen, kind: &str, invocation_id: uuid::Uuid) -> Vec<serde_json::Value> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, id, _)| *k == kind && *id == invocation_id)
+        .map(|(_, _, event)| event.clone())
+        .collect()
+}
+
+/// #828 at the daemon: a WAL whose replay rebuilds an event the broker
+/// refuses. A daemon died with a tool's answer of 1.2 MB recorded and
+/// unpublished; the broker is a stock one, whose `max_payload` is 1 MiB.
+/// The restarted daemon resumes the run, the replay rebuilds the next
+/// `llm.request` with the answer in it, and the broker refuses it.
+///
+/// Before #828 that refusal was transient and left no terminal event:
+/// the row stayed in flight, and every start resumed it into the same
+/// refusal. Now the first start ends the run with one `failed` of kind
+/// `payload_too_large` naming the `llm.request`, and reports nothing
+/// ambiguous: the resume returns an error, but recovery reads the worker
+/// row and finds the run ended. The next start finds nothing in flight:
+/// no resume, nothing ambiguous, no second `failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("oversized", mock.base_url());
+    let file = scratch.path("workspace").join("big.txt");
+    std::fs::write(&file, "a".repeat(1_200_000)).unwrap();
+    std::fs::write(
+        scratch.path("agents").join(format!("{OVERSIZED_AGENT}.md")),
+        format!(
+            "---\nname: {OVERSIZED_AGENT}\nmodel: claude-haiku-4-5\ntools:\n  - builtin__file_read\n\
+             sandbox:\n  fs_read:\n    - {}\nbudget: 1.00\n---\n\nRead the file you are told to read.\n",
+            scratch.path("workspace").display()
+        ),
+    )
+    .unwrap();
+    let invocation = leave_a_wal_with_a_large_answer(&scratch, &file).await;
+    let seen = record_outcomes(&nats_url).await;
+
+    // ---- The first start: the resume ends the run. ----
+    let mut first = Daemon::spawn(&scratch, &nats_url, "daemon-oversized-first.log");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while seen_of(&seen, "failed", invocation).is_empty() {
+        if let Some(status) = first.child.try_wait().expect("poll daemon") {
+            panic!("daemon exited ({status:?})\n--- log ---\n{}", first.log());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no failed for the resumed run within 60s\n--- log ---\n{}",
+            first.log()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Recovery decides what to report once the resume returns. This run
+    // has ended, so it says so in the log and publishes nothing; wait for
+    // that decision rather than for an event that must not come, then a
+    // margin for anything else still on its way to the subscription.
+    first
+        .await_log(
+            "but the invocation has ended; not reporting it ambiguous",
+            Duration::from_secs(30),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    first.stop();
+
+    let failed = seen_of(&seen, "failed", invocation);
+    assert_eq!(failed.len(), 1, "one failed: {failed:#?}");
+    let payload = &failed[0]["payload"]["payload"];
+    assert_eq!(payload["error_kind"], "payload_too_large", "{payload}");
+    assert_eq!(payload["detail"]["kind"], "payload_too_large");
+    assert_eq!(payload["detail"]["event_type"], "llm_request");
+    assert_eq!(
+        payload["detail"]["limit_bytes"],
+        1024 * 1024,
+        "a stock broker"
+    );
+    assert!(
+        payload["detail"]["size_bytes"].as_u64().unwrap() > 1_200_000,
+        "{payload}"
+    );
+    assert!(
+        seen_of(&seen, "llm_request", invocation).is_empty(),
+        "the refused request never reached the stream"
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        0,
+        "the model is never asked"
+    );
+    // The resume returned an error, but recovery reads the worker row,
+    // finds the run ended, and reports nothing ambiguous.
+    assert!(
+        seen_of(&seen, "invocation_ambiguous", invocation).is_empty(),
+        "the start that ends the run reports nothing ambiguous"
+    );
+    let row = fq_runtime::WorkerStore::open(
+        &fq_runtime::RuntimeDbPaths::under(&scratch.path("cache")).worker,
+    )
+    .await
+    .unwrap()
+    .get_invocation_state(&invocation.to_string())
+    .await
+    .unwrap()
+    .expect("the terminal row stays: its archive is too large to deliver (see #981)");
+    assert!(row.terminal_at.is_some(), "the row is terminal: {row:?}");
+    assert_eq!(row.phase, "failed");
+
+    // ---- The next start: nothing in flight. ----
+    let recovery_client = async_nats::connect(&nats_url)
+        .await
+        .expect("connect for the recovery barrier");
+    let mut recovery = recovery_client
+        .subscribe("fq.system.recovery")
+        .await
+        .expect("subscribe to the recovery barrier");
+    recovery_client
+        .flush()
+        .await
+        .expect("flush the subscription");
+    let mut next = Daemon::spawn(&scratch, &nats_url, "daemon-oversized-next.log");
+    let message = tokio::time::timeout(Duration::from_secs(30), recovery.next())
+        .await
+        .expect("startup recovery within 30s")
+        .expect("the recovery subscription stays open");
+    let report: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+    assert_eq!(
+        report["payload"]["payload"]["total"], 0,
+        "nothing is left in flight to resume or report: {report}"
+    );
+    // A resume, had one started, would have published by now.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    next.stop();
+    assert!(
+        !next.log().contains("resuming reducer invocation"),
+        "the run was resumed again:\n{}",
+        next.log()
+    );
+    assert_eq!(
+        seen_of(&seen, "failed", invocation).len(),
+        1,
+        "no second failed"
+    );
+    assert!(
+        seen_of(&seen, "invocation_ambiguous", invocation).is_empty(),
+        "the next start reports nothing ambiguous either"
+    );
+
+    mock.shutdown().await;
+}
+
 /// The client binary. `CARGO_BIN_EXE_*` only names binaries of the
 /// package the test lives in, and `fq` is `fq-cli`'s — but both land in
 /// the same target directory, so the daemon's own path names it.

@@ -177,9 +177,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// before a single grant-bearing server is spawned, so a refused
     /// invocation costs one pair of events and no child processes.
     ///
-    /// `triggered` is published first regardless. The failure has to
-    /// hang off something: a `failed` with no chain root is an event
-    /// the projection cannot attribute to an invocation.
+    /// `triggered` is published first. The failure has to hang off
+    /// something: a `failed` with no chain root is an event the
+    /// projection cannot attribute to an invocation. The one exception is
+    /// a `triggered` too large for the broker (#828): the run then ends
+    /// on a `payload_too_large` `failed` that names the trigger itself,
+    /// in place of this refusal (`publish_failure.rs`).
     pub(super) async fn refuse_for_unavailable_mcp(
         &self,
         agent: &Agent,

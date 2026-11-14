@@ -221,6 +221,27 @@ func TestReactTerminalFailureEscalatesImmediately(t *testing.T) {
 	}
 }
 
+// A run ended by an event too large for the broker (#828) is final: the
+// same work would build the same event, so a retry is a full paid run into
+// the same limit. The issue goes to failed on the first one, with the
+// budget untouched, and the reason given names the kind.
+func TestReactPayloadTooLargeIsTerminal(t *testing.T) {
+	src := &labelSource{}
+	var logs bytes.Buffer
+	r := NewOutcomeReactor(src, outcomeConfig(), slog.New(slog.NewTextHandler(&logs, nil)))
+	triggeredThen(r, "big", 4, OutcomeEvent{Kind: OutcomeFailed, InvocationID: "big", ErrorKind: "payload_too_large"})
+	want := []string{"relabel #4 in-progress->failed"}
+	if !slices.Equal(src.ops, want) {
+		t.Errorf("ops = %v, want %v (not re-queued)", src.ops, want)
+	}
+	if _, ok := r.attempts[4]; ok {
+		t.Error("a terminal failure must not spend a retry")
+	}
+	if got := logs.String(); !strings.Contains(got, "invocation failed (payload_too_large); terminal error") {
+		t.Errorf("log = %q, want the reason naming payload_too_large as terminal", got)
+	}
+}
+
 func TestReactUnknownInvocationIsIgnored(t *testing.T) {
 	src := &labelSource{}
 	r := NewOutcomeReactor(src, outcomeConfig(), discardLogger())

@@ -400,7 +400,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         let agent_id: AgentId = agent.id().clone();
         let _active = self.mark_active(invocation_id, agent_id.clone());
         let start = Instant::now();
-        let totals = InvocationTotals::default();
+        let mut totals = InvocationTotals::default();
+        // Thread parent_event_id through every publish for this
+        // invocation. The Triggered event is the chain root
+        // (parent = None); each subsequent publish updates the
+        // cursor inside publish_chained.
+        let mut cursor: Option<Uuid> = None;
 
         info!(
             agent_id = %agent_id,
@@ -414,10 +419,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // only to give them back. The refusal still publishes
         // `triggered` before `failed`, so the trail reads as one
         // invocation that could not start rather than as an orphan
-        // failure.
+        // failure — unless `triggered` is too large to publish (#828).
         if let Some(why) = self.unavailable_mcp_servers(agent) {
-            return self
+            let refused = self
                 .refuse_for_unavailable_mcp(agent, invocation_id, &trigger, why, totals)
+                .await;
+            return self
+                .end_unstarted_on_refusal(refused, agent, &trigger, invocation_id, start)
                 .await;
         }
 
@@ -507,32 +515,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             payload: trigger.payload.clone(),
         };
 
-        // Thread parent_event_id through every publish for this
-        // invocation. The Triggered event is the chain root
-        // (parent = None); each subsequent publish updates the
-        // cursor inside publish_chained.
-        let mut cursor: Option<Uuid> = None;
-
         // Emit `triggered` once, mirroring the legacy executor. A `?`
         // here would leak the just-provisioned workspace (issue #116):
         // this publish failing is the pre-WAL case — nothing durable
-        // exists, the trigger redelivers into a fresh workspace — so
-        // route the error through the reclaim decision instead.
-        if let Err(err) = self
+        // exists — so its error takes the loop's own way out below.
+        let published = self
             .publish_chained(&mut cursor, triggered_event(agent, invocation_id, &trigger))
-            .await
-        {
-            // The grant servers started above must not outlive the
-            // failed invocation either — same #116-class lesson as the
-            // workspace reclaim below: McpClientManager has no Drop, so
-            // without this their child processes leak on the pre-WAL
-            // publish-failure path.
-            manager.shutdown().await;
-            let outcome = Err(err);
-            self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
-                .await;
-            return outcome;
-        }
+            .await;
 
         let state: Vec<u8> = Vec::new();
         let last_result: Option<CapabilityResult> = None;
@@ -553,33 +542,47 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // agree; a fresh `unix_now_ms()` here also perturbs the sim
         // clock sequence.
 
+        let outcome = match published {
+            Err(err) => {
+                self.end_unstarted_on_refusal(Err(err), agent, &trigger, invocation_id, start)
+                    .await
+            }
+            Ok(()) => {
+                self.run_loop_inner(
+                    agent,
+                    llm,
+                    invocation_id,
+                    &agent_id,
+                    &agent_config,
+                    &step_trigger,
+                    &sandbox,
+                    tools,
+                    workspace.as_deref(),
+                    state,
+                    last_result,
+                    step_index_start,
+                    &mut totals,
+                    start,
+                    started_at_ms,
+                    static_context,
+                    sampling,
+                    durable_start,
+                    &mut cursor,
+                    false,
+                    // Fresh invocation: no previous incarnation, nothing
+                    // recorded for the first step.
+                    Vec::new(),
+                )
+                .await
+            }
+        };
         let outcome = self
-            .run_loop_inner(
-                agent,
-                llm,
-                invocation_id,
-                &agent_id,
-                &agent_config,
-                &step_trigger,
-                &sandbox,
-                tools,
-                workspace.as_deref(),
-                state,
-                last_result,
-                step_index_start,
-                totals,
-                start,
-                started_at_ms,
-                static_context,
-                sampling,
-                durable_start,
-                &mut cursor,
-                false,
-                // Fresh invocation: no previous incarnation, nothing
-                // recorded for the first step.
-                Vec::new(),
-            )
+            .end_on_refused_publish(outcome, agent, invocation_id, totals, start, &mut cursor)
             .await;
+        // The grant servers must not outlive the invocation, the pre-WAL
+        // failure included: McpClientManager has no Drop, so without this
+        // their child processes leak (the #116 lesson, as for the
+        // workspace reclaim).
         manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
@@ -968,7 +971,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 state,
                 last_result,
                 step_index,
-                totals,
+                &mut totals,
                 start,
                 state_row.started_at,
                 // Only applied when replay was empty (the crash fell at
@@ -997,6 +1000,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     .collect(),
             )
             .await;
+        // A replay rebuilds the event the broker refused last time (#828).
+        let outcome = self
+            .end_on_refused_publish(outcome, agent, invocation_id, totals, start, &mut cursor)
+            .await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
         outcome
@@ -1004,8 +1011,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
 
     /// The reducer-loop body extracted so `run` and `resume`
     /// can share it. Caller threads in the prepared
-    /// `(state, last_result, step_index, totals)` plus all the
-    /// invocation-scoped context.
+    /// `(state, last_result, step_index)` plus all the
+    /// invocation-scoped context, and `totals`, which it keeps
+    /// current for a caller that ends the run on its error.
     #[allow(clippy::too_many_arguments)]
     async fn run_loop_inner(
         &self,
@@ -1021,7 +1029,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut state: Vec<u8>,
         mut last_result: Option<CapabilityResult>,
         step_index_start: u32,
-        mut totals: InvocationTotals,
+        totals: &mut InvocationTotals,
         start: Instant,
         started_at_ms: i64,
         static_context: Option<String>,
@@ -1140,7 +1148,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                         kind,
                         message.clone(),
                         FailurePhase::Reducer,
-                        totals,
+                        *totals,
                         cursor,
                     )
                     .await?;
@@ -1169,10 +1177,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 &output.next_action,
                 agent_id,
                 invocation_id,
-                &mut totals,
+                totals,
                 start,
                 *cursor,
             )?;
+            let phase_label = terminal.as_ref().map_or(phase_label, Terminal::phase);
             self.config
                 .store
                 .upsert_invocation_state(&InvocationStateRow {
@@ -1213,8 +1222,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     return self.finish(cursor, agent_id, invocation_id, terminal).await;
                 }
                 NextAction::CallModel(request) => {
-                    let mut ctx =
-                        InvocationCtx::new(llm, agent_id, invocation_id, &mut totals, cursor);
+                    let mut ctx = InvocationCtx::new(llm, agent_id, invocation_id, totals, cursor);
                     let outcome = self
                         .run_model_with_llm(
                             &mut ctx,
@@ -1241,7 +1249,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                             invocation_id,
                             workspace,
                             req,
-                            &mut totals,
+                            totals,
                             start,
                             sampling.as_mut(),
                             &mut context,
@@ -1270,7 +1278,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                                 invocation_id,
                                 workspace,
                                 req,
-                                &mut totals,
+                                totals,
                                 start,
                                 sampling.as_mut(),
                                 &mut context,
@@ -1297,7 +1305,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             kind,
             message.clone(),
             FailurePhase::HostStepBudget,
-            totals,
+            *totals,
             cursor,
         )
         .await?;
@@ -1927,22 +1935,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             error_message,
             phase,
             partial_totals,
+            None,
         );
-        self.publish_chained(cursor, failed).await?;
-
-        // Every caller arrives mid-step, before any terminal write
-        // (a `failed` the reducer decides is stored with the loop's
-        // terminal upsert instead: `terminal.rs`, #946). So this is
-        // the point at which `invocation_state` is marked terminal,
-        // after the publish: a lost `failed` leaves the row in
-        // flight for recovery. Idempotent: a no-op if the row is
-        // already terminal (an operator transition got there first).
-        let terminal_at_ms = self.config.clock.unix_now_ms();
-        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
-            .await?;
-        self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
-            .await?;
-        Ok(())
+        self.fail_mid_step(cursor, agent_id, invocation_id, failed)
+            .await
     }
 
     /// Set `terminal_at` (and update `phase`) on the worker's
@@ -2444,6 +2440,7 @@ mod deferral;
 mod failure;
 mod llm;
 mod mcp;
+mod publish_failure;
 mod replay;
 mod request_caps;
 mod result_cap;

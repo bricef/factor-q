@@ -477,7 +477,7 @@ as an issue, because none lifts on its own:
 ```text
 Archive holds: 1 — finished runs the archive sweeper will not archive until an operator acts; the control plane sees each as not archived
   019a7c2e-5b1d-7f30-9a4e-2c8d1e6f0a42 (researcher): `invocation_archived` is 1252461 bytes, over the broker's max_payload of 1048576
-  -> raise the broker's max_payload well above 1252461 bytes, since the broker also counts a small message header this size leaves out, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
+  -> raise the broker's max_payload above 1252461 bytes, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
 ```
 
 The list is the daemon's memory of its own sweeps, so it is not known
@@ -512,11 +512,11 @@ larger than the broker's max_payload; holding the row unarchived until it
 fits`, with the `invocation_id`, the `event_type`, its `size_bytes` and
 the `limit_bytes`.
 
-To release it, raise the broker's `max_payload` well above the size the
-line reports and restart `fqd`. The size is the event's JSON, and the
-broker also counts a small message header, so a limit set at the size,
-or a few dozen bytes over it, still refuses the event. The daemon reads
-the broker's limit once,
+To release it, raise the broker's `max_payload` above the size the line
+reports and restart `fqd`. The size is what the broker counts: the
+event's JSON and the message-id header the daemon sends with it
+([#828](https://github.com/bricef/factor-q/issues/828)), so a limit at
+or above it takes the event. The daemon reads the broker's limit once,
 when it connects, so a daemon that is already running keeps refusing at
 the old limit. The restart is also what offers the row again: a held row
 is not retried during a run, because the same event would be refused the
@@ -918,6 +918,34 @@ the history. The cap bounds each result, not a turn: a turn of four
 parallel `file_read` calls on large files still produces a request the
 stock broker refuses. A value under 1024 is refused at startup.
 
+An event the broker refuses anyway ends the invocation
+([#828](https://github.com/bricef/factor-q/issues/828)): that turn's
+request, a result under a cap set above the broker's `max_payload`, or
+a `triggered` whose trigger payload and system prompt together pass it.
+Nothing is truncated. The run ends with one `failed` of kind
+`payload_too_large`, whose `detail` names the event refused, its size
+on the wire and the limit.
+
+Once the run has started, the worker's row is marked terminal and the
+workspace reclaimed, so a restart has nothing to resume, and the
+github-watcher does not retry the issue, since the same work would
+build the same event. Before this the refusal left the row in flight,
+and every restart resumed the run into the same refusal. A run that
+ends this way on a resume, rather than live, is not reported
+ambiguous: the resume returns an error, but recovery finds the run
+ended, logs `resume returned an error, but the invocation has ended;
+not reporting it ambiguous` at warn, and publishes nothing (see
+[Triaging unresolved invocations](#triaging-unresolved-invocations)).
+
+A refused `triggered` leaves no row and no `triggered` event, so the
+`failed` is the only record, and it names the trigger in its
+`trigger_id` and `trigger_subject` annotations. The dispatcher consumes
+the trigger. The github-watcher binds a run to its issue through
+`triggered`, so it never sees this failure: the issue stays in progress
+until the watcher's reconcile timeout re-queues it, without counting an
+attempt, so this repeats until the trigger, the agent's prompt or the
+broker's limit changes.
+
 The default also sits above `exec`'s own cap of 100 KiB per stream,
 whose note names `max_lines` and `tail_lines`, so ordinary `exec`
 output is cut there, once. Output with many invalid bytes or control
@@ -946,6 +974,20 @@ rows behind it (see
 A broker serving agents that read large outputs still needs a
 `max_payload` above the stock 1 MiB
 ([see #981](https://github.com/bricef/factor-q/issues/981)).
+
+A run that ended because its `llm.request` was refused is held this
+way too. Its state holds the messages that request carried, and as
+base64 they take four bytes for every three, so the archive is over
+the same limit unless the rest of the request, its tool definitions
+mostly, took more than a quarter of it. A run that ended at a refused
+`tool.result` or terminal event does not hold that event in its state,
+so it archives unless the conversation before it was already too
+large. Until a held row's
+archive is acknowledged, the run's ownership row reads `in_flight`, so
+`fq invocation list` shows a run that has ended as still in flight
+until an operator acts on the hold
+([#1024](https://github.com/bricef/factor-q/issues/1024), open); the
+held row in `fq doctor` is how to find it.
 
 ## When an invocation stops making progress
 
