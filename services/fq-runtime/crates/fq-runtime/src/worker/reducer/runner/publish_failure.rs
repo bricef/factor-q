@@ -39,18 +39,21 @@
 //! `llm.request` goes terminal holding the conversation that made the
 //! request too large, and its `invocation.archived` carries that state at
 //! about four times its size, so the broker refuses the archive as well.
-//! Nothing here delivers it, and until the change for #981 lands the
-//! archive sweeper cannot either: it meets the row first on every pass
-//! (rows never published come first), fails on it, and ends the pass, so
-//! no row behind it is archived or healed. Nothing an operator does from
-//! the client clears that; the remedy is to raise the broker's
-//! `max_payload` and restart the daemon, which reads the limit at
-//! connect. A run ended at a `tool.result` does not hold the refused text
-//! in its state, so its archive is refused only if the conversation before
-//! it was already large; one ended at `triggered` has no row to archive.
-//! The start that resumes such a run also reports it `invocation.ambiguous`
-//! once, after its `failed`, because startup recovery reports every resume
-//! error that way (#1005); `fq invocation drop` clears that flag.
+//! The archive sweeper then holds the row (`worker/archive_retry.rs`):
+//! nothing more is published for it, it is kept whole, logged once per
+//! daemon run and offered again at the next start, the pass goes on to
+//! the rows behind it, and `fq doctor` and `fq status` list the hold with
+//! its reason and remedy. A run ended at a `tool.result` does not hold
+//! the refused text in its state, so its archive is refused only if the
+//! conversation before it was already large; one ended at `triggered` has
+//! no row to archive.
+//!
+//! **What recovery reports.** A run that ends here on a resume returns an
+//! error from the resume; startup recovery reads the worker row, finds it
+//! terminal, logs that at warn and publishes nothing ambiguous (#1005).
+//! The control plane's ownership row reads `in_flight` until the archive
+//! is acknowledged, which for a held row is until an operator acts
+//! (#1024); the held row in `fq doctor` is how an operator finds the run.
 //!
 //! **Two resume paths do not come here.** `resume` returns early for a
 //! budget found exceeded on resume and for a provider failure whose
