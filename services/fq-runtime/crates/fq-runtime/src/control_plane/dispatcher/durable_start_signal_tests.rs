@@ -32,11 +32,20 @@
 //! restart to a replayed copy of its trigger, where startup recovery's
 //! marking of finished runs takes over.
 //!
+//! **A long setup (#967).** From the worker permit to the durable start a
+//! run provisions its workspace, starts its per-invocation MCP servers
+//! and publishes `triggered`, and that can take longer than the
+//! delivery's ack window. These tests give the stub a setup longer than a
+//! short window ([`Setup`]) and hand any copy the broker redelivers
+//! meanwhile to `handle` as well, as the consume loop would
+//! ([`Pulled::handle_beside_copies`]): the delivery must be kept alive
+//! through setup, and the keepalive must end where the setup does.
+//!
 //! The tests run the real `handle` against a real broker and a real
 //! control-plane store, with a stub worker.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,7 +75,7 @@ use crate::llm::fixture::FixtureClient;
 use crate::test_support::nats::{NatsServer, test_nats};
 use crate::trigger::{Trigger, agent_id_from_subject};
 use crate::worker::{
-    DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
+    BoundaryStop, DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
 };
 
 /// The start of the line `handle` logs, at `error`, when the claim store
@@ -95,6 +104,11 @@ const ATTEMPTS_IF_REFUSED_AT_ONCE: u32 = MARK_RETRY_PAUSES.len() as u32 + 1;
 /// than the store's busy timeout (sqlx's default, five seconds), so that
 /// attempt gets through the lock rather than failing on it.
 const LOCK_HELD: Duration = Duration::from_millis(2500);
+
+/// A setup longer than [`SHORT_ACK_WINDOW`] by more than a whole window:
+/// a delivery nothing renews while it runs is redelivered at least once
+/// underneath it.
+const LONG_SETUP: Duration = Duration::from_millis(2500);
 
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
@@ -125,6 +139,20 @@ enum Refusals {
     First(u32),
 }
 
+/// What the stub invocation does before it resolves its signal: the
+/// workspace, the per-invocation MCP servers and the `triggered` publish
+/// a real run does between its worker permit and its first WAL write.
+#[derive(Clone, Copy)]
+enum Setup {
+    /// Nothing: it resolves the signal at once.
+    Instant,
+    /// Something that takes this long.
+    Takes(Duration),
+    /// Something that takes `takes`, with the worker draining from
+    /// `drain_at` into it.
+    DrainedPartWay { takes: Duration, drain_at: Duration },
+}
+
 /// On which turn of `handle`'s loop the stub invocation returns.
 enum Turn {
     /// A later one than the turn that resolved the signal: the stub
@@ -136,6 +164,10 @@ enum Turn {
     /// before it polled the invocation, so that turn ends on the result
     /// with the signal unseen (#966).
     Same,
+    /// This long after the turn that resolved the signal: a run that goes
+    /// on after its durable start, or one that tears down its workspace
+    /// and MCP servers after dropping the signal unfired.
+    After(Duration),
 }
 
 /// What the stub invocation returns.
@@ -145,11 +177,15 @@ enum Returns {
     TransientError,
     /// A completed run.
     Completed,
+    /// A run a drain stopped at its first step boundary, before its first
+    /// WAL write: the trigger is left for the next binary.
+    Drained,
 }
 
 /// An invocation that resolves its durable-start signal and then
 /// returns, on the turn of `handle`'s loop that its [`Turn`] says.
 struct ResolvesThenReturns {
+    setup: Setup,
     resolve: Resolve,
     turn: Turn,
     returns: Returns,
@@ -160,6 +196,11 @@ struct ResolvesThenReturns {
     /// The trigger's id and the invocation id its signal carries, as the
     /// dispatcher handed them over.
     named: Mutex<Option<(Uuid, Uuid)>>,
+    /// How many times an invocation was started.
+    starts: AtomicUsize,
+    /// Whether the worker reports itself draining, and since when.
+    draining: AtomicBool,
+    drained_at: Mutex<Option<tokio::time::Instant>>,
 }
 
 #[async_trait::async_trait]
@@ -176,6 +217,17 @@ impl Worker for ResolvesThenReturns {
             .invocation_id()
             .expect("the dispatcher names the run it starts");
         *self.named.lock().unwrap() = Some((trigger.id, invocation_id));
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        match self.setup {
+            Setup::Instant => {}
+            Setup::Takes(takes) => tokio::time::sleep(takes).await,
+            Setup::DrainedPartWay { takes, drain_at } => {
+                tokio::time::sleep(drain_at).await;
+                *self.drained_at.lock().unwrap() = Some(tokio::time::Instant::now());
+                self.draining.store(true, Ordering::SeqCst);
+                tokio::time::sleep(takes.saturating_sub(drain_at)).await;
+            }
+        }
         match self.resolve {
             Resolve::Drop => drop(durable_start),
             Resolve::Fire => durable_start.fire(),
@@ -190,8 +242,10 @@ impl Worker for ResolvesThenReturns {
                 durable_start.fire();
             }
         }
-        if let Turn::Later = self.turn {
-            tokio::task::yield_now().await;
+        match self.turn {
+            Turn::Later => tokio::task::yield_now().await,
+            Turn::Same => {}
+            Turn::After(runs_on) => tokio::time::sleep(runs_on).await,
         }
         self.ran_to_end.store(true, Ordering::SeqCst);
         match self.returns {
@@ -204,13 +258,21 @@ impl Worker for ResolvesThenReturns {
                 cost: 0.0,
                 duration_ms: 0,
             }),
+            Returns::Drained => Ok(InvocationOutcome::Unstarted {
+                invocation_id,
+                stopped_by: BoundaryStop::Drain,
+            }),
         }
     }
 
     async fn request_drain(&self, _req: DrainRequest) {}
 
     fn drain_status(&self) -> DrainState {
-        DrainState::Running
+        if self.draining.load(Ordering::SeqCst) {
+            DrainState::Draining
+        } else {
+            DrainState::Running
+        }
     }
 }
 
@@ -332,7 +394,13 @@ impl Pulled {
     /// On a consumer configured as the dispatcher's own is, with the
     /// production ack window.
     async fn new(resolve: Resolve, turn: Turn, returns: Returns) -> Self {
-        Self::on(resolve, turn, returns, None).await
+        Self::on(Setup::Instant, resolve, turn, returns, None).await
+    }
+
+    /// With a setup before the signal resolves, on a consumer of the
+    /// test's own whose ack window is [`SHORT_ACK_WINDOW`].
+    async fn setting_up(setup: Setup, resolve: Resolve, turn: Turn, returns: Returns) -> Self {
+        Self::on(setup, resolve, turn, returns, Some(SHORT_ACK_WINDOW)).await
     }
 
     /// On a consumer of the test's own whose ack window is `ack_window`.
@@ -342,10 +410,11 @@ impl Pulled {
         returns: Returns,
         ack_window: Duration,
     ) -> Self {
-        Self::on(resolve, turn, returns, Some(ack_window)).await
+        Self::on(Setup::Instant, resolve, turn, returns, Some(ack_window)).await
     }
 
     async fn on(
+        setup: Setup,
         resolve: Resolve,
         turn: Turn,
         returns: Returns,
@@ -361,12 +430,16 @@ impl Pulled {
         let claim_db = claim_dir.path().join("control-plane.db");
         let claims = Arc::new(ControlPlaneStore::open(&claim_db).await.unwrap());
         let worker = Arc::new(ResolvesThenReturns {
+            setup,
             resolve,
             turn,
             returns,
             claim_db: claim_db.clone(),
             ran_to_end: AtomicBool::new(false),
             named: Mutex::new(None),
+            starts: AtomicUsize::new(0),
+            draining: AtomicBool::new(false),
+            drained_at: Mutex::new(None),
         });
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -440,6 +513,57 @@ impl Pulled {
         tokio::time::timeout(Duration::from_secs(10), self.dispatcher.handle(&self.msg))
             .await
             .expect("handle returns");
+    }
+
+    /// Hand the trigger to `handle` as the consume loop does, and hand
+    /// every copy the broker redelivers meanwhile to `handle` too, beside
+    /// it. Returns when the first `handle` does, with the moment each copy
+    /// arrived.
+    async fn handle_beside_copies(&mut self) -> Vec<tokio::time::Instant> {
+        let dispatcher = &self.dispatcher;
+        let first = tokio::time::timeout(Duration::from_secs(20), dispatcher.handle(&self.msg));
+        tokio::pin!(first);
+        let mut copies = Vec::new();
+        loop {
+            tokio::select! {
+                biased;
+                handled = &mut first => {
+                    handled.expect("handle returns");
+                    return copies;
+                }
+                next = self.messages.next() => match next {
+                    Some(Ok(copy)) => {
+                        copies.push(tokio::time::Instant::now());
+                        dispatcher.handle(&copy).await;
+                    }
+                    Some(Err(err)) => panic!("the pull stream failed while the trigger was handled: {err}"),
+                    None => panic!("the pull stream closed while the trigger was handled"),
+                },
+            }
+        }
+    }
+
+    /// How many invocations the worker was asked to start.
+    fn starts(&self) -> usize {
+        self.worker.starts.load(Ordering::SeqCst)
+    }
+
+    /// When the stub worker began reporting itself draining.
+    fn drained_at(&self) -> tokio::time::Instant {
+        self.worker
+            .drained_at
+            .lock()
+            .unwrap()
+            .expect("the worker drained part-way through setup")
+    }
+
+    /// The dispatcher's count of copies it dropped before a start was
+    /// recorded on their claim, which is this daemon's.
+    fn held_drops(&self) -> u64 {
+        self.bus
+            .consumer_ledger()
+            .record(CONSUMER_NAME)
+            .held_duplicate_dropped
     }
 
     /// Hand the trigger to `handle` with a capture of what it logs at
@@ -540,6 +664,8 @@ struct Sent {
     acks: usize,
     keepalives: usize,
     other: Vec<String>,
+    /// The last answer read: `ack`, `keepalive` or the body of another.
+    last: Option<String>,
 }
 
 impl Answers {
@@ -567,15 +693,27 @@ impl Answers {
             acks: 0,
             keepalives: 0,
             other: Vec::new(),
+            last: None,
         };
         while let Ok(Some(answer)) =
             tokio::time::timeout(Duration::from_millis(500), self.subscription.next()).await
         {
-            match answer.payload.as_ref() {
-                b"" | b"+ACK" => sent.acks += 1,
-                b"+WPI" => sent.keepalives += 1,
-                other => sent.other.push(String::from_utf8_lossy(other).into_owned()),
-            }
+            let last = match answer.payload.as_ref() {
+                b"" | b"+ACK" => {
+                    sent.acks += 1;
+                    "ack".to_string()
+                }
+                b"+WPI" => {
+                    sent.keepalives += 1;
+                    "keepalive".to_string()
+                }
+                other => {
+                    let other = String::from_utf8_lossy(other).into_owned();
+                    sent.other.push(other.clone());
+                    other
+                }
+            };
+            sent.last = Some(last);
         }
         sent
     }
@@ -589,6 +727,176 @@ fn assert_marked_started(claim: TriggerClaim) {
         matches!(claim, TriggerClaim::Started { .. }),
         "the run durably started, so its claim must be marked `durably_started`; \
          a fresh claim on the delivery got {claim:?}"
+    );
+}
+
+/// A setup longer than the delivery's ack window is kept alive through,
+/// and the trigger is delivered once. Before #967's setup keepalive
+/// nothing renewed the delivery between the worker permit and the durable
+/// start, so the broker redelivered it underneath its own setup, and each
+/// copy met this daemon's claim and was dropped and counted as a held
+/// duplicate, spending one of the trigger's deliveries. Now in-progress
+/// acks are sent while the setup runs: no copy comes back, none is dropped,
+/// the run starts once, and the durable start acks the delivery once.
+#[tokio::test]
+async fn a_setup_longer_than_the_ack_window_is_kept_alive_and_delivered_once() {
+    let mut pulled = Pulled::setting_up(
+        Setup::Takes(LONG_SETUP),
+        Resolve::Fire,
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let copies = pulled.handle_beside_copies().await;
+
+    assert!(
+        copies.is_empty(),
+        "the trigger was redelivered underneath its own setup {} time(s)",
+        copies.len()
+    );
+    assert_eq!(
+        pulled.held_drops(),
+        0,
+        "no copy was dropped as a held duplicate"
+    );
+    assert_eq!(pulled.starts(), 1, "the run started once");
+    assert!(pulled.ran_to_end(), "the run reached its end");
+    assert_marked_started(pulled.probe_claim().await);
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
+        "kept alive while it set up, then acked once at its durable start: {sent:?}"
+    );
+    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
+}
+
+/// The setup's keepalive ends at the durable start. The run sets up for
+/// longer than the window, makes its first WAL write, and then goes on for
+/// longer than the window again: the mark lands at once, the delivery is
+/// acked, and nothing is sent for it after that ack, however long the run
+/// goes on.
+#[tokio::test]
+async fn no_keepalive_is_sent_after_the_durable_start() {
+    let mut pulled = Pulled::setting_up(
+        Setup::Takes(LONG_SETUP),
+        Resolve::Fire,
+        Turn::After(LONG_SETUP),
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let copies = pulled.handle_beside_copies().await;
+
+    assert!(copies.is_empty(), "no copy came back: {} did", copies.len());
+    assert!(pulled.ran_to_end(), "the run went on to its end");
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
+        "kept alive through setup, then acked once: {sent:?}"
+    );
+    assert_eq!(
+        sent.last.as_deref(),
+        Some("ack"),
+        "nothing may follow the ack while the run goes on: {sent:?}"
+    );
+}
+
+/// A run that fails during a long setup settles its delivery once, as it
+/// did before the setup keepalive. The setup outlasts the window, then
+/// drops its signal unfired and tears down for longer than the window
+/// again before it returns a transient error. The delivery is kept alive
+/// through both, since no durable start was made, and the pre-start
+/// settlement then NAKs it once, releasing its claim, with nothing sent
+/// after the NAK.
+#[tokio::test]
+async fn a_failure_during_a_long_setup_settles_the_delivery_once() {
+    let mut pulled = Pulled::setting_up(
+        Setup::Takes(LONG_SETUP),
+        Resolve::Drop,
+        Turn::After(LONG_SETUP),
+        Returns::TransientError,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let copies = pulled.handle_beside_copies().await;
+
+    assert!(
+        copies.is_empty(),
+        "the trigger was redelivered underneath its own setup {} time(s)",
+        copies.len()
+    );
+    assert_eq!(
+        pulled.held_drops(),
+        0,
+        "no copy was dropped as a held duplicate"
+    );
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Won,
+        "the NAK released the claim"
+    );
+    let sent = answers.sent().await;
+    assert!(
+        sent.keepalives > 0 && sent.acks == 0 && sent.other.len() == 1,
+        "kept alive through setup and teardown, then settled by one NAK: {sent:?}"
+    );
+    assert!(
+        sent.other[0].starts_with("-NAK") && sent.last.as_deref() == Some(sent.other[0].as_str()),
+        "the one settlement is a NAK and nothing follows it: {sent:?}"
+    );
+}
+
+/// A drain part-way through a long setup stops the keepalive, as it stops
+/// every hold, and leaves the delivery as it was left before there was a
+/// keepalive. The worker reports itself draining after more than a whole
+/// window of setup; the run then sets up for longer than a window again
+/// and returns stopped by the drain before its first WAL write.
+///
+/// Until the drain no copy comes back, because the setup was kept alive.
+/// After it the keepalive stops, the window lapses, and the broker
+/// redelivers (a draining daemon has stopped pulling, so in production the
+/// copy waits for the next binary; this test's pull stream is still open,
+/// which is how it sees the lapse). The delivery is neither acked nor
+/// NAKed, and its claim stays this daemon's for the next binary to adopt.
+#[tokio::test]
+async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery() {
+    let mut pulled = Pulled::setting_up(
+        Setup::DrainedPartWay {
+            takes: LONG_SETUP + LONG_SETUP / 2,
+            drain_at: LONG_SETUP / 2 + SHORT_ACK_WINDOW / 4,
+        },
+        Resolve::Drop,
+        Turn::Later,
+        Returns::Drained,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let copies = pulled.handle_beside_copies().await;
+
+    let drained_at = pulled.drained_at();
+    assert!(
+        copies.iter().all(|arrived| *arrived > drained_at),
+        "a copy came back before the drain, so the setup was not kept alive"
+    );
+    assert!(
+        !copies.is_empty(),
+        "no copy came back after the drain, so the keepalive did not stop with it"
+    );
+    assert_held_by_the_dispatcher(
+        pulled.probe_claim().await,
+        "a drain before the first WAL write leaves the claim for the next binary",
+    );
+    let sent = answers.sent().await;
+    assert!(
+        sent.keepalives > 0 && sent.acks == 0 && sent.other.is_empty(),
+        "kept alive until the drain, and then neither acked nor NAKed: {sent:?}"
     );
 }
 
@@ -885,12 +1193,16 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
         .to_string();
     let (_agent_dir, registry) = registry_with(&agent_id);
     let restarted = Arc::new(ResolvesThenReturns {
+        setup: Setup::Instant,
         resolve: Resolve::Fire,
         turn: Turn::Later,
         returns: Returns::Completed,
         claim_db: pulled.claim_db.clone(),
         ran_to_end: AtomicBool::new(false),
         named: Mutex::new(None),
+        starts: AtomicUsize::new(0),
+        draining: AtomicBool::new(false),
+        drained_at: Mutex::new(None),
     });
     let dispatcher = TriggerDispatcher::new(
         pulled.bus.clone(),
