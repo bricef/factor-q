@@ -269,6 +269,7 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         malformed_acked: 0,
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
+        abandoned_claim_retaken: 0,
     }
 }
 
@@ -620,6 +621,48 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
     );
 }
 
+/// An abandoned claim taken again is counted on the consumer's line apart
+/// from the duplicates (#967), since such a copy ran the trigger, with a
+/// line saying what it means and where its cause is logged. It is not a
+/// fault, and the line names no verdict.
+#[test]
+fn abandoned_claims_taken_again_are_counted_apart_and_explained_without_a_verdict() {
+    let mut counted = active("fq-dispatcher", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        abandoned_claim_retaken,
+        ..
+    } = &mut counted
+    {
+        *abandoned_claim_retaken = 3;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "an abandoned claim taken again is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "  fq-dispatcher: ok (pending 0, abandoned claims taken again since this daemon \
+             started: 3)\n  -> \"taken again\" is a copy that met a claim this daemon holds \
+             that no copy was handling any more, whose run had no start on record: the copy \
+             that took it ended before its first WAL write without settling the delivery, so \
+             this one ran the trigger once, under a new invocation id; the daemon log has a \
+             warn line for each naming the abandoned invocation id, and the failure before it\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("duplicate"), "got:\n{out}");
+}
+
 /// Nothing dropped, nothing said: a line that always reported zero
 /// would be noise on every healthy consumer.
 #[test]
@@ -636,6 +679,7 @@ fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
     let out = render_doctor_report_human(&report);
     assert!(!out.contains("duplicate"), "got:\n{out}");
     assert!(!out.contains("before a start was recorded"), "got:\n{out}");
+    assert!(!out.contains("taken again"), "got:\n{out}");
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
@@ -727,6 +771,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         malformed_acked: 0,
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
+        abandoned_claim_retaken: 0,
     };
     let report = build_doctor_report(
         &[],

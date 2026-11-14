@@ -189,13 +189,15 @@ fn render_consumers(
                 malformed_acked,
                 duplicate_dropped,
                 held_duplicate_dropped,
+                abandoned_claim_retaken,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}{}\n",
+                     pending {num_pending}{}{}{}\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
+                    retaken_suffix(*abandoned_claim_retaken)
                 ));
                 // The held-copy count does not choose this step. It only
                 // ever grows while the daemon runs, so one held copy in
@@ -213,6 +215,7 @@ fn render_consumers(
                     ));
                 }
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
+                out.push_str(&retaken_note(*abandoned_claim_retaken));
             }
             ConsumerHealth::Active {
                 name,
@@ -220,14 +223,17 @@ fn render_consumers(
                 malformed_acked,
                 duplicate_dropped,
                 held_duplicate_dropped,
+                abandoned_claim_retaken,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{}{})\n",
+                    "  {name}: ok (pending {num_pending}{}{}{})\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
+                    retaken_suffix(*abandoned_claim_retaken)
                 ));
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
+                out.push_str(&retaken_note(*abandoned_claim_retaken));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -342,6 +348,38 @@ fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
      will never settle that claim, and the claim does not say which; the daemon log has a warn \
      line for each with its subject, sequence, attempt and the claim's age, and such a claim \
      whose run is on record is listed under \"Stranded trigger claims\" below\n"
+        .to_string()
+}
+
+/// `, abandoned claims taken again since this daemon started: N`, or
+/// nothing when none was. Apart from the duplicates, because it is not
+/// one: such a copy ran the trigger ([`retaken_note`]).
+fn retaken_suffix(abandoned_claim_retaken: u64) -> String {
+    if abandoned_claim_retaken == 0 {
+        String::new()
+    } else {
+        format!(
+            ", abandoned claims taken again since this daemon started: {abandoned_claim_retaken}"
+        )
+    }
+}
+
+/// The line under a consumer that took abandoned claims again, saying what
+/// that count means, or nothing when it is zero (#967).
+///
+/// It is not a fault. Each one follows a failure the daemon logged, a run's
+/// task that died before its first WAL write or a claim release that failed
+/// before a NAK, and the trigger then ran once; the warn line for each
+/// names the abandoned invocation id, which is where to look for why.
+fn retaken_note(abandoned_claim_retaken: u64) -> String {
+    if abandoned_claim_retaken == 0 {
+        return String::new();
+    }
+    "  -> \"taken again\" is a copy that met a claim this daemon holds that no copy was handling \
+     any more, whose run had no start on record: the copy that took it ended before its first WAL \
+     write without settling the delivery, so this one ran the trigger once, under a new \
+     invocation id; the daemon log has a warn line for each naming the abandoned invocation id, \
+     and the failure before it\n"
         .to_string()
 }
 
