@@ -14,12 +14,13 @@ use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::events::Event;
 use crate::events::subjects::{ALL_MAINTENANCE, ALL_TRIGGERS};
+use crate::events::{Event, EventKind};
 
 mod consumers;
 mod ledger;
 pub mod retry;
+pub(crate) mod size;
 
 pub use consumers::UNLIMITED_MAX_DELIVER;
 pub use ledger::{ConsumerLedger, ConsumerRecord};
@@ -38,12 +39,26 @@ pub trait EventSink: Send + Sync {
     /// Publish one event; returns its sequence on the event stream —
     /// the coordinate receipts and the projection watermark speak.
     async fn publish(&self, event: &Event) -> Result<u64, BusError>;
+
+    /// Whether [`Self::publish`] would refuse `event`, whose JSON is
+    /// `body_len` bytes, for its size: the publish's own check, counting
+    /// what the sink adds on the wire. A question rather than a limit, so
+    /// a caller that must not commit to an event the sink would refuse (a
+    /// terminal event about to be stored, #828) cannot count differently
+    /// from the publish. `Ok` for a sink without a limit.
+    fn check_size(&self, _event: &Event, _body_len: usize) -> Result<(), BusError> {
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl EventSink for EventBus {
     async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         EventBus::publish(self, event).await
+    }
+
+    fn check_size(&self, event: &Event, body_len: usize) -> Result<(), BusError> {
+        size::check_event_size(event, body_len, self.max_payload)
     }
 }
 
@@ -269,9 +284,15 @@ pub enum BusError {
     /// `max_payload`. Returned by the pre-flight guard in
     /// [`EventBus::publish`] *before* any bytes reach the wire, so an
     /// oversized event never trips a NATS "Maximum Payload Violation"
-    /// nor poisons the archive-retry sweep. See issue #4.
-    #[error("event payload of {size} bytes exceeds NATS max_payload of {limit} bytes")]
-    PayloadTooLarge { size: usize, limit: usize },
+    /// nor poisons the archive-retry sweep. See issue #4. Names the
+    /// refused event's type, which nothing past the publish knows, and its
+    /// size on the wire, header included (#828; `bus/size.rs`).
+    #[error("{event_type:?} event of {size} bytes exceeds NATS max_payload of {limit} bytes")]
+    PayloadTooLarge {
+        event_type: EventKind,
+        size: usize,
+        limit: usize,
+    },
 
     /// The trigger body exceeds
     /// [`crate::trigger::MAX_TRIGGER_PAYLOAD_BYTES`]. A domain limit,
@@ -360,21 +381,6 @@ fn connect_options(token: Option<&str>) -> async_nats::ConnectOptions {
         Some(token) => async_nats::ConnectOptions::with_token(token.to_string()),
         None => async_nats::ConnectOptions::new(),
     }
-}
-
-/// Pre-flight payload size check: the pure heart of the publish
-/// guard, factored out so it can be tested without a live NATS
-/// server. Returns [`BusError::PayloadTooLarge`] when the serialised
-/// event would exceed the server's advertised `max_payload`.
-///
-/// NATS rejects a publish whose body is strictly greater than
-/// `max_payload`; a body exactly equal to the limit is accepted, so
-/// the guard uses a strict `>` comparison to mirror the server.
-fn check_payload_size(size: usize, limit: usize) -> Result<(), BusError> {
-    if size > limit {
-        return Err(BusError::PayloadTooLarge { size, limit });
-    }
-    Ok(())
 }
 
 impl EventBus {
@@ -683,18 +689,16 @@ impl EventBus {
         // it. Reject an oversized event with a clear, attributable
         // error *before* the bytes reach NATS, rather than tripping a
         // "Maximum Payload Violation" that errors the invocation and
-        // poisons the retry loop.
-        check_payload_size(payload.len(), self.max_payload)?;
+        // poisons the retry loop. What counts is the event and its
+        // header together, as the broker counts them (`bus/size.rs`).
+        let body_len = payload.len();
+        EventSink::check_size(self, event, body_len)?;
 
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert(
-            async_nats::header::NATS_MESSAGE_ID,
-            event.envelope.event_id.to_string(),
-        );
         let ack = self
             .jetstream
-            .publish_with_headers(subject, headers, Bytes::from(payload))
-            .await?
+            .publish_with_headers(subject, size::headers(event), Bytes::from(payload))
+            .await
+            .map_err(|err| size::publish_error(err, event, body_len, self.client.max_payload()))?
             .await?;
         Ok(ack.sequence)
     }

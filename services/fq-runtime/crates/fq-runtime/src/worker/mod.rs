@@ -323,6 +323,11 @@ impl ExecutorError {
     /// store/bus errors to redeliver.
     pub fn is_transient(&self) -> bool {
         match self {
+            // An event larger than the broker's `max_payload` is refused
+            // the same way on every attempt: the run that built it builds
+            // it again (#828). The runner has already ended the invocation
+            // with a `failed` for it, where it could.
+            ExecutorError::Bus(BusError::PayloadTooLarge { .. }) => false,
             // Bus / store unavailability is a momentary infra condition —
             // retryable once JetStream redelivers.
             ExecutorError::Bus(_) | ExecutorError::WorkerStore(_) => true,
@@ -542,5 +547,27 @@ mod executor_error_tests {
             assert!(!ExecutorError::Resume(verdict).is_transient());
         }
         assert!(ExecutorError::WorkerStore("database unavailable".to_string()).is_transient());
+    }
+
+    /// An event the broker refuses for its size is refused again on every
+    /// attempt, so it is permanent (#828); every other bus error is still
+    /// a momentary condition a redelivery can heal.
+    #[test]
+    fn an_oversized_event_is_permanent_but_other_bus_errors_are_transient() {
+        let oversized = ExecutorError::Bus(BusError::PayloadTooLarge {
+            event_type: crate::events::EventKind::ToolResult,
+            size: 2_000_000,
+            limit: 1_048_576,
+        });
+        assert!(!oversized.is_transient());
+
+        let momentary = [
+            BusError::Publish("broker unreachable".to_string()),
+            BusError::PublishTimedOut,
+            BusError::Stream("stream unavailable".to_string()),
+        ];
+        for err in momentary {
+            assert!(ExecutorError::Bus(err).is_transient());
+        }
     }
 }

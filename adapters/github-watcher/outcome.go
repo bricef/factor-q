@@ -64,11 +64,15 @@ type OutcomeSource interface {
 // terminalErrorKinds are `failed` error_kinds that will not be retried: a
 // re-trigger of the same issue would fail the same way. Everything else
 // (notably `llm_error` — the transient class that stranded issue #9) is
-// treated as retryable up to the bounded retry budget.
+// treated as retryable up to the bounded retry budget. `payload_too_large`
+// is an event of the run too large for the broker (#828): the same work
+// is likely to build the same event again, so each retry would be a full
+// paid run into the same limit.
 var terminalErrorKinds = map[string]bool{
 	"budget_exceeded":   true,
 	"max_iterations":    true,
 	"sandbox_violation": true,
+	"payload_too_large": true,
 }
 
 // issueNumberFromTemplate builds a matcher that recovers the issue number

@@ -476,7 +476,8 @@ pub enum ArchiveHoldReason {
         /// The refused event's type, spelled as its own `event_type` on
         /// the wire.
         event_type: String,
-        /// The event's serialised size, in bytes.
+        /// The event's size on the wire, in bytes: its JSON and the
+        /// message-id header sent with it, which is what the broker counts.
         size_bytes: u64,
         /// The broker's `max_payload` it exceeded, in bytes.
         limit_bytes: u64,

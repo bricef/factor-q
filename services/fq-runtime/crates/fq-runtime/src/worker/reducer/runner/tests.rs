@@ -379,6 +379,77 @@ async fn an_agent_needing_an_unavailable_mcp_server_is_refused_at_dispatch() {
     );
 }
 
+/// The refusal's `triggered` can itself be too large for the broker
+/// (#828). It goes out before anything durable exists, so its `failed`
+/// is the whole record: one `payload_too_large` naming `triggered`, in
+/// the setup phase, and not the server's refusal, which could not be
+/// published behind a chain root that does not exist. The error is not
+/// transient, so the dispatcher consumes the trigger rather than
+/// redelivering it into the same refusal.
+#[tokio::test]
+async fn a_refusal_whose_triggered_is_too_large_ends_on_the_size_refusal() {
+    let dir = tempdir().unwrap();
+    let sink = Arc::new(crate::test_support::sim::RecordingSink::new());
+    let limit = 4 * 1024;
+    sink.set_max_payload(limit);
+    let runner = runner_with_unavailable_server(dir.path(), sink.clone(), &["wedged"]).await;
+    let llm = FixtureClient::new();
+    llm.push_response(canned("should not be used", 10, 5));
+
+    let outcome = runner
+        .run(
+            &agent_declaring("needs-wedged", "wedged"),
+            &llm,
+            TriggerSource::Manual,
+            None,
+            json!({ "input": "i".repeat(4 * limit) }),
+        )
+        .await;
+
+    match &outcome {
+        Err(err @ ExecutorError::InvocationFailed { kind, .. }) => {
+            assert!(
+                matches!(kind, crate::events::FailureKind::PayloadTooLarge),
+                "{kind:?}"
+            );
+            assert!(!err.is_transient());
+        }
+        other => panic!("expected the size refusal, got {other:?}"),
+    }
+    let refused = sink.refused();
+    assert_eq!(refused.len(), 1, "only `triggered` is refused");
+    assert!(matches!(refused[0].payload, EventPayload::Triggered(_)));
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "one failed and nothing else");
+    let EventPayload::Failed(failed) = &events[0].payload else {
+        panic!("expected a failed event, got {:?}", events[0].payload);
+    };
+    assert!(matches!(failed.phase, crate::events::FailurePhase::Setup));
+    assert!(matches!(
+        failed.detail,
+        Some(crate::events::FailureDetail::PayloadTooLarge {
+            event_type: crate::events::EventKind::Triggered,
+            limit_bytes,
+            ..
+        }) if limit_bytes == limit as u64
+    ));
+    // With no `triggered` on the stream, the `failed` names the trigger.
+    // A trigger minted for a direct run has no subject to name.
+    let EventPayload::Triggered(triggered) = &refused[0].payload else {
+        unreachable!("checked above");
+    };
+    let trigger_id = triggered.trigger_id.expect("a minted trigger is named");
+    let annotations = &events[0].annotations.0;
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY),
+        Some(&json!(trigger_id.to_string()))
+    );
+    assert_eq!(
+        annotations.get(crate::dead_letter::DEAD_LETTER_SUBJECT_KEY),
+        None
+    );
+}
+
 /// A server mid-dial refuses too. `Starting` covers the whole of a
 /// start-up plus discovery deadline — a minute at the defaults, on
 /// every retry round as well as at boot — and letting an invocation

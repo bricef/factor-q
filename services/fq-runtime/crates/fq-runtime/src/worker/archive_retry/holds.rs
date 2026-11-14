@@ -116,9 +116,8 @@ impl ArchiveHolds {
 pub(super) fn remedy(reason: &ArchiveHoldReason) -> String {
     match reason {
         ArchiveHoldReason::PayloadTooLarge { size_bytes, .. } => format!(
-            "raise the broker's max_payload well above {size_bytes} bytes, since the broker also \
-             counts a small message header this size leaves out, then restart fqd: it reads the \
-             limit when it connects, and offers the row again at start ({GUIDE})"
+            "raise the broker's max_payload above {size_bytes} bytes, then restart fqd: it reads \
+             the limit when it connects, and offers the row again at start ({GUIDE})"
         ),
         ArchiveHoldReason::StoredEventRefused { .. } => format!(
             "keep a copy of the row's terminal_outcome, then release the row by setting it to \
