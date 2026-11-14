@@ -494,12 +494,18 @@ is listed again once that first pass has held it again.
 **An event too large for the broker.** The broker refuses any message
 larger than its `max_payload`, 1 MiB on a stock NATS server, and the
 daemon checks before it sends. `invocation.archived` carries the run's
-whole state: the conversation, every tool result in it included, encoded
-as a JSON array of integers, two to four bytes on the wire per byte of
-state. A run that read a few hundred kilobytes of tool output can
-therefore finish with an archive the broker refuses, and the stored
-terminal event can be refused the same way. The sweeper used to stop its
-pass at such a row, on every pass, so no row behind it was archived
+whole state: the conversation, every tool result in it included, as
+base64 text, four bytes on the wire for every three bytes of state. A
+state of more than 785,949 bytes makes the archive larger than a stock
+broker's 1 MiB, and one of more than 12,582,429 bytes larger than the
+dogfood broker's 16 MiB. Both figures count the message header the
+broker counts, and are for an agent id of eleven characters; a longer
+id lowers them slightly. In tool output that means a run that read two
+results at the default 256 KiB cap archives on a stock broker and one
+that read three does not (see
+[When a tool returns too much](#when-a-tool-returns-too-much)). The
+stored terminal event can be refused the same way. The sweeper used to
+stop its pass at such a row, on every pass, so no row behind it was archived
 either ([#981](https://github.com/bricef/factor-q/issues/981)). Now it
 holds the row, and the log line is `an event this row must publish is
 larger than the broker's max_payload; holding the row unarchived until it
@@ -518,10 +524,12 @@ same way, but a new run's sweeper tries every row once. With its other
 settings at their defaults, `nats-server` will not take a `max_payload`
 above 64 MiB, because the limit may not exceed `max_pending`, which is
 64 MiB by default; going higher means raising that too. The dogfood
-broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A planned change to the archive's
-encoding, the second half of the same issue, makes it about three times
-smaller, so after that upgrade some held rows fit under the limit they
-were held at. There is no release that archives the row without its
+broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A row held by a
+build from before the archive's state became base64, which wrote it as a
+JSON array of integers at about four bytes for each byte, may fit after
+an upgrade without any change to the broker: the same archive is about
+three times smaller, and the upgraded daemon offers the row again when
+it starts. There is no release that archives the row without its
 state: until it fits, it stays held, and it costs its space in
 `worker.db`.
 
@@ -930,8 +938,8 @@ event larger than a stock 1 MiB `max_payload`, and more than about
 run that read three results at the default cap cannot archive on a
 stock broker, since base64 makes them a whole 1 MiB before the rest of
 the conversation is counted, and a run that read two is most
-of the way there. When that happens the invocation completes, the
-archive publish fails, and the archive sweeper holds that row
+of the way there. When the archive is over the limit, the invocation
+completes, the archive publish fails, and the archive sweeper holds that row
 unarchived, lists it in `fq doctor` and `fq status`, and goes on to the
 rows behind it (see
 [When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)).
