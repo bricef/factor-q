@@ -144,6 +144,16 @@ pub struct DoctorReport {
     /// run, so a delivery that never started one shows up nowhere else.
     #[serde(default)]
     pub trigger_claims: DoctorTriggerClaims,
+    /// Every finished invocation's row the worker's archive sweeper is
+    /// holding rather than archiving: an event the row has to publish is
+    /// larger than the broker accepts, its stored terminal event must not
+    /// be republished, or its ids cannot go on an event. Each held row is
+    /// an issue, because none lifts on its own: the remedy beside it says
+    /// what an operator has to do. Read from the daemon's memory of its own
+    /// sweeps, so until the sweeper has finished a pass this start the
+    /// holds are not yet known, which is not an issue.
+    #[serde(default)]
+    pub archive_sweep: crate::health::ArchiveSweep,
 }
 
 /// `control.doctor`'s trigger-claim block, with the bounds its claims were
@@ -163,8 +173,9 @@ pub struct DoctorTriggerClaims {
     /// How old a claim an exited process left may be and still be
     /// reported, in milliseconds: the trigger-claim retention window, the
     /// age at which the daemon's retention sweep deletes such a claim.
-    /// Absent when claim retention is turned off, and then such a claim
-    /// is reported for as long as its row exists.
+    /// Absent when claim rows are kept indefinitely (a negative
+    /// `[state] trigger_claim_retention_days`): the sweep never deletes
+    /// one, and such a claim is reported for as long as its row exists.
     #[serde(default)]
     pub horizon_ms: Option<i64>,
     /// Every stranded claim, oldest first. Empty on a healthy table.
@@ -198,6 +209,14 @@ impl DoctorReport {
         self
     }
 
+    /// Attach the archive sweeper's state. Separate from
+    /// [`build_doctor_report`] because it is the sweeper's live state, like
+    /// the throttle's, rather than a fold of the stores.
+    pub fn with_archive_sweep(mut self, sweep: crate::health::ArchiveSweep) -> Self {
+        self.archive_sweep = sweep;
+        self
+    }
+
     /// Stranded trigger claims that are issues: a delivery that never
     /// started a run, and a run whose claim was never marked.
     pub fn stranded_claim_issues(
@@ -228,10 +247,11 @@ impl DoctorReport {
     /// True when any check reports a problem worth an operator's
     /// attention: stale workers, stuck in-flight work, ambiguous
     /// invocations, permanent failures, a consumer that has stopped
-    /// making progress, or a stranded trigger claim. In-flight work that
-    /// is merely running (not stuck) is healthy, not an issue, and so is
-    /// a consumer that is merely behind, a claim awaiting redelivery, or a
-    /// claim the report cannot judge.
+    /// making progress, a stranded trigger claim, or a row the archive
+    /// sweeper holds. In-flight work that is merely running (not stuck) is
+    /// healthy, not an issue, and so is a consumer that is merely behind,
+    /// a claim awaiting redelivery, a claim the report cannot judge, or an
+    /// archive sweeper that has not finished a pass yet.
     pub fn has_issues(&self) -> bool {
         self.workers.stale > 0
             || self.executions.stuck > 0
@@ -240,6 +260,7 @@ impl DoctorReport {
             || self.faulty_consumers().next().is_some()
             || self.unavailable_mcp_servers().next().is_some()
             || self.stranded_claim_issues().next().is_some()
+            || !self.archive_sweep.holds.is_empty()
     }
 }
 
@@ -323,5 +344,6 @@ pub fn build_doctor_report(
         throttled_models: Vec::new(),
         agents_at_cap: Vec::new(),
         trigger_claims: DoctorTriggerClaims::default(),
+        archive_sweep: Default::default(),
     }
 }

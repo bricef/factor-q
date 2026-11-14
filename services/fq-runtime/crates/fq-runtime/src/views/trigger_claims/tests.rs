@@ -22,7 +22,12 @@ const OLD_EPOCH: i64 = 1_767_000_000_000_000_000;
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-/// The trigger-claim retention the daemon passes by default: thirty days.
+/// The horizon these tests judge with: thirty days, passed explicitly. It
+/// is not the daemon's default window (ninety days since issue 1014), and
+/// nothing here depends on the two agreeing. Leave it at thirty:
+/// `a_run_whose_archive_was_swept_still_shows_its_trigger` also sweeps
+/// the archive at this cutoff, `retention_days`' default, and a longer
+/// one would leave its forty-day-old archive row in place.
 const HORIZON_MS: i64 = 30 * DAY_MS;
 /// A clock far enough from zero that "sixty days ago" is still positive.
 const NOW_MS: i64 = 1_000 * DAY_MS;
@@ -63,7 +68,8 @@ fn without_id(mut row: TriggerClaimRow) -> TriggerClaimRow {
 }
 
 /// A daemon that has been dispatching for `for_ms`, judging with the
-/// bounds the daemon passes.
+/// trigger stream's own redelivery window and message age, and with the
+/// explicit `HORIZON_MS` rather than the daemon's default window.
 fn judgement(for_ms: i64) -> ClaimJudgement<'static> {
     ClaimJudgement {
         claimant: THIS_DAEMON,

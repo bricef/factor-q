@@ -1537,9 +1537,17 @@ impl EdgeFixture {
                  input_per_mtok = 1.0\noutput_per_mtok = 5.0\n"
             )
         };
+        // The archive sweeper's first pass comes one interval after start,
+        // and until then `fq doctor` says the holds are not yet known
+        // rather than none. At the default 10 s a slow run could cross
+        // that line mid-test; a day keeps every golden on the near side,
+        // which is the state a freshly started daemon reports.
         std::fs::write(
             &daemon_config,
-            format!("[edge]\nbind = \"127.0.0.1:0\"\n{pricing}"),
+            format!(
+                "[edge]\nbind = \"127.0.0.1:0\"\n\n\
+                 [worker]\narchive_retry_interval_ms = 86400000\n{pricing}"
+            ),
         )
         .expect("fqd.toml");
         let log_path = dir.path().join("daemon.log");

@@ -579,7 +579,11 @@ effort: high            # reasoning effort for each request
   other limits — `fq agent validate` prints it whether or not it is set,
   and the dashboard's agent page has a row for it — so the question "what
   did I set on this agent?" has an answer that does not depend on the
-  agent being full at the time.
+  agent being full at the time. An invocation an operator resumes with
+  `fq invocation resume` is not held: it counts against the cap but does
+  not wait for a slot, so the agent can be over `max_concurrent` until
+  one of its invocations ends (see
+  [Operating the daemon](operating-the-daemon.md#when-a-provider-hangs-or-throttles)).
 - **`effort`** sets the model's reasoning effort per request: `minimal`,
   `low`, `medium`, `high`, or `xhigh`. Omit it to leave the provider's
   default. `minimal` exists for a real failure mode rather than for

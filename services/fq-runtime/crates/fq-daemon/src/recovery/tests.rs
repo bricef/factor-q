@@ -903,33 +903,11 @@ impl NextStart {
             ),
         }
 
-        let mut pricing = std::collections::HashMap::new();
-        pricing.insert(
-            "claude-haiku".to_string(),
-            fq_runtime::ModelPricing {
-                input_per_million: 1.0,
-                output_per_million: 5.0,
-                cache_read_per_million: None,
-                cache_write_per_million: None,
-                cache_write_1h_per_million: None,
-            },
+        let runner = runner_over(
+            Arc::new(bus.clone()),
+            worker_store.clone(),
+            worker_id.clone(),
         );
-        let runner = Arc::new(fq_runtime::ReducerRunner::new(
-            Arc::new(
-                fq_runtime::ReducerContext::builder()
-                    .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
-                    .build(),
-            ),
-            Arc::new(
-                fq_runtime::RunnerConfig::builder()
-                    .bus(bus.clone())
-                    .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
-                    .store(worker_store.clone())
-                    .worker_id(worker_id.clone())
-                    .build(),
-            ),
-            fq_runtime::Harness::new(),
-        ));
         Self {
             bus,
             cp_store,
@@ -993,6 +971,7 @@ impl NextStart {
                     worker_id: self.worker_id.as_str().to_string(),
                     dispatching_since_ms: 0,
                     trigger_claim_retention_ms: None,
+                    archive_holds: Default::default(),
                 },
                 bus: self.bus.clone(),
                 projection,
@@ -1087,6 +1066,42 @@ impl NextStart {
             "the next start resumes it"
         );
     }
+}
+
+/// The daemon's runner over `store`, running as `worker_id` and publishing
+/// through `sink`: the bus, or something in front of it.
+fn runner_over(
+    sink: Arc<dyn fq_runtime::bus::EventSink>,
+    store: Arc<WorkerStore>,
+    worker_id: WorkerId,
+) -> Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> {
+    let mut pricing = std::collections::HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        fq_runtime::ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+            cache_write_1h_per_million: None,
+        },
+    );
+    Arc::new(fq_runtime::ReducerRunner::new(
+        Arc::new(
+            fq_runtime::ReducerContext::builder()
+                .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            fq_runtime::RunnerConfig::builder()
+                .event_sink(sink)
+                .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        fq_runtime::Harness::new(),
+    ))
 }
 
 /// Take the worker permit, at a cap of 1 the only one, for a run this test
@@ -1527,6 +1542,10 @@ async fn an_operator_resume_on_a_draining_daemon_is_refused_and_left_to_the_next
     );
 }
 
+// An operator's resume is counted against its agent's `max_concurrent` but
+// not held at it (issue 1009), on the same next start as the tests above.
+mod operator_resume_cap;
+
 /// Subscribe to every `invocation.operator_recovered`, whichever agent a
 /// drop publishes it under.
 async fn drops_published(
@@ -1679,3 +1698,7 @@ async fn a_running_recovered_run_is_dropped_only_with_live() {
         "a halted run is not reported completed: {reported:?}"
     );
 }
+
+// What recovery reports about a resume that returned an error (issue 1005),
+// on the same next start as the tests above.
+mod resume_errors;

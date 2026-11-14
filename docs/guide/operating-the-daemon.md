@@ -390,6 +390,41 @@ fq invocation drop <invocation-id>
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
 
+Startup recovery also reports an invocation `ambiguous` when it resumed
+one on its own and the resume could not be carried out, leaving the
+invocation in flight (or its worker row unreadable). The event carries
+`stuck_entity: recovery` and the error in its `note`, and the daemon
+logs `resume failed; emitted invocation.ambiguous`. The event goes out
+once per invocation, however many starts fail the same way: on each
+later start the line ends `invocation.ambiguous was reported on an
+earlier start and is not emitted again`. Two things differ from a stuck
+tool dispatch:
+
+- **It reads `ambiguous` only until the next start.** That start's
+  recovery puts the ownership row back to `in_flight` before it resumes
+  the invocation again, and the event that would turn it back is not
+  sent a second time, so the invocation leaves `fq invocation list
+  --status=ambiguous` and `fq doctor`'s ambiguous count while still
+  unsettled ([#1025](https://github.com/bricef/factor-q/issues/1025)).
+  The daemon log line above is what still says so, on every start.
+- **`resume` cannot settle it.** There is no stuck dispatch to
+  reconcile, so `fq invocation resume` refuses it: as `is not Ambiguous
+  (it may already have been resumed)` while the row reads `ambiguous`,
+  and as `is live; only Ambiguous invocations can be resumed` once it
+  reads `in_flight`. `fq invocation drop` ends it. So does removing the
+  cause and restarting, since every start resumes it again.
+
+A resumed run that ends is not one of these, even when it ends in
+`failed` and the resume returns an error. Its `failed` is published,
+and the daemon logs `resume returned an error, but the invocation has
+ended; not reporting it ambiguous` at warn, with the error. Its
+ownership row reads `failed` once its `invocation.archived` is
+acknowledged, and `in_flight` until then, which for a run whose archive
+the broker refuses is for as long as it is refused
+([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
+[#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
+reported ambiguous as well, and left for an operator to triage.
+
 An invocation waiting for a worker permit is not being driven yet, even
 though every surface shows it as in flight (or, for one you resumed, as
 still ambiguous), so a plain `drop` takes it with no `--live` needed.
@@ -411,6 +446,10 @@ them. The command answers once the interrupted results are recorded, so
 `Resume accepted` means running or waiting its turn, and the daemon log
 says which (see
 [Every run takes a worker permit](#when-a-provider-hangs-or-throttles)).
+The agent's own `max_concurrent` does not hold it back: the run counts
+against that limit but does not wait for a slot under it, so the agent
+can be over its limit until one of its invocations ends (the same
+section says why, and what to do if that matters).
 A daemon that is already draining or stopping refuses the re-drive and
 says so, but the recorded results stand, so the next start resumes the
 invocation on its own.
@@ -426,21 +465,80 @@ archive sweeper republishes it first
 ([#823](https://github.com/bricef/factor-q/issues/823),
 [#946](https://github.com/bricef/factor-q/issues/946)).
 
-The sweeper will not republish a stored event that this build cannot
-read, or one that could not be that row's outcome. The case to expect is
-an event an older daemon stored and had not yet published when you
-upgraded across an event-schema bump. Republished, it would halt every
-durable consumer on the stream (see
-[When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
-So the sweeper **holds** the row instead. It publishes neither the stored
-event nor `invocation.archived` for that row, and it carries on with every
-other row. The daemon log reports a held row once per daemon run, at error
-level, as `stored terminal event cannot be republished; holding the row
-unarchived until an operator releases it`, with the `invocation_id` and
-the reason (for example, the `schema_version` it found and the versions
-this build reads).
+A row the sweeper cannot publish, it **holds**, for one of the three
+reasons below. It publishes nothing more for a held row, leaves the row
+in `worker.db` exactly as it is, and carries on with every other row.
+Until the hold is lifted, the control plane sees that invocation as not
+archived. The daemon log reports a held row once per daemon run, at
+error level, and `fq doctor` and `fq status` list every held row with
+its invocation, the reason and the remedy. `fq doctor` counts each one
+as an issue, because none lifts on its own:
 
-Nothing releases a held row on its own. No later build reads an older
+```text
+Archive holds: 1 — finished runs the archive sweeper will not archive until an operator acts; the control plane sees each as not archived
+  019a7c2e-5b1d-7f30-9a4e-2c8d1e6f0a42 (researcher): `invocation_archived` is 1252461 bytes, over the broker's max_payload of 1048576
+  -> raise the broker's max_payload well above 1252461 bytes, since the broker also counts a small message header this size leaves out, then restart fqd: it reads the limit when it connects, and offers the row again at start (docs/guide/operating-the-daemon.md, "When the archive sweeper holds a terminal row")
+```
+
+The list is the daemon's memory of its own sweeps, so it is not known
+until the sweeper has finished its first pass after a start, one
+`archive_retry_interval_ms` (10 s by default) after it. Until then both
+verbs say `Archive holds: not yet known` rather than none, and in
+`--json` the `archive_sweep` block has no `last_pass_at_ms`. `fq doctor`
+does not count not yet known as an issue, so a `fq doctor
+--fail-on-issues` straight after a restart passes before any hold can
+have been found; wait one interval if the gate is meant to catch them. A
+row held by an earlier run is offered again when the daemon starts, and
+is listed again once that first pass has held it again.
+
+**An event too large for the broker.** The broker refuses any message
+larger than its `max_payload`, 1 MiB on a stock NATS server, and the
+daemon checks before it sends. `invocation.archived` carries the run's
+whole state: the conversation, every tool result in it included, encoded
+as a JSON array of integers, two to four bytes on the wire per byte of
+state. A run that read a few hundred kilobytes of tool output can
+therefore finish with an archive the broker refuses, and the stored
+terminal event can be refused the same way. The sweeper used to stop its
+pass at such a row, on every pass, so no row behind it was archived
+either ([#981](https://github.com/bricef/factor-q/issues/981)). Now it
+holds the row, and the log line is `an event this row must publish is
+larger than the broker's max_payload; holding the row unarchived until it
+fits`, with the `invocation_id`, the `event_type`, its `size_bytes` and
+the `limit_bytes`.
+
+To release it, raise the broker's `max_payload` well above the size the
+line reports and restart `fqd`. The size is the event's JSON, and the
+broker also counts a small message header, so a limit set at the size,
+or a few dozen bytes over it, still refuses the event. The daemon reads
+the broker's limit once,
+when it connects, so a daemon that is already running keeps refusing at
+the old limit. The restart is also what offers the row again: a held row
+is not retried during a run, because the same event would be refused the
+same way, but a new run's sweeper tries every row once. With its other
+settings at their defaults, `nats-server` will not take a `max_payload`
+above 64 MiB, because the limit may not exceed `max_pending`, which is
+64 MiB by default; going higher means raising that too. The dogfood
+broker runs at 16 MiB (`ops/dogfood/infra/nats.conf`). A planned change to the archive's
+encoding, the second half of the same issue, makes it about three times
+smaller, so after that upgrade some held rows fit under the limit they
+were held at. There is no release that archives the row without its
+state: until it fits, it stays held, and it costs its space in
+`worker.db`.
+
+**A stored event this build will not republish.** The sweeper will not
+republish a stored event that this build cannot read, or one that could
+not be that row's outcome. The case to expect is an event an older
+daemon stored and had not yet published when you upgraded across an
+event-schema bump. Republished, it would halt every durable consumer on
+the stream (see
+[When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
+So the sweeper holds the row instead, publishing neither the stored
+event nor `invocation.archived`. The log line is `stored terminal event
+cannot be republished; holding the row unarchived until an operator
+releases it`, with the `invocation_id` and the reason (for example, the
+`schema_version` it found and the versions this build reads).
+
+Nothing releases such a row on its own. No later build reads an older
 event version, so the hold lasts until you release the row. Releasing
 archives the invocation **without** its outcome, so keep a copy of the
 stored event first, because it is the only copy of the run's task status,
@@ -464,6 +562,18 @@ sqlite3 -cmd '.timeout 5000' "$db" \
 The sweeper reads every row afresh on each pass (every 10 s by default),
 so the next pass archives the released row, and the control plane's ack
 deletes it as usual.
+
+**A row whose ids cannot go on an event.** Every event names its agent
+and its invocation, so nothing can be published for a row whose
+`agent_id` is not a valid agent id (non-empty, with no dots, wildcards
+or whitespace) or whose `invocation_id` is not a UUID. The runtime never
+writes either, so such a row was edited by hand or written by a build
+with other rules. It used to end the sweeper's pass on every pass, as an
+oversized archive did; now it is held, and the log line is `this row's
+ids cannot go on an event; holding the row unarchived until an operator
+corrects it`, with the `invocation_id` and a reason that names the field
+and its value. Keep a copy of the row, then correct the field in
+`worker.db` with `sqlite3`, as above; the next pass archives the row.
 
 ## When a provider hangs or throttles
 
@@ -547,8 +657,9 @@ still in flight, `fq doctor` still counts it, and it keeps the slot it
 was admitted under until it ends for real — its resume runs on that
 slot rather than taking a new one. So a persistently throttled model
 cannot turn a capped agent's queue into a burst: whatever the pause
-does to the timing, no more than `max_concurrent` of that agent's
-invocations are ever in flight at once.
+does to the timing, a deferral and its resume never take that agent past
+`max_concurrent`. (An operator's `fq invocation resume` can: see
+"An operator's resume is not held at its agent's cap" below.)
 
 **A deploy during a cap hold costs the trigger nothing.** A cap hold is
 bounded by the invocation ahead of it rather than by a pause, so it
@@ -624,6 +735,30 @@ Either way, while it waits it counts against its agent's
 `max_concurrent`, so that agent's triggers are held behind it. And
 either way it is not being driven, so a plain `fq invocation drop` takes
 it (see [Triaging unresolved invocations](#triaging-unresolved-invocations)).
+
+**An operator's resume is not held at its agent's cap.** It counts
+against `max_concurrent` from the moment it is accepted, but the only
+thing it waits for is a worker permit, never a free slot for its agent.
+An ambiguous invocation holds no slot while it waits for triage, so if
+its agent is already running as many invocations as `max_concurrent`
+allows, the resumed run starts beside them as soon as a worker permit is
+free, and the agent is over its limit until one of its invocations ends.
+That can be a long time: a slot is held for a whole run, through a
+deferral too, so an agent at `max_concurrent: 1` with a long build can
+run two builds side by side for the whole of the shorter one. Running
+more than its limit at once needs `max_concurrent_invocations` above 1:
+at the default of 1 the resumed run waits for the one worker permit, so
+`fq doctor` can show the agent at `2/1` while only one of them runs.
+`fq invocation resume` says this in its human-readable output when it
+accepts. This is deliberate
+([#1009](https://github.com/bricef/factor-q/issues/1009)): you asked for
+that run by id, and holding it at the cap would mean giving it priority
+over the agent's held triggers, because a cap hold is a race between
+waiters, not a queue. If the limit matters for that agent, resume when
+`fq doctor` does not list it under `Agents at cap`; otherwise accept the
+overshoot. Startup recovery's resumes are counted the same way, but
+before the dispatcher admits anything, so no trigger joins them past the
+cap.
 
 What bounds the waiting triggers instead is the consumer's ack-pending
 window: the loop pulls without asking for a permit at all, so triggers
@@ -791,11 +926,12 @@ byte of state. A state blob of roughly 262,000 to 350,000 bytes,
 depending on the text, therefore makes the archive event larger than a
 stock 1 MiB `max_payload`, and one result at the default cap is most
 of the way there. When that happens the invocation completes, the
-archive publish fails, and every pass of the archive retry sweep stops
-at that row with `archive retry sweep failed; will retry next tick`,
-so rows after it in the pass are not archived either. A broker serving
-agents that read large outputs still needs a `max_payload` above the
-stock 1 MiB
+archive publish fails, and the archive sweeper holds that row
+unarchived, lists it in `fq doctor` and `fq status`, and goes on to the
+rows behind it (see
+[When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)).
+A broker serving agents that read large outputs still needs a
+`max_payload` above the stock 1 MiB
 ([see #981](https://github.com/bricef/factor-q/issues/981)).
 
 ## When an invocation stops making progress
@@ -1097,7 +1233,8 @@ nothing ([ADR-0032](../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
 That row is the only record linking a delivery to the run it started.
 The worker's WAL row is deleted once the run is archived, and the archive
 row is swept after `[state] retention_days`; the claim row is kept for
-`[state] trigger_claim_retention_days`, 30 days by default (see
+`[state] trigger_claim_retention_days`, 90 days by default, or
+indefinitely when that is negative (see
 [How long a claim is kept](#how-long-a-claim-is-kept)).
 
 `fq invocation show <id>` reads it:
@@ -1143,10 +1280,10 @@ help:
 Stranded trigger claims: 3 (2 issues) — claimed trigger deliveries that have not settled
   fq-triggers seq 1003: claimed 2026-11-10T09:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 8b000000-…
   -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 7 (an earlier incarnation of the stream, created 2026-01-02T03:03:05Z): claimed 2026-11-12T06:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 9c000000-…
   -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 1002: claimed 2026-11-12T08:12:00Z by 019a4c0e-…, a process that has exited; reserved invocation id 7a000000-…
   -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
 ```
@@ -1160,7 +1297,10 @@ never older than its message, so an older claim names a message the
 broker has dropped. The **redelivery window** is the sum of the trigger
 retry ladder (19m30s today), counted from when this daemon started. The
 **horizon** is `[state] trigger_claim_retention_days`, the age at which
-the retention sweep deletes a claim an exited process left.
+the retention sweep deletes a claim an exited process left. There is
+none when that setting is negative: claim rows are then kept
+indefinitely, and a never-started claim's line says so where it would
+name the horizon.
 
 - **Not started, awaiting redelivery** (not an issue). A process that has
   exited claimed a deliverable message, nothing records a run, and this
@@ -1237,7 +1377,7 @@ stale-worker windows:
 
 ```toml
 [state]
-trigger_claim_retention_days = 30 # the default; -1 keeps claim rows for ever
+trigger_claim_retention_days = 90 # the default; -1 keeps every claim row indefinitely
 ```
 
 The sweep deletes a claim marked started once it is older than the
@@ -1248,10 +1388,11 @@ may be a trigger it is still holding behind a paused model or a full
 agent. Age is counted from when the delivery was claimed (or adopted).
 
 **The floor is the stream's message age plus a day, two days today, and
-a smaller value is refused at startup.** The trigger stream keeps a
-message for a day after it was published, whether or not it has been
-acked: a trigger held for ten hours and then acked stays fourteen
-hours more. So a durable consumer that is deleted and recreated, or
+a non-negative value below it is refused at startup.** A negative value
+is not a window at all: it keeps every claim, as described below. The
+trigger stream keeps a message for a day after it was published,
+whether or not it has been acked: a trigger held for ten hours and then
+acked stays fourteen hours more. So a durable consumer that is deleted and recreated, or
 whose state is lost in a broker restore, replays the triggers published
 in the last day, and the started claims are what keep those from
 running twice. A claim is never older than its message, so a claim
@@ -1263,20 +1404,52 @@ argument reads.
 is at or above the floor. It shortens how long a finished run can show
 the delivery that started it: past the window, `fq invocation show`
 reads `none recorded` for a run that did come from the trigger stream.
-The default keeps the link about as long as `retention_days` keeps the
-archived run, but the claim always goes first: its window runs from
-when the delivery was claimed, the archive's from when the finished run
-was archived. The difference is the run's length plus the archive's
-lag, so a run that sat parked for three days reads `trigger: none
-recorded` for the last three days of its archived life. A higher number
-keeps the link longer at the cost of a larger table; the claim table
-has no index yet, so the reads that look a claim up by its run scan the
-rows the window keeps.
+The default, 90 days, keeps the link three times as long as the default
+`retention_days` keeps the archived run: once the archive row is swept,
+`fq invocation show` still finds the run by its row in the ownership
+table, which no window sweeps, and names its trigger until the claim
+goes. Set the two windows equal and the claim always goes first: its
+window runs from when the delivery was claimed, the archive's from when
+the finished run was archived. The difference is the run's length plus
+the archive's lag, so a run that sat parked for three days reads
+`trigger: none recorded` for the last three days of its archived life.
+A higher number keeps the link longer, at two costs. The table is
+larger, and it has no index yet
+([#989](https://github.com/bricef/factor-q/issues/989)), so the reads
+that look a claim up by its run scan the rows the window keeps. And a
+claim that never started a run (a delivery that died with a daemon)
+stays on the `fq doctor` report for longer: its line, and the non-zero
+exit of `fq doctor --fail-on-issues`, last until the claim is as old as
+the window, 90 days at the default where it was 30 before
+[#1014](https://github.com/bricef/factor-q/issues/1014). No command
+clears such a claim sooner. Requeuing its dead letter or publishing the
+work again runs it under a new claim and leaves this one where it is,
+and no verb deletes a claim row: only the sweep does. What an operator
+can do is lower the window, to no less than the floor, and restart the
+daemon, which reads the window only when it starts (`fq reload` does
+not). The report stops listing such claims older than the new window as
+soon as the daemon is up, and its first sweep, one interval later,
+deletes them, taking with them the trigger link of every run whose claim
+is older than the new window. Raising the number keeps rows from then on;
+it does not bring back a claim a shorter window has already deleted.
 
-**`-1` and `fq doctor`.** With claim rows kept for ever the report has
-no horizon. A never-started line stays for as long as its row exists,
-which is for ever, so `fq doctor --fail-on-issues` stays non-zero, and
-no command clears it.
+**Keeping claims indefinitely.** Set the window to `-1` (any negative
+value does the same) and the sweep never deletes a claim row. The link
+from every run to the trigger delivery that started it is then never
+dropped, and the table grows by a row for every trigger that starts a
+run, without bound: the reads that look a claim up by its run slow down
+as it grows, since the table has no index yet. The floor does not come
+into it, because nothing is deleted.
+
+`fq doctor` has no horizon then. It says so on the line of a claim that
+never started a run, which reads `this line stays while the claim row
+exists, and claim rows are kept indefinitely`. With no such claim the
+report says nothing about retention: on a healthy table it prints
+`Stranded trigger claims: none`. `fq doctor --json` always carries the
+block's `horizon_ms`, as `null`. Since the row is never swept, a
+never-started line never leaves the report: `fq doctor --fail-on-issues`
+stays non-zero until the window is set to a number again and the daemon
+restarted, as above.
 
 **The first sweep after an upgrade.** One sweep interval after a daemon
 that has this window starts (an hour by default), its first sweep
@@ -1286,14 +1459,20 @@ those runs reads `none recorded` from then on. An instance that set
 `retention_days = -1` to keep its history also needs
 `trigger_claim_retention_days = -1` to keep this link.
 
-**One constraint for later work.** `fq doctor` tells a claim whose run
-finished from one that never started by the run's row in the control
-plane's ownership table (`coordination_invocation_owner`), which has no
-retention today. If that table ever gains a window shorter than this
-one, an old claim whose run finished loses its record of the run, and
-the report would turn "started, never marked" into "never started". Keep
-any such window at or above this one, or give the claim its own record
-of the start.
+**One constraint for later work.** Two things here depend on the control
+plane's ownership table (`coordination_invocation_owner`) having no
+retention, which it has none of today. `fq doctor` tells a claim whose
+run finished from one that never started by the run's row there: if
+that table ever gains a window shorter than this one, an old claim whose
+run finished loses its record of the run, and the report would turn
+"started, never marked" into "never started". And once a finished run's
+archive row is swept, `fq invocation show` finds the run by that same
+row (or by its cost rows, if it made a model call), which is what lets
+it show the trigger this window keeps past the archive's window: a
+shorter window on the ownership table could leave such a run unfindable
+while its claim, and so its trigger link, is still kept. Keep any such
+window at or above this one; for the report, the alternative is to give
+the claim its own record of the start.
 
 ## Notifications and alerts
 
