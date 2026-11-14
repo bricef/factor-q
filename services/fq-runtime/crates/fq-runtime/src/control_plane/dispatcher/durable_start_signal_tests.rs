@@ -773,13 +773,18 @@ async fn a_setup_longer_than_the_ack_window_is_kept_alive_and_delivered_once() {
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
 }
 
-/// The setup's keepalive ends at the durable start. The run sets up for
-/// longer than the window, makes its first WAL write, and then goes on for
-/// longer than the window again: the mark lands at once, the delivery is
-/// acked, and nothing is sent for it after that ack, however long the run
-/// goes on.
+/// The setup's keepalive ends with the durable start, and nothing is sent
+/// for the delivery once it is acked. The run sets up for longer than the
+/// window, makes its first WAL write, and then goes on for longer than the
+/// window again: the mark lands at once, the delivery is acked, and the
+/// ack is the last thing sent, however long the run goes on.
+///
+/// One in-progress ack can still go out after the first WAL write and
+/// before the ack, when the keepalive's tick is due in the very poll that
+/// fires the signal: `handle` sees the signal only on its loop's next
+/// turn. That is harmless, and this test does not forbid it.
 #[tokio::test]
-async fn no_keepalive_is_sent_after_the_durable_start() {
+async fn nothing_is_sent_after_the_ack_while_the_run_goes_on() {
     let mut pulled = Pulled::setting_up(
         Setup::Takes(LONG_SETUP),
         Resolve::Fire,
