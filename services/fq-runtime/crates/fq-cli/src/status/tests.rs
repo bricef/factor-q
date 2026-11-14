@@ -22,6 +22,11 @@ fn report() -> StatusReport {
     StatusReport {
         mcp_servers: Vec::new(),
         throttled_models: Vec::new(),
+        // Swept, nothing held: the steady state, which says nothing.
+        archive_sweep: fq_ops::health::ArchiveSweep {
+            last_pass_at_ms: Some(1_700_000_000_000),
+            holds: Vec::new(),
+        },
         version: "0.1.0+deadbee".to_string(),
         drain_deadline_ms: 180_000,
         stuck_after_ms: 4_210_000,
@@ -682,5 +687,70 @@ fn throttled_models_render_their_pause_and_permits() {
     assert!(
         !quiet.contains("Throttled models"),
         "nothing throttled, nothing said: {quiet}"
+    );
+}
+
+/// The rows the archive sweeper holds are a section of their own: how
+/// many, and for each the invocation, the reason and the remedy, as `fq
+/// doctor` prints them. Swept and nothing held, no section.
+#[test]
+fn archive_holds_render_with_their_reason_and_remedy() {
+    let held = fq_ops::health::ArchiveHold {
+        invocation_id: "019a0000-0000-7000-8000-00000000000a".to_string(),
+        agent_id: "researcher".to_string(),
+        reason: fq_ops::health::ArchiveHoldReason::PayloadTooLarge {
+            event_type: "invocation_archived".to_string(),
+            size_bytes: 1_052_275,
+            limit_bytes: 1_048_576,
+        },
+        remedy: "raise the broker's max_payload above 1052275 bytes, then restart fqd".to_string(),
+    };
+    let doc = StatusDocument {
+        daemon: Some(StatusReport {
+            archive_sweep: fq_ops::health::ArchiveSweep {
+                last_pass_at_ms: Some(1_700_000_000_000),
+                holds: vec![held],
+            },
+            ..report()
+        }),
+        ..answered()
+    };
+    let out = render_status_human(&doc);
+    assert!(
+        out.contains(
+            "\nArchive holds: 1 (not archived until an operator acts)\n  \
+             019a0000-0000-7000-8000-00000000000a (researcher): `invocation_archived` is \
+             1052275 bytes, over the broker's max_payload of 1048576\n  -> raise the broker's \
+             max_payload above 1052275 bytes, then restart fqd\n"
+        ),
+        "got:\n{out}"
+    );
+
+    let quiet = render_status_human(&answered());
+    assert!(
+        !quiet.contains("Archive holds"),
+        "swept, nothing held, nothing said: {quiet}"
+    );
+}
+
+/// Before the sweeper's first pass this start, an empty list is not none:
+/// status says the holds are not yet known rather than saying nothing,
+/// which would read as none.
+#[test]
+fn archive_holds_before_the_first_pass_are_not_yet_known() {
+    let doc = StatusDocument {
+        daemon: Some(StatusReport {
+            archive_sweep: fq_ops::health::ArchiveSweep::default(),
+            ..report()
+        }),
+        ..answered()
+    };
+    let out = render_status_human(&doc);
+    assert!(
+        out.contains(
+            "\nArchive holds: not yet known — the archive sweeper has not finished a pass since \
+             this daemon started"
+        ),
+        "got:\n{out}"
     );
 }

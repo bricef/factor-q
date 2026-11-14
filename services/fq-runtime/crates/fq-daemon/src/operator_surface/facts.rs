@@ -71,4 +71,22 @@ pub struct DaemonFacts {
     /// report's "this line stays until the claim is N old" is the sweep's
     /// own schedule. `None` when claim rows are kept for ever.
     pub trigger_claim_retention_ms: Option<i64>,
+    /// The rows the worker's archive sweeper is holding rather than
+    /// archiving: the same value the sweeper writes. Both health reports
+    /// list them with their reasons and remedies, because a held row is
+    /// otherwise visible only in the daemon log.
+    pub archive_holds: std::sync::Arc<fq_runtime::worker::ArchiveHolds>,
+}
+
+impl DaemonFacts {
+    /// Report the holds of `holds`'s sweeper. Separate from the rest
+    /// because the sweeper is built beside the facts, not from the config
+    /// they come from.
+    pub fn with_archive_holds(
+        mut self,
+        holds: std::sync::Arc<fq_runtime::worker::ArchiveHolds>,
+    ) -> Self {
+        self.archive_holds = holds;
+        self
+    }
 }

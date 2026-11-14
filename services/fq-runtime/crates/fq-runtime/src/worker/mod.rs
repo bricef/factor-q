@@ -34,7 +34,7 @@ pub mod store;
 pub mod workspace;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
-pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
+pub use archive_retry::{ArchiveHolds, ArchiveRetryError, ArchiveRetrySweeper};
 pub use deferral::{DeferralQueue, DueResume};
 pub use drain::{DrainReason, DrainRequest, DrainSignal, DrainState};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};

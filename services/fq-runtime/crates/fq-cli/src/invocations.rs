@@ -220,17 +220,29 @@ pub(crate) async fn invocation_resume(
     if json {
         println!("{}", serde_json::to_string_pretty(&receipt)?);
     } else {
-        // A receipt says what was done, not where the run stands, so the
-        // line says what the daemon does with it (#994) rather than
-        // claiming it is already running.
-        println!("Resume accepted for invocation {id}.");
-        println!(
-            "It runs under [worker] max_concurrent_invocations like any other invocation: \
-             at once if a worker is free, otherwise when one frees."
-        );
-        println!("Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.");
+        print!("{}", format_resume_accepted(id));
     }
     Ok(())
+}
+
+/// What `fq invocation resume` prints once the daemon has accepted.
+///
+/// A receipt says what was done, not where the run stands, so the lines
+/// say what the daemon does with it (#994) rather than claiming it is
+/// already running. The agent's cap is the one bound the run is not held
+/// at (issue 1009): the sentence is printed every time, and worded so it
+/// is true of every agent, because the receipt names only the invocation
+/// and knowing the agent's `max_concurrent` would take two more reads.
+/// Pure; covered by unit tests.
+fn format_resume_accepted(id: &str) -> String {
+    format!(
+        "Resume accepted for invocation {id}.\n\
+         It runs under [worker] max_concurrent_invocations like any other invocation: \
+         at once if a worker is free, otherwise when one frees.\n\
+         If its agent sets max_concurrent, this run counts against that limit but is not held \
+         back by it, so the agent can be over its limit until one of its invocations ends.\n\
+         Follow with `fq invocation show {id}` or `fq invocation transcript {id}`.\n"
+    )
 }
 
 #[derive(serde::Serialize, Debug)]

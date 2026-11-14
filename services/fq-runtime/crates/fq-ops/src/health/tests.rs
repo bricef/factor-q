@@ -160,3 +160,60 @@ fn an_active_consumer_without_the_held_duplicate_count_reads_it_as_zero() {
         }
     );
 }
+
+/// A held row's reason on the wire: externally tagged like every other
+/// health enum, so a reader tells the two causes apart by key, and each
+/// carries what its line needs.
+#[test]
+fn an_archive_hold_reads_back_with_its_reason_tagged() {
+    let hold = ArchiveHold {
+        invocation_id: "019a0000-0000-7000-8000-000000000001".to_string(),
+        agent_id: "researcher".to_string(),
+        reason: ArchiveHoldReason::PayloadTooLarge {
+            event_type: "invocation_archived".to_string(),
+            size_bytes: 1_052_275,
+            limit_bytes: 1_048_576,
+        },
+        remedy: "raise the broker's max_payload".to_string(),
+    };
+    let wire = serde_json::to_value(&hold).unwrap();
+    assert_eq!(
+        wire["reason"],
+        serde_json::json!({"payload_too_large": {
+            "event_type": "invocation_archived",
+            "size_bytes": 1_052_275,
+            "limit_bytes": 1_048_576,
+        }})
+    );
+    assert_eq!(serde_json::from_value::<ArchiveHold>(wire).unwrap(), hold);
+    assert_eq!(
+        hold.reason.summary(),
+        "`invocation_archived` is 1052275 bytes, over the broker's max_payload of 1048576"
+    );
+
+    let refused = ArchiveHoldReason::StoredEventRefused {
+        detail: "stored terminal event is unreadable: bad envelope".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap(),
+        serde_json::json!({"stored_event_refused": {
+            "detail": "stored terminal event is unreadable: bad envelope",
+        }})
+    );
+    assert_eq!(
+        refused.summary(),
+        "stored terminal event is unreadable: bad envelope",
+        "its own words, verbatim"
+    );
+
+    let malformed = ArchiveHoldReason::MalformedRow {
+        detail: "agent_id \"a b\" is not an agent id".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&malformed).unwrap(),
+        serde_json::json!({"malformed_row": {
+            "detail": "agent_id \"a b\" is not an agent id",
+        }})
+    );
+    assert_eq!(malformed.summary(), "agent_id \"a b\" is not an agent id");
+}

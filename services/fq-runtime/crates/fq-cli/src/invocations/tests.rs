@@ -130,3 +130,22 @@ fn format_trigger_delivery_names_the_delivery_or_its_absence() {
          window"
     );
 }
+
+/// What an accepted `fq invocation resume` prints (#994, issue 1009): the
+/// worker cap the run waits under, then the agent's cap it counts against
+/// but is not held at, then where to follow it. Each its own line, in
+/// that order.
+#[test]
+fn format_resume_accepted_names_the_worker_cap_and_the_agent_cap_it_is_not_held_at() {
+    let id = "019a2b3c-0000-7000-8000-000000000001";
+    assert_eq!(
+        format_resume_accepted(id),
+        "Resume accepted for invocation 019a2b3c-0000-7000-8000-000000000001.\n\
+         It runs under [worker] max_concurrent_invocations like any other invocation: at once \
+         if a worker is free, otherwise when one frees.\n\
+         If its agent sets max_concurrent, this run counts against that limit but is not held \
+         back by it, so the agent can be over its limit until one of its invocations ends.\n\
+         Follow with `fq invocation show 019a2b3c-0000-7000-8000-000000000001` or \
+         `fq invocation transcript 019a2b3c-0000-7000-8000-000000000001`.\n"
+    );
+}

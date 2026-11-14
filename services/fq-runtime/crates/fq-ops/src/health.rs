@@ -436,6 +436,120 @@ impl AgentAtCap {
     }
 }
 
+/// A finished invocation's row the worker's archive sweeper is holding
+/// rather than archiving, as every operator surface reads it.
+///
+/// The sweeper publishes nothing more for a held row: whatever it owed
+/// the bus and could publish before the hold, such as a terminal event
+/// whose first publish was lost, has gone out, and what it could not,
+/// `invocation.archived` above all, does not. So the control plane sees
+/// the invocation as not archived. The row stays in the worker's store,
+/// whole, and every other row is archived as usual. The list is the
+/// daemon's memory of its own sweeps: a row held by an earlier run is
+/// offered again when the daemon starts, and is listed again once this
+/// run's sweeper has held it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ArchiveHold {
+    /// The invocation whose row is held, in full.
+    pub invocation_id: String,
+    /// The agent that ran it.
+    pub agent_id: String,
+    /// Why the sweeper holds it.
+    pub reason: ArchiveHoldReason,
+    /// What lifts the hold, in the daemon's words: what to change or do,
+    /// and where the operating guide covers it.
+    pub remedy: String,
+}
+
+/// Why the archive sweeper holds a row. Externally tagged, for the same
+/// encoding reason as [`StreamHealth`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveHoldReason {
+    /// An event the row has to publish is larger than the broker accepts:
+    /// its stored terminal event, or `invocation.archived`, which carries
+    /// the run's whole state. The same event is refused on every attempt,
+    /// and the daemon reads the broker's `max_payload` once, when it
+    /// connects, so the sweeper does not offer the row again in this run;
+    /// the next start offers it again.
+    PayloadTooLarge {
+        /// The refused event's type, spelled as its own `event_type` on
+        /// the wire.
+        event_type: String,
+        /// The event's serialised size, in bytes.
+        size_bytes: u64,
+        /// The broker's `max_payload` it exceeded, in bytes.
+        limit_bytes: u64,
+    },
+    /// The row's stored terminal event must not be republished: this
+    /// build cannot read it, or it could not be this row's outcome. The
+    /// case to expect is an event an older build stored and had not
+    /// published when the daemon was upgraded across an event-schema
+    /// change; republished, it would halt every durable consumer on the
+    /// stream. No later build reads an older event version, so the hold
+    /// lasts until an operator releases the row.
+    StoredEventRefused {
+        /// Why, verbatim: what the event failed to parse as, or what it
+        /// turned out to be.
+        detail: String,
+    },
+    /// The row's ids cannot go on an event: its `agent_id` is not a valid
+    /// agent id, or its `invocation_id` is not a UUID. The runtime never
+    /// writes either, so the row was edited by hand or written by a build
+    /// with other rules. The hold lasts until an operator corrects it.
+    MalformedRow {
+        /// Which field, its value, and what is wrong with it.
+        detail: String,
+    },
+}
+
+impl ArchiveHoldReason {
+    /// The reason as one phrase, for every surface that renders it.
+    pub fn summary(&self) -> String {
+        match self {
+            ArchiveHoldReason::PayloadTooLarge {
+                event_type,
+                size_bytes,
+                limit_bytes,
+            } => format!(
+                "`{event_type}` is {size_bytes} bytes, over the broker's max_payload of \
+                 {limit_bytes}"
+            ),
+            ArchiveHoldReason::StoredEventRefused { detail }
+            | ArchiveHoldReason::MalformedRow { detail } => detail.clone(),
+        }
+    }
+}
+
+/// The worker's archive sweeper as both health reports read it: whether
+/// it has looked yet, and the rows it holds.
+///
+/// The holds are known only once the sweeper has finished a pass over
+/// every pending row since the daemon started. Its first pass comes one
+/// `[worker] archive_retry_interval_ms` after start, and a pass the bus
+/// ends early does not count, so until then an empty list means not yet
+/// known, not none. Not yet known is not an issue: it is the absence of a
+/// finding, and every start goes through it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, schemars::JsonSchema)]
+pub struct ArchiveSweep {
+    /// When the sweeper last finished a pass, epoch milliseconds on the
+    /// daemon's clock. Absent until its first finished pass of this start;
+    /// a report from a daemon that does not send it reads the same way.
+    #[serde(default)]
+    pub last_pass_at_ms: Option<i64>,
+    /// Every row held now, in invocation-id order.
+    #[serde(default)]
+    pub holds: Vec<ArchiveHold>,
+}
+
+impl ArchiveSweep {
+    /// Whether the holds are known: the sweeper has finished a pass since
+    /// the daemon started.
+    pub fn has_swept(&self) -> bool {
+        self.last_pass_at_ms.is_some()
+    }
+}
+
 /// A trigger claim that has not settled and will not settle on its own,
 /// as `control.doctor` reports it: a claimed delivery that has neither
 /// been released nor recorded as started.

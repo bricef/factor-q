@@ -119,7 +119,7 @@
   "trigger_claims": {
     "redelivery_window_ms": 1170000,
     "stream_max_age_ms": 86400000,
-    "horizon_ms": 2592000000,
+    "horizon_ms": 7776000000,
     "stranded": [
       {
         "delivery": {
@@ -167,5 +167,9 @@
         "invocation_status": null
       }
     ]
+  },
+  "archive_sweep": {
+    "last_pass_at_ms": null,
+    "holds": []
   }
 }

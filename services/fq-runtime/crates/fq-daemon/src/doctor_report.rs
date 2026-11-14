@@ -78,6 +78,7 @@ pub(crate) fn register_doctor_report(
     let worker_id: Arc<str> = facts.worker_id.as_str().into();
     let dispatching_since_ms = facts.dispatching_since_ms;
     let claim_retention_ms = facts.trigger_claim_retention_ms;
+    let archive_holds = facts.archive_holds.clone();
     let decl = fq_ops::Report::new::<DoctorParams, DoctorReport>(
         fq_ops::ControlReport::Doctor,
         "Durable-execution health in one report: workers, current work, ambiguity, \
@@ -85,13 +86,16 @@ pub(crate) fn register_doctor_report(
         fq_ops::Stability::Experimental,
     )
     .description(
-        "A composite: the four checks are read together, at one instant, by the daemon \
+        "A composite: its checks are read together, at one instant, by the daemon \
          that owns the work being reported on — which is also the cost of asking. This \
          report cannot describe a daemon that is not running, and the absence of an \
          answer is itself the finding rather than a transport failure to retry. \
          The checks that count as *issues* are stale workers, stuck in-flight work, \
-         ambiguous invocations and permanent failures; in-flight work that is merely \
-         running is healthy, and the dead-letter line is informational. `stuck` means an \
+         ambiguous invocations, permanent failures (dead-lettered triggers among them), a \
+         consumer that is missing, unreadable, stuck or halted, an unavailable MCP server, \
+         a stranded trigger claim whose finding is an issue, and a row the archive sweeper \
+         holds; in-flight work that is merely running is healthy, and the throttled-model \
+         and agents-at-cap lines are informational. `stuck` means an \
          in-flight invocation that has crossed no step boundary within `stuck_after_ms`, \
          with no tool or model call open recently enough to explain the silence. That \
          threshold is derived from this daemon's own call deadlines — twice the longest \
@@ -113,7 +117,16 @@ pub(crate) fn register_doctor_report(
          may be waiting behind a paused model or a full agent, and nothing on the claim \
          tells that apart from one that will never start. Nor is a claim whose message is \
          gone after its run started, or one an exited process left that is older than the \
-         retention window.",
+         retention window. \
+         `archive_sweep.holds` lists every finished invocation's row the worker's archive \
+         sweeper is holding rather than archiving, and each is an issue: an event the row \
+         has to publish is larger than the broker accepts, its stored terminal event must \
+         not be republished, or its ids cannot go on an event, and none lifts on its own. \
+         Each carries the reason and the remedy. The list is the daemon's memory of this \
+         run's sweeps: a row held by an earlier run is offered again at start and listed \
+         again once it is held again. Until the sweeper has finished its first pass of this \
+         start, `archive_sweep.last_pass_at_ms` is absent and the holds are not yet known; \
+         that is not an issue, since it is the absence of a finding, not a finding.",
     );
     registry
         .report::<DoctorParams, DoctorReport, _, _>(decl, move |_params: DoctorParams| {
@@ -123,6 +136,7 @@ pub(crate) fn register_doctor_report(
             let throttle = throttle.clone();
             let agent_caps = agent_caps.clone();
             let worker_id = worker_id.clone();
+            let archive_holds = archive_holds.clone();
             async move {
                 let internal = |e: fq_runtime::views::ViewsError| WireError::Internal {
                     message: e.to_string(),
@@ -199,7 +213,9 @@ pub(crate) fn register_doctor_report(
                 .with_agents_at_cap(agent_caps.snapshot())
                 // Judged against this process's own id and start, which
                 // no store fold carries.
-                .with_trigger_claims(trigger_claims))
+                .with_trigger_claims(trigger_claims)
+                // The archive sweeper's live state, like the throttle's.
+                .with_archive_sweep(archive_holds.report()))
             }
         })
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;

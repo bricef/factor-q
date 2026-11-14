@@ -169,6 +169,7 @@ fn render_status_human(doc: &StatusDocument) -> String {
     out.push_str(&render_stores_human(&report.stores));
     out.push_str(&render_mcp_servers_human(&report.mcp_servers));
     out.push_str(&render_throttled_models_human(&report.throttled_models));
+    out.push_str(&render_archive_holds_human(&report.archive_sweep));
 
     // Recovery state: points the operator at the commands they'd need
     // if anything is off; renders "All clear." otherwise.
@@ -268,6 +269,30 @@ fn render_throttled_models_human(models: &[fq_ops::health::ThrottledModel]) -> S
         out.push_str(&format!("  {}\n", throttled_model_line(model)));
     }
     out
+}
+
+/// Pure: the finished runs whose rows the archive sweeper is holding
+/// rather than archiving, with the count, and each row's reason and remedy
+/// as `fq doctor` prints them. Absent when the sweeper has looked and holds
+/// nothing, like the MCP and throttle blocks; before its first pass this
+/// start it says the holds are not yet known, since saying nothing would
+/// read as none. Whether a hold is an issue is `fq doctor`'s call.
+fn render_archive_holds_human(sweep: &fq_ops::health::ArchiveSweep) -> String {
+    let not_swept = !sweep.has_swept();
+    match (sweep.holds.is_empty(), not_swept) {
+        (true, false) => String::new(),
+        (true, true) => format!("\nArchive holds: {}\n", crate::doctor::NOT_YET_SWEPT),
+        (false, _) => format!(
+            "\nArchive holds: {} (not archived until an operator acts{})\n{}",
+            sweep.holds.len(),
+            if not_swept {
+                "; the sweeper has not finished a pass yet, so there may be more"
+            } else {
+                ""
+            },
+            crate::doctor::archive_hold_lines(&sweep.holds)
+        ),
+    }
 }
 
 /// One throttled model as a phrase, shared by the human report and its
