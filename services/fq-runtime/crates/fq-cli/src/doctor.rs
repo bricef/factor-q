@@ -27,7 +27,10 @@ use fq_ops::surface::DoctorReport;
 
 use crate::edge_call::edge_client_for;
 
+mod archive_holds;
 mod trigger_claims;
+use archive_holds::render_archive_holds;
+pub(crate) use archive_holds::{NOT_YET_SWEPT, hold_lines as archive_hold_lines};
 use trigger_claims::render_trigger_claims;
 
 /// Pure: render the human-readable `fq doctor` report, mirroring
@@ -134,6 +137,11 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
     // run, so this is the only place a delivery that never started one
     // shows up. Above the dead letters, which it points at.
     out.push_str(&render_trigger_claims(&report.trigger_claims));
+
+    // Archive holds (#981): finished runs whose rows the archive sweeper
+    // will not archive, each with its reason and remedy. Otherwise only
+    // the daemon log says so. Not yet known until its first pass.
+    out.push_str(&render_archive_holds(&report.archive_sweep));
 
     // Dead-letters (#49): exhausted triggers the dispatcher consumed.
     if report.dead_letters.exhausted_triggers > 0 {

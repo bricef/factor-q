@@ -177,11 +177,14 @@ pub struct ToolDispatchedPayload {
 /// payload, etc.) is in the worker's WAL and surfaced via
 /// `fq invocation resume`/`drop` (step 9).
 ///
-/// A failed automatic resume also rides this event (#64) with
-/// the sentinel `stuck_entity: "recovery"`; there is no stuck
-/// dispatch in that mode, so `stuck_call_id` carries the
-/// invocation id and `note` carries the resume error. Emission
-/// is guarded once-per-invocation by the worker store's
+/// An automatic resume that could not be carried out — the
+/// invocation left in flight, or its row unreadable — also rides
+/// this event (#64) with the sentinel `stuck_entity: "recovery"`;
+/// there is no stuck dispatch in that mode, so `stuck_call_id`
+/// carries the invocation id and `note` carries the resume error.
+/// A resume that returns an error after its run reached a
+/// terminal event does not (#1005). Emission is guarded
+/// once-per-invocation by the worker store's
 /// `ambiguous_reported_at` stamp (see `mark_ambiguous_reported`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationAmbiguousPayload {
