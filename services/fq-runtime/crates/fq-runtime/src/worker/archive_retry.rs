@@ -1719,16 +1719,18 @@ mod tests {
         serde_json::to_vec(&event).unwrap().len()
     }
 
-    /// An `invocation.archived` whose JSON is 31 bytes under a stock
+    /// An `invocation.archived` whose JSON is 31 to 34 bytes under a stock
     /// broker's limit, sent with a 63-byte header: refused for its size,
     /// so the row is held and the row behind it archived in the same pass.
     #[tokio::test]
     async fn an_archive_under_the_limit_by_less_than_its_header_is_held() {
         let world = InTheBand::new(|row, worker| {
-            // Each byte of state is `200,` on the wire, four bytes.
-            row.state_blob = vec![200];
-            let one = archived_json_len(row, worker);
-            row.state_blob = vec![200; 1 + (STOCK_MAX_PAYLOAD - UNDER_BY - one) / 4];
+            // The state is base64 on the wire, four bytes for every three,
+            // so the JSON grows four bytes at a time and lands up to three
+            // short of the mark.
+            row.state_blob = Vec::new();
+            let empty = archived_json_len(row, worker);
+            row.state_blob = vec![200; 3 * ((STOCK_MAX_PAYLOAD - UNDER_BY - empty) / 4)];
             let body = archived_json_len(row, worker);
             assert!(
                 body < STOCK_MAX_PAYLOAD && body + HEADER > STOCK_MAX_PAYLOAD,

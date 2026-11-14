@@ -109,21 +109,6 @@ async fn a_tool_answer_past_a_stock_max_payload_publishes_capped() {
     }
 }
 
-/// What a broker counts against its `max_payload` for `event`: its JSON
-/// and the message-id header the bus publishes with it.
-///
-/// Measured from the JSON, not from `wire_size`, which counts the
-/// body alone today: adding the header to whatever `wire_size` returns
-/// would count it twice once `wire_size` counts it too.
-fn counted_by_the_broker(event: &Event) -> usize {
-    let body = serde_json::to_vec(event).expect("the event serialises");
-    let header = format!(
-        "NATS/1.0\r\nNats-Msg-Id: {}\r\n\r\n",
-        event.envelope.event_id
-    );
-    body.len() + header.len()
-}
-
 /// Where a stock broker stops taking the archive, counted in capped
 /// answers (#981). The archive writes the run's state as base64, four
 /// bytes for every three, and the default cap is a quarter of a stock
@@ -157,7 +142,7 @@ async fn two_capped_answers_archive_on_a_stock_broker_and_three_do_not() {
             .into_iter()
             .find(|e| matches!(e.payload, EventPayload::InvocationArchived(_)))
             .expect("the run publishes its archive");
-        archives.push(counted_by_the_broker(&archive));
+        archives.push(wire_size(&archive));
     }
 
     let [one, two, three] = archives[..] else {
@@ -582,17 +567,22 @@ async fn a_triggered_too_large_for_the_broker_is_recorded_by_its_failed_alone() 
     assert!(llm.requests().is_empty(), "the model is never asked");
 }
 
-/// After the run has ended (#828, see #981): the archive behind
-/// `completed` carries the conversation at about four times its size, so
-/// here it is the only event too large. The row is already terminal, so
-/// this is not a failure of the invocation: no `failed` follows the
-/// `completed`, and the refusal comes back exactly as it did before
-/// #828, with the row left for the archive sweeper.
+/// After the run has ended (#828): the archive behind `completed` is the
+/// only event too large. It carries the run's state, the conversation
+/// with the 150 KiB answer in it, as base64, four bytes for every three,
+/// so it is a third larger than the `llm.request` that carried the same
+/// conversation. Measured on the wire, header included: that request is
+/// 155,334 bytes and the archive 206,642 (154,529 bytes of state), so a
+/// limit of 180 KiB (184,320 bytes) sits between them with room either
+/// side. The row is already terminal, so this is not a failure of the
+/// invocation: no `failed` follows the `completed`, and the refusal comes
+/// back exactly as it did before #828, with the row left for the archive
+/// sweeper.
 #[tokio::test]
 async fn an_archive_too_large_after_completed_is_not_an_invocation_failure() {
     let root = tempfile::tempdir().expect("workspace root");
     let world = world_with_workspaces(831, root.path()).await;
-    let limit = 400 * 1024;
+    let limit = 180 * 1024;
     world.sink.set_max_payload(limit);
     let llm = FixtureClient::new();
     load_oversized_tool_output(&world, &llm, 150 * 1024);
