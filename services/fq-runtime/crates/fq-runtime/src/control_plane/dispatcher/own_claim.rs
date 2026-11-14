@@ -32,6 +32,11 @@
 //!    the next binary is this case too, if a copy reaches this process
 //!    before it exits; that copy then stops at `handle`'s own drain check,
 //!    after the re-take, and leaves the claim to the next binary again.
+//!    So is one double fault: a run that failed for good before its first
+//!    WAL write, whose claim's release before its ack failed and whose ack
+//!    was lost. Nothing of it is on record, so the trigger runs once more,
+//!    where before every copy was dropped until a false
+//!    `trigger_exhausted`.
 //!
 //! **Being handled.** Every copy notes the invocation id it will run under
 //! in [`Handling`] before it writes that id on a claim (a fresh claim, an
@@ -182,8 +187,9 @@ impl TriggerDispatcher {
                     "taking again a trigger claim this daemon holds that no copy is handling and \
                      whose run has no start on record, and running the trigger under a new \
                      invocation id: the copy that took it ended before its run's first WAL write \
-                     and left the delivery unsettled (its task died, the claim's release before its \
-                     NAK failed, or a drain or a shutdown left it for the next binary)");
+                     and left the delivery unsettled (its task died; the claim's release before its \
+                     NAK failed, or before its ack, which was lost; or a drain or a shutdown left it \
+                     for the next binary)");
                 self.bus
                     .consumer_ledger()
                     .note_abandoned_claim_retaken(CONSUMER_NAME);

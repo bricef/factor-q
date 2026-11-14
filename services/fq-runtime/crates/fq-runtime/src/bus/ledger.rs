@@ -42,7 +42,8 @@ pub struct ConsumerRecord {
     /// which no copy was handling any more and whose run had no start on
     /// record: the copy that took it ended before its first WAL write and
     /// left the delivery unsettled (its task died, or the release before
-    /// its NAK failed). Each one ran the trigger under a new invocation id.
+    /// its NAK failed, or before its ack, which was lost). Each one ran the
+    /// trigger under a new invocation id.
     pub abandoned_claim_retaken: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,

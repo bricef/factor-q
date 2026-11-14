@@ -301,10 +301,11 @@ fn malformed_suffix(malformed_acked: u64) -> String {
 /// (#809, #968), and a refused copy starts nothing and mints no id, so
 /// this and its warn line in the daemon log are its only trace. The two
 /// are told apart by when the copy arrived, because they are different
-/// facts: a copy that came after its run's start was recorded was
-/// acked, while one that came before a start was recorded on a claim
-/// this daemon holds was left unacked for a first copy that may or may
-/// not settle it ([`held_duplicate_note`]). The second is not called
+/// facts: a copy that came after its run's start was recorded, on the
+/// claim or, for a claim of this daemon's no copy was handling, in the
+/// run's own records, was acked, while one that came before a start was
+/// recorded on a claim this daemon holds was left unacked for the copy
+/// still handling it ([`held_duplicate_note`]). The second is not called
 /// "held": on this report that word is the admission holds' (`Agents at
 /// cap`). Both counts are in the daemon's memory, which the phrase says.
 fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> String {
@@ -330,24 +331,25 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
 /// recorded, saying what that count can and cannot tell, or nothing when
 /// it is zero.
 ///
-/// It does not say whether anything is wrong, because the claim does
-/// not. The claim's first copy may still be waiting or starting: a
+/// It does not say whether anything is wrong. Such a copy met a claim a
+/// copy of its trigger was still handling, waiting or starting: a
 /// delivery is redelivered under it when its keepalive stops landing for
-/// a whole ack window. Or this daemon may never
-/// settle the claim, and every delivery of that trigger is dropped the
-/// same way until it is dead-lettered. The stranded-claims block of the
-/// same report lists such a claim once a run is on record for it, which
-/// the line points at; one with no run on record is not listed at all,
-/// so this line and the log are where it shows.
+/// a whole ack window, and the first copy still settles it. A copy whose
+/// claim no copy is handling any more is not counted here unless whether
+/// its run is on record could not be read (#967); the dispatcher settles
+/// it by that record instead. The stranded-claims block of the same
+/// report lists such a claim once a run is on record for it and its
+/// mark is overdue, which the line points at.
 fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
     if held_duplicate_dropped == 0 {
         return String::new();
     }
     "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
-     start on it, left unacked: its first copy was still waiting or starting, or this daemon \
-     will never settle that claim, and the claim does not say which; the daemon log has a warn \
-     line for each with its subject, sequence, attempt and the claim's age, and such a claim \
-     whose run is on record is listed under \"Stranded trigger claims\" below\n"
+     start on it while a copy of the trigger was still handling it, left unacked for that copy to \
+     settle, or one that came when whether the claim's run is on record could not be read; the \
+     daemon log has a warn line for each with its subject, sequence, attempt, the claim's age and \
+     why, and such a claim whose run is on record is listed under \"Stranded trigger claims\" \
+     below\n"
         .to_string()
 }
 
