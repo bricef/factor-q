@@ -286,10 +286,12 @@ impl TriggerDispatcher {
     }
 }
 
-/// Reset the delivery's ack window without counting as a delivery.
-/// A failure keeps the hold going: the worst case is the window
-/// expiring and JetStream redelivering, which is where we would be
-/// without the hold at all.
+/// Reset the delivery's ack window without counting as a delivery: the
+/// holds, the wait for a worker permit, a run's setup up to its durable
+/// start, and the mark that records that start all send one every
+/// [`HOLD_KEEPALIVE`]. A failure changes nothing for the caller: the
+/// worst case is the window expiring and JetStream redelivering, which is
+/// where the delivery would be without the keepalive at all.
 pub(super) async fn keep_alive(
     msg: &async_nats::jetstream::Message,
     trigger_id: Option<uuid::Uuid>,
@@ -298,7 +300,8 @@ pub(super) async fn keep_alive(
         warn!(
             error = %err,
             trigger_id = %trigger_name(trigger_id),
-            "failed to keep a held trigger alive"
+            "failed to send a trigger delivery's in-progress ack; if none lands for a whole ack \
+             window, the broker redelivers it"
         );
     }
 }

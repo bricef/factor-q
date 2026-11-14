@@ -10,13 +10,12 @@
 //! so the log line and the count are the only record of it, and each arm
 //! must move its own count and not the other's.
 //!
-//! The held copy is made the way a slow start makes one. Nothing keeps a
-//! delivery alive between its worker permit and its first WAL write, so a
-//! start slower than the ack window is redelivered while its first copy is
-//! still setting up. The first copy is parked in workspace provisioning by
-//! the real `ReducerRunner` (the harness is `boundary_stop_tests`'s), and
-//! the broker's redelivery is brought forward with a NAK on a clone of the
-//! delivery.
+//! The held copy is made while its first copy is still setting up. Setup
+//! is kept alive with in-progress acks, so the broker redelivers under it
+//! only if those stop landing for a whole ack window; the test does not
+//! wait for that, and brings the redelivery forward with a NAK on a clone
+//! of the delivery. The first copy is parked in workspace provisioning by
+//! the real `ReducerRunner` (the harness is `boundary_stop_tests`'s).
 //!
 //! A third refusal is logged and counted in neither: a delivery whose
 //! adoption of a dead process's claim finds the row changed.
@@ -130,8 +129,9 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
     });
     let named = setup.parked().await;
 
-    // The broker's redelivery, brought forward from the end of the ack
-    // window that nothing renews while the first copy sets up.
+    // The broker's redelivery, brought forward: a copy that would
+    // otherwise come only once the setup's keepalives stopped landing for
+    // a whole ack window.
     copy.ack_with(AckKind::Nak(None))
         .await
         .expect("redeliver the trigger");

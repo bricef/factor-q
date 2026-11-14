@@ -90,14 +90,32 @@ struct StagedWorker {
     first_wal_write: Semaphore,
     /// One permit per invocation allowed to finish.
     finish: Semaphore,
+    /// How an invocation waits for its first WAL write.
+    setup: Setup,
+}
+
+/// How a [`StagedWorker`]'s invocation waits between its worker permit and
+/// its first WAL write.
+#[derive(Clone, Copy)]
+enum Setup {
+    /// It awaits the gate, as a run awaits its workspace, its MCP servers
+    /// and its `triggered` publish. The dispatcher keeps the delivery alive
+    /// meanwhile (issue 967), so the broker does not redeliver it.
+    Awaits,
+    /// It blocks its thread until the gate opens, as a setup stuck in a
+    /// synchronous call does (a workspace on a hung filesystem). Nothing
+    /// else in its task runs, the dispatcher's keepalive included, so the
+    /// delivery's ack window passes and the broker redelivers it.
+    BlocksItsThread,
 }
 
 impl StagedWorker {
-    fn new() -> Arc<Self> {
+    fn new(setup: Setup) -> Arc<Self> {
         Arc::new(Self {
             starts: Mutex::new(Vec::new()),
             first_wal_write: Semaphore::new(0),
             finish: Semaphore::new(0),
+            setup,
         })
     }
 
@@ -135,11 +153,30 @@ impl Worker for StagedWorker {
         let invocation_id = durable_start
             .invocation_id()
             .expect("the dispatcher names the invocation on its claim before it starts");
-        self.first_wal_write
-            .acquire()
-            .await
-            .expect("the gate is never closed")
-            .forget();
+        match self.setup {
+            Setup::Awaits => self
+                .first_wal_write
+                .acquire()
+                .await
+                .expect("the gate is never closed")
+                .forget(),
+            // `block_in_place` hands this worker thread's other tasks to the
+            // rest of the runtime, so the consume loop and the test go on
+            // while this task alone is stuck.
+            Setup::BlocksItsThread => tokio::task::block_in_place(|| {
+                loop {
+                    match self.first_wal_write.try_acquire() {
+                        Ok(permit) => return permit.forget(),
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(tokio::sync::TryAcquireError::Closed) => {
+                            panic!("the gate is never closed")
+                        }
+                    }
+                }
+            }),
+        }
         durable_start.fire();
         // An invocation that has just made its first WAL write has work
         // still to do, and the real runner's next move is always an
@@ -191,8 +228,9 @@ struct World {
 impl World {
     /// Start a dispatcher with `max_concurrent` worker permits on a
     /// private broker, through [`TriggerDispatcher::run`]: the real
-    /// durable name, the real filter, the real ack window.
-    async fn start(max_concurrent: usize) -> Self {
+    /// durable name, the real filter, the real ack window. Its worker's
+    /// invocations wait for their first WAL write as `setup` says.
+    async fn start(max_concurrent: usize, setup: Setup) -> Self {
         let server = fq_test_support::NatsServer::start();
         let bus = EventBus::connect(server.url()).await.expect("connect");
         let scratch = tempfile::tempdir().unwrap();
@@ -227,7 +265,7 @@ impl World {
         let claims = TriggerClaims::recover(store.clone(), &starts)
             .await
             .expect("recover the trigger claims");
-        let worker = StagedWorker::new();
+        let worker = StagedWorker::new(setup);
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
             shared_registry(registry),
@@ -354,7 +392,7 @@ impl World {
 /// of defence and not the property under test.
 #[tokio::test]
 async fn an_invocation_that_outlives_the_ack_window_is_not_redelivered() {
-    let mut world = World::start(1).await;
+    let mut world = World::start(1, Setup::Awaits).await;
     world.worker.first_wal_write.add_permits(1);
 
     let trigger = world.publish("long-running").await;
@@ -417,9 +455,18 @@ async fn an_invocation_that_outlives_the_ack_window_is_not_redelivered() {
 /// queued one runs, and a redelivered copy that had been admitted would
 /// run third, stamped `attempt: 2`. With the claim it was refused before
 /// it could queue, and each trigger starts exactly once.
-#[tokio::test]
+///
+/// **How the stalled invocation stalls.** Since issue 967 the dispatcher
+/// keeps a delivery alive from its worker permit to its first WAL write,
+/// so a run that merely waits there is not redelivered: July's own route
+/// is closed before the claim is reached. The broker still redelivers an
+/// un-started trigger when that keepalive cannot run, which is a setup
+/// that blocks its thread ([`Setup::BlocksItsThread`]). That is the stall
+/// here, so the redelivery is still the broker's own and the claim is
+/// still what refuses it. It needs a runtime with more than one thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_trigger_redelivered_before_its_first_wal_write_starts_once() {
-    let mut world = World::start(1).await;
+    let mut world = World::start(1, Setup::BlocksItsThread).await;
 
     let stalled = world.publish("stalled before its first WAL write").await;
     world
