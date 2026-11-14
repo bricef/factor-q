@@ -261,6 +261,19 @@ which is not built; it now reads: the two replay tests in
 `a_trigger_redelivered_before_its_first_wal_write_starts_once`) and the
 twelve dispatcher and store unit tests ADR-0032 names pass in
 `just runtime-ci`. The review is a snapshot and is not edited. The
+2026-07-18 replay now produces its broker-own redelivery by blocking the
+stalled invocation's thread, because the setup keepalive
+([#1039](https://github.com/bricef/factor-q/pull/1039)) closes the
+route ADR-0032's section 5 says it used, a start slower than the ack
+window; the property it certifies is unchanged, and a third test in
+that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
+pins that an awaiting setup longer than the production window is not
+redelivered. ADR-0032 is not edited, so these of its statements are now
+out of date: section 5's account of the two routes to a redelivery
+before durable start, and of the replay using the second; gap 3's "a
+start that takes longer than the whole retry ladder"; and, in its part
+on more than one worker, "where nothing keeps it alive" and "in a slow
+start". The
 retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
 durable retries after 30 seconds, then 2, 5 and 12 minutes, and
@@ -319,19 +332,27 @@ will never settle (the third gap, open as
 kept in memory and start again with the daemon
 ([#968](https://github.com/bricef/factor-q/issues/968)). The third gap is
 narrower and still open
-([#967](https://github.com/bricef/factor-q/issues/967), two of four
+([#967](https://github.com/bricef/factor-q/issues/967), three of four
 changes merged). A durable-start mark the claim store refuses no longer
 stops the run: the dispatcher offers the mark again for up to two
 seconds, keeping the delivery alive meanwhile, and a mark still refused
 is answered by acking the delivery without releasing its claim, so the
 run carries on and is neither redelivered nor falsely dead-lettered
 ([#1021](https://github.com/bricef/factor-q/pull/1021)); the next start's
-recovery then records that run's start, as above. What remains is on a
-live daemon: a setup slower than one ack window is still redelivered
-underneath its own first copy, and a claim the daemon holds for a
-delivery whose task died, or whose ack was lost, has every redelivery
-dropped, until the daemon next starts or the trigger is dead-lettered
-as exhausted, whichever comes first. Outside
+recovery then records that run's start, as above. The dispatcher also
+keeps a delivery alive from its worker permit to its first WAL write,
+as the holds before it and the mark after it do, so a slow setup is no
+longer redelivered underneath its own first copy, and a setup slower
+than the whole retry ladder is no longer dead-lettered as exhausted
+while it is still starting; the keepalive lets go on a drain or
+shutdown ([#1039](https://github.com/bricef/factor-q/pull/1039)). A
+setup that hangs before its first WAL write is therefore kept alive,
+and nothing reports it
+([#1040](https://github.com/bricef/factor-q/issues/1040)). What remains
+is on a live daemon: a claim the daemon holds for a delivery whose task
+died, or whose ack was lost, has every redelivery dropped, until the
+daemon next starts or the trigger is dead-lettered as exhausted,
+whichever comes first. Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered
