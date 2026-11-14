@@ -946,18 +946,6 @@ until the watcher's reconcile timeout re-queues it, without counting an
 attempt, so this repeats until the trigger, the agent's prompt or the
 broker's limit changes.
 
-A run that ends at a request has its archive refused too:
-`invocation.archived` carries the same conversation at about four
-times its size. The archive sweeper holds that row and goes on to the
-rows behind it, and `fq doctor` and `fq status` list it with the size
-and the remedy (see
-[When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)).
-Until its archive is acknowledged, the run's ownership row reads
-`in_flight`, so `fq invocation list` shows a run that has ended as
-still in flight until an operator acts on the hold
-([#1024](https://github.com/bricef/factor-q/issues/1024), open); the
-held row in `fq doctor` is how to find it.
-
 The default also sits above `exec`'s own cap of 100 KiB per stream,
 whose note names `max_lines` and `tail_lines`, so ordinary `exec`
 output is cut there, once. Output with many invalid bytes or control
@@ -986,6 +974,20 @@ rows behind it (see
 A broker serving agents that read large outputs still needs a
 `max_payload` above the stock 1 MiB
 ([see #981](https://github.com/bricef/factor-q/issues/981)).
+
+A run that ended because its `llm.request` was refused is held this
+way too. Its state holds the messages that request carried, and as
+base64 they take four bytes for every three, so the archive is over
+the same limit unless the rest of the request, its tool definitions
+mostly, took more than a quarter of it. A run that ended at a refused
+`tool.result` or terminal event does not hold that event in its state,
+so it archives unless the conversation before it was already too
+large. Until a held row's
+archive is acknowledged, the run's ownership row reads `in_flight`, so
+`fq invocation list` shows a run that has ended as still in flight
+until an operator acts on the hold
+([#1024](https://github.com/bricef/factor-q/issues/1024), open); the
+held row in `fq doctor` is how to find it.
 
 ## When an invocation stops making progress
 

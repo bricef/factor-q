@@ -36,17 +36,19 @@
 //!   this `failed` instead.
 //!
 //! **What becomes of the archive.** A run ended by an oversized
-//! `llm.request` goes terminal holding the conversation that made the
-//! request too large, and its `invocation.archived` carries that state at
-//! about four times its size, so the broker refuses the archive as well.
-//! The archive sweeper then holds the row (`worker/archive_retry.rs`):
-//! nothing more is published for it, it is kept whole, logged once per
-//! daemon run and offered again at the next start, the pass goes on to
-//! the rows behind it, and `fq doctor` and `fq status` list the hold with
-//! its reason and remedy. A run ended at a `tool.result` does not hold
-//! the refused text in its state, so its archive is refused only if the
-//! conversation before it was already large; one ended at `triggered` has
-//! no row to archive.
+//! `llm.request` goes terminal with that request's messages in its state,
+//! and `invocation.archived` writes the state as base64, four bytes for
+//! every three. The archive is then over the limit too, unless what the
+//! request carries besides its messages, its tool definitions mostly, is
+//! more than a quarter of the limit. The archive sweeper holds such a row
+//! (`worker/archive_retry.rs`): nothing more is published for it, it is
+//! kept whole, logged once per daemon run and offered again at the next
+//! start, the pass goes on to the rows behind it, and `fq doctor` and
+//! `fq status` list the hold with its reason and remedy. A run ended at a
+//! `tool.result` or at its terminal event does not hold the refused event
+//! in its state, so its archive is refused only if the conversation
+//! before it was already large; one ended at `triggered` has no row to
+//! archive.
 //!
 //! **What recovery reports.** A run that ends here on a resume returns an
 //! error from the resume; startup recovery reads the worker row, finds it
