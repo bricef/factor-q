@@ -885,6 +885,127 @@ fn throttled_models_are_listed_without_becoming_an_issue() {
     );
 }
 
+/// One row held for each cause, as a daemon would report them.
+fn archive_holds() -> Vec<fq_ops::health::ArchiveHold> {
+    use fq_ops::health::{ArchiveHold, ArchiveHoldReason};
+    vec![
+        ArchiveHold {
+            invocation_id: "019a0000-0000-7000-8000-00000000000a".to_string(),
+            agent_id: "researcher".to_string(),
+            reason: ArchiveHoldReason::PayloadTooLarge {
+                event_type: "invocation_archived".to_string(),
+                size_bytes: 1_052_275,
+                limit_bytes: 1_048_576,
+            },
+            remedy: "raise the broker's max_payload above 1052275 bytes, then restart fqd"
+                .to_string(),
+        },
+        ArchiveHold {
+            invocation_id: "019a0000-0000-7000-8000-00000000000b".to_string(),
+            agent_id: "triager".to_string(),
+            reason: ArchiveHoldReason::StoredEventRefused {
+                detail: "stored event is `host_notice`, not `completed` or `failed`".to_string(),
+            },
+            remedy: "keep a copy of the row's terminal_outcome, then release the row".to_string(),
+        },
+    ]
+}
+
+/// The sweeper's state as a daemon reports it after a pass.
+fn swept(holds: Vec<fq_ops::health::ArchiveHold>) -> fq_ops::health::ArchiveSweep {
+    fq_ops::health::ArchiveSweep {
+        last_pass_at_ms: Some(1_700_000_000_000),
+        holds,
+    }
+}
+
+/// Before the sweeper's first pass this start the holds are not known, and
+/// the block says so instead of "none", which would be a finding the daemon
+/// has not made. Unknown is not an issue either: every start goes through
+/// it, and `--fail-on-issues` must not fail on a daemon that just started.
+#[test]
+fn archive_holds_before_the_first_pass_are_not_yet_known_and_not_an_issue() {
+    let fresh = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(!fresh.archive_sweep.has_swept(), "not swept until attached");
+    assert!(!fresh.has_issues(), "unknown is not a finding");
+    let out = render_doctor_report_human(&fresh);
+    assert!(out.contains("Verdict: All clear."), "got:\n{out}");
+    assert!(
+        out.contains(
+            "Archive holds: not yet known — the archive sweeper has not finished a pass since \
+             this daemon started (its first comes one `[worker] archive_retry_interval_ms` \
+             after start)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("Archive holds: none"), "got:\n{out}");
+
+    // A hold found by a first pass the bus then ended is listed, and is an
+    // issue, with a note that the list may be short.
+    let partial = fresh.with_archive_sweep(fq_ops::health::ArchiveSweep {
+        last_pass_at_ms: None,
+        holds: archive_holds(),
+    });
+    assert!(partial.has_issues());
+    let out = render_doctor_report_human(&partial);
+    assert!(out.contains("Archive holds: 2 — "), "got:\n{out}");
+    assert!(out.contains(", so there may be more)\n"), "got:\n{out}");
+}
+
+/// A held row is an issue, unlike a throttled model: nothing lifts it but
+/// an operator. Each is named with its agent, its reason and the remedy
+/// the daemon reported, and a swept daemon holding nothing says "none" so
+/// the block is always on the page.
+#[test]
+fn archive_holds_are_listed_with_their_remedies_and_are_an_issue() {
+    let quiet = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_archive_sweep(swept(Vec::new()));
+    assert!(!quiet.has_issues());
+    let out = render_doctor_report_human(&quiet);
+    assert!(out.contains("Archive holds: none\n"), "got:\n{out}");
+
+    let report = quiet.with_archive_sweep(swept(archive_holds()));
+    assert!(report.has_issues(), "a held row waits on an operator");
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains("Verdict: issues found"), "got:\n{out}");
+    assert!(
+        out.contains("Archive holds: 2 — finished runs the archive sweeper will not archive"),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "  019a0000-0000-7000-8000-00000000000a (researcher): `invocation_archived` is \
+             1052275 bytes, over the broker's max_payload of 1048576\n  -> raise the broker's \
+             max_payload above 1052275 bytes, then restart fqd\n"
+        ),
+        "the size hold, its reason and its remedy: {out}"
+    );
+    assert!(
+        out.contains(
+            "  019a0000-0000-7000-8000-00000000000b (triager): stored event is `host_notice`, \
+             not `completed` or `failed`\n  -> keep a copy of the row's terminal_outcome, then \
+             release the row\n"
+        ),
+        "the stored-event hold, in its own words: {out}"
+    );
+}
+
 /// One stranded claim, claimed at 2026-01-02T03:04:05Z plus `seq`
 /// minutes, on the current stream unless the message says otherwise.
 fn stranded(
@@ -943,7 +1064,7 @@ fn with_stranded_horizon(
 }
 
 fn with_stranded(claims: Vec<fq_ops::health::StrandedTriggerClaim>) -> DoctorReport {
-    with_stranded_horizon(claims, Some(30 * 86_400_000))
+    with_stranded_horizon(claims, Some(90 * 86_400_000))
 }
 
 /// The trigger-claim block (#954), whole: one line per stranded claim
@@ -990,13 +1111,13 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
   -> not started; if its message is still deliverable, this daemon adopts it and starts a run when the broker redelivers it, which is due within 19m30s of this daemon starting
   fq-triggers seq 2: claimed 2026-01-02T03:06:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000002
   -> this delivery never started a run and will not be redelivered: it has not been redelivered within 19m30s of this daemon starting, so its last delivery was most likely dead-lettered (`fq dead-letters list`)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 3 (an earlier incarnation of the stream, created 2025-12-29T09:20:00Z): claimed 2026-01-02T03:07:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000003
   -> this delivery never started a run and will not be redelivered: its message belonged to an earlier incarnation of the stream
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 4: claimed 2026-01-02T03:08:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; reserved invocation id 1c000000-0000-7000-8000-000000000004
   -> this delivery never started a run and will not be redelivered: its message is older than the stream keeps messages (1d)
-  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 30d old
+  -> work requeued or published again runs under a new sequence this claim cannot show, so this line stays until the claim is 90d old
   fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
   -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
   fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006
@@ -1011,9 +1132,12 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
     );
 }
 
-/// With retention off there is no horizon, and the line says it stays
-/// while the row does; a started run whose status the report did not
-/// learn is still named as started, without an empty status.
+/// With claim rows kept indefinitely (a negative
+/// `[state] trigger_claim_retention_days`) there is no horizon, and the
+/// line says so in those words: it stays while the row does, and the row
+/// is never swept. No day count stands in for the missing horizon. A
+/// started run whose status the report did not learn is still named as
+/// started, without an empty status.
 #[test]
 fn stranded_trigger_claims_without_a_horizon_or_a_status() {
     use fq_ops::health::ClaimHolder::ExitedProcess;
@@ -1029,8 +1153,15 @@ fn stranded_trigger_claims_without_a_horizon_or_a_status() {
     );
     let out = render_doctor_report_human(&report);
     assert!(
-        out.contains("so this line stays while the claim row exists\n"),
+        out.contains(
+            "so this line stays while the claim row exists, and claim rows are kept \
+             indefinitely (`[state] trigger_claim_retention_days` is negative)\n"
+        ),
         "got:\n{out}"
+    );
+    assert!(
+        !out.contains("d old"),
+        "no day count stands in for a horizon there is not:\n{out}"
     );
     assert!(
         out.contains("  -> the run started but its claim was never marked started"),

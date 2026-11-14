@@ -65,7 +65,7 @@ use fq_runtime::llm::fixture::FixtureClient;
 use fq_runtime::llm::{ChatResponse, LlmClient};
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
 use fq_runtime::worker::{
-    DrainRequest, DrainState, DurableStart, ExecutorError, InFlightReport, InvocationOutcome,
+    DrainRequest, DrainState, DurableStart, DurableStartReport, ExecutorError, InvocationOutcome,
     Worker, WorkerStore,
 };
 use fq_runtime::{DispatcherError, TriggerDispatcher, shared_registry};
@@ -217,14 +217,14 @@ impl World {
         );
         // The claims the daemon hands its dispatcher come out of startup
         // recovery over its worker's WAL. The stub worker writes no WAL, so
-        // this one is fresh and holds nothing in flight.
+        // this one is fresh and holds no run.
         let wal = WorkerStore::open(&scratch.path().join("worker.db"))
             .await
             .expect("open the worker store");
-        let in_flight = InFlightReport::scan(&wal)
+        let starts = DurableStartReport::scan(&wal)
             .await
             .expect("scan the worker's WAL");
-        let claims = TriggerClaims::recover(store.clone(), &in_flight)
+        let claims = TriggerClaims::recover(store.clone(), &starts)
             .await
             .expect("recover the trigger claims");
         let worker = StagedWorker::new();

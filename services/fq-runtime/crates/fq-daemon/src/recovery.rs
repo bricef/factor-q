@@ -1,7 +1,8 @@
 //! The daemon's startup recovery: reconciling worker rows against operator
 //! terminal decisions, classifying what was in flight when the last process
-//! stopped, recording on each one's trigger claim that it durably started,
-//! restoring coordination ownership, and re-driving the safe cases.
+//! stopped, recording on the trigger claim of every run with a start on
+//! record that it durably started, restoring coordination ownership, and
+//! re-driving the safe cases.
 //!
 //! Split out of `run_daemon` (#189) as three straight lifts, called at exactly
 //! the points they used to occupy — the order is load-bearing. Reconciliation
@@ -10,11 +11,12 @@
 //! that drives them exists, and queued for a worker permit before the
 //! dispatcher is constructed, which puts every one of them ahead of every
 //! trigger (#994). The claim marks must land before the trigger
-//! dispatcher consumes anything (#959), or it could meet the redelivery of a
-//! trigger whose invocation is in flight while its claim still read
-//! `claimed`, and start the trigger a second time. That order is held by
-//! type rather than by call order: the [`TriggerClaims`] a dispatcher needs
-//! to arbitrate exist only as what the recording returns.
+//! dispatcher consumes anything (#959, #967), or it could meet the
+//! redelivery or replay of a trigger whose run is in flight or finished
+//! while its claim still read `claimed`, and start the trigger a second
+//! time. That order is held by type rather than by call order: the
+//! [`TriggerClaims`] a dispatcher needs to arbitrate exist only as what the
+//! recording returns.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -43,6 +45,8 @@ use uuid::Uuid;
 /// (store unavailable) publishes anyway — it doesn't prove the event
 /// was already sent, and a possible duplicate beats re-silencing the
 /// failure mode #64 exists to make loud.
+///
+/// Returns what it did, so a caller's own log line can say so.
 async fn publish_ambiguous_once(
     worker_store: &fq_runtime::WorkerStore,
     bus: &EventBus,
@@ -50,7 +54,7 @@ async fn publish_ambiguous_once(
     invocation_id: Uuid,
     stamp_key: &str,
     payload: fq_runtime::events::InvocationAmbiguousPayload,
-) {
+) -> AmbiguousReport {
     let now_ms = chrono::Utc::now().timestamp_millis();
     match worker_store
         .mark_ambiguous_reported(stamp_key, now_ms)
@@ -62,7 +66,7 @@ async fn publish_ambiguous_once(
                 invocation_id = %invocation_id,
                 "invocation.ambiguous already reported for this invocation; not re-firing"
             );
-            return;
+            return AmbiguousReport::AlreadyReported;
         }
         Err(err) => {
             tracing::error!(
@@ -83,6 +87,32 @@ async fn publish_ambiguous_once(
             error = %err,
             "failed to publish invocation.ambiguous (stamp already claimed; will not retry)"
         );
+        return AmbiguousReport::PublishFailed;
+    }
+    AmbiguousReport::Published
+}
+
+/// What [`publish_ambiguous_once`] did for one invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AmbiguousReport {
+    /// It published `invocation.ambiguous`.
+    Published,
+    /// An earlier start reported the invocation, so nothing was published.
+    AlreadyReported,
+    /// It went to publish, and the publish failed. Logged, not retried.
+    PublishFailed,
+}
+
+impl AmbiguousReport {
+    /// The end of a log line saying what happened to the report.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Published => "emitted invocation.ambiguous",
+            Self::AlreadyReported => {
+                "invocation.ambiguous was reported on an earlier start and is not emitted again"
+            }
+            Self::PublishFailed => "invocation.ambiguous could not be published",
+        }
     }
 }
 
@@ -131,16 +161,17 @@ pub(crate) struct Recovered {
     /// continues from its workspace and triage may need to inspect it.
     pub in_flight_ids: HashSet<String>,
     /// The trigger claims the dispatcher arbitrates on. They exist only as
-    /// the result of recording every in-flight invocation's durable start
-    /// on its claim, so no dispatcher can arbitrate before that (#959).
+    /// the result of recording on its claim the durable start of every run
+    /// with a start on record, in flight or finished, so no dispatcher can
+    /// arbitrate before that (#959, #967).
     pub claims: TriggerClaims,
 }
 
 /// Classify what was in flight when the last process stopped, publish the
 /// `system.recovery` roll-up, surface the cases that cannot be recovered as
-/// `invocation.ambiguous`, report every in-flight invocation to the control
-/// plane as durably started, and restore coordination ownership for the
-/// ones that can be recovered.
+/// `invocation.ambiguous`, report every run the worker's WAL holds to the
+/// control plane as durably started, and restore coordination ownership for
+/// the ones that can be recovered.
 pub(crate) async fn classify_in_flight(
     worker_store: &Arc<WorkerStore>,
     cp_store: &Arc<ControlPlaneStore>,
@@ -225,8 +256,9 @@ pub(crate) async fn classify_in_flight(
                 )
                 .await;
                 // The coordination consumer (spawned below)
-                // picks up the `invocation.ambiguous` event we
-                // just published and upserts the
+                // picks up the `invocation.ambiguous` event, when
+                // this start published one rather than an earlier
+                // start, and upserts the
                 // coordination_invocation_owner row. v1
                 // collapsed-process used to write directly
                 // here; that's now the consumer's job, which
@@ -245,23 +277,28 @@ pub(crate) async fn classify_in_flight(
         .map(|c| c.state.invocation_id.clone())
         .collect();
 
-    // Every in-flight invocation made its first WAL write, so its trigger
-    // has durably started, whether or not the process that ran it lived to
-    // record that on the trigger's claim. The worker reports its in-flight
-    // set and the control plane records it on the claims, so the redelivery
-    // of such a still-unacked trigger is dropped rather than started a
-    // second time (#959). Ambiguous invocations count: an operator decides
-    // their fate, not a redelivery. In this process the report is not a
-    // message but a direct write into the control-plane store, and it must
-    // land before the dispatcher consumes a trigger: the claims the
+    // Every run the worker's WAL holds made its first WAL write, in flight
+    // or finished and not yet archived, so its trigger has durably started,
+    // whether or not the process that ran it recorded that on the trigger's
+    // claim; so has every run the control plane holds an ownership row for
+    // once the WAL has let it go. The worker reports what its WAL holds and
+    // the control plane marks each such claim still `claimed`, so a
+    // redelivery or a replay of its trigger is dropped rather than adopted
+    // and started a second time (#959 for a run in flight, #967 for one that
+    // finished). Ambiguous invocations count: an operator decides their
+    // fate, not a redelivery. The WAL is read first: a run archived after
+    // that read has its ownership row written before its WAL row goes, so
+    // the control plane's read finds it. In this process the report is not
+    // a message but a direct write into the control-plane store, and it
+    // must land before the dispatcher consumes a trigger: the claims the
     // dispatcher needs are what the recording returns, and an error here
     // stops the boot.
-    let in_flight = fq_runtime::worker::InFlightReport::scan(worker_store.as_ref())
+    let starts = fq_runtime::worker::DurableStartReport::scan(worker_store.as_ref())
         .await
-        .context("failed to read the in-flight invocations to report")?;
-    let claims = TriggerClaims::recover(cp_store.clone(), &in_flight)
+        .context("failed to read the runs the worker's WAL holds, to report")?;
+    let claims = TriggerClaims::recover(cp_store.clone(), &starts)
         .await
-        .context("failed to record a recovered invocation's durable start on its claim")?;
+        .context("failed to record a recovered run's durable start on its claim")?;
 
     // Restore the coordination rows before spawning resumes. A row can be
     // absent after a daemon crash, but the list/dashboard projection keys on
@@ -426,21 +463,8 @@ pub(crate) async fn spawn_resume_tasks(
                     "recovered invocation ended before its turn to resume; nothing to resume"
                 ),
                 Err(err) => {
-                    let note = format!("automatic resume failed: {err}");
-                    tracing::error!(invocation_id = %inv_id, agent_id = %agent_id, error = %err, "resume failed; emitting invocation.ambiguous");
-                    publish_ambiguous_once(
-                        wstore.as_ref(),
-                        &bus,
-                        agent_id,
-                        inv_id,
-                        &inv_id.to_string(),
-                        fq_runtime::events::InvocationAmbiguousPayload {
-                            stuck_entity: "recovery".to_string(),
-                            stuck_call_id: inv_id.to_string(),
-                            note,
-                        },
-                    )
-                    .await;
+                    let row = ResumedRow::read(wstore.as_ref(), &inv_id.to_string()).await;
+                    report_resume_error(row, wstore.as_ref(), &bus, agent_id, inv_id, err).await;
                 }
             }
         }));
@@ -451,6 +475,123 @@ pub(crate) async fn spawn_resume_tasks(
     };
     tasks.announce(resume_count, admission.workers().max_concurrent());
     tasks
+}
+
+/// What the worker row says, once a resume has returned an error, about
+/// the invocation it resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumedRow {
+    /// Still in flight: the resume could not be carried out, and the run
+    /// did not reach a terminal event.
+    InFlight,
+    /// Terminal: the invocation has ended. Usually the run reached its
+    /// terminal event, stored with the terminal write or published before
+    /// it, and the error came after (its archive refused, say). It can
+    /// also be an operator's drop, which marks the row terminal while the
+    /// run is going. Either way the error does not undo the ending.
+    Terminal,
+    /// Gone: the invocation has ended. Only the archive hand-off deletes
+    /// a row, once the control plane has acknowledged an archive, and an
+    /// archive goes out only for a terminal row. Usually this resume
+    /// ended the run; if the resume failed reading the row, whatever
+    /// ended it came first.
+    Archived,
+}
+
+impl ResumedRow {
+    /// Read `invocation_id`'s row.
+    async fn read(
+        worker_store: &WorkerStore,
+        invocation_id: &str,
+    ) -> Result<Self, fq_runtime::WorkerStoreError> {
+        let row = worker_store.get_invocation_state(invocation_id).await?;
+        Ok(match row {
+            None => Self::Archived,
+            Some(row) if row.terminal_at.is_some() => Self::Terminal,
+            Some(_) => Self::InFlight,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::Terminal => "terminal",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+/// Report a recovered invocation whose resume returned `err`, given what
+/// its worker row said afterwards (`row`, read by [`ResumedRow::read`]).
+///
+/// The error alone cannot say whether the run ended (issue 1005). A run
+/// that ends in an ordinary `failed` returns `InvocationFailed` when the
+/// reducer decides it, the provider's error when a model call fails
+/// part-way through a step, and a bus error when its `failed` went out
+/// but its `invocation.archived` was refused; each has published or
+/// stored its terminal event. The worker row says whether the invocation
+/// ended: terminal, or deleted by the archive hand-off, means it did, and
+/// nothing about it is ambiguous. Reporting it would give it a second
+/// ending in the event log, and turn its ownership row to `ambiguous` for
+/// an operator to triage a run that needs nothing. Not reported, its
+/// ownership row reads `failed` once its archive is acknowledged, and
+/// `in_flight` until then: for as long as the archive is refused (issue
+/// 1024).
+///
+/// Only a resume that could not be carried out — the row still in flight,
+/// or unreadable — is `invocation.ambiguous`, at most once
+/// ([`publish_ambiguous_once`]); the log line says whether this start
+/// published it or an earlier one already had.
+async fn report_resume_error(
+    row: Result<ResumedRow, fq_runtime::WorkerStoreError>,
+    worker_store: &WorkerStore,
+    bus: &EventBus,
+    agent_id: AgentId,
+    invocation_id: Uuid,
+    err: ExecutorError,
+) {
+    match row {
+        Ok(row @ (ResumedRow::Terminal | ResumedRow::Archived)) => {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                agent_id = %agent_id,
+                error = %err,
+                row = row.label(),
+                "resume returned an error, but the invocation has ended; not reporting it \
+                 ambiguous"
+            );
+            return;
+        }
+        Ok(ResumedRow::InFlight) => {}
+        // Not knowing is not knowing it ended: report it, as
+        // `publish_ambiguous_once` does when it cannot read its stamp.
+        Err(read) => tracing::error!(
+            invocation_id = %invocation_id,
+            error = %read,
+            "could not read the worker row of an invocation whose resume failed; \
+             treating the resume as not carried out"
+        ),
+    }
+    let report = publish_ambiguous_once(
+        worker_store,
+        bus,
+        agent_id.clone(),
+        invocation_id,
+        &invocation_id.to_string(),
+        fq_runtime::events::InvocationAmbiguousPayload {
+            stuck_entity: "recovery".to_string(),
+            stuck_call_id: invocation_id.to_string(),
+            note: format!("automatic resume failed: {err}"),
+        },
+    )
+    .await;
+    tracing::error!(
+        invocation_id = %invocation_id,
+        agent_id = %agent_id,
+        error = %err,
+        "resume failed; {}",
+        report.describe()
+    );
 }
 
 /// What [`spawn_resume_tasks`] started.

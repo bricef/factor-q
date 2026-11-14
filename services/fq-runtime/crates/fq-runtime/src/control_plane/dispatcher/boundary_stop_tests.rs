@@ -38,8 +38,8 @@ use crate::llm::fixture::FixtureClient;
 use crate::llm::{ChatRequest, ChatResponse, LlmClient, LlmError};
 use crate::worker::workspace::{PerInvocationWorkspace, WorkspaceError, WorkspaceProvider};
 use crate::worker::{
-    Harness, InFlightReport, RecoveryCategory, ReducerContext, ReducerRunner, RunnerConfig, Worker,
-    WorkerId, WorkerStore, scan_in_flight,
+    DurableStartReport, Harness, RecoveryCategory, ReducerContext, ReducerRunner, RunnerConfig,
+    Worker, WorkerId, WorkerStore, scan_in_flight,
 };
 
 /// Every wait in this file polls at this interval, at most
@@ -223,8 +223,8 @@ impl StateDir {
         model: Arc<dyn LlmClient>,
         binary: &str,
     ) -> Arc<TriggerDispatcher> {
-        let in_flight = InFlightReport::scan(&self.wal).await.expect("scan WAL");
-        let claims = TriggerClaims::recover(self.claims.clone(), &in_flight)
+        let starts = DurableStartReport::scan(&self.wal).await.expect("scan WAL");
+        let claims = TriggerClaims::recover(self.claims.clone(), &starts)
             .await
             .expect("recover claims");
         Arc::new(

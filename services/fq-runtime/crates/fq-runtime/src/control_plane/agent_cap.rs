@@ -27,10 +27,28 @@
 //! it finds, and it may find more than the cap now allows; it admits
 //! nothing new until it is back under cap, which is exactly what
 //! `try_enter` gives. Refusing those would leave a half-done invocation
-//! unresumed while it still occupies the host. So the property that
-//! holds unconditionally is
-//! `in_flight(agent) ≤ max(cap, invocations recovered at start)`, and
-//! `control_plane::agent_cap::proptests` is that sentence as a test.
+//! unresumed while it still occupies the host.
+//!
+//! An operator's resume can come at any time, not only before the first
+//! trigger. An ambiguous invocation holds no slot while it waits for
+//! triage, so resuming it can run it beside the invocations the agent has
+//! admitted since: one past the cap for each such resume in flight. That
+//! is decided, not overlooked (issue 1009): the operator asked for this
+//! run by id, and holding it at the cap would need a priority rule among
+//! the waiters, because a cap hold is a race between them, not a queue.
+//! `fq invocation resume` says so when it accepts, and the operator guide
+//! says what to do about it. Such a resume still counts against the cap:
+//! while it is in flight the agent's triggers are held behind it.
+//!
+//! So, for a cap that does not change, what holds is
+//! `in_flight(agent) ≤ max(cap, invocations recovered at start) +
+//! operator resumes in flight`, and a trigger is admitted exactly when
+//! fewer than `cap` of the agent's invocations are in flight, however
+//! they came in. `control_plane::agent_cap::proptests` is those two
+//! sentences as a test. A cap that changes is the other way past it: a
+//! `fq reload` that lowers an agent's cap leaves the invocations already
+//! admitted under the old one running, over the new cap until enough of
+//! them end. Nothing is stopped to make room.
 //!
 //! # Why a count here and not a query of the WAL
 //!
@@ -134,15 +152,19 @@ impl AgentConcurrency {
 
     /// Count an invocation this process did not admit — a resume of
     /// work that was in flight before this daemon (or this operator
-    /// command) reached it. Never refused, and the **only** way the
-    /// count can exceed a cap.
+    /// command) reached it. Never refused, and, for a cap that does not
+    /// change, the **only** way the count can exceed it. (A `fq reload`
+    /// that lowers a cap leaves the invocations already admitted over the
+    /// new one; see the module doc.)
     ///
     /// Its two callers are startup recovery (`recovery::spawn_resume
     /// _tasks`) and `fq invocation resume`. Both are finishing an
     /// invocation whose WAL row is already in flight: holding it back
     /// would extend the time the host stays occupied rather than
     /// shorten it, and for startup recovery it would leave a half-done
-    /// invocation unresumed.
+    /// invocation unresumed. `fq invocation resume` is the one that can
+    /// take the count past the cap after a restart has settled; the module
+    /// doc says why that is left so.
     ///
     /// It is deliberately *not* the deferral path's entry. A deferred
     /// invocation never leaves the count — its [`AgentSlot`] rides the

@@ -42,6 +42,7 @@ use sqlx::{Pool, Row, Sqlite};
 
 use crate::db::schema::{self, Migration, SchemaError};
 
+mod durable_starts;
 mod llm_origin;
 pub(crate) mod terminal_outcome;
 // The verdict type and its check are the kit's; re-exported so the

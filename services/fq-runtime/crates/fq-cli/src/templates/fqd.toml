@@ -128,16 +128,26 @@ directory = "agents"
 # stale_worker_retention_days = 7
 #
 # How long a trigger claim is kept, in days from when it was claimed.
-# Default 30. The dispatcher claims every trigger delivery before it
+# Default 90. The dispatcher claims every trigger delivery before it
 # runs anything, and a claim marked started is what stops a redelivered
 # or replayed copy of that trigger from starting the run twice — so it
 # has to outlive the trigger stream's messages (kept for a day). The
-# minimum is 2, and a smaller value is refused at startup. The claim is
-# also the only record of which trigger started which run (the
-# `trigger:` line of `fq invocation show`); a lower number loses that
-# link for older runs sooner, and nothing else. A claim this daemon is
-# still holding is never deleted. Set to `-1` to keep claims for ever.
-# trigger_claim_retention_days = 30
+# minimum is 2, and a non-negative value below it is refused at
+# startup. The claim is also the only record of which trigger started
+# which run (the `trigger:` line of `fq invocation show`): a lower
+# number loses that link for older runs sooner, and a higher one keeps
+# a delivery that never started a run on `fq doctor`'s report (and
+# `fq doctor --fail-on-issues` failing) for longer, since only its age
+# clears it. A claim this daemon is still holding is never deleted.
+# Set to `-1` (any negative value does the same) to keep every claim
+# row indefinitely: the sweep never deletes one, so the link from a run
+# to the trigger that started it is never dropped, and the table grows
+# by a row for every trigger that starts a run, without bound. A
+# delivery that never started a run then stays on `fq doctor`'s report
+# permanently, its line saying claim rows are kept indefinitely. With no
+# such claim the report says nothing about retention; `fq doctor --json`
+# always carries `horizon_ms: null`.
+# trigger_claim_retention_days = 90
 #
 # How often the retention sweep runs, in seconds. Default 1 hour,
 # shared by every window above. Production doesn't need faster: the
@@ -267,11 +277,17 @@ models = ["claude-haiku-4-5"]
 # archive_retry_interval_ms = 10000
 #
 # How long after `terminal_at` (in ms) the sweeper logs one
-# warning per held row. The sweeper *keeps republishing* past
-# this point — the warn is the operator-visible signal that the
-# control-plane isn't acknowledging in a reasonable time. The
-# local row is never deleted automatically (correctness over
-# cleanup); operator action is required for held rows.
+# warning per row still awaiting its ack. The sweeper *keeps
+# republishing* such a row past this point — the warn is the
+# operator-visible signal that the control-plane isn't
+# acknowledging in a reasonable time. The local row is never
+# deleted automatically (correctness over cleanup); a row whose
+# ack never comes needs an operator.
+# A row the sweeper cannot publish at all, because an event it
+# owes is larger than the broker's max_payload, its stored
+# terminal event is one this build will not republish, or its
+# ids cannot go on an event, is not republished: the sweeper
+# holds it, and `fq doctor` lists it with what to do.
 # archive_warn_after_ms = 60000
 
 # Retry policy for transient model-call failures: a 429, a 5xx, a

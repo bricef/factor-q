@@ -855,8 +855,8 @@ mod tests {
 
     /// The claims a dispatcher under test arbitrates on, got the only way
     /// there is: recovery over its worker's WAL. These tests' workers have
-    /// a fresh WAL with nothing in flight, so there is nothing to record,
-    /// and saying so is the honest version of skipping the step.
+    /// a fresh WAL holding no run, so there is nothing to record, and
+    /// saying so is the honest version of skipping the step.
     pub(super) async fn recovered_claims(
         store: &Arc<crate::control_plane::ControlPlaneStore>,
     ) -> TriggerClaims {
@@ -864,8 +864,8 @@ mod tests {
         let wal = WorkerStore::open(&dir.path().join("worker.db"))
             .await
             .unwrap();
-        let in_flight = crate::worker::InFlightReport::scan(&wal).await.unwrap();
-        TriggerClaims::recover(store.clone(), &in_flight)
+        let starts = crate::worker::DurableStartReport::scan(&wal).await.unwrap();
+        TriggerClaims::recover(store.clone(), &starts)
             .await
             .expect("recover claims over an empty WAL")
     }
@@ -2736,11 +2736,11 @@ You are a test agent."#
                 1,
             )
             // The process that is about to die booted on this same WAL,
-            // which held nothing in flight then.
+            // which held no run then.
             .with_trigger_claims(
                 TriggerClaims::recover(
                     claims.clone(),
-                    &crate::worker::InFlightReport::scan(&wal).await.unwrap(),
+                    &crate::worker::DurableStartReport::scan(&wal).await.unwrap(),
                 )
                 .await
                 .unwrap(),
@@ -2808,13 +2808,15 @@ You are a test agent."#
             ),
             "nothing marked the claim: this is the window #959 is about; got {held:?}"
         );
-        assert!(
-            claims
-                .mark_trigger_started_by_invocation(&in_flight[0].invocation_id)
-                .await
-                .unwrap(),
-            "the claim must name the invocation the WAL row carries, or recovery cannot find it"
-        );
+        // The next start's recovery over the same two stores. It matches
+        // the claim to the WAL row by the invocation id the claim names, so
+        // it marks the claim only if that is the id the WAL row carries.
+        TriggerClaims::recover(
+            claims.clone(),
+            &crate::worker::DurableStartReport::scan(&wal).await.unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             claims
                 .claim_trigger(test_key(&bus, seq), "probe", "probe", 0)
@@ -2822,7 +2824,8 @@ You are a test agent."#
                 .unwrap(),
             crate::control_plane::TriggerClaim::Started {
                 invocation_id: in_flight[0].invocation_id.clone()
-            }
+            },
+            "the claim must name the invocation the WAL row carries, or recovery cannot find it"
         );
     }
 

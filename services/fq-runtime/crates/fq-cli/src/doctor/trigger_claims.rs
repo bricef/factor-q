@@ -103,9 +103,14 @@ fn finding_lines(claim: &StrandedTriggerClaim, claims: &DoctorTriggerClaims) -> 
                     format_span(claims.stream_max_age_ms)
                 ),
             };
+            // No horizon is the negative window that keeps every claim
+            // row: said in those words, since nothing else on the page
+            // tells the reader the row will never be swept.
             let until = match claims.horizon_ms {
                 Some(horizon) => format!("until the claim is {} old", format_span(horizon)),
-                None => "while the claim row exists".to_string(),
+                None => "while the claim row exists, and claim rows are kept indefinitely \
+                         (`[state] trigger_claim_retention_days` is negative)"
+                    .to_string(),
             };
             format!(
                 "  -> this delivery never started a run and will not be redelivered: {why}\n  \

@@ -78,14 +78,31 @@
 //! The same number is `fq doctor`'s horizon: the report stops
 //! listing a claim an exited process left once it is this old, the
 //! age at which this sweep deletes it. **The ownership table has no
-//! retention, and this depends on that.** The report reads
-//! `coordination_invocation_owner` to tell a claim whose run
-//! finished from one that never started; if that table ever gains a
-//! window shorter than this one, an old `claimed` row whose run
+//! retention, and three things depend on that.** The first costs a
+//! duplicate run, not a wrong report: startup recovery
+//! ([`crate::control_plane::dispatcher::TriggerClaims::recover`])
+//! marks the claim of a run that finished while its claim still said
+//! `claimed`, and once the run is archived and its WAL row deleted,
+//! the run's row in `coordination_invocation_owner` is the only
+//! record recovery finds it by (#967). If that table ever gains a
+//! window shorter than this one, such a claim is no longer marked at
+//! the next start once the run's row is gone, and a redelivered or
+//! replayed copy of its trigger, while the stream still holds the
+//! message, is adopted and runs the work a second time. The report
+//! reads the same row to tell a claim whose run finished from one
+//! that never started; with it gone, an old `claimed` row whose run
 //! finished loses its record of the run, and the report would turn
-//! "started, never marked" into "never started". Keep any such
-//! window at or above this one, or give the claim its own record of
-//! the start.
+//! "started, never marked" into "never started". And once the
+//! archive window above has swept a finished run's archive row,
+//! [`crate::views::Views::invocation`] finds the run by its
+//! ownership row (or by its cost-bearing projection rows, which this
+//! sweep keeps, if it made a model call). That is what lets
+//! `fq invocation show` name the trigger this window keeps past
+//! `retention_days`; a shorter window on the ownership table could
+//! leave such a run unfindable while its claim, and so its trigger
+//! link, is still kept. Keep any such window at or above this one;
+//! for startup recovery and the report, the alternative is to give
+//! the claim its own record of the start.
 //!
 //! ## Behaviour
 //! - Any window at `>= 0` → that sweep is active.

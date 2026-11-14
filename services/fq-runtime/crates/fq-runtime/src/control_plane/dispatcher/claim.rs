@@ -7,7 +7,7 @@ use tracing::{debug, error, warn};
 
 use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
-use crate::worker::InFlightReport;
+use crate::worker::{DurableStartReport, WalRun};
 
 use super::admission::{HOLD_KEEPALIVE, keep_alive};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
@@ -86,32 +86,69 @@ pub(super) const MARK_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
 /// only way to get one is [`TriggerClaims::recover`], which first records
-/// the durable start of every invocation a worker reported in flight.
+/// on its claim the durable start of every run that has one on record.
 ///
 /// The adoption arm of `claim_delivery` reads a `claimed` row under
 /// another claimant's id as "nothing durable has started for this
-/// trigger". That is true only once those durable starts are on their
-/// claims. A process that died between an invocation's first WAL write
+/// trigger". That is true only once every start on record is on its
+/// claim. A process that died between an invocation's first WAL write
 /// and its claim being marked left a `claimed` row whose invocation is in
-/// flight, and adopting that row would start the trigger a second time
-/// (#959). The claim-installing constructors take this value and nothing
-/// else, so a claim-arbitrating dispatcher cannot be built before the
-/// recording has run.
+/// flight (#959). A run whose mark failed can go on to finish under a
+/// `claimed` row, its delivery acked with the claim kept (#967). Adopting
+/// either row would start the trigger a second time, on a redelivery or on
+/// a replay of the stream. The claim-installing constructors take this
+/// value and nothing else, so a claim-arbitrating dispatcher cannot be
+/// built before the recording has run.
 pub struct TriggerClaims {
     store: Arc<ControlPlaneStore>,
 }
 
 impl TriggerClaims {
-    /// Record on its claim the durable start of every invocation in
-    /// `in_flight`, then hand `store` over as a claim arbiter.
+    /// Record on its claim the durable start of every run that has one on
+    /// record while its claim still reads `claimed`, then hand `store` over
+    /// as a claim arbiter.
     ///
-    /// The report is the worker's: its WAL's in-flight invocations, each
-    /// of which made its first WAL write and so has durably started,
-    /// whatever its claim says. Ambiguous invocations count. Each claim is
-    /// found by the invocation id it has named since claim time
-    /// ([`ControlPlaneStore::mark_trigger_started_by_invocation`]). A claim
-    /// this marks is that crash window, hit and repaired, and is logged
-    /// with the invocation id.
+    /// A run has a start on record when either of two records holds it:
+    ///
+    /// - **The worker's WAL**, as `starts` reports it: the run made its
+    ///   first WAL write and its row is still there, in flight whatever its
+    ///   category, ambiguous included, or finished and not yet archived.
+    /// - **The control plane's ownership row** for the invocation the claim
+    ///   names. The archive hand-off writes it before the worker deletes its
+    ///   WAL row, so a run that has left the WAL is here; and nothing sweeps
+    ///   it, so it outlives the archive row, which retention does sweep. A
+    ///   report of ambiguity writes one too, for a run the WAL holds.
+    ///
+    /// **An operator's drop is on record the same way, whether or not the
+    /// run started.** A drop writes the invocation's ownership row
+    /// (`failed`), and it can name a run that never made its first WAL
+    /// write: a live drop is accepted from the moment the runner takes the
+    /// run, before its workspace, its MCP servers and its `triggered`
+    /// publish, and a drop of a run whose process died resolves the run's
+    /// agent from that `triggered` event. Such a claim is marked too, so a
+    /// redelivery or a replay of its trigger does not run the work. That is
+    /// the outcome the dispatcher gives the same drop on a live daemon: an
+    /// operator halt before the first WAL write is consumed, not retried,
+    /// because the drop is the run's outcome (`TriggerFate::Consume` in the
+    /// dispatcher).
+    ///
+    /// These are the two records `fq doctor` reads to call a claim started
+    /// and never marked (`Views::stranded_trigger_claims`), and the claims
+    /// are read through the same query
+    /// ([`ControlPlaneStore::unsettled_trigger_claims`]), so a claim the
+    /// report would list that way is one this marks. A `claimed` row with
+    /// neither record, or with no invocation id, is left exactly as it is:
+    /// it may be a delivery that never started, and the adoption arm is
+    /// right to take it.
+    ///
+    /// Each claim is matched to its run by the invocation id it has named
+    /// since claim time and marked by its key
+    /// ([`ControlPlaneStore::mark_unsettled_trigger_started`]), so the cost
+    /// is that one query, a pass over the claim table joined to the
+    /// ownership table by primary key, and one primary-key write per claim
+    /// marked. A claim this marks is logged at `warn`, once, with the
+    /// invocation id and where its run is on record: in flight or finished
+    /// in the worker's WAL, or the status its ownership row holds.
     ///
     /// Run it at startup, over the report of the worker this dispatcher
     /// hands invocations to, before the dispatcher consumes anything. A test
@@ -119,16 +156,33 @@ impl TriggerClaims {
     /// WAL, empty or not: there is no other way to obtain the claims.
     pub async fn recover(
         store: Arc<ControlPlaneStore>,
-        in_flight: &InFlightReport,
+        starts: &DurableStartReport,
     ) -> Result<Self, crate::control_plane::ControlPlaneStoreError> {
-        for invocation_id in in_flight.invocation_ids() {
+        for unsettled in store.unsettled_trigger_claims().await? {
+            let claim = &unsettled.claim;
+            let Some(invocation_id) = claim.invocation_id.as_deref() else {
+                continue;
+            };
+            // The ownership row's presence is the record; its status is only
+            // reported, as stored, so one this build cannot read does not
+            // stop the boot.
+            let run = match (starts.run(invocation_id), &unsettled.owner_row_status) {
+                (Some(WalRun::InFlight), _) => "in flight in the worker's WAL".to_string(),
+                (Some(WalRun::Finished), _) => {
+                    "finished, in the worker's WAL until its archive is acknowledged".to_string()
+                }
+                (None, Some(status)) => format!("on the control plane's record as {status}"),
+                (None, None) => continue,
+            };
             if store
-                .mark_trigger_started_by_invocation(invocation_id)
+                .mark_unsettled_trigger_started(claim.key(), invocation_id)
                 .await?
             {
-                warn!(%invocation_id,
-                    "recorded a durable start missing from its trigger's claim: the process that \
-                     started it died before marking it, so the trigger's redelivery will be dropped");
+                warn!(%invocation_id, stream_seq = claim.stream_seq, claimant = %claim.claimant,
+                    run = %run,
+                    "recorded a durable start missing from its trigger's claim: a start of the run \
+                     this claim names, or an operator's drop of it, is on record, so a redelivery \
+                     or a replay of the trigger will be dropped instead of running it again");
             }
         }
         Ok(Self { store })
@@ -141,11 +195,11 @@ impl TriggerDispatcher {
     /// [`Self::with_caps_and_claims`].
     ///
     /// **Precondition, enforced by the argument's type:** the claims come
-    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
-    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
-    /// for every invocation in flight. Without that, a trigger whose last
-    /// process died between its first WAL write and its claim's update is
-    /// adopted and started again (#959).
+    /// from [`TriggerClaims::recover`] over the worker's report of the runs
+    /// its WAL holds, which marks the claim of every run with a start on
+    /// record. Without that, a trigger whose run started under a process
+    /// that did not mark its claim, in flight (#959) or finished (#967), is
+    /// adopted and started again.
     pub fn with_trigger_claims(
         mut self,
         claims: TriggerClaims,
@@ -162,12 +216,12 @@ impl TriggerDispatcher {
     /// [`Self::new`] was given; the daemon builds both from one setting.
     ///
     /// **Precondition, enforced by the argument's type:** the claims come
-    /// from [`TriggerClaims::recover`] over the worker's in-flight report,
-    /// which calls [`ControlPlaneStore::mark_trigger_started_by_invocation`]
-    /// for every invocation in flight, and so has run before this
-    /// dispatcher consumes a trigger. Without that, a trigger whose last
-    /// process died between its first WAL write and its claim's update is
-    /// adopted and started again (#959).
+    /// from [`TriggerClaims::recover`] over the worker's report of the runs
+    /// its WAL holds, which marks the claim of every run with a start on
+    /// record, and so has run before this dispatcher consumes a trigger.
+    /// Without that, a trigger whose run started under a process that did
+    /// not mark its claim, in flight (#959) or finished (#967), is adopted
+    /// and started again.
     pub fn with_caps_and_claims(
         mut self,
         admission: super::RunAdmission,
@@ -448,16 +502,18 @@ impl TriggerDispatcher {
                 // One worker is deployed today. A different id therefore names
                 // a dead previous process; ADR-0032 adds shared liveness + CAS.
                 //
-                // That process may have reached its invocation's first WAL
-                // write and died before marking this row. Startup recovery has
-                // already answered for that case: it marks the claim of every
-                // invocation it finds in flight, by the id the row has named
-                // since claim time, and this dispatcher holds claims only as
-                // what that marking returned (`TriggerClaims::recover`, #959).
-                // A row still `claimed` here therefore names an invocation
-                // with no in-flight WAL row, and this start is its trigger's
-                // first, unless the earlier invocation already reached a
-                // terminal row (see #967).
+                // That process may have started the run and not marked this
+                // row: it died after the run's first WAL write (#959), or its
+                // mark failed and the run went on to finish (#967). Startup
+                // recovery has already answered for both: it marks the claim
+                // of every run with a start on record, in the worker's WAL or
+                // in the control plane's ownership table, by the id the row
+                // has named since claim time, and this dispatcher holds
+                // claims only as what that marking returned
+                // (`TriggerClaims::recover`). A row still `claimed` here
+                // therefore names an invocation with no start on record, and
+                // this start is, as far as any record shows, its trigger's
+                // first.
                 //
                 // The adopted claim runs under this copy's own id, written over
                 // the dead process's by the same compare-and-set. Reusing that

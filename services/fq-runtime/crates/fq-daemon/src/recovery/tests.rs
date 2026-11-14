@@ -525,14 +525,15 @@ async fn a_daemon_that_dies_before_the_first_wal_write_leaves_the_trigger_to_run
 }
 
 /// **Startup recovery marks the claim of every invocation it finds in
-/// flight, ambiguous ones included, and nothing else (#959).**
+/// flight, ambiguous ones included, and not a claim with nothing on record
+/// (#959).** Finished runs are marked too, in `finished_runs`.
 ///
 /// An ambiguous invocation is not resumed: it waits for an operator. It
 /// did make its first WAL write, so its trigger has durably started, and a
 /// redelivery must not run it again behind the operator's back. A claim
-/// whose invocation left no WAL row stays `claimed`, for the redelivery to
-/// adopt. An in-flight invocation that no claim names, such as a direct
-/// run, is not an error.
+/// whose invocation left no WAL row, and no other record, stays `claimed`,
+/// for the redelivery to adopt. An in-flight invocation that no claim
+/// names, such as a direct run, is not an error.
 #[tokio::test]
 async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
     let server = fq_test_support::test_nats();
@@ -634,6 +635,10 @@ async fn startup_recovery_marks_the_claim_of_every_invocation_in_flight() {
         "a claim whose invocation never reached the WAL is left for the redelivery to adopt"
     );
 }
+
+// A trigger whose run finished while its claim still read `claimed`, and
+// the next daemon's start (issue 967), over the same crash as the tests above.
+mod finished_runs;
 
 // ---- #994: recovery's resumes are admitted like dispatched work ----
 
@@ -899,33 +904,11 @@ impl NextStart {
             ),
         }
 
-        let mut pricing = std::collections::HashMap::new();
-        pricing.insert(
-            "claude-haiku".to_string(),
-            fq_runtime::ModelPricing {
-                input_per_million: 1.0,
-                output_per_million: 5.0,
-                cache_read_per_million: None,
-                cache_write_per_million: None,
-                cache_write_1h_per_million: None,
-            },
+        let runner = runner_over(
+            Arc::new(bus.clone()),
+            worker_store.clone(),
+            worker_id.clone(),
         );
-        let runner = Arc::new(fq_runtime::ReducerRunner::new(
-            Arc::new(
-                fq_runtime::ReducerContext::builder()
-                    .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
-                    .build(),
-            ),
-            Arc::new(
-                fq_runtime::RunnerConfig::builder()
-                    .bus(bus.clone())
-                    .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
-                    .store(worker_store.clone())
-                    .worker_id(worker_id.clone())
-                    .build(),
-            ),
-            fq_runtime::Harness::new(),
-        ));
         Self {
             bus,
             cp_store,
@@ -989,6 +972,7 @@ impl NextStart {
                     worker_id: self.worker_id.as_str().to_string(),
                     dispatching_since_ms: 0,
                     trigger_claim_retention_ms: None,
+                    archive_holds: Default::default(),
                 },
                 bus: self.bus.clone(),
                 projection,
@@ -1083,6 +1067,42 @@ impl NextStart {
             "the next start resumes it"
         );
     }
+}
+
+/// The daemon's runner over `store`, running as `worker_id` and publishing
+/// through `sink`: the bus, or something in front of it.
+fn runner_over(
+    sink: Arc<dyn fq_runtime::bus::EventSink>,
+    store: Arc<WorkerStore>,
+    worker_id: WorkerId,
+) -> Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> {
+    let mut pricing = std::collections::HashMap::new();
+    pricing.insert(
+        "claude-haiku".to_string(),
+        fq_runtime::ModelPricing {
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+            cache_write_1h_per_million: None,
+        },
+    );
+    Arc::new(fq_runtime::ReducerRunner::new(
+        Arc::new(
+            fq_runtime::ReducerContext::builder()
+                .tools(Arc::new(fq_runtime::ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            fq_runtime::RunnerConfig::builder()
+                .event_sink(sink)
+                .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
+                .store(store)
+                .worker_id(worker_id)
+                .build(),
+        ),
+        fq_runtime::Harness::new(),
+    ))
 }
 
 /// Take the worker permit, at a cap of 1 the only one, for a run this test
@@ -1523,6 +1543,10 @@ async fn an_operator_resume_on_a_draining_daemon_is_refused_and_left_to_the_next
     );
 }
 
+// An operator's resume is counted against its agent's `max_concurrent` but
+// not held at it (issue 1009), on the same next start as the tests above.
+mod operator_resume_cap;
+
 /// Subscribe to every `invocation.operator_recovered`, whichever agent a
 /// drop publishes it under.
 async fn drops_published(
@@ -1675,3 +1699,7 @@ async fn a_running_recovered_run_is_dropped_only_with_live() {
         "a halted run is not reported completed: {reported:?}"
     );
 }
+
+// What recovery reports about a resume that returned an error (issue 1005),
+// on the same next start as the tests above.
+mod resume_errors;

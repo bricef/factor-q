@@ -157,10 +157,13 @@ pub struct StateConfig {
     #[serde(default = "default_stale_worker_retention_days")]
     pub stale_worker_retention_days: i64,
     /// How long a trigger claim row is kept before the retention sweep
-    /// deletes it, in days, counted from when it was claimed. Default 30.
-    /// Set to `-1` to keep claim rows for ever. A value below
-    /// [`trigger_claim_retention_floor_days`] (two days) is refused at
-    /// load.
+    /// deletes it, in days, counted from when it was claimed. Default 90.
+    /// Any negative value (`-1` by convention) keeps every claim row
+    /// indefinitely: the sweep never deletes one, so the link from a run
+    /// to the trigger that started it is never dropped, and the table
+    /// grows by a row for every trigger that starts a run, without bound.
+    /// A non-negative value below [`trigger_claim_retention_floor_days`]
+    /// (two days) is refused at load.
     ///
     /// The dispatcher claims every trigger delivery before it does
     /// anything else with it, and marks the claim `durably_started` when
@@ -174,8 +177,11 @@ pub struct StateConfig {
     /// The row is also the only record of which delivery started which
     /// run — the `trigger:` line of `fq invocation show` — and the sweep
     /// takes that link with it. Lowering this loses the link for older
-    /// runs and nothing else. The default keeps it about as long as
-    /// `retention_days` keeps the archived run, but the claim goes first,
+    /// runs and nothing else. The default keeps it three times as long as
+    /// the default `retention_days` keeps the archived run: past the
+    /// archive's window `fq invocation show` still finds a run by its
+    /// ownership row, which no window sweeps, and names its trigger until
+    /// the claim goes. Set the two windows equal and the claim goes first,
     /// by the run's length plus the archive's lag: this window runs from
     /// the claim, the archive's from archiving. `fq doctor` stops listing
     /// a claim an exited process left at this same age, when the sweep
@@ -203,7 +209,7 @@ fn default_stale_worker_retention_days() -> i64 {
 }
 
 fn default_trigger_claim_retention_days() -> i64 {
-    30
+    90
 }
 
 fn default_sweep_interval_seconds() -> u64 {
@@ -289,9 +295,11 @@ pub struct WorkerConfig {
     pub archive_retry_interval_ms: u64,
     /// How long after `terminal_at` (in ms) the sweeper logs a
     /// warning once per pending row. Default 60_000 (60s). The
-    /// sweeper keeps republishing past this point — the warn is
-    /// the operator-visible signal that the control-plane is
-    /// not acknowledging in a reasonable time.
+    /// sweeper keeps republishing a row the control plane has not
+    /// acknowledged past this point — the warn is the
+    /// operator-visible signal that the control plane is not
+    /// acknowledging in a reasonable time. A row the sweeper holds
+    /// instead (`worker::archive_retry`) is not republished at all.
     #[serde(default = "default_archive_warn_after_ms")]
     pub archive_warn_after_ms: i64,
     /// Retry policy for transient LLM API errors (rate limits, transport
@@ -1074,7 +1082,7 @@ api_key_env = "MY_ANTHROPIC_KEY"
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config.state.retention_days, 30);
         assert_eq!(config.state.stale_worker_retention_days, 7);
-        assert_eq!(config.state.trigger_claim_retention_days, 30);
+        assert_eq!(config.state.trigger_claim_retention_days, 90);
         assert_eq!(config.state.sweep_interval_seconds, 3_600);
     }
 
@@ -1145,7 +1153,8 @@ api_key_env = "MY_ANTHROPIC_KEY"
     }
 
     /// The sweep's bound and the doctor's horizon are one number, and the
-    /// `-1` that keeps rows for ever is no horizon at all.
+    /// `-1` that keeps rows for ever is no horizon at all — as is any other
+    /// negative value.
     #[test]
     fn trigger_claim_retention_in_milliseconds() {
         let state = |trigger_claim_retention_days| StateConfig {
@@ -1154,10 +1163,11 @@ api_key_env = "MY_ANTHROPIC_KEY"
         };
         assert_eq!(
             StateConfig::default().trigger_claim_retention_ms(),
-            Some(30 * 86_400_000)
+            Some(90 * 86_400_000)
         );
         assert_eq!(state(2).trigger_claim_retention_ms(), Some(2 * 86_400_000));
         assert_eq!(state(-1).trigger_claim_retention_ms(), None);
+        assert_eq!(state(-30).trigger_claim_retention_ms(), None);
     }
 
     /// The default worker-retention window must stay orders of
@@ -1205,7 +1215,7 @@ sweep_interval_seconds = 300
         let config = Config::from_toml_str("[state]\nstale_worker_retention_days = -1\n").unwrap();
         assert_eq!(config.state.stale_worker_retention_days, -1);
         assert_eq!(config.state.retention_days, 30);
-        assert_eq!(config.state.trigger_claim_retention_days, 30);
+        assert_eq!(config.state.trigger_claim_retention_days, 90);
 
         let config = Config::from_toml_str("[state]\ntrigger_claim_retention_days = -1\n").unwrap();
         assert_eq!(config.state.trigger_claim_retention_days, -1);

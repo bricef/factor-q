@@ -22,7 +22,12 @@ const OLD_EPOCH: i64 = 1_767_000_000_000_000_000;
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-/// The trigger-claim retention the daemon passes by default: thirty days.
+/// The horizon these tests judge with: thirty days, passed explicitly. It
+/// is not the daemon's default window (ninety days since issue 1014), and
+/// nothing here depends on the two agreeing. Leave it at thirty:
+/// `a_run_whose_archive_was_swept_still_shows_its_trigger` also sweeps
+/// the archive at this cutoff, `retention_days`' default, and a longer
+/// one would leave its forty-day-old archive row in place.
 const HORIZON_MS: i64 = 30 * DAY_MS;
 /// A clock far enough from zero that "sixty days ago" is still positive.
 const NOW_MS: i64 = 1_000 * DAY_MS;
@@ -63,7 +68,8 @@ fn without_id(mut row: TriggerClaimRow) -> TriggerClaimRow {
 }
 
 /// A daemon that has been dispatching for `for_ms`, judging with the
-/// bounds the daemon passes.
+/// trigger stream's own redelivery window and message age, and with the
+/// explicit `HORIZON_MS` rather than the daemon's default window.
 fn judgement(for_ms: i64) -> ClaimJudgement<'static> {
     ClaimJudgement {
         claimant: THIS_DAEMON,
@@ -724,9 +730,187 @@ async fn a_run_archived_between_the_two_reads_is_still_found() {
     let [unsettled] = read_before_the_archive.as_slice() else {
         panic!("one claimed row");
     };
-    assert_eq!(unsettled.owner_status, None, "read before the archive");
+    assert_eq!(unsettled.owner_row_status, None, "read before the archive");
     assert_eq!(
         views.start_record(unsettled).await.unwrap(),
         coordination_record("completed")
+    );
+}
+
+// ---- The report and startup recovery agree (issue 967) ----
+
+/// **A restart's recovery marks every claim this report calls started and
+/// never marked.**
+///
+/// Startup recovery marks a `claimed` row's start when its run is on
+/// record, by the same two records this report reads: the worker's WAL row,
+/// in flight or finished, and the control plane's ownership row once the
+/// WAL has let the run go (`TriggerClaims::recover`). So every claim the
+/// report lists as started and never marked before a restart is marked by
+/// it, the report lists none after it, and every other line stays as it
+/// was, its row untouched. Recovery marks more than the report lists: it
+/// does not ask whether the claim's message can still be delivered, so a
+/// claim on record whose message is gone, which the report leaves out, is
+/// marked too. This test shows the report's side. The table holds a run of each kind the report
+/// can see: archived, finished and not yet archived, in flight, archived
+/// with its archive since swept, and ambiguous (in flight, with the
+/// ownership row its recovery publish folds into), beside a claim with
+/// nothing on record and one with no invocation id.
+#[tokio::test]
+async fn a_restarts_recovery_marks_every_claim_this_report_calls_started_and_never_marked() {
+    let seed = Seed::new().await;
+    seed.started(1, EXITED, "inv-ok", NOW_MS - 9 * HOUR_MS)
+        .await;
+    seed.claimed(2, EXITED, "inv-never", NOW_MS - 8 * HOUR_MS)
+        .await;
+    seed.claimed(3, EXITED, "inv-archived", NOW_MS - 7 * HOUR_MS)
+        .await;
+    seed.archived("inv-archived", NOW_MS - 7 * HOUR_MS).await;
+    seed.claimed(4, EXITED, "inv-terminal", NOW_MS - 6 * HOUR_MS)
+        .await;
+    seed.wal("inv-terminal", NOW_MS - 6 * HOUR_MS, Some("failed"))
+        .await;
+    seed.claimed(5, EXITED, "inv-in-flight", NOW_MS - 5 * HOUR_MS)
+        .await;
+    seed.wal("inv-in-flight", NOW_MS - 5 * HOUR_MS, None).await;
+    seed.claimed(6, EXITED, "inv-swept", NOW_MS - 4 * HOUR_MS)
+        .await;
+    seed.archived("inv-swept", NOW_MS - 40 * DAY_MS).await;
+    assert_eq!(seed.cp.sweep_archive(NOW_MS - HORIZON_MS).await.unwrap(), 1);
+    seed.claimed_without_id(7, EXITED, NOW_MS - 3 * HOUR_MS)
+        .await;
+    seed.claimed(8, EXITED, "inv-ambiguous", NOW_MS - 2 * HOUR_MS)
+        .await;
+    seed.wal("inv-ambiguous", NOW_MS - 2 * HOUR_MS, None).await;
+    seed.cp
+        .upsert_invocation_ownership(
+            "inv-ambiguous",
+            "agent-a",
+            NOW_MS - HOUR_MS,
+            OwnerStatus::Ambiguous,
+        )
+        .await
+        .unwrap();
+    let views = seed.views().await;
+    let summary = |stranded: &[StrandedTriggerClaim]| {
+        stranded
+            .iter()
+            .map(|s| (s.delivery.stream_seq, s.finding))
+            .collect::<Vec<_>>()
+    };
+
+    let before = views
+        .stranded_trigger_claims(&judgement(window_ms()))
+        .await
+        .unwrap();
+    let unmarked: Vec<(u64, String)> = before
+        .iter()
+        .filter(|s| s.finding == StrandedClaimFinding::StartedUnmarked)
+        .map(|s| {
+            (
+                s.delivery.stream_seq,
+                s.invocation_id.clone().expect("a run on record is named"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        unmarked.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        vec![3, 4, 5, 6, 8],
+        "before the restart, the report lists each run on record as started and never marked"
+    );
+
+    let store = std::sync::Arc::new(
+        ControlPlaneStore::open(&seed.paths.control_plane)
+            .await
+            .unwrap(),
+    );
+    let wal_report = crate::worker::DurableStartReport::scan(&seed.worker)
+        .await
+        .unwrap();
+    crate::control_plane::dispatcher::TriggerClaims::recover(store, &wal_report)
+        .await
+        .expect("startup recovery");
+
+    let after = views
+        .stranded_trigger_claims(&judgement(window_ms()))
+        .await
+        .unwrap();
+    assert_eq!(
+        summary(&after),
+        summary(&before)
+            .into_iter()
+            .filter(|(_, finding)| *finding != StrandedClaimFinding::StartedUnmarked)
+            .collect::<Vec<_>>(),
+        "after the restart's recovery the report lists no claim as started and never marked, \
+         and every other line as it was"
+    );
+    let probe = |seq| {
+        seed.cp
+            .claim_trigger(Seed::key(seq), "probe", "probe", NOW_MS)
+    };
+    for (seq, invocation_id) in unmarked {
+        assert_eq!(
+            probe(seq).await.unwrap(),
+            crate::control_plane::TriggerClaim::Started { invocation_id },
+            "recovery marked seq {seq} under the id it names"
+        );
+    }
+    assert_eq!(
+        probe(2).await.unwrap(),
+        crate::control_plane::TriggerClaim::Held {
+            claimant: EXITED.into(),
+            invocation_id: Some("inv-never".into()),
+            claimed_at: NOW_MS - 8 * HOUR_MS,
+        },
+        "a claim with nothing on record is left exactly as it was"
+    );
+}
+
+/// **An ownership row whose status this build cannot read does not stop a
+/// restart, and its claim is marked.** Startup recovery needs only to know
+/// that the row exists: it says the run is on record. No writer stores
+/// any status but the four this build knows, but a row from a later build
+/// read by an earlier one would hold one, and a boot stopped by a word it
+/// does not need would leave the daemon down. Written through a raw
+/// connection, because no store method can write one.
+#[tokio::test]
+async fn a_restarts_recovery_marks_a_claim_whose_ownership_row_has_an_unknown_status() {
+    let seed = Seed::new().await;
+    seed.claimed(1, EXITED, "inv-from-a-later-build", NOW_MS - HOUR_MS)
+        .await;
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(&seed.paths.control_plane),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner (invocation_id, worker_id, assigned_at, status) \
+         VALUES ('inv-from-a-later-build', 'worker', 0, 'handed_over')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let store = std::sync::Arc::new(
+        ControlPlaneStore::open(&seed.paths.control_plane)
+            .await
+            .unwrap(),
+    );
+    let wal_report = crate::worker::DurableStartReport::scan(&seed.worker)
+        .await
+        .unwrap();
+    crate::control_plane::dispatcher::TriggerClaims::recover(store, &wal_report)
+        .await
+        .expect("an ownership status this build cannot read does not stop startup recovery");
+    assert_eq!(
+        seed.cp
+            .claim_trigger(Seed::key(1), "probe", "probe", NOW_MS)
+            .await
+            .unwrap(),
+        crate::control_plane::TriggerClaim::Started {
+            invocation_id: "inv-from-a-later-build".into()
+        },
+        "the run is on record, so its claim is marked"
     );
 }

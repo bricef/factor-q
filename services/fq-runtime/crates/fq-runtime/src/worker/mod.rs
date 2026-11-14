@@ -34,7 +34,7 @@ pub mod store;
 pub mod workspace;
 
 pub use archive_ack::{ArchiveAckConsumer, ArchiveAckError};
-pub use archive_retry::{ArchiveRetryError, ArchiveRetrySweeper};
+pub use archive_retry::{ArchiveHolds, ArchiveRetryError, ArchiveRetrySweeper};
 pub use deferral::{DeferralQueue, DueResume};
 pub use drain::{DrainReason, DrainRequest, DrainSignal, DrainState};
 pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, HeartbeatProducer};
@@ -43,7 +43,7 @@ pub use heartbeat::{DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS, Heartb
 // crate and is re-exported here, where the role is.
 pub use fq_ops::worker::WorkerId;
 pub use recovery::{
-    CategoryCounts, ClassifiedInvocation, InFlightReport, RecoveryCategory, categorise,
+    CategoryCounts, ClassifiedInvocation, DurableStartReport, RecoveryCategory, WalRun, categorise,
     scan_in_flight,
 };
 pub use reducer::{

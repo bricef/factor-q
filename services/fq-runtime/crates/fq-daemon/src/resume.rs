@@ -395,7 +395,10 @@ pub(crate) fn register_resume_command(
          receipt; the re-drive is admitted under the worker cap like any \
          other run — at once if a worker permit is free, otherwise in its \
          turn — and runs detached, so the invocation may still be waiting, \
-         or still working, when this returns.",
+         or still working, when this returns. Unlike a triggered run, it is \
+         not held at its agent's `max_concurrent`: it counts against that \
+         limit but does not wait for a slot under it, so the agent can be \
+         over its limit until one of its invocations ends.",
     );
     registry
         .command::<fq_ops::surface::InvocationResumeRequest, _, _>(

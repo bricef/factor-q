@@ -409,7 +409,7 @@ convenience with no correctness implication.
 which defaults to 7 and bounds a different table: how long a
 `coordination_worker` row that has already gone *stale* is kept
 before collection, **or with `state.trigger_claim_retention_days`**,
-which defaults to 30 and bounds the dispatcher's `trigger_claim`
+which defaults to 90 and bounds the dispatcher's `trigger_claim`
 table, counted from each claim and never shorter than the trigger
 stream's message age plus a day
 ([ADR-0032](../../adrs/accepted/0032-exactly-once-trigger-dispatch.md)).
@@ -568,6 +568,20 @@ Crash semantics:
   [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row);
   it archives the invocation without its outcome. Until then,
   the control plane sees that invocation as not archived.
+- An event the broker refuses for its size (`max_payload`),
+  whether the stored terminal event or `invocation.archived`,
+  which carries the whole state blob, **holds** its row the same
+  way: the row stays whole, the pass goes on to the rows behind
+  it, and the hold is logged once per daemon run. A size refusal
+  is the only publish error treated per row; any other ends the
+  pass, since a broker that is down refuses every row alike. The
+  held row is not serialised again in that run, because the bus
+  reads the limit only at connect; the next start offers it
+  again. A row whose `agent_id` or `invocation_id` cannot go on
+  an event (the runtime never writes one) is held too, until an
+  operator corrects it. `fq doctor` and `fq status` list every
+  held row, whatever the cause, with the reason and the remedy
+  ([#981](https://github.com/bricef/factor-q/issues/981)).
 - The mid-step failure sites publish `failed` *before*
   `ensure_terminal` marks the row, and store no copy, so a lost
   `failed` there leaves the row in flight, for recovery to resume.
@@ -581,8 +595,9 @@ Crash semantics:
   worker-scoped subject and the local row is deleted.
 
 The retry sweeper's "correctness over cleanup" rule (never
-delete a held row automatically — see `archive_retry.rs`) means
-a control-plane outage holds the row indefinitely on the worker
+delete a row that has not been acked, held or not — see
+`archive_retry.rs`) means a control-plane outage keeps the row
+indefinitely on the worker
 rather than risking silent data loss.
 
 ### 5.6 Schema evolution — DECIDED, MINIMAL
@@ -768,16 +783,22 @@ Recovery is per-role.
    - **Ambiguous**: latest dispatch row is `dispatched` without
      `completed`. Mark locally as held; publish
      `invocation.ambiguous` to NATS; do not auto-recover.
-8. Report every non-terminal invocation, ambiguous ones included, to
-   the control plane as durably started. Its WAL row proves the
-   durable start, and the trigger claim that has named the invocation
-   since claim time is marked `durably_started`, so a redelivery of
-   its unacked trigger is dropped rather than run a second time
-   ([#959](https://github.com/bricef/factor-q/issues/959)). The worker
-   reports and the control plane records; the control plane does not
-   read the worker's store. In v1 the report is a direct write to the
-   control-plane store, and the dispatcher cannot arbitrate claims
-   until it has landed (§11.3).
+8. Report every invocation the WAL holds, non-terminal ones
+   (ambiguous included) and terminal ones not yet archived, to the
+   control plane as durably started. Its WAL row proves the durable
+   start, and the trigger claim that has named the invocation since
+   claim time is marked `durably_started` if it is still `claimed`, so
+   a redelivery or a replay of its trigger is dropped rather than run
+   a second time ([#959](https://github.com/bricef/factor-q/issues/959)
+   for a run in flight,
+   [#967](https://github.com/bricef/factor-q/issues/967) for one that
+   finished). The control plane marks, in the same pass, every
+   `claimed` row whose invocation it holds an ownership row for, which
+   is where an archived run is on record once its WAL row is deleted.
+   The worker reports and the control plane records; the control
+   plane does not read the worker's store. In v1 the report is a
+   direct write to the control-plane store, and the dispatcher cannot
+   arbitrate claims until it has landed (§11.3).
 9. Resume safe-resume and safe-replay categories automatically.
    Held ambiguous invocations don't block new triggers.
 
@@ -1265,15 +1286,18 @@ What changes when an operator splits the deployment.
 
   Startup recovery adds another, with an ordering requirement
   (added for [#959](https://github.com/bricef/factor-q/issues/959)).
-  The worker scans its WAL into an `InFlightReport`, and
-  `TriggerClaims::recover` writes it straight into the
-  control-plane store, marking the trigger claim of every in-flight
-  invocation `durably_started`. The worker side reads only its own
-  store and the control-plane side reads only the report, but the
-  hand-over is a direct write, not a message. It has to land before
-  the dispatcher consumes a trigger, or a redelivery can adopt the
-  claim of an invocation that is already in flight and start it a
-  second time. That order is held by type: the dispatcher's
+  The worker scans its WAL into a `DurableStartReport`, every
+  invocation it holds in flight or finished and not yet archived, and
+  `TriggerClaims::recover` writes it straight into the control-plane
+  store, marking `durably_started` every `claimed` trigger claim whose
+  invocation the report holds or the control plane's ownership table
+  records ([#967](https://github.com/bricef/factor-q/issues/967)).
+  The worker side reads only its own store and the control-plane side
+  reads only the report and its own store, but the hand-over is a
+  direct write, not a message. It has to land before the dispatcher
+  consumes a trigger, or a redelivery or a replay can adopt the claim
+  of an invocation that has already started and start it a second
+  time. That order is held by type: the dispatcher's
   claim-installing constructors take only the `TriggerClaims` that
   `recover` returns. Lifted across a process boundary, the report
   becomes a message, the §7.1 step 8 report, which then has to be

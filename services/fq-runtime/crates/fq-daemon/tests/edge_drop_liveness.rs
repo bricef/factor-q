@@ -261,6 +261,7 @@ impl Surface {
                     worker_id: "operator-surface-test".to_string(),
                     dispatching_since_ms: 0,
                     trigger_claim_retention_ms: None,
+                    archive_holds: Default::default(),
                 },
                 bus: bus.clone(),
                 projection: projection.clone(),
