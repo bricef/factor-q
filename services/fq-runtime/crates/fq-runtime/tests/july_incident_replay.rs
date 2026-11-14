@@ -24,6 +24,11 @@
 //! message that is already claimed, so the second incident's redelivery
 //! starts nothing.
 //!
+//! A third test pins a keepalive rather than either mechanism: since
+//! issue 967 a run's setup, from its worker permit to its first WAL write,
+//! keeps its delivery alive, so a setup that outlasts the ack window is
+//! not redelivered at all.
+//!
 //! # What is real here, and what is not
 //!
 //! Real: a private `nats-server` process; the `fq-triggers` stream and the
@@ -102,10 +107,12 @@ enum Setup {
     /// and its `triggered` publish. The dispatcher keeps the delivery alive
     /// meanwhile (issue 967), so the broker does not redeliver it.
     Awaits,
-    /// It blocks its thread until the gate opens, as a setup stuck in a
-    /// synchronous call does (a workspace on a hung filesystem). Nothing
-    /// else in its task runs, the dispatcher's keepalive included, so the
-    /// delivery's ack window passes and the broker redelivers it.
+    /// It blocks its thread until the gate opens. Nothing else in its task
+    /// runs, the dispatcher's keepalive included, so the delivery's ack
+    /// window passes and the broker redelivers it. It stands for a
+    /// keepalive that cannot run, the class the slipped keepalive tick of
+    /// 2026-09-16 belongs to; in production, a hung filesystem under the
+    /// workspace's synchronous `create_dir_all` would do it.
     BlocksItsThread,
 }
 
@@ -456,14 +463,19 @@ async fn an_invocation_that_outlives_the_ack_window_is_not_redelivered() {
 /// run third, stamped `attempt: 2`. With the claim it was refused before
 /// it could queue, and each trigger starts exactly once.
 ///
-/// **How the stalled invocation stalls.** Since issue 967 the dispatcher
-/// keeps a delivery alive from its worker permit to its first WAL write,
-/// so a run that merely waits there is not redelivered: July's own route
-/// is closed before the claim is reached. The broker still redelivers an
-/// un-started trigger when that keepalive cannot run, which is a setup
-/// that blocks its thread ([`Setup::BlocksItsThread`]). That is the stall
-/// here, so the redelivery is still the broker's own and the claim is
-/// still what refuses it. It needs a runtime with more than one thread.
+/// **How the stalled invocation stalls.** July's own route, a trigger
+/// queued in the client's prefetch buffer behind a one-second window, was
+/// closed long before this test was written (ADR-0032 section 5), so the
+/// test stood it in with an invocation that awaited past the ack window
+/// between its worker permit and its first WAL write. Since issue 967 the
+/// dispatcher keeps a delivery alive through that stretch, and an awaiting
+/// stall is no longer redelivered either
+/// (`a_setup_that_outlasts_the_ack_window_is_not_redelivered`). The broker
+/// still redelivers an un-started trigger when the keepalive cannot run,
+/// the class the slipped keepalive tick of 2026-09-16 belongs to, so the
+/// stall here blocks its thread ([`Setup::BlocksItsThread`]): the
+/// redelivery is still the broker's own and the claim is still what
+/// refuses it. It needs a runtime with more than one thread.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_trigger_redelivered_before_its_first_wal_write_starts_once() {
     let mut world = World::start(1, Setup::BlocksItsThread).await;
@@ -562,5 +574,67 @@ async fn a_trigger_redelivered_before_its_first_wal_write_starts_once() {
          waited with its delivery kept alive, and the stalled one's start acked it"
     );
 
+    world.stop().await;
+}
+
+/// **An awaiting setup that outlasts the ack window is not redelivered.**
+///
+/// The pin for issue 967's setup keepalive on the production durable,
+/// through `TriggerDispatcher::run`: one trigger whose invocation takes
+/// the worker permit and then awaits, before its first WAL write, for
+/// longer than the durable's whole first-delivery window, as a run
+/// waiting on a slow MCP server does. The dispatcher keeps the delivery
+/// alive meanwhile, so the window passes with the broker having delivered
+/// the trigger once and no copy reaching the claim. The trigger then
+/// starts once, as `attempt: 1`, and its durable start acks it.
+#[tokio::test]
+async fn a_setup_that_outlasts_the_ack_window_is_not_redelivered() {
+    let mut world = World::start(1, Setup::Awaits).await;
+
+    let trigger = world.publish("a setup slower than the ack window").await;
+    world
+        .worker
+        .wait_for_starts(1, Duration::from_secs(10))
+        .await;
+
+    tokio::time::sleep(TRIGGER_RETRY_BACKOFF[0] + Duration::from_secs(3)).await;
+
+    let info = world.consumer_info().await;
+    assert_eq!(
+        (info.delivered.consumer_sequence, info.num_redelivered),
+        (1, 0),
+        "the broker must have delivered the trigger once across a whole ack window with its \
+         setup still running: {info:?}"
+    );
+    assert_eq!(
+        world.drop_counts(),
+        (0, 0),
+        "no copy reached the claim: the setup's keepalive prevented the redelivery"
+    );
+
+    world.worker.first_wal_write.add_permits(1);
+    world
+        .wait_until_nothing_is_unacked(
+            Duration::from_secs(10),
+            "the durable start must ack the trigger",
+        )
+        .await;
+    assert!(
+        matches!(
+            world.claim_on(trigger.stream_seq).await,
+            TriggerClaim::Started { .. }
+        ),
+        "the trigger's claim must record its durable start"
+    );
+    assert_eq!(
+        world.worker.starts(),
+        vec![Start {
+            trigger: trigger.id,
+            attempt: Some(1),
+        }],
+        "one trigger, one invocation, as its first delivery"
+    );
+
+    world.worker.finish.add_permits(1);
     world.stop().await;
 }
