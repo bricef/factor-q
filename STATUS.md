@@ -275,9 +275,13 @@ running daemon holds for a run that has not started. The claim table
 no longer grows without bound, the fifth gap ADR-0032 lists
 ([#969](https://github.com/bricef/factor-q/issues/969)): the retention
 sweep deletes a claim `[state] trigger_claim_retention_days` (default
-30) after it was claimed, a window the config refuses below the trigger
-stream's message age plus a day, and never deletes a claim the running
-daemon holds; `fq doctor` stops listing a dead claim at the same age.
+90, raised from 30 in [#1014](https://github.com/bricef/factor-q/issues/1014); any
+negative value keeps every claim indefinitely) after it was claimed, a
+window the config refuses below the trigger stream's message age plus a
+day, and never deletes a claim the running daemon holds; `fq doctor`
+stops listing a dead claim at the same age, and nothing clears a claim
+that never started a run sooner
+([#1029](https://github.com/bricef/factor-q/issues/1029)).
 The table has no index yet
 ([#989](https://github.com/bricef/factor-q/issues/989)). ADR-0032 lists the gaps the design knowingly leaves open. The first of
 them no longer is: a daemon that died between an invocation's first WAL
@@ -286,7 +290,14 @@ trigger run a second time beside the resumed invocation. The claim row
 now names the invocation from claim time, and startup recovery marks
 the claim of every invocation it finds in flight before the dispatcher
 consumes a trigger
-([#959](https://github.com/bricef/factor-q/issues/959)). The second
+([#959](https://github.com/bricef/factor-q/issues/959)). Since
+[#1030](https://github.com/bricef/factor-q/pull/1030) it marks the claim of a
+finished run too: every `claimed` row whose run has a start on record,
+in the worker's WAL or in the control plane's ownership table, the
+records `fq doctor` reads to call a claim "started, never marked". A
+claim left `claimed` for a run that ended is therefore no longer adopted
+and run a second time by a redelivery, or by a replay from a recreated
+consumer, after a restart. The second
 no longer is either: an invocation that fired its durable-start signal
 and returned within one poll used to be settled as if it had never
 started, its claim released and a transient error NAKed for a second
@@ -306,13 +317,55 @@ still waiting or starting, or a claim this daemon
 will never settle (the third gap, open as
 [#967](https://github.com/bricef/factor-q/issues/967)). Both counts are
 kept in memory and start again with the daemon
-([#968](https://github.com/bricef/factor-q/issues/968)). Outside
+([#968](https://github.com/bricef/factor-q/issues/968)). The third gap is
+narrower and still open
+([#967](https://github.com/bricef/factor-q/issues/967), two of four
+changes merged). A durable-start mark the claim store refuses no longer
+stops the run: the dispatcher offers the mark again for up to two
+seconds, keeping the delivery alive meanwhile, and a mark still refused
+is answered by acking the delivery without releasing its claim, so the
+run carries on and is neither redelivered nor falsely dead-lettered
+([#1021](https://github.com/bricef/factor-q/pull/1021)); the next start's
+recovery then records that run's start, as above. What remains is on a
+live daemon: a setup slower than one ack window is still redelivered
+underneath its own first copy, and a claim the daemon holds for a
+delivery whose task died, or whose ack was lost, has every redelivery
+dropped, until the daemon next starts or the trigger is dead-lettered
+as exhausted, whichever comes first. Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered
 invocations on top of the cap, and they start ahead of any new trigger
 (the review's finding C5,
-[#994](https://github.com/bricef/factor-q/issues/994)). The M0
+[#994](https://github.com/bricef/factor-q/issues/994)). An operator's
+`fq invocation resume` is the one run not held at its agent's
+`max_concurrent`: it counts against that limit, so the agent can be
+over it until one of its invocations ends, and the command says so
+([#1009](https://github.com/bricef/factor-q/issues/1009), whose second
+part, a rate-limited run resumed at once after a restart, is open).
+Startup recovery no longer reports a resumed invocation that ended in
+`failed` as `invocation.ambiguous`: it decides from the worker's row,
+not from the error the resume returned, so only a resume that leaves
+the invocation in flight is reported
+([#1005](https://github.com/bricef/factor-q/issues/1005)). The archive
+hand-off no longer stops at a row it cannot publish
+([#981](https://github.com/bricef/factor-q/issues/981)): the sweeper
+holds such a row (an event too large for the broker, a stored event
+this build will not republish, ids that cannot go on an event), keeps
+it whole, goes on to the rows behind it and offers it again at the next
+start, and `fq doctor` and `fq status` list the holds with their reason
+and remedy. `invocation.archived` now carries the run's state as base64
+text, four bytes on the wire for three of state where it was about four
+for one, so a run holding up to about 786,000 bytes of state (two tool
+results at the default cap) archives on a stock 1 MiB broker. An ended
+run whose archive is held still reads `in_flight` in the ownership
+table ([#1024](https://github.com/bricef/factor-q/issues/1024)). And an
+event the broker refuses for its size now ends its run
+([#828](https://github.com/bricef/factor-q/issues/828)): one terminal
+`failed` of kind `payload_too_large` names the refused event, its size
+on the wire and the broker's limit, where before the run was left in
+flight, resumed into the same refusal and reported ambiguous on every
+start. The M0
 plan's deferred proxy instrumentation (read relative to an
 expert+frontier baseline) to make **M1 (Q1)** decidable now has its own
 track: the
