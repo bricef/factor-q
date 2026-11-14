@@ -333,8 +333,8 @@ fn stuck_dispatcher_with_dropped_duplicates_explains_duplicate_dispatch() {
 }
 
 /// The held-copy count does not choose a stuck dispatcher's next step.
-/// It only grows while the daemon runs: a slow start that was
-/// redelivered hours ago leaves it at 1 when the worker store fails and
+/// It only grows while the daemon runs: a copy dropped that way hours
+/// ago leaves it at 1 when the worker store fails and
 /// every trigger is NAKed before its first WAL write. With no trigger
 /// held at a cap and no copy of a started run, the step stays the one
 /// that points at the handler and the store, and the count's own note

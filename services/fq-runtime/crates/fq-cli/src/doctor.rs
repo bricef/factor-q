@@ -198,7 +198,7 @@ fn render_consumers(
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
                 ));
                 // The held-copy count does not choose this step. It only
-                // ever grows while the daemon runs, so one slow start in
+                // ever grows while the daemon runs, so one held copy in
                 // the morning would make a store failure in the afternoon
                 // read as a duplicate delivery and drop the step that
                 // points at the store. Its own note follows either way.
@@ -326,8 +326,8 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
 ///
 /// It does not say whether anything is wrong, because the claim does
 /// not. The claim's first copy may still be waiting or starting: a
-/// delivery is redelivered under it when its keepalive stops landing,
-/// or when its start outlasts the ack window. Or this daemon may never
+/// delivery is redelivered under it when its keepalive stops landing for
+/// a whole ack window. Or this daemon may never
 /// settle the claim, and every delivery of that trigger is dropped the
 /// same way until it is dead-lettered. The stranded-claims block of the
 /// same report lists such a claim once a run is on record for it, which
