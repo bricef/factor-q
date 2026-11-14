@@ -30,7 +30,8 @@ use std::time::Duration;
 use fq_ops::health::{ClaimHolder, ClaimedMessage, StrandedClaimFinding, StrandedTriggerClaim};
 
 use super::{TriggerClaimState, TriggerDeliveryView, Views, ViewsError};
-use crate::control_plane::store::{TriggerClaimRow, UnsettledTriggerClaim};
+use crate::control_plane::store::{RunRecords, TriggerClaimRow, UnsettledTriggerClaim};
+use crate::worker::WalRun;
 
 /// How long an invocation's start may be on record while its claim still
 /// says `claimed` before the check calls the claim unmarked.
@@ -169,31 +170,47 @@ impl Views {
         &self,
         unsettled: &UnsettledTriggerClaim,
     ) -> Result<Option<StartRecord>, ViewsError> {
-        let coordination = |status: crate::control_plane::store::OwnerStatus| StartRecord {
-            status: status.as_str().to_string(),
-            started_at_ms: None,
+        let invocation_id = unsettled.claim.invocation_id.as_deref();
+        let joined = unsettled.owner_status()?;
+        let wal_row = match (joined, invocation_id) {
+            (None, Some(id)) => self.worker.get_invocation_state(id).await?,
+            _ => None,
         };
-        if let Some(status) = unsettled.owner_status()? {
-            return Ok(Some(coordination(status)));
-        }
-        let Some(invocation_id) = unsettled.claim.invocation_id.as_deref() else {
+        let owner = match (joined, &wal_row, invocation_id) {
+            (Some(status), _, _) => Some(status),
+            (None, None, Some(id)) => self
+                .control_plane
+                .get_invocation_owner(id)
+                .await?
+                .map(|owner| owner.status),
+            _ => None,
+        };
+        // Whether either record holds the run is `RunRecords`'s one
+        // definition, shared with startup recovery and the dispatcher.
+        let records = RunRecords {
+            wal: wal_row
+                .as_ref()
+                .map(|row| WalRun::of_row(row.terminal_at.is_some())),
+            owner_row_status: owner.map(|status| status.as_str().to_string()),
+        };
+        if !records.start_on_record() {
             return Ok(None);
-        };
-        if let Some(row) = self.worker.get_invocation_state(invocation_id).await? {
-            return Ok(Some(StartRecord {
+        }
+        Ok(match (owner, wal_row) {
+            (Some(status), _) => Some(StartRecord {
+                status: status.as_str().to_string(),
+                started_at_ms: None,
+            }),
+            (None, Some(row)) => Some(StartRecord {
                 status: if row.terminal_at.is_some() {
                     row.phase
                 } else {
                     "in_flight".to_string()
                 },
                 started_at_ms: Some(row.started_at),
-            }));
-        }
-        Ok(self
-            .control_plane
-            .get_invocation_owner(invocation_id)
-            .await?
-            .map(|owner| coordination(owner.status)))
+            }),
+            (None, None) => None,
+        })
     }
 }
 

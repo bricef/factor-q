@@ -222,6 +222,19 @@ pub enum WalRun {
     Finished,
 }
 
+impl WalRun {
+    /// Where a run stands from whether its WAL row is terminal. The one
+    /// mapping, for the startup scan ([`DurableStartReport::scan`]) and
+    /// for one run asked about at a time (`Worker::wal_run`).
+    pub fn of_row(terminal: bool) -> Self {
+        if terminal {
+            WalRun::Finished
+        } else {
+            WalRun::InFlight
+        }
+    }
+}
+
 impl DurableStartReport {
     /// Read the runs `store`'s WAL holds.
     pub async fn scan(store: &WorkerStore) -> Result<Self, WorkerStoreError> {
@@ -229,14 +242,7 @@ impl DurableStartReport {
             .list_durable_starts()
             .await?
             .into_iter()
-            .map(|(invocation_id, terminal)| {
-                let run = if terminal {
-                    WalRun::Finished
-                } else {
-                    WalRun::InFlight
-                };
-                (invocation_id, run)
-            })
+            .map(|(invocation_id, terminal)| (invocation_id, WalRun::of_row(terminal)))
             .collect();
         Ok(Self { runs })
     }

@@ -6,8 +6,9 @@ use std::time::Duration;
 use tracing::{debug, error, warn};
 
 use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
+use crate::control_plane::store::RunRecords;
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
-use crate::worker::{DurableStartReport, WalRun};
+use crate::worker::DurableStartReport;
 
 use super::admission::{HOLD_KEEPALIVE, keep_alive};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
@@ -165,15 +166,17 @@ impl TriggerClaims {
             };
             // The ownership row's presence is the record; its status is only
             // reported, as stored, so one this build cannot read does not
-            // stop the boot.
-            let run = match (starts.run(invocation_id), &unsettled.owner_row_status) {
-                (Some(WalRun::InFlight), _) => "in flight in the worker's WAL".to_string(),
-                (Some(WalRun::Finished), _) => {
-                    "finished, in the worker's WAL until its archive is acknowledged".to_string()
-                }
-                (None, Some(status)) => format!("on the control plane's record as {status}"),
-                (None, None) => continue,
+            // stop the boot. Whether either record holds the run is
+            // `RunRecords`'s one definition, shared with `fq doctor` and the
+            // dispatcher's settling of its own claims.
+            let records = RunRecords {
+                wal: starts.run(invocation_id),
+                owner_row_status: unsettled.owner_row_status.clone(),
             };
+            if !records.start_on_record() {
+                continue;
+            }
+            let run = records.where_on_record().unwrap_or_default();
             if store
                 .mark_unsettled_trigger_started(claim.key(), invocation_id)
                 .await?
