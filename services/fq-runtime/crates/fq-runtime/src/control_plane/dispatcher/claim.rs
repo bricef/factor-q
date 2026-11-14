@@ -261,18 +261,13 @@ impl TriggerDispatcher {
     /// attempt blocks, for as long as it waits in the store, which the
     /// budget's own documentation bounds.
     ///
-    /// Nothing keeps a delivery alive between its worker permit and this
-    /// point, so its ack window may be partly spent when the first attempt
-    /// starts, and one attempt can wait out the store's busy timeout or its
-    /// pool. An in-progress ack every [`HOLD_KEEPALIVE`] therefore runs
-    /// alongside the attempts, not only between them. The first goes out a
-    /// tick after the mark starts, so the healthy path sends none; a
-    /// delivery whose window had less than a tick left by then can still
-    /// lapse once. Its copy meets this daemon's own claim and is dropped,
-    /// counted as a duplicate dropped before a start was recorded, or,
-    /// once the mark has landed, acked as a duplicate of a started run:
-    /// either way nothing starts twice, and every window after the first
-    /// tick is renewed.
+    /// `handle` keeps the delivery alive through the run's setup, up to
+    /// this point, so its ack window is all but full when the first
+    /// attempt starts; but one attempt can wait out the store's busy
+    /// timeout or its pool. An in-progress ack every [`HOLD_KEEPALIVE`]
+    /// therefore runs alongside the attempts, not only between them,
+    /// taking over from the setup's. The first goes out a tick after the
+    /// mark starts, so the healthy path sends none.
     ///
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
@@ -446,14 +441,13 @@ impl TriggerDispatcher {
                 // settle it,** so the line says what the row shows and does
                 // not guess. A copy lands here in two kinds of case:
                 //
-                // - The first copy is alive. A hold keeps its delivery alive
-                //   with an in-progress ack every `HOLD_KEEPALIVE`, so it is
+                // - The first copy is alive. Its holds, and its setup from
+                //   its worker permit to its first WAL write (workspace, MCP
+                //   servers, the first step), keep its delivery alive with an
+                //   in-progress ack every `HOLD_KEEPALIVE`, so it is
                 //   redelivered only if those acks stop landing for a whole
-                //   ack window; from its worker permit to its first WAL
-                //   write (workspace, MCP servers, the first step) nothing
-                //   keeps it alive, so a start slower than the window is
-                //   redelivered too. The first copy still starts once, and
-                //   its durable start acks the message.
+                //   ack window. The first copy still starts once, and its
+                //   durable start acks the message.
                 // - This process will never settle the claim (#967): the
                 //   invocation task panicked before its durable start or in
                 //   the poll that made it, a release failed before a NAK, or
@@ -679,8 +673,8 @@ async fn mark_with_retries(
 /// in-progress ack every [`HOLD_KEEPALIVE`], the cadence every hold
 /// keeps. The first goes out a tick after `work` starts, not at once as a
 /// hold's does: work that ends inside the first tick, which is every mark
-/// on a healthy day, sends none, at the price of a window with less than
-/// a tick left lapsing once (`mark_durable_started` says what follows).
+/// on a healthy day, sends none. `handle` kept the delivery's window all
+/// but full through setup, up to the mark, so the wait costs nothing.
 async fn keeping_alive<T>(
     msg: &async_nats::jetstream::Message,
     trigger_id: uuid::Uuid,

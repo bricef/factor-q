@@ -666,6 +666,21 @@ impl TriggerDispatcher {
                     }
                 }
                 outcome = &mut invocation => break outcome,
+                // Setup's keepalive (#967): the workspace, the MCP servers
+                // and the `triggered` publish run between the permit and
+                // the durable start, and can outlast an ack window. Until
+                // the durable start, or the return if none comes, the
+                // delivery is renewed on the holds' cadence, a tick after
+                // setup begins so a quick start sends nothing, and lets go
+                // on a drain or shutdown as they do. The mark keeps it
+                // alive from the durable start until its ack.
+                () = tokio::time::sleep(admission::HOLD_KEEPALIVE),
+                    if !durable_start_observed && !self.stopping() =>
+                {
+                    if !self.stopping() {
+                        admission::keep_alive(msg, Some(trigger_id)).await;
+                    }
+                }
             }
         };
 
