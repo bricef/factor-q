@@ -1459,20 +1459,29 @@ those runs reads `none recorded` from then on. An instance that set
 `retention_days = -1` to keep its history also needs
 `trigger_claim_retention_days = -1` to keep this link.
 
-**One constraint for later work.** Two things here depend on the control
-plane's ownership table (`coordination_invocation_owner`) having no
-retention, which it has none of today. `fq doctor` tells a claim whose
-run finished from one that never started by the run's row there: if
-that table ever gains a window shorter than this one, an old claim whose
-run finished loses its record of the run, and the report would turn
-"started, never marked" into "never started". And once a finished run's
-archive row is swept, `fq invocation show` finds the run by that same
-row (or by its cost rows, if it made a model call), which is what lets
-it show the trigger this window keeps past the archive's window: a
-shorter window on the ownership table could leave such a run unfindable
-while its claim, and so its trigger link, is still kept. Keep any such
-window at or above this one; for the report, the alternative is to give
-the claim its own record of the start.
+**One constraint for later work.** Three things here depend on the
+control plane's ownership table (`coordination_invocation_owner`)
+having no retention, which it has none of today. The first is the
+serious one, because what breaks is a run, not a report. Startup
+recovery marks the claim of a run that finished while its claim still
+said `claimed`, and once the run is archived and its WAL row deleted,
+the run's row in that table is the only record recovery finds it by
+([#967](https://github.com/bricef/factor-q/issues/967)). If that table
+ever gains a window shorter than this one, such a claim is no longer
+marked at the next start once the run's row is gone, and a redelivered
+or replayed copy of its trigger, while the stream still holds the
+message, is adopted and runs the work a second time. `fq doctor` tells
+a claim whose run finished from one that never started by the same
+row: with it gone, an old claim whose run finished loses its record of
+the run, and the report would turn "started, never marked" into "never
+started". And once a finished run's archive row is swept,
+`fq invocation show` finds the run by that same row (or by its cost
+rows, if it made a model call), which is what lets it show the trigger
+this window keeps past the archive's window: a shorter window on the
+ownership table could leave such a run unfindable while its claim, and
+so its trigger link, is still kept. Keep any such window at or above
+this one; for startup recovery and the report, the alternative is to
+give the claim its own record of the start.
 
 ## Notifications and alerts
 
