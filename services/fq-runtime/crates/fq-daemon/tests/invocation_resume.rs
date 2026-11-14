@@ -1456,8 +1456,10 @@ fn seen_of(seen: &Seen, kind: &str, invocation_id: uuid::Uuid) -> Vec<serde_json
 /// Before #828 that refusal was transient and left no terminal event:
 /// the row stayed in flight, and every start resumed it into the same
 /// refusal. Now the first start ends the run with one `failed` of kind
-/// `payload_too_large` naming the `llm.request`, and the next start finds
-/// nothing in flight: no resume, nothing ambiguous, no second `failed`.
+/// `payload_too_large` naming the `llm.request`, and reports nothing
+/// ambiguous: the resume returns an error, but recovery reads the worker
+/// row and finds the run ended. The next start finds nothing in flight:
+/// no resume, nothing ambiguous, no second `failed`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() {
     let server = fq_test_support::NatsServer::start();
@@ -1492,14 +1494,16 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // Recovery reports the resume's error as ambiguous right after the
-    // `failed` (below); wait for it, then a margin for anything else
-    // still on its way to the subscription.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while seen_of(&seen, "invocation_ambiguous", invocation).is_empty() && Instant::now() < deadline
-    {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Recovery decides what to report once the resume returns. This run
+    // has ended, so it says so in the log and publishes nothing; wait for
+    // that decision rather than for an event that must not come, then a
+    // margin for anything else still on its way to the subscription.
+    first
+        .await_log(
+            "but the invocation has ended; not reporting it ambiguous",
+            Duration::from_secs(30),
+        )
+        .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     first.stop();
 
@@ -1527,15 +1531,11 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         0,
         "the model is never asked"
     );
-    // Issue 1005: startup recovery reports every error a resume returns
-    // as `invocation.ambiguous`, this run's terminal failure included, so
-    // the start that ends the run also flags it ambiguous, once. That is
-    // not what this change is about and is pinned here as it stands; the
-    // change for issue 1005 turns this assertion to none.
-    assert_eq!(
-        seen_of(&seen, "invocation_ambiguous", invocation).len(),
-        1,
-        "the first start flags the failed run ambiguous once (issue 1005)"
+    // The resume returned an error, but recovery reads the worker row,
+    // finds the run ended, and reports nothing ambiguous.
+    assert!(
+        seen_of(&seen, "invocation_ambiguous", invocation).is_empty(),
+        "the start that ends the run reports nothing ambiguous"
     );
     let row = fq_runtime::WorkerStore::open(
         &fq_runtime::RuntimeDbPaths::under(&scratch.path("cache")).worker,
@@ -1561,7 +1561,6 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         .flush()
         .await
         .expect("flush the subscription");
-    let ambiguous_before = seen_of(&seen, "invocation_ambiguous", invocation).len();
     let mut next = Daemon::spawn(&scratch, &nats_url, "daemon-oversized-next.log");
     let message = tokio::time::timeout(Duration::from_secs(30), recovery.next())
         .await
@@ -1585,10 +1584,9 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         1,
         "no second failed"
     );
-    assert_eq!(
-        seen_of(&seen, "invocation_ambiguous", invocation).len(),
-        ambiguous_before,
-        "the next start reports nothing ambiguous"
+    assert!(
+        seen_of(&seen, "invocation_ambiguous", invocation).is_empty(),
+        "the next start reports nothing ambiguous either"
     );
 
     mock.shutdown().await;
