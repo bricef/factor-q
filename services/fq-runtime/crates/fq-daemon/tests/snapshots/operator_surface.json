@@ -2891,6 +2891,13 @@
                 "properties": {
                   "active": {
                     "properties": {
+                      "abandoned_claim_retaken": {
+                        "default": 0,
+                        "description": "Deliveries that met a claim the daemon holds itself, with no\nstart recorded on it, that no copy of the trigger was handling\nany more and whose run had no start on record, in the worker's\nWAL or the control plane's: the copy that took the claim ended\nbefore its run's first WAL write and left the delivery\nunsettled (its task died, or releasing the claim before a NAK\nfailed). Each took the claim again under a new invocation id\nand ran the trigger, once. Not a duplicate: the work runs. Not\na fault either, though each one follows a failure the daemon\nlogs; the daemon logs each at warn with its subject, its\nsequence, its attempt, the claim's age and the abandoned\ninvocation id. Counted in memory since the daemon started, like\n`duplicate_dropped`. A report from a daemon that does not send\nit reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "ack_pending": {
                         "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",
@@ -3760,6 +3767,13 @@
                 "properties": {
                   "active": {
                     "properties": {
+                      "abandoned_claim_retaken": {
+                        "default": 0,
+                        "description": "Deliveries that met a claim the daemon holds itself, with no\nstart recorded on it, that no copy of the trigger was handling\nany more and whose run had no start on record, in the worker's\nWAL or the control plane's: the copy that took the claim ended\nbefore its run's first WAL write and left the delivery\nunsettled (its task died, or releasing the claim before a NAK\nfailed). Each took the claim again under a new invocation id\nand ran the trigger, once. Not a duplicate: the work runs. Not\na fault either, though each one follows a failure the daemon\nlogs; the daemon logs each at warn with its subject, its\nsequence, its attempt, the claim's age and the abandoned\ninvocation id. Counted in memory since the daemon started, like\n`duplicate_dropped`. A report from a daemon that does not send\nit reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "ack_pending": {
                         "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",

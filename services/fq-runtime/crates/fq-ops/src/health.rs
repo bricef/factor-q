@@ -144,6 +144,22 @@ pub enum ConsumerHealth {
         /// daemon that does not send it reads as zero.
         #[serde(default)]
         held_duplicate_dropped: u64,
+        /// Deliveries that met a claim the daemon holds itself, with no
+        /// start recorded on it, that no copy of the trigger was handling
+        /// any more and whose run had no start on record, in the worker's
+        /// WAL or the control plane's: the copy that took the claim ended
+        /// before its run's first WAL write and left the delivery
+        /// unsettled (its task died, or releasing the claim before a NAK
+        /// failed). Each took the claim again under a new invocation id
+        /// and ran the trigger, once. Not a duplicate: the work runs. Not
+        /// a fault either, though each one follows a failure the daemon
+        /// logs; the daemon logs each at warn with its subject, its
+        /// sequence, its attempt, the claim's age and the abandoned
+        /// invocation id. Counted in memory since the daemon started, like
+        /// `duplicate_dropped`. A report from a daemon that does not send
+        /// it reads as zero.
+        #[serde(default)]
+        abandoned_claim_retaken: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is

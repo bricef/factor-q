@@ -36,6 +36,12 @@ pub struct ConsumerRecord {
     /// copy is waiting, starting, or will never settle it, so the count
     /// says only that the copy was refused.
     pub held_duplicate_dropped: u64,
+    /// Trigger redeliveries that took again a claim this process holds,
+    /// which no copy was handling any more and whose run had no start on
+    /// record: the copy that took it ended before its first WAL write and
+    /// left the delivery unsettled (its task died, or the release before
+    /// its NAK failed). Each one ran the trigger under a new invocation id.
+    pub abandoned_claim_retaken: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
 }
@@ -78,6 +84,15 @@ impl ConsumerLedger {
             .entry(consumer.to_string())
             .or_default()
             .held_duplicate_dropped += 1;
+    }
+
+    /// The dispatcher took again a claim of its own that no copy was
+    /// handling and whose run had no start on record, and ran the trigger.
+    pub fn note_abandoned_claim_retaken(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .abandoned_claim_retaken += 1;
     }
 
     /// The loop halted on an event it cannot read.
