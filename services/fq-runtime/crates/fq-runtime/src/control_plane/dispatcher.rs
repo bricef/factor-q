@@ -760,6 +760,9 @@ mod claim_retention_tests;
 mod duplicate_drop_tests;
 
 #[cfg(test)]
+mod own_claim_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::{Agent, Sandbox};
