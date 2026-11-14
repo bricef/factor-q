@@ -1,6 +1,7 @@
 use sqlx::Row;
 
 use super::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus};
+use crate::worker::WalRun;
 
 /// Rows one retention DELETE takes before it lets other writers in.
 const SWEEP_BATCH_ROWS: i64 = 10_000;
@@ -104,6 +105,60 @@ impl UnsettledTriggerClaim {
                 })
             })
             .transpose()
+    }
+}
+
+/// What the two records that can hold a run say of the one a claim names:
+/// the worker's WAL and the control plane's ownership table.
+///
+/// **This is the one definition of a start on record**, and three readers
+/// share it, so they cannot disagree about it:
+///
+/// - startup recovery marks the claim of a run that has one
+///   (`TriggerClaims::recover`);
+/// - `fq doctor` calls such a claim started and never marked
+///   (`Views::stranded_trigger_claims`);
+/// - the trigger dispatcher, meeting a claim of its own that no copy of
+///   the trigger is handling any more, acks the copy and marks the claim
+///   when the run has one, and takes the claim again when it has none
+///   (issue 967).
+///
+/// A run has a start on record when either record holds it. The WAL holds
+/// it from its first WAL write until the control plane acknowledges its
+/// archive; the archive hand-off writes the ownership row first, and
+/// nothing sweeps that row, so a run that has left the WAL is on the
+/// ownership table. An operator's drop writes an ownership row too, even
+/// for a run that never made its first WAL write, which counts it as
+/// started on purpose: a dropped run must not be run again. A reader of
+/// both records reads the WAL first, so an archive landing between the two
+/// reads cannot hide the run from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunRecords {
+    /// Where the worker's WAL holds the run, if it holds a row for it.
+    pub wal: Option<WalRun>,
+    /// The ownership row's status as stored, if there is a row. Left
+    /// unparsed: only the row's presence decides, so a status this build
+    /// cannot read does not hide a start.
+    pub owner_row_status: Option<String>,
+}
+
+impl RunRecords {
+    /// Whether the run has a start on record: either record holds it.
+    pub fn start_on_record(&self) -> bool {
+        self.wal.is_some() || self.owner_row_status.is_some()
+    }
+
+    /// Where the run is on record, for a log line, or `None` when it is on
+    /// neither record.
+    pub fn where_on_record(&self) -> Option<String> {
+        match (self.wal, &self.owner_row_status) {
+            (Some(WalRun::InFlight), _) => Some("in flight in the worker's WAL".to_string()),
+            (Some(WalRun::Finished), _) => {
+                Some("finished, in the worker's WAL until its archive is acknowledged".to_string())
+            }
+            (None, Some(status)) => Some(format!("on the control plane's record as {status}")),
+            (None, None) => None,
+        }
     }
 }
 
@@ -252,6 +307,44 @@ impl ControlPlaneStore {
         .bind(key.stream_epoch)
         .bind(key.stream_seq as i64)
         .bind(invocation_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Take again a `claimed` row `claimant` holds, naming `invocation_id`
+    /// in place of `abandoned_invocation_id` and restarting its age, if the
+    /// row is still `claimed` by `claimant` and still names the abandoned
+    /// id. Returns whether it did.
+    ///
+    /// The dispatcher calls it for a claim of its own that no copy of the
+    /// trigger is handling any more and whose run has no start on record
+    /// (issue 967). The id in the condition is what makes it a
+    /// compare-and-set between two copies that both found the claim
+    /// abandoned: [`Self::take_over_trigger_claim`] matches on the claimant
+    /// alone, which another claimant's row allows, but every copy that
+    /// re-takes this row claims under the same id.
+    pub async fn retake_trigger_claim(
+        &self,
+        key: TriggerKey<'_>,
+        claimant: &str,
+        abandoned_invocation_id: &str,
+        invocation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        Ok(sqlx::query(
+            "UPDATE trigger_claim SET invocation_id = ?, claimed_at = ? \
+             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? \
+             AND claimant = ? AND state = 'claimed' AND invocation_id = ?",
+        )
+        .bind(invocation_id)
+        .bind(now_ms)
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
+        .bind(claimant)
+        .bind(abandoned_invocation_id)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -435,12 +528,42 @@ impl ControlPlaneStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|row| UnsettledTriggerClaim {
-                claim: row_to_claim(row),
-                owner_row_status: row.get("owner_status"),
-            })
-            .collect())
+        Ok(rows.iter().map(row_to_unsettled).collect())
+    }
+
+    /// One claim, if it is still `claimed`, joined to its run's ownership
+    /// row exactly as [`Self::unsettled_trigger_claims`] joins every one.
+    ///
+    /// The dispatcher reads it to settle a claim of its own that no copy of
+    /// the trigger is handling any more (issue 967), so it judges the row
+    /// and the ownership record recovery and `fq doctor` judge. One
+    /// primary-key read, and one on the ownership table's primary key.
+    pub async fn unsettled_trigger_claim(
+        &self,
+        key: TriggerKey<'_>,
+    ) -> Result<Option<UnsettledTriggerClaim>, ControlPlaneStoreError> {
+        let row = sqlx::query(
+            "SELECT c.stream AS stream, c.stream_epoch AS stream_epoch, \
+                    c.stream_seq AS stream_seq, c.claimant AS claimant, c.state AS state, \
+                    c.invocation_id AS invocation_id, c.claimed_at AS claimed_at, \
+                    o.status AS owner_status \
+             FROM trigger_claim c \
+             LEFT JOIN coordination_invocation_owner o ON o.invocation_id = c.invocation_id \
+             WHERE c.state = 'claimed' \
+             AND c.stream = ? AND c.stream_epoch = ? AND c.stream_seq = ?",
+        )
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_unsettled))
+    }
+}
+
+fn row_to_unsettled(row: &sqlx::sqlite::SqliteRow) -> UnsettledTriggerClaim {
+    UnsettledTriggerClaim {
+        claim: row_to_claim(row),
+        owner_row_status: row.get("owner_status"),
     }
 }

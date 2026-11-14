@@ -2448,6 +2448,7 @@ mod resume_notice;
 mod server_request;
 mod terminal;
 mod tools_changed_notice;
+mod wal_run;
 use mcp::{GrantServers, triggered_event};
 use terminal::Terminal;
 

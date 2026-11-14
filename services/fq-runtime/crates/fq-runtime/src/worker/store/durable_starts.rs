@@ -32,4 +32,27 @@ impl WorkerStore {
             .map(|row| (row.get("invocation_id"), row.get("terminal")))
             .collect())
     }
+
+    /// Whether this WAL holds a row for `invocation_id`, and if it does,
+    /// whether that row is terminal: one run's line of
+    /// [`Self::list_durable_starts`], read the same way, by the row's
+    /// primary key.
+    ///
+    /// The trigger dispatcher asks it, through the `Worker` port, about a
+    /// claim its own process holds that no copy of the trigger is handling
+    /// any more (issue 967): a row here is a start on record, and the
+    /// trigger must not be started again.
+    pub async fn durable_start_of(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Option<bool>, WorkerStoreError> {
+        let row = sqlx::query(
+            "SELECT terminal_at IS NOT NULL AS terminal FROM invocation_state \
+             WHERE invocation_id = ?",
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.get("terminal")))
+    }
 }

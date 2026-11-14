@@ -48,6 +48,7 @@ fn report() -> StatusReport {
                 malformed_acked: 0,
                 duplicate_dropped: 0,
                 held_duplicate_dropped: 0,
+                abandoned_claim_retaken: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -272,6 +273,7 @@ fn active(num_pending: u64) -> StreamHealth {
             malformed_acked: 0,
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
         }],
     }
 }
@@ -399,6 +401,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             malformed_acked: 0,
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
         }],
     });
     assert!(
@@ -436,6 +439,7 @@ fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
             malformed_acked: 0,
             duplicate_dropped: 5,
             held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
         }],
     });
     assert!(
@@ -472,6 +476,7 @@ fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
             malformed_acked: 0,
             duplicate_dropped: 5,
             held_duplicate_dropped: 2,
+            abandoned_claim_retaken: 0,
         }],
     });
     assert!(
@@ -483,6 +488,42 @@ fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
         ),
         "got:\n{out}"
     );
+}
+
+/// An abandoned claim this daemon took again is counted on a line of its
+/// own (#967), apart from the duplicates, because it is not one: no copy
+/// was handling the claim and nothing of its run was on record, so the
+/// copy ran the trigger, once, under a new invocation id.
+#[test]
+fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-triggers".to_string(),
+        messages: 258,
+        bytes: 4096,
+        first_seq: 1,
+        last_seq: 258,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-dispatcher".to_string(),
+            delivered: 258,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 3,
+        }],
+    });
+    assert!(
+        out.contains(
+            "    abandoned claim taken again: 3 since this daemon started (no copy was handling \
+             it and no run of it was on record; run once under a new invocation id)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("duplicate dropped"), "got:\n{out}");
 }
 
 #[test]
@@ -531,6 +572,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             malformed_acked: 0,
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
         }],
     });
     assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");

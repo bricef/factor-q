@@ -416,6 +416,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             malformed_acked,
             duplicate_dropped,
             held_duplicate_dropped,
+            abandoned_claim_retaken,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -455,11 +456,10 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             // log are its only trace. They are told apart by when the
             // copy arrived. After its run's start was recorded, it is
             // acked. Before a start was recorded on its claim, which this
-            // daemon holds, it is left unacked, and nothing says whether
-            // that claim's first copy is still coming or never will. (Not
-            // "held": that word is the admission holds' on this report.)
-            // Both counts live in the daemon's memory, which each line
-            // says.
+            // daemon holds, it is left unacked for the copy of the trigger
+            // still handling it. (Not "held": that word is the admission
+            // holds' on this report.) Both counts live in the daemon's
+            // memory, which each line says.
             if *duplicate_dropped > 0 {
                 out.push_str(&format!(
                     "    duplicate dropped after its run started: {duplicate_dropped} since this \
@@ -471,6 +471,16 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                     "    duplicate dropped before a start was recorded: {held_duplicate_dropped} \
                      since this daemon started (its claim is this daemon's; refused and left \
                      unacked, not run)\n"
+                ));
+            }
+            // Not a duplicate: a copy that met a claim of this daemon's
+            // that nothing was handling any more, with no run on record,
+            // took it again and ran the trigger (#967).
+            if *abandoned_claim_retaken > 0 {
+                out.push_str(&format!(
+                    "    abandoned claim taken again: {abandoned_claim_retaken} since this daemon \
+                     started (no copy was handling it and no run of it was on record; run once \
+                     under a new invocation id)\n"
                 ));
             }
             out

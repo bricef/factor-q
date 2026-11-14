@@ -414,6 +414,24 @@ pub trait Worker: Send + Sync {
         )))
     }
 
+    /// Where this worker's WAL holds `invocation_id`'s run, if it holds a
+    /// row for it: in flight, or finished and not yet archived. It is the
+    /// worker's half of a start on record, the definition startup recovery,
+    /// `fq doctor` and the trigger dispatcher share
+    /// ([`crate::control_plane::store::RunRecords`]).
+    ///
+    /// The dispatcher asks it about a claim its own process holds that no
+    /// copy of the trigger is handling any more (issue 967), to tell a run
+    /// that started from a delivery that never did. The default answers
+    /// with an error, which the dispatcher reads as "cannot tell" and so
+    /// leaves the claim as it is: a worker that has not been taught to
+    /// answer can never make the dispatcher start a run twice.
+    async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        Err(ExecutorError::WorkerStore(format!(
+            "this worker cannot say whether its WAL holds invocation {invocation_id}"
+        )))
+    }
+
     /// Request that the worker drain: stop starting new steps and let
     /// each in-flight invocation suspend at its next step boundary,
     /// checkpointed to the WAL, to be resumed by the next binary's
@@ -457,6 +475,10 @@ impl<R: crate::worker::reducer::Reducer + Send + Sync + 'static> Worker for Redu
         invocation_id: Uuid,
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.resume(agent, llm, invocation_id).await
+    }
+
+    async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        self.wal_run_of(invocation_id).await
     }
 
     async fn request_drain(&self, _req: DrainRequest) {

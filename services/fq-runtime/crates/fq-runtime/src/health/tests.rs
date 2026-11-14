@@ -560,10 +560,11 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
     );
 }
 
-/// The probe carries both of the dispatcher's duplicate counts from the
-/// consumer ledger into the report, each into its own field (#968).
-/// Every golden reports them at zero, so this is what would notice the
-/// two swapped, or one dropped on the way.
+/// The probe carries the dispatcher's claim counts from the consumer
+/// ledger into the report, each into its own field: both duplicate counts
+/// (#968) and the count of its own abandoned claims taken again (#967).
+/// Every golden reports them at zero, so this is what would notice two
+/// swapped, or one dropped on the way.
 #[tokio::test]
 async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     let server = crate::test_support::nats::test_nats();
@@ -582,6 +583,9 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     ledger.note_duplicate_drop(&durable);
     ledger.note_held_duplicate_drop(&durable);
     ledger.note_held_duplicate_drop(&durable);
+    for _ in 0..3 {
+        ledger.note_abandoned_claim_retaken(&durable);
+    }
 
     let health = probe_stream(
         &bus.jetstream(),
@@ -597,14 +601,20 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     let ConsumerHealth::Active {
         duplicate_dropped,
         held_duplicate_dropped,
+        abandoned_claim_retaken,
         ..
     } = &consumers[0]
     else {
         panic!("the durable exists, so it is Active: {:?}", consumers[0]);
     };
     assert_eq!(
-        (*duplicate_dropped, *held_duplicate_dropped),
-        (1, 2),
-        "one copy dropped after its run started, two before a start was recorded"
+        (
+            *duplicate_dropped,
+            *held_duplicate_dropped,
+            *abandoned_claim_retaken
+        ),
+        (1, 2, 3),
+        "one copy dropped after its run started, two before a start was recorded, and three \
+         abandoned claims taken again"
     );
 }

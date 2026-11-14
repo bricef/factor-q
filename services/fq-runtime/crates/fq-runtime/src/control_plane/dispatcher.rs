@@ -51,6 +51,7 @@ mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
+mod own_claim;
 mod run_admission;
 
 pub use claim::TriggerClaims;
@@ -210,6 +211,10 @@ pub struct TriggerDispatcher {
     workers: Arc<WorkerPermits>,
     /// Durable stream-sequence arbiter, installed by the daemon.
     claim_store: Option<claim::ClaimStore>,
+    /// The invocation ids copies of triggers are handling, so a copy that
+    /// meets this daemon's own claim can tell one in hand from one left
+    /// behind (#967).
+    handling: own_claim::Handling,
 }
 
 impl TriggerDispatcher {
@@ -232,6 +237,7 @@ impl TriggerDispatcher {
             due: std::sync::Mutex::new(Some(due)),
             agent_caps: AgentConcurrency::new(),
             claim_store: None,
+            handling: own_claim::Handling::default(),
         }
     }
 
@@ -489,6 +495,7 @@ impl TriggerDispatcher {
         let claim::ClaimVerdict::Proceed {
             claim,
             delivered: delivery_attempt,
+            handled: _handled,
         } = self.claim_delivery(msg).await
         else {
             return;
@@ -758,6 +765,9 @@ mod claim_retention_tests;
 
 #[cfg(test)]
 mod duplicate_drop_tests;
+
+#[cfg(test)]
+mod own_claim_tests;
 
 #[cfg(test)]
 mod tests {

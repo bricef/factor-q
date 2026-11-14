@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use tracing::{debug, error, warn};
 
-use crate::bus::{TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
+use crate::bus::TRIGGER_STREAM_NAME;
+use crate::control_plane::store::RunRecords;
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
-use crate::worker::{DurableStartReport, WalRun};
+use crate::worker::DurableStartReport;
 
 use super::admission::{HOLD_KEEPALIVE, keep_alive};
+use super::own_claim::{Handled, OwnClaim};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
 /// What the durable claim says about one delivery.
@@ -19,8 +21,13 @@ use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 /// the agent's *model* is accepting work. Two sibling enums called
 /// `Admission` in one function is a reading hazard, not a symmetry.
 pub(super) enum ClaimVerdict {
-    /// This worker owns the delivery: dispatch it.
-    Proceed { claim: Claimed, delivered: i64 },
+    /// This worker owns the delivery: dispatch it. `handled` notes the copy
+    /// as handling its claim until `handle` drops it (`own_claim`).
+    Proceed {
+        claim: Claimed,
+        delivered: i64,
+        handled: Handled,
+    },
     /// Someone else owns it, or it has already run: leave it alone.
     Stop,
 }
@@ -165,15 +172,17 @@ impl TriggerClaims {
             };
             // The ownership row's presence is the record; its status is only
             // reported, as stored, so one this build cannot read does not
-            // stop the boot.
-            let run = match (starts.run(invocation_id), &unsettled.owner_row_status) {
-                (Some(WalRun::InFlight), _) => "in flight in the worker's WAL".to_string(),
-                (Some(WalRun::Finished), _) => {
-                    "finished, in the worker's WAL until its archive is acknowledged".to_string()
-                }
-                (None, Some(status)) => format!("on the control plane's record as {status}"),
-                (None, None) => continue,
+            // stop the boot. Whether either record holds the run is
+            // `RunRecords`'s one definition, shared with `fq doctor` and the
+            // dispatcher's settling of its own claims.
+            let records = RunRecords {
+                wal: starts.run(invocation_id),
+                owner_row_status: unsettled.owner_row_status.clone(),
             };
+            if !records.start_on_record() {
+                continue;
+            }
+            let run = records.where_on_record().unwrap_or_default();
             if store
                 .mark_unsettled_trigger_started(claim.key(), invocation_id)
                 .await?
@@ -236,7 +245,7 @@ impl TriggerDispatcher {
 
     /// This delivery's stable identity: the trigger stream, the
     /// incarnation of it this bus connected to, and the sequence.
-    fn trigger_key(&self, stream_seq: u64) -> TriggerKey<'static> {
+    pub(super) fn trigger_key(&self, stream_seq: u64) -> TriggerKey<'static> {
         TriggerKey {
             stream: TRIGGER_STREAM_NAME,
             stream_epoch: self.bus.trigger_stream_epoch(),
@@ -271,11 +280,9 @@ impl TriggerDispatcher {
     ///
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
-    /// run continues. Without the ack, the same-claimant `Held` arm would
-    /// drop each redelivery until the trigger was dead-lettered as
-    /// `trigger_exhausted` although it ran. The claim is not released
-    /// first, as [`Self::ack`] would: a copy that came back would then win a
-    /// fresh claim and start the work again.
+    /// run continues, so the delivery is not redelivered. The claim is not
+    /// released first, as [`Self::ack`] would: a copy that came back would
+    /// then win a fresh claim and start the work again.
     ///
     /// What stays behind is a `claimed` row for a run that started, and
     /// only until this daemon next starts: [`TriggerClaims::recover`]
@@ -285,18 +292,16 @@ impl TriggerDispatcher {
     /// start it again. Until then `fq doctor` lists the row as started and
     /// never marked, once a minute has passed.
     ///
-    /// **What is left is on a live daemon only.** An ack is published
-    /// without waiting for the broker, so only an ack the client refuses
-    /// to send is seen here, and `ack_keeping_claim` logs it; one lost on
-    /// its way shows only when the delivery comes back. Either way the run
-    /// carries on to its end. A copy that reaches this daemon before it
-    /// next starts, such as the redelivery of a lost ack, meets its own
-    /// `claimed` row and is dropped, logged and counted as a duplicate
-    /// dropped before a start was recorded. If the trigger's deliveries run
-    /// out before that start, it ends as a `trigger_exhausted` dead letter
-    /// although its run started, and requeuing that dead letter would run
-    /// the work twice. Settling such a copy by the start on record is the
-    /// last of #967's pull requests.
+    /// **An ack that is lost as well** is settled by the copy it brings
+    /// back. An ack is published without waiting for the broker, so only
+    /// an ack the client refuses to send is seen here, and
+    /// `ack_keeping_claim` logs it; one lost on its way shows only when
+    /// the delivery comes back. Either way the run carries on to its end.
+    /// A copy that reaches this daemon before it next starts meets its own
+    /// `claimed` row with no copy handling it, finds the run's start on
+    /// record in the worker's WAL or the control plane's ownership table,
+    /// and acks the delivery and marks the claim, without running the
+    /// trigger again (`own_claim`, #967).
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -366,6 +371,10 @@ impl TriggerDispatcher {
         msg: &async_nats::jetstream::Message,
     ) -> ClaimVerdict {
         let invocation_id = uuid::Uuid::now_v7();
+        let named = invocation_id.to_string();
+        // Noted before the id is written on any claim, so no copy can find
+        // a row naming it while it is not noted (`own_claim`).
+        let handled = self.handling.begin(&named);
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
             // Unit-level dispatcher tests that do not host a control plane keep
             // their old isolated setup; the daemon always installs the store.
@@ -376,6 +385,7 @@ impl TriggerDispatcher {
                     invocation_id,
                 },
                 delivered: info.as_ref().map_or(1, |i| i.delivered),
+                handled,
             };
         };
         let info = match msg.info() {
@@ -388,7 +398,6 @@ impl TriggerDispatcher {
         let seq = info.stream_sequence;
         let delivered = info.delivered;
         let now = chrono::Utc::now().timestamp_millis();
-        let named = invocation_id.to_string();
         let result = match store
             .claim_trigger(self.trigger_key(seq), worker_id, &named, now)
             .await
@@ -405,6 +414,7 @@ impl TriggerDispatcher {
                 invocation_id,
             },
             delivered,
+            handled,
         };
         match result {
             TriggerClaim::Won => proceed,
@@ -425,70 +435,24 @@ impl TriggerDispatcher {
                 }
                 ClaimVerdict::Stop
             }
+            // This process's own claim, with no start on it: settled by
+            // whether a copy is still handling it and what is on record
+            // (`own_claim`, #967).
             TriggerClaim::Held {
                 claimant,
                 invocation_id: claimed_for,
                 claimed_at,
             } if claimant == *worker_id => {
-                // This process's own claim, with no start on it. The copy
-                // that took it owns the delivery: an ack or NAK from this
-                // one would resolve that delivery underneath it, so this one
-                // is dropped unanswered. It is logged and counted, apart
-                // from the `Started` drops above (#968), because a refused
-                // copy writes nothing anywhere else.
-                //
-                // **Nothing on the row says whether the first copy will
-                // settle it,** so the line says what the row shows and does
-                // not guess. A copy lands here in two kinds of case:
-                //
-                // - The first copy is alive. Its holds, and its setup from
-                //   its worker permit to its first WAL write (workspace, MCP
-                //   servers, the first step), keep its delivery alive with an
-                //   in-progress ack every `HOLD_KEEPALIVE`, so it is
-                //   redelivered only if those acks stop landing for a whole
-                //   ack window. The first copy still starts once, and its
-                //   durable start acks the message.
-                // - This process will never settle the claim (#967): the
-                //   invocation task panicked before its durable start or in
-                //   the poll that made it, a release failed before a NAK, or
-                //   `mark_trigger_started` was refused on every attempt and
-                //   the ack sent in its place was lost
-                //   (`mark_durable_started`), in which case the run went on.
-                //   Every redelivery then lands here until `max_deliver` is
-                //   reached and the trigger is dead-lettered as
-                //   `trigger_exhausted`, falsely where the run started,
-                //   unless this daemon restarts first: where the run has a
-                //   start on record, the restart's recovery marks the claim
-                //   and the next copy is dropped as one of a started run.
-                //
-                // A process that exits holding a claim (the drain check, the
-                // pause hold's `Interrupted`, a failed `requeue_held` publish,
-                // a drain that stops the invocation before its first WAL
-                // write, #974) leaves a row the next process meets under
-                // another worker id, and the arm below adopts it.
-                //
-                // The subject names the agent, which is the only handle on
-                // a claim whose invocation never wrote a WAL row besides the
-                // sequence. On the last delivery the line says so: no copy
-                // follows, which is true whatever the claim is waiting on.
-                let last = if delivered >= TRIGGER_MAX_DELIVER {
-                    "; this was its last delivery, so no copy follows, and unless the delivery \
-                     is acked before its window lapses the trigger is dead-lettered as \
-                     `trigger_exhausted`"
-                } else {
-                    ""
+                let met = OwnClaim {
+                    worker_id,
+                    seq,
+                    delivered,
+                    now,
+                    named: &named,
+                    claimed_for,
+                    claimed_at,
                 };
-                warn!(stream_seq = seq, delivered, subject = %msg.subject, claimant = %claimant,
-                    claim_age_ms = now.saturating_sub(claimed_at),
-                    claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
-                    "dropping a redelivered trigger whose claim this daemon already holds with no \
-                     start recorded, and leaving it unacked: the first copy may still be waiting \
-                     or starting, or this daemon may never settle the claim (see #967); the claim \
-                     does not say which{last}");
-                self.bus
-                    .consumer_ledger()
-                    .note_held_duplicate_drop(CONSUMER_NAME);
-                ClaimVerdict::Stop
+                self.settle_own_claim(msg, store, met, proceed).await
             }
             TriggerClaim::Held {
                 claimant,
@@ -568,8 +532,9 @@ impl TriggerDispatcher {
 
     /// Ack the delivery, leaving its claim row as it is. [`Self::ack`]
     /// releases the claim first; this alone is for a run that started but
-    /// whose claim could not be marked (`mark_durable_started`).
-    async fn ack_keeping_claim(
+    /// whose claim could not be marked (`mark_durable_started`), or was
+    /// marked by a copy that met its own claim (`own_claim`).
+    pub(super) async fn ack_keeping_claim(
         &self,
         msg: &async_nats::jetstream::Message,
         trigger_id: Option<uuid::Uuid>,

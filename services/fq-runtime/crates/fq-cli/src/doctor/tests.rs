@@ -269,6 +269,7 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         malformed_acked: 0,
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
+        abandoned_claim_retaken: 0,
     }
 }
 
@@ -605,12 +606,12 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
         out.contains(
             "  fq-dispatcher: ok (pending 0, duplicates dropped since this daemon started: \
              5 after their run started, 2 before a start was recorded)\n  -> \"before a start \
-             was recorded\" is a copy that met a claim this daemon holds with no start on it, \
-             left unacked: its first copy was still waiting or starting, or this daemon will \
-             never settle that claim, and the claim does not say which; the daemon log has a \
-             warn line for each with its subject, sequence, attempt and the claim's age, and \
-             such a claim whose run is on record is listed under \"Stranded trigger claims\" \
-             below\n"
+             was recorded\" is a copy that met a claim this daemon holds with no start on it \
+             while a copy of the trigger was still handling it, left unacked for that copy to \
+             settle, or one that came when whether the claim's run is on record could not be \
+             read; the daemon log has a warn line for each with its subject, sequence, attempt, \
+             the claim's age and why, and such a claim whose run is on record is listed under \
+             \"Stranded trigger claims\" below\n"
         ),
         "got:\n{out}"
     );
@@ -618,6 +619,48 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
         out.contains("Consumers: 1 checked, 0 unhealthy"),
         "got:\n{out}"
     );
+}
+
+/// An abandoned claim taken again is counted on the consumer's line apart
+/// from the duplicates (#967), since such a copy ran the trigger, with a
+/// line saying what it means and where its cause is logged. It is not a
+/// fault, and the line names no verdict.
+#[test]
+fn abandoned_claims_taken_again_are_counted_apart_and_explained_without_a_verdict() {
+    let mut counted = active("fq-dispatcher", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        abandoned_claim_retaken,
+        ..
+    } = &mut counted
+    {
+        *abandoned_claim_retaken = 3;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "an abandoned claim taken again is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "  fq-dispatcher: ok (pending 0, abandoned claims taken again since this daemon \
+             started: 3)\n  -> \"taken again\" is a copy that met a claim this daemon holds \
+             that no copy was handling any more, whose run had no start on record: the copy \
+             that took it ended before its first WAL write without settling the delivery, so \
+             this one ran the trigger once, under a new invocation id; the daemon log has a \
+             warn line for each naming the abandoned invocation id, and the failure before it\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("duplicate"), "got:\n{out}");
 }
 
 /// Nothing dropped, nothing said: a line that always reported zero
@@ -636,6 +679,7 @@ fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
     let out = render_doctor_report_human(&report);
     assert!(!out.contains("duplicate"), "got:\n{out}");
     assert!(!out.contains("before a start was recorded"), "got:\n{out}");
+    assert!(!out.contains("taken again"), "got:\n{out}");
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
@@ -727,6 +771,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         malformed_acked: 0,
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
+        abandoned_claim_retaken: 0,
     };
     let report = build_doctor_report(
         &[],
@@ -1121,7 +1166,7 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
   fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
   -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
   fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006
-  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, this daemon drops each redelivery until it next starts and its recovery marks the claim, and a trigger whose deliveries run out first is dead-lettered as exhausted although its run started; do not requeue that dead letter — `fq invocation show 1c000000-0000-7000-8000-000000000006`
+  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, the next redelivery is acked and marks the claim without starting the work again, and this daemon's next start marks it if none comes; a run in flight whose task died after its first durable write waits for that start to resume it — `fq invocation show 1c000000-0000-7000-8000-000000000006`
   fq-triggers seq 7: claimed 2026-01-02T03:11:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; no invocation id on the claim
   -> the claim was written before claims named their run, so this report cannot tell whether it started one; not an issue
 ";

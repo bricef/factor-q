@@ -2891,6 +2891,13 @@
                 "properties": {
                   "active": {
                     "properties": {
+                      "abandoned_claim_retaken": {
+                        "default": 0,
+                        "description": "Deliveries that met a claim the daemon holds itself, with no\nstart recorded on it, that no copy of the trigger was handling\nany more and whose run had no start on record, in the worker's\nWAL or the control plane's: the copy that took the claim ended\nbefore its run's first WAL write and left the delivery\nunsettled (its task died, or releasing the claim before a NAK\nfailed, or before an ack that was lost as well). Each took the\nclaim again under a new invocation id\nand ran the trigger, once, unless a drain or a shutdown under\nway stopped it first and left it for the next binary. Not a\nduplicate: the work runs. Not\na fault either, though each one follows a failure the daemon\nlogs; the daemon logs each at warn with its subject, its\nsequence, its attempt, the claim's age and the abandoned\ninvocation id. Counted in memory since the daemon started, like\n`duplicate_dropped`. A report from a daemon that does not send\nit reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "ack_pending": {
                         "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",
@@ -2904,14 +2911,14 @@
                         "type": "integer"
                       },
                       "duplicate_dropped": {
-                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Copies of a run that has started. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start, or the claim was the daemon's own, no copy\nwas handling it, and the run's start was on record, when the\nclaim is marked as the copy is acked. Copies of a run that has\nstarted. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
                       },
                       "held_duplicate_dropped": {
                         "default": 0,
-                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, and\nthe claim is the daemon's own. \"Held\" in the name is the\nclaim's state: the daemon holds the durable claim on that\ndelivery's stream sequence, and it records no start. It is\nnot an admission hold (a paused model, an agent at its cap,\na wait for a worker permit), though a trigger in one is a\ncommon first copy. Copies of a trigger still in hand. The\nfirst copy may be waiting or still starting (its holds and\nits setup renew its ack window, so a copy arrives under it\nonly when those renewals stop landing for a whole window),\nor the daemon may never settle that claim; nothing on the\nclaim says which, and neither does this count. The daemon\nlogs each one at warn with its subject, its sequence, its\nattempt and the claim's age. Counted in memory since the\ndaemon started, like `duplicate_dropped`. A report from a\ndaemon that does not send it reads as zero.",
+                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, the\nclaim is the daemon's own, and a copy of the trigger was still\nhandling it. \"Held\" in the name is the claim's state: the\ndaemon holds the durable claim on that delivery's stream\nsequence, and it records no start. It is not an admission\nhold (a paused model, an agent at its cap, a wait for a worker\npermit), though a trigger in one is a common first copy.\nCopies of a trigger still in hand: the first copy is waiting,\nsetting up or marking its start (its holds and its setup renew\nits ack window, so a copy arrives under it only when those\nrenewals stop landing for a whole window), and it still\nsettles the delivery. A copy whose claim no copy is handling\nany more is settled by what is on record instead: acked, and\ncounted in `duplicate_dropped`, where the run started; taken\nagain, and counted in `abandoned_claim_retaken`, where nothing\nis on record. It is counted here too when whether its run is\non record could not be read, and left for a later copy. The\ndaemon logs each one at warn with its subject, its sequence,\nits attempt, the claim's age and why. Counted in memory since\nthe daemon started, like `duplicate_dropped`. A report from a\ndaemon that does not send it reads as zero.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
@@ -3257,7 +3264,7 @@
               },
               {
                 "const": "started_unmarked",
-                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. Held by this daemon,\none of two things happened, and only the daemon log tells which:\nthe claim store refused the mark and the dispatcher acked the\ndelivery anyway, keeping its claim; or the run's task panicked in\nthe step that made its first durable write, and nothing was acked.\nWhere nothing was acked, or the ack was lost, every redelivery is\ndropped until this daemon next starts and its recovery marks the\nclaim, and a trigger whose deliveries run out first ends as a\n`trigger_exhausted` dead letter although its run started. Left by a\nprocess that has exited, a redelivery would be adopted and start\nthe work again, and a false dead letter may already exist.",
+                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. Held by this daemon,\none of two things happened, and only the daemon log tells which:\nthe claim store refused the mark and the dispatcher acked the\ndelivery anyway, keeping its claim; or the run's task panicked in\nthe step that made its first durable write, and nothing was acked.\nWhere nothing was acked, or the ack was lost, the next redelivery\nfinds the run's start on record, is acked and marks the claim,\nwithout starting the work again; this daemon's next start marks it\nif none comes. A run whose task panicked stays in flight, with\nnothing driving it, until that start's recovery resumes it. Left by\na process that has exited, a redelivery would be adopted and start\nthe work again, and a false dead letter may already exist.",
                 "type": "string"
               },
               {
@@ -3268,7 +3275,7 @@
             ]
           },
           "StrandedTriggerClaim": {
-            "description": "A trigger claim that has not settled and will not settle on its own,\nas `control.doctor` reports it: a claimed delivery that has neither\nbeen released nor recorded as started.\n\nA claim this daemon holds for an invocation that has not started is\nnever one of these, however old. A trigger can wait behind a paused\nmodel or a full agent for hours, and nothing on the claim says\nwhether the daemon holding it is still going to start it, so the\nreport does not guess. Nor is a claim whose delivery can no longer\nchange anything: one whose run started but whose message is gone, and\none an exited process left that is older than the report's horizon.",
+            "description": "A trigger claim that has not settled and will not settle on its own,\nas `control.doctor` reports it: a claimed delivery that has neither\nbeen released nor recorded as started.\n\nA claim this daemon holds for an invocation that has not started is\nnever one of these, however old. A trigger can wait behind a paused\nmodel or a full agent for hours, and nothing on the claim says\nwhether a copy of its trigger is still handling it, so the report does\nnot guess. The dispatcher knows, and settles such a claim that no copy\nis handling when the trigger's next delivery arrives: it takes the\nclaim again and runs the trigger. Nor is a claim whose delivery can no longer\nchange anything: one whose run started but whose message is gone, and\none an exited process left that is older than the report's horizon.",
             "properties": {
               "delivery": {
                 "$ref": "#/$defs/TriggerDeliveryView",
@@ -3760,6 +3767,13 @@
                 "properties": {
                   "active": {
                     "properties": {
+                      "abandoned_claim_retaken": {
+                        "default": 0,
+                        "description": "Deliveries that met a claim the daemon holds itself, with no\nstart recorded on it, that no copy of the trigger was handling\nany more and whose run had no start on record, in the worker's\nWAL or the control plane's: the copy that took the claim ended\nbefore its run's first WAL write and left the delivery\nunsettled (its task died, or releasing the claim before a NAK\nfailed, or before an ack that was lost as well). Each took the\nclaim again under a new invocation id\nand ran the trigger, once, unless a drain or a shutdown under\nway stopped it first and left it for the next binary. Not a\nduplicate: the work runs. Not\na fault either, though each one follows a failure the daemon\nlogs; the daemon logs each at warn with its subject, its\nsequence, its attempt, the claim's age and the abandoned\ninvocation id. Counted in memory since the daemon started, like\n`duplicate_dropped`. A report from a daemon that does not send\nit reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "ack_pending": {
                         "description": "Matching messages delivered and not yet acked: work this\nconsumer has in hand right now.",
                         "format": "uint64",
@@ -3773,14 +3787,14 @@
                         "type": "integer"
                       },
                       "duplicate_dropped": {
-                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start. Copies of a run that has started. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
+                        "description": "Redeliveries this consumer acked and dropped because the\ninvocation they would have started has already started: the\ndurable claim on that delivery's stream sequence had\nrecorded its start, or the claim was the daemon's own, no copy\nwas handling it, and the run's start was on record, when the\nclaim is marked as the copy is acked. Copies of a run that has\nstarted. Zero\non a consumer that was never offered a message it had\nalready begun. Reported because it is the only trace such a\ndelivery leaves: no invocation is created for it, so\nnothing downstream records it. Counted in memory since the\ndaemon started; a restart resets it.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
                       },
                       "held_duplicate_dropped": {
                         "default": 0,
-                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, and\nthe claim is the daemon's own. \"Held\" in the name is the\nclaim's state: the daemon holds the durable claim on that\ndelivery's stream sequence, and it records no start. It is\nnot an admission hold (a paused model, an agent at its cap,\na wait for a worker permit), though a trigger in one is a\ncommon first copy. Copies of a trigger still in hand. The\nfirst copy may be waiting or still starting (its holds and\nits setup renew its ack window, so a copy arrives under it\nonly when those renewals stop landing for a whole window),\nor the daemon may never settle that claim; nothing on the\nclaim says which, and neither does this count. The daemon\nlogs each one at warn with its subject, its sequence, its\nattempt and the claim's age. Counted in memory since the\ndaemon started, like `duplicate_dropped`. A report from a\ndaemon that does not send it reads as zero.",
+                        "description": "Redeliveries this consumer dropped and left unacked because\nthey arrived before a start was recorded on their claim, the\nclaim is the daemon's own, and a copy of the trigger was still\nhandling it. \"Held\" in the name is the claim's state: the\ndaemon holds the durable claim on that delivery's stream\nsequence, and it records no start. It is not an admission\nhold (a paused model, an agent at its cap, a wait for a worker\npermit), though a trigger in one is a common first copy.\nCopies of a trigger still in hand: the first copy is waiting,\nsetting up or marking its start (its holds and its setup renew\nits ack window, so a copy arrives under it only when those\nrenewals stop landing for a whole window), and it still\nsettles the delivery. A copy whose claim no copy is handling\nany more is settled by what is on record instead: acked, and\ncounted in `duplicate_dropped`, where the run started; taken\nagain, and counted in `abandoned_claim_retaken`, where nothing\nis on record. It is counted here too when whether its run is\non record could not be read, and left for a later copy. The\ndaemon logs each one at warn with its subject, its sequence,\nits attempt, the claim's age and why. Counted in memory since\nthe daemon started, like `duplicate_dropped`. A report from a\ndaemon that does not send it reads as zero.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"
