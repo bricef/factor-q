@@ -119,20 +119,18 @@ fn finding_lines(claim: &StrandedTriggerClaim, claims: &DoctorTriggerClaims) -> 
             )
         }
         // A redelivery settles it by the run's start on record (#967); the
-        // next start's recovery settles it if no copy comes, and resumes a
-        // run whose task died in flight. After the trigger's last delivery
-        // no copy comes, and the dead-letter watch, which does not consult
-        // the records, dead-letters a trigger whose run started (pull
-        // request 5 of #967), so the line says not to requeue it.
+        // dead-letter watch settles it the same way if the trigger's
+        // deliveries ran out, and the next start's recovery does if neither
+        // comes, and resumes a run whose task died in flight.
         (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ThisDaemon) => format!(
             "  -> {started} but its claim was never marked started: if this daemon logged \
              `could not mark trigger durably started` for invocation {invocation}, it acked the \
              delivery; otherwise, or if that ack was lost, the next redelivery is acked and marks \
-             the claim without starting the work again, and this daemon's next start marks it if \
-             none comes; if none comes because that was the trigger's last delivery, the trigger \
-             is dead-lettered as exhausted although its run started: do not requeue that dead \
-             letter; a run in flight whose task died after its first durable write waits for this \
-             daemon's next start to resume it — `fq invocation show {invocation}`\n"
+             the claim without starting the work again, and if that was the trigger's last \
+             delivery the dead-letter watch marks it instead of writing a dead letter, as this \
+             daemon's next start does if neither comes; a run in flight whose task died after its \
+             first durable write waits for that start to resume it — `fq invocation show \
+             {invocation}`\n"
         ),
         (StrandedClaimFinding::StartedUnmarked, ClaimHolder::ExitedProcess) => format!(
             "  -> {started} but its claim was never marked started: a redelivery would be adopted \

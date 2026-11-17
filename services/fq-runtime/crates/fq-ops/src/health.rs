@@ -694,14 +694,13 @@ pub enum StrandedClaimFinding {
     /// finds the run's start on record, is acked and marks the claim,
     /// without starting the work again; this daemon's next start marks it
     /// if none comes. If none comes because the trigger's last delivery's
-    /// answer never reached the broker, the dead-letter watch, which does
-    /// not consult the records, ends the trigger as a `trigger_exhausted`
-    /// dead letter although its run started: that dead letter is false,
-    /// and requeuing it runs the work twice. A run whose task panicked stays in flight,
-    /// with nothing driving it, until that start's recovery resumes it.
-    /// Left by
+    /// answer never reached the broker, the dead-letter watch finds the
+    /// run's start on record, marks the claim and writes no
+    /// `trigger_exhausted`. A run whose task panicked stays in flight, with
+    /// nothing driving it, until that start's recovery resumes it. Left by
     /// a process that has exited, a redelivery would be adopted and start
-    /// the work again, and a false dead letter may already exist.
+    /// the work again, and a false dead letter may already exist, written
+    /// by a daemon that did not yet consult the records.
     StartedUnmarked,
     /// Left by a process that has exited, by a build that did not name the
     /// invocation at claim time, so the report cannot tell whether it

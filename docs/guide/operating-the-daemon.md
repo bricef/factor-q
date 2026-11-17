@@ -1227,8 +1227,8 @@ something else.)
   going as well as after it ends. That copy is acked too, the claim is
   marked, and the trigger is not run again
   ([#967](https://github.com/bricef/factor-q/issues/967)). If the lost
-  answer was the trigger's last delivery's, though, no copy comes back
-  to be acked: see "Started, never marked".
+  answer was the trigger's last delivery's, no copy comes back to be
+  acked, and the dead-letter watch settles it instead: see below.
 - **Before a start was recorded.** The claim is this daemon's, records
   no start, and a copy of the trigger is still handling it, so the copy
   is dropped and left unacked for that one. That first copy may be
@@ -1289,6 +1289,44 @@ meets a claim left by a process that has exited, and finds the claim changed
 as it adopts it (`the claim it met changed before this daemon could
 adopt it`). The same fields name it. One daemon has nothing that
 changes such a row in that moment, so the line is not expected.
+
+**The dead-letter watch decides by the records, and counts the triggers
+it keeps.** When a trigger's fifth and last delivery lapses with no
+answer reaching the broker, the broker reports the trigger exhausted
+and `fq-advisory-watch` decides whether to dead-letter it. It looks at
+the trigger's claim, and through it at what is on record for the run:
+the claim marked started, or the run in the worker's WAL or on the
+control plane's ownership table. With nothing on record it writes the
+`trigger_exhausted` dead letter as it always has. With a start on
+record it writes none, since requeuing that dead letter would run the
+work twice: it marks the claim, logs `not dead-lettering a trigger
+whose deliveries ran out` at warn with the subject, the sequence, the
+invocation and where the start is on record, and counts it on its own
+line ([#967](https://github.com/bricef/factor-q/issues/967)).
+
+```text
+  fq-advisory-watch: ok (pending 0, exhausted but started since this
+     daemon started: 1)
+  -> "exhausted but started" is a trigger whose deliveries ran out with
+     no answer reaching the broker while its run had a start on record
+     (its last delivery's task died after its first WAL write, or its
+     ack was lost): its claim was marked and no `trigger_exhausted` was
+     written, since requeuing one would run the work twice; the daemon
+     log has a warn line for each naming the invocation and where its
+     start is on record
+```
+
+Two cases are neither, and the watch holds its verdict on them, NAKing
+the advisory to decide again when it comes back: the claim store or the
+worker's WAL cannot be read, so a dead letter now could be false; or a
+copy of the trigger is still handling its claim, so its run may still
+start, and the verdict waits until that copy's start is marked or it
+ends. Each held advisory logs `holding the dead-letter verdict on an
+exhausted trigger` with the reason, on the escalation this section
+describes, and a verdict held for long shows `fq-advisory-watch` as
+redelivering, and then as stuck. A copy that has handled a claim
+through all five deliveries is a setup that has stopped renewing its
+ack window, such as one blocked in its workspace or its MCP servers.
 
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
@@ -1449,12 +1487,14 @@ name the horizon.
   delivery started the run and its task then died, or its mark landed
   or gave up and its ack was lost, or it was a copy of a run started
   earlier and its ack was lost. Once that delivery's ack window lapses,
-  the advisory watch dead-letters the trigger as `trigger_exhausted`,
-  without consulting the claim or the run's records. That dead letter
-  is false, and requeuing it starts the work twice: read the run with
-  `fq invocation show` and do not requeue it. Having the watch consult the records is the fifth
-  pull request of [#967](https://github.com/bricef/factor-q/issues/967),
-  not built yet.
+  the advisory watch looks at the claim and the run's records before it
+  calls the trigger exhausted. It finds the start, marks the claim, and
+  writes no `trigger_exhausted`, and counts it as exhausted but started
+  (see [the dispatcher's counts](#when-a-consumer-stops-making-progress)).
+  Before [#967](https://github.com/bricef/factor-q/issues/967)'s last
+  change it wrote a false dead letter here; one already in
+  `fq dead-letters list` for a run that `fq invocation show` says
+  started is that, and requeuing it starts the work twice.
 
   If no redelivery comes, startup recovery, before the dispatcher
   consumes anything,
@@ -1470,12 +1510,12 @@ name the horizon.
   delivery was acked, because it judges a message deliverable by its age
   and stream incarnation, not by the consumer's ack state; the daemon
   log can, by the lines above for that invocation. There is nothing to
-  repair from the CLI: read the run with `fq invocation show`. A second
-  route to a false `trigger_exhausted` dead letter, beside the last
-  delivery: if the daemon cannot read the run's records at any of its
-  redeliveries, each is dropped as one before a start was recorded, with
-  the read's error on its warn line. Do not requeue either dead letter;
-  it starts the work twice.
+  repair from the CLI: read the run with `fq invocation show`. If the
+  daemon cannot read the run's records at any of its redeliveries, each
+  is dropped as one before a start was recorded, with the read's error
+  on its warn line, and once the deliveries run out the watch holds its
+  verdict until the records can be read, rather than write a dead
+  letter that could be false.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
   cannot look for a run.
@@ -1670,7 +1710,7 @@ exist today but do not yet have an out-of-band producer.
 | `fq doctor`: unavailable shared MCP servers | Alert when required work is blocked; otherwise notification | `fq doctor` | The supervisor retries startup; if required work remains blocked, fix the server or its configuration. |
 | `fq doctor`: throttled models or agents at concurrency caps | Notification | `fq doctor` | Provider backoff and available agent slots release held work automatically. |
 | `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. |
-| `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted if the broker redelivers it, and a never-started line ages out at `[state] trigger_claim_retention_days`, when the sweep deletes its claim; otherwise none: requeue or re-publish the work of a delivery that never started a run, and do not requeue the false dead letter of a run that started. |
+| `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted if the broker redelivers it, and a never-started line ages out at `[state] trigger_claim_retention_days`, when the sweep deletes its claim; otherwise none: requeue or re-publish the work of a delivery that never started a run. A run that started is not dead-lettered; a dead letter for one that `fq invocation show` says started was written before the watch consulted the records, and is not to be requeued. |
 | Pricing change refused by the drift bound (#735) | Notification | None (producer in #735) | The last accepted pricing remains in use; review and accept the change during normal hours. |
 | Pricing data stale (#735) | Alert | None (producer in #735) | None once the safe staleness limit is exhausted; restore the pricing source or provide an override. |
 | Summary consumer `start`, `progress`, and `outcome` lines | Neither; these are the record | Event stream and dashboard | Not applicable; consumers display the durable record and do not page on it. |
