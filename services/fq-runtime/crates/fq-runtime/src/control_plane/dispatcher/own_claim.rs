@@ -93,7 +93,7 @@ impl Handling {
         }
     }
 
-    fn handles(&self, invocation_id: &str) -> bool {
+    pub(super) fn handles(&self, invocation_id: &str) -> bool {
         self.lock().contains(invocation_id)
     }
 

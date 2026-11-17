@@ -45,10 +45,11 @@ use sqlx::{ConnectOptions, Connection};
 use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
+use super::claim::MARK_RETRY_BUDGET;
 use super::tests::{canned_response, registry_with, unique_agent_id};
 use super::{CONSUMER_NAME, TriggerClaims, TriggerDispatcher};
 use crate::agent::Agent;
-use crate::bus::{EventBus, TRIGGER_STREAM_NAME};
+use crate::bus::{EventBus, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
 use crate::control_plane::ControlPlaneStore;
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
@@ -565,6 +566,21 @@ impl Arena {
         )
     }
 
+    /// Wait until the copy that started `run` no longer counts as handling
+    /// its claim, for at most `within`. Says whether it let go; what that
+    /// means is for the caller to judge from what follows.
+    async fn until_let_go(&self, run: Uuid, within: Duration) -> bool {
+        let invocation_id = run.to_string();
+        let deadline = tokio::time::Instant::now() + within;
+        while self.dispatcher.handling.handles(&invocation_id) {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+
     /// The claim row for the trigger at `seq`, read without writing.
     async fn claim(&self, seq: u64) -> Option<ClaimRow> {
         let mut conn = SqliteConnectOptions::new()
@@ -855,6 +871,65 @@ async fn a_panic_after_the_first_wal_write_is_acked_and_marked_and_not_run_again
         arena.counts(),
         (1, 0, 0),
         "counted as a copy of a run that started"
+    );
+}
+
+/// **A run whose mark gave up and whose ack was lost has its copies acked
+/// while it is still running.** The review of this change ran it. The run
+/// makes its first WAL write, the claim store refuses every attempt to
+/// mark its start, the ack sent in the mark's place never reaches the
+/// broker, and the run goes on, here for as long as the trigger has
+/// deliveries left. While a copy counted as handling its claim until its
+/// run ended, every redelivery was dropped as one a copy is still
+/// handling: nothing settled the delivery, and once its deliveries ran
+/// out the dead-letter watch would have called a running trigger
+/// exhausted. Now a copy stops counting as handling its claim once its
+/// mark has landed or given up, and from then on the WAL holds its run, so
+/// each redelivery is acked, the first one marks the claim, and nothing
+/// starts a second time.
+#[tokio::test]
+async fn a_run_whose_mark_gave_up_and_whose_ack_was_lost_has_its_copies_acked_while_it_runs() {
+    let (arena, _server) = arena().await;
+    arena.worker.queue(Run::WaitsAfterStart);
+    refuse_updates(&arena.claim_db).await;
+    let first = arena.spawn_delivery(SEQ, 1, true);
+    arena.worker.until_waiting(1).await;
+    let first_run = arena.worker.starts()[0].0;
+    let let_go = arena
+        .until_let_go(first_run, MARK_RETRY_BUDGET + Duration::from_secs(10))
+        .await;
+    heal(&arena.claim_db).await;
+
+    let last = TRIGGER_MAX_DELIVER as u32;
+    for delivered in 2..=last {
+        let copy = arena.deliver(delivered, false).await;
+        assert_eq!(
+            (copy.acks, copy.naks),
+            (1, 0),
+            "delivery {delivered} of a trigger whose run is running, with its start on record, \
+             must be acked (the first copy let go of its claim: {let_go}): {copy:?}"
+        );
+    }
+    assert_eq!(
+        arena
+            .claim(SEQ)
+            .await
+            .map(|row| (row.started, row.invocation_id)),
+        Some((true, Some(first_run.to_string()))),
+        "the first copy that came back marked the claim, naming the run"
+    );
+    assert_eq!(
+        arena.counts(),
+        (u64::from(last - 1), 0, 0),
+        "every copy counted as one of a run that started"
+    );
+    arena.worker.run_gate.add_permits(1);
+    let first = arena.finish(first).await;
+    assert!(!first.panicked, "{first:?}");
+    assert_eq!(arena.worker.starts().len(), 1, "the trigger started once");
+    assert_eq!(
+        arena.wal().await,
+        vec![(first_run.to_string(), WalRun::Finished)]
     );
 }
 
