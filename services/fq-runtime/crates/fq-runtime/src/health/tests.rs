@@ -586,6 +586,9 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     for _ in 0..3 {
         ledger.note_abandoned_claim_retaken(&durable);
     }
+    for _ in 0..4 {
+        ledger.note_started_not_dead_lettered(&durable);
+    }
 
     let health = probe_stream(
         &bus.jetstream(),
@@ -602,6 +605,7 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
         duplicate_dropped,
         held_duplicate_dropped,
         abandoned_claim_retaken,
+        started_not_dead_lettered,
         ..
     } = &consumers[0]
     else {
@@ -611,9 +615,10 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
         (
             *duplicate_dropped,
             *held_duplicate_dropped,
-            *abandoned_claim_retaken
+            *abandoned_claim_retaken,
+            *started_not_dead_lettered
         ),
-        (1, 2, 3),
+        (1, 2, 3, 4),
         "one copy dropped after its run started, two before a start was recorded, and three \
          abandoned claims taken again"
     );

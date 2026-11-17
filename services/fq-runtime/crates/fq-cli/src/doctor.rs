@@ -190,14 +190,16 @@ fn render_consumers(
                 duplicate_dropped,
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
+                started_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}{}{}\n",
+                     pending {num_pending}{}{}{}{}\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
-                    retaken_suffix(*abandoned_claim_retaken)
+                    retaken_suffix(*abandoned_claim_retaken),
+                    started_suffix(*started_not_dead_lettered)
                 ));
                 // The held-copy count does not choose this step. It only
                 // ever grows while the daemon runs, so one held copy in
@@ -216,6 +218,7 @@ fn render_consumers(
                 }
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
+                out.push_str(&started_note(*started_not_dead_lettered));
             }
             ConsumerHealth::Active {
                 name,
@@ -224,16 +227,19 @@ fn render_consumers(
                 duplicate_dropped,
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
+                started_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{}{}{})\n",
+                    "  {name}: ok (pending {num_pending}{}{}{}{})\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
-                    retaken_suffix(*abandoned_claim_retaken)
+                    retaken_suffix(*abandoned_claim_retaken),
+                    started_suffix(*started_not_dead_lettered)
                 ));
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
+                out.push_str(&started_note(*started_not_dead_lettered));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -391,6 +397,36 @@ fn retaken_note(abandoned_claim_retaken: u64) -> String {
      an ack that was then lost; or a drain left it); the copy then runs the trigger unless a drain \
      or the trigger's own checks stop it first; the daemon log has a warn line for each naming \
      the abandoned invocation id, and the failure before it\n"
+        .to_string()
+}
+
+/// `, exhausted but started since this daemon started: N`, or nothing
+/// when none was ([`started_note`]).
+fn started_suffix(started_not_dead_lettered: u64) -> String {
+    if started_not_dead_lettered == 0 {
+        String::new()
+    } else {
+        format!(", exhausted but started since this daemon started: {started_not_dead_lettered}")
+    }
+}
+
+/// The line under the dead-letter watch's consumer when it kept triggers
+/// out of the dead letters because their run had started, saying what
+/// that means, or nothing when it is zero (#967).
+///
+/// It is not a fault, and nothing is left to do: the claim was marked,
+/// and the run, started, is the trigger's outcome. The line says why no
+/// dead letter was written, so an operator looking for one does not go
+/// looking for the work in `fq dead-letters list`.
+fn started_note(started_not_dead_lettered: u64) -> String {
+    if started_not_dead_lettered == 0 {
+        return String::new();
+    }
+    "  -> \"exhausted but started\" is a trigger whose deliveries ran out with no answer reaching \
+     the broker while its run had a start on record (its last delivery's task died after its \
+     first WAL write, or its ack was lost): its claim was marked and no `trigger_exhausted` was \
+     written, since requeuing one would run the work twice; the daemon log has a warn line for \
+     each naming the invocation and where its start is on record\n"
         .to_string()
 }
 

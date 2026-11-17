@@ -2950,6 +2950,13 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "started_not_dead_lettered": {
+                        "default": 0,
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their run had a start on\nrecord: on the trigger's claim, in the worker's WAL, or on the\ncontrol plane's ownership table. The broker reports a trigger\nexhausted when its last delivery's answer never reached it,\nwhich happens to a run that started too: the last delivery's\ntask died after its first WAL write, or its ack was lost. A\n`trigger_exhausted` dead letter for such a trigger would be\nfalse, and requeuing it would run the work twice, so the watch\nmarks the claim instead and writes none. Not a fault; the\ndaemon logs each one at warn with the trigger's subject, its\nsequence, the invocation and where its start is on record.\nCounted on the watch's own consumer, in memory since the\ndaemon started. A report from a daemon that does not send it\nreads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "stuck": {
                         "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
                         "type": "boolean"
@@ -3822,6 +3829,13 @@
                       },
                       "redeliveries": {
                         "description": "Deliveries this consumer has made past its acked floor,\nbeyond the first delivery of each still-pending message —\nthe \"delivered count climbing while the watermark is frozen\"\nthat a NAK loop looks like from outside. Zero on a healthy\nconsumer, however far behind it is.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "started_not_dead_lettered": {
+                        "default": 0,
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their run had a start on\nrecord: on the trigger's claim, in the worker's WAL, or on the\ncontrol plane's ownership table. The broker reports a trigger\nexhausted when its last delivery's answer never reached it,\nwhich happens to a run that started too: the last delivery's\ntask died after its first WAL write, or its ack was lost. A\n`trigger_exhausted` dead letter for such a trigger would be\nfalse, and requeuing it would run the work twice, so the watch\nmarks the claim instead and writes none. Not a fault; the\ndaemon logs each one at warn with the trigger's subject, its\nsequence, the invocation and where its start is on record.\nCounted on the watch's own consumer, in memory since the\ndaemon started. A report from a daemon that does not send it\nreads as zero.",
                         "format": "uint64",
                         "minimum": 0,
                         "type": "integer"

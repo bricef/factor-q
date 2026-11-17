@@ -176,6 +176,23 @@ pub enum ConsumerHealth {
         /// it reads as zero.
         #[serde(default)]
         abandoned_claim_retaken: u64,
+        /// Triggers whose deliveries ran out but which the dead-letter
+        /// watch did not dead-letter, because their run had a start on
+        /// record: on the trigger's claim, in the worker's WAL, or on the
+        /// control plane's ownership table. The broker reports a trigger
+        /// exhausted when its last delivery's answer never reached it,
+        /// which happens to a run that started too: the last delivery's
+        /// task died after its first WAL write, or its ack was lost. A
+        /// `trigger_exhausted` dead letter for such a trigger would be
+        /// false, and requeuing it would run the work twice, so the watch
+        /// marks the claim instead and writes none. Not a fault; the
+        /// daemon logs each one at warn with the trigger's subject, its
+        /// sequence, the invocation and where its start is on record.
+        /// Counted on the watch's own consumer, in memory since the
+        /// daemon started. A report from a daemon that does not send it
+        /// reads as zero.
+        #[serde(default)]
+        started_not_dead_lettered: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is

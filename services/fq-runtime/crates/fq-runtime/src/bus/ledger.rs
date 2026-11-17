@@ -51,6 +51,14 @@ pub struct ConsumerRecord {
     /// the trigger is refused after its claim; so this counts claims, not
     /// runs.
     pub abandoned_claim_retaken: u64,
+    /// Exhausted triggers the dead-letter watch did not dead-letter
+    /// because their run had a start on record: the broker's
+    /// MAX_DELIVERIES advisory came, but the trigger's claim, or the
+    /// worker's WAL or the control plane's ownership table, holds a
+    /// start of its run, so a `trigger_exhausted` dead letter would be
+    /// false and requeuing it would run the work twice. Counted on the
+    /// watch's own consumer.
+    pub started_not_dead_lettered: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
 }
@@ -102,6 +110,15 @@ impl ConsumerLedger {
             .entry(consumer.to_string())
             .or_default()
             .abandoned_claim_retaken += 1;
+    }
+
+    /// The dead-letter watch did not dead-letter an exhausted trigger,
+    /// because its run had a start on record.
+    pub fn note_started_not_dead_lettered(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .started_not_dead_lettered += 1;
     }
 
     /// The loop halted on an event it cannot read.

@@ -40,7 +40,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     },
     {
@@ -55,7 +56,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     },
     {
@@ -70,7 +72,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     },
     {
@@ -85,7 +88,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     },
     {
@@ -100,7 +104,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     },
     {
@@ -115,7 +120,8 @@
         "malformed_acked": 0,
         "duplicate_dropped": 0,
         "held_duplicate_dropped": 0,
-        "abandoned_claim_retaken": 0
+        "abandoned_claim_retaken": 0,
+        "started_not_dead_lettered": 0
       }
     }
   ],

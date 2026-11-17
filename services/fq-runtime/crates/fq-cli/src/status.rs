@@ -417,6 +417,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             duplicate_dropped,
             held_duplicate_dropped,
             abandoned_claim_retaken,
+            started_not_dead_lettered,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -483,6 +484,17 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                     "    abandoned claims taken again: {abandoned_claim_retaken} since this daemon \
                      started (no copy was handling the claim and no run of it was on record; each \
                      taken under a new invocation id to run the trigger)\n"
+                ));
+            }
+            // The dead-letter watch's decision (#967): a trigger whose
+            // deliveries ran out but whose run had a start on record is
+            // not dead-lettered, since requeuing it would run the work
+            // twice.
+            if *started_not_dead_lettered > 0 {
+                out.push_str(&format!(
+                    "    exhausted but started: {started_not_dead_lettered} since this daemon \
+                     started (deliveries ran out, but the run has a start on record; not \
+                     dead-lettered)\n"
                 ));
             }
             out

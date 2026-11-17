@@ -114,6 +114,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     }];
     let html = health(

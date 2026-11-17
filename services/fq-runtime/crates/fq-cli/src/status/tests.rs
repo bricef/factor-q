@@ -49,6 +49,7 @@ fn report() -> StatusReport {
                 duplicate_dropped: 0,
                 held_duplicate_dropped: 0,
                 abandoned_claim_retaken: 0,
+                started_not_dead_lettered: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -274,6 +275,7 @@ fn active(num_pending: u64) -> StreamHealth {
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     }
 }
@@ -402,6 +404,7 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -440,6 +443,7 @@ fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
             duplicate_dropped: 5,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -477,6 +481,7 @@ fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
             duplicate_dropped: 5,
             held_duplicate_dropped: 2,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -514,6 +519,7 @@ fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 3,
+            started_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -525,6 +531,41 @@ fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
         "got:\n{out}"
     );
     assert!(!out.contains("duplicate dropped"), "got:\n{out}");
+}
+
+/// A trigger the dead-letter watch kept out of the dead letters because
+/// its run started is counted on a line of its own under the watch's
+/// consumer (#967).
+#[test]
+fn a_watch_that_kept_started_triggers_out_of_the_dead_letters_says_how_many() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-advisories".to_string(),
+        messages: 3,
+        bytes: 512,
+        first_seq: 1,
+        last_seq: 3,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-advisory-watch".to_string(),
+            delivered: 3,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 2,
+        }],
+    });
+    assert!(
+        out.contains(
+            "    exhausted but started: 2 since this daemon started (deliveries ran out, but the \
+             run has a start on record; not dead-lettered)\n"
+        ),
+        "got:\n{out}"
+    );
 }
 
 #[test]
@@ -574,6 +615,7 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             duplicate_dropped: 0,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }],
     });
     assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");
