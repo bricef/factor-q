@@ -51,8 +51,9 @@
 //!    after the re-take, and leaves the claim to the next binary again.
 //!    So is one double fault: a run that failed for good before its first
 //!    WAL write, whose claim's release before its ack failed, or was given
-//!    up on, and whose ack was lost. Nothing of it is on record, so the trigger runs once more,
-//!    where before every copy was dropped until a false
+//!    up on, and whose ack was lost. Nothing of it is on record, so the
+//!    trigger runs once more, where before every copy was dropped until a
+//!    false
 //!    `trigger_exhausted`.
 //!
 //! **Being handled.** Every copy notes the invocation id it will run under
