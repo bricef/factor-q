@@ -1,0 +1,8 @@
+1 dead-lettered trigger(s), newest first:
+
+  2026-01-02 03:04:05  researcher  seq=13 via advisory
+      trigger exhausted after 5 deliveries (limit 5) [advisory]
+      payload: {"n":3}
+      start not checked: a copy of the trigger is still handling its claim; its run may have started, so check `fq invocation show 6b000000-0000-7000-8000-000000000006` before requeueing it
+
+-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one
