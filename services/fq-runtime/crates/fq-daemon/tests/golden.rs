@@ -2833,6 +2833,59 @@ fn golden_dead_letters_list_unchecked_json() {
     );
 }
 
+/// A dead letter the advisory watch wrote for an advisory from an earlier
+/// incarnation of the trigger stream (#1054), shaped as the watch writes
+/// it: under the system sentinel, with an empty subject, no payload and no
+/// trigger id, and the `unattributed` annotation saying why. Its sequence
+/// is the earlier stream's. The human listing gives it a line saying why it
+/// names no trigger, and the JSON carries the field. A fixture of its own,
+/// so the listings above are untouched.
+fn unattributed_dead_letter_events() -> Vec<Event> {
+    vec![
+        dead_letter_event(
+            AgentId::SYSTEM_STR,
+            7,
+            None,
+            "advisory",
+            serde_json::Value::Null,
+            25,
+            BASE_MS,
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_SUBJECT_KEY,
+            serde_json::json!(""),
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY,
+            serde_json::json!(
+                "its advisory came from an earlier incarnation of the trigger stream (emitted \
+                 2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), \
+                 so its sequence is that stream's, whose messages went with it"
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn golden_dead_letters_list_unattributed_human() {
+    check_golden_on(
+        EdgeFixture::start_with_events(unattributed_dead_letter_events()),
+        "dead_letters_list_unattributed_human",
+        &["dead-letters", "list"],
+        &[],
+    );
+}
+
+#[test]
+fn golden_dead_letters_list_unattributed_json() {
+    check_golden_on(
+        EdgeFixture::start_with_events(unattributed_dead_letter_events()),
+        "dead_letters_list_unattributed_json",
+        &["dead-letters", "list", "--json"],
+        &[],
+    );
+}
+
 /// The narrowing the verb offers, now applied at the log rather than
 /// after the fact — and the proof that it is applied at all: the
 /// fixture's dead letters belong to `researcher`, so `--agent fixer`

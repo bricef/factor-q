@@ -74,6 +74,7 @@ async fn attributed_to(arena: &Arena, published: &PublishedTrigger) {
     assert_eq!(dead.trigger_stream_seq, Some(SEQ));
     assert_eq!(dead.source, "advisory");
     assert_eq!(dead.start_unchecked, None);
+    assert_eq!(dead.unattributed, None);
     assert!(
         dead.error_message
             .starts_with("trigger exhausted after 2 deliveries"),
@@ -105,7 +106,8 @@ async fn attributed_to(arena: &Arena, published: &PublishedTrigger) {
 /// claim marked started. The watch does not read that message: it writes
 /// the dead letter under the system sentinel, with no subject, payload or
 /// trigger id, as it does for a trigger that aged out of the stream, so the
-/// exhaustion is still recorded and nothing false is attributed. The
+/// exhaustion is still recorded and nothing false is attributed, and says
+/// on it why it names none, with the stream's creation time. The
 /// current trigger's claim and run are left as they were. Attributed to
 /// the current message, the dead letter would name a trigger that ran, and
 /// requeuing it would run that work twice.
@@ -146,6 +148,14 @@ async fn an_advisory_from_an_earlier_incarnation_names_no_trigger_of_the_current
     assert_eq!(dead.trigger_stream_seq, Some(SEQ));
     assert_eq!(dead.source, "advisory");
     assert_eq!(dead.start_unchecked, None);
+    let created = chrono::DateTime::from_timestamp_nanos(arena.bus.trigger_stream_epoch())
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+    let why = dead.unattributed.expect("it says why it names no trigger");
+    assert!(
+        why.starts_with("its advisory came from an earlier incarnation of the trigger stream")
+            && why.contains(&format!("before the stream was created at {created}")),
+        "{why}"
+    );
     assert_eq!(
         claim(&arena).await,
         Some((true, Some(run))),

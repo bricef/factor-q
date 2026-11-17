@@ -1396,6 +1396,13 @@
               },
               "trigger_subject": {
                 "type": "string"
+              },
+              "unattributed": {
+                "description": "Why this dead letter names no trigger, when the dead-letter watch\nwrote it for an advisory from an earlier incarnation of the trigger\nstream: one the broker emitted before the stream was last created.\nIt gives when the advisory was emitted and when the stream was\ncreated. The advisory's sequence, `trigger_stream_seq` here, is a\nposition on that earlier stream, whose messages went with it, and\nthe message the stream holds at the same sequence now is another\ntrigger, so the dead letter names none: it is recorded under the\nsystem sentinel with no subject, payload or trigger id, and\n`dead_letter.requeue` refuses it. Absent on every other dead letter,\nincluding one written under the system sentinel because its trigger\nhad aged out of the stream.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1512,6 +1519,13 @@
               },
               "trigger_subject": {
                 "type": "string"
+              },
+              "unattributed": {
+                "description": "Why this dead letter names no trigger, when the dead-letter watch\nwrote it for an advisory from an earlier incarnation of the trigger\nstream: one the broker emitted before the stream was last created.\nIt gives when the advisory was emitted and when the stream was\ncreated. The advisory's sequence, `trigger_stream_seq` here, is a\nposition on that earlier stream, whose messages went with it, and\nthe message the stream holds at the same sequence now is another\ntrigger, so the dead letter names none: it is recorded under the\nsystem sentinel with no subject, payload or trigger id, and\n`dead_letter.requeue` refuses it. Absent on every other dead letter,\nincluding one written under the system sentinel because its trigger\nhad aged out of the stream.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [

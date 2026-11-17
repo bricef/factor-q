@@ -79,6 +79,18 @@ fn start_unchecked(annotation: &serde_json::Value) -> StartUnchecked {
 /// it.
 pub const DEAD_LETTER_START_UNCHECKED_KEY: &str = "start_unchecked";
 
+/// Set by the advisory watch on a dead letter it wrote for an advisory from
+/// an earlier incarnation of the trigger stream (issue 1054): why the dead
+/// letter names no trigger. The advisory's sequence is a position on the
+/// stream before this one, and the message this stream holds at the same
+/// sequence is another trigger, so the watch reads nothing at it and
+/// writes the dead letter under the system sentinel with no subject,
+/// payload or trigger id. The value is the reason, as text, with when the
+/// advisory was emitted and when the stream was created; [`from_event`]
+/// lifts it into [`DeadLetter::unattributed`], so a listing can say why a
+/// dead letter names nothing and that its sequence is not this stream's.
+pub const DEAD_LETTER_UNATTRIBUTED_KEY: &str = "unattributed";
+
 /// Recognise a dead letter in one recorded event, or decline.
 ///
 /// This is the whole of the atom's definition: a `Failed` event whose
@@ -123,6 +135,9 @@ pub fn from_event(event: &Event) -> Option<DeadLetter> {
             .unwrap_or(serde_json::Value::Null),
         error_message: failed.error_message.clone(),
         start_unchecked: annotation(DEAD_LETTER_START_UNCHECKED_KEY).map(start_unchecked),
+        // Present in any form, it still says the dead letter names nothing.
+        unattributed: annotation(DEAD_LETTER_UNATTRIBUTED_KEY)
+            .map(|why| why.as_str().map_or_else(|| why.to_string(), str::to_string)),
     })
 }
 
@@ -188,6 +203,28 @@ mod tests {
         assert_eq!(dead.trigger_payload, serde_json::json!({"n": 1}));
         assert_eq!(dead.agent_id, "researcher");
         assert_eq!(dead.start_unchecked, None);
+        assert_eq!(dead.unattributed, None);
+    }
+
+    /// A dead letter the watch wrote for an advisory from an earlier
+    /// incarnation of the trigger stream says why it names no trigger,
+    /// wherever it is read; a reason in a form this build does not expect
+    /// still says it.
+    #[test]
+    fn an_unattributed_dead_letter_says_why() {
+        let why = "its advisory came from an earlier incarnation of the trigger stream";
+        let event = failed(FailureKind::TriggerExhausted)
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::json!(why));
+        assert_eq!(
+            from_event(&event).expect("a dead letter").unattributed,
+            Some(why.to_string())
+        );
+        let garbled = failed(FailureKind::TriggerExhausted)
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::json!({"n": 1}));
+        assert_eq!(
+            from_event(&garbled).expect("a dead letter").unattributed,
+            Some(r#"{"n":1}"#.to_string())
+        );
     }
 
     /// One whose annotation cannot be read still says its start was not
