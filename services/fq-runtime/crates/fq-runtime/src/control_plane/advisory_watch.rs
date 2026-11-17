@@ -40,7 +40,7 @@ use crate::bus::{
     ADVISORY_STREAM_NAME, BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog, STREAM_NAME,
     TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
 };
-use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck};
+use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck, TriggerDispatcher};
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
     DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
@@ -163,15 +163,33 @@ pub enum AdvisoryOutcome {
 pub struct AdvisoryWatch {
     bus: EventBus,
     /// What the dispatcher has on record for a trigger, consulted before
-    /// one is called exhausted. `None` dead-letters every exhausted
-    /// trigger without looking.
+    /// one is called exhausted. `None` only for a dispatcher that holds no
+    /// claim store, a test's, and then every exhausted trigger is
+    /// dead-lettered without looking.
     records: Option<ExhaustionCheck>,
     /// How long a held verdict is held ([`HELD_VERDICT_LIMIT`]).
     held_verdict_limit: Duration,
 }
 
 impl AdvisoryWatch {
-    pub fn new(bus: EventBus) -> Self {
+    /// The watch over `dispatcher`'s triggers, consulting its records
+    /// ([`TriggerDispatcher::exhaustion_check`]) before it calls one
+    /// exhausted (issue 967). It takes the dispatcher, not the records, so
+    /// a daemon cannot build a watch that dead-letters a trigger whose run
+    /// started without looking: there is no constructor without them
+    /// outside the tests.
+    pub fn new(bus: EventBus, dispatcher: &TriggerDispatcher) -> Self {
+        Self {
+            bus,
+            records: dispatcher.exhaustion_check(),
+            held_verdict_limit: HELD_VERDICT_LIMIT,
+        }
+    }
+
+    /// A watch with no dispatcher to consult, for the tests of what it
+    /// does with an advisory before any records come into it.
+    #[cfg(test)]
+    pub(crate) fn without_records(bus: EventBus) -> Self {
         Self {
             bus,
             records: None,
@@ -184,15 +202,6 @@ impl AdvisoryWatch {
     #[cfg(test)]
     pub(crate) fn with_held_verdict_limit(mut self, limit: Duration) -> Self {
         self.held_verdict_limit = limit;
-        self
-    }
-
-    /// Consult the dispatcher's records before calling a trigger
-    /// exhausted ([`TriggerDispatcher::exhaustion_check`]).
-    ///
-    /// [`TriggerDispatcher::exhaustion_check`]: crate::control_plane::dispatcher::TriggerDispatcher::exhaustion_check
-    pub fn with_records(mut self, records: Option<ExhaustionCheck>) -> Self {
-        self.records = records;
         self
     }
 
@@ -569,7 +578,7 @@ mod tests {
         }
 
         let advisory = wait_for_captured_advisory(&bus, &consumer_name).await;
-        let watch = AdvisoryWatch::new(bus.clone());
+        let watch = AdvisoryWatch::without_records(bus.clone());
         assert_eq!(
             watch.handle_advisory(&advisory).await.unwrap(),
             AdvisoryOutcome::Emitted
@@ -640,7 +649,7 @@ mod tests {
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
-        let watch = AdvisoryWatch::new(bus.clone());
+        let watch = AdvisoryWatch::without_records(bus.clone());
         // No message exists at this sequence.
         let advisory = format!(
             r#"{{"type":"io.nats.jetstream.advisory.v1.max_deliver","stream":"{TRIGGER_STREAM_NAME}","consumer":"gone","stream_seq":18446744073709551,"deliveries":5}}"#

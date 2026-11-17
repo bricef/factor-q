@@ -406,8 +406,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // a trigger whose run has a start on record in the dispatcher's
     // records, which it consults first (#967).
     let (advisory_shutdown_tx, advisory_shutdown_rx) = tokio::sync::oneshot::channel();
-    let advisory_watch =
-        fq_runtime::AdvisoryWatch::new(bus.clone()).with_records(dispatcher.exhaustion_check());
+    let advisory_watch = fq_runtime::AdvisoryWatch::new(bus.clone(), &dispatcher);
     let mut advisory_handle =
         tokio::spawn(async move { advisory_watch.run(advisory_shutdown_rx).await });
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });

@@ -101,7 +101,7 @@ async fn exhaust(arena: &Arena) -> Vec<u8> {
 
 /// The real watch, consulting the arena's dispatcher.
 fn watch(arena: &Arena) -> AdvisoryWatch {
-    AdvisoryWatch::new(arena.bus.clone()).with_records(arena.dispatcher.exhaustion_check())
+    AdvisoryWatch::new(arena.bus.clone(), &arena.dispatcher)
 }
 
 /// The trigger's dead letter, if one was written.
