@@ -57,7 +57,8 @@ pub struct ConsumerRecord {
     /// worker's WAL or the control plane's ownership table, holds a
     /// start of its run, so a `trigger_exhausted` dead letter would be
     /// false and requeuing it would run the work twice. Counted on the
-    /// watch's own consumer.
+    /// watch's own consumer, once per verdict: an advisory whose ack was
+    /// lost comes back and is counted again.
     pub started_not_dead_lettered: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,

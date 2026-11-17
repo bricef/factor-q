@@ -150,11 +150,29 @@ pub enum AdvisoryOutcome {
     RunStarted,
     /// The verdict is held, for the reason given: the advisory is NAKed
     /// and decided again when it comes back.
-    Held { why: String },
+    Held(Hold),
     /// A dead-letter event was emitted without the trigger's start
     /// checked: its verdict was held past [`HELD_VERDICT_LIMIT`], and the
     /// event says so ([`StartUnchecked`]).
     Unchecked,
+}
+
+/// A verdict the watch holds, with what its line names: the trigger's
+/// sequence and subject, why, and the invocation the claim names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    pub why: String,
+    pub stream_seq: u64,
+    pub subject: String,
+    pub invocation_id: Option<String>,
+}
+
+/// Why the watch NAKs an advisory, for its line.
+enum Nak<'a> {
+    /// It holds the verdict.
+    Held(&'a Hold),
+    /// Handling the advisory failed.
+    Failed(&'a str),
 }
 
 /// The advisory watch. Owns the bus; spawn as a tokio task via
@@ -226,8 +244,9 @@ impl AdvisoryWatch {
                 msg = messages.next() => {
                     match msg {
                         Some(Ok(msg)) => match self.handle_advisory(&msg.payload).await {
-                            Ok(AdvisoryOutcome::Held { why }) => {
-                                nak_for_retry(&msg, policy, &mut redelivery_log, &why, true).await;
+                            Ok(AdvisoryOutcome::Held(hold)) => {
+                                nak_for_retry(&msg, policy, &mut redelivery_log, Nak::Held(&hold))
+                                    .await;
                             }
                             Ok(outcome) => {
                                 debug!(?outcome, "advisory handled");
@@ -237,7 +256,8 @@ impl AdvisoryWatch {
                             }
                             Err(err) => {
                                 let err = err.to_string();
-                                nak_for_retry(&msg, policy, &mut redelivery_log, &err, false).await;
+                                nak_for_retry(&msg, policy, &mut redelivery_log, Nak::Failed(&err))
+                                    .await;
                             }
                         },
                         Some(Err(err)) => {
@@ -339,13 +359,18 @@ impl AdvisoryWatch {
                 Exhausted::Started {
                     invocation_id,
                     on_record,
-                    marked,
+                    mark,
                 } => {
-                    warn!(subject = %trigger_subject, stream_seq = advisory.stream_seq,
-                        deliveries = advisory.deliveries, %invocation_id, run = %on_record, marked,
+                    warn!(consumer = CONSUMER_NAME, subject = %trigger_subject,
+                        stream_seq = advisory.stream_seq, deliveries = advisory.deliveries,
+                        %invocation_id, run = %on_record, claim = %mark,
                         "not dead-lettering a trigger whose deliveries ran out: its run has a start \
                          on record, so a `trigger_exhausted` dead letter would be false and \
-                         requeuing it would run the work twice; its claim is marked started");
+                         requeuing it would run the work twice; `claim` says what became of its \
+                         claim; if no task is driving the run, which is so when its last \
+                         delivery's task died after its first WAL write, it stays in flight until \
+                         this daemon next starts and its recovery resumes it, and shows meanwhile \
+                         among `fq doctor`'s stuck executions");
                     self.bus
                         .consumer_ledger()
                         .note_started_not_dead_lettered(CONSUMER_NAME);
@@ -353,7 +378,12 @@ impl AdvisoryWatch {
                 }
                 Exhausted::Undecided { why, invocation_id } => {
                     if advisory.emitted_within(self.held_verdict_limit, chrono::Utc::now()) {
-                        return Ok(AdvisoryOutcome::Held { why });
+                        return Ok(AdvisoryOutcome::Held(Hold {
+                            why,
+                            stream_seq: advisory.stream_seq,
+                            subject: trigger_subject,
+                            invocation_id,
+                        }));
                     }
                     unchecked = Some(StartUnchecked {
                         reason: why,
@@ -409,7 +439,8 @@ impl AdvisoryWatch {
         };
         self.bus.publish(&event).await?;
         if let Some(unchecked) = unchecked {
-            error!(agent_id = %event.envelope.agent_id, stream_seq = advisory.stream_seq,
+            error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
+                stream_seq = advisory.stream_seq,
                 subject = %trigger_subject, reason = %unchecked.reason,
                 invocation_id = %unchecked.invocation_id.as_deref().unwrap_or("none"),
                 limit_secs = self.held_verdict_limit.as_secs(),
@@ -458,12 +489,17 @@ impl AdvisoryWatch {
 /// with no record of it), so the delay is what keeps a persistent fault,
 /// or a verdict held for long, from becoming a hot loop (#549). `held`
 /// says the verdict was held rather than the handling failed.
+/// NAK an advisory to come back after the policy's delay, with a line
+/// under the loop's [`RedeliveryLog`]: the first, then each step of the
+/// escalation, then one per interval, shared by every advisory the loop
+/// NAKs. A held verdict also gets a line of its own on the advisory's
+/// first delivery, so every held trigger is named in the log at least
+/// once, by sequence and subject, however many are held together.
 async fn nak_for_retry(
     msg: &async_nats::jetstream::Message,
     policy: ConsumerRedeliveryPolicy,
     redelivery_log: &mut RedeliveryLog,
-    why: &str,
-    held: bool,
+    why: Nak<'_>,
 ) {
     let delivered = msg
         .info()
@@ -471,18 +507,20 @@ async fn nak_for_retry(
         .and_then(|info| u64::try_from(info.delivered).ok())
         .unwrap_or(1);
     let delay = policy.nak_delay(delivered);
-    if redelivery_log.admit(delivered, std::time::Instant::now()) {
-        if held {
-            warn!(reason = %why, delivered, retry_in_ms = delay.as_millis() as u64,
-                "holding the dead-letter verdict on an exhausted trigger; nak to decide again");
-        } else {
-            warn!(
-                error = %why,
-                delivered,
+    let admitted = redelivery_log.admit(delivered, std::time::Instant::now());
+    match why {
+        Nak::Held(hold) if admitted || delivered == 1 => {
+            warn!(consumer = CONSUMER_NAME, stream_seq = hold.stream_seq,
+                subject = %hold.subject, reason = %hold.why,
+                invocation_id = %hold.invocation_id.as_deref().unwrap_or("none"), delivered,
                 retry_in_ms = delay.as_millis() as u64,
-                "advisory handling failed; nak for retry"
-            );
+                "holding the dead-letter verdict on an exhausted trigger; nak to decide again");
         }
+        Nak::Failed(err) if admitted => {
+            warn!(consumer = CONSUMER_NAME, error = %err, delivered,
+                retry_in_ms = delay.as_millis() as u64, "advisory handling failed; nak for retry");
+        }
+        Nak::Held(_) | Nak::Failed(_) => {}
     }
     if let Err(nak_err) = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))

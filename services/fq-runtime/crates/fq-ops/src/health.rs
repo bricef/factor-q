@@ -187,10 +187,12 @@ pub enum ConsumerHealth {
         /// false, and requeuing it would run the work twice, so the watch
         /// marks the claim instead and writes none. Not a fault; the
         /// daemon logs each one at warn with the trigger's subject, its
-        /// sequence, the invocation and where its start is on record.
-        /// Counted on the watch's own consumer, in memory since the
-        /// daemon started. A report from a daemon that does not send it
-        /// reads as zero.
+        /// sequence, the invocation, where its start is on record and
+        /// what became of its claim. Counted on the watch's own consumer,
+        /// in memory since the daemon started, once per verdict: an
+        /// advisory whose ack was lost comes back, is decided again and is
+        /// counted again, so this can count one trigger twice. A report
+        /// from a daemon that does not send it reads as zero.
         #[serde(default)]
         started_not_dead_lettered: u64,
     },

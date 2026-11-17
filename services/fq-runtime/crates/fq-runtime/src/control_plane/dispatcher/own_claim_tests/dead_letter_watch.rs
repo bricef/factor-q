@@ -337,7 +337,7 @@ async fn a_trigger_whose_records_cannot_be_read_is_held_until_they_can() {
     let held = watch.handle_advisory(&advisory).await.unwrap();
 
     assert!(
-        matches!(held, AdvisoryOutcome::Held { .. }),
+        matches!(held, AdvisoryOutcome::Held(_)),
         "the verdict is held while the records cannot be read: {held:?}"
     );
     assert!(dead_letter(&arena).await.is_none());
@@ -375,7 +375,7 @@ async fn a_trigger_still_handled_is_held_and_not_dead_lettered_once_its_run_star
     let held = watch.handle_advisory(&advisory).await.unwrap();
 
     assert!(
-        matches!(held, AdvisoryOutcome::Held { .. }),
+        matches!(held, AdvisoryOutcome::Held(_)),
         "the verdict is held while a copy handles the claim: {held:?}"
     );
     assert!(dead_letter(&arena).await.is_none());
@@ -408,7 +408,7 @@ async fn a_trigger_still_handled_is_dead_lettered_once_its_copy_ends_with_nothin
     let held = watch.handle_advisory(&advisory).await.unwrap();
 
     assert!(
-        matches!(held, AdvisoryOutcome::Held { .. }),
+        matches!(held, AdvisoryOutcome::Held(_)),
         "the verdict is held while a copy handles the claim: {held:?}"
     );
     arena.worker.setup_gate.add_permits(1);
@@ -670,7 +670,7 @@ async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the
         "a trigger whose run started was dead-lettered: {outcome:?}"
     );
     assert!(
-        matches!(outcome, AdvisoryOutcome::Held { .. }),
+        matches!(outcome, AdvisoryOutcome::Held(_)),
         "the copy was handling the claim when the watch asked: {outcome:?}"
     );
     assert_eq!(
@@ -795,7 +795,7 @@ async fn a_verdict_inside_the_limit_is_still_held() {
     let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
 
     assert!(
-        matches!(outcome, AdvisoryOutcome::Held { .. }),
+        matches!(outcome, AdvisoryOutcome::Held(_)),
         "a few seconds is inside the hour: {outcome:?}"
     );
     assert!(dead_letter(&arena).await.is_none());

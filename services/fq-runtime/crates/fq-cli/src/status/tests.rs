@@ -568,6 +568,50 @@ fn a_watch_that_kept_started_triggers_out_of_the_dead_letters_says_how_many() {
     );
 }
 
+/// A dead-letter watch redelivering is not given the trigger's bound,
+/// which is not its own, and a stuck one names the hold line as well as
+/// the failure line (#967).
+#[test]
+fn a_redelivering_dead_letter_watch_is_described_as_holding_or_retrying() {
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-advisories".to_string(),
+        messages: 3,
+        bytes: 512,
+        first_seq: 1,
+        last_seq: 3,
+        consumers: vec![ConsumerHealth::Active {
+            name: "fq-advisory-watch".to_string(),
+            delivered: 9,
+            ack_pending: 1,
+            num_pending: 0,
+            num_redelivered: 1,
+            redeliveries: 8,
+            stuck: true,
+            malformed_acked: 0,
+            duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
+        }],
+    });
+    assert!(
+        out.contains(
+            "    -> 8 redeliveries past its acked floor; it is holding a verdict on an exhausted \
+             trigger, or its handler keeps failing: look for `holding the dead-letter verdict` \
+             or `advisory handling failed` in the daemon log\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "    redelivered:    1 (holding or retrying; no delivery bound, and a held verdict \
+             ends within an hour of its advisory)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("trigger bound"), "got:\n{out}");
+}
+
 #[test]
 fn an_unavailable_stream_renders_its_reason() {
     let out = render_stream_health_human(&StreamHealth::Unavailable {

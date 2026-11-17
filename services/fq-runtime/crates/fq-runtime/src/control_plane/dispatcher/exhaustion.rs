@@ -60,8 +60,6 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
-
 use crate::bus::TRIGGER_STREAM_NAME;
 use crate::control_plane::store::RunRecords;
 use crate::control_plane::{ControlPlaneStore, TriggerKey};
@@ -81,6 +79,37 @@ pub struct ExhaustionCheck {
     stream_epoch: i64,
 }
 
+/// What became of the claim of an exhausted trigger whose run has a start
+/// on record. Said on the watch's line, so an operator reading it knows
+/// whether a redelivered or replayed copy will meet a marked claim now or
+/// only after this daemon's next start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaimMark {
+    /// It was marked started already, by the copy that recorded the start.
+    Already,
+    /// This check marked it: it was `claimed`.
+    Now,
+    /// It changed between the read and the mark (marked by its copy, or
+    /// given back), and the mark left it as it was.
+    Changed,
+    /// The mark failed, for the reason given; startup recovery marks it.
+    Failed(String),
+}
+
+impl std::fmt::Display for ClaimMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Already => f.write_str("already marked started"),
+            Self::Now => f.write_str("marked started now"),
+            Self::Changed => f.write_str("not marked: the claim changed before the mark"),
+            Self::Failed(err) => write!(
+                f,
+                "not marked: the mark failed ({err}); this daemon's next start marks it"
+            ),
+        }
+    }
+}
+
 /// The watch's verdict on one exhausted trigger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Exhausted {
@@ -92,8 +121,8 @@ pub(crate) enum Exhausted {
         invocation_id: String,
         /// Where the start is on record, for the log line.
         on_record: String,
-        /// Whether this check marked the claim, which was `claimed`.
-        marked: bool,
+        /// What became of the claim, for the log line.
+        mark: ClaimMark,
     },
     /// Not decided yet: decide again later.
     Undecided {
@@ -136,7 +165,7 @@ impl ExhaustionCheck {
             return Exhausted::Started {
                 invocation_id,
                 on_record: "on its claim, marked durably started".to_string(),
-                marked: false,
+                mark: ClaimMark::Already,
             };
         }
         if self.handling.handles(&invocation_id) {
@@ -188,24 +217,21 @@ impl ExhaustionCheck {
             return Exhausted::NothingOnRecord;
         }
         let on_record = records.where_on_record().unwrap_or_default();
-        let marked = match self
+        // A failed mark does not change the verdict: the trigger is not
+        // dead-lettered either way, and the watch's line says so.
+        let mark = match self
             .store
             .mark_unsettled_trigger_started(key, &invocation_id)
             .await
         {
-            Ok(marked) => marked,
-            Err(err) => {
-                warn!(error = %err, stream_seq = key.stream_seq, %invocation_id,
-                    "could not mark the claim of an exhausted trigger whose run has a start on \
-                     record; it is not dead-lettered either way, and the next start's recovery \
-                     marks the claim");
-                false
-            }
+            Ok(true) => ClaimMark::Now,
+            Ok(false) => ClaimMark::Changed,
+            Err(err) => ClaimMark::Failed(err.to_string()),
         };
         Exhausted::Started {
             invocation_id,
             on_record,
-            marked,
+            mark,
         }
     }
 }

@@ -430,7 +430,18 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             let mut out = format!(
                 "  consumer {name}: {status} (delivered {delivered}, pending {num_pending})\n"
             );
-            if *stuck {
+            // The dead-letter watch leaves an advisory unacked on purpose
+            // while it holds a verdict (#967), and its durable has no
+            // delivery bound: a hold ends at the watch's own limit.
+            let watch = name == "fq-advisory-watch";
+            if *stuck && watch {
+                out.push_str(&format!(
+                    "    -> {redeliveries} redeliveries past its acked floor; it is holding a \
+                     verdict on an exhausted trigger, or its handler keeps failing: look for \
+                     `holding the dead-letter verdict` or `advisory handling failed` in the \
+                     daemon log\n"
+                ));
+            } else if *stuck {
                 out.push_str(&format!(
                     "    -> {redeliveries} redeliveries past its acked floor; its handler \
                      keeps failing\n"
@@ -439,7 +450,12 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             if *ack_pending > 0 {
                 out.push_str(&format!("    ack pending:    {ack_pending}\n"));
             }
-            if *num_redelivered > 0 {
+            if *num_redelivered > 0 && watch {
+                out.push_str(&format!(
+                    "    redelivered:    {num_redelivered} (holding or retrying; no delivery \
+                     bound, and a held verdict ends within an hour of its advisory)\n"
+                ));
+            } else if *num_redelivered > 0 {
                 out.push_str(&format!(
                     "    redelivered:    {num_redelivered} (retrying; trigger bound {})\n",
                     fq_ops::surface::TRIGGER_MAX_DELIVER

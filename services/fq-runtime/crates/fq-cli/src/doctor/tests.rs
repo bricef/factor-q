@@ -701,13 +701,33 @@ fn exhausted_triggers_that_started_are_counted_and_explained_without_a_verdict()
             "  fq-advisory-watch: ok (pending 0, exhausted but started since this daemon started: \
              2)\n  -> \"exhausted but started\" is a trigger whose deliveries ran out with no \
              answer reaching the broker while its run had a start on record (its last delivery's \
-             task died after its first WAL write, or its ack was lost): its claim was marked and \
-             no `trigger_exhausted` was written, since requeuing one would run the work twice; \
-             the daemon log has a warn line for each naming the invocation and where its start \
-             is on record\n"
+             task died after its first WAL write, or its ack was lost): no `trigger_exhausted` \
+             was written, since requeuing one would run the work twice; a run no task is driving \
+             stays in flight until this daemon next starts and resumes it, and shows meanwhile \
+             under `Current executions` as stuck; the daemon log has a warn line for each verdict \
+             naming the invocation, where its start is on record and what became of its claim\n"
         ),
         "got:\n{out}"
     );
+}
+
+/// A stuck dead-letter watch is not said to be only a failing handler:
+/// it leaves an advisory unacked while it holds a verdict (#967), and the
+/// step names the line for that and the line for a failure.
+#[test]
+fn a_stuck_dead_letter_watch_names_the_hold_line_and_the_failure_line() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![active("fq-advisory-watch", true, 9)],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains(ADVISORY_WATCH_STUCK), "got:\n{out}");
+    assert!(!out.contains("its handler keeps failing"), "got:\n{out}");
 }
 
 /// Nothing dropped, nothing said: a line that always reported zero
