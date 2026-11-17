@@ -268,8 +268,10 @@ route ADR-0032's section 5 says it used, a start slower than the ack
 window; the property it certifies is unchanged, and a third test in
 that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
-redelivered. ADR-0032 is not edited, so these of its statements are now
-out of date: section 5's account of the two routes to a redelivery
+redelivered. ADR-0032 is not edited for the keepalive (its only
+change since records the finished retry ladder, 2026-11-14), so these
+of its statements are now out of date: section 5's account of the two
+routes to a redelivery
 before durable start, and of the replay using the second; gap 3's "a
 start that takes longer than the whole retry ladder"; and, in its part
 on more than one worker, "where nothing keeps it alive" and "in a slow
