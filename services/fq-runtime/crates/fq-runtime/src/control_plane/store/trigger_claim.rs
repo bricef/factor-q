@@ -559,6 +559,29 @@ impl ControlPlaneStore {
         .await?;
         Ok(row.as_ref().map(row_to_unsettled))
     }
+
+    /// The claim row for `key`, whatever its state, read without writing:
+    /// `None` when nothing claims the delivery.
+    ///
+    /// The dead-letter watch reads it before it calls a trigger exhausted
+    /// (issue 967): a row marked started is a start on record, and a
+    /// `claimed` row names the run whose records it reads next. One
+    /// primary-key read.
+    pub async fn trigger_claim(
+        &self,
+        key: TriggerKey<'_>,
+    ) -> Result<Option<TriggerClaimRow>, ControlPlaneStoreError> {
+        let row = sqlx::query(
+            "SELECT stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at \
+             FROM trigger_claim WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+        )
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_claim))
+    }
 }
 
 fn row_to_unsettled(row: &sqlx::sqlite::SqliteRow) -> UnsettledTriggerClaim {

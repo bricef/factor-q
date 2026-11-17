@@ -60,6 +60,24 @@ struct MaxDeliverAdvisory {
     consumer: String,
     stream_seq: u64,
     deliveries: i64,
+    /// When the server emitted it, RFC 3339.
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+impl MaxDeliverAdvisory {
+    /// Whether the advisory was emitted for the incarnation of the trigger
+    /// stream created at `stream_epoch` (nanoseconds) or a later one, not
+    /// for one before it. An advisory without a timestamp the watch can
+    /// read is taken as this incarnation's: the server always stamps it.
+    fn of_incarnation(&self, stream_epoch: i64) -> bool {
+        let emitted = self
+            .timestamp
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| at.timestamp_nanos_opt());
+        emitted.is_none_or(|nanos| nanos >= stream_epoch)
+    }
 }
 
 /// Errors that prevent the watch from starting or progressing.
@@ -231,7 +249,17 @@ impl AdvisoryWatch {
 
         // Issue 967: a trigger whose run has a start on record is not
         // dead-lettered, and a verdict that cannot be taken yet is held.
-        if let Some(records) = &self.records {
+        // The claims key on the stream's incarnation, which the advisory
+        // does not carry: one emitted before the stream was last created
+        // names a message of the old stream, and today's claim at that
+        // sequence says nothing about it, so the claims are not consulted.
+        let this_incarnation = advisory.of_incarnation(self.bus.trigger_stream_epoch());
+        if !this_incarnation {
+            info!(stream_seq = advisory.stream_seq, timestamp = ?advisory.timestamp,
+                "an advisory from an earlier incarnation of the trigger stream; its trigger's \
+                 claim cannot be found, so it is dead-lettered without consulting the claims");
+        }
+        if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
             match records.verdict(advisory.stream_seq).await {
                 Exhausted::NothingOnRecord => {}
                 Exhausted::Started {
@@ -566,5 +594,33 @@ mod tests {
         assert_eq!(advisory.consumer, "fq-dispatcher");
         assert_eq!(advisory.stream_seq, 42);
         assert_eq!(advisory.deliveries, 5);
+        assert_eq!(
+            advisory.timestamp.as_deref(),
+            Some("2026-07-14T16:18:43.605745113Z")
+        );
+    }
+
+    /// The incarnation an advisory belongs to is read off its timestamp:
+    /// one emitted before the stream's creation is an earlier
+    /// incarnation's, one at or after it this one's, and one with no
+    /// readable timestamp is taken as this one's.
+    #[test]
+    fn an_advisory_belongs_to_the_incarnation_its_timestamp_falls_in() {
+        let at = |timestamp: Option<&str>| MaxDeliverAdvisory {
+            stream: TRIGGER_STREAM_NAME.to_string(),
+            consumer: "fq-dispatcher".to_string(),
+            stream_seq: 1,
+            deliveries: 5,
+            timestamp: timestamp.map(str::to_string),
+        };
+        let created = chrono::DateTime::parse_from_rfc3339("2026-07-14T16:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        assert!(at(Some("2026-07-14T16:18:43Z")).of_incarnation(created));
+        assert!(at(Some("2026-07-14T16:00:00Z")).of_incarnation(created));
+        assert!(!at(Some("2026-07-14T15:59:59Z")).of_incarnation(created));
+        assert!(at(None).of_incarnation(created));
+        assert!(at(Some("not a time")).of_incarnation(created));
     }
 }

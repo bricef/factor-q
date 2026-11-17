@@ -231,6 +231,41 @@ async fn a_last_delivery_that_copies_a_run_started_earlier_is_not_dead_lettered(
     assert_eq!(kept(&arena), 1);
 }
 
+/// **A last delivery whose run was archived while the watch read its
+/// records is not dead-lettered.** The fifth delivery's run finishes with
+/// its mark refused and its ack lost, so the claim is `claimed` and the WAL
+/// holds the run finished. When the watch asks the worker about it, the
+/// worker hands the run off to the archive (the ownership row written, then
+/// the WAL row deleted) and answers from a WAL that no longer holds it. The
+/// ownership row, read second, does: the watch finds the start there,
+/// marks the claim, and writes no dead letter. Ignoring the ownership row,
+/// or reading it before the WAL, would dead-letter a run that finished.
+#[tokio::test]
+async fn a_last_delivery_whose_run_was_archived_meanwhile_is_not_dead_lettered() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    fail(&arena, 4).await;
+    refuse_updates(&arena.claim_db).await;
+    let last = arena.deliver(5, true).await;
+    assert!(!last.panicked, "{last:?}");
+    let run = arena.worker.starts()[4].0.to_string();
+    heal(&arena.claim_db).await;
+    assert_eq!(claim(&arena).await, Some((false, Some(run.clone()))));
+    let advisory = exhaust(&arena).await;
+    *arena.worker.hands_off_on_read.lock().unwrap() = Some(std::sync::Arc::clone(&arena.claims));
+
+    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(
+        arena.wal().await.is_empty(),
+        "the run was handed off while the watch read the WAL"
+    );
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(claim(&arena).await, Some((true, Some(run))));
+    assert_eq!(kept(&arena), 1);
+}
+
 /// **A trigger with nothing on record is dead-lettered as before.** Four
 /// deliveries fail transiently and the fifth's task dies before its first
 /// WAL write: the claim is `claimed`, no copy handles it, and nothing of
