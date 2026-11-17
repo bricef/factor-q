@@ -372,7 +372,8 @@ start on record (that delivery started the run and its task then died,
 or its mark landed or gave up and its ack was lost, or it was a copy of
 a run started earlier and its ack was lost) is not dead-lettered; its
 claim is marked, then or, if that mark fails, at the next start, and
-`fq status` and `fq doctor` count it as exhausted but started. A trigger with nothing on record is dead-lettered as
+`fq status` and `fq doctor` count it as exhausted but started. A
+trigger with nothing on record is dead-lettered as
 before. While the records cannot be read, or a copy of the trigger is
 still handling its claim, the watch holds its verdict and decides again
 when the advisory comes back, rather than write a dead letter that could
@@ -387,7 +388,8 @@ writes the dead letter anyway, logs it at error, and marks it in
 reason and the invocation to look at before a requeue. What stays open
 is narrow. That dead letter can be false, since the run may have
 started, or may start after the hour, and requeuing it then runs the
-work twice; the mark is there so that the invocation is checked first. An advisory emitted
+work twice; the mark is there so that the invocation is checked
+first. An advisory emitted
 before the trigger stream was last created is dead-lettered without a
 look at the claims, since its sequence names a message of the old
 stream, and the dead letter is attributed to the message the new stream
