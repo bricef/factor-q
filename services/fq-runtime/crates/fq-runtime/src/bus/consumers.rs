@@ -344,9 +344,13 @@ impl EventBus {
     /// forever — but a poison advisory never reaches the retry path:
     /// [`crate::control_plane::advisory_watch`] consumes an unparseable
     /// or foreign advisory outright. What NAKs here is transient
-    /// bus/stream trouble, and an advisory dropped to a delivery bound
-    /// is an exhausted trigger with no dead letter — the one record of
-    /// that exhaustion, lost.
+    /// bus/stream trouble, or a verdict the watch holds on purpose until
+    /// it can tell whether the trigger's run started (issue 967), which
+    /// the watch itself ends at its limit,
+    /// [`crate::control_plane::advisory_watch::HELD_VERDICT_LIMIT`], far
+    /// inside the stream's own age limit. An advisory dropped to a
+    /// delivery bound is an exhausted trigger with no dead letter — the
+    /// one record of that exhaustion, lost.
     pub async fn advisory_consumer(&self, name: &str) -> Result<consumer::PullConsumer, BusError> {
         debug!(
             consumer = name,

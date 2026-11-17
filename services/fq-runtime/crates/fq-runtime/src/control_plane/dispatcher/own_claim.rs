@@ -330,8 +330,9 @@ impl TriggerDispatcher {
         why: &str,
     ) {
         let last = if met.delivered >= TRIGGER_MAX_DELIVER {
-            "; this was its last delivery, so no copy follows, and unless the delivery is acked \
-             before its window lapses the trigger is dead-lettered as `trigger_exhausted`"
+            "; this was its last delivery, so no copy follows: unless the delivery is acked \
+             before its window lapses, the dead-letter watch then decides by the records whether \
+             to dead-letter the trigger as `trigger_exhausted`"
         } else {
             ""
         };

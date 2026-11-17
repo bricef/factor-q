@@ -150,7 +150,9 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
             report.dead_letters.exhausted_triggers
         ));
         out.push_str(
-            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run\n",
+            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run, \
+             but for one the listing marks `start not checked` make the check it gives first: a \
+             run still going shows in `fq invocation show` only as a `Live execution:` block\n",
         );
     } else {
         out.push_str("Dead-letters: none\n");
@@ -190,21 +192,25 @@ fn render_consumers(
                 duplicate_dropped,
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
+                started_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}{}{}\n",
+                     pending {num_pending}{}{}{}{}\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
-                    retaken_suffix(*abandoned_claim_retaken)
+                    retaken_suffix(*abandoned_claim_retaken),
+                    started_suffix(*started_not_dead_lettered)
                 ));
                 // The held-copy count does not choose this step. It only
                 // ever grows while the daemon runs, so one held copy in
                 // the morning would make a store failure in the afternoon
                 // read as a duplicate delivery and drop the step that
                 // points at the store. Its own note follows either way.
-                if name == "fq-dispatcher"
+                if name == "fq-advisory-watch" {
+                    out.push_str(ADVISORY_WATCH_STUCK);
+                } else if name == "fq-dispatcher"
                     && (dispatcher_has_held_triggers || *duplicate_dropped > 0)
                 {
                     out.push_str("  -> redeliveries on the trigger consumer while triggers are held mean a trigger may have been delivered twice; the durable claim drops the duplicate (see the duplicates-dropped counts) — check fq invocation list and the transcripts' attempt: field if none is counted\n");
@@ -216,6 +222,7 @@ fn render_consumers(
                 }
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
+                out.push_str(&started_note(*started_not_dead_lettered));
             }
             ConsumerHealth::Active {
                 name,
@@ -224,16 +231,19 @@ fn render_consumers(
                 duplicate_dropped,
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
+                started_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{}{}{})\n",
+                    "  {name}: ok (pending {num_pending}{}{}{}{})\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
-                    retaken_suffix(*abandoned_claim_retaken)
+                    retaken_suffix(*abandoned_claim_retaken),
+                    started_suffix(*started_not_dead_lettered)
                 ));
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
+                out.push_str(&started_note(*started_not_dead_lettered));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -391,6 +401,53 @@ fn retaken_note(abandoned_claim_retaken: u64) -> String {
      an ack that was then lost; or a drain left it); the copy then runs the trigger unless a drain \
      or the trigger's own checks stop it first; the daemon log has a warn line for each naming \
      the abandoned invocation id, and the failure before it\n"
+        .to_string()
+}
+
+/// The step under a stuck dead-letter watch. The watch leaves an advisory
+/// unacked on purpose while it holds its verdict on an exhausted trigger
+/// (#967), so its redeliveries are not only a handler failing; the two
+/// have their own lines in the daemon log, and this names both.
+const ADVISORY_WATCH_STUCK: &str = "  -> the dead-letter watch redelivers an advisory while it \
+     holds its verdict on an exhausted trigger (a copy of the trigger is still handling its claim, \
+     or its run's records cannot be read) or while its handler fails; in the daemon log, \
+     `consumer=fq-advisory-watch` with `holding the dead-letter verdict on an exhausted trigger` \
+     names each held trigger's sequence, subject and reason; a hold ends when the verdict can be \
+     taken, or else, about an hour after the advisory, in a dead letter marked `start not checked` \
+     unless a last look finds the run started; `advisory handling failed` is the handler failing: \
+     free whatever it is blocked on (disk, store, broker)\n";
+
+/// `, exhausted but started since this daemon started: N`, or nothing
+/// when none was ([`started_note`]).
+fn started_suffix(started_not_dead_lettered: u64) -> String {
+    if started_not_dead_lettered == 0 {
+        String::new()
+    } else {
+        format!(", exhausted but started since this daemon started: {started_not_dead_lettered}")
+    }
+}
+
+/// The line under the dead-letter watch's consumer when it kept triggers
+/// out of the dead letters because their run had started, saying what
+/// that means, or nothing when it is zero (#967).
+///
+/// It is not a fault: the run, started, is the trigger's outcome. The line
+/// says why no dead letter was written, so an operator looking for one
+/// does not go looking for the work in `fq dead-letters list`, and where
+/// a run that no task is driving shows until the daemon's next start
+/// resumes it: among the stuck executions, which the stuck-invocation
+/// sweep flags.
+fn started_note(started_not_dead_lettered: u64) -> String {
+    if started_not_dead_lettered == 0 {
+        return String::new();
+    }
+    "  -> \"exhausted but started\" is a trigger whose deliveries ran out with no answer reaching \
+     the broker while its run had a start on record (its last delivery's task died after its \
+     first WAL write, or its ack was lost): no `trigger_exhausted` was written, since requeuing \
+     one would run the work twice; a run no task is driving stays in flight until this daemon \
+     next starts and resumes it, and shows meanwhile under `Current executions` as stuck; the \
+     daemon log has a warn line for each verdict naming the invocation, where its start is on \
+     record and what became of its claim\n"
         .to_string()
 }
 

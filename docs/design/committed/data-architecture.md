@@ -1316,7 +1316,10 @@ What changes when an operator splits the deployment.
   tell" and leaves the claim as it is, so a worker that cannot answer
   never makes it start a run twice. What the lift has to keep is the
   order: the worker's answer before the ownership row, so a run archived
-  between the two reads is still found.
+  between the two reads is still found. The dead-letter watch asks the
+  same question, through the dispatcher, before it calls a trigger
+  exhausted, and holds its verdict on the same failed answer rather than
+  write a dead letter that could be false.
 - The per-store files are fixed names under the cache directory
   (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
   physically separate (#262). A per-role `state_db` config

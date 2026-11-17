@@ -16,6 +16,7 @@ fn active(stuck: bool, ack_pending: u64, num_pending: u64, delivered: u64) -> Co
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
+        started_not_dead_lettered: 0,
     }
 }
 
@@ -125,9 +126,10 @@ fn a_large_backlog_is_a_verdict_and_not_a_fault() {
 }
 
 /// A report from a daemon that does not send `held_duplicate_dropped`
-/// (#968) or `abandoned_claim_retaken` (#967) still reads, with each count
-/// at zero: the fields are additive, and a client newer than the daemon it
-/// asks must render that daemon's report rather than fail on it.
+/// (#968), `abandoned_claim_retaken` or `started_not_dead_lettered` (#967)
+/// still reads, with each count at zero: the fields are additive, and a
+/// client newer than the daemon it asks must render that daemon's report
+/// rather than fail on it.
 #[test]
 fn an_active_consumer_without_the_held_duplicate_count_reads_it_as_zero() {
     let older = serde_json::json!({
@@ -159,6 +161,7 @@ fn an_active_consumer_without_the_held_duplicate_count_reads_it_as_zero() {
             duplicate_dropped: 3,
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
         }
     );
 }

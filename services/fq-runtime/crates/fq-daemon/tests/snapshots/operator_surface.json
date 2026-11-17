@@ -1369,6 +1369,17 @@
                 "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
                 "type": "string"
               },
+              "start_unchecked": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StartUnchecked"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when the dead-letter watch wrote this without being able to\ncheck whether the trigger's run started. The watch held its\nverdict, because a copy of the trigger was still handling the\nclaim, the run's records could not be read, or the claim changed\nbetween two reads of it, until the advisory was an hour old and the\nwatch had looked at it three times; a last look then found no start\neither. Such a dead letter may be false, since the run may have\nstarted or may yet start. Before requeueing it, check the\ninvocation it names: the run started if `fq invocation show` gives\na `Live execution:` block, an `archived:` line, a `status:` other\nthan `(no coordination row)` or a trigger line saying\n`durably started`. With no invocation named, find the run among the\nagent's `triggered` events. Absent on every other dead letter."
+              },
               "timestamp": {
                 "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
                 "type": "string"
@@ -1395,6 +1406,26 @@
               "source",
               "trigger_payload",
               "error_message"
+            ],
+            "type": "object"
+          },
+          "StartUnchecked": {
+            "description": "Why a dead letter's trigger was not checked for a start, and where to\nlook ([`DeadLetter::start_unchecked`]).",
+            "properties": {
+              "invocation_id": {
+                "description": "The invocation the trigger's claim named when the watch last read\nit: the run to check (`fq invocation show`) before requeueing.\nAbsent when the claim, or this mark, could not be read.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the watch could not take its verdict: the claim could not be\nread; a copy of the trigger was still handling its claim; the\nworker could not say whether its WAL holds the run; the claim could\nnot be read with its ownership row; or the claim changed while the\nrun's records were read. A reader that cannot parse the mark says\nso here instead.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
             ],
             "type": "object"
           }
@@ -1454,6 +1485,17 @@
                 "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
                 "type": "string"
               },
+              "start_unchecked": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StartUnchecked"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when the dead-letter watch wrote this without being able to\ncheck whether the trigger's run started. The watch held its\nverdict, because a copy of the trigger was still handling the\nclaim, the run's records could not be read, or the claim changed\nbetween two reads of it, until the advisory was an hour old and the\nwatch had looked at it three times; a last look then found no start\neither. Such a dead letter may be false, since the run may have\nstarted or may yet start. Before requeueing it, check the\ninvocation it names: the run started if `fq invocation show` gives\na `Live execution:` block, an `archived:` line, a `status:` other\nthan `(no coordination row)` or a trigger line saying\n`durably started`. With no invocation named, find the run among the\nagent's `triggered` events. Absent on every other dead letter."
+              },
               "timestamp": {
                 "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
                 "type": "string"
@@ -1480,6 +1522,26 @@
               "source",
               "trigger_payload",
               "error_message"
+            ],
+            "type": "object"
+          },
+          "StartUnchecked": {
+            "description": "Why a dead letter's trigger was not checked for a start, and where to\nlook ([`DeadLetter::start_unchecked`]).",
+            "properties": {
+              "invocation_id": {
+                "description": "The invocation the trigger's claim named when the watch last read\nit: the run to check (`fq invocation show`) before requeueing.\nAbsent when the claim, or this mark, could not be read.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the watch could not take its verdict: the claim could not be\nread; a copy of the trigger was still handling its claim; the\nworker could not say whether its WAL holds the run; the claim could\nnot be read with its ownership row; or the claim changed while the\nrun's records were read. A reader that cannot parse the mark says\nso here instead.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
             ],
             "type": "object"
           }
@@ -2950,8 +3012,15 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "started_not_dead_lettered": {
+                        "default": 0,
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their run had a start on\nrecord: on the trigger's claim, in the worker's WAL, or on the\ncontrol plane's ownership table. The broker reports a trigger\nexhausted when its last delivery's answer never reached it,\nwhich happens to a run that started too: the last delivery's\ntask died after its first WAL write, or its ack was lost. A\n`trigger_exhausted` dead letter for such a trigger would be\nfalse, and requeuing it would run the work twice, so the watch\nmarks the claim instead and writes none. Not a fault; the\ndaemon logs each one at warn with the trigger's subject, its\nsequence, the invocation, where its start is on record and\nwhat became of its claim. Counted on the watch's own consumer,\nin memory since the daemon started, once per verdict: an\nadvisory whose ack was lost comes back, is decided again and is\ncounted again, so this can count one trigger twice. A report\nfrom a daemon that does not send it reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "stuck": {
-                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. On the\ndead-letter watch's consumer it can also be a verdict the\nwatch holds on purpose until it can tell whether an\nexhausted trigger's run started, which ends about an hour\nafter the advisory at the latest. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
                         "type": "boolean"
                       }
                     },
@@ -3264,7 +3333,7 @@
               },
               {
                 "const": "started_unmarked",
-                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. Held by this daemon,\none of two things happened, and only the daemon log tells which:\nthe claim store refused the mark and the dispatcher acked the\ndelivery anyway, keeping its claim; or the run's task panicked in\nthe step that made its first durable write, and nothing was acked.\nWhere nothing was acked, or the ack was lost, the next redelivery\nfinds the run's start on record, is acked and marks the claim,\nwithout starting the work again; this daemon's next start marks it\nif none comes. If none comes because the trigger's last delivery's\nanswer never reached the broker, the dead-letter watch, which does\nnot consult the records, ends the trigger as a `trigger_exhausted`\ndead letter although its run started: that dead letter is false,\nand requeuing it runs the work twice. A run whose task panicked stays in flight,\nwith nothing driving it, until that start's recovery resumes it.\nLeft by\na process that has exited, a redelivery would be adopted and start\nthe work again, and a false dead letter may already exist.",
+                "description": "The run the claim names has started, the claim still says it has\nnot, and its message is still deliverable. Held by this daemon,\none of two things happened, and only the daemon log tells which:\nthe claim store refused the mark and the dispatcher acked the\ndelivery anyway, keeping its claim; or the run's task panicked in\nthe step that made its first durable write, and nothing was acked.\nWhere nothing was acked, or the ack was lost, the next redelivery\nfinds the run's start on record, is acked and marks the claim,\nwithout starting the work again; this daemon's next start marks it\nif none comes. If none comes because the trigger's last delivery's\nanswer never reached the broker, the dead-letter watch finds the\nrun's start on record, marks the claim and writes no\n`trigger_exhausted`. A run whose task panicked stays in flight, with\nnothing driving it, until that start's recovery resumes it. Left by\na process that has exited, a redelivery would be adopted and start\nthe work again, and a false dead letter may already exist, written\nby a daemon that did not yet consult the records.",
                 "type": "string"
               },
               {
@@ -3826,8 +3895,15 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "started_not_dead_lettered": {
+                        "default": 0,
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their run had a start on\nrecord: on the trigger's claim, in the worker's WAL, or on the\ncontrol plane's ownership table. The broker reports a trigger\nexhausted when its last delivery's answer never reached it,\nwhich happens to a run that started too: the last delivery's\ntask died after its first WAL write, or its ack was lost. A\n`trigger_exhausted` dead letter for such a trigger would be\nfalse, and requeuing it would run the work twice, so the watch\nmarks the claim instead and writes none. Not a fault; the\ndaemon logs each one at warn with the trigger's subject, its\nsequence, the invocation, where its start is on record and\nwhat became of its claim. Counted on the watch's own consumer,\nin memory since the daemon started, once per verdict: an\nadvisory whose ack was lost comes back, is decided again and is\ncounted again, so this can count one trigger twice. A report\nfrom a daemon that does not send it reads as zero.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "stuck": {
-                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. On the\ndead-letter watch's consumer it can also be a verdict the\nwatch holds on purpose until it can tell whether an\nexhausted trigger's run started, which ends about an hour\nafter the advisory at the latest. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
                         "type": "boolean"
                       }
                     },

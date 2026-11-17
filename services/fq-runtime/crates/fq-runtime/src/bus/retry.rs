@@ -41,7 +41,8 @@ pub const DEFAULT_NAK_MAX: Duration = Duration::from_secs(60);
 ///
 /// Sized for the handlers it actually covers — the projection,
 /// coordination and heartbeat consumers write to SQLite and return,
-/// and the advisory watch publishes one event. **It is not a blanket
+/// and the advisory watch reads the trigger's claim and the worker's WAL
+/// from SQLite and publishes at most one event. **It is not a blanket
 /// claim about every durable.** The summariser's handler calls a model
 /// inline and runs under the worker's response budget, so its durable
 /// overrides this window rather than tripping it and having the summary

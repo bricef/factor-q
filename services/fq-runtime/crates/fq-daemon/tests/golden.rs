@@ -2661,6 +2661,11 @@ fn agent_list_without_a_daemon_reports_why() {
 /// back.
 const DEAD_LETTER_TRIGGER_OLDER: u32 = 31;
 const DEAD_LETTER_TRIGGER_NEWER: u32 = 32;
+const DEAD_LETTER_TRIGGER_UNCHECKED: u32 = 33;
+
+/// The invocation the unchecked dead letter's claim named: the run an
+/// operator is told to look at before requeueing it.
+const INV_HELD: &str = "6b000000-0000-7000-8000-000000000006";
 
 /// A dead-letter event exactly as both emitters shape it (the
 /// operator-module broker tests pin the emitters to this contract).
@@ -2774,6 +2779,55 @@ fn golden_dead_letters_list_json() {
     check_golden_on(
         EdgeFixture::start_with_events(dead_letter_events()),
         "dead_letters_list_json",
+        &["dead-letters", "list", "--json"],
+        &[],
+    );
+}
+
+/// A dead letter the advisory watch wrote without checking whether the
+/// trigger's run started (#967): it held its verdict, because a copy of
+/// the trigger was still handling the claim, until its limit ran out. The
+/// fact rides on the event's `start_unchecked` annotation, through the
+/// edge's `dead_letter.list`, to the listing an operator reads before a
+/// requeue: the human listing gives it a line naming the invocation to
+/// check, and the JSON carries the field. A fixture of its own, so the
+/// two listings above, whose dead letters were checked, are untouched.
+fn unchecked_dead_letter_events() -> Vec<Event> {
+    vec![
+        dead_letter_event(
+            AGENT_RESEARCHER,
+            13,
+            Some(fixed_uuid(DEAD_LETTER_TRIGGER_UNCHECKED)),
+            "advisory",
+            serde_json::json!({"n": 3}),
+            24,
+            BASE_MS,
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_START_UNCHECKED_KEY,
+            serde_json::json!({
+                "reason": "a copy of the trigger is still handling its claim",
+                "invocation_id": INV_HELD,
+            }),
+        ),
+    ]
+}
+
+#[test]
+fn golden_dead_letters_list_unchecked_human() {
+    check_golden_on(
+        EdgeFixture::start_with_events(unchecked_dead_letter_events()),
+        "dead_letters_list_unchecked_human",
+        &["dead-letters", "list"],
+        &[],
+    );
+}
+
+#[test]
+fn golden_dead_letters_list_unchecked_json() {
+    check_golden_on(
+        EdgeFixture::start_with_events(unchecked_dead_letter_events()),
+        "dead_letters_list_unchecked_json",
         &["dead-letters", "list", "--json"],
         &[],
     );

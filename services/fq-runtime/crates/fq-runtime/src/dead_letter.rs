@@ -26,7 +26,7 @@
 
 use crate::events::{Event, EventPayload, FailureKind};
 
-pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState};
+pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState, StartUnchecked};
 
 /// Annotation keys shared by the two dead-letter emitters (#49/#169):
 /// the dispatcher's inline path and the advisory watch. `trigger_*`
@@ -58,6 +58,26 @@ pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
 /// (`trigger.publish`), because there would be nothing for a second
 /// requeue to be refused on.
 pub const DEAD_LETTER_TRIGGER_ID_KEY: &str = "trigger_id";
+
+/// The `start_unchecked` annotation as written. One this build cannot read
+/// still says the start was not checked: dropped, it would show the dead
+/// letter as checked, and a requeue of it could run the work twice.
+fn start_unchecked(annotation: &serde_json::Value) -> StartUnchecked {
+    serde_json::from_value(annotation.clone()).unwrap_or_else(|err| StartUnchecked {
+        reason: format!("its reason could not be read ({err})"),
+        invocation_id: None,
+    })
+}
+
+/// Set by the advisory watch on a dead letter it wrote without being able
+/// to check whether the trigger's run started (issue 967): its verdict
+/// could not be taken by the time the advisory was an hour old and looked
+/// at three times, and a last look found no start. The value is a
+/// [`StartUnchecked`], the reason and the invocation the claim names, the
+/// run to check before a requeue; [`from_event`] lifts it into
+/// [`DeadLetter::start_unchecked`] so every reader of the dead letter sees
+/// it.
+pub const DEAD_LETTER_START_UNCHECKED_KEY: &str = "start_unchecked";
 
 /// Recognise a dead letter in one recorded event, or decline.
 ///
@@ -102,6 +122,7 @@ pub fn from_event(event: &Event) -> Option<DeadLetter> {
             .cloned()
             .unwrap_or(serde_json::Value::Null),
         error_message: failed.error_message.clone(),
+        start_unchecked: annotation(DEAD_LETTER_START_UNCHECKED_KEY).map(start_unchecked),
     })
 }
 
@@ -166,6 +187,47 @@ mod tests {
         assert_eq!(dead.source, "inline");
         assert_eq!(dead.trigger_payload, serde_json::json!({"n": 1}));
         assert_eq!(dead.agent_id, "researcher");
+        assert_eq!(dead.start_unchecked, None);
+    }
+
+    /// One whose annotation cannot be read still says its start was not
+    /// checked, rather than reading as a checked dead letter.
+    #[test]
+    fn an_unreadable_unchecked_annotation_still_marks_the_dead_letter_unchecked() {
+        let event = failed(FailureKind::TriggerExhausted).annotate(
+            DEAD_LETTER_START_UNCHECKED_KEY,
+            serde_json::json!("garbled"),
+        );
+        let unchecked = from_event(&event)
+            .expect("a dead letter")
+            .start_unchecked
+            .expect("still unchecked");
+        assert!(
+            unchecked.reason.starts_with("its reason could not be read"),
+            "{unchecked:?}"
+        );
+        assert_eq!(unchecked.invocation_id, None);
+    }
+
+    /// A dead letter the watch wrote without checking the trigger's start
+    /// says so, with the reason and the invocation to look at, wherever it
+    /// is read.
+    #[test]
+    fn an_unchecked_start_is_lifted_onto_the_dead_letter() {
+        let event = failed(FailureKind::TriggerExhausted).annotate(
+            DEAD_LETTER_START_UNCHECKED_KEY,
+            serde_json::json!({
+                "reason": "a copy of the trigger is still handling its claim",
+                "invocation_id": "019a0000-0000-7000-8000-000000000001",
+            }),
+        );
+        assert_eq!(
+            from_event(&event).expect("a dead letter").start_unchecked,
+            Some(StartUnchecked {
+                reason: "a copy of the trigger is still handling its claim".to_string(),
+                invocation_id: Some("019a0000-0000-7000-8000-000000000001".to_string()),
+            })
+        );
     }
 
     /// An exhaustion the emitter could not fully describe is still one

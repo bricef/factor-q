@@ -1,0 +1,18 @@
+[
+  {
+    "event_id": "00000000-0000-7000-8000-000000001024",
+    "timestamp": "2026-01-02T03:04:05Z",
+    "agent_id": "researcher",
+    "trigger_subject": "fq.trigger.researcher",
+    "trigger_stream_seq": 13,
+    "source": "advisory",
+    "trigger_payload": {
+      "n": 3
+    },
+    "error_message": "trigger exhausted after 5 deliveries (limit 5) [advisory]",
+    "start_unchecked": {
+      "reason": "a copy of the trigger is still handling its claim",
+      "invocation_id": "6b000000-0000-7000-8000-000000000006"
+    }
+  }
+]

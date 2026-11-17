@@ -309,10 +309,8 @@ impl TriggerDispatcher {
     /// WAL or the control plane's ownership table, and acks the delivery
     /// and marks the claim, without running the trigger again (`own_claim`,
     /// #967). If the lost ack was the trigger's last delivery, no copy comes
-    /// back, and the dead-letter watch, which does not consult the records,
-    /// dead-letters a trigger whose run started as `trigger_exhausted`;
-    /// requeuing that dead letter would run the work twice. Having the
-    /// watch consult the records is pull request 5 of #967.
+    /// back; the dead-letter watch then finds the start on record, marks the
+    /// claim, and writes no `trigger_exhausted` (`exhaustion`).
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,

@@ -1105,6 +1105,50 @@ async fn one_claim_reads_joined_as_every_claim_does() {
     assert_eq!(store.unsettled_trigger_claim(key(4)).await.unwrap(), None);
 }
 
+/// **One claim reads back in whatever state it is (issue 967).** The
+/// dead-letter watch reads a trigger's claim before it calls the trigger
+/// exhausted: a `claimed` row and a `durably_started` row each come back
+/// as they are, under their own key and no other, and an unclaimed key
+/// reads as nothing.
+#[tokio::test]
+async fn one_claim_reads_back_in_whatever_state_it_is() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-claimed", 100)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(2), "worker-a", "inv-started", 101)
+        .await
+        .unwrap();
+    store
+        .mark_trigger_started(key(2), "inv-started")
+        .await
+        .unwrap();
+
+    let claimed = store.trigger_claim(key(1)).await.unwrap().expect("claimed");
+    assert_eq!(
+        (
+            claimed.stream_seq,
+            claimed.durably_started,
+            claimed.invocation_id.as_deref(),
+            claimed.claimant.as_str(),
+            claimed.claimed_at,
+        ),
+        (1, false, Some("inv-claimed"), "worker-a", 100)
+    );
+    let started = store.trigger_claim(key(2)).await.unwrap().expect("started");
+    assert_eq!(
+        (
+            started.stream_seq,
+            started.durably_started,
+            started.invocation_id.as_deref()
+        ),
+        (2, true, Some("inv-started"))
+    );
+    assert_eq!(store.trigger_claim(key(3)).await.unwrap(), None);
+}
+
 /// **A start on record is either record holding the run (issue 967).** The
 /// one definition, shared by startup recovery, `fq doctor` and the
 /// dispatcher: a WAL row in flight or finished, or an ownership row of any

@@ -270,6 +270,7 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
+        started_not_dead_lettered: 0,
     }
 }
 
@@ -668,6 +669,67 @@ fn abandoned_claims_taken_again_are_counted_apart_and_explained_without_a_verdic
     assert!(!out.contains("duplicate"), "got:\n{out}");
 }
 
+/// A trigger the dead-letter watch kept out of the dead letters because
+/// its run started is counted on the watch's line, with a line saying why
+/// no dead letter was written (#967). Not a fault.
+#[test]
+fn exhausted_triggers_that_started_are_counted_and_explained_without_a_verdict() {
+    let mut counted = active("fq-advisory-watch", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        started_not_dead_lettered,
+        ..
+    } = &mut counted
+    {
+        *started_not_dead_lettered = 2;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![counted],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "a started trigger kept out of the dead letters is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "  fq-advisory-watch: ok (pending 0, exhausted but started since this daemon started: \
+             2)\n  -> \"exhausted but started\" is a trigger whose deliveries ran out with no \
+             answer reaching the broker while its run had a start on record (its last delivery's \
+             task died after its first WAL write, or its ack was lost): no `trigger_exhausted` \
+             was written, since requeuing one would run the work twice; a run no task is driving \
+             stays in flight until this daemon next starts and resumes it, and shows meanwhile \
+             under `Current executions` as stuck; the daemon log has a warn line for each verdict \
+             naming the invocation, where its start is on record and what became of its claim\n"
+        ),
+        "got:\n{out}"
+    );
+}
+
+/// A stuck dead-letter watch is not said to be only a failing handler:
+/// it leaves an advisory unacked while it holds a verdict (#967), and the
+/// step names the line for that and the line for a failure.
+#[test]
+fn a_stuck_dead_letter_watch_names_the_hold_line_and_the_failure_line() {
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![active("fq-advisory-watch", true, 9)],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(out.contains(ADVISORY_WATCH_STUCK), "got:\n{out}");
+    assert!(!out.contains("its handler keeps failing"), "got:\n{out}");
+}
+
 /// Nothing dropped, nothing said: a line that always reported zero
 /// would be noise on every healthy consumer.
 #[test]
@@ -685,6 +747,7 @@ fn a_consumer_that_dropped_no_duplicates_says_nothing_about_them() {
     assert!(!out.contains("duplicate"), "got:\n{out}");
     assert!(!out.contains("before a start was recorded"), "got:\n{out}");
     assert!(!out.contains("taken again"), "got:\n{out}");
+    assert!(!out.contains("exhausted but started"), "got:\n{out}");
 }
 
 /// Every consumer is named, healthy ones included: an operator reading
@@ -777,6 +840,7 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         duplicate_dropped: 0,
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
+        started_not_dead_lettered: 0,
     };
     let report = build_doctor_report(
         &[],
@@ -1171,7 +1235,7 @@ Stranded trigger claims: 7 (5 issues) — claimed trigger deliveries that have n
   fq-triggers seq 5: claimed 2026-01-02T03:09:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; invocation 1c000000-0000-7000-8000-000000000005
   -> the run started (completed) but its claim was never marked started: a redelivery would be adopted and start the work again, and a false `trigger_exhausted` dead letter may already exist — `fq invocation show 1c000000-0000-7000-8000-000000000005`
   fq-triggers seq 6: claimed 2026-01-02T03:10:05Z by this daemon; invocation 1c000000-0000-7000-8000-000000000006
-  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, the next redelivery is acked and marks the claim without starting the work again, and this daemon's next start marks it if none comes; if none comes because that was the trigger's last delivery, the trigger is dead-lettered as exhausted although its run started: do not requeue that dead letter; a run in flight whose task died after its first durable write waits for this daemon's next start to resume it — `fq invocation show 1c000000-0000-7000-8000-000000000006`
+  -> the run started (in_flight) but its claim was never marked started: if this daemon logged `could not mark trigger durably started` for invocation 1c000000-0000-7000-8000-000000000006, it acked the delivery; otherwise, or if that ack was lost, the next redelivery is acked and marks the claim without starting the work again, and if that was the trigger's last delivery the dead-letter watch marks it instead of writing a dead letter, as this daemon's next start does if neither comes; a run in flight whose task died after its first durable write waits for that start to resume it — `fq invocation show 1c000000-0000-7000-8000-000000000006`
   fq-triggers seq 7: claimed 2026-01-02T03:11:05Z by 019a0000-0000-7000-8000-00000000dead, a process that has exited; no invocation id on the claim
   -> the claim was written before claims named their run, so this report cannot tell whether it started one; not an issue
 ";

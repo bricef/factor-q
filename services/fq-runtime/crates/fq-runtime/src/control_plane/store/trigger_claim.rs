@@ -143,6 +143,15 @@ pub struct RunRecords {
 }
 
 impl RunRecords {
+    /// The records as the WAL alone gives them, when the ownership row was
+    /// not read.
+    pub fn in_the_wal(wal: Option<WalRun>) -> Self {
+        Self {
+            wal,
+            owner_row_status: None,
+        }
+    }
+
     /// Whether the run has a start on record: either record holds it.
     pub fn start_on_record(&self) -> bool {
         self.wal.is_some() || self.owner_row_status.is_some()
@@ -558,6 +567,29 @@ impl ControlPlaneStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.as_ref().map(row_to_unsettled))
+    }
+
+    /// The claim row for `key`, whatever its state, read without writing:
+    /// `None` when nothing claims the delivery.
+    ///
+    /// The dead-letter watch reads it before it calls a trigger exhausted
+    /// (issue 967): a row marked started is a start on record, and a
+    /// `claimed` row names the run whose records it reads next. One
+    /// primary-key read.
+    pub async fn trigger_claim(
+        &self,
+        key: TriggerKey<'_>,
+    ) -> Result<Option<TriggerClaimRow>, ControlPlaneStoreError> {
+        let row = sqlx::query(
+            "SELECT stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at \
+             FROM trigger_claim WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+        )
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_claim))
     }
 }
 
