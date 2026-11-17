@@ -31,26 +31,29 @@
 //!    the run on record: no step left a claim that a later delivery or
 //!    restart cannot settle.
 //!
-//! # Known open: a trigger whose run started, left to be dead-lettered
+//! # The dead-letter watch's verdict
 //!
-//! One more thing is checked, and the property tolerates it today. When
-//! the trigger's deliveries on the dispatcher's durable run out and no ack
-//! has reached the broker, the dead-letter watch calls the trigger
-//! exhausted, and if a start of it is on record that dead letter is false:
-//! requeuing it runs the work twice. With invariant 3 holding, the only way
-//! there is a last delivery whose answer never reached the broker while
-//! its run had a start on record: the answers were lost, or the task that
-//! would have sent them died. No copy is left for the dispatcher to
-//! settle, and the watch does not consult the records; having it consult
-//! them is pull request 5 of issue 967. [`play`] reports the case
-//! ([`KnownOpen`]), and fails if it is reached any other way.
+//! One more thing is checked when it happens. When the trigger's
+//! deliveries on the dispatcher's durable run out and no ack has reached
+//! the broker, the broker reports the trigger exhausted, and the
+//! dead-letter watch takes its verdict. The property takes that verdict
+//! through the watch's own decision ([`ExhaustionCheck::verdict`], over the
+//! arena's dispatcher) at that moment, and checks:
 //!
-//! Random lives almost never reach it: it takes five deliveries on the
-//! durable with no ack among them, and none of 1000 random lives did in a
-//! one-off run. So
-//! [`a_fault_on_the_last_delivery_leaves_a_started_trigger_to_the_dead_letter_watch`]
+//! 6. **Dead-lettered exactly when nothing is on record.** A trigger whose
+//!    run has a start on record is not dead-lettered: requeuing that dead
+//!    letter would run the work twice. One with nothing on record is.
+//!    Nothing is handling a copy at that moment in these sequential lives,
+//!    and the records can be read, so the verdict is never held.
+//!
+//! Only what the watch then does with the verdict, writing the dead letter
+//! or not, is left out here; `dead_letter_watch` drives the real watch with
+//! the broker's own advisory. Random lives almost never reach an exhausted
+//! trigger: it takes five deliveries on the durable with no ack among
+//! them, and none of 1000 random lives did in a one-off run. So
+//! [`a_fault_on_the_last_delivery_does_not_dead_letter_a_started_trigger`]
 //! plays the two lives that do on every run, through every invariant
-//! above, and asserts today's modelled outcome.
+//! above.
 //!
 //! # Fidelity: what each step does
 //!
@@ -69,6 +72,7 @@
 //! | the store refuses releases | the release before an ack or a NAK fails | `ack`, `nak` |
 //! | answers are lost | the next copy answers on a closed connection | the ack after a refused mark, a NAK, an ack |
 //! | restart | a new claimant id, claims recovered over the WAL; a run in flight is resumed and finishes | `TriggerClaims::recover`, then a new dispatcher |
+//! | deliveries run out | the durable's last delivery is handled and no ack has reached the broker | `ExhaustionCheck::verdict`, as the dead-letter watch takes it |
 //!
 //! The broker is modelled, not run: it counts deliveries up to
 //! `TRIGGER_MAX_DELIVER`, considers the trigger settled once an ack that was
@@ -86,6 +90,7 @@ use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 use super::{Answered, Arena, Run, SEQ, heal, refuse_deletes, refuse_updates};
 use crate::bus::TRIGGER_MAX_DELIVER;
+use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck};
 use crate::test_support::nats::test_nats;
 use crate::worker::WalRun;
 
@@ -142,9 +147,9 @@ struct Broker {
     /// An ack that was not lost has arrived on the dispatcher's durable:
     /// nothing is redelivered.
     acked: bool,
-    /// The last delivery on the dispatcher's durable was handled with no
-    /// ack reaching the broker while a start of the trigger was on record.
-    left_to_be_dead_lettered: bool,
+    /// The dead-letter watch's verdict, once the durable's last delivery
+    /// was handled with no ack reaching the broker.
+    exhausted: Option<Exhausted>,
     /// The daemon has restarted, so a recreated durable can replay.
     restarted: bool,
     /// The next copy's answers are lost.
@@ -162,20 +167,10 @@ enum Source {
     Replay,
 }
 
-/// What a life of the trigger left that is known to be wrong today.
-#[derive(Debug, Default)]
-struct KnownOpen {
-    /// The trigger's deliveries on the dispatcher's durable ran out with no
-    /// ack reaching the broker while a start of it was on record: the
-    /// dead-letter watch, which does not consult the records, would call it
-    /// exhausted (pull request 5 of issue 967).
-    left_to_be_dead_lettered: bool,
-}
-
 /// Hand a copy to `handle`, with `run` queued for a run it starts, check
-/// invariant 3, and note what the broker received. The known-open case is
-/// noted only when it has a cause: the last delivery's answers were lost,
-/// or its task died.
+/// invariant 3, note what the broker received, and, when the durable's
+/// deliveries have run out, take the watch's verdict and check invariant
+/// 6.
 async fn deliver(
     arena: &Arena,
     broker: &mut Broker,
@@ -214,14 +209,30 @@ async fn deliver(
         if !lost && answered.acks > 0 {
             broker.acked = true;
         }
-        if n == MAX_DELIVER && !broker.acked && started_after {
-            prop_assert!(
-                lost || answered.panicked,
-                "the trigger was left to be dead-lettered with a start on record, though its last \
-                 delivery lost nothing and its task did not die: {:?}",
-                answered
-            );
-            broker.left_to_be_dead_lettered = true;
+        if n == MAX_DELIVER && !broker.acked {
+            let check: ExhaustionCheck = arena
+                .dispatcher
+                .exhaustion_check()
+                .expect("the arena's dispatcher holds claims");
+            let verdict = check.verdict(SEQ).await;
+            match &verdict {
+                Exhausted::NothingOnRecord => prop_assert!(
+                    !started_after,
+                    "the watch would dead-letter a trigger whose run has a start on record"
+                ),
+                Exhausted::Started { .. } => prop_assert!(
+                    started_after,
+                    "the watch kept a trigger with nothing on record out of the dead letters: {:?}",
+                    verdict
+                ),
+                Exhausted::Undecided(why) => prop_assert!(
+                    false,
+                    "the watch held its verdict though nothing handles a copy and the records can \
+                     be read: {}",
+                    why
+                ),
+            }
+            broker.exhausted = Some(verdict);
         }
     }
     Ok(answered)
@@ -253,9 +264,9 @@ async fn check(arena: &Arena, after: &str) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-/// Play `steps`, then stop the faults and settle the trigger. Returns what
-/// the life left that is known to be wrong today.
-async fn play(arena: &mut Arena, steps: &[Step]) -> Result<KnownOpen, TestCaseError> {
+/// Play `steps`, then stop the faults and settle the trigger. Returns the
+/// dead-letter watch's verdict, if the durable's deliveries ran out.
+async fn play(arena: &mut Arena, steps: &[Step]) -> Result<Option<Exhausted>, TestCaseError> {
     let mut broker = Broker::default();
     for (i, step) in steps.iter().enumerate() {
         match *step {
@@ -344,15 +355,11 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<KnownOpen, TestCaseEr
     );
     prop_assert_eq!(replay.acks, 1, "the replay is acked: {:?}", replay);
     check(arena, "the settling replay").await?;
-    Ok(KnownOpen {
-        left_to_be_dead_lettered: broker.left_to_be_dead_lettered,
-    })
+    Ok(broker.exhausted)
 }
 
 /// **A trigger starts once and its claim settles, whatever happens to its
-/// copies.** The property, over random lives of one trigger. A life that
-/// leaves the trigger to be dead-lettered although its run started is the
-/// known-open case the module doc describes, and is tolerated here.
+/// copies.** The property, over random lives of one trigger.
 #[test]
 fn a_trigger_starts_once_and_its_claim_settles_whatever_happens_to_its_copies() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -368,7 +375,7 @@ fn a_trigger_starts_once_and_its_claim_settles_whatever_happens_to_its_copies() 
     let outcome = runner.run(&prop::collection::vec(step(), 1..8), |steps| {
         rt.block_on(async {
             let mut arena = Arena::new(&url, 1).await;
-            play(&mut arena, &steps).await.map(|_known_open| ())
+            play(&mut arena, &steps).await.map(|_exhausted| ())
         })
     });
     if let Err(err) = outcome {
@@ -391,26 +398,21 @@ async fn the_shrunk_dead_run_is_taken_again() {
     }
 }
 
-/// **A fault on the last delivery leaves a started trigger to the
-/// dead-letter watch: the known-open case, as it is today.** Two lives
-/// show it, the two the review of this change named: four deliveries fail
-/// transiently and are NAKed, and the fifth and last starts the run, whose
-/// task then dies in the poll of its first WAL write; or whose mark is
-/// refused on every attempt and whose ack is lost. Either way no copy
-/// follows for the dispatcher to settle and no ack reaches the broker, so
-/// the dead-letter watch, which does not consult the records, would call a
-/// trigger exhausted whose run started (pull request 5 of issue 967).
+/// **A fault on the last delivery does not dead-letter a started
+/// trigger.** Two lives show the case, the two the review of issue 967's
+/// fourth change named: four deliveries fail transiently and are NAKed,
+/// and the fifth and last starts the run, whose task then dies in the poll
+/// of its first WAL write; or whose mark is refused on every attempt and
+/// whose ack is lost. Either way no copy follows for the dispatcher to
+/// settle and no ack reaches the broker. The watch's verdict finds the
+/// start on record and keeps the trigger out of the dead letters.
 ///
 /// Random lives almost never reach this, so this test plays both lives on
-/// every run, through every invariant the property checks, and asserts
-/// today's modelled outcome: each is left to be dead-lettered. When pull
-/// request 5 lands and the model of the watch learns to consult the
-/// records, the assertion is turned round. Neither this form nor an
-/// ignored test asserting the fixed outcome would notice the real watch
-/// being fixed, because this harness models the watch rather than running
-/// it; pull request 5's own test has to drive the real `advisory_watch`.
+/// every run, through every invariant the property checks. Before issue
+/// 967's last change the watch dead-lettered both; this test, with the
+/// verdict reverted to dead-lettering everything, fails on both.
 #[tokio::test]
-async fn a_fault_on_the_last_delivery_leaves_a_started_trigger_to_the_dead_letter_watch() {
+async fn a_fault_on_the_last_delivery_does_not_dead_letter_a_started_trigger() {
     let fails_four_times = [Step::Deliver(Run::FailsTransiently); 4];
     let lives: [Vec<Step>; 2] = [
         [&fails_four_times[..], &[Step::Deliver(Run::DiesAfterStart)]].concat(),
@@ -426,15 +428,13 @@ async fn a_fault_on_the_last_delivery_leaves_a_started_trigger_to_the_dead_lette
     ];
     for steps in lives {
         let (mut arena, _server) = super::arena().await;
-        let open = play(&mut arena, &steps)
+        let exhausted = play(&mut arena, &steps)
             .await
             .unwrap_or_else(|err| panic!("{steps:?}: {err}"));
         assert!(
-            open.left_to_be_dead_lettered,
-            "{steps:?}: today's modelled outcome is that the trigger is left to be dead-lettered \
-             although its run started, because the watch does not consult the records (known \
-             open: pull request 5 of issue 967). If the model of the watch has learned to consult \
-             the records, turn this assertion round."
+            matches!(exhausted, Some(Exhausted::Started { .. })),
+            "{steps:?}: the trigger's deliveries ran out with its run's start on record, so the \
+             watch keeps it out of the dead letters: {exhausted:?}"
         );
     }
 }

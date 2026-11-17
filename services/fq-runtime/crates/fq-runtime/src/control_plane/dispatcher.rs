@@ -51,10 +51,13 @@ mod boundary_stop_tests;
 mod claim;
 mod dead_letter;
 mod deferral;
+mod exhaustion;
 mod own_claim;
 mod run_admission;
 
 pub use claim::TriggerClaims;
+pub(crate) use exhaustion::Exhausted;
+pub use exhaustion::ExhaustionCheck;
 pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
 use std::sync::Arc;
 

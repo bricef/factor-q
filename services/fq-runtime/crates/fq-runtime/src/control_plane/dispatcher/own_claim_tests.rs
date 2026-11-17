@@ -60,6 +60,7 @@ use crate::worker::{
     InvocationStateRow, WalRun, Worker, WorkerStore,
 };
 
+mod dead_letter_watch;
 mod proptests;
 
 /// What one run of the stub does between its start and its return.
@@ -85,6 +86,9 @@ enum Run {
     /// Waits at [`Scripted::setup_gate`] before its first WAL write, then
     /// makes it, fires its signal, and panics in the same poll.
     WaitsInSetupThenDiesAfterStart,
+    /// Waits at [`Scripted::setup_gate`], then panics before its first WAL
+    /// write.
+    WaitsInSetupThenDiesBeforeStart,
 }
 
 /// The stub worker: each `run_invocation` takes the next [`Run`] from its
@@ -118,6 +122,8 @@ struct Scripted {
     /// records the run's ownership row, and only then is the WAL row
     /// deleted. Then it answers, from a WAL that no longer holds the run.
     hands_off_on_read: Mutex<Option<Arc<ControlPlaneStore>>>,
+    /// While set, `wal_run` errs: the worker cannot say what its WAL holds.
+    fail_wal_reads: AtomicBool,
 }
 
 impl Scripted {
@@ -135,6 +141,7 @@ impl Scripted {
             wal_read_gate: Semaphore::new(0),
             wal_reads_held: AtomicUsize::new(0),
             hands_off_on_read: Mutex::new(None),
+            fail_wal_reads: AtomicBool::new(false),
         })
     }
 
@@ -267,6 +274,10 @@ impl Worker for Scripted {
             Run::WaitsInSetup | Run::WaitsInSetupThenDiesAfterStart => {
                 self.wait(&self.setup_gate).await
             }
+            Run::WaitsInSetupThenDiesBeforeStart => {
+                self.wait(&self.setup_gate).await;
+                panic!("injected: the invocation task dies in setup, before its first WAL write")
+            }
             Run::Completes | Run::DiesAfterStart | Run::WaitsAfterStart => {}
         }
         self.wal
@@ -297,6 +308,11 @@ impl Worker for Scripted {
     }
 
     async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        if self.fail_wal_reads.load(Ordering::SeqCst) {
+            return Err(ExecutorError::WorkerStore(
+                "injected: the worker store cannot be read".to_string(),
+            ));
+        }
         let hands_off = self.hands_off_on_read.lock().unwrap().clone();
         if let Some(claims) = hands_off {
             self.hand_off(&claims, invocation_id).await;

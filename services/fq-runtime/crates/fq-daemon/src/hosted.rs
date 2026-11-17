@@ -310,16 +310,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let (maint_shutdown_tx, mut maint_handle) =
         crate::maintenance_task::spawn(&bus, runtime_id, &config, pricing.refresh);
 
-    // Spawn the advisory watch (#169). Drains the captured JetStream
-    // MAX_DELIVERIES advisories for the trigger stream and emits the
-    // dead-letter events the dispatcher's inline path cannot: a crash
-    // during the final delivery, and pre-bound poison triggers at
-    // consumer-upgrade time.
-    let (advisory_shutdown_tx, advisory_shutdown_rx) = tokio::sync::oneshot::channel();
-    let advisory_watch = fq_runtime::AdvisoryWatch::new(bus.clone());
-    let mut advisory_handle =
-        tokio::spawn(async move { advisory_watch.run(advisory_shutdown_rx).await });
-
     // Spawn the worker heartbeat producer (worker side). Fires
     // a heartbeat immediately and then every 10s (the default
     // interval). Without this, the coordination consumer's
@@ -410,6 +400,16 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     .with_throttle(throttle)
     .with_caps_and_claims(admission, claims, worker_id.as_str())
     .with_deferrals(deferrals, due_resumes);
+    // Spawn the advisory watch (#169). Drains the captured JetStream
+    // MAX_DELIVERIES advisories for the trigger stream and emits the
+    // dead-letter events the dispatcher's inline path cannot, except for
+    // a trigger whose run has a start on record in the dispatcher's
+    // records, which it consults first (#967).
+    let (advisory_shutdown_tx, advisory_shutdown_rx) = tokio::sync::oneshot::channel();
+    let advisory_watch =
+        fq_runtime::AdvisoryWatch::new(bus.clone()).with_records(dispatcher.exhaustion_check());
+    let mut advisory_handle =
+        tokio::spawn(async move { advisory_watch.run(advisory_shutdown_rx).await });
     let mut dispatcher_handle = tokio::spawn(async move { dispatcher.run(disp_shutdown_rx).await });
     // Set by the select's own dispatcher arm, which consumes the handle.
     let mut dispatcher_joined = false;

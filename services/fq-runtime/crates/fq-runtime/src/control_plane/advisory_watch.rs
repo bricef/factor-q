@@ -35,8 +35,10 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 use crate::bus::{
-    ADVISORY_STREAM_NAME, BusError, EventBus, STREAM_NAME, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
+    ADVISORY_STREAM_NAME, BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog, STREAM_NAME,
+    TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
 };
+use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck};
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
     DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
@@ -71,7 +73,7 @@ pub enum AdvisoryWatchError {
 }
 
 /// What handling one advisory did — returned for logs and tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdvisoryOutcome {
     /// A dead-letter event was emitted.
     Emitted,
@@ -79,6 +81,12 @@ pub enum AdvisoryOutcome {
     AlreadySurfaced,
     /// Unparseable or foreign advisory; consumed without effect.
     Skipped,
+    /// The trigger's run has a start on record: no dead letter, and the
+    /// claim is marked (issue 967).
+    RunStarted,
+    /// The verdict is held, for the reason given: the advisory is NAKed
+    /// and decided again when it comes back.
+    Held { why: String },
 }
 
 /// The advisory watch. Owns the bus; spawn as a tokio task via
@@ -86,18 +94,31 @@ pub enum AdvisoryOutcome {
 /// covers.
 pub struct AdvisoryWatch {
     bus: EventBus,
+    /// What the dispatcher has on record for a trigger, consulted before
+    /// one is called exhausted. `None` dead-letters every exhausted
+    /// trigger without looking.
+    records: Option<ExhaustionCheck>,
 }
 
 impl AdvisoryWatch {
     pub fn new(bus: EventBus) -> Self {
-        Self { bus }
+        Self { bus, records: None }
+    }
+
+    /// Consult the dispatcher's records before calling a trigger
+    /// exhausted ([`TriggerDispatcher::exhaustion_check`]).
+    ///
+    /// [`TriggerDispatcher::exhaustion_check`]: crate::control_plane::dispatcher::TriggerDispatcher::exhaustion_check
+    pub fn with_records(mut self, records: Option<ExhaustionCheck>) -> Self {
+        self.records = records;
+        self
     }
 
     /// Run the watch loop until `shutdown` fires.
     pub async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), AdvisoryWatchError> {
         info!(stream = ADVISORY_STREAM_NAME, "advisory watch starting");
         let policy = self.bus.redelivery_policy();
-        let mut redelivery_log = crate::bus::RedeliveryLog::new(policy);
+        let mut redelivery_log = RedeliveryLog::new(policy);
         let consumer = self.bus.advisory_consumer(CONSUMER_NAME).await?;
         let mut messages = consumer
             .messages()
@@ -114,6 +135,9 @@ impl AdvisoryWatch {
                 msg = messages.next() => {
                     match msg {
                         Some(Ok(msg)) => match self.handle_advisory(&msg.payload).await {
+                            Ok(AdvisoryOutcome::Held { why }) => {
+                                nak_for_retry(&msg, policy, &mut redelivery_log, &why, true).await;
+                            }
                             Ok(outcome) => {
                                 debug!(?outcome, "advisory handled");
                                 if let Err(err) = msg.ack().await {
@@ -121,33 +145,8 @@ impl AdvisoryWatch {
                                 }
                             }
                             Err(err) => {
-                                // Transient bus/stream trouble: NAK with the
-                                // bus's escalating delay. The advisory
-                                // consumer redelivers without limit — an
-                                // advisory dropped to a delivery bound is an
-                                // exhausted trigger with no record of it — so
-                                // the delay is what keeps a persistent fault
-                                // from becoming a hot loop (#549).
-                                let delivered = msg
-                                    .info()
-                                    .ok()
-                                    .and_then(|info| u64::try_from(info.delivered).ok())
-                                    .unwrap_or(1);
-                                let delay = policy.nak_delay(delivered);
-                                if redelivery_log.admit(delivered, std::time::Instant::now()) {
-                                    warn!(
-                                        error = %err,
-                                        delivered,
-                                        retry_in_ms = delay.as_millis() as u64,
-                                        "advisory handling failed; nak for retry"
-                                    );
-                                }
-                                if let Err(nak_err) = msg
-                                    .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
-                                    .await
-                                {
-                                    error!(error = %nak_err, "failed to nak advisory");
-                                }
+                                let err = err.to_string();
+                                nak_for_retry(&msg, policy, &mut redelivery_log, &err, false).await;
                             }
                         },
                         Some(Err(err)) => {
@@ -230,6 +229,30 @@ impl AdvisoryWatch {
             return Ok(AdvisoryOutcome::AlreadySurfaced);
         }
 
+        // Issue 967: a trigger whose run has a start on record is not
+        // dead-lettered, and a verdict that cannot be taken yet is held.
+        if let Some(records) = &self.records {
+            match records.verdict(advisory.stream_seq).await {
+                Exhausted::NothingOnRecord => {}
+                Exhausted::Started {
+                    invocation_id,
+                    on_record,
+                    marked,
+                } => {
+                    warn!(subject = %trigger_subject, stream_seq = advisory.stream_seq,
+                        deliveries = advisory.deliveries, %invocation_id, run = %on_record, marked,
+                        "not dead-lettering a trigger whose deliveries ran out: its run has a start \
+                         on record, so a `trigger_exhausted` dead letter would be false and \
+                         requeuing it would run the work twice; its claim is marked started");
+                    self.bus
+                        .consumer_ledger()
+                        .note_started_not_dead_lettered(CONSUMER_NAME);
+                    return Ok(AdvisoryOutcome::RunStarted);
+                }
+                Exhausted::Undecided(why) => return Ok(AdvisoryOutcome::Held { why }),
+            }
+        }
+
         let payload = EventPayload::Failed(FailedPayload {
             error_kind: FailureKind::TriggerExhausted,
             error_message: format!(
@@ -298,6 +321,46 @@ impl AdvisoryWatch {
             EventPayload::Failed(p) if matches!(p.error_kind, FailureKind::TriggerExhausted)
         ) && event.annotations.0.get(DEAD_LETTER_STREAM_SEQ_KEY)
             == Some(&serde_json::json!(stream_seq))
+    }
+}
+
+/// NAK an advisory with the bus's escalating delay, logging why at most
+/// once per escalation step. The advisory consumer redelivers without
+/// limit (an advisory dropped to a delivery bound is an exhausted trigger
+/// with no record of it), so the delay is what keeps a persistent fault,
+/// or a verdict held for long, from becoming a hot loop (#549). `held`
+/// says the verdict was held rather than the handling failed.
+async fn nak_for_retry(
+    msg: &async_nats::jetstream::Message,
+    policy: ConsumerRedeliveryPolicy,
+    redelivery_log: &mut RedeliveryLog,
+    why: &str,
+    held: bool,
+) {
+    let delivered = msg
+        .info()
+        .ok()
+        .and_then(|info| u64::try_from(info.delivered).ok())
+        .unwrap_or(1);
+    let delay = policy.nak_delay(delivered);
+    if redelivery_log.admit(delivered, std::time::Instant::now()) {
+        if held {
+            warn!(reason = %why, delivered, retry_in_ms = delay.as_millis() as u64,
+                "holding the dead-letter verdict on an exhausted trigger; nak to decide again");
+        } else {
+            warn!(
+                error = %why,
+                delivered,
+                retry_in_ms = delay.as_millis() as u64,
+                "advisory handling failed; nak for retry"
+            );
+        }
+    }
+    if let Err(nak_err) = msg
+        .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
+        .await
+    {
+        error!(error = %nak_err, "failed to nak advisory");
     }
 }
 
