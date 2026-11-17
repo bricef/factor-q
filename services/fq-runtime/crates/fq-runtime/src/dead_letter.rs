@@ -59,6 +59,16 @@ pub const DEAD_LETTER_SOURCE_KEY: &str = "dead_letter_source";
 /// requeue to be refused on.
 pub const DEAD_LETTER_TRIGGER_ID_KEY: &str = "trigger_id";
 
+/// The `start_unchecked` annotation as written. One this build cannot read
+/// still says the start was not checked: dropped, it would show the dead
+/// letter as checked, and a requeue of it could run the work twice.
+fn start_unchecked(annotation: &serde_json::Value) -> StartUnchecked {
+    serde_json::from_value(annotation.clone()).unwrap_or_else(|err| StartUnchecked {
+        reason: format!("its reason could not be read ({err})"),
+        invocation_id: None,
+    })
+}
+
 /// Set by the advisory watch on a dead letter it wrote without being able
 /// to check whether the trigger's run started (issue 967): its verdict was
 /// held past its limit. The value is a [`StartUnchecked`], the reason and
@@ -110,8 +120,7 @@ pub fn from_event(event: &Event) -> Option<DeadLetter> {
             .cloned()
             .unwrap_or(serde_json::Value::Null),
         error_message: failed.error_message.clone(),
-        start_unchecked: annotation(DEAD_LETTER_START_UNCHECKED_KEY)
-            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        start_unchecked: annotation(DEAD_LETTER_START_UNCHECKED_KEY).map(start_unchecked),
     })
 }
 
@@ -177,6 +186,25 @@ mod tests {
         assert_eq!(dead.trigger_payload, serde_json::json!({"n": 1}));
         assert_eq!(dead.agent_id, "researcher");
         assert_eq!(dead.start_unchecked, None);
+    }
+
+    /// One whose annotation cannot be read still says its start was not
+    /// checked, rather than reading as a checked dead letter.
+    #[test]
+    fn an_unreadable_unchecked_annotation_still_marks_the_dead_letter_unchecked() {
+        let event = failed(FailureKind::TriggerExhausted).annotate(
+            DEAD_LETTER_START_UNCHECKED_KEY,
+            serde_json::json!("garbled"),
+        );
+        let unchecked = from_event(&event)
+            .expect("a dead letter")
+            .start_unchecked
+            .expect("still unchecked");
+        assert!(
+            unchecked.reason.starts_with("its reason could not be read"),
+            "{unchecked:?}"
+        );
+        assert_eq!(unchecked.invocation_id, None);
     }
 
     /// A dead letter the watch wrote without checking the trigger's start

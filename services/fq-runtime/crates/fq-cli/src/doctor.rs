@@ -411,9 +411,10 @@ const ADVISORY_WATCH_STUCK: &str = "  -> the dead-letter watch redelivers an adv
      holds its verdict on an exhausted trigger (a copy of the trigger is still handling its claim, \
      or its run's records cannot be read) or while its handler fails; in the daemon log, \
      `consumer=fq-advisory-watch` with `holding the dead-letter verdict on an exhausted trigger` \
-     names each held trigger's sequence, subject and reason, and a hold ends within an hour of the \
-     advisory in a dead letter marked `start not checked`; `advisory handling failed` is the \
-     handler failing: free whatever it is blocked on (disk, store, broker)\n";
+     names each held trigger's sequence, subject and reason; a hold ends when the verdict can be \
+     taken, or else, about an hour after the advisory, in a dead letter marked `start not checked` \
+     unless a last look finds the run started; `advisory handling failed` is the handler failing: \
+     free whatever it is blocked on (disk, store, broker)\n";
 
 /// `, exhausted but started since this daemon started: N`, or nothing
 /// when none was ([`started_note`]).

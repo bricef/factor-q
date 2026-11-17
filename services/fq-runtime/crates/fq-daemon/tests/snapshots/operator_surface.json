@@ -3020,7 +3020,7 @@
                         "type": "integer"
                       },
                       "stuck": {
-                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. On the\ndead-letter watch's consumer it can also be a verdict the\nwatch holds on purpose until it can tell whether an\nexhausted trigger's run started (#967), which ends about an\nhour after the advisory at the latest. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
                         "type": "boolean"
                       }
                     },
@@ -3903,7 +3903,7 @@
                         "type": "integer"
                       },
                       "stuck": {
-                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
+                        "description": "True once `redeliveries` has passed the daemon's\n`[bus] stuck_after_redeliveries`: the consumer is retrying\none message rather than making progress, and the fault\nbehind it has outlasted the whole escalation. On the\ndead-letter watch's consumer it can also be a verdict the\nwatch holds on purpose until it can tell whether an\nexhausted trigger's run started (#967), which ends about an\nhour after the advisory at the latest. The verdict\nis computed daemon-side because the threshold is the\ndaemon's configuration — a reader that judged for itself\nwould be quoting a number it does not have.",
                         "type": "boolean"
                       }
                     },

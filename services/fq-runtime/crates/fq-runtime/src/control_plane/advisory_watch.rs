@@ -239,9 +239,18 @@ impl AdvisoryWatch {
     /// started without looking: there is no constructor without them
     /// outside the tests.
     pub fn new(bus: EventBus, dispatcher: &TriggerDispatcher) -> Self {
+        let records = dispatcher.exhaustion_check();
+        if records.is_none() {
+            warn!(
+                consumer = CONSUMER_NAME,
+                "the dispatcher holds no claim store, so the dead-letter watch consults no \
+                 records: every exhausted trigger is dead-lettered without a look at whether \
+                 its run started"
+            );
+        }
         Self {
             bus,
-            records: dispatcher.exhaustion_check(),
+            records,
             held_verdict_limit: HELD_VERDICT_LIMIT,
         }
     }
@@ -267,7 +276,11 @@ impl AdvisoryWatch {
 
     /// Run the watch loop until `shutdown` fires.
     pub async fn run(self, mut shutdown: oneshot::Receiver<()>) -> Result<(), AdvisoryWatchError> {
-        info!(stream = ADVISORY_STREAM_NAME, "advisory watch starting");
+        info!(
+            consumer = CONSUMER_NAME,
+            stream = ADVISORY_STREAM_NAME,
+            "advisory watch starting"
+        );
         let policy = self.bus.redelivery_policy();
         let mut redelivery_log = RedeliveryLog::new(policy);
         let consumer = self.bus.advisory_consumer(CONSUMER_NAME).await?;
@@ -280,7 +293,7 @@ impl AdvisoryWatch {
             tokio::select! {
                 biased;
                 _ = &mut shutdown => {
-                    info!("advisory watch received shutdown signal");
+                    info!(consumer = CONSUMER_NAME, "advisory watch received shutdown signal");
                     break;
                 }
                 msg = messages.next() => {
@@ -291,9 +304,9 @@ impl AdvisoryWatch {
                                     .await;
                             }
                             Ok(outcome) => {
-                                debug!(?outcome, "advisory handled");
+                                debug!(consumer = CONSUMER_NAME, ?outcome, "advisory handled");
                                 if let Err(err) = msg.ack().await {
-                                    error!(error = %err, "failed to ack advisory");
+                                    error!(consumer = CONSUMER_NAME, error = %err, "failed to ack advisory");
                                 }
                             }
                             Err(err) => {
@@ -303,10 +316,10 @@ impl AdvisoryWatch {
                             }
                         },
                         Some(Err(err)) => {
-                            warn!(error = %err, "error reading advisory message");
+                            warn!(consumer = CONSUMER_NAME, error = %err, "error reading advisory message");
                         }
                         None => {
-                            warn!("advisory stream ended unexpectedly");
+                            warn!(consumer = CONSUMER_NAME, "advisory stream ended unexpectedly");
                             break;
                         }
                     }
@@ -314,7 +327,7 @@ impl AdvisoryWatch {
             }
         }
 
-        info!("advisory watch stopped");
+        info!(consumer = CONSUMER_NAME, "advisory watch stopped");
         Ok(())
     }
 
@@ -329,14 +342,15 @@ impl AdvisoryWatch {
         let advisory: MaxDeliverAdvisory = match serde_json::from_slice(payload) {
             Ok(a) => a,
             Err(err) => {
-                warn!(error = %err, "unparseable advisory; consuming");
+                warn!(consumer = CONSUMER_NAME, error = %err, "unparseable advisory; consuming");
                 return Ok(AdvisoryOutcome::Skipped);
             }
         };
         // The capture subject is scoped to the trigger stream; be
         // defensive about a widened filter anyway.
         if advisory.stream != TRIGGER_STREAM_NAME {
-            debug!(stream = %advisory.stream, "advisory for a foreign stream; skipping");
+            debug!(consumer = CONSUMER_NAME, stream = %advisory.stream,
+                "advisory for a foreign stream; skipping");
             return Ok(AdvisoryOutcome::Skipped);
         }
 
@@ -377,6 +391,7 @@ impl AdvisoryWatch {
             && self.already_surfaced(agent, advisory.stream_seq).await
         {
             info!(
+                consumer = CONSUMER_NAME,
                 agent_id = %agent,
                 stream_seq = advisory.stream_seq,
                 "exhausted trigger already surfaced inline; skipping"
@@ -392,7 +407,8 @@ impl AdvisoryWatch {
         // sequence says nothing about it, so the claims are not consulted.
         let this_incarnation = advisory.of_incarnation(self.bus.trigger_stream_epoch());
         if !this_incarnation {
-            info!(stream_seq = advisory.stream_seq, timestamp = ?advisory.timestamp,
+            info!(consumer = CONSUMER_NAME, stream_seq = advisory.stream_seq,
+                timestamp = ?advisory.timestamp,
                 "an advisory from an earlier incarnation of the trigger stream; its trigger's \
                  claim cannot be found, so it is dead-lettered without consulting the claims");
         }
@@ -516,6 +532,7 @@ impl AdvisoryWatch {
             return Ok(AdvisoryOutcome::Unchecked);
         }
         error!(
+            consumer = CONSUMER_NAME,
             agent_id = %event.envelope.agent_id,
             stream_seq = advisory.stream_seq,
             deliveries = advisory.deliveries,
@@ -549,16 +566,13 @@ impl AdvisoryWatch {
     }
 }
 
-/// NAK an advisory with the bus's escalating delay, logging why at most
-/// once per escalation step. The advisory consumer redelivers without
-/// limit (an advisory dropped to a delivery bound is an exhausted trigger
-/// with no record of it), so the delay is what keeps a persistent fault,
-/// or a verdict held for long, from becoming a hot loop (#549). `held`
-/// says the verdict was held rather than the handling failed.
-/// NAK an advisory to come back after the policy's delay, with a line
-/// under the loop's [`RedeliveryLog`]: the first, then each step of the
-/// escalation, then one per interval, shared by every advisory the loop
-/// NAKs. A held verdict also gets a line of its own on the advisory's
+/// NAK an advisory to come back after the bus's escalating delay. The
+/// advisory consumer redelivers without limit (an advisory dropped to a
+/// delivery bound is an exhausted trigger with no record of it), so the
+/// delay is what keeps a persistent fault, or a held verdict, from becoming
+/// a hot loop (#549). The line goes under the loop's [`RedeliveryLog`]:
+/// the first, then each step of the escalation, then one per interval,
+/// shared by every advisory the loop NAKs. A held verdict also gets a line of its own on the advisory's
 /// first delivery, so every held trigger is named in the log at least
 /// once, by sequence and subject, however many are held together.
 async fn nak_for_retry(
@@ -588,7 +602,7 @@ async fn nak_for_retry(
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
         .await
     {
-        error!(error = %nak_err, "failed to nak advisory");
+        error!(consumer = CONSUMER_NAME, error = %nak_err, "failed to nak advisory");
     }
 }
 
