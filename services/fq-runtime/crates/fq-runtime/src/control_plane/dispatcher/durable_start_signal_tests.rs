@@ -41,6 +41,20 @@
 //! ([`Pulled::handle_beside_copies`]): the delivery must be kept alive
 //! through setup, and the keepalive must end where the setup does.
 //!
+//! **A release held up (#1057, known open).** Nothing renews a delivery
+//! between a run's return and its answer, and the answer goes out only
+//! after the claim is released. Two tests hold the release up past the
+//! ack window ([`hold_the_release`]): a copy arrives, takes the freed
+//! claim and runs the trigger a second time, which they pin as today's
+//! outcome until issue 1057 keeps the delivery alive through that gap.
+//!
+//! **Bounded (#1048).** Copies are driven beside the first copy, as the
+//! consume loop's tasks are, never awaited inside its turn: a copy waiting
+//! for the worker permit the first copy holds would otherwise stop the
+//! first copy from ever finishing. Each wait that could last has a
+//! deadline whose message names what was still pending, and every test
+//! that drives copies runs under [`TEST_DEADLINE`] as a backstop.
+//!
 //! The tests run the real `handle` against a real broker and a real
 //! control-plane store, with a stub worker. They pin what was decided,
 //! from the claim, the refusals spent and the answers on the wire. The
@@ -57,6 +71,7 @@ use std::time::Duration;
 use async_nats::jetstream::Message;
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use serde_json::json;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
@@ -108,8 +123,21 @@ const LONG_SETUP: Duration = Duration::from_millis(2500);
 /// The backstop on a test that drives copies of a delivery
 /// ([`within_the_test_deadline`]). Such a test waits on the broker, the
 /// claim store and the dispatcher's tasks, and before issue 1048 one of
-/// them could wait for ever.
+/// them could wait for ever. Longer than every deadline below, so one of
+/// those, which says what it was waiting on, fails first.
 const TEST_DEADLINE: Duration = Duration::from_secs(90);
+
+/// How long [`Pulled::handle_beside_copies`] may take. The longest drive
+/// is the held-up release's: a [`LONG_SETUP`], the release held for
+/// [`RELEASE_HELD_FOR`], then the copy's own setup, about eight seconds;
+/// five times that leaves room for a loaded machine.
+const DRIVE_DEADLINE: Duration = Duration::from_secs(40);
+
+/// How long [`Answers::sent`] keeps reading while answers keep arriving. A
+/// delivery that is still being renewed this long after its test's drive
+/// has ended is still in someone's hands, which is a failure to report
+/// rather than a reason to keep reading.
+const ANSWERS_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
@@ -207,6 +235,8 @@ struct ResolvesThenReturns {
     release_held_for: Option<Duration>,
     /// When that held release landed.
     release_landed_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+    /// When the last run started returned.
+    returned_at: Mutex<Option<tokio::time::Instant>>,
 }
 
 #[async_trait::async_trait]
@@ -254,6 +284,7 @@ impl Worker for ResolvesThenReturns {
             Turn::After(runs_on) => tokio::time::sleep(runs_on).await,
         }
         self.ran_to_end.store(true, Ordering::SeqCst);
+        *self.returned_at.lock().unwrap() = Some(tokio::time::Instant::now());
         if let Some(held_for) = self.release_held_for
             && self.starts.load(Ordering::SeqCst) == 1
         {
@@ -558,6 +589,7 @@ impl Pulled {
             drained_at: Mutex::new(None),
             release_held_for,
             release_landed_at: Arc::new(Mutex::new(None)),
+            returned_at: Mutex::new(None),
         });
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -634,29 +666,57 @@ impl Pulled {
     }
 
     /// Hand the trigger to `handle` as the consume loop does, and hand
-    /// every copy the broker redelivers meanwhile to `handle` too, beside
-    /// it. Returns when the first `handle` does, with the moment each copy
-    /// arrived.
+    /// every copy the broker redelivers meanwhile to `handle` too, each
+    /// driven beside the others as the loop's tasks are. Copies are taken
+    /// until the first `handle` returns; those in hand are then driven to
+    /// their end. Returns the moment each copy arrived.
+    ///
+    /// Never await a copy inside the first copy's turn: a copy that takes
+    /// a fresh claim waits for the worker permit the first copy holds, and
+    /// the first copy, no longer polled, never lets it go (#1048). Fails
+    /// after [`DRIVE_DEADLINE`], naming what was still being handled.
     async fn handle_beside_copies(&mut self) -> Vec<tokio::time::Instant> {
         let dispatcher = &self.dispatcher;
-        let first = tokio::time::timeout(Duration::from_secs(20), dispatcher.handle(&self.msg));
+        let messages = &mut self.messages;
+        let first = dispatcher.handle(&self.msg);
         tokio::pin!(first);
-        let mut copies = Vec::new();
+        let deadline = tokio::time::sleep(DRIVE_DEADLINE);
+        tokio::pin!(deadline);
+        let mut first_done = false;
+        let mut arrived = Vec::new();
+        // The delivery attempt of each copy still being handled.
+        let mut pending: Vec<i64> = Vec::new();
+        let mut in_hand = FuturesUnordered::new();
         loop {
+            if first_done && in_hand.is_empty() {
+                return arrived;
+            }
             tokio::select! {
-                biased;
-                handled = &mut first => {
-                    handled.expect("handle returns");
-                    return copies;
+                () = &mut first, if !first_done => first_done = true,
+                Some(delivered) = in_hand.next(), if !in_hand.is_empty() => {
+                    pending.retain(|attempt| *attempt != delivered);
                 }
-                next = self.messages.next() => match next {
+                next = messages.next(), if !first_done => match next {
                     Some(Ok(copy)) => {
-                        copies.push(tokio::time::Instant::now());
-                        dispatcher.handle(&copy).await;
+                        arrived.push(tokio::time::Instant::now());
+                        let delivered = copy.info().expect("a JetStream delivery").delivered;
+                        pending.push(delivered);
+                        in_hand.push(async move {
+                            dispatcher.handle(&copy).await;
+                            delivered
+                        });
                     }
                     Some(Err(err)) => panic!("the pull stream failed while the trigger was handled: {err}"),
                     None => panic!("the pull stream closed while the trigger was handled"),
                 },
+                () = &mut deadline => panic!(
+                    "the trigger was not handled within {DRIVE_DEADLINE:?}: the first copy's \
+                     `handle` {}, and {} of the {} copies were still being handled (delivery \
+                     attempts {pending:?})",
+                    if first_done { "had returned" } else { "had not returned" },
+                    pending.len(),
+                    arrived.len(),
+                ),
             }
         }
     }
@@ -673,6 +733,15 @@ impl Pulled {
             .lock()
             .unwrap()
             .expect("the worker drained part-way through setup")
+    }
+
+    /// When the last run started returned.
+    fn returned_at(&self) -> tokio::time::Instant {
+        self.worker
+            .returned_at
+            .lock()
+            .unwrap()
+            .expect("the run returned")
     }
 
     /// When the release [`hold_the_release`] held up landed.
@@ -805,8 +874,9 @@ impl Answers {
     }
 
     /// The answers sent so far, read until none has arrived for half a
-    /// second.
+    /// second. Fails if they are still arriving after [`ANSWERS_DEADLINE`].
     async fn sent(&mut self) -> Sent {
+        let deadline = tokio::time::Instant::now() + ANSWERS_DEADLINE;
         let mut sent = Sent {
             acks: 0,
             keepalives: 0,
@@ -832,6 +902,11 @@ impl Answers {
                 }
             };
             sent.last = Some(last);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "answers were still arriving after {ANSWERS_DEADLINE:?}, so something is still \
+                 handling the delivery: {sent:?}"
+            );
         }
         sent
     }
@@ -858,37 +933,40 @@ fn assert_marked_started(claim: TriggerClaim) {
 /// the run starts once, and the durable start acks the delivery once.
 #[tokio::test]
 async fn a_setup_longer_than_the_ack_window_is_kept_alive_and_delivered_once() {
-    let mut pulled = Pulled::setting_up(
-        Setup::Takes(LONG_SETUP),
-        Resolve::Fire,
-        Turn::Later,
-        Returns::Completed,
-    )
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up(
+            Setup::Takes(LONG_SETUP),
+            Resolve::Fire,
+            Turn::Later,
+            Returns::Completed,
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        let copies = pulled.handle_beside_copies().await;
+
+        assert!(
+            copies.is_empty(),
+            "the trigger was redelivered underneath its own setup {} time(s)",
+            copies.len()
+        );
+        assert_eq!(
+            pulled.held_drops(),
+            0,
+            "no copy was dropped as a held duplicate"
+        );
+        assert_eq!(pulled.starts(), 1, "the run started once");
+        assert!(pulled.ran_to_end(), "the run reached its end");
+        assert_marked_started(pulled.probe_claim().await);
+        pulled.wait_until_acked().await;
+        let sent = answers.sent().await;
+        assert!(
+            sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
+            "kept alive while it set up, then acked once at its durable start: {sent:?}"
+        );
+        assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
+    })
     .await;
-    let mut answers = pulled.watch_answers().await;
-
-    let copies = pulled.handle_beside_copies().await;
-
-    assert!(
-        copies.is_empty(),
-        "the trigger was redelivered underneath its own setup {} time(s)",
-        copies.len()
-    );
-    assert_eq!(
-        pulled.held_drops(),
-        0,
-        "no copy was dropped as a held duplicate"
-    );
-    assert_eq!(pulled.starts(), 1, "the run started once");
-    assert!(pulled.ran_to_end(), "the run reached its end");
-    assert_marked_started(pulled.probe_claim().await);
-    pulled.wait_until_acked().await;
-    let sent = answers.sent().await;
-    assert!(
-        sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
-        "kept alive while it set up, then acked once at its durable start: {sent:?}"
-    );
-    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
 }
 
 /// The setup's keepalive ends with the durable start, and nothing is sent
@@ -903,30 +981,33 @@ async fn a_setup_longer_than_the_ack_window_is_kept_alive_and_delivered_once() {
 /// turn. That is harmless, and this test does not forbid it.
 #[tokio::test]
 async fn nothing_is_sent_after_the_ack_while_the_run_goes_on() {
-    let mut pulled = Pulled::setting_up(
-        Setup::Takes(LONG_SETUP),
-        Resolve::Fire,
-        Turn::After(LONG_SETUP),
-        Returns::Completed,
-    )
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up(
+            Setup::Takes(LONG_SETUP),
+            Resolve::Fire,
+            Turn::After(LONG_SETUP),
+            Returns::Completed,
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        let copies = pulled.handle_beside_copies().await;
+
+        assert!(copies.is_empty(), "no copy came back: {} did", copies.len());
+        assert!(pulled.ran_to_end(), "the run went on to its end");
+        pulled.wait_until_acked().await;
+        let sent = answers.sent().await;
+        assert!(
+            sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
+            "kept alive through setup, then acked once: {sent:?}"
+        );
+        assert_eq!(
+            sent.last.as_deref(),
+            Some("ack"),
+            "nothing may follow the ack while the run goes on: {sent:?}"
+        );
+    })
     .await;
-    let mut answers = pulled.watch_answers().await;
-
-    let copies = pulled.handle_beside_copies().await;
-
-    assert!(copies.is_empty(), "no copy came back: {} did", copies.len());
-    assert!(pulled.ran_to_end(), "the run went on to its end");
-    pulled.wait_until_acked().await;
-    let sent = answers.sent().await;
-    assert!(
-        sent.keepalives > 0 && sent.acks == 1 && sent.other.is_empty(),
-        "kept alive through setup, then acked once: {sent:?}"
-    );
-    assert_eq!(
-        sent.last.as_deref(),
-        Some("ack"),
-        "nothing may follow the ack while the run goes on: {sent:?}"
-    );
 }
 
 /// A run that fails during a long setup settles its delivery once, as it
@@ -936,43 +1017,62 @@ async fn nothing_is_sent_after_the_ack_while_the_run_goes_on() {
 /// through both, since no durable start was made, and the pre-start
 /// settlement then NAKs it once, releasing its claim, with nothing sent
 /// after the NAK.
+///
+/// **A loud failure here may be issue 1057, not a new flake.** Nothing
+/// renews the delivery between the run's return and its NAK, which goes
+/// out only after the claim's release. When the machine is loaded enough
+/// for that release to outlast the one-second window, a copy arrives,
+/// takes the freed claim and runs the trigger again: the copy count, the
+/// held count or the one NAK fails. This used to hang, because the helper
+/// awaited that copy inside the first copy's turn (#1048). Its windows are
+/// not widened to hide it; the forced form of the same order is
+/// [`a_copy_during_a_held_up_release_runs_the_trigger_again`].
 #[tokio::test]
 async fn a_failure_during_a_long_setup_settles_the_delivery_once() {
-    let mut pulled = Pulled::setting_up(
-        Setup::Takes(LONG_SETUP),
-        Resolve::Drop,
-        Turn::After(LONG_SETUP),
-        Returns::TransientError,
-    )
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up(
+            Setup::Takes(LONG_SETUP),
+            Resolve::Drop,
+            Turn::After(LONG_SETUP),
+            Returns::TransientError,
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        let copies = pulled.handle_beside_copies().await;
+
+        let returned = pulled.returned_at();
+        let after_return = copies.iter().filter(|arrived| **arrived > returned).count();
+        assert!(
+            copies.is_empty(),
+            "the trigger was redelivered {} time(s): {} while the run was setting up or tearing \
+             down, kept alive, and {after_return} after it returned, while its claim was released \
+             and before its NAK went out, which is issue 1057's window",
+            copies.len(),
+            copies.len() - after_return
+        );
+        assert_eq!(
+            pulled.held_drops(),
+            0,
+            "no copy was dropped as a held duplicate"
+        );
+        assert_eq!(
+            pulled.probe_claim().await,
+            TriggerClaim::Won,
+            "the NAK released the claim"
+        );
+        let sent = answers.sent().await;
+        assert!(
+            sent.keepalives > 0 && sent.acks == 0 && sent.other.len() == 1,
+            "kept alive through setup and teardown, then settled by one NAK: {sent:?}"
+        );
+        assert!(
+            sent.other[0].starts_with("-NAK")
+                && sent.last.as_deref() == Some(sent.other[0].as_str()),
+            "the one settlement is a NAK and nothing follows it: {sent:?}"
+        );
+    })
     .await;
-    let mut answers = pulled.watch_answers().await;
-
-    let copies = pulled.handle_beside_copies().await;
-
-    assert!(
-        copies.is_empty(),
-        "the trigger was redelivered underneath its own setup {} time(s)",
-        copies.len()
-    );
-    assert_eq!(
-        pulled.held_drops(),
-        0,
-        "no copy was dropped as a held duplicate"
-    );
-    assert_eq!(
-        pulled.probe_claim().await,
-        TriggerClaim::Won,
-        "the NAK released the claim"
-    );
-    let sent = answers.sent().await;
-    assert!(
-        sent.keepalives > 0 && sent.acks == 0 && sent.other.len() == 1,
-        "kept alive through setup and teardown, then settled by one NAK: {sent:?}"
-    );
-    assert!(
-        sent.other[0].starts_with("-NAK") && sent.last.as_deref() == Some(sent.other[0].as_str()),
-        "the one settlement is a NAK and nothing follows it: {sent:?}"
-    );
 }
 
 /// A drain part-way through a long setup stops the keepalive, as it stops
@@ -989,38 +1089,41 @@ async fn a_failure_during_a_long_setup_settles_the_delivery_once() {
 /// NAKed, and its claim stays this daemon's for the next binary to adopt.
 #[tokio::test]
 async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery() {
-    let mut pulled = Pulled::setting_up(
-        Setup::DrainedPartWay {
-            takes: LONG_SETUP + LONG_SETUP / 2,
-            drain_at: LONG_SETUP / 2 + SHORT_ACK_WINDOW / 4,
-        },
-        Resolve::Drop,
-        Turn::Later,
-        Returns::Drained,
-    )
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up(
+            Setup::DrainedPartWay {
+                takes: LONG_SETUP + LONG_SETUP / 2,
+                drain_at: LONG_SETUP / 2 + SHORT_ACK_WINDOW / 4,
+            },
+            Resolve::Drop,
+            Turn::Later,
+            Returns::Drained,
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        let copies = pulled.handle_beside_copies().await;
+
+        let drained_at = pulled.drained_at();
+        assert!(
+            copies.iter().all(|arrived| *arrived > drained_at),
+            "a copy came back before the drain, so the setup was not kept alive"
+        );
+        assert!(
+            !copies.is_empty(),
+            "no copy came back after the drain, so the keepalive did not stop with it"
+        );
+        assert_held_by_the_dispatcher(
+            pulled.probe_claim().await,
+            "a drain before the first WAL write leaves the claim for the next binary",
+        );
+        let sent = answers.sent().await;
+        assert!(
+            sent.keepalives > 0 && sent.acks == 0 && sent.other.is_empty(),
+            "kept alive until the drain, and then neither acked nor NAKed: {sent:?}"
+        );
+    })
     .await;
-    let mut answers = pulled.watch_answers().await;
-
-    let copies = pulled.handle_beside_copies().await;
-
-    let drained_at = pulled.drained_at();
-    assert!(
-        copies.iter().all(|arrived| *arrived > drained_at),
-        "a copy came back before the drain, so the setup was not kept alive"
-    );
-    assert!(
-        !copies.is_empty(),
-        "no copy came back after the drain, so the keepalive did not stop with it"
-    );
-    assert_held_by_the_dispatcher(
-        pulled.probe_claim().await,
-        "a drain before the first WAL write leaves the claim for the next binary",
-    );
-    let sent = answers.sent().await;
-    assert!(
-        sent.keepalives > 0 && sent.acks == 0 && sent.other.is_empty(),
-        "kept alive until the drain, and then neither acked nor NAKed: {sent:?}"
-    );
 }
 
 /// **A copy that arrives while a run's claim release is held up takes the
@@ -1402,6 +1505,7 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
         drained_at: Mutex::new(None),
         release_held_for: None,
         release_landed_at: Arc::new(Mutex::new(None)),
+        returned_at: Mutex::new(None),
     });
     let dispatcher = TriggerDispatcher::new(
         pulled.bus.clone(),
