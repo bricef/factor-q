@@ -450,3 +450,230 @@ async fn an_advisory_from_an_earlier_incarnation_of_the_stream_does_not_consult_
     );
     assert_eq!(kept(&arena), 0);
 }
+
+/// The watch's own durable, as the broker reports it.
+async fn watch_consumer(arena: &Arena) -> async_nats::jetstream::consumer::Info {
+    arena
+        .bus
+        .jetstream()
+        .get_stream(ADVISORY_STREAM_NAME)
+        .await
+        .expect("the advisory stream")
+        .get_consumer::<async_nats::jetstream::consumer::pull::Config>(WATCH_CONSUMER)
+        .await
+        .expect("the watch's durable")
+        .info()
+        .await
+        .expect("its info")
+        .clone()
+}
+
+/// Exhaust every published trigger of the arena's agent on one scratch
+/// durable that never acks, and wait until the broker's advisories for
+/// all `messages` of them are on the watch's stream.
+async fn exhaust_all(arena: &Arena, messages: u64) {
+    let consumer = arena
+        .bus
+        .jetstream()
+        .get_stream(TRIGGER_STREAM_NAME)
+        .await
+        .expect("the trigger stream")
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some(format!("exhaust-{}", uuid::Uuid::now_v7().simple())),
+            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+            filter_subject: subjects::trigger(&arena.agent),
+            max_deliver: 2,
+            ack_wait: Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await
+        .expect("a scratch durable");
+    let mut deliveries = consumer.messages().await.expect("its messages");
+    for delivery in 1..=2 * messages {
+        let _unacked = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
+            .await
+            .unwrap_or_else(|_| panic!("delivery {delivery} within 5s"))
+            .expect("the durable is open")
+            .expect("a delivery");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let captured = arena
+            .bus
+            .jetstream()
+            .get_stream(ADVISORY_STREAM_NAME)
+            .await
+            .expect("the advisory stream")
+            .info()
+            .await
+            .expect("its info")
+            .state
+            .messages;
+        if captured >= messages {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{captured} of {messages} advisories within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The dead letter for the trigger at `seq`, if one was written.
+async fn dead_letter_at(arena: &Arena, seq: u64) -> Option<Event> {
+    dead_letter(arena)
+        .await
+        .filter(|event| event.annotations.0.get(DEAD_LETTER_STREAM_SEQ_KEY) == Some(&json!(seq)))
+}
+
+/// **The watch's loop holds a verdict until its cause ends, and decides
+/// the advisories behind it meanwhile.** This drives the real loop,
+/// `AdvisoryWatch::run`, on the watch's own durable, where every other
+/// test here calls the decision by hand. Two triggers run out of
+/// deliveries. A copy is still handling the first's claim, so its verdict
+/// is held: the loop NAKs the advisory, which stays pending on the durable
+/// and comes back. The second, with nothing on record, is dead-lettered
+/// meanwhile, so a held verdict does not hold up the rest. Once the copy
+/// dies before its first WAL write, the held advisory's next delivery
+/// dead-letters the first trigger. A loop that acked a held advisory as
+/// done would lose that trigger for good.
+#[tokio::test]
+async fn the_watch_loop_holds_a_verdict_until_its_cause_ends() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let second = arena
+        .bus
+        .publish_trigger(
+            &AgentId::new(&arena.agent).unwrap(),
+            &json!({ "input": "two" }),
+        )
+        .await
+        .expect("publish the second trigger");
+    assert_eq!(second.stream_seq, SEQ + 1);
+    arena.worker.queue(Run::WaitsInSetupThenDiesBeforeStart);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    exhaust_all(&arena, 2).await;
+
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let looping = tokio::spawn(watch(&arena).run(stopped));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while dead_letter_at(&arena, second.stream_seq).await.is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the second trigger, with nothing on record, is dead-lettered while the first is held"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let held = watch_consumer(&arena).await;
+        if held.num_redelivered >= 1 {
+            assert_eq!(
+                held.num_ack_pending, 1,
+                "the held advisory is pending on the durable, not acked: {held:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the held advisory was not delivered again within 10s: {held:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        dead_letter_at(&arena, SEQ).await.is_none(),
+        "the first trigger is not dead-lettered while its copy handles the claim"
+    );
+
+    arena.worker.setup_gate.add_permits(1);
+    let first = arena.finish(first).await;
+    assert!(first.panicked, "{first:?}");
+    // Past the longest NAK delay this advisory can have reached by now.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    while dead_letter_at(&arena, SEQ).await.is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the held verdict was not taken once its copy ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(watch_consumer(&arena).await.num_ack_pending, 0);
+    let _ = stop.send(());
+    looping
+        .await
+        .expect("the loop's task")
+        .expect("the loop stops cleanly");
+}
+
+/// **The watch asks whether a copy is handling the claim before it reads
+/// the records.** The order is load-bearing, as it is in the own-claim arm.
+/// The first copy waits in setup, so nothing is on record; the watch's read
+/// of the records, if it makes one, is held there; the copy then makes its
+/// first WAL write and dies in the same poll, and only then does the watch
+/// go on. Asked first, the note holds the verdict, and asked again the
+/// watch finds the start. Asked after the records, the watch would have
+/// read an empty WAL, found no note once the copy died, and dead-lettered a
+/// trigger whose run started.
+#[tokio::test]
+async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the_records() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetupThenDiesAfterStart);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    let advisory = exhaust(&arena).await;
+    arena
+        .worker
+        .hold_wal_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = {
+        let the_watch = std::sync::Arc::clone(&the_watch);
+        let advisory = advisory.clone();
+        tokio::spawn(async move { the_watch.handle_advisory(&advisory).await.unwrap() })
+    };
+    // The watch answers at once, or is held reading the records.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !asking.is_finished()
+        && arena
+            .worker
+            .wal_reads_held
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the watch neither answered nor read the records within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    arena.worker.setup_gate.add_permits(1);
+    let first = arena.finish(first).await;
+    assert!(
+        first.panicked,
+        "the copy dies after its first WAL write: {first:?}"
+    );
+    arena
+        .worker
+        .hold_wal_reads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "a trigger whose run started was dead-lettered: {outcome:?}"
+    );
+    assert!(
+        matches!(outcome, AdvisoryOutcome::Held { .. }),
+        "the copy was handling the claim when the watch asked: {outcome:?}"
+    );
+    assert_eq!(
+        the_watch.handle_advisory(&advisory).await.unwrap(),
+        AdvisoryOutcome::RunStarted
+    );
+}
