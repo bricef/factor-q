@@ -16,6 +16,12 @@
 //! yes. The tests in this binary share it, and each reads only the lines
 //! that name its own trigger.
 //!
+//! **What guarantees the order is the constructor**, not a habit of the
+//! tests: `Daemon::new` installs the subscriber before it starts a broker
+//! or connects anything, and a test reads the log through the daemon it
+//! got back (`Daemon::log`). A test that needs the log before it has a
+//! daemon calls `Log::installed` itself, first.
+//!
 //! **What is pinned here.** Each of these lines is the only record an
 //! operator has of the case it reports, and its level and the fields that
 //! name the delivery are what make it findable in a daemon's journal, so
@@ -136,8 +142,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Log {
 }
 
 impl Log {
-    /// The process's one subscriber, installed by whichever test asks
-    /// first. Every test asks before it does anything that logs.
+    /// The process's one subscriber, installed on the first call.
+    /// `Daemon::new` makes that call before anything else, so a test with
+    /// a daemon cannot log ahead of it.
     fn installed() -> &'static Log {
         static LOG: OnceLock<Log> = OnceLock::new();
         LOG.get_or_init(|| {
@@ -388,6 +395,9 @@ async fn skip_every_claim_update(claim_db: &Path) {
 /// A private broker, one agent, a claim store, and a dispatcher that runs
 /// its consume loop on them once [`Daemon::start`] is called.
 struct Daemon {
+    /// The process's one subscriber, installed before anything below was
+    /// started.
+    log: &'static Log,
     bus: EventBus,
     url: String,
     agent: AgentId,
@@ -405,6 +415,8 @@ struct Daemon {
 
 impl Daemon {
     async fn new(label: &str, script: Script) -> Self {
+        // First, before anything here can log (the module doc says why).
+        let log = Log::installed();
         let server = fq_test_support::NatsServer::start();
         let url = server.url().to_string();
         let bus = EventBus::connect(&url).await.expect("connect NATS");
@@ -423,6 +435,7 @@ impl Daemon {
             ended: Notify::new(),
         });
         Self {
+            log,
             subject: fq_runtime::events::subjects::trigger(&name),
             bus,
             url,
@@ -573,8 +586,8 @@ impl Deliveries {
 /// dropped. The gate then opens and the first copy starts and acks.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_held_copy_is_one_warn_line_naming_its_delivery_and_the_last_says_so() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("held", Script::GatedSetup).await;
+    let log = daemon.log;
     let mut deliveries = Deliveries::watch(&daemon.url).await;
     daemon.start("binary-1").await;
     let published = daemon.publish().await;
@@ -646,8 +659,8 @@ async fn each_held_copy_is_one_warn_line_naming_its_delivery_and_the_last_says_s
 /// met.** Nothing else records it: it is not counted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_adoption_is_one_warn_line_naming_the_delivery_and_the_claim_it_met() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("adoption-lost", Script::Nothing).await;
+    let log = daemon.log;
     let published = daemon.publish().await;
     let left_behind = Uuid::now_v7().to_string();
     assert_eq!(
@@ -704,8 +717,8 @@ async fn a_lost_adoption_is_one_warn_line_naming_the_delivery_and_the_claim_it_m
 /// a held copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_copy_of_a_started_run_is_one_warn_line_naming_the_start() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("copy-after-start", Script::Nothing).await;
+    let log = daemon.log;
     let published = daemon.publish().await;
     let started = Uuid::now_v7().to_string();
     let key = daemon.key(published.stream_seq);
@@ -750,8 +763,8 @@ async fn a_copy_of_a_started_run_is_one_warn_line_naming_the_start() {
 /// says the mark was given up (#967).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mark_that_heals_inside_its_retries_is_one_warn_line() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("mark-heals", Script::RefusedMarks(Refusals::First(2))).await;
+    let log = daemon.log;
 
     let (trigger_id, invocation_id) = daemon.run_one().await;
 
@@ -779,8 +792,8 @@ async fn a_mark_that_heals_inside_its_retries_is_one_warn_line() {
 /// not one per attempt, which names the run and the trigger** (#967).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mark_refused_past_its_retries_is_one_error_line_naming_the_run_and_the_trigger() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("mark-gives-up", Script::RefusedMarks(Refusals::Every)).await;
+    let log = daemon.log;
 
     let (trigger_id, invocation_id) = daemon.run_one().await;
 
@@ -806,12 +819,12 @@ async fn a_mark_refused_past_its_retries_is_one_error_line_naming_the_run_and_th
 /// second is offered.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mark_that_blocks_past_the_time_bound_says_it_had_one_attempt() {
-    let log = Log::installed();
     let mut daemon = Daemon::new(
         "mark-blocks",
         Script::LockedStore(Duration::from_millis(2500)),
     )
     .await;
+    let log = daemon.log;
 
     daemon.run_one().await;
 
@@ -831,8 +844,8 @@ async fn a_mark_that_blocks_past_the_time_bound_says_it_had_one_attempt() {
 /// run whose delivery will come back.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_ack_after_a_refused_mark_is_one_error_line_naming_the_trigger() {
-    let log = Log::installed();
     let mut daemon = Daemon::new("ack-fails", Script::RefusedMarksAndClosedConnection).await;
+    let log = daemon.log;
 
     let (trigger_id, _) = daemon.run_one().await;
 
