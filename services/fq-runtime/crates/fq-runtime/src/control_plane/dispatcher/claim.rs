@@ -14,6 +14,9 @@ use super::admission::{HOLD_KEEPALIVE, keep_alive};
 use super::own_claim::{Handled, OwnClaim};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
+mod settlement;
+pub(super) use settlement::Answer;
+
 /// What the durable claim says about one delivery.
 ///
 /// Named apart from [`super::admission::Admission`], which decides
@@ -329,7 +332,7 @@ impl TriggerDispatcher {
         } = *claim;
         let marked = keeping_alive(
             msg,
-            trigger_id,
+            Some(trigger_id),
             mark_with_retries(store, self.trigger_key(stream_seq), invocation_id),
         )
         .await;
@@ -532,14 +535,17 @@ impl TriggerDispatcher {
 }
 
 impl TriggerDispatcher {
+    /// Release the delivery's claim and ack it, keeping the delivery in
+    /// progress until the ack is published ([`settlement`], #1057).
     pub(super) async fn ack(
         &self,
         msg: &async_nats::jetstream::Message,
         trigger_id: Option<uuid::Uuid>,
         context: &str,
     ) {
-        self.release_unstarted_claim(msg).await;
-        self.ack_keeping_claim(msg, trigger_id, context).await;
+        let answer = Answer::Ack { context };
+        self.settle(msg, trigger_id, std::future::ready(()), answer)
+            .await;
     }
 
     /// Ack the delivery, leaving its claim row as it is. [`Self::ack`]
@@ -568,7 +574,9 @@ impl TriggerDispatcher {
     /// error, so the otherwise-lost run is retried. The delay escalates
     /// with the delivery attempt ([`trigger_retry_backoff`]); a bare
     /// `Nak(None)` would redeliver immediately and burn the bounded
-    /// retries in a tight loop.
+    /// retries in a tight loop. The claim is released first, and the
+    /// delivery is kept in progress until the NAK is published
+    /// ([`settlement`], #1057).
     pub(super) async fn nak(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -576,7 +584,19 @@ impl TriggerDispatcher {
         delay: std::time::Duration,
         context: &str,
     ) {
-        self.release_unstarted_claim(msg).await;
+        let answer = Answer::Nak { delay, context };
+        self.settle(msg, Some(trigger_id), std::future::ready(()), answer)
+            .await;
+    }
+
+    /// Publish a NAK, the claim already released.
+    async fn send_nak(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        trigger_id: Option<uuid::Uuid>,
+        delay: std::time::Duration,
+        context: &str,
+    ) {
         if let Err(err) = msg
             .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
             .await
@@ -585,14 +605,14 @@ impl TriggerDispatcher {
                 error = %err,
                 context,
                 subject = %msg.subject,
-                trigger_id = %trigger_id,
+                trigger_id = %trigger_name(trigger_id),
                 "failed to NAK trigger message"
             );
         } else {
             warn!(
                 context,
                 subject = %msg.subject,
-                trigger_id = %trigger_id,
+                trigger_id = %trigger_name(trigger_id),
                 retry_in_ms = delay.as_millis() as u64,
                 "NAK'd trigger for redelivery"
             );
@@ -650,11 +670,15 @@ async fn mark_with_retries(
 /// in-progress ack every [`HOLD_KEEPALIVE`], the cadence every hold
 /// keeps. The first goes out a tick after `work` starts, not at once as a
 /// hold's does: work that ends inside the first tick, which is every mark
-/// on a healthy day, sends none. `handle` kept the delivery's window all
-/// but full through setup, up to the mark, so the wait costs nothing.
+/// and every settlement on a healthy day, sends none. Where the run's
+/// setup, a hold or the mark came before, it kept the delivery's window
+/// all but full, so the wait costs nothing. The refusals at the front of
+/// `handle` come after only the claim's own store calls, which nothing
+/// renews, so their first renewal comes a tick after whatever share of the
+/// window those calls used.
 async fn keeping_alive<T>(
     msg: &async_nats::jetstream::Message,
-    trigger_id: uuid::Uuid,
+    trigger_id: Option<uuid::Uuid>,
     work: impl std::future::Future<Output = T>,
 ) -> T {
     let mut work = std::pin::pin!(work);
@@ -662,7 +686,7 @@ async fn keeping_alive<T>(
         tokio::select! {
             biased;
             done = &mut work => return done,
-            () = tokio::time::sleep(HOLD_KEEPALIVE) => keep_alive(msg, Some(trigger_id)).await,
+            () = tokio::time::sleep(HOLD_KEEPALIVE) => keep_alive(msg, trigger_id).await,
         }
     }
 }

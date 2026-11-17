@@ -41,15 +41,17 @@
 //! ([`Pulled::handle_beside_copies`]): the delivery must be kept alive
 //! through setup, and the keepalive must end where the setup does.
 //!
-//! **A release held up (#1057, known open).** Nothing renews a delivery
-//! between a run's return and its answer, and the answer goes out only
-//! after the claim is released. Two tests hold the release up past the
-//! ack window ([`Pulled::setting_up_with_a_held_release`]): a copy
-//! arrives, takes the freed claim and runs the trigger a second time,
-//! which they pin as today's outcome until issue 1057 keeps the delivery
-//! alive through that gap. The same event, unforced, is what
-//! [`a_failure_during_a_long_setup_settles_the_delivery_once`] fails on
-//! under load.
+//! **Settling (#1057).** A delivery's answer goes out only after its claim
+//! is released, and on a last delivery after its dead letter is
+//! published; the delivery is kept in progress through all of that. Tests
+//! hold the release up past the ack window
+//! ([`Pulled::setting_up_with_a_held_release`]), make the store refuse it,
+//! cut it off at its bound, and make the dead letter's publish slow or time
+//! out. Each checks that the delivery was renewed until its answer and
+//! answered once, and that no copy came while it settled: by reading the
+//! pull stream, where a copy would arrive, or, on a last delivery, which
+//! no copy follows, by watching for the broker's max-deliveries advisory
+//! instead.
 //!
 //! **Bounded (#1048).** Copies are driven beside the first copy, as the
 //! consume loop's tasks are, never awaited inside its turn: a copy waiting
@@ -393,10 +395,10 @@ async fn lock_claim_store(claim_db: &Path, held_for: Duration) {
 
 /// How long [`Pulled::setting_up_with_a_held_release`] holds the claim
 /// store's write lock from the run's return: three ack windows
-/// ([`SHORT_ACK_WINDOW`]), so a copy arrives while the release waits, with
-/// about two seconds to spare, and under the store's busy timeout (sqlx's
-/// five seconds), so the dispatcher's `DELETE` waits it out rather than
-/// failing on it.
+/// ([`SHORT_ACK_WINDOW`]), so a delivery nothing renewed would lapse while
+/// the release waits, with about two seconds to spare, and under the
+/// store's busy timeout (sqlx's five seconds), so the dispatcher's `DELETE`
+/// waits it out rather than failing on it.
 const RELEASE_HELD_FOR: Duration = Duration::from_secs(3);
 
 /// The claim store's busy timeout: sqlx's default, which
@@ -505,17 +507,18 @@ impl Pulled {
     }
 
     /// As [`Self::setting_up`], with the first run's claim release held
-    /// up, so that a copy of the delivery arrives while the release waits
-    /// and claims once it has landed (issue 1057).
+    /// up past the ack window (issue 1057). Before issue 1057 a copy of the
+    /// delivery arrived while the release waited, and claimed once it had
+    /// landed; now the delivery is kept alive until its answer, and none
+    /// should.
     ///
     /// **The real interleaving.** As the first run returns, a connection of
     /// the test's own takes the claim store's write lock for
     /// [`RELEASE_HELD_FOR`] ([`lock_claim_store`]). The dispatcher's own
     /// release of the claim (`release_unstarted_claim`, a `DELETE`) waits
-    /// behind it and then lands, and nothing renews the delivery while it
-    /// waits: the setup's keepalive ended when the run returned, and the
-    /// NAK or ack goes out only after the release. Once the ack window
-    /// lapses the broker redelivers.
+    /// behind it and then lands, and the NAK or ack goes out only after the
+    /// release. Before issue 1057 nothing renewed the delivery while it
+    /// waited, so once the ack window lapsed the broker redelivered.
     ///
     /// **The gate, which the daemon does not have.** A copy's claim insert
     /// would wait behind the same lock and then race the dispatcher's
@@ -529,9 +532,10 @@ impl Pulled {
     /// and changes nothing the dispatcher does. A copy that arrives before
     /// the first run returns is not held.
     ///
-    /// **After issue 1057.** Once the delivery is kept alive until its
-    /// answer, no copy arrives while the release is held up, and the gate
-    /// holds nothing: the tests that use this assert one run and no copy.
+    /// **Since issue 1057** the delivery is kept alive until its answer, so
+    /// no copy arrives while the release is held up and the gate holds
+    /// nothing; the tests that use this assert one run and no copy, and
+    /// the gate is what makes a regression show as a second run.
     async fn setting_up_with_a_held_release(
         setup: Setup,
         resolve: Resolve,
@@ -718,9 +722,9 @@ impl Pulled {
     /// after [`DRIVE_DEADLINE`], naming what was still being handled.
     ///
     /// With a held-up release ([`Self::setting_up_with_a_held_release`]),
-    /// this also watches for the release to land, and holds each copy that
+    /// this also watches for the release to land, holds each copy that
     /// arrived after the first run returned until it has
-    /// ([`wait_for_the_release`]).
+    /// ([`wait_for_the_release`]), and returns only once it has seen it.
     async fn handle_beside_copies(&mut self) -> Vec<tokio::time::Instant> {
         let held_release = self.worker.release_held_for.is_some();
         let key = test_key(&self.bus, self.stream_seq());
@@ -741,7 +745,7 @@ impl Pulled {
         let mut pending: Vec<i64> = Vec::new();
         let mut in_hand = FuturesUnordered::new();
         loop {
-            if first_done && in_hand.is_empty() {
+            if first_done && in_hand.is_empty() && landing_seen {
                 return arrived;
             }
             tokio::select! {
@@ -1164,20 +1168,18 @@ async fn nothing_is_sent_after_the_ack_while_the_run_goes_on() {
 /// settlement then NAKs it once, releasing its claim, with nothing sent
 /// after the NAK.
 ///
-/// **A loud failure here is issue 1057, not a new flake.** Nothing
-/// renews the delivery between the run's return and its NAK, which goes
-/// out only after the claim's release. When that release is slow enough
-/// to outlast the one-second window, a copy arrives; if the release lands
-/// first, the copy takes the freed claim and the dispatcher handles the
-/// trigger a second time, and this test fails, in about twelve seconds
-/// instead of six, on the copy count. The review of PR 1058 measured it at
-/// 23 of 288 runs of this test alone under build-like load, every one with
-/// the copy after the first run returned. It is the same event that used
-/// to hang, when the helper awaited the copy inside the first copy's turn
-/// (#1048). The message counts the copies before and after the first
-/// run's return and prints a timeline with the runs started. The windows
-/// are not widened to hide it; the forced form of the same order is
-/// [`a_copy_during_a_held_up_release_runs_the_trigger_again`].
+/// **Issue 1057 used to fail this test under load.** The claim's release
+/// before the NAK can outlast the one-second window on a loaded machine;
+/// before issue 1057 nothing renewed the delivery in that gap, so a copy
+/// arrived, took the freed claim once the release landed, and the trigger
+/// ran a second time (the review of PR 1058 measured 23 failures in 288
+/// runs of this test alone under build-like load). The delivery is now
+/// kept in progress until its answer is published, so that order no
+/// longer happens. The message still counts the copies before and after
+/// the first run's return and prints a timeline with the runs started, so
+/// a failure here says which window it came from. The forced form of the
+/// same order is
+/// [`a_held_up_release_keeps_the_delivery_alive_until_its_answer`].
 #[tokio::test]
 async fn a_failure_during_a_long_setup_settles_the_delivery_once() {
     within_the_test_deadline(async {
@@ -1433,6 +1435,112 @@ async fn a_release_the_store_refuses_still_naks_the_delivery_and_stops_the_keepa
             pulled.probe_claim().await,
             "the release failed, so the claim is left `claimed` by the dispatcher",
         );
+    })
+    .await;
+}
+
+/// **A release that outlasts the settlement's own bound is given up on: the
+/// delivery is answered anyway and the keepalive stops, and the release,
+/// not cancelled, lands later (issue 1057).** The claim store's write lock
+/// is held for twice the bound passed to `settle_within`, standing in for a
+/// store stuck in a way it does not bound itself. The NAK goes out at the
+/// bound, the delivery is renewed until then and nothing follows the NAK;
+/// the claim is still `claimed` when settling returns, and goes once the
+/// lock does. No copy comes, which the test reads the pull stream for.
+///
+/// The test's bound, 1.5 seconds, sits under the store's 5-second busy
+/// timeout, so the release is still waiting for the lock when it is given
+/// up on: a state the production bound excludes, since it stays above the
+/// store's own waits (`settlement::RELEASE_BOUND` says why that matters).
+/// What is pinned here holds wherever the release is stuck: settling stops
+/// waiting at its bound, answers the delivery, stops renewing it, and does
+/// not call the release back.
+#[tokio::test]
+async fn a_release_that_outlasts_its_bound_is_given_up_and_the_delivery_naked() {
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up(
+            Setup::Instant,
+            Resolve::Drop,
+            Turn::Later,
+            Returns::TransientError,
+        )
+        .await;
+        let named = Uuid::now_v7().to_string();
+        pulled
+            .claims
+            .claim_trigger(
+                test_key(&pulled.bus, pulled.stream_seq()),
+                "worker-a",
+                &named,
+                0,
+            )
+            .await
+            .expect("claim the trigger");
+        let mut answers = pulled.watch_answers().await;
+        let bound = Duration::from_millis(1500);
+        lock_claim_store(&pulled.claim_db, bound * 2).await;
+
+        let began = tokio::time::Instant::now();
+        let answer = super::claim::Answer::Nak {
+            delay: Duration::from_secs(30),
+            context: "test",
+        };
+        tokio::time::timeout(
+            bound * 2,
+            pulled.dispatcher.settle_within(
+                &pulled.msg,
+                None,
+                std::future::ready(()),
+                answer,
+                bound,
+            ),
+        )
+        .await
+        .expect("settling returns at its bound, before the lock goes");
+        let key = test_key(&pulled.bus, pulled.stream_seq());
+        let claim = pulled
+            .claims
+            .unsettled_trigger_claim(key)
+            .await
+            .expect("read the claim");
+        assert!(
+            claim.is_some(),
+            "the claim was released before settling gave up on it; the lock should still be held"
+        );
+
+        let sent = answers.sent().await;
+        let waited = sent.settled_at() - began;
+        assert!(
+            waited >= bound && waited < bound * 2,
+            "the NAK went out after {waited:?}, not at the bound of {bound:?}: {sent:?}"
+        );
+        let silence = sent.longest_silence_from(began);
+        assert!(
+            silence < SHORT_ACK_WINDOW,
+            "the delivery went {silence:?} without an answer while its release waited: {sent:?}"
+        );
+        assert!(
+            sent.acks == 0
+                && sent.other.len() == 1
+                && sent.other[0].starts_with("-NAK")
+                && sent.last.as_deref() == sent.other.first().map(String::as_str),
+            "the delivery was NAKed once and nothing followed the NAK: {sent:?}"
+        );
+        assert_no_copy_arrives(&mut pulled.messages, SHORT_ACK_WINDOW).await;
+        let lands_by = began + bound * 2 + Duration::from_secs(3);
+        while pulled
+            .claims
+            .unsettled_trigger_claim(key)
+            .await
+            .expect("read the claim")
+            .is_some()
+        {
+            assert!(
+                tokio::time::Instant::now() < lands_by,
+                "the release given up on never landed once the lock went"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     })
     .await;
 }

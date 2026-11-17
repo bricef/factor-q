@@ -10,6 +10,7 @@
 
 use tracing::info;
 
+use super::claim::Answer;
 use super::{TriggerDispatcher, TriggerFate, trigger_fate};
 use crate::agent::AgentId;
 use crate::worker::{ExecutorError, InvocationOutcome};
@@ -50,7 +51,10 @@ impl TriggerDispatcher {
     ) {
         match (trigger_fate(result, delivery_attempt), result) {
             (TriggerFate::DeadLetter, Err(err)) => {
-                self.dead_letter_exhausted(
+                // The dead letter is published inside the settlement, so
+                // the delivery is kept alive through it as well as through
+                // the release and the ack (#1057).
+                let dead_letter = self.dead_letter_exhausted(
                     agent_id,
                     msg.subject.as_str(),
                     trigger_id,
@@ -58,9 +62,11 @@ impl TriggerDispatcher {
                     msg.info().map(|info| info.stream_sequence).unwrap_or(0),
                     delivery_attempt,
                     err,
-                )
-                .await;
-                self.ack(msg, Some(trigger_id), "transient retry limit exhausted")
+                );
+                let answer = Answer::Ack {
+                    context: "transient retry limit exhausted",
+                };
+                self.settle(msg, Some(trigger_id), dead_letter, answer)
                     .await;
             }
             (TriggerFate::Retry(delay), _) => {
