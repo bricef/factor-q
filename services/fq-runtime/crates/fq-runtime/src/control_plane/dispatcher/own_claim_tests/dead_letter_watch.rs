@@ -19,11 +19,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::json;
 
-use super::{Arena, Run, SEQ, arena, heal, refuse_updates};
+use super::{Arena, Run, SEQ, arena, exec, heal, refuse_updates};
 use crate::agent::AgentId;
 use crate::bus::{ADVISORY_STREAM_NAME, STREAM_NAME, TRIGGER_STREAM_NAME};
 use crate::control_plane::advisory_watch::{
-    AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER,
+    AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER, HELD_VERDICT_MIN_LOOKS,
 };
 use crate::dead_letter::{
     DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY, StartUnchecked,
@@ -31,6 +31,10 @@ use crate::dead_letter::{
 };
 use crate::events::{Event, EventPayload, FailureKind, subjects};
 use crate::trigger::PublishedTrigger;
+
+/// The delivery the tests hand the watch an advisory on: enough looks
+/// that only the advisory's age decides whether a verdict is still held.
+const LOOKED: u64 = HELD_VERDICT_MIN_LOOKS;
 
 /// Publish the arena's trigger for real: the message the advisory names.
 async fn publish(arena: &Arena) -> PublishedTrigger {
@@ -161,7 +165,10 @@ async fn a_last_delivery_whose_run_started_and_whose_task_died_is_not_dead_lette
     let run = arena.worker.starts()[4].0.to_string();
     let advisory = exhaust(&arena).await;
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(
@@ -190,7 +197,10 @@ async fn a_last_delivery_whose_mark_landed_and_whose_ack_was_lost_is_not_dead_le
     assert_eq!(claim(&arena).await, Some((true, Some(run.clone()))));
     let advisory = exhaust(&arena).await;
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
@@ -219,7 +229,10 @@ async fn a_last_delivery_that_copies_a_run_started_earlier_is_not_dead_lettered(
     heal(&arena.claim_db).await;
     let advisory = exhaust(&arena).await;
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
@@ -255,7 +268,10 @@ async fn a_last_delivery_whose_run_was_archived_meanwhile_is_not_dead_lettered()
     let advisory = exhaust(&arena).await;
     *arena.worker.hands_off_on_read.lock().unwrap() = Some(std::sync::Arc::clone(&arena.claims));
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(
@@ -282,7 +298,10 @@ async fn a_trigger_with_nothing_on_record_is_dead_lettered_as_before() {
     assert!(last.panicked, "{last:?}");
     let advisory = exhaust(&arena).await;
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::Emitted);
     let event = dead_letter(&arena)
@@ -334,7 +353,7 @@ async fn a_trigger_whose_records_cannot_be_read_is_held_until_they_can() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let watch = watch(&arena);
 
-    let held = watch.handle_advisory(&advisory).await.unwrap();
+    let held = watch.handle_advisory(&advisory, LOOKED).await.unwrap();
 
     assert!(
         matches!(held, AdvisoryOutcome::Held(_)),
@@ -347,7 +366,7 @@ async fn a_trigger_whose_records_cannot_be_read_is_held_until_they_can() {
         .fail_wal_reads
         .store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        watch.handle_advisory(&advisory).await.unwrap(),
+        watch.handle_advisory(&advisory, LOOKED).await.unwrap(),
         AdvisoryOutcome::RunStarted
     );
     assert!(dead_letter(&arena).await.is_none());
@@ -372,7 +391,7 @@ async fn a_trigger_still_handled_is_held_and_not_dead_lettered_once_its_run_star
     let advisory = exhaust(&arena).await;
     let watch = watch(&arena);
 
-    let held = watch.handle_advisory(&advisory).await.unwrap();
+    let held = watch.handle_advisory(&advisory, LOOKED).await.unwrap();
 
     assert!(
         matches!(held, AdvisoryOutcome::Held(_)),
@@ -383,7 +402,7 @@ async fn a_trigger_still_handled_is_held_and_not_dead_lettered_once_its_run_star
     let first = arena.finish(first).await;
     assert_eq!(first.acks, 1, "{first:?}");
     assert_eq!(
-        watch.handle_advisory(&advisory).await.unwrap(),
+        watch.handle_advisory(&advisory, LOOKED).await.unwrap(),
         AdvisoryOutcome::RunStarted
     );
     assert!(dead_letter(&arena).await.is_none());
@@ -405,7 +424,7 @@ async fn a_trigger_still_handled_is_dead_lettered_once_its_copy_ends_with_nothin
     let advisory = exhaust(&arena).await;
     let watch = watch(&arena);
 
-    let held = watch.handle_advisory(&advisory).await.unwrap();
+    let held = watch.handle_advisory(&advisory, LOOKED).await.unwrap();
 
     assert!(
         matches!(held, AdvisoryOutcome::Held(_)),
@@ -415,7 +434,7 @@ async fn a_trigger_still_handled_is_dead_lettered_once_its_copy_ends_with_nothin
     let first = arena.finish(first).await;
     assert!(first.panicked, "{first:?}");
     assert_eq!(
-        watch.handle_advisory(&advisory).await.unwrap(),
+        watch.handle_advisory(&advisory, LOOKED).await.unwrap(),
         AdvisoryOutcome::Emitted
     );
     assert!(dead_letter(&arena).await.is_some());
@@ -441,7 +460,10 @@ async fn an_advisory_from_an_earlier_incarnation_of_the_stream_does_not_consult_
     earlier["timestamp"] = json!("2000-01-01T00:00:00Z");
     let earlier = serde_json::to_vec(&earlier).unwrap();
 
-    let outcome = watch(&arena).handle_advisory(&earlier).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&earlier, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::Emitted);
     assert_eq!(
@@ -635,7 +657,7 @@ async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the
     let asking = {
         let the_watch = std::sync::Arc::clone(&the_watch);
         let advisory = advisory.clone();
-        tokio::spawn(async move { the_watch.handle_advisory(&advisory).await.unwrap() })
+        tokio::spawn(async move { the_watch.handle_advisory(&advisory, LOOKED).await.unwrap() })
     };
     // The watch answers at once, or is held reading the records.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -674,7 +696,7 @@ async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the
         "the copy was handling the claim when the watch asked: {outcome:?}"
     );
     assert_eq!(
-        the_watch.handle_advisory(&advisory).await.unwrap(),
+        the_watch.handle_advisory(&advisory, LOOKED).await.unwrap(),
         AdvisoryOutcome::RunStarted
     );
 }
@@ -715,7 +737,7 @@ async fn a_verdict_held_past_the_limit_with_a_copy_handling_is_dead_lettered_unc
 
     let outcome = watch(&arena)
         .with_held_verdict_limit(PAST)
-        .handle_advisory(&advisory)
+        .handle_advisory(&advisory, LOOKED)
         .await
         .unwrap();
 
@@ -764,7 +786,7 @@ async fn a_verdict_held_past_the_limit_with_the_records_unreadable_is_dead_lette
 
     let outcome = watch(&arena)
         .with_held_verdict_limit(PAST)
-        .handle_advisory(&advisory)
+        .handle_advisory(&advisory, LOOKED)
         .await
         .unwrap();
 
@@ -792,7 +814,10 @@ async fn a_verdict_inside_the_limit_is_still_held() {
     arena.worker.until_waiting(1).await;
     let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
 
-    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
 
     assert!(
         matches!(outcome, AdvisoryOutcome::Held(_)),
@@ -820,7 +845,10 @@ async fn an_advisory_with_no_timestamp_is_not_held() {
         .remove("timestamp");
     let unstamped = serde_json::to_vec(&unstamped).unwrap();
 
-    let outcome = watch(&arena).handle_advisory(&unstamped).await.unwrap();
+    let outcome = watch(&arena)
+        .handle_advisory(&unstamped, LOOKED)
+        .await
+        .unwrap();
 
     assert_eq!(outcome, AdvisoryOutcome::Unchecked);
     assert!(
@@ -831,4 +859,233 @@ async fn an_advisory_with_no_timestamp_is_not_held() {
     );
     arena.worker.setup_gate.add_permits(1);
     arena.finish(first).await;
+}
+
+/// Start the watch on `advisory` in a task and wait until it is held in its
+/// read of the WAL ([`super::Scripted::hold_wal_reads`]): it has read what
+/// the WAL holds and not yet acted on it.
+async fn held_in_its_wal_read(
+    arena: &Arena,
+    the_watch: &std::sync::Arc<AdvisoryWatch>,
+    advisory: &[u8],
+) -> tokio::task::JoinHandle<AdvisoryOutcome> {
+    use std::sync::atomic::Ordering;
+    arena.worker.hold_wal_reads.store(true, Ordering::SeqCst);
+    let asking = {
+        let the_watch = std::sync::Arc::clone(the_watch);
+        let advisory = advisory.to_vec();
+        tokio::spawn(async move { the_watch.handle_advisory(&advisory, LOOKED).await.unwrap() })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while arena.worker.wal_reads_held.load(Ordering::SeqCst) == 0 {
+        assert!(
+            !asking.is_finished() && tokio::time::Instant::now() < deadline,
+            "the watch did not reach its read of the WAL"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    arena.worker.hold_wal_reads.store(false, Ordering::SeqCst);
+    asking
+}
+
+/// **A claim marked between the watch's two reads is a start, not a held
+/// verdict.** The claim names a run in flight that no copy is handling
+/// (its mark was refused and its ack lost). The watch reads the claim,
+/// then the WAL, which holds the run; before it reads the claim again, a
+/// copy settles the claim by the record and marks it. The claim is no
+/// longer `claimed`. Held for that, the verdict would become, past the
+/// limit, a dead letter marked unchecked for a run the watch had read and
+/// whose claim says it started. The watch reads the claim once more and
+/// finds the mark: the run started, and the trigger is not dead-lettered.
+/// Inside the limit, so that only the decision after the second read can
+/// answer: past it, the last look would find the run in the WAL as well.
+#[tokio::test]
+async fn a_claim_marked_between_the_watchs_reads_is_a_start_not_a_held_verdict() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    refuse_updates(&arena.claim_db).await;
+    arena.worker.queue(Run::WaitsAfterStart);
+    let first = arena.spawn_delivery(SEQ, 1, true);
+    arena.worker.until_waiting(1).await;
+    let run = arena.worker.starts()[0].0;
+    assert!(
+        arena.until_let_go(run, Duration::from_secs(15)).await,
+        "the first copy lets go once its mark gives up"
+    );
+    heal(&arena.claim_db).await;
+    let run = run.to_string();
+    assert_eq!(claim(&arena).await, Some((false, Some(run.clone()))));
+    let advisory = exhaust(&arena).await;
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    let second = arena.deliver(2, false).await;
+    assert_eq!(
+        second.acks, 1,
+        "the copy settles the claim by the record: {second:?}"
+    );
+    assert_eq!(claim(&arena).await, Some((true, Some(run.clone()))));
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(kept(&arena), 1);
+    arena.worker.run_gate.add_permits(1);
+    arena.finish(first).await;
+}
+
+/// **A claim taken again between the watch's reads is not judged by the old
+/// run's WAL.** The first copy dies before its start, so its WAL is empty.
+/// The watch reads that empty WAL for the abandoned id; before it reads the
+/// claim again, a copy takes the claim again under a new id and waits in
+/// setup. The claim's second read names the new run, which has no WAL row
+/// or ownership row yet: judged with the old run's WAL, that is "nothing on
+/// record", a dead letter while the new copy is setting up. The watch
+/// checks that the claim still names the run whose WAL it read, holds its
+/// verdict, and finds the start once the new copy's run has begun.
+#[tokio::test]
+async fn a_claim_taken_again_between_the_watchs_reads_is_not_judged_by_the_old_runs_wal() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::DiesBeforeStart);
+    let first = arena.deliver(1, false).await;
+    assert!(first.panicked, "{first:?}");
+    let abandoned = arena.worker.starts()[0].0.to_string();
+    assert_eq!(claim(&arena).await, Some((false, Some(abandoned.clone()))));
+    let advisory = exhaust(&arena).await;
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let second = arena.spawn_delivery(SEQ, 2, false);
+    arena.worker.until_waiting(1).await;
+    let retaken = arena.worker.starts()[1].0.to_string();
+    assert_ne!(retaken, abandoned);
+    assert_eq!(claim(&arena).await, Some((false, Some(retaken.clone()))));
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "dead-lettered while a copy that took the claim again is setting up: {outcome:?}"
+    );
+    assert!(matches!(outcome, AdvisoryOutcome::Held(_)), "{outcome:?}");
+    arena.worker.setup_gate.add_permits(1);
+    let second = arena.finish(second).await;
+    assert_eq!(second.acks, 1, "{second:?}");
+    assert_eq!(
+        the_watch.handle_advisory(&advisory, LOOKED).await.unwrap(),
+        AdvisoryOutcome::RunStarted
+    );
+    assert!(dead_letter(&arena).await.is_none());
+}
+
+/// **At the limit, a start found in the WAL is a start, even while a copy
+/// is still handling the claim.** The run made its first WAL write and its
+/// task died; a copy is still noted as handling the claim (its thread
+/// blocked after the write, say), so every look holds the verdict. Past the
+/// limit the watch's last look reads the WAL once for the run the claim
+/// names and finds it: the trigger is not dead-lettered, and the claim is
+/// left for its copy, or the next start, to mark. Only a found start
+/// counts: an empty read would not end the hold.
+#[tokio::test]
+async fn at_the_limit_a_start_found_in_the_wal_wins_over_a_copy_still_handling() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::DiesAfterStart);
+    arena.deliver(1, false).await;
+    let run = arena.worker.starts()[0].0.to_string();
+    assert_eq!(claim(&arena).await, Some((false, Some(run.clone()))));
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    let still_handling = arena.dispatcher.handling.begin(&run);
+
+    let held = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+    assert!(
+        matches!(held, AdvisoryOutcome::Held(_)),
+        "inside the limit, a copy still handling holds the verdict: {held:?}"
+    );
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(
+        claim(&arena).await,
+        Some((false, Some(run))),
+        "the claim is left for the copy handling it"
+    );
+    assert_eq!(kept(&arena), 1);
+    drop(still_handling);
+}
+
+/// **An advisory is looked at a few times before its dead letter can be
+/// written unchecked, however old it is.** Seen for the first time past the
+/// limit (the daemon was down for longer), it would otherwise get one look,
+/// and a reason that clears in a moment would become an unchecked dead
+/// letter. The watch holds it on its first and second deliveries, and only
+/// on its third writes the dead letter marked unchecked.
+#[tokio::test]
+async fn an_advisory_past_the_limit_is_looked_at_three_times_before_an_unchecked_dead_letter() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    let watch = watch(&arena).with_held_verdict_limit(PAST);
+
+    for delivered in 1..HELD_VERDICT_MIN_LOOKS {
+        let outcome = watch.handle_advisory(&advisory, delivered).await.unwrap();
+        assert!(
+            matches!(outcome, AdvisoryOutcome::Held(_)),
+            "look {delivered}: {outcome:?}"
+        );
+        assert!(dead_letter(&arena).await.is_none());
+    }
+    assert_eq!(
+        watch
+            .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS)
+            .await
+            .unwrap(),
+        AdvisoryOutcome::Unchecked
+    );
+    assert!(dead_letter(&arena).await.is_some());
+    arena.worker.setup_gate.add_permits(1);
+    arena.finish(first).await;
+}
+
+/// **A claim gone between the watch's reads does not hide the run the
+/// watch read.** The run made its first WAL write and its task died, so the
+/// WAL holds it and no copy handles the claim. The watch reads the claim,
+/// then the WAL, which holds the run; before it reads the claim again, the
+/// row is gone (the test deletes it, as a release would). With no row to
+/// mark or to name the run, the WAL's answer, already read, is still a
+/// start on record: the trigger is not dead-lettered and its verdict is not
+/// held.
+#[tokio::test]
+async fn a_claim_gone_between_the_watchs_reads_does_not_hide_the_run_it_read() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::DiesAfterStart);
+    arena.deliver(1, false).await;
+    let run = arena.worker.starts()[0].0.to_string();
+    assert_eq!(claim(&arena).await, Some((false, Some(run))));
+    let advisory = exhaust(&arena).await;
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    exec(&arena.claim_db, &["DELETE FROM trigger_claim"]).await;
+    assert_eq!(claim(&arena).await, None);
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
 }

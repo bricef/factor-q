@@ -68,7 +68,7 @@ use std::sync::Arc;
 use crate::bus::TRIGGER_STREAM_NAME;
 use crate::control_plane::store::RunRecords;
 use crate::control_plane::{ControlPlaneStore, TriggerKey};
-use crate::worker::Worker;
+use crate::worker::{WalRun, Worker};
 
 use super::TriggerDispatcher;
 use super::own_claim::Handling;
@@ -99,6 +99,10 @@ pub(crate) enum ClaimMark {
     Changed,
     /// The mark failed, for the reason given; startup recovery marks it.
     Failed(String),
+    /// Not marked here: the start was found on the watch's last look, past
+    /// its limit, while the claim was not this check's to mark (a copy
+    /// still handling it marks it when its start lands).
+    Left,
 }
 
 impl std::fmt::Display for ClaimMark {
@@ -110,6 +114,10 @@ impl std::fmt::Display for ClaimMark {
             Self::Failed(err) => write!(
                 f,
                 "not marked: the mark failed ({err}); this daemon's next start marks it"
+            ),
+            Self::Left => f.write_str(
+                "not marked here: the copy handling its claim marks it when its start lands, or \
+                 this daemon's next start does",
             ),
         }
     }
@@ -161,18 +169,22 @@ impl ExhaustionCheck {
         let Some(row) = row else {
             return Exhausted::NothingOnRecord;
         };
+        // A claim marked started is a start on record, whatever else the
+        // row holds.
+        if row.durably_started {
+            return Exhausted::Started {
+                invocation_id: row
+                    .invocation_id
+                    .unwrap_or_else(|| "none named on the claim".to_string()),
+                on_record: "on its claim, marked durably started".to_string(),
+                mark: ClaimMark::Already,
+            };
+        }
         // A claim written before claims named their run cannot be looked
         // up, and is dead-lettered as it always was.
         let Some(invocation_id) = row.invocation_id else {
             return Exhausted::NothingOnRecord;
         };
-        if row.durably_started {
-            return Exhausted::Started {
-                invocation_id,
-                on_record: "on its claim, marked durably started".to_string(),
-                mark: ClaimMark::Already,
-            };
-        }
         if self.handling.handles(&invocation_id) {
             return Exhausted::Undecided {
                 why: "a copy of the trigger is still handling its claim".to_string(),
@@ -205,14 +217,11 @@ impl ExhaustionCheck {
                 };
             }
         };
-        // Marked or given back between the two reads: the next read decides.
+        // Marked, given back or taken again between the two reads.
         let Some(unsettled) =
             unsettled.filter(|u| u.claim.invocation_id.as_deref() == Some(invocation_id.as_str()))
         else {
-            return Exhausted::Undecided {
-                why: "the trigger's claim changed while its run's records were read".to_string(),
-                invocation_id: Some(invocation_id),
-            };
+            return self.after_the_claim_changed(key, invocation_id, wal).await;
         };
         let records = RunRecords {
             wal,
@@ -237,6 +246,77 @@ impl ExhaustionCheck {
             invocation_id,
             on_record,
             mark,
+        }
+    }
+
+    /// The claim stopped being `claimed` for `invocation_id` between the
+    /// two reads: a copy marked it started (it settled the claim by the
+    /// record, or the first copy's own mark landed), gave it back, or took
+    /// it again under another id. A start already found is still a start:
+    /// held instead, it would become, past the watch's limit, a dead letter
+    /// marked unchecked for a run the watch itself read.
+    async fn after_the_claim_changed(
+        &self,
+        key: TriggerKey<'_>,
+        invocation_id: String,
+        wal: Option<WalRun>,
+    ) -> Exhausted {
+        if let Ok(Some(row)) = self.store.trigger_claim(key).await
+            && row.durably_started
+        {
+            return Exhausted::Started {
+                invocation_id: row.invocation_id.unwrap_or(invocation_id),
+                on_record: "on its claim, marked durably started".to_string(),
+                mark: ClaimMark::Already,
+            };
+        }
+        if wal.is_some() {
+            let records = RunRecords {
+                wal,
+                owner_row_status: None,
+            };
+            return Exhausted::Started {
+                invocation_id,
+                on_record: records.where_on_record().unwrap_or_default(),
+                mark: ClaimMark::Changed,
+            };
+        }
+        Exhausted::Undecided {
+            why: "the trigger's claim changed while its run's records were read".to_string(),
+            invocation_id: Some(invocation_id),
+        }
+    }
+
+    /// The watch's last look, past its limit, before it writes a dead
+    /// letter it could not check: the verdict taken again and, if it still
+    /// cannot be taken, the worker's WAL read once for the run the claim
+    /// names. Only a start found counts. An empty read is never taken for
+    /// "not started", for the reason [`Self::verdict`] asks about a copy
+    /// still handling the claim before it reads the records: that copy can
+    /// make its first WAL write just after the read. A start found here is
+    /// not marked ([`ClaimMark::Left`]).
+    pub(crate) async fn last_look(&self, stream_seq: u64) -> Exhausted {
+        match self.verdict(stream_seq).await {
+            Exhausted::Undecided {
+                why,
+                invocation_id: Some(invocation_id),
+            } => match self.worker.wal_run(&invocation_id).await {
+                Ok(Some(wal)) => Exhausted::Started {
+                    on_record: RunRecords {
+                        wal: Some(wal),
+                        owner_row_status: None,
+                    }
+                    .where_on_record()
+                    .unwrap_or_default(),
+                    invocation_id,
+                    mark: ClaimMark::Left,
+                },
+                Ok(None) | Err(_) => Exhausted::Undecided {
+                    why,
+                    invocation_id: Some(invocation_id),
+                },
+            },
+            verdict => verdict,
         }
     }
 }

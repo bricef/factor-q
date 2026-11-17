@@ -97,6 +97,16 @@ pub const CONSUMER_NAME: &str = "fq-advisory-watch";
 /// unchecked at once rather than held until it ages out of its stream.
 pub const HELD_VERDICT_LIMIT: Duration = Duration::from_secs(60 * 60);
 
+/// How many times the watch looks at an exhausted trigger before it will
+/// write a dead letter it could not check, whatever the advisory's age:
+/// the advisory's delivery count to the watch. An advisory first seen past
+/// [`HELD_VERDICT_LIMIT`], because the daemon was down for longer, would
+/// otherwise get one look, and a reason that clears in a moment (a claim
+/// that changed between two reads, a store busy for a second) would become
+/// an unchecked dead letter. Three looks take about three seconds under the
+/// bus's escalating NAK delay (one second, then two).
+pub const HELD_VERDICT_MIN_LOOKS: u64 = 3;
+
 /// The fields this watch consumes from the server's
 /// `io.nats.jetstream.advisory.v1.max_deliver` payload; unknown
 /// fields are ignored.
@@ -125,20 +135,34 @@ impl MaxDeliverAdvisory {
         emitted.is_none_or(|nanos| nanos >= stream_epoch)
     }
 
+    /// When the server emitted it, if the watch can read its timestamp.
+    fn emitted_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.timestamp
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&chrono::Utc))
+    }
+
     /// Whether the advisory was emitted less than `limit` before `now`.
     /// One with no timestamp the watch can read is not: its age cannot be
     /// told. One stamped after `now` (a broker clock ahead of this
     /// daemon's) is.
     fn emitted_within(&self, limit: Duration, now: chrono::DateTime<chrono::Utc>) -> bool {
-        self.timestamp
-            .as_deref()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-            .is_some_and(|at| {
-                (now - at.with_timezone(&chrono::Utc))
-                    .to_std()
-                    .unwrap_or_default()
-                    < limit
-            })
+        self.emitted_at()
+            .is_some_and(|at| (now - at).to_std().unwrap_or_default() < limit)
+    }
+
+    /// Whether the watch has looked at this advisory long enough to write a
+    /// dead letter it could not check: on its
+    /// [`HELD_VERDICT_MIN_LOOKS`]th delivery or later, and emitted `limit`
+    /// or more before `now`, or at a time the watch cannot read.
+    fn looked_long_enough(
+        &self,
+        delivered: u64,
+        limit: Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        delivered >= HELD_VERDICT_MIN_LOOKS && !self.emitted_within(limit, now)
     }
 }
 
@@ -162,14 +186,16 @@ pub enum AdvisoryOutcome {
     /// Unparseable or foreign advisory; consumed without effect.
     Skipped,
     /// The trigger's run has a start on record: no dead letter, and the
-    /// claim is marked (issue 967).
+    /// claim is marked if it was this watch's to mark (issue 967).
     RunStarted,
     /// The verdict is held, for the reason given: the advisory is NAKed
     /// and decided again when it comes back.
     Held(Hold),
     /// A dead-letter event was emitted without the trigger's start
-    /// checked: its verdict was held past [`HELD_VERDICT_LIMIT`], and the
-    /// event says so ([`StartUnchecked`]).
+    /// checked, and the event says so ([`StartUnchecked`]): its verdict
+    /// could not be taken within [`HELD_VERDICT_LIMIT`] of the advisory
+    /// (or, for an advisory whose age cannot be told, within
+    /// [`HELD_VERDICT_MIN_LOOKS`] looks), and the last look found no start.
     Unchecked,
 }
 
@@ -259,7 +285,7 @@ impl AdvisoryWatch {
                 }
                 msg = messages.next() => {
                     match msg {
-                        Some(Ok(msg)) => match self.handle_advisory(&msg.payload).await {
+                        Some(Ok(msg)) => match self.handle_advisory(&msg.payload, delivered(&msg)).await {
                             Ok(AdvisoryOutcome::Held(hold)) => {
                                 nak_for_retry(&msg, policy, &mut redelivery_log, Nak::Held(&hold))
                                     .await;
@@ -292,11 +318,13 @@ impl AdvisoryWatch {
         Ok(())
     }
 
-    /// Handle one captured advisory payload. `pub(crate)` so the
-    /// broker-backed tests drive it directly.
+    /// Handle one captured advisory payload, on its `delivered`th delivery
+    /// to the watch. `pub(crate)` so the broker-backed tests drive it
+    /// directly.
     pub(crate) async fn handle_advisory(
         &self,
         payload: &[u8],
+        delivered: u64,
     ) -> Result<AdvisoryOutcome, AdvisoryWatchError> {
         let advisory: MaxDeliverAdvisory = match serde_json::from_slice(payload) {
             Ok(a) => a,
@@ -368,9 +396,19 @@ impl AdvisoryWatch {
                 "an advisory from an earlier incarnation of the trigger stream; its trigger's \
                  claim cannot be found, so it is dead-lettered without consulting the claims");
         }
+        // Looked at long enough, a verdict that still cannot be taken is
+        // written as a dead letter marked unchecked, after a last look for
+        // a start on record.
+        let looked_long_enough =
+            advisory.looked_long_enough(delivered, self.held_verdict_limit, chrono::Utc::now());
         let mut unchecked = None;
         if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
-            match records.verdict(advisory.stream_seq).await {
+            let verdict = if looked_long_enough {
+                records.last_look(advisory.stream_seq).await
+            } else {
+                records.verdict(advisory.stream_seq).await
+            };
+            match verdict {
                 Exhausted::NothingOnRecord => {}
                 Exhausted::Started {
                     invocation_id,
@@ -393,7 +431,7 @@ impl AdvisoryWatch {
                     return Ok(AdvisoryOutcome::RunStarted);
                 }
                 Exhausted::Undecided { why, invocation_id } => {
-                    if advisory.emitted_within(self.held_verdict_limit, chrono::Utc::now()) {
+                    if !looked_long_enough {
                         return Ok(AdvisoryOutcome::Held(Hold {
                             why,
                             stream_seq: advisory.stream_seq,
@@ -455,14 +493,26 @@ impl AdvisoryWatch {
         };
         self.bus.publish(&event).await?;
         if let Some(unchecked) = unchecked {
-            error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
-                stream_seq = advisory.stream_seq,
-                subject = %trigger_subject, reason = %unchecked.reason,
-                invocation_id = %unchecked.invocation_id.as_deref().unwrap_or("none"),
-                limit_secs = self.held_verdict_limit.as_secs(),
-                "dead-lettered an exhausted trigger without checking whether its run started: \
-                 its verdict was held past the watch's limit, so the dead letter is marked as \
-                 unchecked and may be false; look at the invocation before requeueing it");
+            let invocation_id = unchecked.invocation_id.as_deref().unwrap_or("none");
+            if advisory.emitted_at().is_some() {
+                error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
+                    stream_seq = advisory.stream_seq, subject = %trigger_subject,
+                    reason = %unchecked.reason, %invocation_id,
+                    limit_secs = self.held_verdict_limit.as_secs(),
+                    "dead-lettered an exhausted trigger without checking whether its run \
+                     started: its verdict could not be taken within the watch's limit and its \
+                     last look found no start, so the dead letter is marked as unchecked and may \
+                     be false; look at the invocation before requeueing it");
+            } else {
+                error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
+                    stream_seq = advisory.stream_seq, subject = %trigger_subject,
+                    reason = %unchecked.reason, %invocation_id, looks = delivered,
+                    "dead-lettered an exhausted trigger without checking whether its run \
+                     started: its advisory carries no timestamp the watch can read, so its age \
+                     cannot be told and it was held only for the watch's first looks, and the \
+                     last look found no start; the dead letter is marked as unchecked and may be \
+                     false; look at the invocation before requeueing it");
+            }
             return Ok(AdvisoryOutcome::Unchecked);
         }
         error!(
@@ -517,11 +567,7 @@ async fn nak_for_retry(
     redelivery_log: &mut RedeliveryLog,
     why: Nak<'_>,
 ) {
-    let delivered = msg
-        .info()
-        .ok()
-        .and_then(|info| u64::try_from(info.delivered).ok())
-        .unwrap_or(1);
+    let delivered = delivered(msg);
     let delay = policy.nak_delay(delivered);
     let admitted = redelivery_log.admit(delivered, std::time::Instant::now());
     match why {
@@ -544,6 +590,15 @@ async fn nak_for_retry(
     {
         error!(error = %nak_err, "failed to nak advisory");
     }
+}
+
+/// How many times the broker has delivered `msg` to the watch, this
+/// delivery included; one when it does not say.
+fn delivered(msg: &async_nats::jetstream::Message) -> u64 {
+    msg.info()
+        .ok()
+        .and_then(|info| u64::try_from(info.delivered).ok())
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -634,7 +689,7 @@ mod tests {
         let advisory = wait_for_captured_advisory(&bus, &consumer_name).await;
         let watch = AdvisoryWatch::without_records(bus.clone());
         assert_eq!(
-            watch.handle_advisory(&advisory).await.unwrap(),
+            watch.handle_advisory(&advisory, 1).await.unwrap(),
             AdvisoryOutcome::Emitted
         );
 
@@ -691,7 +746,7 @@ mod tests {
         // Redelivered / overlapping advisory: suppressed by the seq
         // dedup against the event just emitted.
         assert_eq!(
-            watch.handle_advisory(&advisory).await.unwrap(),
+            watch.handle_advisory(&advisory, 1).await.unwrap(),
             AdvisoryOutcome::AlreadySurfaced
         );
     }
@@ -709,7 +764,7 @@ mod tests {
             r#"{{"type":"io.nats.jetstream.advisory.v1.max_deliver","stream":"{TRIGGER_STREAM_NAME}","consumer":"gone","stream_seq":18446744073709551,"deliveries":5}}"#
         );
         assert_eq!(
-            watch.handle_advisory(advisory.as_bytes()).await.unwrap(),
+            watch.handle_advisory(advisory.as_bytes(), 1).await.unwrap(),
             AdvisoryOutcome::Emitted
         );
         let events_stream = bus
@@ -776,5 +831,40 @@ mod tests {
         assert!(!at(Some("2026-07-14T15:59:59Z")).of_incarnation(created));
         assert!(at(None).of_incarnation(created));
         assert!(at(Some("not a time")).of_incarnation(created));
+    }
+
+    /// The age that ends a hold is read off the same timestamp, against the
+    /// daemon's clock. An advisory stamped after `now` (a broker clock
+    /// ahead of the daemon's) is within the limit; one stamped a moment
+    /// less than the limit ago is; one stamped exactly the limit ago, or
+    /// earlier, is not; and one whose stamp is missing or unreadable is
+    /// not, since its age cannot be told. The watch writes an unchecked
+    /// dead letter only once it is past the limit and has looked at the
+    /// advisory [`HELD_VERDICT_MIN_LOOKS`] times.
+    #[test]
+    fn an_advisory_is_within_the_limit_only_while_its_readable_stamp_is_younger() {
+        let at = |timestamp: Option<&str>| MaxDeliverAdvisory {
+            stream: TRIGGER_STREAM_NAME.to_string(),
+            consumer: "fq-dispatcher".to_string(),
+            stream_seq: 1,
+            deliveries: 5,
+            timestamp: timestamp.map(str::to_string),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let hour = Duration::from_secs(60 * 60);
+        assert!(at(Some("2026-11-17T12:05:00Z")).emitted_within(hour, now));
+        assert!(at(Some("2026-11-17T11:00:00.001Z")).emitted_within(hour, now));
+        assert!(!at(Some("2026-11-17T11:00:00Z")).emitted_within(hour, now));
+        assert!(!at(Some("2026-11-17T09:00:00Z")).emitted_within(hour, now));
+        assert!(!at(Some("not a time")).emitted_within(hour, now));
+        assert!(!at(None).emitted_within(hour, now));
+
+        let old = at(Some("2026-11-17T09:00:00Z"));
+        assert!(!old.looked_long_enough(HELD_VERDICT_MIN_LOOKS - 1, hour, now));
+        assert!(old.looked_long_enough(HELD_VERDICT_MIN_LOOKS, hour, now));
+        assert!(at(None).looked_long_enough(HELD_VERDICT_MIN_LOOKS, hour, now));
+        assert!(!at(Some("2026-11-17T12:05:00Z")).looked_long_enough(100, hour, now));
     }
 }
