@@ -105,6 +105,12 @@ const LOCK_HELD: Duration = Duration::from_millis(2500);
 /// underneath it.
 const LONG_SETUP: Duration = Duration::from_millis(2500);
 
+/// The backstop on a test that drives copies of a delivery
+/// ([`within_the_test_deadline`]). Such a test waits on the broker, the
+/// claim store and the dispatcher's tasks, and before issue 1048 one of
+/// them could wait for ever.
+const TEST_DEADLINE: Duration = Duration::from_secs(90);
+
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
     /// Drop it unfired. `run_loop_for` does this when `run_loop_inner`
@@ -196,6 +202,11 @@ struct ResolvesThenReturns {
     /// Whether the worker reports itself draining, and since when.
     draining: AtomicBool,
     drained_at: Mutex<Option<tokio::time::Instant>>,
+    /// For how long the first run holds up its own claim's release as it
+    /// returns, if it does ([`hold_the_release`]).
+    release_held_for: Option<Duration>,
+    /// When that held release landed.
+    release_landed_at: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 
 #[async_trait::async_trait]
@@ -243,6 +254,11 @@ impl Worker for ResolvesThenReturns {
             Turn::After(runs_on) => tokio::time::sleep(runs_on).await,
         }
         self.ran_to_end.store(true, Ordering::SeqCst);
+        if let Some(held_for) = self.release_held_for
+            && self.starts.load(Ordering::SeqCst) == 1
+        {
+            hold_the_release(&self.claim_db, held_for, &self.release_landed_at).await;
+        }
         match self.returns {
             Returns::TransientError => Err(ExecutorError::WorkerStore(
                 "simulated transient store outage".to_string(),
@@ -339,6 +355,81 @@ async fn lock_claim_store(claim_db: &Path, held_for: Duration) {
     });
 }
 
+/// Hold up the release of the claim a run is about to return to, so that
+/// a copy of its delivery arrives while the release waits and claims just
+/// after it lands (issue 1057).
+///
+/// **The real interleaving.** The connection takes the claim store's write
+/// lock before the run returns. The dispatcher's release of the claim
+/// (`release_unstarted_claim`, a `DELETE`) then waits behind it, and
+/// nothing renews the delivery while it waits: the setup's keepalive ended
+/// when the run returned, and the NAK or ack goes out only after the
+/// release. Once the ack window lapses the broker redelivers, and the
+/// copy's claim insert waits behind the same lock.
+///
+/// **The stand-in.** After `held_for` the release lands in the
+/// dispatcher's place: this connection deletes the claim row and lets the
+/// lock go. That alone would leave the dispatcher's own queued `DELETE` to
+/// race the copy's insert, and if the insert won, the `DELETE` would
+/// remove the claim the copy just took, which lets a later copy claim
+/// again. The daemon cannot do that: a copy claims only once the row is
+/// gone, and the row goes only through that same `DELETE`. So for
+/// [`STAND_IN_GUARD`] after the stand-in, deleting a claim row is refused:
+/// the dispatcher's `DELETE` either finds no row or fails, which it logs
+/// and goes on from to its NAK or ack, as on any store error. A copy that
+/// took the freed claim reaches its own release only after a run of its
+/// own, by when the refusal is gone.
+async fn hold_the_release(
+    claim_db: &Path,
+    held_for: Duration,
+    landed_at: &Arc<Mutex<Option<tokio::time::Instant>>>,
+) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut conn)
+        .await
+        .expect("take the claim store's write lock");
+    let landed_at = Arc::clone(landed_at);
+    tokio::spawn(async move {
+        tokio::time::sleep(held_for).await;
+        for statement in [
+            "DELETE FROM trigger_claim WHERE state = 'claimed'",
+            "CREATE TRIGGER refuse_releases BEFORE DELETE ON trigger_claim \
+             BEGIN SELECT RAISE(ABORT, 'injected: the release already landed'); END",
+            "COMMIT",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut conn)
+                .await
+                .expect("release the claim in the dispatcher's place");
+        }
+        *landed_at.lock().unwrap() = Some(tokio::time::Instant::now());
+        tokio::time::sleep(STAND_IN_GUARD).await;
+        sqlx::query("DROP TRIGGER refuse_releases")
+            .execute(&mut conn)
+            .await
+            .expect("stop refusing releases");
+        conn.close().await.expect("close the claim store's file");
+    });
+}
+
+/// How long after the stand-in release ([`hold_the_release`]) deleting a
+/// claim row is refused. The dispatcher's own `DELETE`, queued behind the
+/// lock, runs as soon as the lock goes (its busy handler retries every
+/// 100 ms by then); a copy that took the freed claim releases it only
+/// after a run of its own, at least a [`LONG_SETUP`] later.
+const STAND_IN_GUARD: Duration = Duration::from_secs(1);
+
+/// How long [`hold_the_release`] holds a release up: three ack windows
+/// ([`SHORT_ACK_WINDOW`]), so a copy arrives while it waits whatever the
+/// load, and under the store's busy timeout (sqlx's five seconds), so the
+/// dispatcher's `DELETE` waits it out rather than failing on it.
+const RELEASE_HELD_FOR: Duration = Duration::from_secs(3);
+
 /// Let the claim store take marks again: drop the refusal
 /// [`refuse_claim_marks`] installed.
 async fn heal_claim_marks(claim_db: &Path) {
@@ -389,13 +480,34 @@ impl Pulled {
     /// On a consumer configured as the dispatcher's own is, with the
     /// production ack window.
     async fn new(resolve: Resolve, turn: Turn, returns: Returns) -> Self {
-        Self::on(Setup::Instant, resolve, turn, returns, None).await
+        Self::on(Setup::Instant, resolve, turn, returns, None, None).await
     }
 
     /// With a setup before the signal resolves, on a consumer of the
     /// test's own whose ack window is [`SHORT_ACK_WINDOW`].
     async fn setting_up(setup: Setup, resolve: Resolve, turn: Turn, returns: Returns) -> Self {
-        Self::on(setup, resolve, turn, returns, Some(SHORT_ACK_WINDOW)).await
+        Self::on(setup, resolve, turn, returns, Some(SHORT_ACK_WINDOW), None).await
+    }
+
+    /// As [`Self::setting_up`], with the first run holding up its own
+    /// claim's release for [`RELEASE_HELD_FOR`] as it returns
+    /// ([`hold_the_release`]).
+    async fn setting_up_with_a_held_release(
+        setup: Setup,
+        resolve: Resolve,
+        turn: Turn,
+        returns: Returns,
+    ) -> Self {
+        let window = Some(SHORT_ACK_WINDOW);
+        Self::on(
+            setup,
+            resolve,
+            turn,
+            returns,
+            window,
+            Some(RELEASE_HELD_FOR),
+        )
+        .await
     }
 
     /// On a consumer of the test's own whose ack window is `ack_window`.
@@ -405,7 +517,15 @@ impl Pulled {
         returns: Returns,
         ack_window: Duration,
     ) -> Self {
-        Self::on(Setup::Instant, resolve, turn, returns, Some(ack_window)).await
+        Self::on(
+            Setup::Instant,
+            resolve,
+            turn,
+            returns,
+            Some(ack_window),
+            None,
+        )
+        .await
     }
 
     async fn on(
@@ -414,6 +534,7 @@ impl Pulled {
         turn: Turn,
         returns: Returns,
         ack_window: Option<Duration>,
+        release_held_for: Option<Duration>,
     ) -> Self {
         let server = test_nats();
         let url = server.url().to_string();
@@ -435,6 +556,8 @@ impl Pulled {
             starts: AtomicUsize::new(0),
             draining: AtomicBool::new(false),
             drained_at: Mutex::new(None),
+            release_held_for,
+            release_landed_at: Arc::new(Mutex::new(None)),
         });
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -550,6 +673,15 @@ impl Pulled {
             .lock()
             .unwrap()
             .expect("the worker drained part-way through setup")
+    }
+
+    /// When the release [`hold_the_release`] held up landed.
+    fn release_landed_at(&self) -> tokio::time::Instant {
+        self.worker
+            .release_landed_at
+            .lock()
+            .unwrap()
+            .expect("the held release landed")
     }
 
     /// The dispatcher's count of copies it dropped before a start was
@@ -891,6 +1023,109 @@ async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery
     );
 }
 
+/// **A copy that arrives while a run's claim release is held up takes the
+/// freed claim and runs the trigger again: the known-open case of issue
+/// 1057, as it is today.** Played after a run that fails before its
+/// durable start (NAKed) and after one that returns without starting
+/// (consumed, acked).
+///
+/// The run sets up for longer than the ack window, kept alive, and returns
+/// before its first WAL write. Its claim's release is then held up for
+/// [`RELEASE_HELD_FOR`] ([`hold_the_release`] says which part of that is
+/// the real interleaving and which the stand-in), and nothing renews the
+/// delivery while it waits, so the broker redelivers. The copies wait
+/// behind the release; when it lands one of them takes the freed claim,
+/// waits for the worker permit the first copy holds, and runs the trigger
+/// a second time, and the rest meet its claim and are dropped as held.
+///
+/// Two things are pinned. **The drive finishes:** the first copy goes on
+/// to its answer and frees the permit while the copy waits for it. Before
+/// issue 1048 [`Pulled::handle_beside_copies`] awaited the copy inside the
+/// first copy's arm, so neither could finish. **What the dispatcher does in
+/// this order today:** two runs. Issue 1057 is to keep the delivery alive
+/// from the run's return until its answer is published, so that no copy
+/// comes and one run starts; when it lands, turn the assertion round.
+async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns) {
+    let naks = matches!(returns, Returns::TransientError);
+    let mut pulled = Pulled::setting_up_with_a_held_release(
+        Setup::Takes(LONG_SETUP),
+        Resolve::Drop,
+        Turn::Later,
+        returns,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    let copies = pulled.handle_beside_copies().await;
+
+    let landed = pulled.release_landed_at();
+    assert!(
+        copies.first().is_some_and(|arrived| *arrived < landed),
+        "the order this test is for did not happen: no copy arrived while the release was held \
+         up ({} copies came)",
+        copies.len()
+    );
+    assert_eq!(
+        pulled.starts(),
+        2,
+        "known open (issue 1057): a copy that arrives while a claim's release is held up takes \
+         the freed claim and runs the trigger again, because nothing keeps the delivery alive \
+         between the run's return and its answer. If one run started, issue 1057 is fixed: turn \
+         this assertion round"
+    );
+    assert_eq!(
+        pulled.held_drops(),
+        copies.len() as u64 - 1,
+        "every other copy met the claim of the one that ran, and was dropped as held"
+    );
+    let sent = answers.sent().await;
+    let answered_once = if naks {
+        sent.acks == 0 && sent.other.len() == 1 && sent.other[0].starts_with("-NAK")
+    } else {
+        sent.acks == 1 && sent.other.is_empty()
+    };
+    assert!(
+        sent.keepalives > 0 && answered_once,
+        "the first copy was kept alive through its setup and then answered once, with a {}: \
+         {sent:?}",
+        if naks { "NAK" } else { "ack" }
+    );
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Won,
+        "both runs released the claim"
+    );
+}
+
+#[tokio::test]
+async fn a_copy_during_a_held_up_release_after_a_failure_runs_the_trigger_again() {
+    within_the_test_deadline(a_copy_during_a_held_up_release_runs_the_trigger_again(
+        Returns::TransientError,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn a_copy_during_a_held_up_release_after_a_clean_return_runs_the_trigger_again() {
+    within_the_test_deadline(a_copy_during_a_held_up_release_runs_the_trigger_again(
+        Returns::Completed,
+    ))
+    .await;
+}
+
+/// Run a test's body against [`TEST_DEADLINE`], so that a hang is a
+/// failure. Each step that can wait has a deadline of its own, shorter
+/// than this one, whose message names what it was waiting on; this is the
+/// backstop for a step that has none.
+async fn within_the_test_deadline(body: impl std::future::Future<Output = ()>) {
+    if tokio::time::timeout(TEST_DEADLINE, body).await.is_err() {
+        panic!(
+            "the test did not finish within {TEST_DEADLINE:?}: a step with no deadline of its own \
+             was still waiting"
+        );
+    }
+}
+
 /// The signal is dropped unfired and the invocation then fails with a
 /// transient error: `handle` must not poll the spent receiver again, and
 /// the settlement after its loop NAKs the trigger for redelivery and
@@ -1165,6 +1400,8 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
         starts: AtomicUsize::new(0),
         draining: AtomicBool::new(false),
         drained_at: Mutex::new(None),
+        release_held_for: None,
+        release_landed_at: Arc::new(Mutex::new(None)),
     });
     let dispatcher = TriggerDispatcher::new(
         pulled.bus.clone(),
