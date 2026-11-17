@@ -1,0 +1,13 @@
+[
+  {
+    "event_id": "00000000-0000-7000-8000-000000001025",
+    "timestamp": "2026-01-02T03:04:05Z",
+    "agent_id": "system",
+    "trigger_subject": "",
+    "trigger_stream_seq": 7,
+    "source": "advisory",
+    "trigger_payload": null,
+    "error_message": "trigger exhausted after 5 deliveries (limit 5) [advisory]",
+    "unattributed": "its advisory came from an earlier incarnation of the trigger stream (emitted 2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), so its sequence is that stream's, whose messages went with it"
+  }
+]

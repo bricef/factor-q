@@ -62,6 +62,20 @@ pub struct DeadLetter {
     /// agent's `triggered` events. Absent on every other dead letter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_unchecked: Option<StartUnchecked>,
+    /// Why this dead letter names no trigger, when the dead-letter watch
+    /// wrote it for an advisory from an earlier incarnation of the trigger
+    /// stream: one the broker emitted before the stream was last created.
+    /// It gives when the advisory was emitted and when the stream was
+    /// created. The advisory's sequence, `trigger_stream_seq` here, is a
+    /// position on that earlier stream, whose messages went with it, and
+    /// the message the stream holds at the same sequence now is another
+    /// trigger, so the dead letter names none: it is recorded under the
+    /// system sentinel with no subject, payload or trigger id, and
+    /// `dead_letter.requeue` refuses it. Absent on every other dead letter,
+    /// including one written under the system sentinel because its trigger
+    /// had aged out of the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattributed: Option<String>,
 }
 
 /// Why a dead letter's trigger was not checked for a start, and where to

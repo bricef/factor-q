@@ -42,7 +42,8 @@
 //! dead-lettered without looking at the records, which key on this
 //! incarnation, or at the message this stream holds at its sequence, which
 //! is another trigger (issue 1054): the dead letter names no trigger, as
-//! for one whose message aged out of the stream. The incarnation is
+//! for one whose message aged out of the stream, and carries why
+//! ([`DEAD_LETTER_UNATTRIBUTED_KEY`]). The incarnation is
 //! decided first, from the advisory's timestamp against the creation of
 //! the stream this daemon connected to, and one with no timestamp the
 //! watch can read is taken as this incarnation's.
@@ -70,7 +71,7 @@ use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck, TriggerDispat
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
     DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
-    StartUnchecked,
+    DEAD_LETTER_UNATTRIBUTED_KEY, StartUnchecked,
 };
 use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
@@ -150,6 +151,23 @@ impl MaxDeliverAdvisory {
             .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
             .and_then(|at| at.timestamp_nanos_opt());
         emitted.is_none_or(|nanos| nanos >= stream_epoch)
+    }
+
+    /// Why the dead letter for this advisory, from an incarnation of the
+    /// trigger stream before the one created at `stream_epoch`, names no
+    /// trigger ([`DEAD_LETTER_UNATTRIBUTED_KEY`]).
+    fn unattributed_reason(&self, stream_epoch: i64) -> String {
+        let at = |time: chrono::DateTime<chrono::Utc>| {
+            time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        };
+        format!(
+            "its advisory came from an earlier incarnation of the trigger stream (emitted {}, \
+             before the stream was created at {}), so its sequence is that stream's, whose \
+             messages went with it",
+            self.emitted_at()
+                .map_or_else(|| "at a time that cannot be read".to_string(), at),
+            at(chrono::DateTime::from_timestamp_nanos(stream_epoch)),
+        )
     }
 
     /// When the server emitted it, if the watch can read its timestamp.
@@ -236,6 +254,9 @@ struct Named {
     payload: serde_json::Value,
     /// The id the trigger's publisher gave it, if it gave one.
     trigger_id: Option<Uuid>,
+    /// Why no trigger is named, when the advisory came from an earlier
+    /// incarnation of the stream ([`DEAD_LETTER_UNATTRIBUTED_KEY`]).
+    unattributed: Option<String>,
 }
 
 impl Named {
@@ -246,6 +267,7 @@ impl Named {
             subject: String::new(),
             payload: serde_json::Value::Null,
             trigger_id: None,
+            unattributed: None,
         }
     }
 }
@@ -417,6 +439,7 @@ impl AdvisoryWatch {
             subject: trigger_subject,
             payload: trigger_payload,
             trigger_id,
+            unattributed,
         } = self.named_trigger(&advisory, this_incarnation).await?;
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
@@ -530,6 +553,12 @@ impl AdvisoryWatch {
             ),
             None => event,
         };
+        let event = match unattributed {
+            Some(why) => {
+                event.annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::Value::String(why))
+            }
+            None => event,
+        };
         let event = match &unchecked {
             Some(unchecked) => event.annotate(
                 DEAD_LETTER_START_UNCHECKED_KEY,
@@ -584,7 +613,8 @@ impl AdvisoryWatch {
     /// letter would name a trigger that may have run, or may never have
     /// been exhausted, and requeuing it would run that work again. So it
     /// names no trigger, as one whose message aged out of the stream does,
-    /// and the exhaustion is still recorded.
+    /// and says why ([`DEAD_LETTER_UNATTRIBUTED_KEY`]), and the exhaustion
+    /// is still recorded.
     async fn named_trigger(
         &self,
         advisory: &MaxDeliverAdvisory,
@@ -597,7 +627,10 @@ impl AdvisoryWatch {
                  names a message of the stream before this one, so the watch reads neither the \
                  message nor the claim this stream has at that sequence, and dead-letters it \
                  naming no trigger");
-            return Ok(Named::nothing());
+            return Ok(Named {
+                unattributed: Some(advisory.unattributed_reason(self.bus.trigger_stream_epoch())),
+                ..Named::nothing()
+            });
         }
         // The original trigger: subject → agent, payload → annotation.
         // Triggers age out after 24h — an older advisory still
@@ -623,6 +656,7 @@ impl AdvisoryWatch {
                 subject: raw.subject.to_string(),
                 payload: serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
                 trigger_id: trigger_id_in(Some(&raw.headers)),
+                unattributed: None,
             },
             None => Named::nothing(),
         })
@@ -932,6 +966,30 @@ mod tests {
         assert!(!at(Some("2026-07-14T15:59:59Z")).of_incarnation(created));
         assert!(at(None).of_incarnation(created));
         assert!(at(Some("not a time")).of_incarnation(created));
+    }
+
+    /// The reason an earlier incarnation's dead letter names no trigger
+    /// gives both times, so an operator can tell when the stream was
+    /// recreated, and says the sequence is not this stream's.
+    #[test]
+    fn an_earlier_incarnations_dead_letter_says_when_the_stream_was_created() {
+        let advisory = MaxDeliverAdvisory {
+            stream: TRIGGER_STREAM_NAME.to_string(),
+            consumer: "fq-dispatcher".to_string(),
+            stream_seq: 7,
+            deliveries: 5,
+            timestamp: Some("2026-11-16T10:00:00.250Z".to_string()),
+        };
+        let created = chrono::DateTime::parse_from_rfc3339("2026-11-17T08:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        assert_eq!(
+            advisory.unattributed_reason(created),
+            "its advisory came from an earlier incarnation of the trigger stream (emitted \
+             2026-11-16T10:00:00.250Z, before the stream was created at 2026-11-17T08:00:00Z), \
+             so its sequence is that stream's, whose messages went with it"
+        );
     }
 
     /// The age that ends a hold is read off the same timestamp, against the

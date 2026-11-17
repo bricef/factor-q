@@ -112,6 +112,12 @@ pub(crate) async fn list_dead_letters(
 /// `triggered` events, which name each run and carry its payload. A look
 /// is a moment: a copy can still start the run after it, and both lines
 /// say so.
+///
+/// A dead letter the watch wrote for an advisory from an earlier
+/// incarnation of the trigger stream (issue 1054) gets a line saying why it
+/// names no trigger: listed under the system sentinel with no payload, it
+/// would read like one whose trigger aged out, and its `seq=` like a
+/// position on the stream as it is now.
 fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
     let seq = d
         .trigger_stream_seq
@@ -126,6 +132,11 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
         d.error_message,
         truncate_json(&d.trigger_payload, 120),
     );
+    if let Some(why) = &d.unattributed {
+        out.push_str(&format!(
+            "      names no trigger: {why}; `fq dead-letters requeue` refuses it\n"
+        ));
+    }
     if let Some(unchecked) = &d.start_unchecked {
         out.push_str(&format!(
             "      start not checked: {}; its run may have started\n",
@@ -169,7 +180,31 @@ mod tests {
             trigger_payload: serde_json::json!({"n": 2}),
             error_message: "trigger exhausted after 5 deliveries (limit 5)".to_string(),
             start_unchecked,
+            unattributed: None,
         }
+    }
+
+    /// One the watch wrote for an advisory from an earlier incarnation of
+    /// the trigger stream says why it names no trigger, and that a requeue
+    /// is refused.
+    #[test]
+    fn an_unattributed_dead_letter_says_why_it_names_no_trigger() {
+        let unattributed = fq_ops::dead_letter::DeadLetter {
+            agent_id: "system".to_string(),
+            trigger_subject: String::new(),
+            trigger_payload: serde_json::Value::Null,
+            unattributed: Some(
+                "its advisory came from an earlier incarnation of the trigger stream".to_string(),
+            ),
+            ..dead(None)
+        };
+        assert_eq!(
+            dead_letter_lines(&unattributed),
+            "  2026-01-01 00:00:00  system  seq=12 via advisory\n      trigger exhausted after 5 \
+             deliveries (limit 5)\n      payload: null\n      names no trigger: its advisory \
+             came from an earlier incarnation of the trigger stream; `fq dead-letters requeue` \
+             refuses it\n"
+        );
     }
 
     /// A dead letter whose start was checked reads as it always has.
