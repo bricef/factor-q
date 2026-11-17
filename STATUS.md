@@ -414,12 +414,20 @@ the mark is there so that the run is checked first, and
 ([#1059](https://github.com/bricef/factor-q/issues/1059)). An advisory
 emitted before the trigger stream was last created is dead-lettered
 without a look at the claims, since its sequence names a message of the
-old stream, and the dead letter is attributed to the message the new
-stream holds at that sequence, if it holds one, with that message's
-agent, subject, payload and trigger id
-([#1054](https://github.com/bricef/factor-q/issues/1054)); a claim
-written before claims named their run is dead-lettered without a look
-too. And a trigger consumed without its run starting (it failed for
+old stream, so its dead letter may record a trigger whose run started.
+It is no longer attributed to the message the new stream holds at that
+sequence: the watch reads nothing there and writes the dead letter for
+the system with no subject, payload or trigger id, which
+`fq dead-letters requeue` refuses, and `fq dead-letters list` says why
+it names no trigger
+([#1054](https://github.com/bricef/factor-q/issues/1054)). Two readings
+of an advisory's incarnation still attribute it to the message at its
+sequence: one with no timestamp the watch can read is taken as the
+current incarnation's, though the broker always stamps one, and the
+incarnation is the one the daemon connected to, so an advisory emitted
+before the stream is recreated under a running daemon is read at its
+sequence until the daemon restarts. A claim written before claims named
+their run is dead-lettered without a look at the records, as before. And a trigger consumed without its run starting (it failed for
 good before its first WAL write, was refused at admission, was requeued
 from a hold, or was halted in setup, among others) has its claim
 released before its delivery is acked, so a lost ack brings the
