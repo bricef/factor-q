@@ -448,8 +448,9 @@ async fn a_trigger_still_handled_is_dead_lettered_once_its_copy_ends_with_nothin
 /// incarnation, which the advisory does not carry; a sequence the broker
 /// reported before the stream was last created names another message, so
 /// the claim at that sequence today says nothing about it. Such an advisory
-/// is dead-lettered as before, and the claim is left alone, though here the
-/// claim at that sequence has a start on record.
+/// is dead-lettered, naming no trigger ([`incarnation`] has what the dead
+/// letter says), and the claim is left alone, though here the claim at that
+/// sequence has a start on record.
 #[tokio::test]
 async fn an_advisory_from_an_earlier_incarnation_of_the_stream_does_not_consult_the_claims() {
     let (arena, _server) = arena().await;

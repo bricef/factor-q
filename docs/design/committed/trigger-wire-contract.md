@@ -98,11 +98,15 @@ Downstream, the identity appears on the invocation's `triggered` event as
 `trigger_id` (see [event schema](event-schema.md)), which is what links
 an invocation to the trigger that caused it, and on the dead-letter
 event's `trigger_id` annotation when a trigger exhausts its deliveries —
-**usually, not always.** Two cases produce a dead letter that names no
-trigger: one recorded before triggers were named, and one the advisory path
-reconstructs after the original has already aged off the trigger stream,
-which reads the identity rather than inventing one. Such a dead letter still
-lists and still carries its payload, but it cannot be requeued idempotently —
+**usually, not always.** Three cases produce a dead letter that names no
+trigger: one recorded before triggers were named; one the advisory path
+reconstructs after the original has already aged off the trigger stream;
+and one the advisory path records for an advisory from an earlier
+incarnation of the trigger stream, whose sequence names a message of the
+stream before it rather than the one the stream holds at that sequence now.
+The advisory path reads the identity rather than inventing one, and in its
+two cases it has no payload to record either. Such a dead letter still
+lists, but it cannot be requeued idempotently —
 there would be nothing to refuse a second attempt on — so `dead_letter.requeue`
 refuses it and re-running it means `trigger.publish`, as new work with a new
 name.

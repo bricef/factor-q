@@ -13,9 +13,10 @@
 //! **From the advisory to the records.** The broker's MAX_DELIVERIES
 //! advisory names the stream and the message's sequence. The claim table
 //! keys on those and the stream's incarnation, which the advisory does not
-//! carry: the watch takes this dispatcher's, and does not consult the
-//! claims at all for an advisory older than it (`advisory_watch`). The
-//! claim row then names the run:
+//! carry: the watch takes this dispatcher's, and for an advisory older than
+//! it consults neither the claims nor the message at its sequence, which in
+//! this incarnation is another trigger, and dead-letters it naming no
+//! trigger (`advisory_watch`). The claim row then names the run:
 //!
 //! - **No row:** nothing claims the delivery, so every copy that claimed
 //!   it gave the claim back before any start, or none ever did. Nothing is
