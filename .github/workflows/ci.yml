@@ -45,10 +45,20 @@ permissions:
 # `rust-ci` is a thin aggregate that fails iff any half fails; it keeps the
 # "Rust CI" required-status-check name, so the split needs no
 # branch-protection edit.
+#
+# Every job has a `timeout-minutes`, so a test that hangs fails its job in
+# minutes instead of holding it for GitHub's six-hour default (#1048). Two
+# values: 30 for the jobs that compile Rust or build the images, 10 for the
+# rest. Over the 260 runs before this was added the slowest job of all took
+# 13.7 minutes (Container image) and the slowest Runtime CI 11.1, so 30 is
+# more than twice the worst seen; none of the others reached 90 seconds.
+# A new job gets one of the two; raise a value only with the run that
+# shows the job needs longer.
 jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       runtime: ${{ steps.filter.outputs.runtime }}
       store: ${{ steps.filter.outputs.store }}
@@ -70,6 +80,7 @@ jobs:
   docs-lint:
     name: Docs lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # markdownlint runs via npx inside `just lint-docs`; setup-node
@@ -98,6 +109,7 @@ jobs:
   quality:
     name: Code quality
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
@@ -134,6 +146,7 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
@@ -158,6 +171,7 @@ jobs:
     name: Dependency audit comment
     needs: audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # PR context only — the comment needs somewhere to go. Fork PRs get a
     # read-only token, so the upsert would fail; the script exits 0 either
     # way, but there is no point spending the build. `always()`: the report is
@@ -196,6 +210,7 @@ jobs:
     name: Runtime CI
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # sccache: a per-compilation-unit compiler cache over GitHub's Actions
     # cache backend, layered on top of rust-cache's whole-target/ cache.
     # HONEST CAVEAT (#51 Deliverable 6): this OVERLAPS rust-cache, which
@@ -253,6 +268,7 @@ jobs:
     name: Store CI
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # sccache over the GHA backend — see the caveat on runtime-ci.
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -299,6 +315,7 @@ jobs:
     needs: [runtime-ci, store-ci, dashboard-ci, audit]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - run: |
           echo "runtime-ci:   ${{ needs.runtime-ci.result }}"
@@ -314,6 +331,7 @@ jobs:
     name: Dashboard CI
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # fq-dashboard path-depends on fq-runtime (services/fq-dashboard/Cargo.toml),
     # so this job builds when EITHER changes — hence the `runtime || dashboard`
     # gate on every step (rather than a dedicated filter that would duplicate
@@ -366,6 +384,7 @@ jobs:
     name: Dashboard E2E
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # sccache over the GHA backend — see the caveat on runtime-ci.
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -408,6 +427,7 @@ jobs:
     name: Dashboard screenshots
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Elevated for this job only: push the ci/dashboard-screenshots
     # branch + upsert the PR gallery comment. The workflow default
     # stays read-only.
@@ -459,6 +479,7 @@ jobs:
     name: Coupling metrics
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # PR context only — the comment needs somewhere to go, and the diff needs
     # a merge base. Fork PRs get a read-only token, so the upsert would fail;
     # the script exits 0 either way, but there is no point spending the build.
@@ -491,6 +512,7 @@ jobs:
   pr-size:
     name: PR size
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Every PR, no path filter: the question "is this one change?" applies to
     # a docs sweep as much as to a runtime change. PR context only, same-repo
     # only — the label and the comment need a writable token, which a fork
@@ -522,6 +544,7 @@ jobs:
   ops-ci:
     name: Ops scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
@@ -531,6 +554,7 @@ jobs:
     name: Go adapters
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - if: needs.changes.outputs.go != 'true'
         run: echo "No Go-relevant changes — skipping the build."
@@ -562,6 +586,7 @@ jobs:
     name: Container image
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - if: needs.changes.outputs.docker != 'true'
         run: echo "No Docker-relevant changes — skipping the image build."
