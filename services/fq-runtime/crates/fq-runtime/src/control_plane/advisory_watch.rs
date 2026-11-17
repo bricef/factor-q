@@ -39,7 +39,13 @@
 //! finds, and otherwise the watch writes the dead letter, marked as one
 //! whose start could not be checked and naming the run the claim names.
 //! An advisory from an earlier incarnation of the trigger stream is
-//! dead-lettered without looking: the records key on this one.
+//! dead-lettered without looking at the records, which key on this
+//! incarnation, or at the message this stream holds at its sequence, which
+//! is another trigger (issue 1054): the dead letter names no trigger, as
+//! for one whose message aged out of the stream. The incarnation is
+//! decided first, from the advisory's timestamp against the creation of
+//! the stream this daemon connected to, and one with no timestamp the
+//! watch can read is taken as this incarnation's.
 //!
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash
@@ -220,6 +226,30 @@ pub struct Hold {
     pub invocation_id: Option<String>,
 }
 
+/// The trigger an advisory names, as its dead letter records it
+/// ([`AdvisoryWatch::named_trigger`]).
+struct Named {
+    /// The trigger's agent, or none: the dead letter goes under the system
+    /// sentinel.
+    agent_id: Option<AgentId>,
+    subject: String,
+    payload: serde_json::Value,
+    /// The id the trigger's publisher gave it, if it gave one.
+    trigger_id: Option<Uuid>,
+}
+
+impl Named {
+    /// No trigger: no agent, subject, payload or id.
+    fn nothing() -> Self {
+        Self {
+            agent_id: None,
+            subject: String::new(),
+            payload: serde_json::Value::Null,
+            trigger_id: None,
+        }
+    }
+}
+
 /// Why the watch NAKs an advisory, for its line.
 enum Nak<'a> {
     /// It holds the verdict.
@@ -378,34 +408,16 @@ impl AdvisoryWatch {
             return Ok(AdvisoryOutcome::Skipped);
         }
 
-        // The original trigger: subject → agent, payload → annotation.
-        // Triggers age out after 24h — an older advisory still
-        // surfaces, attributed to the system sentinel.
-        let trigger = self
-            .bus
-            .jetstream()
-            .get_stream(TRIGGER_STREAM_NAME)
-            .await
-            .map_err(|err| AdvisoryWatchError::Stream(err.to_string()))?
-            .get_raw_message(advisory.stream_seq)
-            .await
-            .ok();
-
-        // The identity is read, never assigned. This watch did not
-        // dispatch the trigger, so it has no standing to name it: if
-        // the publisher stamped a header the id is recorded, and if the
-        // trigger arrived unnamed (or has aged out of the stream) the
-        // dead letter says so by carrying no name, rather than
-        // inventing one that matches nothing anywhere else.
-        let (agent_id, trigger_subject, trigger_payload, trigger_id) = match &trigger {
-            Some(raw) => (
-                agent_id_from_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
-                raw.subject.to_string(),
-                serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
-                trigger_id_in(Some(&raw.headers)),
-            ),
-            None => (None, String::new(), serde_json::Value::Null, None),
-        };
+        // The incarnation of the trigger stream the advisory was emitted
+        // for, decided before anything is read from the stream: a sequence
+        // from before the stream was last created is not this stream's.
+        let this_incarnation = advisory.of_incarnation(self.bus.trigger_stream_epoch());
+        let Named {
+            agent_id,
+            subject: trigger_subject,
+            payload: trigger_payload,
+            trigger_id,
+        } = self.named_trigger(&advisory, this_incarnation).await?;
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
@@ -429,13 +441,6 @@ impl AdvisoryWatch {
         // does not carry: one emitted before the stream was last created
         // names a message of the old stream, and today's claim at that
         // sequence says nothing about it, so the claims are not consulted.
-        let this_incarnation = advisory.of_incarnation(self.bus.trigger_stream_epoch());
-        if !this_incarnation {
-            info!(consumer = CONSUMER_NAME, stream_seq = advisory.stream_seq,
-                timestamp = ?advisory.timestamp,
-                "an advisory from an earlier incarnation of the trigger stream; its trigger's \
-                 claim cannot be found, so it is dead-lettered without consulting the claims");
-        }
         // Looked at long enough, a verdict that still cannot be taken is
         // written as a dead letter marked unchecked, after a last look for
         // a start on record.
@@ -500,8 +505,9 @@ impl AdvisoryWatch {
         });
         let event = match &agent_id {
             Some(agent) => Event::new(agent.clone(), Uuid::now_v7(), payload),
-            // Trigger aged out of the stream: the agent is unknowable,
-            // but the exhaustion still counts.
+            // No trigger named (it aged out of the stream, or the advisory
+            // is an earlier incarnation's): the agent is unknowable, but
+            // the exhaustion still counts.
             None => Event::system(Uuid::now_v7(), payload),
         }
         .annotate(
@@ -564,6 +570,62 @@ impl AdvisoryWatch {
              dead-letter event from its MAX_DELIVERIES advisory"
         );
         Ok(AdvisoryOutcome::Emitted)
+    }
+
+    /// The trigger `advisory` names, as its dead letter records it: the
+    /// message at the advisory's sequence, read off the trigger stream as
+    /// it is now, when the advisory was emitted for this incarnation of the
+    /// stream (`this_incarnation`).
+    ///
+    /// An advisory from an earlier incarnation is not read at all (issue
+    /// 1054). Its sequence is a position on the stream before this one,
+    /// whose messages went with it, and the message this stream holds at
+    /// the same sequence is another trigger: attributed to it, the dead
+    /// letter would name a trigger that may have run, or may never have
+    /// been exhausted, and requeuing it would run that work again. So it
+    /// names no trigger, as one whose message aged out of the stream does,
+    /// and the exhaustion is still recorded.
+    async fn named_trigger(
+        &self,
+        advisory: &MaxDeliverAdvisory,
+        this_incarnation: bool,
+    ) -> Result<Named, AdvisoryWatchError> {
+        if !this_incarnation {
+            info!(consumer = CONSUMER_NAME, stream_seq = advisory.stream_seq,
+                timestamp = ?advisory.timestamp,
+                "an advisory from an earlier incarnation of the trigger stream: its sequence \
+                 names a message of the stream before this one, so the watch reads neither the \
+                 message nor the claim this stream has at that sequence, and dead-letters it \
+                 naming no trigger");
+            return Ok(Named::nothing());
+        }
+        // The original trigger: subject → agent, payload → annotation.
+        // Triggers age out after 24h — an older advisory still
+        // surfaces, attributed to the system sentinel.
+        let trigger = self
+            .bus
+            .jetstream()
+            .get_stream(TRIGGER_STREAM_NAME)
+            .await
+            .map_err(|err| AdvisoryWatchError::Stream(err.to_string()))?
+            .get_raw_message(advisory.stream_seq)
+            .await
+            .ok();
+        // The identity is read, never assigned. This watch did not
+        // dispatch the trigger, so it has no standing to name it: if
+        // the publisher stamped a header the id is recorded, and if the
+        // trigger arrived unnamed (or has aged out of the stream) the
+        // dead letter says so by carrying no name, rather than
+        // inventing one that matches nothing anywhere else.
+        Ok(match trigger {
+            Some(raw) => Named {
+                agent_id: agent_id_from_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
+                subject: raw.subject.to_string(),
+                payload: serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
+                trigger_id: trigger_id_in(Some(&raw.headers)),
+            },
+            None => Named::nothing(),
+        })
     }
 
     /// Whether the agent's most recent `failed` event is a dead-letter

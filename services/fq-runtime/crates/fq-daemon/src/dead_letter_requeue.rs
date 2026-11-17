@@ -114,10 +114,13 @@ fn requeue_declaration() -> fq_ops::Command {
          Unlike `trigger.publish`, the record exists before this answers, so \
          the key resolves with no wait and there is no watermark to gate on. ",
         "A DEAD LETTER WITH NO `trigger_id` IS REFUSED, `Unlocatable`, and \
-         nothing is published. Two kinds have none: anything dead-lettered \
-         before triggers were named, and one the advisory path recorded after \
-         the original had aged off the trigger stream — it reads the identity \
-         and never invents one. Such a dead letter can only be re-run as new \
+         nothing is published. Three kinds have none: anything dead-lettered \
+         before triggers were named; one the advisory path recorded after the \
+         original had aged off the trigger stream; and one it recorded for an \
+         advisory from an earlier incarnation of the trigger stream, whose \
+         sequence names a message of the stream before it rather than the one \
+         this stream holds at that sequence — the advisory path reads the \
+         identity and never invents one. Such a dead letter can only be re-run as new \
          work, with `trigger.publish`, and that is deliberately your call to \
          make rather than this command's: requeueing it would hand back the \
          guarantee's name without the guarantee. ",
@@ -298,10 +301,12 @@ fn unnamed(event: &Event) -> WireError {
         message: format!(
             "the dead letter recorded by event `{}` names no trigger, so it cannot be requeued \
              idempotently — there would be nothing to refuse a second attempt on, and requeueing \
-             it twice would run the agent twice. Two dead letters are like this and neither is a \
-             defect: one recorded before triggers were named, and one the advisory path built \
-             after the original had already aged off the trigger stream, which reads the \
-             identity and never invents one. Its payload is still on the record \
+             it twice would run the agent twice. Three dead letters are like this and none is a \
+             defect: one recorded before triggers were named; one the advisory path built \
+             after the original had already aged off the trigger stream; and one it built for \
+             an advisory from an earlier incarnation of the trigger stream, whose sequence \
+             names a message of the stream before it. The advisory path reads the identity \
+             and never invents one. Whatever payload it recorded is on the record \
              (`dead_letter.list`), so re-running it is `trigger.publish` — new work, named \
              honestly as new work.",
             event.envelope.event_id
