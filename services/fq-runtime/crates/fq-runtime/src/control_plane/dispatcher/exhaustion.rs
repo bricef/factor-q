@@ -51,9 +51,11 @@
 //!   and the run may still start: a dead letter now would be false if it
 //!   does, and none at all would lose the trigger if the copy's task then
 //!   died. The note ends when the copy's start is marked or its `handle`
-//!   returns, and the verdict is taken then. A copy is still handling a
-//!   claim when its deliveries run out only if its keepalive stopped before
-//!   its start was marked: a drain or shutdown let it go, its keepalives
+//!   returns, and the verdict is taken then. A copy's delivery is renewed
+//!   until its start is marked or, if it does not start, until the
+//!   delivery is answered, so a copy is still handling a claim when its
+//!   deliveries run out only if its renewals stopped before either: a
+//!   drain or shutdown let it go while it waited or set up, its renewals
 //!   did not land, or its setup blocked its thread. A setup that waits is
 //!   kept alive, and its deliveries do not run out.
 //! - **The claim changed between the two reads** of it: marked started,

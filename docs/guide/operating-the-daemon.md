@@ -1350,10 +1350,12 @@ ends; or the claim changed between the watch's two reads of it (marked
 started, given back, or taken again under another id). On the last, the
 watch reads the claim once more, and a start it finds is a verdict: the
 claim marked started, or a run it had already read in the WAL. A start
-the watch has found is never held. A copy is still handling a claim
-when its deliveries run out only if its keepalive stopped before its
-start was marked: a drain or shutdown let it go, its keepalives did not
-land, or its setup blocked its thread. A setup that waits, such as one
+the watch has found is never held. A copy's delivery is renewed until
+its start is marked or, if it does not start, until the delivery is
+answered, so a copy is still handling a claim when its deliveries run
+out only if its renewals stopped before either: a drain or shutdown let
+it go while it waited or set up, its renewals did not land, or its setup
+blocked its thread. A setup that waits, such as one
 hung on an MCP server
 ([#1040](https://github.com/bricef/factor-q/issues/1040)), is kept
 alive, so its deliveries do not run out and the watch never sees it.

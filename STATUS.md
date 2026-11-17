@@ -394,10 +394,12 @@ still handling its claim, or the claim changed between the watch's two
 reads of it with no start found, the watch holds its verdict and
 decides again when the advisory comes back, rather than write a dead
 letter that could be false; a start it has found, the claim marked or
-the run in the WAL, is never held. A copy is still handling a claim
-when its deliveries run out only if its keepalive stopped before its
-start was marked: a drain or shutdown let it go, its keepalives did not
-land, or its setup blocked its thread. A hold ends about an hour after
+the run in the WAL, is never held. A copy's delivery is renewed until
+its start is marked or, if it does not start, until the delivery is
+answered, so a copy is still handling a claim when its deliveries run
+out only if its renewals stopped before either: a drain or shutdown let
+it go while it waited or set up, its renewals did not land, or its setup
+blocked its thread. A hold ends about an hour after
 the broker emitted the advisory, and not before the watch has looked
 at it three times, far inside the day the advisory stream keeps it,
 since an advisory dropped while held would leave no dead letter at
