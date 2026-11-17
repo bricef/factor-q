@@ -69,8 +69,9 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use uuid::Uuid;
 
-/// The start of the line for a copy dropped because this daemon already
-/// holds its trigger's claim with no start recorded.
+/// The start of the line for a copy dropped unanswered because it met a
+/// claim this daemon holds with no start recorded while another copy of
+/// the trigger is still handling it (`own_claim`).
 const HELD_DROP: &str = "dropping a redelivered trigger whose claim this daemon already holds";
 /// The clause the held drop adds on a trigger's last delivery.
 const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
@@ -582,8 +583,9 @@ impl Deliveries {
 ///
 /// The first copy parks in its setup. Its delivery is NAKed from here,
 /// once per attempt, so the broker redelivers it to the dispatcher until
-/// the bound; each copy meets the claim the first copy holds and is
-/// dropped. The gate then opens and the first copy starts and acks.
+/// the bound. Each copy meets the claim the first copy holds, and is
+/// dropped because the first copy is still handling it. The gate then
+/// opens and the first copy starts and acks.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_held_copy_is_one_warn_line_naming_its_delivery_and_the_last_says_so() {
     let mut daemon = Daemon::new("held", Script::GatedSetup).await;
@@ -841,7 +843,8 @@ async fn a_mark_that_blocks_past_the_time_bound_says_it_had_one_attempt() {
 /// **An ack that cannot be sent, after a mark refused on every attempt, is
 /// one `error` line naming the trigger**, beside the one line for the
 /// refused mark (#967). It is what an operator has to go on for a started
-/// run whose delivery will come back.
+/// run whose delivery will come back, to be settled by the run's start on
+/// record.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_ack_after_a_refused_mark_is_one_error_line_naming_the_trigger() {
     let mut daemon = Daemon::new("ack-fails", Script::RefusedMarksAndClosedConnection).await;

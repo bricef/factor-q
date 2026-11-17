@@ -150,9 +150,9 @@ async fn a_redelivery_during_the_first_copys_setup_is_dropped_and_counted_as_hel
     );
 }
 
-/// **A copy on a trigger's last delivery is dropped and counted as held,
-/// as any other copy is, and the first copy still starts the trigger and
-/// acks it.**
+/// **A copy on a trigger's last delivery, met while its first copy is
+/// still setting up, is dropped and counted as held like the copies before
+/// it, and the first copy still starts the trigger and acks it.**
 ///
 /// Past the last delivery no copy comes, and the trigger is dead-lettered
 /// unless the delivery is acked, whatever the claim is waiting on. The
