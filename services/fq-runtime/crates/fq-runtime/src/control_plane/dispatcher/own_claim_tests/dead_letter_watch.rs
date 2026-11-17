@@ -828,11 +828,14 @@ async fn a_verdict_inside_the_limit_is_still_held() {
     arena.finish(first).await;
 }
 
-/// **An advisory with no timestamp is not held.** Its age cannot be told,
-/// so it could never be said to have run out; held, it would wait until it
-/// aged out of its stream. It is dead-lettered unchecked at once.
+/// **An advisory with no timestamp is held only for its first looks.** Its
+/// age cannot be told, so it could never be said to have run out; held for
+/// as long as it lasted, it would wait until it aged out of its stream. It
+/// is held on its first and second deliveries, as any advisory is, so a
+/// reason that clears in a moment does not become an unchecked dead
+/// letter, and dead-lettered unchecked on the third.
 #[tokio::test]
-async fn an_advisory_with_no_timestamp_is_not_held() {
+async fn an_advisory_with_no_timestamp_is_held_only_for_its_first_looks() {
     let (arena, _server) = arena().await;
     publish(&arena).await;
     arena.worker.queue(Run::WaitsInSetup);
@@ -844,9 +847,18 @@ async fn an_advisory_with_no_timestamp_is_not_held() {
         .expect("an advisory is an object")
         .remove("timestamp");
     let unstamped = serde_json::to_vec(&unstamped).unwrap();
+    let watch = watch(&arena);
 
-    let outcome = watch(&arena)
-        .handle_advisory(&unstamped, LOOKED)
+    for delivered in 1..HELD_VERDICT_MIN_LOOKS {
+        let outcome = watch.handle_advisory(&unstamped, delivered).await.unwrap();
+        assert!(
+            matches!(outcome, AdvisoryOutcome::Held(_)),
+            "look {delivered}: {outcome:?}"
+        );
+        assert!(dead_letter(&arena).await.is_none());
+    }
+    let outcome = watch
+        .handle_advisory(&unstamped, HELD_VERDICT_MIN_LOOKS)
         .await
         .unwrap();
 
@@ -1143,4 +1155,77 @@ async fn the_watch_loop_ends_a_hold_past_the_limit_on_the_brokers_third_delivery
         .expect("the loop stops cleanly");
     arena.worker.setup_gate.add_permits(1);
     arena.finish(first).await;
+}
+
+/// A trigger whose run started, whose mark was refused and whose ack was
+/// lost, and whose run then finished: its claim is `claimed`, its WAL holds
+/// the finished run, and the watch's WAL read will play the archive
+/// hand-off (the ownership row is written, then the WAL row deleted) and so
+/// find the WAL empty. Returns the run's invocation id.
+async fn a_finished_run_handed_off_during_the_watchs_wal_read(arena: &Arena) -> String {
+    publish(arena).await;
+    refuse_updates(&arena.claim_db).await;
+    let first = arena.deliver(1, true).await;
+    assert!(!first.panicked, "{first:?}");
+    let run = arena.worker.starts()[0].0.to_string();
+    heal(&arena.claim_db).await;
+    assert_eq!(claim(arena).await, Some((false, Some(run.clone()))));
+    *arena.worker.hands_off_on_read.lock().unwrap() = Some(std::sync::Arc::clone(&arena.claims));
+    run
+}
+
+/// **A claim marked between the watch's reads after its run left the WAL
+/// is a start.** The run finished and is handed off to the control plane
+/// while the watch reads the WAL, so the watch reads an empty WAL; a copy
+/// then settles the claim by the ownership row and marks it, before the
+/// watch reads the claim again. The claim is no longer `claimed`, and the
+/// watch read no run in the WAL: only its read of the claim once more can
+/// call this a start, and it does. Inside the limit, where without that
+/// read the verdict would be held.
+#[tokio::test]
+async fn a_claim_marked_between_the_reads_after_its_run_left_the_wal_is_a_start() {
+    let (arena, _server) = arena().await;
+    let run = a_finished_run_handed_off_during_the_watchs_wal_read(&arena).await;
+    let advisory = exhaust(&arena).await;
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    assert!(arena.wal().await.is_empty(), "handed off during the read");
+    let second = arena.deliver(2, false).await;
+    assert_eq!(
+        second.acks, 1,
+        "the copy settles by the ownership row: {second:?}"
+    );
+    assert_eq!(claim(&arena).await, Some((true, Some(run))));
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+}
+
+/// **The same past the limit is not an unchecked dead letter.** Without
+/// the read of the claim once more, the last look would read the run's
+/// WAL again, find it empty, and write a dead letter marked unchecked for
+/// a trigger whose claim says its run started.
+#[tokio::test]
+async fn past_the_limit_a_claim_marked_after_its_run_left_the_wal_is_not_dead_lettered() {
+    let (arena, _server) = arena().await;
+    let run = a_finished_run_handed_off_during_the_watchs_wal_read(&arena).await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    let the_watch = std::sync::Arc::new(watch(&arena).with_held_verdict_limit(PAST));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    assert!(arena.wal().await.is_empty(), "handed off during the read");
+    let second = arena.deliver(2, false).await;
+    assert_eq!(
+        second.acks, 1,
+        "the copy settles by the ownership row: {second:?}"
+    );
+    assert_eq!(claim(&arena).await, Some((true, Some(run))));
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
 }

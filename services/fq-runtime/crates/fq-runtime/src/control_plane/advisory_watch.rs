@@ -898,6 +898,7 @@ mod tests {
         let old = at(Some("2026-11-17T09:00:00Z"));
         assert!(!old.looked_long_enough(HELD_VERDICT_MIN_LOOKS - 1, hour, now));
         assert!(old.looked_long_enough(HELD_VERDICT_MIN_LOOKS, hour, now));
+        assert!(!at(None).looked_long_enough(HELD_VERDICT_MIN_LOOKS - 1, hour, now));
         assert!(at(None).looked_long_enough(HELD_VERDICT_MIN_LOOKS, hour, now));
         assert!(!at(Some("2026-11-17T12:05:00Z")).looked_long_enough(100, hour, now));
     }
