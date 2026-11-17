@@ -10,9 +10,12 @@
 //!    hold or for a worker permit, setting up, or marking its start. That
 //!    copy owns the delivery, and an ack or a NAK from this one would
 //!    settle it underneath, so this copy is dropped unanswered, logged and
-//!    counted (`held_duplicate_dropped`). The holds and the setup keep the
-//!    first copy's delivery alive, so a copy comes only when those
-//!    in-progress acks stopped landing for a whole ack window.
+//!    counted (`held_duplicate_dropped`). The holds, the setup and the
+//!    mark keep the first copy's delivery alive, so a copy comes only when
+//!    those in-progress acks stopped landing for a whole ack window. A copy
+//!    stops handling its claim once its mark has landed or given up and its
+//!    delivery is answered, though its run goes on: from then on its run is
+//!    on record, and a copy that comes back is case 2.
 //! 2. **No copy is handling it, and the run has a start on record**, in the
 //!    worker's WAL or on the control plane's ownership table, by the one
 //!    definition ([`RunRecords`]) startup recovery and `fq doctor` read
@@ -40,11 +43,19 @@
 //!
 //! **Being handled.** Every copy notes the invocation id it will run under
 //! in [`Handling`] before it writes that id on a claim (a fresh claim, an
-//! adoption, a re-take), and the note is taken out when `handle` returns
-//! or unwinds from a panic. A row naming a noted id is case 1. A row naming
-//! an id that is not noted was written by a copy whose `handle` has ended;
-//! that copy polled its run, so a run that had not made its first WAL write
-//! by then never will.
+//! adoption, a re-take). The note is taken out once the copy has answered
+//! its delivery after its run's durable start, its mark having landed or
+//! given up (`mark_durable_started`), or else when `handle` returns or
+//! unwinds from a panic. A row naming a noted id is case 1. A row naming an
+//! id that is not noted names a run that has made its first WAL write, and
+//! so is on record, or one whose copy's `handle` has ended without it; that
+//! copy polled its run, so a run that had not made its first WAL write by
+//! then never will.
+//!
+//! **The note is checked before the records are read, and the order is
+//! load-bearing.** Read the other way round, a copy could find the WAL empty
+//! just before the first copy makes its first WAL write and dies, then find
+//! no note, and take the claim again over a run that started.
 //!
 //! **Reading the records.** The WAL first, through the worker
 //! ([`crate::worker::Worker::wal_run`]), then the ownership row, joined to
@@ -77,8 +88,9 @@ use super::claim::ClaimVerdict;
 use super::{CONSUMER_NAME, TriggerDispatcher};
 
 /// The invocation ids this dispatcher's copies of triggers are handling:
-/// noted before a copy writes its id on a claim, and taken out when its
-/// `handle` returns or unwinds.
+/// noted before a copy writes its id on a claim, and taken out once its
+/// delivery is answered after its durable start, or when its `handle`
+/// returns or unwinds.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Handling(Arc<Mutex<HashSet<String>>>);
 
@@ -104,11 +116,25 @@ impl Handling {
     }
 }
 
-/// A copy's note in [`Handling`]. `handle` holds it to its end, and
-/// dropping it, a panic's unwinding included, takes the note out.
+/// A copy's note in [`Handling`]. `handle` holds it until the copy has
+/// answered its delivery after its durable start ([`Handled::release`]),
+/// or to its end; dropping it, a panic's unwinding included, takes the
+/// note out.
 pub(super) struct Handled {
     handling: Handling,
     invocation_id: String,
+}
+
+impl Handled {
+    /// Stop counting as handling the claim, before the note drops. Once a
+    /// copy's run has made its first WAL write and its delivery has been
+    /// answered, its mark having landed or given up, nothing about the
+    /// delivery is left for it to settle, and its run is on record: a copy
+    /// that comes back is settled by that record (case 2), not dropped as
+    /// one of a claim in hand for as long as the run lasts.
+    pub(super) fn release(&mut self) {
+        self.handling.lock().remove(&self.invocation_id);
+    }
 }
 
 impl Drop for Handled {

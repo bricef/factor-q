@@ -495,7 +495,7 @@ impl TriggerDispatcher {
         let claim::ClaimVerdict::Proceed {
             claim,
             delivered: delivery_attempt,
-            handled: _handled,
+            mut handled,
         } = self.claim_delivery(msg).await
         else {
             return;
@@ -669,7 +669,8 @@ impl TriggerDispatcher {
                     // first WAL write): settled after the loop.
                     if signal.is_ok() {
                         durable_start_observed = true;
-                        self.mark_durable_started(msg, &claim, trigger_id).await;
+                        self.mark_durable_started(msg, &claim, trigger_id, &mut handled)
+                            .await;
                     }
                 }
                 outcome = &mut invocation => break outcome,
@@ -697,7 +698,8 @@ impl TriggerDispatcher {
         // marked and acked the same way.
         if !signal_resolved && durably_started.try_recv().is_ok() {
             durable_start_observed = true;
-            self.mark_durable_started(msg, &claim, trigger_id).await;
+            self.mark_durable_started(msg, &claim, trigger_id, &mut handled)
+                .await;
         }
 
         // The invocation returned before the durable-start signal fired,

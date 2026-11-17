@@ -292,24 +292,35 @@ impl TriggerDispatcher {
     /// start it again. Until then `fq doctor` lists the row as started and
     /// never marked, once a minute has passed.
     ///
+    /// **Once it returns, the copy stops counting as handling its claim**
+    /// ([`Handled::release`]): the delivery has been answered and the run's
+    /// first WAL write is on record, though the run goes on.
+    ///
     /// **An ack that is lost as well** is settled by the copy it brings
     /// back. An ack is published without waiting for the broker, so only
     /// an ack the client refuses to send is seen here, and
     /// `ack_keeping_claim` logs it; one lost on its way shows only when
     /// the delivery comes back. Either way the run carries on to its end.
-    /// A copy that reaches this daemon before it next starts meets its own
-    /// `claimed` row with no copy handling it, finds the run's start on
-    /// record in the worker's WAL or the control plane's ownership table,
-    /// and acks the delivery and marks the claim, without running the
-    /// trigger again (`own_claim`, #967).
+    /// A copy that reaches this daemon before it next starts, while the run
+    /// is still going or after it ended, meets its own `claimed` row with
+    /// no copy handling it, finds the run's start on record in the worker's
+    /// WAL or the control plane's ownership table, and acks the delivery
+    /// and marks the claim, without running the trigger again (`own_claim`,
+    /// #967). If the lost ack was the trigger's last delivery, no copy comes
+    /// back, and the dead-letter watch, which does not consult the records,
+    /// dead-letters a trigger whose run started as `trigger_exhausted`;
+    /// requeuing that dead letter would run the work twice. Having the
+    /// watch consult the records is pull request 5 of #967.
     pub(super) async fn mark_durable_started(
         &self,
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
+        handled: &mut Handled,
     ) {
         let Some((store, _)) = self.claim_store.as_ref() else {
             self.ack(msg, Some(trigger_id), "durably started").await;
+            handled.release();
             return;
         };
         let Claimed {
@@ -348,6 +359,7 @@ impl TriggerDispatcher {
                     .await;
             }
         }
+        handled.release();
     }
 
     pub(super) async fn release_unstarted_claim(&self, msg: &async_nats::jetstream::Message) {
