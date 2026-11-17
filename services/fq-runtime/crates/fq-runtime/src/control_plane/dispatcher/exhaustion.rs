@@ -45,7 +45,8 @@
 //!   false, and an operator who requeued it would run the work twice;
 //!   holding it costs a later verdict, and shows meanwhile as the watch's
 //!   consumer redelivering, and in the end as stuck, in `fq status` and
-//!   `fq doctor`.
+//!   `fq doctor`. A run already read in the WAL is a start even when the
+//!   second read of the claim, joined to the ownership row, then errs.
 //! - **A copy is still handling the claim.** Nothing is on record yet,
 //!   and the run may still start: a dead letter now would be false if it
 //!   does, and none at all would lose the trigger if the copy's task then
@@ -57,8 +58,11 @@
 //!   kept alive, and its deliveries do not run out.
 //! - **The claim changed between the two reads** of it: marked started,
 //!   given back, or taken again under another id. It is read once more,
-//!   and a start found is a verdict: the claim marked started, or a run the
-//!   check already read in the WAL. Only with neither is the verdict held.
+//!   and a start found is a verdict: the claim marked started (a run that
+//!   left the WAL is settled by its ownership row and marked so), or a run
+//!   the check already read in the WAL. Only with neither is the verdict
+//!   held, naming the run the claim names now: after a re-take, the one
+//!   that may yet start.
 //!
 //! A start found is never held: positive evidence wins wherever the check
 //! has it.
@@ -68,8 +72,9 @@
 //! emitted it) and the watch has looked at it
 //! `advisory_watch::HELD_VERDICT_MIN_LOOKS` times, the watch takes a last
 //! look ([`ExhaustionCheck::last_look`]): the verdict again, and the WAL
-//! read once for the run the claim names, trusting only a start found. If
-//! that still decides nothing, it writes the dead letter, marked as one
+//! read once for the run the claim names, trusting only a start found,
+//! which marks the claim as any start does. If that still decides
+//! nothing, it writes the dead letter, marked as one
 //! whose start could not be checked and naming the invocation the claim
 //! names ([`Exhausted::Undecided`] carries it), so the trigger is never
 //! lost silently when its advisory ages out of its stream. The reason on

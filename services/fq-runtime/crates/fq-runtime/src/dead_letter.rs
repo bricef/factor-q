@@ -70,9 +70,11 @@ fn start_unchecked(annotation: &serde_json::Value) -> StartUnchecked {
 }
 
 /// Set by the advisory watch on a dead letter it wrote without being able
-/// to check whether the trigger's run started (issue 967): its verdict was
-/// held past its limit. The value is a [`StartUnchecked`], the reason and
-/// the invocation the claim named; [`from_event`] lifts it into
+/// to check whether the trigger's run started (issue 967): its verdict
+/// could not be taken by the time the advisory was an hour old and looked
+/// at three times, and a last look found no start. The value is a
+/// [`StartUnchecked`], the reason and the invocation the claim names, the
+/// run to check before a requeue; [`from_event`] lifts it into
 /// [`DeadLetter::start_unchecked`] so every reader of the dead letter sees
 /// it.
 pub const DEAD_LETTER_START_UNCHECKED_KEY: &str = "start_unchecked";

@@ -48,12 +48,18 @@ pub struct DeadLetter {
     pub trigger_payload: serde_json::Value,
     pub error_message: String,
     /// Set when the dead-letter watch wrote this without being able to
-    /// check whether the trigger's run started: its verdict was held,
-    /// because a copy of the trigger was still handling the claim or the
-    /// run's records could not be read, until the watch's limit ran out.
-    /// Such a dead letter may be false, since the run may have started, so
-    /// look at the invocation it names before requeueing it. Absent on
-    /// every other dead letter.
+    /// check whether the trigger's run started. The watch held its
+    /// verdict, because a copy of the trigger was still handling the
+    /// claim, the run's records could not be read, or the claim changed
+    /// between two reads of it, until the advisory was an hour old and the
+    /// watch had looked at it three times; a last look then found no start
+    /// either. Such a dead letter may be false, since the run may have
+    /// started or may yet start. Before requeueing it, check the
+    /// invocation it names: the run started if `fq invocation show` gives
+    /// a `Live execution:` block, an `archived:` line, a `status:` other
+    /// than `(no coordination row)` or a trigger line saying
+    /// `durably started`. With no invocation named, find the run among the
+    /// agent's `triggered` events. Absent on every other dead letter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_unchecked: Option<StartUnchecked>,
 }
@@ -62,10 +68,16 @@ pub struct DeadLetter {
 /// look ([`DeadLetter::start_unchecked`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StartUnchecked {
-    /// Why the watch held its verdict until its limit ran out.
+    /// Why the watch could not take its verdict: the claim could not be
+    /// read; a copy of the trigger was still handling its claim; the
+    /// worker could not say whether its WAL holds the run; the claim could
+    /// not be read with its ownership row; or the claim changed while the
+    /// run's records were read. A reader that cannot parse the mark says
+    /// so here instead.
     pub reason: String,
-    /// The invocation the trigger's claim named, when the claim could be
-    /// read: the run to look at (`fq invocation show`) before requeueing.
+    /// The invocation the trigger's claim named when the watch last read
+    /// it: the run to check (`fq invocation show`) before requeueing.
+    /// Absent when the claim, or this mark, could not be read.
     pub invocation_id: Option<String>,
 }
 

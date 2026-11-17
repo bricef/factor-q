@@ -453,7 +453,7 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             if *num_redelivered > 0 && watch {
                 out.push_str(&format!(
                     "    redelivered:    {num_redelivered} (holding or retrying; no delivery \
-                     bound, and a held verdict ends within an hour of its advisory)\n"
+                     bound, and a held verdict ends about an hour after its advisory)\n"
                 ));
             } else if *num_redelivered > 0 {
                 out.push_str(&format!(

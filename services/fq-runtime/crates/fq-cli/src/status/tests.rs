@@ -605,7 +605,7 @@ fn a_redelivering_dead_letter_watch_is_described_as_holding_or_retrying() {
     assert!(
         out.contains(
             "    redelivered:    1 (holding or retrying; no delivery bound, and a held verdict \
-             ends within an hour of its advisory)\n"
+             ends about an hour after its advisory)\n"
         ),
         "got:\n{out}"
     );

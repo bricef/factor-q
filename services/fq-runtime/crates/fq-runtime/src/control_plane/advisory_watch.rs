@@ -29,13 +29,17 @@
 //! record for the trigger ([`ExhaustionCheck`]). With nothing on record
 //! it dead-letters the trigger. With a start on record it writes none,
 //! since requeuing it would run the work twice, and counts it. When it
-//! cannot tell, because a copy of the trigger is still handling its claim
-//! or the records cannot be read, it holds its verdict, NAKing the
-//! advisory to decide again, until [`HELD_VERDICT_LIMIT`] after the
-//! broker emitted the advisory, and then writes the dead letter anyway,
-//! marked as one whose start could not be checked. An advisory from an
-//! earlier incarnation of the trigger stream is dead-lettered without
-//! looking: the records key on this one.
+//! cannot tell, because a copy of the trigger is still handling its claim,
+//! the records cannot be read, or the claim changed between two reads of
+//! it with no start found, it holds its verdict, NAKing the advisory to
+//! decide again. A start it has found is never held. The hold ends once
+//! the advisory is [`HELD_VERDICT_LIMIT`] old, counted from when the
+//! broker emitted it, and the watch has looked at it
+//! [`HELD_VERDICT_MIN_LOOKS`] times: a last look then counts any start it
+//! finds, and otherwise the watch writes the dead letter, marked as one
+//! whose start could not be checked and naming the run the claim names.
+//! An advisory from an earlier incarnation of the trigger stream is
+//! dead-lettered without looking: the records key on this one.
 //!
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash
@@ -592,9 +596,10 @@ impl AdvisoryWatch {
 /// delay is what keeps a persistent fault, or a held verdict, from becoming
 /// a hot loop (#549). The line goes under the loop's [`RedeliveryLog`]:
 /// the first, then each step of the escalation, then one per interval,
-/// shared by every advisory the loop NAKs. A held verdict also gets a line of its own on the advisory's
-/// first delivery, so every held trigger is named in the log at least
-/// once, by sequence and subject, however many are held together.
+/// shared by every advisory the loop NAKs. A held verdict also gets a line
+/// of its own on the advisory's first delivery, so every held trigger is
+/// named in the log at least once, by sequence and subject, however many
+/// are held together.
 async fn nak_for_retry(
     msg: &async_nats::jetstream::Message,
     policy: ConsumerRedeliveryPolicy,
