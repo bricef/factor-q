@@ -1429,6 +1429,44 @@ sooner and writing fewer of these dead letters, not a point after which
 a held verdict cannot resolve: a copy still handling its claim can start
 its run after it, which is why the dead letter is marked.
 
+**An advisory from an earlier incarnation of the trigger stream names no
+trigger.** A recreated trigger stream numbers its messages from 1 again,
+and the advisory stream keeps an advisory for a day, so the watch can be
+handed an advisory the broker emitted before the stream was last
+created. Its sequence names a message of that earlier stream, gone with
+it, and the message the stream holds at the same sequence now is another
+trigger. Before it reads anything, the watch compares the advisory's
+timestamp with the creation of the stream the daemon connected to. For
+an earlier incarnation's advisory it reads neither the message nor the
+claim at that sequence, logs `an advisory from an earlier incarnation of
+the trigger stream` at info, and writes the dead letter for the system
+with no subject, payload or trigger id, as for a trigger that aged out
+([#1054](https://github.com/bricef/factor-q/issues/1054)).
+`fq dead-letters requeue` refuses it, and `fq dead-letters list` says why
+it names nothing:
+
+```text
+  2026-11-17 09:12:40  system  seq=7 via advisory
+      trigger exhausted after 5 deliveries (limit 5) — surfaced from the
+      MAX_DELIVERIES advisory (consumer fq-dispatcher)
+      payload: null
+      names no trigger: its advisory came from an earlier incarnation of
+      the trigger stream (emitted 2026-11-16T22:03:11Z, before the stream
+      was created at 2026-11-17T08:00:00Z), so its sequence is that
+      stream's, whose messages went with it; `fq dead-letters requeue`
+      refuses it
+```
+
+Its `seq=` is the earlier stream's and says nothing about the trigger at
+that sequence today, and since the claims were not consulted, the
+trigger it records may have started its run before the stream was
+recreated. An advisory with no timestamp the watch can read is taken as
+the current incarnation's, though the broker always stamps one. The
+watch learns the stream's incarnation when the daemon connects, so an
+advisory emitted before the stream is recreated under a running daemon
+is still attributed to the message at its sequence until the daemon
+restarts.
+
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
 rows below that point as they were (see
