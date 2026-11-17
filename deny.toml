@@ -56,6 +56,21 @@ ignore = [
     # Accepted 2026-11-10 (docs/decision-log.md, SECURITY.md R8); goes with
     # the sqlx upgrade in #941.
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.30 via sqlx-sqlite 0.9 (latest needs <0.38); exploit needs a crafted DB+WAL pair, and factor-q opens only its own state files" },
+    # chrono is unmaintained: every version, with no patched release. It is
+    # a direct dependency of five crates and every timestamp in the runtime
+    # is a `chrono::DateTime<Utc>`, the event envelope's included, so leaving
+    # it is a migration across 62 files that must keep the event wire
+    # format's timestamps byte for byte, not a dependency bump. No
+    # vulnerability is known. Accepted 2026-11-17 (docs/decision-log.md,
+    # SECURITY.md R9); goes with the migration in #1050.
+    { id = "RUSTSEC-2026-0543", reason = "chrono: every runtime timestamp is a chrono type; replacing it is a migration that must preserve the event wire format (#1050)" },
+    # humantime is unmaintained because it wraps chrono. factor-q calls
+    # nothing in it: it is reached only through tarpc 0.38.0, the latest
+    # release, which formats an RPC's deadline with it in two tracing spans
+    # and has no feature that turns it off. No vulnerability is known.
+    # Accepted 2026-11-17 (docs/decision-log.md, SECURITY.md R9); goes when
+    # tarpc drops it (#1051).
+    { id = "RUSTSEC-2026-0542", reason = "humantime: reached only through tarpc 0.38 (latest), which formats RPC deadlines with it; goes when tarpc drops it (#1051)" },
 ]
 
 [licenses]

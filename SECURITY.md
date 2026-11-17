@@ -12,7 +12,7 @@ the operational one-line caveats.
 
 ## Posture today
 
-*As of 2026-11-10.* This section describes what the code enforces now. If
+*As of 2026-11-17.* This section describes what the code enforces now. If
 it contradicts the code, one of them is wrong — fix whichever it is.
 
 - **Sandbox:** built-in tools are denied by default, and filesystem and
@@ -117,6 +117,7 @@ refreshed whenever a row changes.
 | R6 | Shared MCP servers are deduplicated without regard to `env`, so one server can run on another agent's credentials | Include the environment in the sharing key | [#523](https://github.com/bricef/factor-q/issues/523) |
 | R7 | The `includeContext` path of server-initiated MCP execution bypasses the inbound redaction chain | Route `includeContext` injection through the redact chain (ADR-0018 §4) | [#345](https://github.com/bricef/factor-q/issues/345) |
 | R8 | The bundled SQLite (`libsqlite3-sys` 0.30, via `sqlx` 0.9) can return stale process memory when it opens a crafted database and `-wal` pair (RUSTSEC-2026-0459). factor-q opens only its own state files, so reaching this needs write access to its state directory. Accepted on 2026-11-10; see the [decision log](docs/decision-log.md) | Upgrade `sqlx` once a release allows `libsqlite3-sys` 0.39, then drop the `deny.toml` ignore | [#941](https://github.com/bricef/factor-q/issues/941) |
+| R9 | `chrono`, which every timestamp in the runtime is built on, and `humantime`, reached only through `tarpc`, are unmaintained (RUSTSEC-2026-0543, RUSTSEC-2026-0542). No vulnerability is known in either; one found from now on would have no upstream fix. Accepted on 2026-11-17; see the [decision log](docs/decision-log.md) | Move the runtime's timestamps to a maintained time library and stop linking `humantime`, then drop both `deny.toml` ignores | [#1050](https://github.com/bricef/factor-q/issues/1050), [#1051](https://github.com/bricef/factor-q/issues/1051) |
 
 ## Fleet residual risk
 
