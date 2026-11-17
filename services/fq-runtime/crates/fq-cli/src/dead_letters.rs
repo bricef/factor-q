@@ -106,8 +106,12 @@ pub(crate) async fn list_dead_letters(
 /// so `status:   (no coordination row)` alone does not mean it never
 /// started: its `Live execution:` block, from the worker's WAL, says it
 /// did. For the same reason `fq invocation list`, which reads only
-/// ownership rows, misses it, so a dead letter that names no run points at
-/// `fq doctor`'s `Current executions` as well.
+/// ownership rows, misses it, and `fq doctor`'s `Current executions` only
+/// counts the runs in flight, so a dead letter that names no run (its
+/// claim, or its mark, could not be read) points at the agent's
+/// `triggered` events, which name each run and carry its payload. A look
+/// is a moment: a copy can still start the run after it, and both lines
+/// say so.
 fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
     let seq = d
         .trigger_stream_seq
@@ -131,13 +135,18 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
             Some(id) => format!(
                 "      -> before requeueing, run `fq invocation show {id}`: it started if that \
                  shows a `Live execution:` block, an `archived:` line, a `status:` other than \
-                 `(no coordination row)` or a trigger line saying `durably started`\n"
+                 `(no coordination row)` or a trigger line saying `durably started`; a copy can \
+                 still start it after you look\n"
             ),
-            None => "      -> no run is named, as the trigger's claim could not be read: before \
-                     requeueing, check for a run of this trigger under `fq doctor`'s `Current \
-                     executions` (runs in flight) and in `fq invocation list` (runs on the control \
-                     plane's record)\n"
-                .to_string(),
+            None => format!(
+                "      -> no run is named (the trigger's claim, or this mark, could not be read): \
+                 before requeueing, list {agent}'s runs with `fq events query --agent {agent} \
+                 --type triggered`, find the one with this payload by `fq events get <event-id>`, \
+                 and check it with `fq invocation show <id>`; `fq doctor`'s `Current executions` \
+                 only counts the runs in flight and names the stuck ones; a copy can still start \
+                 the run after you look\n",
+                agent = d.agent_id
+            ),
         });
     }
     out
@@ -176,8 +185,9 @@ mod tests {
     /// One the watch wrote without checking the trigger's start says so,
     /// with the reason, and gives the check to make before a requeue: what
     /// in `fq invocation show`'s output says the run started, the live
-    /// block of a run still going included; with no invocation named, where
-    /// a run in flight shows as well as the control plane's record.
+    /// block of a run still going included; with no invocation named, how
+    /// to find the run from the agent's `triggered` events, and what
+    /// `fq doctor` cannot tell.
     #[test]
     fn an_unchecked_dead_letter_says_so_and_gives_the_check() {
         let named = dead_letter_lines(&dead(Some(fq_ops::dead_letter::StartUnchecked {
@@ -190,7 +200,8 @@ mod tests {
                  run may have started\n      -> before requeueing, run `fq invocation show \
                  019a0000-0000-7000-8000-000000000001`: it started if that shows a `Live \
                  execution:` block, an `archived:` line, a `status:` other than `(no \
-                 coordination row)` or a trigger line saying `durably started`\n"
+                 coordination row)` or a trigger line saying `durably started`; a copy can still \
+                 start it after you look\n"
             ),
             "got:\n{named}"
         );
@@ -199,11 +210,14 @@ mod tests {
             invocation_id: None,
         })));
         assert!(
-            unnamed.contains("under `fq doctor`'s `Current executions` (runs in flight)"),
+            unnamed.contains(
+                "list researcher's runs with `fq events query --agent researcher --type \
+                 triggered`"
+            ),
             "got:\n{unnamed}"
         );
         assert!(
-            unnamed.contains("in `fq invocation list`"),
+            unnamed.contains("`fq doctor`'s `Current executions` only counts the runs in flight"),
             "got:\n{unnamed}"
         );
     }

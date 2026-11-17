@@ -1337,7 +1337,8 @@ claim marked started, or a run it had already read in the WAL. A start
 the watch has found is never held. A copy is still handling a claim
 when its deliveries run out only if its keepalive stopped before its
 start was marked: a drain or shutdown let it go, its keepalives did not
-land, or its setup blocked its thread. A setup that waits, such as one hung on an MCP server
+land, or its setup blocked its thread. A setup that waits, such as one
+hung on an MCP server
 ([#1040](https://github.com/bricef/factor-q/issues/1040)), is kept
 alive, so its deliveries do not run out and the watch never sees it.
 The watch logs `holding the dead-letter verdict on an exhausted
@@ -1381,7 +1382,7 @@ gives it lines of its own:
       -> before requeueing, run `fq invocation show 019a…`: it started if
       that shows a `Live execution:` block, an `archived:` line, a
       `status:` other than `(no coordination row)` or a trigger line
-      saying `durably started`
+      saying `durably started`; a copy can still start it after you look
 ```
 
 Such a dead letter can be false: the run may have started already,
@@ -1399,13 +1400,18 @@ or is dropped, and by startup recovery: for it the output says
 block, so that status alone does not mean the run never started. The
 run has not started if the command answers `no invocation found with
 id=…`, or shows none of the four, only a `trigger:` line saying
-`claimed, start not recorded` or `none recorded` and, at most, its
-`triggered` event. A copy still handling the claim can start it after
-you look. With no invocation named, the claim itself could not be
-read: look for a run of the trigger under `fq doctor`'s
-`Current executions`, which counts the runs in flight in this daemon,
-as well as in `fq invocation list`, which reads only ownership rows and
-so misses a run still going. Requeue it by its sequence
+`claimed, start not recorded` or `none recorded`, and its events: its
+`triggered` event at most, and a `failed` one if it was refused in
+setup. A copy still handling the claim can start it after you look.
+With no invocation named, the claim itself could not be read, or the
+dead letter's own mark could not: list the agent's runs with
+`fq events query --agent <agent> --type triggered`, read each with
+`fq events get <event-id>` to find the one whose trigger payload is
+this dead letter's, and check that run with `fq invocation show <id>`.
+`fq doctor`'s `Current executions` only counts the runs in flight in
+this daemon and names the stuck ones, so it can say whether any run is
+going, not which; `fq invocation list` reads only ownership rows and so
+misses a run still going. Requeue it by its sequence
 (`--trigger-seq`): without one, `fq dead-letters requeue` takes the
 agent's newest dead letter, checked or not
 ([#1059](https://github.com/bricef/factor-q/issues/1059)).
