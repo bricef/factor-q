@@ -126,6 +126,7 @@ fn the_report_roundtrips_through_its_declared_shape() {
                     malformed_acked: 0,
                     duplicate_dropped: 0,
                     held_duplicate_dropped: 0,
+                    abandoned_claim_retaken: 0,
                 }],
             },
         ],

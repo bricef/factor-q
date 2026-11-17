@@ -976,3 +976,162 @@ async fn schema_v1_upgrades_to_trigger_claim_v2() {
         TriggerClaim::Won
     );
 }
+
+/// **A claim of this daemon's own is taken again only while it still names
+/// the abandoned run (issue 967).** The re-take is a compare-and-set on the
+/// claimant, the `claimed` state and the invocation id the row names: two
+/// copies that both found the claim abandoned claim under the same id, so
+/// only the id in the condition lets exactly one of them win. It renames
+/// the claim and restarts its age, and touches no other row.
+#[tokio::test]
+async fn a_claim_is_taken_again_only_while_it_names_the_abandoned_run() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(9), "worker-a", "inv-abandoned", 100)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(10), "worker-a", "inv-other", 100)
+        .await
+        .unwrap();
+
+    assert!(
+        !store
+            .retake_trigger_claim(key(9), "worker-b", "inv-abandoned", "inv-new", 200)
+            .await
+            .unwrap(),
+        "another claimant's re-take changes nothing"
+    );
+    assert!(
+        !store
+            .retake_trigger_claim(key(9), "worker-a", "inv-wrong", "inv-new", 200)
+            .await
+            .unwrap(),
+        "a re-take naming another abandoned run changes nothing"
+    );
+    assert!(
+        store
+            .retake_trigger_claim(key(9), "worker-a", "inv-abandoned", "inv-first", 200)
+            .await
+            .unwrap(),
+        "the first copy to find the claim abandoned takes it"
+    );
+    assert!(
+        !store
+            .retake_trigger_claim(key(9), "worker-a", "inv-abandoned", "inv-second", 201)
+            .await
+            .unwrap(),
+        "a second copy that found it abandoned loses: the row names the first now"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(9), "probe", "probe", 0)
+            .await
+            .unwrap(),
+        TriggerClaim::Held {
+            claimant: "worker-a".to_string(),
+            invocation_id: Some("inv-first".to_string()),
+            claimed_at: 200,
+        },
+        "renamed, and its age restarted"
+    );
+    assert_eq!(
+        claimed_invocation(&store, key(10)).await.as_deref(),
+        Some("inv-other"),
+        "another trigger's claim is untouched"
+    );
+
+    store
+        .mark_trigger_started(key(10), "inv-other")
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .retake_trigger_claim(key(10), "worker-a", "inv-other", "inv-new", 300)
+            .await
+            .unwrap(),
+        "a claim marked started is never taken again"
+    );
+}
+
+/// **One claim reads joined to its ownership row as every claim does (issue
+/// 967).** The dispatcher reads a claim of its own through
+/// `unsettled_trigger_claim`, which must return what
+/// `unsettled_trigger_claims` returns for that row, the ownership status
+/// included, and nothing for a row that is no longer `claimed`.
+#[tokio::test]
+async fn one_claim_reads_joined_as_every_claim_does() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-owned", 100)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(2), "worker-a", "inv-bare", 101)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(3), "worker-a", "inv-started", 102)
+        .await
+        .unwrap();
+    store
+        .mark_trigger_started(key(3), "inv-started")
+        .await
+        .unwrap();
+    store
+        .upsert_invocation_ownership("inv-owned", "worker-a", 150, OwnerStatus::Completed)
+        .await
+        .unwrap();
+
+    let every = store.unsettled_trigger_claims().await.unwrap();
+    for seq in [1, 2] {
+        let one = store.unsettled_trigger_claim(key(seq)).await.unwrap();
+        let from_every = every.iter().find(|u| u.claim.stream_seq == seq).cloned();
+        assert_eq!(one, from_every, "claim {seq}");
+    }
+    assert_eq!(
+        store
+            .unsettled_trigger_claim(key(1))
+            .await
+            .unwrap()
+            .and_then(|u| u.owner_row_status),
+        Some("completed".to_string())
+    );
+    assert_eq!(
+        store.unsettled_trigger_claim(key(3)).await.unwrap(),
+        None,
+        "a started claim is not unsettled"
+    );
+    assert_eq!(store.unsettled_trigger_claim(key(4)).await.unwrap(), None);
+}
+
+/// **A start on record is either record holding the run (issue 967).** The
+/// one definition, shared by startup recovery, `fq doctor` and the
+/// dispatcher: a WAL row in flight or finished, or an ownership row of any
+/// status, counts; neither does not.
+#[test]
+fn a_start_on_record_is_either_record_holding_the_run() {
+    use crate::control_plane::store::RunRecords;
+    use crate::worker::WalRun;
+    let cases = [
+        (None, None, false),
+        (Some(WalRun::InFlight), None, true),
+        (Some(WalRun::Finished), None, true),
+        (None, Some("completed"), true),
+        (None, Some("failed"), true),
+        (None, Some("a status this build cannot read"), true),
+        (Some(WalRun::InFlight), Some("ambiguous"), true),
+    ];
+    for (wal, owner, expected) in cases {
+        let records = RunRecords {
+            wal,
+            owner_row_status: owner.map(str::to_string),
+        };
+        assert_eq!(records.start_on_record(), expected, "{records:?}");
+        assert_eq!(
+            records.where_on_record().is_some(),
+            expected,
+            "where_on_record agrees: {records:?}"
+        );
+    }
+}

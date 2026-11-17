@@ -1986,3 +1986,49 @@ async fn v8_to_v9_migration_preserves_rows_and_adds_shared_sequence() {
         Some(2)
     );
 }
+
+/// **One run's durable start reads as the scan reads it (issue 967).** The
+/// dispatcher asks about one invocation at a time
+/// (`WorkerStore::durable_start_of`), and the answer must be the scan's line
+/// for that run: a row in flight, a finished row awaiting its archive, and
+/// none for a run whose archive was acknowledged or that never wrote one.
+#[tokio::test]
+async fn one_runs_durable_start_reads_as_the_scan_reads_it() {
+    use crate::worker::{DurableStartReport, WalRun};
+    let (store, _dir) = open_fresh().await;
+    let mut in_flight = terminal_state_row("in-flight", 0);
+    in_flight.phase = "awaiting_model".to_string();
+    in_flight.terminal_at = None;
+    store.upsert_invocation_state(&in_flight).await.unwrap();
+    store
+        .upsert_invocation_state(&terminal_state_row("finished", 2))
+        .await
+        .unwrap();
+    store
+        .upsert_invocation_state(&terminal_state_row("archived", 2))
+        .await
+        .unwrap();
+    store.delete_invocation_state("archived").await.unwrap();
+
+    let report = DurableStartReport::scan(&store).await.unwrap();
+    for id in ["in-flight", "finished", "archived", "never-written"] {
+        let one = store
+            .durable_start_of(id)
+            .await
+            .unwrap()
+            .map(WalRun::of_row);
+        assert_eq!(
+            one,
+            report.run(id),
+            "{id}: one run's read disagrees with the scan"
+        );
+    }
+    assert_eq!(
+        store.durable_start_of("in-flight").await.unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        store.durable_start_of("finished").await.unwrap(),
+        Some(true)
+    );
+}

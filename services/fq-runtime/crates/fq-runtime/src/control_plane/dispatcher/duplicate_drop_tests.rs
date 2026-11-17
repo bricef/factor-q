@@ -4,11 +4,13 @@
 //! `claim_delivery` drops a redelivered trigger in two arms. A copy whose
 //! claim records a durable start is a copy of a run that has started: it
 //! is acked, logged and counted as `duplicate_dropped`. A copy whose claim
-//! this daemon already holds with no start recorded is a copy of a trigger
-//! still in hand: it is left unacked, logged and counted as
-//! `held_duplicate_dropped`. A refused copy writes nothing anywhere else,
-//! so the log line and the count are the only record of it, and each arm
-//! must move its own count and not the other's.
+//! this daemon already holds with no start recorded, while a copy of the
+//! trigger is still handling it, is a copy of a trigger still in hand: it
+//! is left unacked, logged and counted as `held_duplicate_dropped`. A
+//! refused copy writes nothing anywhere else, so the log line and the
+//! count are the only record of it, and each arm must move its own count
+//! and not the other's. (A copy whose claim no copy is handling any more
+//! is settled by what is on record instead: `own_claim_tests`.)
 //!
 //! The held copy is made while its first copy is still setting up. Setup
 //! is kept alive with in-progress acks, so the broker redelivers under it

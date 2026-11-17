@@ -118,7 +118,10 @@ pub enum ConsumerHealth {
         /// Redeliveries this consumer acked and dropped because the
         /// invocation they would have started has already started: the
         /// durable claim on that delivery's stream sequence had
-        /// recorded its start. Copies of a run that has started. Zero
+        /// recorded its start, or the claim was the daemon's own, no copy
+        /// was handling it, and the run's start was on record, when the
+        /// claim is marked as the copy is acked. Copies of a run that has
+        /// started. Zero
         /// on a consumer that was never offered a message it had
         /// already begun. Reported because it is the only trace such a
         /// delivery leaves: no invocation is created for it, so
@@ -126,24 +129,53 @@ pub enum ConsumerHealth {
         /// daemon started; a restart resets it.
         duplicate_dropped: u64,
         /// Redeliveries this consumer dropped and left unacked because
-        /// they arrived before a start was recorded on their claim, and
-        /// the claim is the daemon's own. "Held" in the name is the
-        /// claim's state: the daemon holds the durable claim on that
-        /// delivery's stream sequence, and it records no start. It is
-        /// not an admission hold (a paused model, an agent at its cap,
-        /// a wait for a worker permit), though a trigger in one is a
-        /// common first copy. Copies of a trigger still in hand. The
-        /// first copy may be waiting or still starting (its holds and
-        /// its setup renew its ack window, so a copy arrives under it
-        /// only when those renewals stop landing for a whole window),
-        /// or the daemon may never settle that claim; nothing on the
-        /// claim says which, and neither does this count. The daemon
-        /// logs each one at warn with its subject, its sequence, its
-        /// attempt and the claim's age. Counted in memory since the
-        /// daemon started, like `duplicate_dropped`. A report from a
-        /// daemon that does not send it reads as zero.
+        /// they arrived before a start was recorded on their claim, the
+        /// claim is the daemon's own, and either a copy of the trigger was
+        /// still handling it, or no copy was and the claim could not be
+        /// settled from the records just then: another copy that met the
+        /// same claim settled or took it first, or reading the records or
+        /// taking the claim again failed. The first is the usual case:
+        /// copies of a trigger still in hand, whose first copy is waiting,
+        /// setting up or marking its start (its holds, its setup and its
+        /// mark renew its ack window, so a copy arrives under it only when
+        /// those renewals stop landing for a whole window), and still
+        /// settles the delivery. The second leaves the copy for a later
+        /// one to settle. A copy whose claim no copy is handling, and
+        /// whose records can be read, is settled by them and not counted
+        /// here: acked, and counted in `duplicate_dropped`, where the run
+        /// started; taken again, and counted in `abandoned_claim_retaken`,
+        /// where nothing is on record. "Held" in the name is the claim's
+        /// state: the daemon holds the durable claim on that delivery's
+        /// stream sequence, and it records no start. It is not an
+        /// admission hold (a paused model, an agent at its cap, a wait for
+        /// a worker permit), though a trigger in one is a common first
+        /// copy. The daemon logs each one at warn with its subject, its
+        /// sequence, its attempt, the claim's age and why. Counted in memory since the daemon started, like
+        /// `duplicate_dropped`. A report from a daemon that does not send
+        /// it reads as zero.
         #[serde(default)]
         held_duplicate_dropped: u64,
+        /// Claims the daemon held itself, with no start recorded on them,
+        /// that a delivery took again: no copy of the trigger was handling
+        /// the claim any more and its run had no start on record, in the
+        /// worker's WAL or the control plane's, because the copy that took
+        /// it ended before its run's first WAL write and left the delivery
+        /// unsettled (its task died, or releasing the claim before a NAK
+        /// failed, or before an ack that was lost as well), or because a
+        /// drain left it for the next binary. Each was taken under a new
+        /// invocation id to run the trigger once. The copy that took it
+        /// runs the trigger unless a drain or a shutdown under way stops it
+        /// first, or the trigger is refused after its claim as any delivery
+        /// would be (its agent no longer loaded, a payload that does not
+        /// parse), so this counts claims taken again, not runs. Not a
+        /// duplicate. Not a fault either, though each one follows a failure
+        /// the daemon logs; the daemon logs each at warn with its subject,
+        /// its sequence, its attempt, the claim's age and the abandoned
+        /// invocation id. Counted in memory since the daemon started, like
+        /// `duplicate_dropped`. A report from a daemon that does not send
+        /// it reads as zero.
+        #[serde(default)]
+        abandoned_claim_retaken: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is
@@ -559,10 +591,13 @@ impl ArchiveSweep {
 /// A claim this daemon holds for an invocation that has not started is
 /// never one of these, however old. A trigger can wait behind a paused
 /// model or a full agent for hours, and nothing on the claim says
-/// whether the daemon holding it is still going to start it, so the
-/// report does not guess. Nor is a claim whose delivery can no longer
-/// change anything: one whose run started but whose message is gone, and
-/// one an exited process left that is older than the report's horizon.
+/// whether a copy of its trigger is still handling it, so the report does
+/// not guess. The dispatcher knows, and settles such a claim that no copy
+/// is handling when the trigger's next delivery arrives: it takes the
+/// claim again to run the trigger. Nor is a claim whose delivery can no
+/// longer change anything: one whose run started but whose message is
+/// gone, and one an exited process left that is older than the report's
+/// horizon.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct StrandedTriggerClaim {
     /// The delivery, and the claim on it as the control plane holds it.
@@ -638,11 +673,17 @@ pub enum StrandedClaimFinding {
     /// the claim store refused the mark and the dispatcher acked the
     /// delivery anyway, keeping its claim; or the run's task panicked in
     /// the step that made its first durable write, and nothing was acked.
-    /// Where nothing was acked, or the ack was lost, every redelivery is
-    /// dropped until this daemon next starts and its recovery marks the
-    /// claim, and a trigger whose deliveries run out first ends as a
-    /// `trigger_exhausted` dead letter although its run started. Left by a
-    /// process that has exited, a redelivery would be adopted and start
+    /// Where nothing was acked, or the ack was lost, the next redelivery
+    /// finds the run's start on record, is acked and marks the claim,
+    /// without starting the work again; this daemon's next start marks it
+    /// if none comes. If none comes because the trigger's last delivery's
+    /// answer never reached the broker, the dead-letter watch, which does
+    /// not consult the records, ends the trigger as a `trigger_exhausted`
+    /// dead letter although its run started: that dead letter is false,
+    /// and requeuing it runs the work twice. A run whose task panicked stays in flight,
+    /// with nothing driving it, until that start's recovery resumes it.
+    /// Left by
+    /// a process that has exited, a redelivery would be adopted and start
     /// the work again, and a false dead letter may already exist.
     StartedUnmarked,
     /// Left by a process that has exited, by a build that did not name the

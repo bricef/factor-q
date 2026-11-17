@@ -39,7 +39,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     },
     {
@@ -53,7 +54,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     },
     {
@@ -67,7 +69,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     },
     {
@@ -81,7 +84,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     },
     {
@@ -95,7 +99,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     },
     {
@@ -109,7 +114,8 @@
         "stuck": false,
         "malformed_acked": 0,
         "duplicate_dropped": 0,
-        "held_duplicate_dropped": 0
+        "held_duplicate_dropped": 0,
+        "abandoned_claim_retaken": 0
       }
     }
   ],

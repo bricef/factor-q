@@ -189,13 +189,15 @@ fn render_consumers(
                 malformed_acked,
                 duplicate_dropped,
                 held_duplicate_dropped,
+                abandoned_claim_retaken,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}{}\n",
+                     pending {num_pending}{}{}{}\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
+                    retaken_suffix(*abandoned_claim_retaken)
                 ));
                 // The held-copy count does not choose this step. It only
                 // ever grows while the daemon runs, so one held copy in
@@ -213,6 +215,7 @@ fn render_consumers(
                     ));
                 }
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
+                out.push_str(&retaken_note(*abandoned_claim_retaken));
             }
             ConsumerHealth::Active {
                 name,
@@ -220,14 +223,17 @@ fn render_consumers(
                 malformed_acked,
                 duplicate_dropped,
                 held_duplicate_dropped,
+                abandoned_claim_retaken,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{}{})\n",
+                    "  {name}: ok (pending {num_pending}{}{}{})\n",
                     malformed_suffix(*malformed_acked),
-                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped)
+                    duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
+                    retaken_suffix(*abandoned_claim_retaken)
                 ));
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
+                out.push_str(&retaken_note(*abandoned_claim_retaken));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -295,10 +301,11 @@ fn malformed_suffix(malformed_acked: u64) -> String {
 /// (#809, #968), and a refused copy starts nothing and mints no id, so
 /// this and its warn line in the daemon log are its only trace. The two
 /// are told apart by when the copy arrived, because they are different
-/// facts: a copy that came after its run's start was recorded was
-/// acked, while one that came before a start was recorded on a claim
-/// this daemon holds was left unacked for a first copy that may or may
-/// not settle it ([`held_duplicate_note`]). The second is not called
+/// facts: a copy that came after its run's start was recorded, on the
+/// claim or, for a claim of this daemon's no copy was handling, in the
+/// run's own records, was acked, while one that came before a start was
+/// recorded on a claim this daemon holds was left unacked for the copy
+/// still handling it ([`held_duplicate_note`]). The second is not called
 /// "held": on this report that word is the admission holds' (`Agents at
 /// cap`). Both counts are in the daemon's memory, which the phrase says.
 fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> String {
@@ -324,24 +331,66 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
 /// recorded, saying what that count can and cannot tell, or nothing when
 /// it is zero.
 ///
-/// It does not say whether anything is wrong, because the claim does
-/// not. The claim's first copy may still be waiting or starting: a
-/// delivery is redelivered under it when its keepalive stops landing for
-/// a whole ack window. Or this daemon may never
-/// settle the claim, and every delivery of that trigger is dropped the
-/// same way until it is dead-lettered. The stranded-claims block of the
-/// same report lists such a claim once a run is on record for it, which
-/// the line points at; one with no run on record is not listed at all,
-/// so this line and the log are where it shows.
+/// It does not say whether anything is wrong. Most such copies met a
+/// claim a copy of their trigger was still handling, waiting, starting or
+/// marking its start: a delivery is redelivered under it when its
+/// keepalive stops landing for a whole ack window, and the first copy
+/// still settles it. The rest met a claim no copy was handling any more
+/// and could not settle it from the records just then (#967): another
+/// copy that met the same claim got to it first, or reading the records
+/// or taking the claim again failed, and a later copy asks again. (A
+/// claim naming no run is dropped and counted too, but no row this
+/// daemon writes names none, so it is a guard and not a cause to list.) The stranded-claims block of the same report lists
+/// such a claim once a run is on record for it and its mark is overdue,
+/// which the line points at.
 fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
     if held_duplicate_dropped == 0 {
         return String::new();
     }
     "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
-     start on it, left unacked: its first copy was still waiting or starting, or this daemon \
-     will never settle that claim, and the claim does not say which; the daemon log has a warn \
-     line for each with its subject, sequence, attempt and the claim's age, and such a claim \
-     whose run is on record is listed under \"Stranded trigger claims\" below\n"
+     start on it and was left unacked: usually a copy of the trigger was still handling the claim \
+     and settles it itself; otherwise the claim could not be settled from the records just then \
+     (another copy got to it first, or a read or the re-take failed) and a later copy asks \
+     again; the daemon log has a warn line for each with its subject, \
+     sequence, attempt, the claim's age and why, and such a claim whose run is on record is \
+     listed under \"Stranded trigger claims\" below\n"
+        .to_string()
+}
+
+/// `, abandoned claims taken again since this daemon started: N`, or
+/// nothing when none was. Apart from the duplicates, because it is not
+/// one: such a copy took the claim to run the trigger ([`retaken_note`]).
+fn retaken_suffix(abandoned_claim_retaken: u64) -> String {
+    if abandoned_claim_retaken == 0 {
+        String::new()
+    } else {
+        format!(
+            ", abandoned claims taken again since this daemon started: {abandoned_claim_retaken}"
+        )
+    }
+}
+
+/// The line under a consumer that took abandoned claims again, saying what
+/// that count means, or nothing when it is zero (#967).
+///
+/// It is not a fault. Each one follows a failure the daemon logged (a
+/// run's task that died before its first WAL write; a claim release that
+/// failed before a NAK, or before an ack that was then lost) or a drain
+/// that left the claim for the next binary; the warn line for each names
+/// the abandoned invocation id, which is where to look for why. It counts
+/// claims taken again, not runs: the copy that took one runs the trigger
+/// unless a drain or the trigger's own checks stop it first.
+fn retaken_note(abandoned_claim_retaken: u64) -> String {
+    if abandoned_claim_retaken == 0 {
+        return String::new();
+    }
+    "  -> \"taken again\" counts claims this daemon held that a copy took again, under a new \
+     invocation id, to run the trigger: no copy was handling the claim any more and its run had \
+     no start on record, because the copy that took it ended before its first WAL write without \
+     settling the delivery (its task died; giving the claim back failed before a NAK, or before \
+     an ack that was then lost; or a drain left it); the copy then runs the trigger unless a drain \
+     or the trigger's own checks stop it first; the daemon log has a warn line for each naming \
+     the abandoned invocation id, and the failure before it\n"
         .to_string()
 }
 

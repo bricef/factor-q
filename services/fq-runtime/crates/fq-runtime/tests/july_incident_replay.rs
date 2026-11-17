@@ -56,6 +56,7 @@
 //! None of them runs the consume loop with a claim store installed. These
 //! do, which is the path a redelivery took in July.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,7 +72,7 @@ use fq_runtime::llm::{ChatResponse, LlmClient};
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
 use fq_runtime::worker::{
     DrainRequest, DrainState, DurableStart, DurableStartReport, ExecutorError, InvocationOutcome,
-    Worker, WorkerStore,
+    WalRun, Worker, WorkerStore,
 };
 use fq_runtime::{DispatcherError, TriggerDispatcher, shared_registry};
 use serde_json::json;
@@ -89,8 +90,19 @@ struct Start {
 
 /// A worker whose two interesting moments are in the test's hands: the
 /// first WAL write, and the end of the invocation.
+///
+/// It writes no WAL, but it answers the dispatcher's question about one
+/// (`Worker::wal_run`) truthfully: a run is on record from the moment it
+/// passes its first-WAL-write gate, as a real run is from its first WAL
+/// write. A redelivered copy that meets this daemon's own claim is
+/// therefore judged by the dispatcher's own rules, which is what the
+/// replays are cited for, and not dropped because its records could not be
+/// read, which the trait's default answer would make it.
 struct StagedWorker {
     starts: Mutex<Vec<Start>>,
+    /// The runs past their first-WAL-write gate, by invocation id, and
+    /// whether each has finished.
+    on_record: Mutex<HashMap<String, bool>>,
     /// One permit per invocation allowed to reach its first WAL write.
     first_wal_write: Semaphore,
     /// One permit per invocation allowed to finish.
@@ -120,6 +132,7 @@ impl StagedWorker {
     fn new(setup: Setup) -> Arc<Self> {
         Arc::new(Self {
             starts: Mutex::new(Vec::new()),
+            on_record: Mutex::new(HashMap::new()),
             first_wal_write: Semaphore::new(0),
             finish: Semaphore::new(0),
             setup,
@@ -184,6 +197,10 @@ impl Worker for StagedWorker {
                 }
             }),
         }
+        self.on_record
+            .lock()
+            .unwrap()
+            .insert(invocation_id.to_string(), false);
         durable_start.fire();
         // An invocation that has just made its first WAL write has work
         // still to do, and the real runner's next move is always an
@@ -201,6 +218,10 @@ impl Worker for StagedWorker {
             .await
             .expect("the gate is never closed")
             .forget();
+        self.on_record
+            .lock()
+            .unwrap()
+            .insert(invocation_id.to_string(), true);
         Ok(InvocationOutcome::Completed {
             invocation_id,
             response: ChatResponse::completed(None),
@@ -209,10 +230,41 @@ impl Worker for StagedWorker {
         })
     }
 
+    async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        Ok(self
+            .on_record
+            .lock()
+            .unwrap()
+            .get(invocation_id)
+            .map(|finished| {
+                if *finished {
+                    WalRun::Finished
+                } else {
+                    WalRun::InFlight
+                }
+            }))
+    }
+
     async fn request_drain(&self, _req: DrainRequest) {}
 
     fn drain_status(&self) -> DrainState {
         DrainState::Running
+    }
+}
+
+/// Opens every gate of the worker if the test unwinds. A run that blocks
+/// its thread at a gate ([`Setup::BlocksItsThread`]) holds a runtime
+/// worker until the gate opens, and a runtime cannot shut down under it:
+/// without this, a failing assertion hangs the test instead of reporting
+/// the failure.
+struct OpenGatesOnUnwind(Arc<StagedWorker>);
+
+impl Drop for OpenGatesOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.first_wal_write.add_permits(64);
+            self.0.finish.add_permits(64);
+        }
     }
 }
 
@@ -228,6 +280,7 @@ struct World {
     consumer: async_nats::jetstream::consumer::PullConsumer,
     shutdown: oneshot::Sender<()>,
     run: tokio::task::JoinHandle<Result<(), DispatcherError>>,
+    _gates: OpenGatesOnUnwind,
     _server: fq_test_support::NatsServer,
     _scratch: tempfile::TempDir,
 }
@@ -290,6 +343,7 @@ impl World {
             .expect("open the dispatcher's durable");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let run = tokio::spawn(dispatcher.run(shutdown_rx));
+        let gates = OpenGatesOnUnwind(worker.clone());
 
         Self {
             bus,
@@ -299,6 +353,7 @@ impl World {
             consumer,
             shutdown,
             run,
+            _gates: gates,
             _server: server,
             _scratch: scratch,
         }
