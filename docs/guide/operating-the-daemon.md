@@ -1194,11 +1194,11 @@ something else.)
      daemon holds with no start on it and was left unacked: usually a
      copy of the trigger was still handling the claim and settles it
      itself; otherwise the claim could not be settled from the records
-     just then (another copy got to it first, the claim names no run, or
-     a read or the re-take failed) and a later copy asks again; the
-     daemon log has a warn line for each with its subject, sequence,
-     attempt, the claim's age and why, and such a claim whose run is on
-     record is listed under "Stranded trigger claims" below
+     just then (another copy got to it first, or a read or the re-take
+     failed) and a later copy asks again; the daemon log has a warn line
+     for each with its subject, sequence, attempt, the claim's age and
+     why, and such a claim whose run is on record is listed under
+     "Stranded trigger claims" below
   -> "taken again" counts claims this daemon held that a copy took
      again, under a new invocation id, to run the trigger: no copy was
      handling the claim any more and its run had no start on record,
@@ -1227,8 +1227,8 @@ something else.)
   going as well as after it ends. That copy is acked too, the claim is
   marked, and the trigger is not run again
   ([#967](https://github.com/bricef/factor-q/issues/967)). If the lost
-  ack was the trigger's last delivery, though, no copy comes back to be
-  acked: see "Started, never marked".
+  answer was the trigger's last delivery's, though, no copy comes back
+  to be acked: see "Started, never marked".
 - **Before a start was recorded.** The claim is this daemon's, records
   no start, and a copy of the trigger is still handling it, so the copy
   is dropped and left unacked for that one. That first copy may be
@@ -1242,10 +1242,9 @@ something else.)
   Either way it still starts once, and settles the delivery itself. A
   copy is counted here too when no copy is handling the claim but it
   cannot be settled from the records just then, and is left for a later
-  copy: another copy that met the same claim settled or took it first;
-  the claim names no run (a build from before claims named their run
-  wrote it); or reading the records, or taking the claim again, failed
-  (the worker or the claim store erred).
+  copy: another copy that met the same claim settled or took it first,
+  or reading the records, or taking the claim again, failed (the worker
+  or the claim store erred).
 - **Taken again.** The claim is this daemon's, records no start, no copy
   of the trigger is handling it any more, and nothing of its run is on
   record: the copy that took it ended before its run's first durable
@@ -1444,14 +1443,16 @@ name the horizon.
   trigger whose claim this daemon holds` at warn and counted as a
   duplicate dropped after its run started.
 
-  **No redelivery comes after the trigger's last delivery.** If that
-  fifth delivery is the one that started the run, and its task then
-  died or its ack was lost, nothing is left for the dispatcher to
-  settle, and once that delivery's ack window lapses the advisory watch
-  dead-letters the trigger as `trigger_exhausted`, without consulting
-  the claim or the run's records. That dead letter is false, and requeuing
-  it starts the work twice: read the run with `fq invocation show` and
-  do not requeue it. Having the watch consult the records is the fifth
+  **No redelivery comes after the trigger's last delivery.** If the
+  fifth delivery's answer never reaches the broker while its run has a
+  start on record, nothing is left for the dispatcher to settle: that
+  delivery started the run and its task then died, or its mark landed
+  or gave up and its ack was lost, or it was a copy of a run started
+  earlier and its ack was lost. Once that delivery's ack window lapses,
+  the advisory watch dead-letters the trigger as `trigger_exhausted`,
+  without consulting the claim or the run's records. That dead letter
+  is false, and requeuing it starts the work twice: read the run with
+  `fq invocation show` and do not requeue it. Having the watch consult the records is the fifth
   pull request of [#967](https://github.com/bricef/factor-q/issues/967),
   not built yet.
 

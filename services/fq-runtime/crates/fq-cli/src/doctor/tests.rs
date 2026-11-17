@@ -609,8 +609,8 @@ fn held_duplicates_are_counted_apart_and_explained_without_a_verdict() {
              was recorded\" is a copy that met a claim this daemon holds with no start on it and \
              was left unacked: usually a copy of the trigger was still handling the claim and \
              settles it itself; otherwise the claim could not be settled from the records just \
-             then (another copy got to it first, the claim names no run, or a read or the re-take \
-             failed) and a later copy asks again; the daemon log has a warn line for each with \
+             then (another copy got to it first, or a read or the re-take failed) and a later \
+             copy asks again; the daemon log has a warn line for each with \
              its subject, sequence, attempt, the claim's age and why, and such a claim whose run \
              is on record is listed under \"Stranded trigger claims\" below\n"
         ),

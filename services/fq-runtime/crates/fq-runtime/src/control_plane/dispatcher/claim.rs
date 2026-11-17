@@ -22,7 +22,9 @@ use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 /// `Admission` in one function is a reading hazard, not a symmetry.
 pub(super) enum ClaimVerdict {
     /// This worker owns the delivery: dispatch it. `handled` notes the copy
-    /// as handling its claim until `handle` drops it (`own_claim`).
+    /// as handling its claim until `mark_durable_started` releases it, once
+    /// the start is marked or the mark gives up, or else until `handle`
+    /// drops it (`own_claim`).
     Proceed {
         claim: Claimed,
         delivered: i64,

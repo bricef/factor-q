@@ -130,27 +130,27 @@ pub enum ConsumerHealth {
         duplicate_dropped: u64,
         /// Redeliveries this consumer dropped and left unacked because
         /// they arrived before a start was recorded on their claim, the
-        /// claim is the daemon's own, and a copy of the trigger was still
-        /// handling it. "Held" in the name is the claim's state: the
-        /// daemon holds the durable claim on that delivery's stream
-        /// sequence, and it records no start. It is not an admission
-        /// hold (a paused model, an agent at its cap, a wait for a worker
-        /// permit), though a trigger in one is a common first copy.
-        /// Copies of a trigger still in hand: the first copy is waiting,
-        /// setting up or marking its start (its holds and its setup renew
-        /// its ack window, so a copy arrives under it only when those
-        /// renewals stop landing for a whole window), and it still
-        /// settles the delivery. A copy whose claim no copy is handling
-        /// any more is settled by what is on record instead: acked, and
-        /// counted in `duplicate_dropped`, where the run started; taken
-        /// again, and counted in `abandoned_claim_retaken`, where nothing
-        /// is on record. Such a copy is counted here, and left for a later
-        /// copy, when the claim cannot be settled from the records just
-        /// then: another copy that met the same claim settled or took it
-        /// first, the claim names no run, or reading the records or taking
-        /// the claim again failed. The daemon logs each one at warn with
-        /// its subject, its sequence, its attempt, the claim's age and
-        /// why. Counted in memory since the daemon started, like
+        /// claim is the daemon's own, and either a copy of the trigger was
+        /// still handling it, or no copy was and the claim could not be
+        /// settled from the records just then: another copy that met the
+        /// same claim settled or took it first, or reading the records or
+        /// taking the claim again failed. The first is the usual case:
+        /// copies of a trigger still in hand, whose first copy is waiting,
+        /// setting up or marking its start (its holds, its setup and its
+        /// mark renew its ack window, so a copy arrives under it only when
+        /// those renewals stop landing for a whole window), and still
+        /// settles the delivery. The second leaves the copy for a later
+        /// one to settle. A copy whose claim no copy is handling, and
+        /// whose records can be read, is settled by them and not counted
+        /// here: acked, and counted in `duplicate_dropped`, where the run
+        /// started; taken again, and counted in `abandoned_claim_retaken`,
+        /// where nothing is on record. "Held" in the name is the claim's
+        /// state: the daemon holds the durable claim on that delivery's
+        /// stream sequence, and it records no start. It is not an
+        /// admission hold (a paused model, an agent at its cap, a wait for
+        /// a worker permit), though a trigger in one is a common first
+        /// copy. The daemon logs each one at warn with its subject, its
+        /// sequence, its attempt, the claim's age and why. Counted in memory since the daemon started, like
         /// `duplicate_dropped`. A report from a daemon that does not send
         /// it reads as zero.
         #[serde(default)]
@@ -676,11 +676,11 @@ pub enum StrandedClaimFinding {
     /// Where nothing was acked, or the ack was lost, the next redelivery
     /// finds the run's start on record, is acked and marks the claim,
     /// without starting the work again; this daemon's next start marks it
-    /// if none comes. If none comes because that was the trigger's last
-    /// delivery, the dead-letter watch, which does not consult the
-    /// records, ends the trigger as a `trigger_exhausted` dead letter
-    /// although its run started: that dead letter is false, and requeuing
-    /// it runs the work twice. A run whose task panicked stays in flight,
+    /// if none comes. If none comes because the trigger's last delivery's
+    /// answer never reached the broker, the dead-letter watch, which does
+    /// not consult the records, ends the trigger as a `trigger_exhausted`
+    /// dead letter although its run started: that dead letter is false,
+    /// and requeuing it runs the work twice. A run whose task panicked stays in flight,
     /// with nothing driving it, until that start's recovery resumes it.
     /// Left by
     /// a process that has exited, a redelivery would be adopted and start

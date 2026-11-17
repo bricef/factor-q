@@ -275,8 +275,9 @@ out of date: section 5's account of the two routes to a redelivery
 before durable start, and of the replay using the second; gap 3's "a
 start that takes longer than the whole retry ladder", and its account of
 the same-claimant arm dropping every redelivery until the trigger is
-dead-lettered, which now happens only after a trigger's last delivery
-(below); the row of section 2's table for a claim the same process
+dead-lettered, which now happens only when a trigger's last delivery
+leaves a started run unacked, or when the run's records cannot be read
+at any delivery (below); the row of section 2's table for a claim the same process
 holds, which "Stops" with "No log line and no count"; and, in its part
 on more than one worker, "where nothing keeps it alive" and "in a slow
 start". The
@@ -334,7 +335,9 @@ copy came before or after a start was recorded). Both counts are kept
 in memory and start again with the daemon
 ([#968](https://github.com/bricef/factor-q/issues/968)). The third gap,
 a live process holding a claim it will never settle, is closed except
-after a trigger's last delivery
+in two cases, both below: a trigger's last delivery that leaves a
+started run unacked, and a daemon that cannot read the run's records at
+any delivery
 ([#967](https://github.com/bricef/factor-q/issues/967), in five changes,
 four of them merged once
 [#1041](https://github.com/bricef/factor-q/pull/1041) lands). A
@@ -366,12 +369,14 @@ a new invocation id to run the trigger, counted in `fq status` and
 `fq doctor` as an abandoned claim taken again. A task that panicked in
 the very step that made its first WAL write is the first kind: its
 trigger is not run again, and its run waits in flight for the next
-start's recovery. What stays open is a fault on a trigger's last
-delivery: when that delivery starts the run and its task then dies, or
-its mark gives up and its ack is lost, no copy follows for the
-dispatcher to settle, and the dead-letter watch, which does not consult
-the records, dead-letters a trigger whose run started as
-`trigger_exhausted`; requeuing that dead letter runs the work twice.
+start's recovery. What stays open is a last delivery whose answer never
+reaches the broker while its run has a start on record: that delivery
+started the run and its task then died, or its mark landed or gave up
+and its ack was lost, or it was a copy of a run started earlier and its
+ack was lost. No copy follows for the dispatcher to settle, and the
+dead-letter watch, which does not consult the records, dead-letters a
+trigger whose run started as `trigger_exhausted`; requeuing that dead
+letter runs the work twice.
 Having the watch consult the records is the fifth change of
 [#967](https://github.com/bricef/factor-q/issues/967), not built yet. A
 copy whose run's records cannot be read is still dropped, so a daemon

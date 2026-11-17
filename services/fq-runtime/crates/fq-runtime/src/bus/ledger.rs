@@ -34,9 +34,10 @@ pub struct ConsumerRecord {
     /// already holds their claim and it records no start: a copy of the
     /// trigger was still handling it (waiting, setting up or marking its
     /// start), or no copy was and the claim could not be settled from the
-    /// records just then (another copy settled or took it first, the claim
-    /// names no run, or reading the records or taking the claim again
-    /// failed). A copy whose claim no copy is handling, and whose records
+    /// records just then (another copy settled or took it first, or
+    /// reading the records or taking the claim again failed; a claim
+    /// naming no run is dropped here too, a guard, since no row this
+    /// process writes names none). A copy whose claim no copy is handling, and whose records
     /// can be read, is settled by them instead (counted as
     /// `duplicate_dropped` or `abandoned_claim_retaken`).
     pub held_duplicate_dropped: u64,

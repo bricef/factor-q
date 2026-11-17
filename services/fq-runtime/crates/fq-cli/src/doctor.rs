@@ -337,9 +337,10 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
 /// keepalive stops landing for a whole ack window, and the first copy
 /// still settles it. The rest met a claim no copy was handling any more
 /// and could not settle it from the records just then (#967): another
-/// copy that met the same claim got to it first, the claim names no run,
-/// or reading the records or taking the claim again failed, and a later
-/// copy asks again. The stranded-claims block of the same report lists
+/// copy that met the same claim got to it first, or reading the records
+/// or taking the claim again failed, and a later copy asks again. (A
+/// claim naming no run is dropped and counted too, but no row this
+/// daemon writes names none, so it is a guard and not a cause to list.) The stranded-claims block of the same report lists
 /// such a claim once a run is on record for it and its mark is overdue,
 /// which the line points at.
 fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
@@ -349,8 +350,8 @@ fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
     "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
      start on it and was left unacked: usually a copy of the trigger was still handling the claim \
      and settles it itself; otherwise the claim could not be settled from the records just then \
-     (another copy got to it first, the claim names no run, or a read or the re-take failed) and \
-     a later copy asks again; the daemon log has a warn line for each with its subject, \
+     (another copy got to it first, or a read or the re-take failed) and a later copy asks \
+     again; the daemon log has a warn line for each with its subject, \
      sequence, attempt, the claim's age and why, and such a claim whose run is on record is \
      listed under \"Stranded trigger claims\" below\n"
         .to_string()
