@@ -7,11 +7,14 @@
 //! one is in one of three cases, and this module tells them apart.
 //!
 //! 1. **A copy of the trigger is still handling the claim**: waiting in a
-//!    hold or for a worker permit, setting up, or marking its start. That
+//!    hold or for a worker permit, setting up, marking its start, or
+//!    settling its delivery (giving its claim back, and on a last delivery
+//!    publishing its dead letter, before its NAK or ack). That
 //!    copy owns the delivery, and an ack or a NAK from this one would
 //!    settle it underneath, so this copy is dropped unanswered, logged and
-//!    counted (`held_duplicate_dropped`). The holds, the setup and the
-//!    mark keep the first copy's delivery alive, so a copy comes only when
+//!    counted (`held_duplicate_dropped`). The holds, the setup, the mark
+//!    and the settlement (`claim::settlement`, issue 1057) keep the first
+//!    copy's delivery alive, so a copy comes only when
 //!    those in-progress acks stopped landing for a whole ack window. A copy
 //!    stops handling its claim once its mark has landed or given up and its
 //!    delivery is answered, though its run goes on: from then on its run is
@@ -31,9 +34,14 @@
 //! 3. **No copy is handling it, and nothing is on record**: the copy that
 //!    took it ended before its run's first WAL write and left the delivery
 //!    unsettled, because its task died, or because the claim's release
-//!    before its NAK failed. The copy takes the claim again under its own
-//!    invocation id, by a compare-and-set on the abandoned one, to run the
-//!    trigger once. Logged at `warn`, once, and counted
+//!    before its NAK failed, or was given up on and had not landed
+//!    (`claim::settlement`). A release given up on is not called back: one
+//!    that landed after a re-take would delete the new claim, since it
+//!    matches the row by its sequence alone (issue 1061), and only the
+//!    bound's sitting above the store's own waits keeps that out of reach
+//!    (`settlement::RELEASE_BOUND`). The copy takes the claim again under
+//!    its own invocation id, by a compare-and-set on the abandoned one, to
+//!    run the trigger once. Logged at `warn`, once, and counted
 //!    (`abandoned_claim_retaken`), which counts claims taken again, not
 //!    runs: the copy runs the trigger unless a drain stops it, as below, or
 //!    `handle` refuses the trigger after its claim as it would any
@@ -42,8 +50,8 @@
 //!    before it exits; that copy then stops at `handle`'s own drain check,
 //!    after the re-take, and leaves the claim to the next binary again.
 //!    So is one double fault: a run that failed for good before its first
-//!    WAL write, whose claim's release before its ack failed and whose ack
-//!    was lost. Nothing of it is on record, so the trigger runs once more,
+//!    WAL write, whose claim's release before its ack failed, or was given
+//!    up on, and whose ack was lost. Nothing of it is on record, so the trigger runs once more,
 //!    where before every copy was dropped until a false
 //!    `trigger_exhausted`.
 //!
@@ -220,8 +228,8 @@ impl TriggerDispatcher {
                      whose run has no start on record, and running the trigger under a new \
                      invocation id: the copy that took it ended before its run's first WAL write \
                      and left the delivery unsettled (its task died; the claim's release before its \
-                     NAK failed, or before its ack, which was lost; or a drain or a shutdown left it \
-                     for the next binary)");
+                     NAK failed or was given up on, or before its ack, which was lost; or a drain or \
+                     a shutdown left it for the next binary)");
                 self.bus
                     .consumer_ledger()
                     .note_abandoned_claim_retaken(CONSUMER_NAME);

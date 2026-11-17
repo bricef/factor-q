@@ -32,8 +32,8 @@ pub struct ConsumerRecord {
     pub duplicate_dropped: u64,
     /// Trigger redeliveries dropped, and left unacked, because this process
     /// already holds their claim and it records no start: a copy of the
-    /// trigger was still handling it (waiting, setting up or marking its
-    /// start), or no copy was and the claim could not be settled from the
+    /// trigger was still handling it (waiting, setting up, marking its
+    /// start or settling its delivery), or no copy was and the claim could not be settled from the
     /// records just then (another copy settled or took it first, or
     /// reading the records or taking the claim again failed; a claim
     /// naming no run is dropped here too, a guard, since no row this
@@ -45,7 +45,8 @@ pub struct ConsumerRecord {
     /// copy was handling the claim any more and its run had no start on
     /// record, because the copy that took it ended before its first WAL
     /// write and left the delivery unsettled (its task died, or the release
-    /// before its NAK failed, or before its ack, which was lost), or a drain
+    /// before its NAK failed or was given up on, or before its ack, which
+    /// was lost), or a drain
     /// left it. Each was taken under a new invocation id to run the
     /// trigger, which the copy then does unless a drain stops it first or
     /// the trigger is refused after its claim; so this counts claims, not
