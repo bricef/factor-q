@@ -999,8 +999,8 @@ async fn a_claim_taken_again_between_the_watchs_reads_is_not_judged_by_the_old_r
 /// blocked after the write, say), so every look holds the verdict. Past the
 /// limit the watch's last look reads the WAL once for the run the claim
 /// names and finds it: the trigger is not dead-lettered, and the claim is
-/// left for its copy, or the next start, to mark. Only a found start
-/// counts: an empty read would not end the hold.
+/// marked, a compare-and-set the copy's own later mark does not mind. Only
+/// a found start counts: an empty read would not end the hold.
 #[tokio::test]
 async fn at_the_limit_a_start_found_in_the_wal_wins_over_a_copy_still_handling() {
     let (arena, _server) = arena().await;
@@ -1028,11 +1028,7 @@ async fn at_the_limit_a_start_found_in_the_wal_wins_over_a_copy_still_handling()
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
-    assert_eq!(
-        claim(&arena).await,
-        Some((false, Some(run))),
-        "the claim is left for the copy handling it"
-    );
+    assert_eq!(claim(&arena).await, Some((true, Some(run))));
     assert_eq!(kept(&arena), 1);
     drop(still_handling);
 }
@@ -1228,4 +1224,78 @@ async fn past_the_limit_a_claim_marked_after_its_run_left_the_wal_is_not_dead_le
 
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
+}
+
+/// **After a re-take, an unchecked dead letter names the run the claim
+/// names now.** Past the limit, the claim names a run whose copy died
+/// before its first WAL write. The watch reads the claim, then that run's
+/// empty WAL; meanwhile a copy takes the claim again under a new id and
+/// waits in setup, so the claim changed and the verdict cannot be taken.
+/// The dead letter is written unchecked, and the run it names is the one
+/// that may yet start: the re-taken one, which an operator checking it
+/// finds. Naming the abandoned run instead, the check would say "never
+/// started" while the re-taken run went on to start, and a requeue would
+/// run the work twice.
+#[tokio::test]
+async fn after_a_retake_an_unchecked_dead_letter_names_the_run_the_claim_names_now() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::DiesBeforeStart);
+    let first = arena.deliver(1, false).await;
+    assert!(first.panicked, "{first:?}");
+    let abandoned = arena.worker.starts()[0].0.to_string();
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    let the_watch = std::sync::Arc::new(watch(&arena).with_held_verdict_limit(PAST));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let second = arena.spawn_delivery(SEQ, 2, false);
+    arena.worker.until_waiting(1).await;
+    let retaken = arena.worker.starts()[1].0.to_string();
+    assert_ne!(retaken, abandoned);
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::Unchecked);
+    let unchecked = from_event(&dead_letter(&arena).await.expect("dead-lettered"))
+        .expect("a dead letter")
+        .start_unchecked
+        .expect("marked unchecked");
+    assert_eq!(unchecked.invocation_id, Some(retaken.clone()));
+    arena.worker.setup_gate.add_permits(1);
+    let second = arena.finish(second).await;
+    assert_eq!(second.acks, 1, "the re-taken run started: {second:?}");
+    assert_eq!(claim(&arena).await, Some((true, Some(retaken))));
+}
+
+/// **A run read in the WAL is a start even when the second read of the
+/// claim fails.** The run made its first WAL write and its task died. The
+/// watch reads the claim, then the WAL, which holds the run; its second
+/// read of the claim, joined to the ownership table, errs (the test takes
+/// the table away). The start the watch has found is a verdict, not a
+/// reason to hold: inside the limit, the trigger is kept out of the dead
+/// letters and its claim marked, the mark being on the claim's own table.
+#[tokio::test]
+async fn a_run_read_in_the_wal_is_a_start_when_the_second_claim_read_fails() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::DiesAfterStart);
+    arena.deliver(1, false).await;
+    let run = arena.worker.starts()[0].0.to_string();
+    assert_eq!(claim(&arena).await, Some((false, Some(run.clone()))));
+    let advisory = exhaust(&arena).await;
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE coordination_invocation_owner RENAME TO taken_away"],
+    )
+    .await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(claim(&arena).await, Some((true, Some(run))));
 }

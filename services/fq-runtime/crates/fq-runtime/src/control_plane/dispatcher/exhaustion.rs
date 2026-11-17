@@ -108,17 +108,13 @@ pub struct ExhaustionCheck {
 pub(crate) enum ClaimMark {
     /// It was marked started already, by the copy that recorded the start.
     Already,
-    /// This check marked it: it was `claimed`.
+    /// This check marked it: it was `claimed` for the run.
     Now,
-    /// It changed between the read and the mark (marked by its copy, or
-    /// given back), and the mark left it as it was.
+    /// It was not `claimed` for the run when the mark came (marked by its
+    /// copy, given back, or taken again), and the mark left it as it was.
     Changed,
     /// The mark failed, for the reason given; startup recovery marks it.
     Failed(String),
-    /// Not marked here: the start was found on the watch's last look, past
-    /// its limit, while the claim was not this check's to mark (a copy
-    /// still handling it marks it when its start lands).
-    Left,
 }
 
 impl std::fmt::Display for ClaimMark {
@@ -130,10 +126,6 @@ impl std::fmt::Display for ClaimMark {
             Self::Failed(err) => write!(
                 f,
                 "not marked: the mark failed ({err}); this daemon's next start marks it"
-            ),
-            Self::Left => f.write_str(
-                "not marked here: the copy handling its claim marks it when its start lands, or \
-                 this daemon's next start does",
             ),
         }
     }
@@ -165,14 +157,19 @@ pub(crate) enum Exhausted {
 }
 
 impl ExhaustionCheck {
-    /// The verdict on the trigger at `stream_seq` of the stream this
-    /// dispatcher consumes.
-    pub(crate) async fn verdict(&self, stream_seq: u64) -> Exhausted {
-        let key = TriggerKey {
+    /// The claim table's key for the trigger at `stream_seq`.
+    fn key(&self, stream_seq: u64) -> TriggerKey<'static> {
+        TriggerKey {
             stream: TRIGGER_STREAM_NAME,
             stream_epoch: self.stream_epoch,
             stream_seq,
-        };
+        }
+    }
+
+    /// The verdict on the trigger at `stream_seq` of the stream this
+    /// dispatcher consumes.
+    pub(crate) async fn verdict(&self, stream_seq: u64) -> Exhausted {
+        let key = self.key(stream_seq);
         let row = match self.store.trigger_claim(key).await {
             Ok(row) => row,
             Err(err) => {
@@ -224,6 +221,13 @@ impl ExhaustionCheck {
         };
         let unsettled = match self.store.unsettled_trigger_claim(key).await {
             Ok(unsettled) => unsettled,
+            // The WAL holds the run: a start on record, whatever this read
+            // could not say.
+            Err(_) if wal.is_some() => {
+                return self
+                    .started(key, invocation_id, RunRecords::in_the_wal(wal))
+                    .await;
+            }
             Err(err) => {
                 return Exhausted::Undecided {
                     why: format!(
@@ -246,9 +250,23 @@ impl ExhaustionCheck {
         if !records.start_on_record() {
             return Exhausted::NothingOnRecord;
         }
+        self.started(key, invocation_id, records).await
+    }
+
+    /// The verdict on a run with a start on record, the claim marked if it
+    /// is still `claimed` for the run. The mark is a compare-and-set on the
+    /// state and the id, so it leaves a claim marked, given back or taken
+    /// again alone, and it is safe while a copy still handles the claim:
+    /// that copy's own mark sets the row whatever it holds. A failed mark
+    /// does not change the verdict: the trigger is not dead-lettered either
+    /// way, and the watch's line says so.
+    async fn started(
+        &self,
+        key: TriggerKey<'_>,
+        invocation_id: String,
+        records: RunRecords,
+    ) -> Exhausted {
         let on_record = records.where_on_record().unwrap_or_default();
-        // A failed mark does not change the verdict: the trigger is not
-        // dead-lettered either way, and the watch's line says so.
         let mark = match self
             .store
             .mark_unsettled_trigger_started(key, &invocation_id)
@@ -267,36 +285,39 @@ impl ExhaustionCheck {
 
     /// The claim stopped being `claimed` for `invocation_id` between the
     /// two reads: a copy marked it started (it settled the claim by the
-    /// record, or the first copy's own mark landed), gave it back, or took
-    /// it again under another id. A start already found is still a start:
-    /// held instead, it would become, past the watch's limit, a dead letter
-    /// marked unchecked for a run the watch itself read.
+    /// record, the ownership row included once the run left the WAL, or the
+    /// first copy's own mark landed), gave it back, or took it again under
+    /// another id. It is read once more. Marked started is a start on
+    /// record, and so is a run already read in the WAL: held instead, either
+    /// would become, past the watch's limit, a dead letter marked unchecked
+    /// for a run that started. With neither, the verdict is held, naming
+    /// the run the claim names now: after a re-take, that is the run that
+    /// may yet start, and the one an operator has to look at.
     async fn after_the_claim_changed(
         &self,
         key: TriggerKey<'_>,
         invocation_id: String,
         wal: Option<WalRun>,
     ) -> Exhausted {
-        if let Ok(Some(row)) = self.store.trigger_claim(key).await
+        let now = self.store.trigger_claim(key).await;
+        if let Ok(Some(row)) = &now
             && row.durably_started
         {
             return Exhausted::Started {
-                invocation_id: row.invocation_id.unwrap_or(invocation_id),
+                invocation_id: row.invocation_id.clone().unwrap_or(invocation_id),
                 on_record: "on its claim, marked durably started".to_string(),
                 mark: ClaimMark::Already,
             };
         }
         if wal.is_some() {
-            let records = RunRecords {
-                wal,
-                owner_row_status: None,
-            };
-            return Exhausted::Started {
-                invocation_id,
-                on_record: records.where_on_record().unwrap_or_default(),
-                mark: ClaimMark::Changed,
-            };
+            return self
+                .started(key, invocation_id, RunRecords::in_the_wal(wal))
+                .await;
         }
+        let invocation_id = match now {
+            Ok(Some(row)) => row.invocation_id.unwrap_or(invocation_id),
+            Ok(None) | Err(_) => invocation_id,
+        };
         Exhausted::Undecided {
             why: "the trigger's claim changed while its run's records were read".to_string(),
             invocation_id: Some(invocation_id),
@@ -309,24 +330,19 @@ impl ExhaustionCheck {
     /// names. Only a start found counts. An empty read is never taken for
     /// "not started", for the reason [`Self::verdict`] asks about a copy
     /// still handling the claim before it reads the records: that copy can
-    /// make its first WAL write just after the read. A start found here is
-    /// not marked ([`ClaimMark::Left`]).
+    /// make its first WAL write just after the read. A start found here
+    /// marks the claim as any other does ([`Self::started`]).
     pub(crate) async fn last_look(&self, stream_seq: u64) -> Exhausted {
         match self.verdict(stream_seq).await {
             Exhausted::Undecided {
                 why,
                 invocation_id: Some(invocation_id),
             } => match self.worker.wal_run(&invocation_id).await {
-                Ok(Some(wal)) => Exhausted::Started {
-                    on_record: RunRecords {
-                        wal: Some(wal),
-                        owner_row_status: None,
-                    }
-                    .where_on_record()
-                    .unwrap_or_default(),
-                    invocation_id,
-                    mark: ClaimMark::Left,
-                },
+                Ok(Some(wal)) => {
+                    let key = self.key(stream_seq);
+                    self.started(key, invocation_id, RunRecords::in_the_wal(Some(wal)))
+                        .await
+                }
                 Ok(None) | Err(_) => Exhausted::Undecided {
                     why,
                     invocation_id: Some(invocation_id),

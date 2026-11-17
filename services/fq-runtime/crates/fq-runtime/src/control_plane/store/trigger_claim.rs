@@ -143,6 +143,15 @@ pub struct RunRecords {
 }
 
 impl RunRecords {
+    /// The records as the WAL alone gives them, when the ownership row was
+    /// not read.
+    pub fn in_the_wal(wal: Option<WalRun>) -> Self {
+        Self {
+            wal,
+            owner_row_status: None,
+        }
+    }
+
     /// Whether the run has a start on record: either record holds it.
     pub fn start_on_record(&self) -> bool {
         self.wal.is_some() || self.owner_row_status.is_some()
