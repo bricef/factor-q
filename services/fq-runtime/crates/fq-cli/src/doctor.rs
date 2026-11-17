@@ -151,7 +151,8 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
         ));
         out.push_str(
             "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run, \
-             but not one the listing marks `start not checked` before looking at the run it names\n",
+             but for one the listing marks `start not checked` make the check it gives first: a \
+             run still going shows in `fq invocation show` only as a `Live execution:` block\n",
         );
     } else {
         out.push_str("Dead-letters: none\n");
