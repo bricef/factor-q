@@ -14,16 +14,39 @@
 //! 2. **One run on record, and a marked claim names it.** The WAL holds at
 //!    most one run of the trigger, and a claim marked started names that
 //!    run.
+//! 3. **A copy of a trigger that started is acked.** A copy that arrives
+//!    while a start of its trigger is on record, and whose answers reach the
+//!    broker, is acked, so the broker stops redelivering a trigger whose
+//!    run started.
 //!
 //! And at the end, once faults stop:
 //!
-//! 3. **Liveness.** A trigger with nothing on record that the broker can
+//! 4. **Liveness.** A trigger with nothing on record that the broker can
 //!    still deliver, or that a restart lets a replay reach, is started by
 //!    that copy.
-//! 4. **Every claim settles.** After a restart, a replay of the trigger
+//! 5. **Every claim settles.** After a restart, a replay of the trigger
 //!    starts nothing, is acked, and finds the claim marked started, naming
 //!    the run on record: no step left a claim that a later delivery or
 //!    restart cannot settle.
+//!
+//! # Known open: a trigger whose run started, left to be dead-lettered
+//!
+//! One more thing is checked, and the property tolerates it today. When
+//! the trigger's deliveries on the dispatcher's durable run out and no ack
+//! has reached the broker, the dead-letter watch calls the trigger
+//! exhausted, and if a start of it is on record that dead letter is false:
+//! requeuing it runs the work twice. With invariant 3 holding, the only way
+//! there is a copy that never came back: the last delivery started the run
+//! (its task then died, or its mark gave up and its ack was lost), or every
+//! ack after the start was lost, the last one included. No copy is left for
+//! the dispatcher to settle, and the watch does not consult the records;
+//! having it consult them is pull request 5 of issue 967. [`play`] reports
+//! the case ([`KnownOpen`]) rather than failing on it, because a random
+//! life reaches it now and then and the property must not fail on a gap
+//! that is known and tracked.
+//! [`a_trigger_whose_last_delivery_started_its_run_is_not_left_to_be_dead_lettered`]
+//! asserts it on the two lives that show it and is ignored, with that
+//! reason, until pull request 5 makes it pass.
 //!
 //! # Fidelity: what each step does
 //!
@@ -45,9 +68,11 @@
 //!
 //! The broker is modelled, not run: it counts deliveries up to
 //! `TRIGGER_MAX_DELIVER`, considers the trigger settled once an ack that was
-//! not lost arrives, and delivers nothing settled except a replay. The
-//! model's only judgement is when a copy may arrive; every decision about a
-//! copy is the dispatcher's own.
+//! not lost arrives on the dispatcher's durable, and delivers nothing
+//! settled except a replay. A replay comes from a recreated durable, so its
+//! ack settles nothing on the dispatcher's. The model's only judgement is
+//! when a copy may arrive; every decision about a copy is the dispatcher's
+//! own.
 //!
 //! [`the_shrunk_dead_run_is_taken_again`] replays by hand the case this
 //! property shrank to against the code before issue 967's last change.
@@ -110,8 +135,12 @@ fn step() -> impl Strategy<Value = Step> {
 struct Broker {
     /// Deliveries of the trigger on the dispatcher's durable so far.
     delivered: u32,
-    /// An ack that was not lost has arrived: nothing is redelivered.
+    /// An ack that was not lost has arrived on the dispatcher's durable:
+    /// nothing is redelivered.
     acked: bool,
+    /// The last delivery on the dispatcher's durable was handled with no
+    /// ack reaching the broker while a start of the trigger was on record.
+    left_to_be_dead_lettered: bool,
     /// The daemon has restarted, so a recreated durable can replay.
     restarted: bool,
     /// The next copy's answers are lost.
@@ -120,18 +149,60 @@ struct Broker {
 
 const MAX_DELIVER: u32 = TRIGGER_MAX_DELIVER as u32;
 
-/// Hand a copy to `handle`, delivery `delivered`, with `run` queued for a
-/// run it starts, and note what the broker received.
-async fn deliver(arena: &Arena, broker: &mut Broker, run: Run, delivered: u32) -> Answered {
+/// Where a copy comes from.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// Delivery `n` on the dispatcher's durable.
+    Durable(u32),
+    /// A replay from a durable recreated on the stream.
+    Replay,
+}
+
+/// What a life of the trigger left that is known to be wrong today.
+#[derive(Debug, Default)]
+struct KnownOpen {
+    /// The trigger's deliveries on the dispatcher's durable ran out with no
+    /// ack reaching the broker while a start of it was on record: the
+    /// dead-letter watch, which does not consult the records, would call it
+    /// exhausted (pull request 5 of issue 967).
+    left_to_be_dead_lettered: bool,
+}
+
+/// Hand a copy to `handle`, with `run` queued for a run it starts, check
+/// invariant 3, and note what the broker received.
+async fn deliver(
+    arena: &Arena,
+    broker: &mut Broker,
+    run: Run,
+    source: Source,
+) -> Result<Answered, TestCaseError> {
+    let started_before = !arena.wal().await.is_empty();
     arena.worker.queue(run);
     let lost = std::mem::take(&mut broker.lose_next);
+    let delivered = match source {
+        Source::Durable(n) => n,
+        Source::Replay => 1,
+    };
     let answered = arena.deliver(delivered, lost).await;
     // A run this copy did not start is not the next copy's to start.
     arena.worker.script.lock().unwrap().clear();
-    if !lost && answered.acks > 0 {
-        broker.acked = true;
+    if started_before && !lost {
+        prop_assert!(
+            answered.acks > 0,
+            "{:?} came while a start of its trigger was on record and was not acked: {:?}",
+            source,
+            answered
+        );
     }
-    answered
+    if let Source::Durable(n) = source {
+        if !lost && answered.acks > 0 {
+            broker.acked = true;
+        }
+        if n == MAX_DELIVER && !broker.acked {
+            broker.left_to_be_dead_lettered = !arena.wal().await.is_empty();
+        }
+    }
+    Ok(answered)
 }
 
 /// The invariants that hold after every step.
@@ -160,8 +231,9 @@ async fn check(arena: &Arena, after: &str) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-/// Play `steps`, then stop the faults and settle the trigger.
-async fn play(arena: &mut Arena, steps: &[Step]) -> Result<(), TestCaseError> {
+/// Play `steps`, then stop the faults and settle the trigger. Returns what
+/// the life left that is known to be wrong today.
+async fn play(arena: &mut Arena, steps: &[Step]) -> Result<KnownOpen, TestCaseError> {
     let mut broker = Broker::default();
     for (i, step) in steps.iter().enumerate() {
         match *step {
@@ -171,13 +243,13 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<(), TestCaseError> {
                 }
                 broker.delivered += 1;
                 let delivered = broker.delivered;
-                deliver(arena, &mut broker, run, delivered).await;
+                deliver(arena, &mut broker, run, Source::Durable(delivered)).await?;
             }
             Step::Replay(run) => {
                 if !broker.restarted {
                     continue;
                 }
-                deliver(arena, &mut broker, run, 1).await;
+                deliver(arena, &mut broker, run, Source::Replay).await?;
             }
             Step::RefuseUpdates => refuse_updates(&arena.claim_db).await,
             Step::RefuseReleases => refuse_deletes(&arena.claim_db).await,
@@ -201,10 +273,16 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<(), TestCaseError> {
         if !broker.acked && broker.delivered < MAX_DELIVER {
             broker.delivered += 1;
             let delivered = broker.delivered;
-            deliver(arena, &mut broker, Run::Completes, delivered).await;
+            deliver(
+                arena,
+                &mut broker,
+                Run::Completes,
+                Source::Durable(delivered),
+            )
+            .await?;
         } else {
             arena.restart().await;
-            deliver(arena, &mut broker, Run::Completes, 1).await;
+            deliver(arena, &mut broker, Run::Completes, Source::Replay).await?;
         }
         let wal = arena.wal().await;
         prop_assert_eq!(
@@ -219,7 +297,7 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<(), TestCaseError> {
     // the claim marked started, naming the run on record.
     let started = arena.worker.starts().len();
     arena.restart().await;
-    let replay = deliver(arena, &mut broker, Run::Completes, 1).await;
+    let replay = deliver(arena, &mut broker, Run::Completes, Source::Replay).await?;
     prop_assert_eq!(
         arena.worker.starts().len(),
         started,
@@ -243,11 +321,16 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<(), TestCaseError> {
         claim
     );
     prop_assert_eq!(replay.acks, 1, "the replay is acked: {:?}", replay);
-    check(arena, "the settling replay").await
+    check(arena, "the settling replay").await?;
+    Ok(KnownOpen {
+        left_to_be_dead_lettered: broker.left_to_be_dead_lettered,
+    })
 }
 
 /// **A trigger starts once and its claim settles, whatever happens to its
-/// copies.** The property, over random lives of one trigger.
+/// copies.** The property, over random lives of one trigger. A life that
+/// leaves the trigger to be dead-lettered although its run started is the
+/// known-open case the module doc describes, and is tolerated here.
 #[test]
 fn a_trigger_starts_once_and_its_claim_settles_whatever_happens_to_its_copies() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -263,7 +346,7 @@ fn a_trigger_starts_once_and_its_claim_settles_whatever_happens_to_its_copies() 
     let outcome = runner.run(&prop::collection::vec(step(), 1..8), |steps| {
         rt.block_on(async {
             let mut arena = Arena::new(&url, 1).await;
-            play(&mut arena, &steps).await
+            play(&mut arena, &steps).await.map(|_known_open| ())
         })
     });
     if let Err(err) = outcome {
@@ -284,4 +367,58 @@ async fn the_shrunk_dead_run_is_taken_again() {
     if let Err(err) = outcome {
         panic!("{err}");
     }
+}
+
+/// **A trigger whose last delivery started its run is not left to be
+/// dead-lettered.** Known open, and ignored until pull request 5 of issue
+/// 967 makes it pass. Two lives show it, the two the review of this change
+/// named: four deliveries fail transiently and are NAKed, and the fifth and
+/// last starts the run, whose task then dies in the poll of its first WAL
+/// write; or whose mark is refused on every attempt and whose ack is lost.
+/// Either way no copy follows for the dispatcher to settle, the broker
+/// never receives an ack, and the dead-letter watch, which does not consult
+/// the records, would call a trigger exhausted whose run started.
+///
+/// Ignored rather than written as an assertion of today's behaviour,
+/// because the dead letter is the watch's decision and this harness models
+/// the watch rather than running it: a test that asserted today's outcome
+/// would stay green when the watch is fixed, and flag nothing. This one
+/// states the outcome pull request 5 has to reach, is listed as ignored
+/// with its reason in every run, and fails when run with `--ignored`; that
+/// pull request makes the model's watch consult the records as the real
+/// one will, and un-ignores it.
+#[tokio::test]
+#[ignore = "known open until pull request 5 of issue 967: the dead-letter watch does not consult \
+            the records, so a run started by a trigger's last delivery is dead-lettered as \
+            exhausted"]
+async fn a_trigger_whose_last_delivery_started_its_run_is_not_left_to_be_dead_lettered() {
+    let fails_four_times = [Step::Deliver(Run::FailsTransiently); 4];
+    let lives: [Vec<Step>; 2] = [
+        [&fails_four_times[..], &[Step::Deliver(Run::DiesAfterStart)]].concat(),
+        [
+            &fails_four_times[..],
+            &[
+                Step::RefuseUpdates,
+                Step::LoseAnswers,
+                Step::Deliver(Run::Completes),
+            ],
+        ]
+        .concat(),
+    ];
+    let mut left = Vec::new();
+    for steps in lives {
+        let (mut arena, _server) = super::arena().await;
+        let open = play(&mut arena, &steps)
+            .await
+            .unwrap_or_else(|err| panic!("{steps:?}: {err}"));
+        if open.left_to_be_dead_lettered {
+            left.push(steps);
+        }
+    }
+    assert!(
+        left.is_empty(),
+        "the trigger's deliveries ran out with no ack reaching the broker while its run's start \
+         was on record, so the dead-letter watch would call it exhausted, and requeuing that dead \
+         letter would run the work twice, in these lives: {left:#?}"
+    );
 }
