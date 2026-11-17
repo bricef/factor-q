@@ -19,8 +19,13 @@
 //!
 //! A third refusal is logged and counted in neither: a delivery whose
 //! adoption of a dead process's claim finds the row changed.
+//!
+//! These tests pin what each arm decided, from the counts, the claim, the
+//! runs started and the answers on the wire. The lines they log are read
+//! in `tests/dispatcher_log_lines.rs`, under one subscriber for the whole
+//! process: a capture on a test's own thread could miss a line whose
+//! callsite another test had reached first (#1031).
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
@@ -35,55 +40,6 @@ use crate::bus::EventBus;
 use crate::control_plane::TriggerClaim;
 use crate::test_support::nats::test_nats;
 
-/// The start of the line the held arm logs.
-const HELD_DROP: &str = "dropping a redelivered trigger whose claim this daemon already holds";
-/// The start of the line the started arm logs.
-const STARTED_DROP: &str = "dropping duplicate trigger delivery after durable start";
-/// The clause the held arm adds on a trigger's last delivery.
-const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
-/// The start of the line for a delivery whose adoption found the row
-/// changed.
-const ADOPTION_LOST: &str = "the claim it met changed before this daemon could adopt it";
-
-/// The warn lines emitted on this thread while a capture is installed.
-/// `durable_start_signal_tests` reads its error lines through it too.
-#[derive(Clone, Default)]
-pub(super) struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Captured {
-    /// Install the capture on this thread until the guard drops. A
-    /// `#[tokio::test]` runtime is single-threaded, so `handle` and every
-    /// task it awaits log here.
-    pub(super) fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::set_default(subscriber)
-    }
-
-    /// The captured lines that contain `needle`.
-    pub(super) fn lines_with(&self, needle: &str) -> Vec<String> {
-        String::from_utf8_lossy(&self.0.lock().unwrap())
-            .lines()
-            .filter(|line| line.contains(needle))
-            .map(str::to_string)
-            .collect()
-    }
-}
-
 /// The two counts the consumer ledger keeps for the dispatcher, as
 /// `(duplicate_dropped, held_duplicate_dropped)`.
 fn drop_counts(bus: &EventBus) -> (u64, u64) {
@@ -92,18 +48,16 @@ fn drop_counts(bus: &EventBus) -> (u64, u64) {
 }
 
 /// **A redelivery that arrives while the first copy is still setting up
-/// is dropped, logged once and counted as a held duplicate; the started
-/// count does not move.**
+/// is dropped and counted once as a held duplicate; the started count does
+/// not move.**
 ///
 /// The first copy claims the trigger and parks in its setup, before its
 /// first WAL write. Its redelivery meets a claim this daemon holds with no
 /// start on it, and must return without starting anything or answering the
-/// delivery, with one warn line that says which delivery, which attempt,
-/// whose claim, how old it is and which invocation it names. The first
-/// copy then starts the trigger once, and its durable start acks it, which
-/// is not a drop and moves neither count.
+/// delivery. The first copy then starts the trigger once, and its durable
+/// start acks it, which is not a drop and moves neither count.
 #[tokio::test]
-async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held() {
+async fn a_redelivery_during_the_first_copys_setup_is_dropped_and_counted_as_held() {
     let server = test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let agent = unique_agent_id("redelivered-in-setup");
@@ -144,39 +98,14 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
     );
     let (_listener, mut answers) = answers_to(server.url(), &redelivered).await;
 
-    let log = Captured::default();
-    {
-        let _capture = log.install();
-        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&redelivered))
-            .await
-            .expect("the copy is refused, not parked behind the first");
-    }
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&redelivered))
+        .await
+        .expect("the copy is refused, not parked behind the first");
 
     assert_eq!(
         drop_counts(&bus),
         (0, 1),
-        "the copy is counted as held, and not as a copy of a started run"
-    );
-    let held = log.lines_with(HELD_DROP);
-    assert_eq!(held.len(), 1, "one line per refused copy: {held:#?}");
-    for field in [
-        format!("stream_seq={seq}"),
-        "delivered=2".to_string(),
-        format!("subject={}", crate::events::subjects::trigger(&agent)),
-        "claimant=binary-1".to_string(),
-        "claim_age_ms=".to_string(),
-        format!("claim_invocation_id={named}"),
-    ] {
-        assert!(held[0].contains(&field), "no `{field}` in {}", held[0]);
-    }
-    assert!(
-        !held[0].contains(LAST_DELIVERY),
-        "a second delivery is not the last: {}",
-        held[0]
-    );
-    assert!(
-        log.lines_with(STARTED_DROP).is_empty(),
-        "the held copy is not reported as a copy of a started run"
+        "the copy is counted once as held, and not as a copy of a started run"
     );
     // The copy answers nothing: the delivery is the first copy's to
     // answer. A NAK with a delay would leave the delivery pending too, so
@@ -219,16 +148,17 @@ async fn a_redelivery_during_the_first_copys_setup_is_logged_and_counted_as_held
     );
 }
 
-/// **The held drop of a trigger's last delivery says it was the last.**
+/// **A copy on a trigger's last delivery is dropped and counted as held,
+/// as any other copy is, and the first copy still starts the trigger and
+/// acks it.**
 ///
-/// Past it no copy comes, and the trigger is dead-lettered unless the
-/// delivery is acked, whatever the claim is waiting on. The first copy
-/// parks in its setup; the broker's redeliveries are brought forward one
-/// after another to the bound, and the last one is handed to `handle`.
-/// The first copy then starts and acks the trigger, which the line did
-/// not rule out.
+/// Past the last delivery no copy comes, and the trigger is dead-lettered
+/// unless the delivery is acked, whatever the claim is waiting on. The
+/// first copy parks in its setup; the broker's redeliveries are brought
+/// forward one after another to the bound, and the last one is handed to
+/// `handle`. The first copy then starts and acks the trigger.
 #[tokio::test]
-async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
+async fn a_held_copy_on_the_last_delivery_is_counted_and_the_first_copy_still_acks() {
     let server = test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let agent = unique_agent_id("last-delivery-in-setup");
@@ -262,21 +192,14 @@ async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
         assert_eq!(copy.info().unwrap().delivered, delivery);
     }
 
-    let log = Captured::default();
-    {
-        let _capture = log.install();
-        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&copy))
-            .await
-            .expect("the copy is refused, not parked behind the first");
-    }
-    let held = log.lines_with(HELD_DROP);
-    assert_eq!(held.len(), 1, "one line per refused copy: {held:#?}");
-    assert!(
-        held[0].contains(&format!("delivered={bound}")) && held[0].contains(LAST_DELIVERY),
-        "the last delivery's drop says it was the last: {}",
-        held[0]
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&copy))
+        .await
+        .expect("the copy is refused, not parked behind the first");
+    assert_eq!(
+        drop_counts(&bus),
+        (0, 1),
+        "the last delivery's copy is counted once as held"
     );
-    assert_eq!(drop_counts(&bus), (0, 1));
 
     setup.let_through();
     tokio::time::timeout(Duration::from_secs(20), first)
@@ -291,8 +214,9 @@ async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
     assert_eq!(model.requests().len(), 1, "the trigger ran once");
 }
 
-/// **A delivery whose adoption loses to a changed row is logged, left
-/// unanswered, and counted in neither count.**
+/// **A delivery whose adoption loses to a changed row is dropped: nothing
+/// runs, nothing answers it, and neither count moves.** Its log line is
+/// the only record of it.
 ///
 /// The adoption is a compare-and-set on the row as it was read: still
 /// `claimed`, by the claimant the read found. If the row changed in
@@ -302,7 +226,7 @@ async fn the_held_drop_of_a_last_delivery_says_it_was_the_last() {
 /// makes every update skip its row, which is what the set sees when the
 /// row is no longer the one it read.
 #[tokio::test]
-async fn a_delivery_whose_adoption_loses_to_a_changed_row_is_logged() {
+async fn a_delivery_whose_adoption_loses_to_a_changed_row_is_dropped_unanswered_and_uncounted() {
     let server = test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let agent = unique_agent_id("adoption-lost");
@@ -333,32 +257,12 @@ async fn a_delivery_whose_adoption_loses_to_a_changed_row_is_logged() {
     skip_every_claim_update(&claim_db).await;
     let (_listener, mut answers) = answers_to(server.url(), &msg).await;
 
-    let log = Captured::default();
-    {
-        let _capture = log.install();
-        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&msg))
-            .await
-            .expect("the delivery is dropped");
-    }
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&msg))
+        .await
+        .expect("the delivery is dropped");
 
     assert!(model.requests().is_empty(), "nothing ran");
     assert_eq!(drop_counts(&bus), (0, 0), "a lost adoption is not counted");
-    let lost = log.lines_with(ADOPTION_LOST);
-    assert_eq!(
-        lost.len(),
-        1,
-        "one line for the dropped delivery: {lost:#?}"
-    );
-    for field in [
-        format!("stream_seq={seq}"),
-        "delivered=1".to_string(),
-        format!("subject={}", crate::events::subjects::trigger(&agent)),
-        "claimant=binary-1".to_string(),
-        "claim_age_ms=".to_string(),
-        format!("claim_invocation_id={left_behind}"),
-    ] {
-        assert!(lost[0].contains(&field), "no `{field}` in {}", lost[0]);
-    }
     ack_pending_stays(&mut consumer, 1, Duration::from_millis(300)).await;
     if let Ok(Some(answer)) = tokio::time::timeout(Duration::from_millis(300), answers.next()).await
     {
@@ -393,8 +297,8 @@ async fn skip_every_claim_update(claim_db: &std::path::Path) {
 /// started run, and the held count does not move.**
 ///
 /// The trigger runs and its claim is marked started. The same delivery,
-/// handed to `handle` again, meets that claim: it is acked and dropped
-/// with the started arm's line, and counted there only.
+/// handed to `handle` again, meets that claim: it is acked, dropped and
+/// counted in the started arm only.
 #[tokio::test]
 async fn a_copy_after_the_durable_start_is_counted_as_started_not_held() {
     let server = test_nats();
@@ -424,27 +328,14 @@ async fn a_copy_after_the_durable_start_is_counted_as_started_not_held() {
         "the claim records the durable start"
     );
 
-    let log = Captured::default();
-    {
-        let _capture = log.install();
-        tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&copy))
-            .await
-            .expect("the copy is answered");
-    }
+    tokio::time::timeout(Duration::from_secs(5), dispatcher.handle(&copy))
+        .await
+        .expect("the copy is answered");
 
     assert_eq!(
         drop_counts(&bus),
         (1, 0),
-        "the copy is counted as a copy of a started run, and not as held"
-    );
-    assert_eq!(
-        log.lines_with(STARTED_DROP).len(),
-        1,
-        "one line for the refused copy"
-    );
-    assert!(
-        log.lines_with(HELD_DROP).is_empty(),
-        "a copy of a started run is not reported as held"
+        "the copy is counted once as a copy of a started run, and not as held"
     );
     assert_eq!(model.requests().len(), 1, "the copy started nothing");
 }
