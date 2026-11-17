@@ -21,7 +21,10 @@
 //!    definition ([`RunRecords`]) startup recovery and `fq doctor` read
 //!    too. The run's mark was refused past its retries and the ack sent in
 //!    its place was lost; or its task died in the very poll that made its
-//!    first WAL write; or an operator dropped it. The copy is acked and the
+//!    first WAL write; or an operator dropped it before its first WAL write
+//!    and then both the claim's release and the ack after the drop failed
+//!    to land (a drop is on the ownership table whether or not the run
+//!    started, and is its outcome). The copy is acked and the
 //!    claim marked `durably_started`, as the next start's recovery would
 //!    mark it, and the trigger is not run again. It is counted with the
 //!    copies of runs that started (`duplicate_dropped`).
@@ -29,9 +32,12 @@
 //!    took it ended before its run's first WAL write and left the delivery
 //!    unsettled, because its task died, or because the claim's release
 //!    before its NAK failed. The copy takes the claim again under its own
-//!    invocation id, by a compare-and-set on the abandoned one, and runs
-//!    the trigger, once. Logged at `warn`, once, and counted
-//!    (`abandoned_claim_retaken`). A claim a drain or a shutdown left for
+//!    invocation id, by a compare-and-set on the abandoned one, to run the
+//!    trigger once. Logged at `warn`, once, and counted
+//!    (`abandoned_claim_retaken`), which counts claims taken again, not
+//!    runs: the copy runs the trigger unless a drain stops it, as below, or
+//!    `handle` refuses the trigger after its claim as it would any
+//!    delivery's. A claim a drain or a shutdown left for
 //!    the next binary is this case too, if a copy reaches this process
 //!    before it exits; that copy then stops at `handle`'s own drain check,
 //!    after the re-take, and leaves the claim to the next binary again.

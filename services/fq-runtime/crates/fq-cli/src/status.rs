@@ -473,14 +473,16 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                      unacked, not run)\n"
                 ));
             }
-            // Not a duplicate: a copy that met a claim of this daemon's
-            // that nothing was handling any more, with no run on record,
-            // took it again and ran the trigger (#967).
+            // Not a duplicate: a claim of this daemon's that no copy was
+            // handling any more, with no run on record, taken again by a
+            // copy to run the trigger (#967). It counts claims, not runs:
+            // a drain under way, or the trigger refused after its claim,
+            // can stop that copy before it runs anything.
             if *abandoned_claim_retaken > 0 {
                 out.push_str(&format!(
-                    "    abandoned claim taken again: {abandoned_claim_retaken} since this daemon \
-                     started (no copy was handling it and no run of it was on record; run once \
-                     under a new invocation id)\n"
+                    "    abandoned claims taken again: {abandoned_claim_retaken} since this daemon \
+                     started (no copy was handling the claim and no run of it was on record; each \
+                     taken under a new invocation id to run the trigger)\n"
                 ));
             }
             out

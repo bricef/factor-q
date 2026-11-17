@@ -331,31 +331,34 @@ fn duplicate_suffix(duplicate_dropped: u64, held_duplicate_dropped: u64) -> Stri
 /// recorded, saying what that count can and cannot tell, or nothing when
 /// it is zero.
 ///
-/// It does not say whether anything is wrong. Such a copy met a claim a
-/// copy of its trigger was still handling, waiting or starting: a
-/// delivery is redelivered under it when its keepalive stops landing for
-/// a whole ack window, and the first copy still settles it. A copy whose
-/// claim no copy is handling any more is not counted here unless whether
-/// its run is on record could not be read (#967); the dispatcher settles
-/// it by that record instead. The stranded-claims block of the same
-/// report lists such a claim once a run is on record for it and its
-/// mark is overdue, which the line points at.
+/// It does not say whether anything is wrong. Most such copies met a
+/// claim a copy of their trigger was still handling, waiting, starting or
+/// marking its start: a delivery is redelivered under it when its
+/// keepalive stops landing for a whole ack window, and the first copy
+/// still settles it. The rest met a claim no copy was handling any more
+/// and could not settle it from the records just then (#967): another
+/// copy that met the same claim got to it first, the claim names no run,
+/// or reading the records or taking the claim again failed, and a later
+/// copy asks again. The stranded-claims block of the same report lists
+/// such a claim once a run is on record for it and its mark is overdue,
+/// which the line points at.
 fn held_duplicate_note(held_duplicate_dropped: u64) -> String {
     if held_duplicate_dropped == 0 {
         return String::new();
     }
     "  -> \"before a start was recorded\" is a copy that met a claim this daemon holds with no \
-     start on it while a copy of the trigger was still handling it, left unacked for that copy to \
-     settle, or one that came when whether the claim's run is on record could not be read; the \
-     daemon log has a warn line for each with its subject, sequence, attempt, the claim's age and \
-     why, and such a claim whose run is on record is listed under \"Stranded trigger claims\" \
-     below\n"
+     start on it and was left unacked: usually a copy of the trigger was still handling the claim \
+     and settles it itself; otherwise the claim could not be settled from the records just then \
+     (another copy got to it first, the claim names no run, or a read or the re-take failed) and \
+     a later copy asks again; the daemon log has a warn line for each with its subject, \
+     sequence, attempt, the claim's age and why, and such a claim whose run is on record is \
+     listed under \"Stranded trigger claims\" below\n"
         .to_string()
 }
 
 /// `, abandoned claims taken again since this daemon started: N`, or
 /// nothing when none was. Apart from the duplicates, because it is not
-/// one: such a copy ran the trigger ([`retaken_note`]).
+/// one: such a copy took the claim to run the trigger ([`retaken_note`]).
 fn retaken_suffix(abandoned_claim_retaken: u64) -> String {
     if abandoned_claim_retaken == 0 {
         String::new()
@@ -369,19 +372,24 @@ fn retaken_suffix(abandoned_claim_retaken: u64) -> String {
 /// The line under a consumer that took abandoned claims again, saying what
 /// that count means, or nothing when it is zero (#967).
 ///
-/// It is not a fault. Each one follows a failure the daemon logged, a run's
-/// task that died before its first WAL write or a claim release that failed
-/// before a NAK, and the trigger then ran once; the warn line for each
-/// names the abandoned invocation id, which is where to look for why.
+/// It is not a fault. Each one follows a failure the daemon logged (a
+/// run's task that died before its first WAL write; a claim release that
+/// failed before a NAK, or before an ack that was then lost) or a drain
+/// that left the claim for the next binary; the warn line for each names
+/// the abandoned invocation id, which is where to look for why. It counts
+/// claims taken again, not runs: the copy that took one runs the trigger
+/// unless a drain or the trigger's own checks stop it first.
 fn retaken_note(abandoned_claim_retaken: u64) -> String {
     if abandoned_claim_retaken == 0 {
         return String::new();
     }
-    "  -> \"taken again\" is a copy that met a claim this daemon holds that no copy was handling \
-     any more, whose run had no start on record: the copy that took it ended before its first WAL \
-     write without settling the delivery, so this one ran the trigger once, under a new \
-     invocation id; the daemon log has a warn line for each naming the abandoned invocation id, \
-     and the failure before it\n"
+    "  -> \"taken again\" counts claims this daemon held that a copy took again, under a new \
+     invocation id, to run the trigger: no copy was handling the claim any more and its run had \
+     no start on record, because the copy that took it ended before its first WAL write without \
+     settling the delivery (its task died; giving the claim back failed before a NAK, or before \
+     an ack that was then lost; or a drain left it); the copy then runs the trigger unless a drain \
+     or the trigger's own checks stop it first; the daemon log has a warn line for each naming \
+     the abandoned invocation id, and the failure before it\n"
         .to_string()
 }
 

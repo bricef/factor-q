@@ -1264,8 +1264,9 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
 /// The signal fires, the claim store refuses every attempt to mark the
 /// claim, and the ack sent in place of the mark cannot be sent either.
 /// What follows is the risk #967 accepted: the delivery is left un-acked
-/// with its claim `claimed`, so its redeliveries will meet this daemon's
-/// own claim and be dropped. The failure must be logged, naming the
+/// with its claim `claimed`, so its redeliveries meet this daemon's own
+/// claim and are settled by the run's start on record (`own_claim`). The
+/// failure must be logged, naming the
 /// trigger, and the run must still go on to its end.
 #[tokio::test]
 async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_run_runs_on() {

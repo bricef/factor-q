@@ -30,20 +30,25 @@ pub struct ConsumerRecord {
     /// Trigger redeliveries dropped because their claim records a durable
     /// start: a copy of a run that has started. Acked.
     pub duplicate_dropped: u64,
-    /// Trigger redeliveries dropped because this process already holds
-    /// their claim and it records no start, while a copy of the trigger is
-    /// still handling it: waiting, setting up or marking its start. Left
-    /// unacked. A copy whose claim no copy is handling is settled by what
-    /// is on record instead (counted as `duplicate_dropped` or
-    /// `abandoned_claim_retaken`), unless that cannot be read, when it is
-    /// dropped and counted here too.
+    /// Trigger redeliveries dropped, and left unacked, because this process
+    /// already holds their claim and it records no start: a copy of the
+    /// trigger was still handling it (waiting, setting up or marking its
+    /// start), or no copy was and the claim could not be settled from the
+    /// records just then (another copy settled or took it first, the claim
+    /// names no run, or reading the records or taking the claim again
+    /// failed). A copy whose claim no copy is handling, and whose records
+    /// can be read, is settled by them instead (counted as
+    /// `duplicate_dropped` or `abandoned_claim_retaken`).
     pub held_duplicate_dropped: u64,
-    /// Trigger redeliveries that took again a claim this process holds,
-    /// which no copy was handling any more and whose run had no start on
-    /// record: the copy that took it ended before its first WAL write and
-    /// left the delivery unsettled (its task died, or the release before
-    /// its NAK failed, or before its ack, which was lost). Each one ran the
-    /// trigger under a new invocation id.
+    /// Claims this process holds that a trigger redelivery took again: no
+    /// copy was handling the claim any more and its run had no start on
+    /// record, because the copy that took it ended before its first WAL
+    /// write and left the delivery unsettled (its task died, or the release
+    /// before its NAK failed, or before its ack, which was lost), or a drain
+    /// left it. Each was taken under a new invocation id to run the
+    /// trigger, which the copy then does unless a drain stops it first or
+    /// the trigger is refused after its claim; so this counts claims, not
+    /// runs.
     pub abandoned_claim_retaken: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
@@ -90,7 +95,7 @@ impl ConsumerLedger {
     }
 
     /// The dispatcher took again a claim of its own that no copy was
-    /// handling and whose run had no start on record, and ran the trigger.
+    /// handling and whose run had no start on record, to run the trigger.
     pub fn note_abandoned_claim_retaken(&self, consumer: &str) {
         self.lock()
             .entry(consumer.to_string())

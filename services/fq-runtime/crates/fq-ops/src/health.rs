@@ -144,28 +144,33 @@ pub enum ConsumerHealth {
         /// any more is settled by what is on record instead: acked, and
         /// counted in `duplicate_dropped`, where the run started; taken
         /// again, and counted in `abandoned_claim_retaken`, where nothing
-        /// is on record. It is counted here too when whether its run is
-        /// on record could not be read, and left for a later copy. The
-        /// daemon logs each one at warn with its subject, its sequence,
-        /// its attempt, the claim's age and why. Counted in memory since
-        /// the daemon started, like `duplicate_dropped`. A report from a
-        /// daemon that does not send it reads as zero.
+        /// is on record. Such a copy is counted here, and left for a later
+        /// copy, when the claim cannot be settled from the records just
+        /// then: another copy that met the same claim settled or took it
+        /// first, the claim names no run, or reading the records or taking
+        /// the claim again failed. The daemon logs each one at warn with
+        /// its subject, its sequence, its attempt, the claim's age and
+        /// why. Counted in memory since the daemon started, like
+        /// `duplicate_dropped`. A report from a daemon that does not send
+        /// it reads as zero.
         #[serde(default)]
         held_duplicate_dropped: u64,
-        /// Deliveries that met a claim the daemon holds itself, with no
-        /// start recorded on it, that no copy of the trigger was handling
-        /// any more and whose run had no start on record, in the worker's
-        /// WAL or the control plane's: the copy that took the claim ended
-        /// before its run's first WAL write and left the delivery
+        /// Claims the daemon held itself, with no start recorded on them,
+        /// that a delivery took again: no copy of the trigger was handling
+        /// the claim any more and its run had no start on record, in the
+        /// worker's WAL or the control plane's, because the copy that took
+        /// it ended before its run's first WAL write and left the delivery
         /// unsettled (its task died, or releasing the claim before a NAK
-        /// failed, or before an ack that was lost as well). Each took the
-        /// claim again under a new invocation id
-        /// and ran the trigger, once, unless a drain or a shutdown under
-        /// way stopped it first and left it for the next binary. Not a
-        /// duplicate: the work runs. Not
-        /// a fault either, though each one follows a failure the daemon
-        /// logs; the daemon logs each at warn with its subject, its
-        /// sequence, its attempt, the claim's age and the abandoned
+        /// failed, or before an ack that was lost as well), or because a
+        /// drain left it for the next binary. Each was taken under a new
+        /// invocation id to run the trigger once. The copy that took it
+        /// runs the trigger unless a drain or a shutdown under way stops it
+        /// first, or the trigger is refused after its claim as any delivery
+        /// would be (its agent no longer loaded, a payload that does not
+        /// parse), so this counts claims taken again, not runs. Not a
+        /// duplicate. Not a fault either, though each one follows a failure
+        /// the daemon logs; the daemon logs each at warn with its subject,
+        /// its sequence, its attempt, the claim's age and the abandoned
         /// invocation id. Counted in memory since the daemon started, like
         /// `duplicate_dropped`. A report from a daemon that does not send
         /// it reads as zero.
@@ -589,9 +594,10 @@ impl ArchiveSweep {
 /// whether a copy of its trigger is still handling it, so the report does
 /// not guess. The dispatcher knows, and settles such a claim that no copy
 /// is handling when the trigger's next delivery arrives: it takes the
-/// claim again and runs the trigger. Nor is a claim whose delivery can no longer
-/// change anything: one whose run started but whose message is gone, and
-/// one an exited process left that is older than the report's horizon.
+/// claim again to run the trigger. Nor is a claim whose delivery can no
+/// longer change anything: one whose run started but whose message is
+/// gone, and one an exited process left that is older than the report's
+/// horizon.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct StrandedTriggerClaim {
     /// The delivery, and the claim on it as the control plane holds it.
@@ -670,8 +676,13 @@ pub enum StrandedClaimFinding {
     /// Where nothing was acked, or the ack was lost, the next redelivery
     /// finds the run's start on record, is acked and marks the claim,
     /// without starting the work again; this daemon's next start marks it
-    /// if none comes. A run whose task panicked stays in flight, with
-    /// nothing driving it, until that start's recovery resumes it. Left by
+    /// if none comes. If none comes because that was the trigger's last
+    /// delivery, the dead-letter watch, which does not consult the
+    /// records, ends the trigger as a `trigger_exhausted` dead letter
+    /// although its run started: that dead letter is false, and requeuing
+    /// it runs the work twice. A run whose task panicked stays in flight,
+    /// with nothing driving it, until that start's recovery resumes it.
+    /// Left by
     /// a process that has exited, a redelivery would be adopted and start
     /// the work again, and a false dead letter may already exist.
     StartedUnmarked,

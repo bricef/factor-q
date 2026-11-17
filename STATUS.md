@@ -268,14 +268,18 @@ route ADR-0032's section 5 says it used, a start slower than the ack
 window; the property it certifies is unchanged, and a third test in
 that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
-redelivered. ADR-0032 is not edited, so these of its statements are now
+redelivered. ADR-0032's only edit since records the finished retry
+ladder (2026-11-14); it is not edited for the keepalive or for the
+settling of a daemon's own claims, so these of its statements are now
 out of date: section 5's account of the two routes to a redelivery
-before durable start, and of the replay using the second; gap 3 as a
-whole, now closed (below), its "a start that takes longer than the whole
-retry ladder" included; the row of section 2's table for a claim the
-same process holds, which "Stops" with "No log line and no count"; and,
-in its part on more than one worker, "where nothing keeps it alive" and
-"in a slow start". The
+before durable start, and of the replay using the second; gap 3's "a
+start that takes longer than the whole retry ladder", and its account of
+the same-claimant arm dropping every redelivery until the trigger is
+dead-lettered, which now happens only after a trigger's last delivery
+(below); the row of section 2's table for a claim the same process
+holds, which "Stops" with "No log line and no count"; and, in its part
+on more than one worker, "where nothing keeps it alive" and "in a slow
+start". The
 retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
 durable retries after 30 seconds, then 2, 5 and 12 minutes, and
@@ -329,9 +333,12 @@ started run (`fq status` and `fq doctor` name the two by whether the
 copy came before or after a start was recorded). Both counts are kept
 in memory and start again with the daemon
 ([#968](https://github.com/bricef/factor-q/issues/968)). The third gap,
-a live process holding a claim it will never settle, is now shut as well
-([#967](https://github.com/bricef/factor-q/issues/967), in four
-changes). A durable-start mark the claim store refuses no longer
+a live process holding a claim it will never settle, is closed except
+after a trigger's last delivery
+([#967](https://github.com/bricef/factor-q/issues/967), in five changes,
+four of them merged once
+[#1041](https://github.com/bricef/factor-q/pull/1041) lands). A
+durable-start mark the claim store refuses no longer
 stops the run: the dispatcher offers the mark again for up to two
 seconds, keeping the delivery alive meanwhile, and a mark still refused
 is answered by acking the delivery without releasing its claim, so the
@@ -348,23 +355,32 @@ setup that hangs before its first WAL write is therefore kept alive,
 and nothing reports it
 ([#1040](https://github.com/bricef/factor-q/issues/1040)). And a copy
 that meets a claim the daemon holds itself is settled by what is on
-record instead of always being dropped: while a copy of the trigger is
-still handling the claim it is dropped, as before; once none is, a run
-with a start on record, in the worker's WAL or the control plane's
-ownership table, has the copy acked and the claim marked, and a run with
-none has the claim taken again under a new invocation id and the
-trigger run once, counted in `fq status` and `fq doctor` as an
-abandoned claim taken again. A task that panicked in the very step that
-made its first WAL write is the first kind: its trigger is not run
-again, and its run waits in flight for the next start's recovery. A
+record instead of always being dropped
+([#1041](https://github.com/bricef/factor-q/pull/1041)): while a copy of
+the trigger is still handling the claim, until its start is marked or
+its mark gives up, it is dropped, as before; once none is, a run with a
+start on record, in the worker's WAL or the control plane's ownership
+table, has the copy acked and the claim marked, whether the run is still
+going or has ended, and a run with none has the claim taken again under
+a new invocation id to run the trigger, counted in `fq status` and
+`fq doctor` as an abandoned claim taken again. A task that panicked in
+the very step that made its first WAL write is the first kind: its
+trigger is not run again, and its run waits in flight for the next
+start's recovery. What stays open is a fault on a trigger's last
+delivery: when that delivery starts the run and its task then dies, or
+its mark gives up and its ack is lost, no copy follows for the
+dispatcher to settle, and the dead-letter watch, which does not consult
+the records, dead-letters a trigger whose run started as
+`trigger_exhausted`; requeuing that dead letter runs the work twice.
+Having the watch consult the records is the fifth change of
+[#967](https://github.com/bricef/factor-q/issues/967), not built yet. A
 copy whose run's records cannot be read is still dropped, so a daemon
-that cannot read them at any of a trigger's deliveries can still
-dead-letter it as exhausted although its run started. And one double
-fault runs a trigger once more: a run that failed for good before its
-first WAL write leaves nothing on record, so if releasing its claim
-fails and its ack is lost as well, its redelivery takes the claim again
-and runs it, where before the copy was dropped until a false
-`trigger_exhausted`. Outside
+that cannot read them at any of a trigger's deliveries can dead-letter
+it the same way. And one double fault runs a trigger once more: a run
+that failed for good before its first WAL write leaves nothing on
+record, so if releasing its claim fails and its ack is lost as well, its
+redelivery takes the claim again and runs it, where before the copy was
+dropped until a false `trigger_exhausted`. Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered

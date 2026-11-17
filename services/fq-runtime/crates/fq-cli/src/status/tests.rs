@@ -493,7 +493,7 @@ fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
 /// An abandoned claim this daemon took again is counted on a line of its
 /// own (#967), apart from the duplicates, because it is not one: no copy
 /// was handling the claim and nothing of its run was on record, so the
-/// copy ran the trigger, once, under a new invocation id.
+/// copy took the claim under a new invocation id to run the trigger.
 #[test]
 fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
     let out = render_stream_health_human(&StreamHealth::Available {
@@ -518,8 +518,9 @@ fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
     });
     assert!(
         out.contains(
-            "    abandoned claim taken again: 3 since this daemon started (no copy was handling \
-             it and no run of it was on record; run once under a new invocation id)\n"
+            "    abandoned claims taken again: 3 since this daemon started (no copy was \
+             handling the claim and no run of it was on record; each taken under a new \
+             invocation id to run the trigger)\n"
         ),
         "got:\n{out}"
     );

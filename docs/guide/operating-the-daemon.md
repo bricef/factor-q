@@ -1191,18 +1191,24 @@ something else.)
      started: 5 after their run started, 2 before a start was recorded,
      abandoned claims taken again since this daemon started: 1)
   -> "before a start was recorded" is a copy that met a claim this
-     daemon holds with no start on it while a copy of the trigger was
-     still handling it, left unacked for that copy to settle, or one that
-     came when whether the claim's run is on record could not be read;
-     the daemon log has a warn line for each with its subject, sequence,
+     daemon holds with no start on it and was left unacked: usually a
+     copy of the trigger was still handling the claim and settles it
+     itself; otherwise the claim could not be settled from the records
+     just then (another copy got to it first, the claim names no run, or
+     a read or the re-take failed) and a later copy asks again; the
+     daemon log has a warn line for each with its subject, sequence,
      attempt, the claim's age and why, and such a claim whose run is on
      record is listed under "Stranded trigger claims" below
-  -> "taken again" is a copy that met a claim this daemon holds that no
-     copy was handling any more, whose run had no start on record: the
-     copy that took it ended before its first WAL write without settling
-     the delivery, so this one ran the trigger once, under a new
-     invocation id; the daemon log has a warn line for each naming the
-     abandoned invocation id, and the failure before it
+  -> "taken again" counts claims this daemon held that a copy took
+     again, under a new invocation id, to run the trigger: no copy was
+     handling the claim any more and its run had no start on record,
+     because the copy that took it ended before its first WAL write
+     without settling the delivery (its task died; giving the claim back
+     failed before a NAK, or before an ack that was then lost; or a drain
+     left it); the copy then runs the trigger unless a drain or the
+     trigger's own checks stop it first; the daemon log has a warn line
+     for each naming the abandoned invocation id, and the failure before
+     it
 ```
 
 - **After their run started.** The run's first durable write is on
@@ -1216,9 +1222,13 @@ something else.)
   run's start was refused on every attempt and the ack the daemon sent
   in its place was lost (the run itself carries on; see "Started, never
   marked" below), or the run's task panicked in the step that made its
-  first durable write. That copy is acked too, the claim is marked, and
-  the trigger is not run again
-  ([#967](https://github.com/bricef/factor-q/issues/967)).
+  first durable write. A copy stops handling its claim once its start is
+  marked or its mark has given up, so this holds while the run is still
+  going as well as after it ends. That copy is acked too, the claim is
+  marked, and the trigger is not run again
+  ([#967](https://github.com/bricef/factor-q/issues/967)). If the lost
+  ack was the trigger's last delivery, though, no copy comes back to be
+  acked: see "Started, never marked".
 - **Before a start was recorded.** The claim is this daemon's, records
   no start, and a copy of the trigger is still handling it, so the copy
   is dropped and left unacked for that one. That first copy may be
@@ -1228,22 +1238,30 @@ something else.)
   from its worker permit to its first durable write (its workspace, its
   MCP servers, its first step) the same in-progress acks keep it alive,
   so a slow start is not redelivered either unless they stop landing. Or
-  it may be marking its start. Either way it still starts once. A copy
-  is counted here too when no copy is handling the claim but whether its
-  run is on record could not be read (the worker or the claim store
-  failed the read), and it is left for a later copy to try again; or
-  when another copy that met the same claim settled or took it first,
-  and that copy answers the delivery.
+  it may be marking its start, which the same in-progress acks cover.
+  Either way it still starts once, and settles the delivery itself. A
+  copy is counted here too when no copy is handling the claim but it
+  cannot be settled from the records just then, and is left for a later
+  copy: another copy that met the same claim settled or took it first;
+  the claim names no run (a build from before claims named their run
+  wrote it); or reading the records, or taking the claim again, failed
+  (the worker or the claim store erred).
 - **Taken again.** The claim is this daemon's, records no start, no copy
   of the trigger is handling it any more, and nothing of its run is on
   record: the copy that took it ended before its run's first durable
   write without settling the delivery, because its task panicked, or
   because giving the claim back before a retry failed. The copy takes
   the claim again under a new invocation id, by a compare-and-set on the
-  old one, and runs the trigger once. It is not a duplicate: the work
-  runs, and the count is not an issue. One double fault lands here too:
-  a run that failed for good before its first durable write, whose claim
-  could not be given back and whose ack was lost, is run once more.
+  old one, to run the trigger once. The count is of claims taken again,
+  not of runs: the copy then runs the trigger unless a drain under way
+  stops it first, which leaves the claim for the next binary again, or
+  the trigger is refused after its claim as any delivery would be (its
+  agent no longer loaded, a payload that does not parse). It is not a
+  duplicate, and not an issue. A claim a drain left behind is taken
+  again the same way, if a copy reaches the daemon before it exits. One
+  double fault lands here too: a run that failed for good before its
+  first durable write, whose claim could not be given back and whose
+  ack was lost, is run once more.
 
 The warn lines are `dropping duplicate trigger delivery after durable
 start`, `acking a redelivered trigger whose claim this daemon holds`,
@@ -1420,11 +1438,25 @@ name the horizon.
   Either way the row lasts only until a redelivery reaches the running
   daemon or the daemon next starts. A redelivery comes when nothing
   acked the delivery or its ack was lost: it meets the claim with no
-  copy of the trigger handling it, finds the run's start on record, and
-  is acked and marks the claim without starting the work again, logging
-  `acking a redelivered trigger whose claim this daemon holds` at warn
-  and counted as a duplicate dropped after its run started. If none
-  comes, startup recovery, before the dispatcher consumes anything,
+  copy of the trigger handling it, while the run is still going or after
+  it ended, finds the run's start on record, and is acked and marks the
+  claim without starting the work again, logging `acking a redelivered
+  trigger whose claim this daemon holds` at warn and counted as a
+  duplicate dropped after its run started.
+
+  **No redelivery comes after the trigger's last delivery.** If that
+  fifth delivery is the one that started the run, and its task then
+  died or its ack was lost, nothing is left for the dispatcher to
+  settle, and once that delivery's ack window lapses the advisory watch
+  dead-letters the trigger as `trigger_exhausted`, without consulting
+  the claim or the run's records. That dead letter is false, and requeuing
+  it starts the work twice: read the run with `fq invocation show` and
+  do not requeue it. Having the watch consult the records is the fifth
+  pull request of [#967](https://github.com/bricef/factor-q/issues/967),
+  not built yet.
+
+  If no redelivery comes, startup recovery, before the dispatcher
+  consumes anything,
   records the start on every `claimed` row whose run is on record, in
   the worker's WAL (in flight or finished) or in the control plane's
   ownership table, and logs `recorded a durable start missing from its
@@ -1437,12 +1469,12 @@ name the horizon.
   delivery was acked, because it judges a message deliverable by its age
   and stream incarnation, not by the consumer's ack state; the daemon
   log can, by the lines above for that invocation. There is nothing to
-  repair from the CLI: read the run with `fq invocation show`. One case
-  can still end in a false `trigger_exhausted` dead letter: if the
-  daemon cannot read the run's records at any of its redeliveries, each
-  is dropped as one before a start was recorded, with the read's error
-  on its warn line. Do not requeue that dead letter; it starts the work
-  twice.
+  repair from the CLI: read the run with `fq invocation show`. A second
+  route to a false `trigger_exhausted` dead letter, beside the last
+  delivery: if the daemon cannot read the run's records at any of its
+  redeliveries, each is dropped as one before a start was recorded, with
+  the read's error on its warn line. Do not requeue either dead letter;
+  it starts the work twice.
 - **Cannot tell** (not an issue). The claim names no invocation, because
   a build from before claims named their run wrote it, so the report
   cannot look for a run.
@@ -1458,7 +1490,7 @@ memory, and the report does not ask. A claim no copy is handling any
 more, left by a run that panicked before its first durable write or by
 a release that failed before a retry, looks the same to the report, and
 is settled by the trigger's next delivery instead: the dispatcher takes
-the claim again and runs the trigger, counting it on the `fq-dispatcher`
+the claim again to run the trigger, counting it on the `fq-dispatcher`
 line as an abandoned claim taken again and logging it with its subject,
 its sequence, the claim's age and the abandoned invocation id (see
 [the dispatcher's counts](#when-a-consumer-stops-making-progress)). If
