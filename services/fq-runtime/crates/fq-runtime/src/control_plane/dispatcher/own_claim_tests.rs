@@ -33,7 +33,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,7 +50,7 @@ use super::tests::{canned_response, registry_with, unique_agent_id};
 use super::{CONSUMER_NAME, TriggerClaims, TriggerDispatcher};
 use crate::agent::Agent;
 use crate::bus::{EventBus, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
-use crate::control_plane::ControlPlaneStore;
+use crate::control_plane::{ControlPlaneStore, OwnerStatus};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
 use crate::test_support::nats::{NatsServer, test_nats};
@@ -82,6 +82,9 @@ enum Run {
     /// Makes its first WAL write, fires its signal, then waits at
     /// [`Scripted::run_gate`] before it finishes.
     WaitsAfterStart,
+    /// Waits at [`Scripted::setup_gate`] before its first WAL write, then
+    /// makes it, fires its signal, and panics in the same poll.
+    WaitsInSetupThenDiesAfterStart,
 }
 
 /// The stub worker: each `run_invocation` takes the next [`Run`] from its
@@ -103,6 +106,18 @@ struct Scripted {
     waiting: AtomicUsize,
     /// Notified when a run reaches a gate.
     reached_gate: Notify,
+    /// While set, `wal_run` reads the WAL and then waits at
+    /// [`Self::wal_read_gate`] before it answers: the copy asking is held
+    /// between reading the records and acting on what it read.
+    hold_wal_reads: AtomicBool,
+    wal_read_gate: Semaphore,
+    /// How many `wal_run` calls are waiting at that gate.
+    wal_reads_held: AtomicUsize,
+    /// When set, `wal_run` first plays the archive hand-off for a finished
+    /// run it is asked about, as the hand-off does it: the control plane
+    /// records the run's ownership row, and only then is the WAL row
+    /// deleted. Then it answers, from a WAL that no longer holds the run.
+    hands_off_on_read: Mutex<Option<Arc<ControlPlaneStore>>>,
 }
 
 impl Scripted {
@@ -116,6 +131,10 @@ impl Scripted {
             run_gate: Semaphore::new(0),
             waiting: AtomicUsize::new(0),
             reached_gate: Notify::new(),
+            hold_wal_reads: AtomicBool::new(false),
+            wal_read_gate: Semaphore::new(0),
+            wal_reads_held: AtomicUsize::new(0),
+            hands_off_on_read: Mutex::new(None),
         })
     }
 
@@ -135,6 +154,33 @@ impl Scripted {
             .expect("the gate is never closed")
             .forget();
         self.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The archive hand-off of `invocation_id`'s run, if the WAL holds it
+    /// finished: its ownership row is written on the control plane, then
+    /// its WAL row is deleted.
+    async fn hand_off(&self, claims: &ControlPlaneStore, invocation_id: &str) {
+        let terminal = self
+            .wal
+            .durable_start_of(invocation_id)
+            .await
+            .expect("read the WAL");
+        if terminal != Some(true) {
+            return;
+        }
+        claims
+            .upsert_invocation_ownership(
+                invocation_id,
+                "own-claim-worker",
+                3,
+                OwnerStatus::Completed,
+            )
+            .await
+            .expect("write the ownership row");
+        self.wal
+            .delete_invocation_state(invocation_id)
+            .await
+            .expect("delete the WAL row");
     }
 
     /// Wait until `n` runs are waiting at a gate.
@@ -218,7 +264,9 @@ impl Worker for Scripted {
                     "injected: a transient failure before the first WAL write".to_string(),
                 ));
             }
-            Run::WaitsInSetup => self.wait(&self.setup_gate).await,
+            Run::WaitsInSetup | Run::WaitsInSetupThenDiesAfterStart => {
+                self.wait(&self.setup_gate).await
+            }
             Run::Completes | Run::DiesAfterStart | Run::WaitsAfterStart => {}
         }
         self.wal
@@ -226,7 +274,10 @@ impl Worker for Scripted {
             .await
             .expect("the first WAL write");
         durable_start.fire();
-        if run == Run::DiesAfterStart {
+        if matches!(
+            run,
+            Run::DiesAfterStart | Run::WaitsInSetupThenDiesAfterStart
+        ) {
             panic!("injected: the invocation task dies in the poll that made its first WAL write");
         }
         if run == Run::WaitsAfterStart {
@@ -246,11 +297,26 @@ impl Worker for Scripted {
     }
 
     async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
-        self.wal
+        let hands_off = self.hands_off_on_read.lock().unwrap().clone();
+        if let Some(claims) = hands_off {
+            self.hand_off(&claims, invocation_id).await;
+        }
+        let answer = self
+            .wal
             .durable_start_of(invocation_id)
             .await
             .map(|terminal| terminal.map(WalRun::of_row))
-            .map_err(|err| ExecutorError::WorkerStore(err.to_string()))
+            .map_err(|err| ExecutorError::WorkerStore(err.to_string()));
+        if self.hold_wal_reads.load(Ordering::SeqCst) {
+            self.wal_reads_held.fetch_add(1, Ordering::SeqCst);
+            self.wal_read_gate
+                .acquire()
+                .await
+                .expect("the gate is never closed")
+                .forget();
+            self.wal_reads_held.fetch_sub(1, Ordering::SeqCst);
+        }
+        answer
     }
 
     async fn request_drain(&self, _req: DrainRequest) {}
@@ -931,6 +997,106 @@ async fn a_run_whose_mark_gave_up_and_whose_ack_was_lost_has_its_copies_acked_wh
         arena.wal().await,
         vec![(first_run.to_string(), WalRun::Finished)]
     );
+}
+
+/// **Whether a copy is still handling the claim is asked before the
+/// records are read.** The order is load-bearing, and this is the case
+/// that shows it. The first copy waits in setup, before its first WAL
+/// write, so nothing is on record yet; a second copy arrives, and any read
+/// it makes of the records is held there. The first copy then makes its
+/// first WAL write and dies in the same poll, and only then does the
+/// second copy go on. Asked first, the note says the first copy was
+/// handling the claim when the second came, so the second never reads the
+/// records and is dropped. Asked the other way round, the second copy
+/// would have read an empty WAL, then found no note once the first copy
+/// died, and taken the claim again over a run that started.
+#[tokio::test]
+async fn whether_a_copy_is_handling_the_claim_is_asked_before_the_records_are_read() {
+    let (arena, _server) = arena().await;
+    arena.worker.queue(Run::WaitsInSetupThenDiesAfterStart);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    arena.worker.hold_wal_reads.store(true, Ordering::SeqCst);
+
+    let second = arena.spawn_delivery(SEQ, 2, false);
+    // The second copy is answered at once, or is held reading the records.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !second.task.is_finished() && arena.worker.wal_reads_held.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the second copy neither finished nor read the records within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    arena.worker.setup_gate.add_permits(1);
+    let first = arena.finish(first).await;
+    assert!(
+        first.panicked,
+        "the first copy dies after its first WAL write: {first:?}"
+    );
+    arena.worker.hold_wal_reads.store(false, Ordering::SeqCst);
+    arena.worker.wal_read_gate.add_permits(1);
+    let second = arena.finish(second).await;
+
+    assert!(
+        arena.worker.started_over_a_start.lock().unwrap().is_empty(),
+        "the trigger was started again over a run that started"
+    );
+    assert_eq!(arena.worker.starts().len(), 1, "the trigger started once");
+    assert_eq!(
+        second,
+        Answered::default(),
+        "the second copy came while the first was handling the claim, and is dropped unanswered"
+    );
+    assert_eq!(arena.counts(), (0, 1, 0));
+}
+
+/// **A run archived while a copy reads its records is found on the control
+/// plane's record, and is not run again.** The dispatcher reads the worker's
+/// WAL first and the ownership row second, because the archive hand-off
+/// writes the ownership row before it deletes the WAL row: whatever moment
+/// the hand-off lands, one of the two reads finds the run. Here it lands
+/// inside the first read. The run finished with its mark refused and its
+/// ack lost; when the next copy asks the worker about it, the worker hands
+/// it off and then answers from a WAL that no longer holds it. The
+/// ownership row, read next, does. Ignoring the ownership row, or reading
+/// it before the WAL, would find nothing and start the trigger again.
+#[tokio::test]
+async fn a_run_archived_between_the_two_reads_of_its_records_is_not_run_again() {
+    let (arena, _server) = arena().await;
+    refuse_updates(&arena.claim_db).await;
+    let first = arena.deliver(1, true).await;
+    assert!(!first.panicked, "{first:?}");
+    let first_run = arena.worker.starts()[0].0;
+    assert_eq!(
+        arena.wal().await,
+        vec![(first_run.to_string(), WalRun::Finished)]
+    );
+    heal(&arena.claim_db).await;
+    *arena.worker.hands_off_on_read.lock().unwrap() = Some(Arc::clone(&arena.claims));
+
+    let again = arena.deliver(2, false).await;
+
+    assert_eq!(
+        arena.worker.starts().len(),
+        1,
+        "the run is on the control plane's record: the trigger must not start again"
+    );
+    assert_eq!(
+        arena.wal().await,
+        vec![],
+        "the run was handed off while the copy read the WAL"
+    );
+    assert_eq!(
+        arena
+            .claim(SEQ)
+            .await
+            .map(|row| (row.started, row.invocation_id)),
+        Some((true, Some(first_run.to_string()))),
+        "the claim is marked, naming the archived run"
+    );
+    assert_eq!((again.acks, again.naks), (1, 0), "{again:?}");
+    assert_eq!(arena.counts(), (1, 0, 0));
 }
 
 /// **A copy that meets a claim whose first copy is still setting up is
