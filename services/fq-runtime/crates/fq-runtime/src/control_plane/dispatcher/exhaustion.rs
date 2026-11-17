@@ -36,7 +36,7 @@
 //! empty just before a copy makes its first WAL write and dies, and a run
 //! that started would be dead-lettered.
 //!
-//! **Held verdicts.** Two cases are neither, and the watch holds its
+//! **Held verdicts.** Three cases are neither, and the watch holds its
 //! verdict on them, NAKing the advisory to decide again when it comes
 //! back:
 //!
@@ -55,13 +55,29 @@
 //!   its start was marked: a drain or shutdown let it go, its keepalives
 //!   did not land, or its setup blocked its thread. A setup that waits is
 //!   kept alive, and its deliveries do not run out.
+//! - **The claim changed between the two reads** of it: marked started,
+//!   given back, or taken again under another id. It is read once more,
+//!   and a start found is a verdict: the claim marked started, or a run the
+//!   check already read in the WAL. Only with neither is the verdict held.
 //!
-//! A held verdict does not wait for ever. Past the watch's limit
-//! (`advisory_watch::HELD_VERDICT_LIMIT`, measured from when the broker
-//! emitted the advisory) the watch writes the dead letter anyway, marked
-//! as one whose start could not be checked and naming the invocation the
-//! claim names ([`Exhausted::Undecided`] carries it), so the trigger is
-//! never lost silently when its advisory ages out of its stream.
+//! A start found is never held: positive evidence wins wherever the check
+//! has it.
+//!
+//! A held verdict does not wait for ever. Once the advisory is
+//! `advisory_watch::HELD_VERDICT_LIMIT` old (measured from when the broker
+//! emitted it) and the watch has looked at it
+//! `advisory_watch::HELD_VERDICT_MIN_LOOKS` times, the watch takes a last
+//! look ([`ExhaustionCheck::last_look`]): the verdict again, and the WAL
+//! read once for the run the claim names, trusting only a start found. If
+//! that still decides nothing, it writes the dead letter, marked as one
+//! whose start could not be checked and naming the invocation the claim
+//! names ([`Exhausted::Undecided`] carries it), so the trigger is never
+//! lost silently when its advisory ages out of its stream. The reason on
+//! such a dead letter is one of five: the claim could not be read; a copy
+//! of the trigger is still handling its claim (and the WAL holds no run of
+//! it); the worker could not say whether its WAL holds the run; the claim
+//! could not be read with its ownership row; or the claim changed while
+//! the run's records were read (and neither a mark nor a run was found).
 
 use std::sync::Arc;
 

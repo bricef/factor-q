@@ -75,26 +75,33 @@ pub const CONSUMER_NAME: &str = "fq-advisory-watch";
 /// checked ([`StartUnchecked`]), measured from when the broker emitted the
 /// advisory. Issue 967: a held verdict must end on purpose.
 ///
-/// One hour. The dispatcher's whole retry ladder is about half an hour from
-/// a trigger's first delivery to the end of its fifth delivery's window, so
-/// a verdict still held an hour after the deliveries ran out, a copy still
-/// handling the claim or records still unreadable, is not going to resolve
-/// by itself, and waiting longer only keeps from the operator a trigger
-/// that may never run. The bound above it is the advisory stream's own: it
-/// keeps an advisory for 24 hours ([`crate::bus::DEFAULT_TRIGGER_MAX_AGE`]),
-/// and a held advisory that ages out is gone with no dead letter and no
-/// record, which an hour ends far inside. The trigger's own message is kept
-/// for the same 24 hours from its publish, which came before the advisory
-/// by at least the ladder, so a dead letter written at the limit still
-/// carries the trigger's subject, payload and id.
+/// One hour, as a trade. Held longer, a trigger that may never run is kept
+/// from the operator longer; given up sooner, more of these dead letters
+/// are false. Nothing makes a held verdict resolve within the hour: the
+/// retry ladder bounds the trigger's redeliveries, not how long a copy
+/// still handling its claim may take to start, and such a copy can start
+/// its run after the limit. That is why the dead letter is marked. The
+/// bound above the hour is the advisory stream's own: it keeps an advisory
+/// for 24 hours ([`crate::bus::DEFAULT_TRIGGER_MAX_AGE`]), and a held
+/// advisory that ages out is gone with no dead letter and no record, which
+/// an hour ends far inside.
+///
+/// The trigger's own message is kept for the same 24 hours from its
+/// publish, which came before the advisory, so it ages out first. A dead
+/// letter written at the limit carries the trigger's subject, payload and
+/// id only if the deliveries ran out less than about 23 hours after the
+/// publish (holds and a daemon that was down can make it later). Otherwise
+/// the message is gone and the dead letter is written without them,
+/// attributed to the system, a form `fq dead-letters requeue` refuses.
 ///
 /// Measured from the advisory's own timestamp, so a restart does not reset
 /// it, against this daemon's clock: a daemon clock ahead of the broker's by
 /// some amount ends the hold that much early, one behind ends it that much
 /// late, and an hour absorbs any ordinary difference. An advisory with no
-/// timestamp the watch can read is not held at all: its age cannot be told,
-/// so it could never be said to have run out, and it is dead-lettered
-/// unchecked at once rather than held until it ages out of its stream.
+/// timestamp the watch can read is held only for its first
+/// [`HELD_VERDICT_MIN_LOOKS`] looks: its age cannot be told, so it could
+/// never be said to have run out, and it is dead-lettered unchecked after
+/// them rather than held until it ages out of its stream.
 pub const HELD_VERDICT_LIMIT: Duration = Duration::from_secs(60 * 60);
 
 /// How many times the watch looks at an exhausted trigger before it will

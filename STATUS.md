@@ -374,27 +374,32 @@ a run started earlier and its ack was lost) is not dead-lettered; its
 claim is marked, then or, if that mark fails, at the next start, and
 `fq status` and `fq doctor` count it as exhausted but started. A
 trigger with nothing on record is dead-lettered as
-before. While the records cannot be read, or a copy of the trigger is
-still handling its claim, the watch holds its verdict and decides again
-when the advisory comes back, rather than write a dead letter that could
-be false. A copy is still handling a claim when its deliveries run out
-only if its keepalive stopped before its start was marked: a drain or
-shutdown let it go, its keepalives did not land, or its setup blocked
-its thread. A hold ends an hour after the broker emitted the advisory,
-far inside the day the advisory stream keeps it, since an advisory
-dropped while held would leave no dead letter at all: the watch then
-writes the dead letter anyway, logs it at error, and marks it in
+before. While the records cannot be read, a copy of the trigger is
+still handling its claim, or the claim changed between the watch's two
+reads of it with no start found, the watch holds its verdict and
+decides again when the advisory comes back, rather than write a dead
+letter that could be false; a start it has found, the claim marked or
+the run in the WAL, is never held. A copy is still handling a claim
+when its deliveries run out only if its keepalive stopped before its
+start was marked: a drain or shutdown let it go, its keepalives did not
+land, or its setup blocked its thread. A hold ends about an hour after
+the broker emitted the advisory, and not before the watch has looked
+at it three times, far inside the day the advisory stream keeps it,
+since an advisory dropped while held would leave no dead letter at
+all: a last look then counts any start it finds, and otherwise the
+watch writes the dead letter anyway, logs it at error, and marks it in
 `fq dead-letters list` as one whose start was not checked, with the
-reason and the invocation to look at before a requeue. What stays open
-is narrow. That dead letter can be false, since the run may have
-started, or may start after the hour, and requeuing it then runs the
-work twice; the mark is there so that the invocation is checked
-first. An advisory emitted
-before the trigger stream was last created is dead-lettered without a
-look at the claims, since its sequence names a message of the old
-stream, and the dead letter is attributed to the message the new stream
-holds at that sequence, if it holds one, with that message's agent,
-subject, payload and trigger id
+reason and the check to make before a requeue. What stays open is
+narrow. That dead letter can be false, since the run may have started,
+or may start after the hour, and requeuing it then runs the work twice;
+the mark is there so that the run is checked first, and
+`fq dead-letters requeue` does not refuse one
+([#1059](https://github.com/bricef/factor-q/issues/1059)). An advisory
+emitted before the trigger stream was last created is dead-lettered
+without a look at the claims, since its sequence names a message of the
+old stream, and the dead letter is attributed to the message the new
+stream holds at that sequence, if it holds one, with that message's
+agent, subject, payload and trigger id
 ([#1054](https://github.com/bricef/factor-q/issues/1054)); a claim
 written before claims named their run is dead-lettered without a look
 too. And a trigger consumed without its run starting (it failed for

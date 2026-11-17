@@ -1325,15 +1325,19 @@ meanwhile under `Current executions` as stuck.
      is on record and what became of its claim
 ```
 
-Two cases are neither, and the watch holds its verdict on them, NAKing
-the advisory to decide again when it comes back: the claim store or the
-worker's WAL cannot be read, so a dead letter now could be false; or a
-copy of the trigger is still handling its claim, so its run may still
+Three cases are neither, and the watch holds its verdict on them,
+NAKing the advisory to decide again when it comes back: the claim store
+or the worker's WAL cannot be read, so a dead letter now could be false;
+a copy of the trigger is still handling its claim, so its run may still
 start, and the verdict waits until that copy's start is marked or it
-ends. A copy is still handling a claim when its deliveries run out only
-if its keepalive stopped before its start was marked: a drain or
-shutdown let it go, its keepalives did not land, or its setup blocked
-its thread. A setup that waits, such as one hung on an MCP server
+ends; or the claim changed between the watch's two reads of it (marked
+started, given back, or taken again under another id). On the last, the
+watch reads the claim once more, and a start it finds is a verdict: the
+claim marked started, or a run it had already read in the WAL. A start
+the watch has found is never held. A copy is still handling a claim
+when its deliveries run out only if its keepalive stopped before its
+start was marked: a drain or shutdown let it go, its keepalives did not
+land, or its setup blocked its thread. A setup that waits, such as one hung on an MCP server
 ([#1040](https://github.com/bricef/factor-q/issues/1040)), is kept
 alive, so its deliveries do not run out and the watch never sees it.
 The watch logs `holding the dead-letter verdict on an exhausted
@@ -1344,15 +1348,28 @@ escalation this section describes, which all the watch's advisories
 share. A verdict held for long shows `fq-advisory-watch` as
 redelivering, and then as stuck.
 
-**A held verdict ends within an hour.** An hour after the broker
-emitted the advisory, the watch writes the dead letter anyway: the
-advisory stream keeps an advisory for a day, and one dropped while held
-would leave no dead letter at all. The dead letter carries the
-trigger's subject, payload and id as any other, and says that the
-trigger's start could not be checked. The watch logs it once at error
-(`dead-lettered an exhausted trigger without checking whether its run
-started`) with the sequence, the subject, the reason and the
-invocation, and `fq dead-letters list` gives it a line of its own:
+**A held verdict ends within about an hour.** The advisory stream keeps
+an advisory for a day, and one dropped while held would leave no dead
+letter at all, so once the advisory is an hour old, and the watch has
+looked at it at least three times, the watch takes a last look: the
+verdict again and, if that still cannot be taken, the worker's WAL read
+once for the run the claim names. A start found is a verdict as always;
+an empty read is not taken for "never started", since a copy still
+handling the claim can make its first WAL write just after it. If the
+last look decides nothing, the watch writes the dead letter anyway,
+saying that the trigger's start could not be checked and why: the claim
+could not be read; a copy of the trigger is still handling its claim;
+the worker could not say whether its WAL holds the run; the claim could
+not be read with its ownership row; or the claim changed while the
+run's records were read. The trigger's message ages out of its stream a
+day after its publish, before the advisory does, so the dead letter
+carries the trigger's subject, payload and id only if the deliveries ran
+out within about 23 hours of the publish; otherwise it is written for
+the system with none of them, and `fq dead-letters requeue` refuses it.
+The watch logs it once at error (`dead-lettered an exhausted trigger
+without checking whether its run started`) with the sequence, the
+subject, the reason and the invocation, and `fq dead-letters list`
+gives it lines of its own:
 
 ```text
   2026-11-17 09:12:40  researcher  seq=12 via advisory
@@ -1381,7 +1398,7 @@ or is dropped, and by startup recovery: for it the output says
 `status:   (no coordination row)` and then shows the `Live execution:`
 block, so that status alone does not mean the run never started. The
 run has not started if the command answers `no invocation found with
-id=…`, or shows none of the four: a `trigger:` line saying
+id=…`, or shows none of the four, only a `trigger:` line saying
 `claimed, start not recorded` or `none recorded` and, at most, its
 `triggered` event. A copy still handling the claim can start it after
 you look. With no invocation named, the claim itself could not be
@@ -1391,12 +1408,20 @@ as well as in `fq invocation list`, which reads only ownership rows and
 so misses a run still going. Requeue it by its sequence
 (`--trigger-seq`): without one, `fq dead-letters requeue` takes the
 agent's newest dead letter, checked or not
-([#1059](https://github.com/bricef/factor-q/issues/1059)). The hour is measured from the advisory's own
-timestamp against this daemon's clock, so a restart does not reset it;
-a daemon clock ahead of the broker's ends the hold early by the
-difference, and one behind ends it late. An advisory with no timestamp
-the watch can read is not held at all, since its age cannot be told:
-it is dead-lettered at once, marked the same way.
+([#1059](https://github.com/bricef/factor-q/issues/1059)).
+
+The hour is measured from the advisory's own timestamp against this
+daemon's clock, so a restart does not reset it; a daemon clock ahead of
+the broker's ends the hold early by the difference, and one behind ends
+it late. An advisory first seen after its hour, because the daemon was
+down for longer, is still looked at three times, about three seconds, so
+a reason that clears in a moment does not become an unchecked dead
+letter. An advisory with no timestamp the watch can read is held only
+for those three looks, since its age cannot be told, and is then
+dead-lettered the same way. The hour is a trade between telling you
+sooner and writing fewer of these dead letters, not a point after which
+a held verdict cannot resolve: a copy still handling its claim can start
+its run after it, which is why the dead letter is marked.
 
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
@@ -1569,7 +1594,7 @@ name the horizon.
   `fq dead-letters list` for a run that `fq invocation show` says
   started is that, and requeuing it starts the work twice. So can be a
   dead letter the listing marks `start not checked`, which the watch
-  writes when it could not read the records for an hour (see
+  writes when it could not take its verdict within an hour (see
   [the dispatcher's counts](#when-a-consumer-stops-making-progress)).
 
   If no redelivery comes, startup recovery, before the dispatcher
