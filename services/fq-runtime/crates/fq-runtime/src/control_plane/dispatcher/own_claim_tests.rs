@@ -1141,9 +1141,18 @@ async fn a_copy_that_meets_a_first_copy_whose_mark_is_pending_is_dropped() {
     refuse_updates(&arena.claim_db).await;
     let first = arena.spawn_delivery(SEQ, 1, false);
     arena.worker.until_waiting(1).await;
+    let first_run = arena.worker.starts()[0].0;
 
     let copy = arena.deliver(2, false).await;
 
+    // The premise: the copy came while the first copy was still marking.
+    // Still noted once the copy has returned, it was noted when the copy
+    // came; not noted, the mark's retries (about 1.5s) ran out first.
+    assert!(
+        arena.dispatcher.handling.handles(&first_run.to_string()),
+        "the first copy's mark gave up before this check, so the copy may have come after it: \
+         the machine was too slow for this test to say anything ({copy:?})"
+    );
     assert_eq!(copy, Answered::default(), "the copy is dropped, unanswered");
     assert_eq!(arena.claim(SEQ).await.map(|row| row.started), Some(false));
     assert_eq!(
