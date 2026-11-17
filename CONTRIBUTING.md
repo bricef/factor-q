@@ -236,6 +236,18 @@ daemon; after changing the Dockerfile, build them and run
   `fq-lint` resolves the declaration and excludes the file from the
   size budgets either way. Integration tests that need NATS spawn an
   isolated broker using the pinned `nats-server` binary.
+- **A test that reads log lines installs one subscriber for its whole
+  process**, in an integration-test binary of its own
+  (`fq-runtime/tests/dispatcher_log_lines.rs` is the pattern), not a
+  capture on its own thread (`tracing::subscriber::set_default` or
+  `with_default`) inside a binary other tests share. tracing caches
+  whether a callsite is of interest for the whole process, so a test
+  that reaches a `warn!` without a capture can leave it switched off for
+  the capturing test that reaches it next, and that test fails on an
+  empty capture
+  ([#1031](https://github.com/bricef/factor-q/issues/1031)). Beside the
+  code, a test asserts what was decided instead: a count, a returned
+  value, what a store or the broker was left with.
 - **Commits** follow conventional style: imperative mood, short
   first line, body explains the "why" and links to ADRs where
   relevant.

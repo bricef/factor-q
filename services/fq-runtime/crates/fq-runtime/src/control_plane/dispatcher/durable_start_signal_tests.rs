@@ -42,7 +42,12 @@
 //! through setup, and the keepalive must end where the setup does.
 //!
 //! The tests run the real `handle` against a real broker and a real
-//! control-plane store, with a stub worker.
+//! control-plane store, with a stub worker. They pin what was decided,
+//! from the claim, the refusals spent and the answers on the wire. The
+//! lines a refused mark and a failed ack log are read in
+//! `tests/dispatcher_log_lines.rs`, under one subscriber for the whole
+//! process: a capture on a test's own thread could miss a line whose
+//! callsite another test had reached first (#1031).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -58,7 +63,6 @@ use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use super::claim::{MARK_RETRY_BUDGET, MARK_RETRY_PAUSES};
-use super::duplicate_drop_tests::Captured;
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
     unique_consumer_name,
@@ -77,15 +81,6 @@ use crate::trigger::{Trigger, agent_id_from_subject};
 use crate::worker::{
     BoundaryStop, DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
 };
-
-/// The start of the line `handle` logs, at `error`, when the claim store
-/// has refused every attempt to mark a durable start.
-const MARK_GAVE_UP: &str = "could not mark trigger durably started";
-/// The start of the line `handle` logs, at `warn`, when a mark lands
-/// after the claim store refused the attempts before it.
-const MARK_HEALED: &str = "marked trigger durably started after the claim store refused";
-/// The line a delivery's ack logs when the client cannot send it.
-const ACK_FAILED: &str = "failed to ack trigger message";
 
 /// An ack window shorter than the pauses between a refused mark's
 /// attempts ([`MARK_RETRY_PAUSES`], 1.5 seconds in all), for a consumer
@@ -566,15 +561,6 @@ impl Pulled {
             .held_duplicate_dropped
     }
 
-    /// Hand the trigger to `handle` with a capture of what it logs at
-    /// `warn` and above installed.
-    async fn handle_capturing(&self) -> Captured {
-        let log = Captured::default();
-        let _capture = log.install();
-        self.handle().await;
-        log
-    }
-
     fn ran_to_end(&self) -> bool {
         self.worker.ran_to_end.load(Ordering::SeqCst)
     }
@@ -963,9 +949,9 @@ async fn a_dropped_signal_then_a_clean_return_acks_the_trigger() {
 /// The signal fires and the claim store refuses the first two attempts
 /// to mark the claim, then takes the third: a store that heals inside the
 /// retries. Nothing else may happen. The run is not stopped, the claim
-/// ends `durably_started`, the delivery is acked once and nothing else is
-/// sent for it but keepalives, and the heal is logged once at `warn`.
-/// Before #967 the first refusal stopped the run there, un-acked.
+/// ends `durably_started`, and the delivery is acked once and nothing else
+/// is sent for it but keepalives. Before #967 the first refusal stopped
+/// the run there, un-acked.
 #[tokio::test]
 async fn a_mark_refused_then_accepted_inside_its_retries_marks_the_claim_and_acks_once() {
     let mut pulled = Pulled::new(
@@ -976,7 +962,7 @@ async fn a_mark_refused_then_accepted_inside_its_retries_marks_the_claim_and_ack
     .await;
     let mut answers = pulled.watch_answers().await;
 
-    let log = pulled.handle_capturing().await;
+    pulled.handle().await;
 
     assert!(
         pulled.ran_to_end(),
@@ -994,22 +980,12 @@ async fn a_mark_refused_then_accepted_inside_its_retries_marks_the_claim_and_ack
         sent.acks == 1 && sent.other.is_empty(),
         "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
     );
-    assert_eq!(
-        log.lines_with(MARK_HEALED).len(),
-        1,
-        "the heal is logged once"
-    );
-    assert!(
-        log.lines_with(MARK_GAVE_UP).is_empty(),
-        "the mark landed, so nothing says it was given up"
-    );
 }
 
 /// The signal fires and the claim store refuses every attempt to mark the
 /// claim. The run started, so it is neither stopped nor redelivered: the
 /// delivery is acked without its claim being released, the claim stays
-/// `claimed` by the dispatcher, the run goes on to its end, and the give-up
-/// is logged once at `error`, naming the invocation and the trigger.
+/// `claimed` by the dispatcher, and the run goes on to its end.
 ///
 /// The consumer's ack window is shorter than the pauses between the
 /// attempts ([`SHORT_ACK_WINDOW`]), so this also pins the keepalive that
@@ -1033,7 +1009,7 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
     .await;
     let mut answers = pulled.watch_answers().await;
 
-    let log = pulled.handle_capturing().await;
+    pulled.handle().await;
 
     assert!(
         pulled.ran_to_end(),
@@ -1055,17 +1031,6 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
         "the delivery was kept alive while its mark was retried: {sent:?}"
     );
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
-
-    let (trigger_id, invocation_id) = pulled.named();
-    let gave_up = log.lines_with(MARK_GAVE_UP);
-    assert_eq!(gave_up.len(), 1, "the give-up is logged once: {gave_up:?}");
-    let line = &gave_up[0];
-    assert!(
-        line.contains("ERROR")
-            && line.contains(&format!("invocation_id={invocation_id}"))
-            && line.contains(&format!("trigger_id={trigger_id}")),
-        "logged at error, naming the invocation and the trigger: {line}"
-    );
 }
 
 /// Wait `wait` on the pull stream for a copy of the delivery, and fail if
@@ -1097,8 +1062,7 @@ async fn assert_no_copy_comes_back(messages: &mut pull::Stream, wait: Duration) 
 ///
 /// - **No attempt is offered once the time bound has passed.** The store
 ///   gets the one attempt it got before there were retries, and the
-///   delivery is then acked keeping its claim: one refusal is spent, and
-///   the give-up line says one attempt.
+///   delivery is then acked keeping its claim: one refusal is spent.
 /// - **The delivery is kept alive alongside an attempt, not only between
 ///   attempts.** There is no "between" here, and the consumer's ack
 ///   window ([`SHORT_ACK_WINDOW`]) is shorter than the lock: keepalives
@@ -1119,7 +1083,7 @@ async fn a_mark_that_blocks_past_the_time_bound_is_offered_once_with_its_deliver
     .await;
     let mut answers = pulled.watch_answers().await;
 
-    let log = pulled.handle_capturing().await;
+    pulled.handle().await;
 
     assert!(
         pulled.ran_to_end(),
@@ -1145,13 +1109,6 @@ async fn a_mark_that_blocks_past_the_time_bound_is_offered_once_with_its_deliver
         "the delivery was kept alive while its one attempt waited on the lock: {sent:?}"
     );
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
-    let gave_up = log.lines_with(MARK_GAVE_UP);
-    assert_eq!(gave_up.len(), 1, "the give-up is logged once: {gave_up:?}");
-    assert!(
-        gave_up[0].contains("attempts=1"),
-        "the give-up line says one attempt was offered: {}",
-        gave_up[0]
-    );
 }
 
 /// A refused mark through a restart, end to end: the two halves of #967
@@ -1266,10 +1223,11 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
 /// What follows is the risk #967 accepted: the delivery is left un-acked
 /// with its claim `claimed`, so its redeliveries meet this daemon's own
 /// claim and are settled by the run's start on record (`own_claim`). The
-/// failure must be logged, naming the
-/// trigger, and the run must still go on to its end.
+/// run must still go on to its end, with the delivery left pending and the
+/// claim left as it was.
 #[tokio::test]
-async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_run_runs_on() {
+async fn a_failed_ack_after_a_mark_refused_past_its_retries_leaves_the_delivery_and_the_run_runs_on()
+ {
     let mut pulled = Pulled::new(
         Resolve::FireIntoRefusedMarks(Refusals::Every),
         Turn::Later,
@@ -1278,7 +1236,7 @@ async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_ru
     .await;
     pulled.refuse_acks().await;
 
-    let log = pulled.handle_capturing().await;
+    pulled.handle().await;
 
     assert!(
         pulled.ran_to_end(),
@@ -1289,19 +1247,6 @@ async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_ru
         "the claim must be left `claimed` by the dispatcher, not released",
     );
     ack_pending_stays(&mut pulled.consumer, 1, Duration::from_millis(300)).await;
-    let (trigger_id, _) = pulled.named();
-    let failed = log.lines_with(ACK_FAILED);
-    assert_eq!(failed.len(), 1, "the failed ack is logged once: {failed:?}");
-    assert!(
-        failed[0].contains("ERROR") && failed[0].contains(&format!("trigger_id={trigger_id}")),
-        "logged at error, naming the trigger: {}",
-        failed[0]
-    );
-    assert_eq!(
-        log.lines_with(MARK_GAVE_UP).len(),
-        1,
-        "the refused mark is logged once"
-    );
 }
 
 /// The signal fires and the invocation completes in the same poll, so

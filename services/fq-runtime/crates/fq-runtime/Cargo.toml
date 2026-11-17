@@ -85,6 +85,10 @@ fq-test-support = { workspace = true }
 # claim about output, and asserting it any other way would be asserting
 # the limiter rather than the loop (#549). A whole test binary of its
 # own, because a captured subscriber has to be the process-global one.
+# `tests/dispatcher_log_lines.rs` reads the trigger dispatcher's lines the
+# same way (#1031): a capture on one test's thread missed lines whose
+# callsite another test had reached first, since tracing caches a
+# callsite's interest for the whole process.
 tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
