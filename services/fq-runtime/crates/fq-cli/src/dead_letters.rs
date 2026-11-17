@@ -86,22 +86,104 @@ pub(crate) async fn list_dead_letters(
     }
     println!("{} dead-lettered trigger(s), newest first:\n", dead.len());
     for d in &dead {
-        let seq = d
-            .trigger_stream_seq
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "  {}  {}  seq={} via {}",
-            d.timestamp.format("%Y-%m-%d %H:%M:%S"),
-            d.agent_id,
-            seq,
-            d.source,
-        );
-        println!("      {}", d.error_message);
-        println!("      payload: {}", truncate_json(&d.trigger_payload, 120));
+        print!("{}", dead_letter_lines(d));
     }
     println!("\n-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one");
     Ok(())
+}
+
+/// One dead letter's lines in the listing.
+///
+/// A dead letter the watch wrote without checking whether the trigger's
+/// run started (issue 967) gets a line of its own saying so and naming
+/// the invocation to look at: it may be false, and requeuing a trigger
+/// whose run started runs the work twice. This listing is where an
+/// operator decides whether to requeue, so the line is here.
+fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
+    let seq = d
+        .trigger_stream_seq
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let mut out = format!(
+        "  {}  {}  seq={} via {}\n      {}\n      payload: {}\n",
+        d.timestamp.format("%Y-%m-%d %H:%M:%S"),
+        d.agent_id,
+        seq,
+        d.source,
+        d.error_message,
+        truncate_json(&d.trigger_payload, 120),
+    );
+    if let Some(unchecked) = &d.start_unchecked {
+        let look = match &unchecked.invocation_id {
+            Some(id) => format!("`fq invocation show {id}`"),
+            None => format!("`fq invocation list` for a run of {}", d.agent_id),
+        };
+        out.push_str(&format!(
+            "      start not checked: {}; its run may have started, so check {look} before \
+             requeueing it\n",
+            unchecked.reason
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dead(
+        start_unchecked: Option<fq_ops::dead_letter::StartUnchecked>,
+    ) -> fq_ops::dead_letter::DeadLetter {
+        fq_ops::dead_letter::DeadLetter {
+            event_id: "019a0000-0000-7000-8000-000000000009".to_string(),
+            timestamp: chrono::DateTime::from_timestamp(1_767_225_600, 0).unwrap(),
+            agent_id: "researcher".to_string(),
+            trigger_subject: "fq.trigger.researcher".to_string(),
+            trigger_stream_seq: Some(12),
+            source: "advisory".to_string(),
+            trigger_payload: serde_json::json!({"n": 2}),
+            error_message: "trigger exhausted after 5 deliveries (limit 5)".to_string(),
+            start_unchecked,
+        }
+    }
+
+    /// A dead letter whose start was checked reads as it always has.
+    #[test]
+    fn a_checked_dead_letter_has_no_warning_line() {
+        assert_eq!(
+            dead_letter_lines(&dead(None)),
+            "  2026-01-01 00:00:00  researcher  seq=12 via advisory\n      trigger exhausted \
+             after 5 deliveries (limit 5)\n      payload: {\"n\":2}\n"
+        );
+    }
+
+    /// One the watch wrote without checking the trigger's start says so,
+    /// with the reason, and names the invocation to look at before a
+    /// requeue; with no invocation named it points at the agent's runs.
+    #[test]
+    fn an_unchecked_dead_letter_says_so_and_names_the_run_to_check() {
+        let named = dead_letter_lines(&dead(Some(fq_ops::dead_letter::StartUnchecked {
+            reason: "a copy of the trigger is still handling its claim".to_string(),
+            invocation_id: Some("019a0000-0000-7000-8000-000000000001".to_string()),
+        })));
+        assert!(
+            named.ends_with(
+                "      start not checked: a copy of the trigger is still handling its claim; its \
+                 run may have started, so check `fq invocation show \
+                 019a0000-0000-7000-8000-000000000001` before requeueing it\n"
+            ),
+            "got:\n{named}"
+        );
+        let unnamed = dead_letter_lines(&dead(Some(fq_ops::dead_letter::StartUnchecked {
+            reason: "the trigger's claim could not be read: disk I/O error".to_string(),
+            invocation_id: None,
+        })));
+        assert!(
+            unnamed
+                .contains("check `fq invocation list` for a run of researcher before requeueing"),
+            "got:\n{unnamed}"
+        );
+    }
 }
 
 /// What `fq dead-letters requeue --json` prints: the requeued trigger,

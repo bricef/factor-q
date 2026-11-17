@@ -225,7 +225,7 @@ async fn deliver(
                     "the watch kept a trigger with nothing on record out of the dead letters: {:?}",
                     verdict
                 ),
-                Exhausted::Undecided(why) => prop_assert!(
+                Exhausted::Undecided { why, .. } => prop_assert!(
                     false,
                     "the watch held its verdict though nothing handles a copy and the records can \
                      be read: {}",

@@ -1369,6 +1369,17 @@
                 "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
                 "type": "string"
               },
+              "start_unchecked": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StartUnchecked"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when the dead-letter watch wrote this without being able to\ncheck whether the trigger's run started: its verdict was held,\nbecause a copy of the trigger was still handling the claim or the\nrun's records could not be read, until the watch's limit ran out.\nSuch a dead letter may be false, since the run may have started, so\nlook at the invocation it names before requeueing it. Absent on\nevery other dead letter."
+              },
               "timestamp": {
                 "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
                 "type": "string"
@@ -1395,6 +1406,26 @@
               "source",
               "trigger_payload",
               "error_message"
+            ],
+            "type": "object"
+          },
+          "StartUnchecked": {
+            "description": "Why a dead letter's trigger was not checked for a start, and where to\nlook ([`DeadLetter::start_unchecked`]).",
+            "properties": {
+              "invocation_id": {
+                "description": "The invocation the trigger's claim named, when the claim could be\nread: the run to look at (`fq invocation show`) before requeueing.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the watch held its verdict until its limit ran out.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
             ],
             "type": "object"
           }
@@ -1454,6 +1485,17 @@
                 "description": "Which emitter surfaced it: `\"inline\"` | `\"advisory\"`.",
                 "type": "string"
               },
+              "start_unchecked": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StartUnchecked"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when the dead-letter watch wrote this without being able to\ncheck whether the trigger's run started: its verdict was held,\nbecause a copy of the trigger was still handling the claim or the\nrun's records could not be read, until the watch's limit ran out.\nSuch a dead letter may be false, since the run may have started, so\nlook at the invocation it names before requeueing it. Absent on\nevery other dead letter."
+              },
               "timestamp": {
                 "description": "When the exhaustion was recorded, RFC3339.\n\nDeclared to the surface as a string rather than a reflected\nschema: that is exactly what it serialises as, and reflecting\n`chrono::DateTime` would need schemars' chrono integration —\na wider change than this atom (the Event atom made the same\ncall for its payload tree).",
                 "type": "string"
@@ -1480,6 +1522,26 @@
               "source",
               "trigger_payload",
               "error_message"
+            ],
+            "type": "object"
+          },
+          "StartUnchecked": {
+            "description": "Why a dead letter's trigger was not checked for a start, and where to\nlook ([`DeadLetter::start_unchecked`]).",
+            "properties": {
+              "invocation_id": {
+                "description": "The invocation the trigger's claim named, when the claim could be\nread: the run to look at (`fq invocation show`) before requeueing.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the watch held its verdict until its limit ran out.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
             ],
             "type": "object"
           }

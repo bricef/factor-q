@@ -27,6 +27,8 @@
 //! `trigger_stream_seq` annotation makes duplicates reconcilable, and
 //! a best-effort last-event check suppresses the common overlap.
 
+use std::time::Duration;
+
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::oneshot;
@@ -40,8 +42,9 @@ use crate::bus::{
 };
 use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck};
 use crate::dead_letter::{
-    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
+    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
+    DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
+    StartUnchecked,
 };
 use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
@@ -50,6 +53,33 @@ use crate::trigger::{agent_id_from_subject, trigger_id_in};
 
 /// Name of the durable JetStream consumer the advisory watch creates.
 pub const CONSUMER_NAME: &str = "fq-advisory-watch";
+
+/// How long the watch holds its verdict on an exhausted trigger before it
+/// writes the dead letter anyway, marked as one whose start could not be
+/// checked ([`StartUnchecked`]), measured from when the broker emitted the
+/// advisory. Issue 967: a held verdict must end on purpose.
+///
+/// One hour. The dispatcher's whole retry ladder is about half an hour from
+/// a trigger's first delivery to the end of its fifth delivery's window, so
+/// a verdict still held an hour after the deliveries ran out, a copy still
+/// handling the claim or records still unreadable, is not going to resolve
+/// by itself, and waiting longer only keeps from the operator a trigger
+/// that may never run. The bound above it is the advisory stream's own: it
+/// keeps an advisory for 24 hours ([`crate::bus::DEFAULT_TRIGGER_MAX_AGE`]),
+/// and a held advisory that ages out is gone with no dead letter and no
+/// record, which an hour ends far inside. The trigger's own message is kept
+/// for the same 24 hours from its publish, which came before the advisory
+/// by at least the ladder, so a dead letter written at the limit still
+/// carries the trigger's subject, payload and id.
+///
+/// Measured from the advisory's own timestamp, so a restart does not reset
+/// it, against this daemon's clock: a daemon clock ahead of the broker's by
+/// some amount ends the hold that much early, one behind ends it that much
+/// late, and an hour absorbs any ordinary difference. An advisory with no
+/// timestamp the watch can read is not held at all: its age cannot be told,
+/// so it could never be said to have run out, and it is dead-lettered
+/// unchecked at once rather than held until it ages out of its stream.
+pub const HELD_VERDICT_LIMIT: Duration = Duration::from_secs(60 * 60);
 
 /// The fields this watch consumes from the server's
 /// `io.nats.jetstream.advisory.v1.max_deliver` payload; unknown
@@ -78,6 +108,22 @@ impl MaxDeliverAdvisory {
             .and_then(|at| at.timestamp_nanos_opt());
         emitted.is_none_or(|nanos| nanos >= stream_epoch)
     }
+
+    /// Whether the advisory was emitted less than `limit` before `now`.
+    /// One with no timestamp the watch can read is not: its age cannot be
+    /// told. One stamped after `now` (a broker clock ahead of this
+    /// daemon's) is.
+    fn emitted_within(&self, limit: Duration, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.timestamp
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at| {
+                (now - at.with_timezone(&chrono::Utc))
+                    .to_std()
+                    .unwrap_or_default()
+                    < limit
+            })
+    }
 }
 
 /// Errors that prevent the watch from starting or progressing.
@@ -105,6 +151,10 @@ pub enum AdvisoryOutcome {
     /// The verdict is held, for the reason given: the advisory is NAKed
     /// and decided again when it comes back.
     Held { why: String },
+    /// A dead-letter event was emitted without the trigger's start
+    /// checked: its verdict was held past [`HELD_VERDICT_LIMIT`], and the
+    /// event says so ([`StartUnchecked`]).
+    Unchecked,
 }
 
 /// The advisory watch. Owns the bus; spawn as a tokio task via
@@ -116,11 +166,25 @@ pub struct AdvisoryWatch {
     /// one is called exhausted. `None` dead-letters every exhausted
     /// trigger without looking.
     records: Option<ExhaustionCheck>,
+    /// How long a held verdict is held ([`HELD_VERDICT_LIMIT`]).
+    held_verdict_limit: Duration,
 }
 
 impl AdvisoryWatch {
     pub fn new(bus: EventBus) -> Self {
-        Self { bus, records: None }
+        Self {
+            bus,
+            records: None,
+            held_verdict_limit: HELD_VERDICT_LIMIT,
+        }
+    }
+
+    /// Hold verdicts for `limit` instead of [`HELD_VERDICT_LIMIT`], so a
+    /// test can run an advisory past the limit without waiting an hour.
+    #[cfg(test)]
+    pub(crate) fn with_held_verdict_limit(mut self, limit: Duration) -> Self {
+        self.held_verdict_limit = limit;
+        self
     }
 
     /// Consult the dispatcher's records before calling a trigger
@@ -259,6 +323,7 @@ impl AdvisoryWatch {
                 "an advisory from an earlier incarnation of the trigger stream; its trigger's \
                  claim cannot be found, so it is dead-lettered without consulting the claims");
         }
+        let mut unchecked = None;
         if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
             match records.verdict(advisory.stream_seq).await {
                 Exhausted::NothingOnRecord => {}
@@ -277,7 +342,15 @@ impl AdvisoryWatch {
                         .note_started_not_dead_lettered(CONSUMER_NAME);
                     return Ok(AdvisoryOutcome::RunStarted);
                 }
-                Exhausted::Undecided(why) => return Ok(AdvisoryOutcome::Held { why }),
+                Exhausted::Undecided { why, invocation_id } => {
+                    if advisory.emitted_within(self.held_verdict_limit, chrono::Utc::now()) {
+                        return Ok(AdvisoryOutcome::Held { why });
+                    }
+                    unchecked = Some(StartUnchecked {
+                        reason: why,
+                        invocation_id,
+                    });
+                }
             }
         }
 
@@ -300,7 +373,7 @@ impl AdvisoryWatch {
         }
         .annotate(
             DEAD_LETTER_SUBJECT_KEY,
-            serde_json::Value::String(trigger_subject),
+            serde_json::Value::String(trigger_subject.clone()),
         )
         .annotate(DEAD_LETTER_PAYLOAD_KEY, trigger_payload)
         .annotate(
@@ -318,12 +391,30 @@ impl AdvisoryWatch {
             ),
             None => event,
         };
+        let event = match &unchecked {
+            Some(unchecked) => event.annotate(
+                DEAD_LETTER_START_UNCHECKED_KEY,
+                serde_json::to_value(unchecked).unwrap_or_default(),
+            ),
+            None => event,
+        };
         self.bus.publish(&event).await?;
+        if let Some(unchecked) = unchecked {
+            error!(agent_id = %event.envelope.agent_id, stream_seq = advisory.stream_seq,
+                subject = %trigger_subject, reason = %unchecked.reason,
+                invocation_id = %unchecked.invocation_id.as_deref().unwrap_or("none"),
+                limit_secs = self.held_verdict_limit.as_secs(),
+                "dead-lettered an exhausted trigger without checking whether its run started: \
+                 its verdict was held past the watch's limit, so the dead letter is marked as \
+                 unchecked and may be false; look at the invocation before requeueing it");
+            return Ok(AdvisoryOutcome::Unchecked);
+        }
         error!(
             agent_id = %event.envelope.agent_id,
             stream_seq = advisory.stream_seq,
             deliveries = advisory.deliveries,
-            "trigger exhausted without a live dispatcher; emitted dead-letter event from advisory"
+            "trigger exhausted with nothing of its run on record, or none consulted; emitted a \
+             dead-letter event from its MAX_DELIVERIES advisory"
         );
         Ok(AdvisoryOutcome::Emitted)
     }

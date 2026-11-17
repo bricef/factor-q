@@ -50,6 +50,13 @@
 //!   does, and none at all would lose the trigger if the copy's task then
 //!   died. The note ends when the copy's start is marked or its `handle`
 //!   returns, and the verdict is taken then.
+//!
+//! A held verdict does not wait for ever. Past the watch's limit
+//! (`advisory_watch::HELD_VERDICT_LIMIT`, measured from when the broker
+//! emitted the advisory) the watch writes the dead letter anyway, marked
+//! as one whose start could not be checked and naming the invocation the
+//! claim names ([`Exhausted::Undecided`] carries it), so the trigger is
+//! never lost silently when its advisory ages out of its stream.
 
 use std::sync::Arc;
 
@@ -88,8 +95,15 @@ pub(crate) enum Exhausted {
         /// Whether this check marked the claim, which was `claimed`.
         marked: bool,
     },
-    /// Not decided yet, for the reason given: decide again later.
-    Undecided(String),
+    /// Not decided yet: decide again later.
+    Undecided {
+        /// Why the verdict cannot be taken now.
+        why: String,
+        /// The invocation the claim names, when the claim was read: where
+        /// to look if the verdict is never taken and the trigger is
+        /// dead-lettered unchecked.
+        invocation_id: Option<String>,
+    },
 }
 
 impl ExhaustionCheck {
@@ -104,9 +118,10 @@ impl ExhaustionCheck {
         let row = match self.store.trigger_claim(key).await {
             Ok(row) => row,
             Err(err) => {
-                return Exhausted::Undecided(format!(
-                    "the trigger's claim could not be read: {err}"
-                ));
+                return Exhausted::Undecided {
+                    why: format!("the trigger's claim could not be read: {err}"),
+                    invocation_id: None,
+                };
             }
         };
         let Some(row) = row else {
@@ -125,9 +140,10 @@ impl ExhaustionCheck {
             };
         }
         if self.handling.handles(&invocation_id) {
-            return Exhausted::Undecided(format!(
-                "a copy of the trigger is still handling its claim, for invocation {invocation_id}"
-            ));
+            return Exhausted::Undecided {
+                why: "a copy of the trigger is still handling its claim".to_string(),
+                invocation_id: Some(invocation_id),
+            };
         }
         self.settle_by_the_records(key, invocation_id).await
     }
@@ -138,26 +154,31 @@ impl ExhaustionCheck {
         let wal = match self.worker.wal_run(&invocation_id).await {
             Ok(wal) => wal,
             Err(err) => {
-                return Exhausted::Undecided(format!(
-                    "the worker could not say whether its WAL holds invocation {invocation_id}: {err}"
-                ));
+                return Exhausted::Undecided {
+                    why: format!("the worker could not say whether its WAL holds the run: {err}"),
+                    invocation_id: Some(invocation_id),
+                };
             }
         };
         let unsettled = match self.store.unsettled_trigger_claim(key).await {
             Ok(unsettled) => unsettled,
             Err(err) => {
-                return Exhausted::Undecided(format!(
-                    "the trigger's claim could not be read with its ownership row: {err}"
-                ));
+                return Exhausted::Undecided {
+                    why: format!(
+                        "the trigger's claim could not be read with its ownership row: {err}"
+                    ),
+                    invocation_id: Some(invocation_id),
+                };
             }
         };
         // Marked or given back between the two reads: the next read decides.
         let Some(unsettled) =
             unsettled.filter(|u| u.claim.invocation_id.as_deref() == Some(invocation_id.as_str()))
         else {
-            return Exhausted::Undecided(
-                "the trigger's claim changed while its run's records were read".to_string(),
-            );
+            return Exhausted::Undecided {
+                why: "the trigger's claim changed while its run's records were read".to_string(),
+                invocation_id: Some(invocation_id),
+            };
         };
         let records = RunRecords {
             wal,

@@ -26,7 +26,8 @@ use crate::control_plane::advisory_watch::{
     AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER,
 };
 use crate::dead_letter::{
-    DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
+    DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY, StartUnchecked,
+    from_event,
 };
 use crate::events::{Event, EventPayload, FailureKind, subjects};
 use crate::trigger::PublishedTrigger;
@@ -676,4 +677,158 @@ async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the
         the_watch.handle_advisory(&advisory).await.unwrap(),
         AdvisoryOutcome::RunStarted
     );
+}
+
+/// The advisory, stamped at the moment the trigger stream was created: as
+/// old as an advisory of this incarnation can be, a few seconds by the
+/// time a test has exhausted its trigger. Past a limit shorter than that,
+/// without sleeping.
+fn stamped_at_the_streams_creation(arena: &Arena, advisory: &[u8]) -> Vec<u8> {
+    let mut stamped: serde_json::Value = serde_json::from_slice(advisory).unwrap();
+    let created = chrono::DateTime::from_timestamp_nanos(arena.bus.trigger_stream_epoch());
+    stamped["timestamp"] = json!(created.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+    serde_json::to_vec(&stamped).unwrap()
+}
+
+/// A limit the stamped advisory is past: exhausting a trigger takes two
+/// one-second ack windows.
+const PAST: Duration = Duration::from_millis(500);
+
+/// **A verdict held past the limit, with a copy still handling the claim,
+/// ends in a dead letter marked as unchecked.** A held verdict must end on
+/// purpose: the advisory stream keeps an advisory for a day, and one that
+/// ages out while held is gone with no dead letter, no run and no record.
+/// Past the limit the watch writes the dead letter anyway, with the
+/// trigger's payload and id as always, and says on it that the start could
+/// not be checked, why, and which invocation the claim names, since that
+/// run may yet start. The claim is left as it is, and the count of
+/// triggers kept for a start on record does not move.
+#[tokio::test]
+async fn a_verdict_held_past_the_limit_with_a_copy_handling_is_dead_lettered_unchecked() {
+    let (arena, _server) = arena().await;
+    let published = publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    let copy = arena.worker.starts()[0].0.to_string();
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Unchecked);
+    let event = dead_letter(&arena)
+        .await
+        .expect("the trigger is dead-lettered");
+    let dead = from_event(&event).expect("a dead letter");
+    assert_eq!(
+        dead.start_unchecked,
+        Some(StartUnchecked {
+            reason: "a copy of the trigger is still handling its claim".to_string(),
+            invocation_id: Some(copy.clone()),
+        })
+    );
+    assert_eq!(dead.trigger_payload, json!({ "input": "hi" }));
+    assert_eq!(
+        event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY),
+        Some(&json!(published.id.to_string()))
+    );
+    assert_eq!(claim(&arena).await, Some((false, Some(copy))));
+    assert_eq!(kept(&arena), 0);
+    arena.worker.setup_gate.add_permits(1);
+    arena.finish(first).await;
+}
+
+/// **A verdict held past the limit with the records unreadable ends the
+/// same way.** The last delivery's run started and its task died, so a
+/// start is on record, but the worker cannot say what its WAL holds. Past
+/// the limit the dead letter is written, marked unchecked with the reason
+/// and the invocation the claim names: here the run did start, which is
+/// exactly why the mark is there.
+#[tokio::test]
+async fn a_verdict_held_past_the_limit_with_the_records_unreadable_is_dead_lettered_unchecked() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    fail(&arena, 4).await;
+    arena.worker.queue(Run::DiesAfterStart);
+    arena.deliver(5, false).await;
+    let run = arena.worker.starts()[4].0.to_string();
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    arena
+        .worker
+        .fail_wal_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Unchecked);
+    let dead = from_event(&dead_letter(&arena).await.expect("dead-lettered")).unwrap();
+    let unchecked = dead.start_unchecked.expect("marked unchecked");
+    assert!(
+        unchecked
+            .reason
+            .starts_with("the worker could not say whether its WAL holds the run"),
+        "{unchecked:?}"
+    );
+    assert_eq!(unchecked.invocation_id, Some(run));
+    assert_eq!(dead.trigger_payload, json!({ "input": "hi" }));
+}
+
+/// **Inside the limit a verdict is still held.** The same stamped
+/// advisory, a few seconds old, against the watch's own hour.
+#[tokio::test]
+async fn a_verdict_inside_the_limit_is_still_held() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+
+    let outcome = watch(&arena).handle_advisory(&advisory).await.unwrap();
+
+    assert!(
+        matches!(outcome, AdvisoryOutcome::Held { .. }),
+        "a few seconds is inside the hour: {outcome:?}"
+    );
+    assert!(dead_letter(&arena).await.is_none());
+    arena.worker.setup_gate.add_permits(1);
+    arena.finish(first).await;
+}
+
+/// **An advisory with no timestamp is not held.** Its age cannot be told,
+/// so it could never be said to have run out; held, it would wait until it
+/// aged out of its stream. It is dead-lettered unchecked at once.
+#[tokio::test]
+async fn an_advisory_with_no_timestamp_is_not_held() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    let mut unstamped: serde_json::Value = serde_json::from_slice(&exhaust(&arena).await).unwrap();
+    unstamped
+        .as_object_mut()
+        .expect("an advisory is an object")
+        .remove("timestamp");
+    let unstamped = serde_json::to_vec(&unstamped).unwrap();
+
+    let outcome = watch(&arena).handle_advisory(&unstamped).await.unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Unchecked);
+    assert!(
+        from_event(&dead_letter(&arena).await.expect("dead-lettered"))
+            .unwrap()
+            .start_unchecked
+            .is_some()
+    );
+    arena.worker.setup_gate.add_permits(1);
+    arena.finish(first).await;
 }

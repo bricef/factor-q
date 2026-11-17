@@ -47,6 +47,26 @@ pub struct DeadLetter {
     pub source: String,
     pub trigger_payload: serde_json::Value,
     pub error_message: String,
+    /// Set when the dead-letter watch wrote this without being able to
+    /// check whether the trigger's run started: its verdict was held,
+    /// because a copy of the trigger was still handling the claim or the
+    /// run's records could not be read, until the watch's limit ran out.
+    /// Such a dead letter may be false, since the run may have started, so
+    /// look at the invocation it names before requeueing it. Absent on
+    /// every other dead letter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_unchecked: Option<StartUnchecked>,
+}
+
+/// Why a dead letter's trigger was not checked for a start, and where to
+/// look ([`DeadLetter::start_unchecked`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartUnchecked {
+    /// Why the watch held its verdict until its limit ran out.
+    pub reason: String,
+    /// The invocation the trigger's claim named, when the claim could be
+    /// read: the run to look at (`fq invocation show`) before requeueing.
+    pub invocation_id: Option<String>,
 }
 
 /// A dead letter addressed by its event-log sequence — the universal

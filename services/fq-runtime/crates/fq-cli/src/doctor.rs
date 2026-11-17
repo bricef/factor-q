@@ -150,7 +150,8 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
             report.dead_letters.exhausted_triggers
         ));
         out.push_str(
-            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run\n",
+            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run, \
+             but not one the listing marks `start not checked` before looking at the run it names\n",
         );
     } else {
         out.push_str("Dead-letters: none\n");
