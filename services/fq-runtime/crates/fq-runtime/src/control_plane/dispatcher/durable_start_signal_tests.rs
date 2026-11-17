@@ -1264,8 +1264,9 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
 /// The signal fires, the claim store refuses every attempt to mark the
 /// claim, and the ack sent in place of the mark cannot be sent either.
 /// What follows is the risk #967 accepted: the delivery is left un-acked
-/// with its claim `claimed`, so its redeliveries will meet this daemon's
-/// own claim and be dropped. The failure must be logged, naming the
+/// with its claim `claimed`, so its redeliveries meet this daemon's own
+/// claim and are settled by the run's start on record (`own_claim`). The
+/// failure must be logged, naming the
 /// trigger, and the run must still go on to its end.
 #[tokio::test]
 async fn a_failed_ack_after_a_mark_refused_past_its_retries_is_logged_and_the_run_runs_on() {
@@ -1341,12 +1342,11 @@ async fn a_signal_fired_in_the_poll_that_fails_transiently_is_acked_not_retried(
 /// What a mark refused on every attempt must leave: the claim as it was,
 /// `claimed` by the dispatcher, and the delivery acked.
 ///
-/// The run started, so a redelivery is never wanted: on this daemon the
-/// same-claimant `Held` arm would drop each one until the trigger was
-/// dead-lettered as `trigger_exhausted` although it ran, and after a
-/// restart a finished run's claim would be adopted and the work run
-/// again. So the delivery is acked. The claim is not released first: a
-/// lost ack would then let the redelivery win a fresh claim. A started
+/// The run started, so a redelivery is never wanted: each one would meet
+/// the daemon's own `claimed` row and have to be settled by the run's
+/// start on record (`own_claim`), spending one of the trigger's
+/// deliveries. So the delivery is acked. The claim is not released first:
+/// a lost ack would then let the redelivery win a fresh claim. A started
 /// run under a claim that still says `claimed` is what is left (#967).
 async fn assert_acked_with_the_claim_kept(pulled: &mut Pulled) {
     assert!(pulled.ran_to_end(), "the invocation ran to its end");

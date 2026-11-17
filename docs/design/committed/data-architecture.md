@@ -1303,6 +1303,20 @@ What changes when an operator splits the deployment.
   becomes a message, the §7.1 step 8 report, which then has to be
   durable, and the order becomes "do not adopt a claim while its
   holder's report can still arrive".
+
+  Settling a copy of a trigger that meets the dispatcher's own claim
+  adds a third (added for
+  [#967](https://github.com/bricef/factor-q/issues/967)): once no copy
+  of the trigger is handling the claim, the dispatcher asks the worker,
+  through `Worker::wal_run`, whether its WAL holds the run the claim
+  names, and then reads the run's ownership row in its own store. The
+  question is an in-process call the worker answers from its own store.
+  Lifted across a process boundary it becomes a request that can fail
+  or time out; the dispatcher already reads a failed answer as "cannot
+  tell" and leaves the claim as it is, so a worker that cannot answer
+  never makes it start a run twice. What the lift has to keep is the
+  order: the worker's answer before the ownership row, so a run archived
+  between the two reads is still found.
 - The per-store files are fixed names under the cache directory
   (`fq_runtime::db::RuntimeDbPaths`), so the roles are already
   physically separate (#262). A per-role `state_db` config
