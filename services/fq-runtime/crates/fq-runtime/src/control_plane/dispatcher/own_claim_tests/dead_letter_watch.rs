@@ -32,6 +32,8 @@ use crate::dead_letter::{
 use crate::events::{Event, EventPayload, FailureKind, subjects};
 use crate::trigger::PublishedTrigger;
 
+mod incarnation;
+
 /// The delivery the tests hand the watch an advisory on: enough looks
 /// that only the advisory's age decides whether a verdict is still held.
 const LOOKED: u64 = HELD_VERDICT_MIN_LOOKS;
