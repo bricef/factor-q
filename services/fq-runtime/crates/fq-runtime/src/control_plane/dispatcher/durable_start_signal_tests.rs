@@ -399,6 +399,11 @@ async fn lock_claim_store(claim_db: &Path, held_for: Duration) {
 /// failing on it.
 const RELEASE_HELD_FOR: Duration = Duration::from_secs(3);
 
+/// The claim store's busy timeout: sqlx's default, which
+/// `ControlPlaneStore::open` does not change. A write that waits this long
+/// for the lock fails.
+const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Watch for the first run's claim release to land, for a held-up
 /// release ([`Pulled::setting_up_with_a_held_release`]): from the first
 /// run's return, read the claim row until it is gone, and note when.
@@ -533,16 +538,21 @@ impl Pulled {
         turn: Turn,
         returns: Returns,
     ) -> Self {
+        Self::setting_up_with_the_release_held_for(setup, resolve, turn, returns, RELEASE_HELD_FOR)
+            .await
+    }
+
+    /// As [`Self::setting_up_with_a_held_release`], holding the store's
+    /// lock for `held_for` instead.
+    async fn setting_up_with_the_release_held_for(
+        setup: Setup,
+        resolve: Resolve,
+        turn: Turn,
+        returns: Returns,
+        held_for: Duration,
+    ) -> Self {
         let window = Some(SHORT_ACK_WINDOW);
-        Self::on(
-            setup,
-            resolve,
-            turn,
-            returns,
-            window,
-            Some(RELEASE_HELD_FOR),
-        )
-        .await
+        Self::on(setup, resolve, turn, returns, window, Some(held_for)).await
     }
 
     /// On a consumer of the test's own whose ack window is `ack_window`.
@@ -661,6 +671,30 @@ impl Pulled {
             .info()
             .expect("a JetStream delivery")
             .stream_sequence
+    }
+
+    /// Hand the trigger to `handle` and wait up to `within` for it to
+    /// return.
+    async fn handle_within(&self, within: Duration) {
+        tokio::time::timeout(within, self.dispatcher.handle(&self.msg))
+            .await
+            .expect("handle returns");
+    }
+
+    /// NAK the delivery in hand and take its redelivery, until it is the
+    /// trigger's last delivery.
+    async fn redeliver_until_the_last(&mut self) {
+        while self.msg.info().expect("a JetStream delivery").delivered < TRIGGER_MAX_DELIVER {
+            self.msg
+                .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                .await
+                .expect("redeliver the trigger");
+            self.msg = tokio::time::timeout(Duration::from_secs(5), self.messages.next())
+                .await
+                .expect("a redelivery within 5s")
+                .expect("stream open")
+                .expect("message ok");
+        }
     }
 
     /// Hand the trigger to `handle` and wait for it to return. Before
@@ -884,11 +918,20 @@ impl Pulled {
 }
 
 /// Every answer one delivery sends the broker, read off its ack subject
-/// by a connection of its own. An ack is an empty body, an in-progress
-/// ack `+WPI`, a NAK `-NAK`.
+/// by a connection of its own and stamped as it arrives. An ack is an
+/// empty body, an in-progress ack `+WPI`, a NAK `-NAK`.
 struct Answers {
     _client: async_nats::Client,
-    subscription: async_nats::Subscriber,
+    /// Each answer, by kind (`ack`, `keepalive` or the body of another),
+    /// with the moment it arrived.
+    seen: Arc<Mutex<Vec<(tokio::time::Instant, String)>>>,
+    collector: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Answers {
+    fn drop(&mut self) {
+        self.collector.abort();
+    }
 }
 
 /// What [`Answers::sent`] read, counted by kind.
@@ -899,6 +942,40 @@ struct Sent {
     other: Vec<String>,
     /// The last answer read: `ack`, `keepalive` or the body of another.
     last: Option<String>,
+    /// Every answer, in order, with the moment it arrived.
+    timeline: Vec<(tokio::time::Instant, String)>,
+}
+
+impl Sent {
+    /// When the one answer that settled the delivery, an ack or a NAK,
+    /// arrived.
+    fn settled_at(&self) -> tokio::time::Instant {
+        let mut settlements = self.timeline.iter().filter(|(_, kind)| kind != "keepalive");
+        let (at, _) = settlements.next().expect("the delivery was answered");
+        assert!(
+            settlements.next().is_none(),
+            "the delivery was answered more than once: {self:?}"
+        );
+        *at
+    }
+
+    /// The longest the delivery went without an answer reaching the
+    /// broker, from `from` until it was settled.
+    fn longest_silence_from(&self, from: tokio::time::Instant) -> Duration {
+        let settled = self.settled_at();
+        let mut marks: Vec<_> = self
+            .timeline
+            .iter()
+            .map(|(at, _)| *at)
+            .filter(|at| *at > from && *at <= settled)
+            .collect();
+        marks.insert(0, from);
+        marks
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 impl Answers {
@@ -908,52 +985,75 @@ impl Answers {
             .reply
             .clone()
             .expect("a JetStream delivery has an ack subject");
-        let subscription = client.subscribe(reply).await.expect("watch the answers");
+        let mut subscription = client.subscribe(reply).await.expect("watch the answers");
         client
             .flush()
             .await
             .expect("the watch is in place before the delivery is answered");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let collector = tokio::spawn({
+            let seen = Arc::clone(&seen);
+            async move {
+                while let Some(answer) = subscription.next().await {
+                    let kind = match answer.payload.as_ref() {
+                        b"" | b"+ACK" => "ack".to_string(),
+                        b"+WPI" => "keepalive".to_string(),
+                        other => String::from_utf8_lossy(other).into_owned(),
+                    };
+                    seen.lock()
+                        .unwrap()
+                        .push((tokio::time::Instant::now(), kind));
+                }
+            }
+        });
         Self {
             _client: client,
-            subscription,
+            seen,
+            collector,
         }
     }
 
-    /// The answers sent so far, read until none has arrived for half a
-    /// second. Fails if they are still arriving after [`ANSWERS_DEADLINE`].
+    /// The answers sent so far, once none has arrived for half a second.
+    /// Fails if they are still arriving after [`ANSWERS_DEADLINE`].
     async fn sent(&mut self) -> Sent {
+        let quiet = Duration::from_millis(500);
         let deadline = tokio::time::Instant::now() + ANSWERS_DEADLINE;
-        let mut sent = Sent {
-            acks: 0,
-            keepalives: 0,
-            other: Vec::new(),
-            last: None,
-        };
-        while let Ok(Some(answer)) =
-            tokio::time::timeout(Duration::from_millis(500), self.subscription.next()).await
-        {
-            let last = match answer.payload.as_ref() {
-                b"" | b"+ACK" => {
-                    sent.acks += 1;
-                    "ack".to_string()
-                }
-                b"+WPI" => {
-                    sent.keepalives += 1;
-                    "keepalive".to_string()
-                }
-                other => {
-                    let other = String::from_utf8_lossy(other).into_owned();
-                    sent.other.push(other.clone());
-                    other
-                }
-            };
-            sent.last = Some(last);
+        loop {
+            tokio::time::sleep(quiet).await;
+            let sent = self.read();
+            if sent
+                .timeline
+                .last()
+                .is_none_or(|(at, _)| at.elapsed() >= quiet)
+            {
+                return sent;
+            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "answers were still arriving after {ANSWERS_DEADLINE:?}, so something is still \
                  handling the delivery: {sent:?}"
             );
         }
+    }
+
+    /// The answers seen so far, counted by kind.
+    fn read(&self) -> Sent {
+        let timeline = self.seen.lock().unwrap().clone();
+        let mut sent = Sent {
+            acks: 0,
+            keepalives: 0,
+            other: Vec::new(),
+            last: timeline.last().map(|(_, kind)| kind.clone()),
+            timeline: Vec::new(),
+        };
+        for (_, kind) in &timeline {
+            match kind.as_str() {
+                "ack" => sent.acks += 1,
+                "keepalive" => sent.keepalives += 1,
+                other => sent.other.push(other.to_string()),
+            }
+        }
+        sent.timeline = timeline;
         sent
     }
 }
@@ -1178,38 +1278,30 @@ async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery
     .await;
 }
 
-/// **A copy that arrives while a run's claim release is held up takes the
-/// freed claim and runs the trigger again: the known-open case of issue
-/// 1057, as it is today.** Played after a run that fails before its
-/// durable start (NAKed) and after one that returns without starting
+/// **A run's claim release held up past the ack window keeps its
+/// delivery alive until the delivery is answered, so no copy comes and the
+/// trigger runs once (issue 1057).** Played after a run that fails before
+/// its durable start (NAKed) and after one that returns without starting
 /// (consumed, acked).
 ///
 /// The run sets up for longer than the ack window, kept alive, and returns
 /// before its first WAL write. Its claim's release is then held up for
-/// [`RELEASE_HELD_FOR`], and nothing renews the delivery while it waits,
-/// so the broker redelivers. The copies are held by the helper's gate
-/// until the dispatcher's own release lands
+/// [`RELEASE_HELD_FOR`], three windows
 /// ([`Pulled::setting_up_with_a_held_release`] says which part of this is
-/// real and what the gate adds); then one of them takes the freed claim,
-/// waits for the worker permit the first copy holds, and runs the trigger
-/// a second time, and the rest meet its claim and are dropped as held.
+/// real and what the helper's gate adds). Before issue 1057 nothing renewed
+/// the delivery between the run's return and its answer, so the broker
+/// redelivered, a copy took the freed claim once the release landed, and
+/// the trigger ran again. Now the delivery is kept in progress from the
+/// run's return until its answer is published.
 ///
-/// Two things are pinned. **The drive finishes:** the first copy goes on
-/// to its answer and frees the permit while the copy waits for it. Before
-/// issue 1048 [`Pulled::handle_beside_copies`] awaited the copy inside the
-/// first copy's arm, so neither could finish. **What the dispatcher does in
-/// this order today:** a second run, at least. That is asserted first, so
-/// that once issue 1057 keeps the delivery alive from the run's return
-/// until its answer is published, it is this assertion that fails and
-/// says how to turn the test round: one run, no copy, the first copy
-/// answered once. It is at least two, not two, because the copy that
-/// runs settles the same way: on a loaded machine its own release can
-/// outlast the window, and a later copy runs the trigger a third time
-/// (seen under build-like load, on the NAK path). The test then checks
-/// that the second run came from the order it is for: a copy that arrived
-/// between the first run's return and the release landing, not one that
-/// came earlier.
-async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns) {
+/// Pinned: one run, asserted first, so that against the old dispatcher it
+/// is this assertion that fails and names the issue; that the release
+/// really was held past the window (else the test shows nothing); that no
+/// copy arrived after the run returned; that in-progress acks reached the
+/// broker during the settlement, never a whole window apart; that the
+/// first copy was answered once and nothing followed; and that the claim
+/// ends released.
+async fn a_held_up_release_keeps_the_delivery_alive_until_its_answer(returns: Returns) {
     let naks = matches!(returns, Returns::TransientError);
     let mut pulled = Pulled::setting_up_with_a_held_release(
         Setup::Takes(LONG_SETUP),
@@ -1223,65 +1315,300 @@ async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns
     let copies = pulled.handle_beside_copies().await;
 
     let timeline = pulled.timeline(&copies);
-    let starts = pulled.starts();
-    assert!(
-        starts >= 2,
-        "known open (issue 1057): a copy that arrives while a claim's release is held up takes \
-         the freed claim and runs the trigger again, because nothing keeps the delivery alive \
-         between the run's return and its answer. If one run started and no copy arrived after \
-         the first run returned, issue 1057 is fixed: turn this test round to assert that, one \
-         run, no copy, and the first copy answered once. {timeline}"
+    assert_eq!(
+        pulled.starts(),
+        1,
+        "the trigger ran again: the delivery was not kept alive between the run's return and \
+         its answer, so a copy arrived while the claim's release was held up and took the freed \
+         claim once it landed (issue 1057). {timeline}"
     );
     let returned = pulled.first_returned_at();
-    let landed = pulled.release_landed_at();
+    let landed = pulled
+        .release_landed_at()
+        .unwrap_or_else(|| panic!("the held-up release never landed. {timeline}"));
     assert!(
-        landed.is_some_and(|landed| {
-            copies
-                .iter()
-                .any(|arrived| *arrived > returned && *arrived < landed)
-        }),
-        "the second run did not come from the order this test is for: no copy arrived between \
-         the first run's return and its claim's release landing. {timeline}"
+        landed - returned > SHORT_ACK_WINDOW,
+        "the release was not held up past the ack window, so this test shows nothing. {timeline}"
+    );
+    assert!(
+        copies.iter().all(|arrived| *arrived < returned),
+        "a copy arrived after the run returned. {timeline}"
     );
     assert_eq!(
         pulled.held_drops(),
-        (copies.len() - (starts - 1)) as u64,
-        "every copy that did not run the trigger met the claim of one that did, and was dropped \
-         as held. {timeline}"
+        copies.len() as u64,
+        "any copy that came during the setup was dropped as held. {timeline}"
     );
     let sent = answers.sent().await;
+    assert!(
+        sent.settled_at() - returned > SHORT_ACK_WINDOW,
+        "the first copy was answered before its release, held up for longer than the ack \
+         window, could have landed: the answer did not wait for the release. {timeline}: \
+         {sent:?}"
+    );
+    let silence = sent.longest_silence_from(returned);
+    assert!(
+        silence < SHORT_ACK_WINDOW,
+        "the delivery went {silence:?} without an answer between the run's return and its \
+         settlement, as long as its ack window: {sent:?}"
+    );
     let answered_once = if naks {
         sent.acks == 0 && sent.other.len() == 1 && sent.other[0].starts_with("-NAK")
     } else {
         sent.acks == 1 && sent.other.is_empty()
     };
     assert!(
-        sent.keepalives > 0 && answered_once,
-        "the first copy was kept alive through its setup and then answered once, with a {}: \
-         {sent:?}",
+        answered_once && sent.last.as_deref() != Some("keepalive"),
+        "the first copy was answered once, with a {}, and nothing followed: {sent:?}",
         if naks { "NAK" } else { "ack" }
     );
     assert_eq!(
         pulled.probe_claim().await,
         TriggerClaim::Won,
-        "the claim ends released: the first copy's release landed, and the copy that took the \
-         freed claim released it in turn"
+        "the claim ends released"
     );
 }
 
 #[tokio::test]
-async fn a_copy_during_a_held_up_release_after_a_failure_runs_the_trigger_again() {
-    within_the_test_deadline(a_copy_during_a_held_up_release_runs_the_trigger_again(
+async fn a_held_up_release_after_a_failure_keeps_the_delivery_alive_until_its_nak() {
+    within_the_test_deadline(a_held_up_release_keeps_the_delivery_alive_until_its_answer(
         Returns::TransientError,
     ))
     .await;
 }
 
 #[tokio::test]
-async fn a_copy_during_a_held_up_release_after_a_clean_return_runs_the_trigger_again() {
-    within_the_test_deadline(a_copy_during_a_held_up_release_runs_the_trigger_again(
+async fn a_held_up_release_after_a_clean_return_keeps_the_delivery_alive_until_its_ack() {
+    within_the_test_deadline(a_held_up_release_keeps_the_delivery_alive_until_its_answer(
         Returns::Completed,
     ))
+    .await;
+}
+
+/// **A release the claim store refuses still answers the delivery, and the
+/// keepalive stops with the answer (issue 1057).** The store's write lock
+/// is held from the run's return for longer than its busy timeout (sqlx's
+/// five seconds), so the release fails on the lock rather than landing.
+/// The delivery is kept in progress the whole time, the NAK goes out after
+/// the failure, nothing follows it, and the claim is left as the failed
+/// release left it, `claimed` by the dispatcher. No copy comes: only the
+/// first delivery is handed to `handle`, so a copy the broker sent would
+/// be waiting on the pull stream, which the test reads.
+#[tokio::test]
+async fn a_release_the_store_refuses_still_naks_the_delivery_and_stops_the_keepalive() {
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up_with_the_release_held_for(
+            Setup::Instant,
+            Resolve::Drop,
+            Turn::Later,
+            Returns::TransientError,
+            STORE_BUSY_TIMEOUT + Duration::from_secs(1),
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        pulled.handle_within(STORE_BUSY_TIMEOUT * 2).await;
+
+        let returned = pulled.first_returned_at();
+        let sent = answers.sent().await;
+        assert!(
+            sent.settled_at() - returned >= STORE_BUSY_TIMEOUT,
+            "the release did not wait out the store's busy timeout before failing: {sent:?}"
+        );
+        let silence = sent.longest_silence_from(returned);
+        assert!(
+            silence < SHORT_ACK_WINDOW,
+            "the delivery went {silence:?} without an answer while its release waited and \
+             failed, as long as its ack window: {sent:?}"
+        );
+        assert!(
+            sent.acks == 0
+                && sent.other.len() == 1
+                && sent.other[0].starts_with("-NAK")
+                && sent.last.as_deref() == sent.other.first().map(String::as_str),
+            "the delivery was NAKed once and nothing followed the NAK: {sent:?}"
+        );
+        assert_no_copy_arrives(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
+        assert_held_by_the_dispatcher(
+            pulled.probe_claim().await,
+            "the release failed, so the claim is left `claimed` by the dispatcher",
+        );
+    })
+    .await;
+}
+
+/// Wait `wait` on the pull stream, and fail if a copy of the delivery
+/// arrives. A stream that closes or fails fails too, since it would read as
+/// no copy without saying whether one was on its way.
+async fn assert_no_copy_arrives(messages: &mut pull::Stream, wait: Duration) {
+    match tokio::time::timeout(wait, messages.next()).await {
+        Err(_elapsed) => {}
+        Ok(None) => panic!("the pull stream closed while waiting for a copy"),
+        Ok(Some(Err(err))) => panic!("the pull stream failed while waiting for a copy: {err}"),
+        Ok(Some(Ok(copy))) => panic!(
+            "a copy of the delivery arrived, as delivery {:?}: the delivery was not kept alive \
+             until its answer",
+            copy.info().map(|info| info.delivered).ok()
+        ),
+    }
+}
+
+/// How the stand-in for the events stream answers a dead letter's publish
+/// in [`a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack`].
+#[derive(Clone, Copy)]
+enum DeadLetterPublish {
+    /// Never: the publish fails when its acknowledgement times out.
+    TimesOut,
+    /// With an acknowledgement, this long after the publish: it succeeds,
+    /// slowly.
+    SucceedsAfter(Duration),
+}
+
+/// The dead letter on a trigger's last delivery, its publish answered as
+/// `publish` says, and the delivery kept alive until its ack (issue 1057).
+///
+/// On the last delivery a transient failure before the durable start is
+/// dead-lettered by the dispatcher, which publishes the dead letter, then
+/// releases the claim and acks. The events stream is deleted and a
+/// subscriber of the test's own takes its subjects, so the publish waits on
+/// that subscriber. A last delivery is never redelivered, but a window
+/// that lapses before its ack makes the broker give up on the trigger and
+/// send its max-deliveries advisory, which the dead-letter watch reads, for
+/// a trigger the dispatcher is dead-lettering itself. With the delivery
+/// kept alive through the publish, no advisory is sent and the ack lands.
+async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+    publish: DeadLetterPublish,
+) {
+    let mut pulled = Pulled::setting_up(
+        Setup::Instant,
+        Resolve::Drop,
+        Turn::Later,
+        Returns::TransientError,
+    )
+    .await;
+    pulled.redeliver_until_the_last().await;
+    let watcher = async_nats::connect(pulled.url.as_str())
+        .await
+        .expect("connect a watcher");
+    let mut advisories = watcher
+        .subscribe(format!(
+            "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.>"
+        ))
+        .await
+        .expect("watch the max-deliveries advisories");
+    pulled
+        .bus
+        .jetstream()
+        .delete_stream(crate::bus::STREAM_NAME)
+        .await
+        .expect("delete the events stream");
+    let publishes = Arc::new(AtomicUsize::new(0));
+    let mut stand_ins = Vec::new();
+    for subject in crate::bus::EVENT_STREAM_SUBJECTS {
+        let mut subscription = watcher
+            .subscribe(subject.to_string())
+            .await
+            .expect("take the events stream's subjects");
+        let (publishes, watcher) = (Arc::clone(&publishes), watcher.clone());
+        stand_ins.push(tokio::spawn(async move {
+            while let Some(published) = subscription.next().await {
+                publishes.fetch_add(1, Ordering::SeqCst);
+                let (DeadLetterPublish::SucceedsAfter(after), Some(reply)) =
+                    (publish, published.reply)
+                else {
+                    continue;
+                };
+                tokio::time::sleep(after).await;
+                let ack = r#"{"stream":"fq-events","seq":1}"#;
+                watcher
+                    .publish(reply, ack.into())
+                    .await
+                    .expect("acknowledge the publish");
+            }
+        }));
+    }
+    watcher.flush().await.expect("the watches are in place");
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle_within(Duration::from_secs(20)).await;
+
+    let returned = pulled.first_returned_at();
+    let sent = answers.sent().await;
+    let took = match publish {
+        DeadLetterPublish::TimesOut => Duration::from_secs(4),
+        DeadLetterPublish::SucceedsAfter(after) => after,
+    };
+    let settled_in = sent.settled_at() - returned;
+    assert!(
+        settled_in >= took,
+        "the dead letter's publish took less than {took:?}, so this test shows nothing: {sent:?}"
+    );
+    if let DeadLetterPublish::SucceedsAfter(after) = publish {
+        assert!(
+            settled_in < after + Duration::from_secs(2),
+            "the delivery was settled {settled_in:?} after the run's return, too near the \
+             client's five seconds for the publish's acknowledgement to tell a publish that \
+             succeeded from one that timed out: {sent:?}"
+        );
+    }
+    assert_eq!(
+        publishes.load(Ordering::SeqCst),
+        1,
+        "the dead letter was published once"
+    );
+    let silence = sent.longest_silence_from(returned);
+    assert!(
+        silence < SHORT_ACK_WINDOW,
+        "the last delivery went {silence:?} without an answer while its dead letter was \
+         published, as long as its ack window: {sent:?}"
+    );
+    assert!(
+        sent.acks == 1 && sent.other.is_empty() && sent.last.as_deref() == Some("ack"),
+        "the last delivery was acked once and nothing followed: {sent:?}"
+    );
+    if let Ok(Some(advisory)) = tokio::time::timeout(SHORT_ACK_WINDOW * 2, advisories.next()).await
+    {
+        panic!(
+            "the broker gave up on the last delivery before its ack: {}",
+            String::from_utf8_lossy(&advisory.payload)
+        );
+    }
+    for stand_in in stand_ins {
+        stand_in.abort();
+    }
+}
+
+/// **A dead letter whose publish times out on the trigger's last delivery
+/// keeps the delivery alive until its ack (issue 1057).** The publish
+/// fails after async-nats' five seconds for its acknowledgement, and the
+/// delivery is then acked, as it was before issue 1057. That leaves no
+/// dead letter anywhere, since the ack also stops the broker's advisory
+/// that the dead-letter watch would act on: a fault, issue 1062. The test
+/// checks for the ack only because that is what happens today; what it is
+/// for is the renewal through the wait, and that the broker does not give
+/// up on the delivery.
+#[tokio::test]
+async fn a_dead_letter_whose_publish_times_out_keeps_the_last_delivery_alive_until_its_ack() {
+    within_the_test_deadline(
+        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+            DeadLetterPublish::TimesOut,
+        ),
+    )
+    .await;
+}
+
+/// **A dead letter published slowly on the trigger's last delivery keeps
+/// the delivery alive until its ack (issue 1057).** The stand-in for the
+/// events stream acknowledges the publish after two and a half seconds,
+/// longer than two ack windows, so the publish succeeds, slowly, and the
+/// delivery is renewed through the wait for its acknowledgement.
+#[tokio::test]
+async fn a_dead_letter_published_slowly_keeps_the_last_delivery_alive_until_its_ack() {
+    within_the_test_deadline(
+        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+            DeadLetterPublish::SucceedsAfter(Duration::from_millis(2500)),
+        ),
+    )
     .await;
 }
 
