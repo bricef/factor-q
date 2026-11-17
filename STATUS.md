@@ -268,8 +268,8 @@ route ADR-0032's section 5 says it used, a start slower than the ack
 window; the property it certifies is unchanged, and a third test in
 that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
-redelivered. ADR-0032's only edit since records the finished retry
-ladder (2026-11-14); it is not edited for the keepalive or for the
+redelivered. ADR-0032's one edit since 2026-11-11 records the finished
+retry ladder (2026-11-14); it is not edited for the keepalive or for the
 settling of a daemon's own claims, so these of its statements are now
 out of date: section 5's account of the two routes to a redelivery
 before durable start, and of the replay using the second; gap 3's "a
