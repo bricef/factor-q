@@ -305,23 +305,7 @@ impl AdvisoryWatch {
                 }
                 msg = messages.next() => {
                     match msg {
-                        Some(Ok(msg)) => match self.handle_advisory(&msg.payload, delivered(&msg)).await {
-                            Ok(AdvisoryOutcome::Held(hold)) => {
-                                nak_for_retry(&msg, policy, &mut redelivery_log, Nak::Held(&hold))
-                                    .await;
-                            }
-                            Ok(outcome) => {
-                                debug!(consumer = CONSUMER_NAME, ?outcome, "advisory handled");
-                                if let Err(err) = msg.ack().await {
-                                    error!(consumer = CONSUMER_NAME, error = %err, "failed to ack advisory");
-                                }
-                            }
-                            Err(err) => {
-                                let err = err.to_string();
-                                nak_for_retry(&msg, policy, &mut redelivery_log, Nak::Failed(&err))
-                                    .await;
-                            }
-                        },
+                        Some(Ok(msg)) => self.answer(&msg, policy, &mut redelivery_log).await,
                         Some(Err(err)) => {
                             warn!(consumer = CONSUMER_NAME, error = %err, "error reading advisory message");
                         }
@@ -336,6 +320,35 @@ impl AdvisoryWatch {
 
         info!(consumer = CONSUMER_NAME, "advisory watch stopped");
         Ok(())
+    }
+
+    /// Decide one delivered advisory and answer the broker: NAK a held
+    /// verdict or a failure to decide again, ack anything else.
+    async fn answer(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        policy: ConsumerRedeliveryPolicy,
+        redelivery_log: &mut RedeliveryLog,
+    ) {
+        // A delivery count the broker does not give counts as enough looks:
+        // read as the first, it would keep a verdict held on every delivery
+        // until the advisory aged out of its stream, with no dead letter.
+        let looks = delivered(msg).unwrap_or(HELD_VERDICT_MIN_LOOKS);
+        match self.handle_advisory(&msg.payload, looks).await {
+            Ok(AdvisoryOutcome::Held(hold)) => {
+                nak_for_retry(msg, policy, redelivery_log, Nak::Held(&hold)).await;
+            }
+            Ok(outcome) => {
+                debug!(consumer = CONSUMER_NAME, ?outcome, "advisory handled");
+                if let Err(err) = msg.ack().await {
+                    error!(consumer = CONSUMER_NAME, error = %err, "failed to ack advisory");
+                }
+            }
+            Err(err) => {
+                let err = err.to_string();
+                nak_for_retry(msg, policy, redelivery_log, Nak::Failed(&err)).await;
+            }
+        }
     }
 
     /// Handle one captured advisory payload, on its `delivered`th delivery
@@ -588,7 +601,8 @@ async fn nak_for_retry(
     redelivery_log: &mut RedeliveryLog,
     why: Nak<'_>,
 ) {
-    let delivered = delivered(msg);
+    // The delay escalates from the first step when the count is not given.
+    let delivered = delivered(msg).unwrap_or(1);
     let delay = policy.nak_delay(delivered);
     let admitted = redelivery_log.admit(delivered, std::time::Instant::now());
     match why {
@@ -614,12 +628,11 @@ async fn nak_for_retry(
 }
 
 /// How many times the broker has delivered `msg` to the watch, this
-/// delivery included; one when it does not say.
-fn delivered(msg: &async_nats::jetstream::Message) -> u64 {
+/// delivery included, if it says.
+fn delivered(msg: &async_nats::jetstream::Message) -> Option<u64> {
     msg.info()
         .ok()
         .and_then(|info| u64::try_from(info.delivered).ok())
-        .unwrap_or(1)
 }
 
 #[cfg(test)]

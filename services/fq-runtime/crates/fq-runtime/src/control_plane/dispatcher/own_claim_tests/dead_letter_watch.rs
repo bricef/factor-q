@@ -1089,3 +1089,58 @@ async fn a_claim_gone_between_the_watchs_reads_does_not_hide_the_run_it_read() {
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
 }
+
+/// **The real loop ends a hold on the broker's third delivery.** A copy is
+/// still handling the claim, so every look holds the verdict, and the
+/// watch's limit is half a second. The loop hands each delivery's count, as
+/// the broker gives it, to the decision: the first look is inside the
+/// limit, the second is past it but only the second, and the third writes
+/// the dead letter marked unchecked, about three seconds in (one second,
+/// then two, of NAK delay). A loop that handed over any other count could
+/// hold the verdict on every delivery until the advisory aged out of its
+/// stream a day later, with no dead letter: the silent loss the limit ends.
+#[tokio::test]
+async fn the_watch_loop_ends_a_hold_past_the_limit_on_the_brokers_third_delivery() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    arena.worker.queue(Run::WaitsInSetup);
+    let first = arena.spawn_delivery(SEQ, 1, false);
+    arena.worker.until_waiting(1).await;
+    exhaust_all(&arena, 1).await;
+
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let began = tokio::time::Instant::now();
+    let looping = tokio::spawn(watch(&arena).with_held_verdict_limit(PAST).run(stopped));
+    let deadline = began + Duration::from_secs(20);
+    let event = loop {
+        if let Some(event) = dead_letter_at(&arena, SEQ).await {
+            break event;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no dead letter within 20s: the hold did not end; consumer={:?}",
+            watch_consumer(&arena).await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let elapsed = began.elapsed();
+
+    assert!(
+        from_event(&event)
+            .expect("a dead letter")
+            .start_unchecked
+            .is_some(),
+        "marked unchecked"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2500),
+        "held on its first two deliveries (one second, then two): {elapsed:?}"
+    );
+    let _ = stop.send(());
+    looping
+        .await
+        .expect("the loop's task")
+        .expect("the loop stops cleanly");
+    arena.worker.setup_gate.add_permits(1);
+    arena.finish(first).await;
+}
