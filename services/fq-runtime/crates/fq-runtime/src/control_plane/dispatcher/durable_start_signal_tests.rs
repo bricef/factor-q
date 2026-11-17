@@ -1198,13 +1198,17 @@ async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery
 /// to its answer and frees the permit while the copy waits for it. Before
 /// issue 1048 [`Pulled::handle_beside_copies`] awaited the copy inside the
 /// first copy's arm, so neither could finish. **What the dispatcher does in
-/// this order today:** two runs. That is asserted first, so that once issue
-/// 1057 keeps the delivery alive from the run's return until its answer
-/// is published, it is this assertion that fails and says how to turn the
-/// test round: one run, no copy, the first copy answered once. The test
-/// then checks that the second run came from the order it is for: a copy
-/// that arrived between the first run's return and the release landing,
-/// not one that came earlier.
+/// this order today:** a second run, at least. That is asserted first, so
+/// that once issue 1057 keeps the delivery alive from the run's return
+/// until its answer is published, it is this assertion that fails and
+/// says how to turn the test round: one run, no copy, the first copy
+/// answered once. It is at least two, not two, because the copy that
+/// runs settles the same way: on a loaded machine its own release can
+/// outlast the window, and a later copy runs the trigger a third time
+/// (seen under build-like load, on the NAK path). The test then checks
+/// that the second run came from the order it is for: a copy that arrived
+/// between the first run's return and the release landing, not one that
+/// came earlier.
 async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns) {
     let naks = matches!(returns, Returns::TransientError);
     let mut pulled = Pulled::setting_up_with_a_held_release(
@@ -1219,9 +1223,9 @@ async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns
     let copies = pulled.handle_beside_copies().await;
 
     let timeline = pulled.timeline(&copies);
-    assert_eq!(
-        pulled.starts(),
-        2,
+    let starts = pulled.starts();
+    assert!(
+        starts >= 2,
         "known open (issue 1057): a copy that arrives while a claim's release is held up takes \
          the freed claim and runs the trigger again, because nothing keeps the delivery alive \
          between the run's return and its answer. If one run started and no copy arrived after \
@@ -1241,8 +1245,9 @@ async fn a_copy_during_a_held_up_release_runs_the_trigger_again(returns: Returns
     );
     assert_eq!(
         pulled.held_drops(),
-        copies.len() as u64 - 1,
-        "every other copy met the claim of the one that ran, and was dropped as held"
+        (copies.len() - (starts - 1)) as u64,
+        "every copy that did not run the trigger met the claim of one that did, and was dropped \
+         as held. {timeline}"
     );
     let sent = answers.sent().await;
     let answered_once = if naks {
