@@ -21,6 +21,22 @@
 //! durable stream ([`crate::bus::ADVISORY_STREAM_NAME`]) rather than
 //! subscribed live.
 //!
+//! **It decides by the records** (issue 967). The broker reports a
+//! trigger exhausted whenever its last delivery's answer never reached
+//! it, and that happens to a run that started too: the last delivery's
+//! task died after its first WAL write, or its ack was lost. So before
+//! it writes a dead letter the watch asks the dispatcher what is on
+//! record for the trigger ([`ExhaustionCheck`]). With nothing on record
+//! it dead-letters the trigger. With a start on record it writes none,
+//! since requeuing it would run the work twice, and counts it. When it
+//! cannot tell, because a copy of the trigger is still handling its claim
+//! or the records cannot be read, it holds its verdict, NAKing the
+//! advisory to decide again, until [`HELD_VERDICT_LIMIT`] after the
+//! broker emitted the advisory, and then writes the dead letter anyway,
+//! marked as one whose start could not be checked. An advisory from an
+//! earlier incarnation of the trigger stream is dead-lettered without
+//! looking: the records key on this one.
+//!
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash
 //! between emit and ack can duplicate one event; the shared

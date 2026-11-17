@@ -426,6 +426,13 @@ pub trait Worker: Send + Sync {
     /// with an error, which the dispatcher reads as "cannot tell" and so
     /// leaves the claim as it is: a worker that has not been taught to
     /// answer can never make the dispatcher start a run twice.
+    ///
+    /// The dead-letter watch asks it too, before it calls such a trigger
+    /// exhausted, and reads an error the same way: it holds its verdict,
+    /// and past its limit writes the dead letter marked as one whose start
+    /// could not be checked. A worker that cannot answer costs each such
+    /// trigger an hour and an unchecked dead letter, never a false one
+    /// that says nothing of the doubt.
     async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
         Err(ExecutorError::WorkerStore(format!(
             "this worker cannot say whether its WAL holds invocation {invocation_id}"
