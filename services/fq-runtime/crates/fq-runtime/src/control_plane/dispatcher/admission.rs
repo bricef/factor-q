@@ -77,7 +77,8 @@ use crate::worker::DueResume;
 /// follows the ack, how often the hold asks whether it can stop.
 ///
 /// **One constant for every wait** — both holds and the wait for a
-/// worker permit. The trigger durable's real
+/// worker permit, and a run's setup, the mark of its durable start and a
+/// delivery's settlement too (`claim::settlement`). The trigger durable's real
 /// first-delivery deadline is 30 seconds (`TRIGGER_RETRY_BACKOFF[0]`;
 /// JetStream replaces `ack_wait` with `backoff[0]` wherever a schedule
 /// is set), and one slipped tick means a redelivery, a second `handle`
@@ -288,8 +289,9 @@ impl TriggerDispatcher {
 
 /// Reset the delivery's ack window without counting as a delivery: the
 /// holds, the wait for a worker permit, a run's setup up to its durable
-/// start, and the mark that records that start all send one every
-/// [`HOLD_KEEPALIVE`]. A failure changes nothing for the caller: the
+/// start, the mark that records that start, and the settlement that gives
+/// a claim back and answers the delivery (`claim::settlement`) all send
+/// one every [`HOLD_KEEPALIVE`]. A failure changes nothing for the caller: the
 /// worst case is the window expiring and JetStream redelivering, which is
 /// where the delivery would be without the keepalive at all.
 pub(super) async fn keep_alive(

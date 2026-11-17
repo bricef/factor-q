@@ -276,8 +276,10 @@ date: section 5's account of the two routes to a redelivery before
 durable start, and of the replay using the second; gap 3 as a whole,
 now closed (below), its "a start that takes longer than the whole retry
 ladder" included; the row of section 2's table for a claim the same
-process holds, which "Stops" with "No log line and no count"; and, in
-its part on more than one worker, "where nothing keeps it alive", "in a
+process holds, which "Stops" with "No log line and no count";
+section 4's "leaves no row behind", since a release the claim store
+refuses, or one settling gives up waiting for that never lands, leaves
+the claim `claimed`; and, in its part on more than one worker, "where nothing keeps it alive", "in a
 slow start", and that a trigger whose durable-start report never
 arrives "is dead-lettered as exhausted while its invocation runs",
 since the watch now holds its verdict while a copy handles the claim.
@@ -349,7 +351,20 @@ as the holds before it and the mark after it do, so a slow setup is no
 longer redelivered underneath its own first copy, and a setup slower
 than the whole retry ladder is no longer dead-lettered as exhausted
 while it is still starting; the keepalive lets go on a drain or
-shutdown ([#1039](https://github.com/bricef/factor-q/pull/1039)). A
+shutdown ([#1039](https://github.com/bricef/factor-q/pull/1039)). It
+keeps a delivery alive while it is settled too, from the run's return,
+or the trigger's refusal, until its NAK or ack is published, through the
+claim's release and, on a last delivery, the dead letter's publish, so a
+release slow enough to outlast the ack window no longer lets a copy
+arrive, take the freed claim and handle the trigger a second time
+([#1057](https://github.com/bricef/factor-q/issues/1057)). Settling
+waits at most 40 seconds for the release, longer than the claim store's
+own waits (30 seconds for a connection, 5 for its lock), then answers
+the delivery without it and logs `gave up waiting for the claim store to
+release a trigger's claim` at error. Giving up stops the wait, not the
+release, which lands when the store lets it; a release matches the claim
+by its sequence, not by the invocation it names, and scoping it to its
+own invocation is [#1061](https://github.com/bricef/factor-q/issues/1061). A
 setup that hangs before its first WAL write is therefore kept alive,
 and nothing reports it
 ([#1040](https://github.com/bricef/factor-q/issues/1040)). A copy
@@ -407,12 +422,21 @@ good before its first WAL write, was refused at admission, was requeued
 from a hold, or was halted in setup, among others) has its claim
 released before its delivery is acked, so a lost ack brings the
 delivery back to be handled again: with the claim released it takes a
-fresh one, and with the release failed as well it meets a claim with
-nothing on record and takes it again. A trigger that failed for good
-then fails again, one requeued from a hold can run twice, and on the
-last delivery the watch finds no claim and writes a `trigger_exhausted`
-for a trigger already dealt with
-([#1055](https://github.com/bricef/factor-q/issues/1055)). Outside
+fresh one, and with the release failed, or given up on and not landed,
+as well it meets a claim with nothing on record and takes it again. A
+trigger that failed for good then fails again, one requeued from a hold
+can run twice, and on the last delivery the watch finds no claim and
+writes a `trigger_exhausted` for a trigger already dealt with
+([#1055](https://github.com/bricef/factor-q/issues/1055)). A slow
+release no longer leads there, since the delivery is kept alive until
+its answer is published
+([#1057](https://github.com/bricef/factor-q/issues/1057)); only a lost
+answer does. And a trigger that fails transiently before its first WAL
+write on its last delivery, and whose dead letter the dispatcher cannot
+publish, is
+acked all the same, which also stops the broker's advisory to the
+watch, so it is consumed with no run and no dead letter from either
+([#1062](https://github.com/bricef/factor-q/issues/1062)). Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered

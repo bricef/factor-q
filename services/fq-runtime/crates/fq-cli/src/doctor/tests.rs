@@ -659,8 +659,9 @@ fn abandoned_claims_taken_again_are_counted_apart_and_explained_without_a_verdic
              took again, under a new invocation id, to run the trigger: no copy was handling the \
              claim any more and its run had no start on record, because the copy that took it \
              ended before its first WAL write without settling the delivery (its task died; \
-             giving the claim back failed before a NAK, or before an ack that was then lost; or \
-             a drain left it); the copy then runs the trigger unless a drain or the trigger's \
+             giving the claim back failed or was given up on before a NAK, or before an ack \
+             that was then lost; or a drain left it); the copy then runs the trigger unless a \
+             drain or the trigger's \
              own checks stop it first; the daemon log has a warn line for each naming the \
              abandoned invocation id, and the failure before it\n"
         ),

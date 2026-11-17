@@ -1204,8 +1204,9 @@ something else.)
      handling the claim any more and its run had no start on record,
      because the copy that took it ended before its first WAL write
      without settling the delivery (its task died; giving the claim back
-     failed before a NAK, or before an ack that was then lost; or a drain
-     left it); the copy then runs the trigger unless a drain or the
+     failed or was given up on before a NAK, or before an ack that was
+     then lost; or a drain left it); the copy then runs the trigger unless
+     a drain or the
      trigger's own checks stop it first; the daemon log has a warn line
      for each naming the abandoned invocation id, and the failure before
      it
@@ -1238,8 +1239,14 @@ something else.)
   from its worker permit to its first durable write (its workspace, its
   MCP servers, its first step) the same in-progress acks keep it alive,
   so a slow start is not redelivered either unless they stop landing. Or
-  it may be marking its start, which the same in-progress acks cover.
-  Either way it still starts once, and settles the delivery itself. A
+  it may be marking its start, which the same in-progress acks cover. Or
+  it may be settling the delivery, from its run's return or its refusal
+  until its NAK or ack is published: giving its claim back and, on a
+  fifth and last delivery, publishing its dead letter first. The same
+  in-progress acks cover that too
+  ([#1057](https://github.com/bricef/factor-q/issues/1057)). Either way
+  the trigger runs at most once, and that copy settles the delivery
+  itself. A
   copy is counted here too when no copy is handling the claim but it
   cannot be settled from the records just then, and is left for a later
   copy: another copy that met the same claim settled or took it first,
@@ -1249,7 +1256,8 @@ something else.)
   of the trigger is handling it any more, and nothing of its run is on
   record: the copy that took it ended before its run's first durable
   write without settling the delivery, because its task panicked, or
-  because giving the claim back before a retry failed. The copy takes
+  because giving the claim back before a retry failed, or was given up
+  on after 40 seconds and had not landed by then. The copy takes
   the claim again under a new invocation id, by a compare-and-set on the
   old one, to run the trigger once. The count is of claims taken again,
   not of runs: the copy then runs the trigger unless a drain under way
@@ -1259,8 +1267,8 @@ something else.)
   duplicate, and not an issue. A claim a drain left behind is taken
   again the same way, if a copy reaches the daemon before it exits. One
   double fault lands here too: a run that failed for good before its
-  first durable write, whose claim could not be given back and whose
-  ack was lost, is run once more.
+  first durable write, whose claim could not be given back, or was
+  given up on, and whose ack was lost, is run once more.
 
 The warn lines are `dropping duplicate trigger delivery after durable
 start`, `acking a redelivered trigger whose claim this daemon holds`,
@@ -1269,7 +1277,15 @@ and `taking again a trigger claim this daemon holds`. All carry the
 stream sequence and the attempt (`delivered`). The last three add the
 subject, which names the agent, the claim's age (`claim_age_ms`) and the
 invocation id the claim names: `claim_invocation_id`, or, on a re-take,
-`abandoned_invocation_id` beside the new `invocation_id`. The drop says
+`abandoned_invocation_id` beside the new `invocation_id`. The failure
+before a re-take is logged at error: `failed to release unfinished
+trigger claim`, with the error and `stream_seq`, or, when settling
+stopped waiting for the release after 40 seconds and answered the
+delivery without it, `gave up waiting for the claim store to release a
+trigger's claim`, with `stream_seq`, the subject, `trigger_id`, what the
+delivery was being answered for (`context`) and how long it waited
+(`waited_ms`); a task that died, or a drain, leaves no such line. The
+drop says
 why it dropped the copy, and on the trigger's fifth and last delivery
 it says that no copy follows. A drop before a start was recorded costs
 the trigger one of its five deliveries. The same sequence dropped again
@@ -1636,14 +1652,23 @@ model, a full agent or the worker cap for hours (`Throttled models` and
 copy of the trigger is still handling it. The dispatcher knows that, in
 memory, and the report does not ask. A claim no copy is handling any
 more, left by a run that panicked before its first durable write or by
-a release that failed before a retry, looks the same to the report, and
+a release that failed, or was given up on and had not landed, before a
+retry, looks the same to the report, and
 is settled by the trigger's next delivery instead: the dispatcher takes
 the claim again to run the trigger, counting it on the `fq-dispatcher`
 line as an abandoned claim taken again and logging it with its subject,
 its sequence, the claim's age and the abandoned invocation id (see
 [the dispatcher's counts](#when-a-consumer-stops-making-progress)). If
 that was the trigger's last delivery, no copy comes, and the trigger is
-a `trigger_exhausted` dead letter to requeue. A started run whose
+a `trigger_exhausted` dead letter to requeue. A release that failed,
+or was given up on and never landed, before an ack leaves a claim no
+delivery comes back to, since the ack consumed it. The check does not
+list it while this daemon runs. After a restart it is a claim an exited
+process left, with no run on record: listed as not started, awaiting
+redelivery, until the redelivery window has passed, then as never
+started, an issue, until the horizon, although its delivery was
+consumed rather than dead-lettered. The release's error line in the
+daemon log (above) names its sequence. A started run whose
 message is gone,
 since no redelivery can follow. And a claim an exited process left that
 is older than the horizon.

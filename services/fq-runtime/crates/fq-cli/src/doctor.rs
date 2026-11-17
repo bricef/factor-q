@@ -385,8 +385,9 @@ fn retaken_suffix(abandoned_claim_retaken: u64) -> String {
 ///
 /// It is not a fault. Each one follows a failure the daemon logged (a
 /// run's task that died before its first WAL write; a claim release that
-/// failed before a NAK, or before an ack that was then lost) or a drain
-/// that left the claim for the next binary; the warn line for each names
+/// failed, or that settling gave up waiting for and that had not landed,
+/// before a NAK, or before an ack that was then lost) or a drain that
+/// left the claim for the next binary; the warn line for each names
 /// the abandoned invocation id, which is where to look for why. It counts
 /// claims taken again, not runs: the copy that took one runs the trigger
 /// unless a drain or the trigger's own checks stop it first.
@@ -397,8 +398,9 @@ fn retaken_note(abandoned_claim_retaken: u64) -> String {
     "  -> \"taken again\" counts claims this daemon held that a copy took again, under a new \
      invocation id, to run the trigger: no copy was handling the claim any more and its run had \
      no start on record, because the copy that took it ended before its first WAL write without \
-     settling the delivery (its task died; giving the claim back failed before a NAK, or before \
-     an ack that was then lost; or a drain left it); the copy then runs the trigger unless a drain \
+     settling the delivery (its task died; giving the claim back failed or was given up on before \
+     a NAK, or before an ack that was then lost; or a drain left it); the copy then runs the \
+     trigger unless a drain \
      or the trigger's own checks stop it first; the daemon log has a warn line for each naming \
      the abandoned invocation id, and the failure before it\n"
         .to_string()
