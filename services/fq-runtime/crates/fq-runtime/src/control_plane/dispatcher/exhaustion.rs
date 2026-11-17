@@ -23,7 +23,8 @@
 //! - **A row marked `durably_started`:** a start on record.
 //! - **A `claimed` row:** first, whether a copy of the trigger is still
 //!   handling it ([`Handling`]): if so, the run may still start, and the
-//!   verdict waits for the copy to end. Then the records, by the one
+//!   verdict waits for the copy to end, or for the watch's limit (below).
+//!   Then the records, by the one
 //!   definition recovery, `fq doctor` and the own-claim arm use
 //!   ([`RunRecords`]): the worker's WAL first, through
 //!   [`Worker::wal_run`], then the ownership row, so a run archived between
@@ -49,7 +50,11 @@
 //!   and the run may still start: a dead letter now would be false if it
 //!   does, and none at all would lose the trigger if the copy's task then
 //!   died. The note ends when the copy's start is marked or its `handle`
-//!   returns, and the verdict is taken then.
+//!   returns, and the verdict is taken then. A copy is still handling a
+//!   claim when its deliveries run out only if its keepalive stopped before
+//!   its start was marked: a drain or shutdown let it go, its keepalives
+//!   did not land, or its setup blocked its thread. A setup that waits is
+//!   kept alive, and its deliveries do not run out.
 //!
 //! A held verdict does not wait for ever. Past the watch's limit
 //! (`advisory_watch::HELD_VERDICT_LIMIT`, measured from when the broker
