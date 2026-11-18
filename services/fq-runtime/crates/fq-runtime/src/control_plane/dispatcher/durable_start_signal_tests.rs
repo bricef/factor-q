@@ -104,6 +104,7 @@ use crate::bus::{
     EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_MAX_DELIVER, TRIGGER_RETRY_BACKOFF,
     TRIGGER_STREAM_NAME,
 };
+use crate::control_plane::store::ClaimState;
 use crate::control_plane::{ControlPlaneStore, OwnerStatus, TriggerClaim};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
@@ -2644,7 +2645,7 @@ async fn a_start_that_cannot_be_recorded_on_another_invocations_claim_leaves_it(
         .await
         .expect("the other invocation's claim must be left, not released");
     assert!(
-        !claim.durably_started && claim.invocation_id.as_deref() == Some(ANOTHER_RUN),
+        claim.state == ClaimState::Claimed && claim.invocation_id.as_deref() == Some(ANOTHER_RUN),
         "the other invocation's claim is left as it was: {claim:?}"
     );
     pulled.wait_until_acked().await;
@@ -2680,7 +2681,8 @@ async fn the_ack_after_an_unmarked_start_keeps_the_runs_own_claim() {
         .await
         .expect("the run started, so its claim must be kept, not released");
     assert!(
-        !claim.durably_started && claim.invocation_id.as_deref() == Some(run.to_string().as_str()),
+        claim.state == ClaimState::Claimed
+            && claim.invocation_id.as_deref() == Some(run.to_string().as_str()),
         "the run's own claim is left as it was: {claim:?}"
     );
     pulled.wait_until_acked().await;
@@ -2864,7 +2866,7 @@ async fn a_release_landing_after_its_claim_was_taken_again_leaves_the_new_claim(
         // run's mark found gone would be written with the time of the mark.
         let marked = the_claim(&pulled).await.expect("the run's claim");
         assert!(
-            marked.durably_started
+            marked.state == ClaimState::DurablyStarted
                 && marked.invocation_id.as_deref() == Some(run.to_string().as_str())
                 && marked.claimed_at == taken_again.claimed_at,
             "the run's start is marked on the claim taken again, which keeps its age \

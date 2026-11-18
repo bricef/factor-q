@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use fq_ops::{DeadLetter, Domain, OpId, Receipt, VerbId};
 use fq_runtime::bus::TRIGGER_STREAM_NAME;
-use fq_runtime::control_plane::store::TriggerClaimRow;
+use fq_runtime::control_plane::store::{ClaimState, TriggerClaimRow};
 use fq_runtime::control_plane::{OwnerStatus, TriggerKey};
 use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
@@ -1038,7 +1038,8 @@ async fn a_start_found_in_the_records_is_refused_and_marks_the_claim() {
             .claim_row(32)
             .await
             .expect("the claim is still there")
-            .durably_started,
+            .state
+            == ClaimState::DurablyStarted,
         "the claim is marked started"
     );
 
@@ -1371,7 +1372,7 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
         .expect("publish the first trigger");
     let started = world
         .claim_until(first.stream_seq, "durably started", |row| {
-            row.durably_started
+            row.state == ClaimState::DurablyStarted
         })
         .await;
     let first_run = started
@@ -1383,7 +1384,9 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
         .await
         .expect("publish the second trigger");
     world
-        .claim_until(second.stream_seq, "claimed", |row| !row.durably_started)
+        .claim_until(second.stream_seq, "claimed", |row| {
+            row.state == ClaimState::Claimed
+        })
         .await;
 
     let (event, event_id) =
@@ -1439,7 +1442,9 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
         .await
         .expect("publish the third trigger");
     let held = world
-        .claim_until(third.stream_seq, "claimed", |row| !row.durably_started)
+        .claim_until(third.stream_seq, "claimed", |row| {
+            row.state == ClaimState::Claimed
+        })
         .await;
     let third_run = held.invocation_id.expect("a claim names its run");
     world.wal_row(&third_run, RUNNER).await;
@@ -1461,7 +1466,8 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
                 .claim_row(third.stream_seq)
                 .await
                 .expect("the claim is still there")
-                .durably_started,
+                .state
+                == ClaimState::DurablyStarted,
             "the last look's start marks the claim; got {err}"
         );
     }

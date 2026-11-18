@@ -94,7 +94,7 @@
 use std::sync::Arc;
 
 use crate::bus::TRIGGER_STREAM_NAME;
-use crate::control_plane::store::RunRecords;
+use crate::control_plane::store::{ClaimState, RunRecords};
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerKey};
 use crate::worker::{WalRun, Worker};
 
@@ -213,14 +213,17 @@ impl ExhaustionCheck {
         };
         // A claim marked started is a start on record, whatever else the
         // row holds.
-        if row.durably_started {
-            return Exhausted::Started {
-                invocation_id: row
-                    .invocation_id
-                    .unwrap_or_else(|| "none named on the claim".to_string()),
-                on_record: "on its claim, marked durably started".to_string(),
-                mark: ClaimMark::Already,
-            };
+        match row.state {
+            ClaimState::DurablyStarted => {
+                return Exhausted::Started {
+                    invocation_id: row
+                        .invocation_id
+                        .unwrap_or_else(|| "none named on the claim".to_string()),
+                    on_record: "on its claim, marked durably started".to_string(),
+                    mark: ClaimMark::Already,
+                };
+            }
+            ClaimState::Claimed => {}
         }
         // A claim written before claims named their run cannot be looked
         // up, and is dead-lettered as it always was.
@@ -330,14 +333,17 @@ impl ExhaustionCheck {
         wal: Option<WalRun>,
     ) -> Exhausted {
         let now = self.store.trigger_claim(key).await;
-        if let Ok(Some(row)) = &now
-            && row.durably_started
-        {
-            return Exhausted::Started {
-                invocation_id: row.invocation_id.clone().unwrap_or(invocation_id),
-                on_record: "on its claim, marked durably started".to_string(),
-                mark: ClaimMark::Already,
-            };
+        if let Ok(Some(row)) = &now {
+            match row.state {
+                ClaimState::DurablyStarted => {
+                    return Exhausted::Started {
+                        invocation_id: row.invocation_id.clone().unwrap_or(invocation_id),
+                        on_record: "on its claim, marked durably started".to_string(),
+                        mark: ClaimMark::Already,
+                    };
+                }
+                ClaimState::Claimed => {}
+            }
         }
         if wal.is_some() {
             return self

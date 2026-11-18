@@ -67,6 +67,40 @@ pub enum RecordedStart {
     AlreadyStarted { invocation_id: Option<String> },
 }
 
+/// Where a claim row stands: the `state` column.
+///
+/// A reader decides by matching on it rather than asking whether the row
+/// has started, so that a state added later is an arm that reader has to
+/// write, not a value that reads as one of these (issue 1055). The
+/// compiler forces the readers that match: `claim_trigger`,
+/// `record_trigger_start`, the dead-letter watch's two reads of the claim
+/// and the invocation view's mapping. It does not force two others, which
+/// a state added later has to be written into by hand: `of_column`,
+/// which reads anything but `durably_started` as `claimed`, and the SQL
+/// statements that filter on `state = '…'`, which it never sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimState {
+    /// A copy has taken the delivery, and nothing of its run is settled:
+    /// `state = 'claimed'`.
+    Claimed,
+    /// The run the row names has made its first WAL write:
+    /// `state = 'durably_started'`.
+    DurablyStarted,
+}
+
+impl ClaimState {
+    /// The state a row's `state` column holds. The column's `CHECK` admits
+    /// only the two values; anything but `durably_started` reads as
+    /// `claimed`, as the row's flag did.
+    fn of_column(state: &str) -> Self {
+        if state == "durably_started" {
+            ClaimState::DurablyStarted
+        } else {
+            ClaimState::Claimed
+        }
+    }
+}
+
 /// One claim row, read back whole for an operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerClaimRow {
@@ -74,8 +108,8 @@ pub struct TriggerClaimRow {
     pub stream_epoch: i64,
     pub stream_seq: u64,
     pub claimant: String,
-    /// `state = 'durably_started'`; otherwise the row is `claimed`.
-    pub durably_started: bool,
+    /// Where the row stands.
+    pub state: ClaimState,
     /// Nullable in the schema: a claim written before claims named their
     /// invocation at claim time has none. An adoption names one, as does a
     /// start recorded over it ([`ControlPlaneStore::record_trigger_start`]);
@@ -198,7 +232,7 @@ fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> TriggerClaimRow {
         stream_epoch: row.get("stream_epoch"),
         stream_seq: row.get::<i64, _>("stream_seq") as u64,
         claimant: row.get("claimant"),
-        durably_started: row.get::<String, _>("state") == "durably_started",
+        state: ClaimState::of_column(&row.get::<String, _>("state")),
         invocation_id: row.get("invocation_id"),
         claimed_at: row.get("claimed_at"),
     }
@@ -249,16 +283,15 @@ impl ControlPlaneStore {
         .bind(key.stream_seq as i64)
         .fetch_one(&self.pool)
         .await?;
-        if row.get::<String, _>("state") == "durably_started" {
-            Ok(TriggerClaim::Started {
+        match ClaimState::of_column(&row.get::<String, _>("state")) {
+            ClaimState::DurablyStarted => Ok(TriggerClaim::Started {
                 invocation_id: row.get("invocation_id"),
-            })
-        } else {
-            Ok(TriggerClaim::Held {
+            }),
+            ClaimState::Claimed => Ok(TriggerClaim::Held {
                 claimant: row.get("claimant"),
                 invocation_id: row.get("invocation_id"),
                 claimed_at: row.get("claimed_at"),
-            })
+            }),
         }
     }
 
@@ -362,12 +395,16 @@ impl ControlPlaneStore {
         .fetch_optional(&mut *tx)
         .await?;
         let found = row.map(|row| {
-            let started = row.get::<String, _>("state") == "durably_started";
-            (started, row.get::<Option<String>, _>("invocation_id"))
+            let state = ClaimState::of_column(&row.get::<String, _>("state"));
+            (state, row.get::<Option<String>, _>("invocation_id"))
         });
         let recorded = match found {
-            Some((_, Some(named))) if named == invocation_id => RecordedStart::Marked,
-            Some((true, started)) => {
+            Some((ClaimState::Claimed | ClaimState::DurablyStarted, Some(named)))
+                if named == invocation_id =>
+            {
+                RecordedStart::Marked
+            }
+            Some((ClaimState::DurablyStarted, started)) => {
                 // Read only; rolled back here rather than when the
                 // transaction is dropped, so the write lock goes now.
                 tx.rollback().await?;
@@ -375,7 +412,7 @@ impl ControlPlaneStore {
                     invocation_id: started,
                 });
             }
-            Some((false, claimed_for)) => RecordedStart::WrittenOver { claimed_for },
+            Some((ClaimState::Claimed, claimed_for)) => RecordedStart::WrittenOver { claimed_for },
             None => RecordedStart::Written,
         };
         let write = match &recorded {

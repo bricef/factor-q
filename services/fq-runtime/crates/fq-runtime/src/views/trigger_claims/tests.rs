@@ -51,7 +51,7 @@ fn claim(seq: u64, claimant: &str, invocation_id: &str, claimed_at: i64) -> Trig
         stream_epoch: EPOCH,
         stream_seq: seq,
         claimant: claimant.into(),
-        durably_started: false,
+        state: crate::control_plane::store::ClaimState::Claimed,
         invocation_id: Some(invocation_id.into()),
         claimed_at,
     }
