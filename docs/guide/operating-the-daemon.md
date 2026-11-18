@@ -386,11 +386,22 @@ start, because its durable was deleted and recreated, it meets the
 [#1024](https://github.com/bricef/factor-q/issues/1024) too. Some of
 those name a phase other than `setup` for a run that never started,
 and each such run gets a `failed` row whose archive never arrives,
-which reads as a start on record. A row this build cannot read, a
-status or archive state written by hand or by a newer build, is left as
-it is: events for it are logged at warn and passed over, and startup
-recovery logs it at error and decides from the worker's WAL whether to
-resume the run.
+which reads as a start on record.
+
+A row this build cannot read, a status or archive state written by hand
+or by a newer build, is left as it is. Events for it are logged at warn
+and passed over, startup recovery logs it at error and decides from the
+worker's WAL whether to resume the run, and the stuck-invocation sweep
+goes on past it. Other reads fail on it: `fq invocation list` with no
+`--status`, `fq invocation show` of that run, `fq workers list` and
+`show`, and `fq doctor`, each with a malformed-row error, and the
+retention sweep once a stale worker owns the row. `fq invocation drop`
+of the run works: it stops the run, writes the archive record and marks
+the worker's row finished, though the command then says that reading the
+run back failed, since `show` fails on the row. The ownership row itself
+keeps reading as it
+did, and only a hand edit of `coordination_invocation_owner` clears it
+([#1082](https://github.com/bricef/factor-q/issues/1082)).
 
 `ambiguous` is the state that needs a decision: the daemon knows a tool
 dispatch was issued but not whether it took effect, so it will not replay
@@ -483,10 +494,13 @@ the coordination backlog before it classifies is item 3 of
 A second ending that reaches the control plane is refused and logged at
 error, `two endings published for one run; the ownership row keeps the
 ending it recorded`, with the ending `recorded`, the one `reported`, and
-the event type. When the recorded ending is an operator's drop whose
-archive is already written, as when you drop a run as it finishes, the
-same refusal is logged at warn instead: `an ending reached a run whose
-recorded ending is already archived, as after an operator's drop`.
+the event type. When the row records `failed` with its archive already
+written, which is what a drop leaves, as when you drop a run as it
+finishes, the same refusal is logged at warn instead: `an ending reached
+a run recorded failed with its archive written, as an operator's drop
+leaves it`. A worker's own failure leaves the same state once its archive
+arrives, so a second ending after that is logged at warn too, although
+no drop was involved.
 
 A report that reaches the control plane after the run is recorded
 `completed` or `failed`, a drop included, leaves the ownership row as it
@@ -552,13 +566,16 @@ in `worker.db` exactly as it is, and carries on with every other row.
 Until the hold is lifted, the control plane sees that invocation as not
 archived. It does see it as finished, once the run's terminal event is
 folded: the ownership row reads `completed` or `failed`, with its
-archive still pending, so `fq invocation list` shows the run ended. A
-row held
-because its stored terminal event will not be republished, or because
-its ids cannot go on an event, never tells the control plane that the
-run ended, so its ownership row stays as it was, absent or `in_flight`
-([#1071](https://github.com/bricef/factor-q/issues/1071)); `fq doctor`
-lists it. The daemon log reports a held row once per daemon run, at
+archive still pending, so `fq invocation list` shows the run ended. Not
+every held run reads that way. A row held because its stored terminal
+event will not be republished, or because its ids cannot go on an
+event, never tells the control plane that the run ended, so its
+ownership row stays as it was, absent or `in_flight`
+([#1071](https://github.com/bricef/factor-q/issues/1071)). So does a
+run that ended, and was held, before the daemon was upgraded to a build
+that moves the row on a run's ending: the older build consumed that
+ending without moving the row, and it is not folded again. `fq doctor`
+lists every held row whatever its ownership row says. The daemon log reports a held row once per daemon run, at
 error level, and `fq doctor` and `fq status` list every held row with
 its invocation, the reason and the remedy. `fq doctor` counts each one
 as an issue, because none lifts on its own:

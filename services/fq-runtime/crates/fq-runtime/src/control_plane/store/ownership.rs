@@ -94,6 +94,10 @@ impl ControlPlaneStore {
         worker_id: Option<&str>,
         assigned_at: Option<i64>,
     ) -> Result<bool, ControlPlaneStoreError> {
+        // `apply` moves only between pairs a row may hold; a write of any
+        // other is a caller's mistake (the column's CHECK covers values,
+        // not pairs).
+        debug_assert!(to.is_valid(), "an ownership row cannot hold {}", to.name());
         let written = match expected {
             None => {
                 let (Some(worker_id), Some(assigned_at)) = (worker_id, assigned_at) else {

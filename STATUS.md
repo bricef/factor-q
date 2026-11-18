@@ -551,7 +551,10 @@ compare-and-set on the state it was decided from: a late
 operator's drop still wins, a second ending is refused and logged at
 error, and a `failed` in `setup` (published only while the run's WAL
 holds no row) writes no row, so it records no start. A row this build
-cannot read is left as it is, and no event or start waits for it. A
+cannot read is left as it is, and no event, start or stuck sweep waits
+for it; the list and detail reads, `fq doctor` and the retention sweep
+still fail on it, and only a hand edit clears it
+([#1082](https://github.com/bricef/factor-q/issues/1082)). A
 run that published its `failed` and died before marking its WAL row
 terminal is no longer resumed at the next start, provided the
 coordination consumer folded that `failed` before the daemon died. If

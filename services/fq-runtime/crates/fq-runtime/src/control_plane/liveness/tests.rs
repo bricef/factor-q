@@ -219,6 +219,49 @@ async fn progress_then_a_new_stall_is_reported_again() {
     }
 }
 
+/// An ownership row this build cannot read does not stop the sweep: it
+/// closes nothing, and a stuck run scanned after it is still reported. The
+/// unreadable row's own run, whose last boundary is recent, is not.
+#[tokio::test]
+async fn the_sweep_goes_on_past_an_ownership_row_this_build_cannot_read() {
+    let server = crate::test_support::nats::test_nats();
+    let fixture = Fixture::new(server.url()).await;
+    let unreadable = fixture.in_flight(10).await;
+    fixture
+        .control_plane
+        .upsert_invocation_ownership(
+            &unreadable,
+            "w",
+            1,
+            crate::control_plane::store::OwnerStatus::InFlight,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .control_plane
+            .overwrite_owner_status_for_test(&unreadable, "weird")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !super::is_closed_by_control_plane(&fixture.control_plane, &unreadable)
+            .await
+            .expect("an unreadable row is not an error here"),
+        "the row closes nothing"
+    );
+    let stuck = fixture.in_flight(10 * THRESHOLD_MS).await;
+    let sweep = fixture.sweep();
+    let mut sub = Box::pin(fixture.subscribe().await);
+
+    sweep
+        .tick(NOW)
+        .await
+        .expect("the tick goes on past the row");
+    let reported = next_stuck(&mut sub).await;
+    assert_eq!(reported.envelope.invocation_id.to_string(), stuck);
+}
+
 /// The exit criterion for "one definition of stuck": `fq doctor`'s
 /// verdict and the sweep's must name the same invocation, from the same
 /// stores, at the same instant and threshold. They are separate code

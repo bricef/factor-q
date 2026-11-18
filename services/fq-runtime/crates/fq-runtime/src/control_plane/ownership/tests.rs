@@ -147,6 +147,25 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
 }
 
 /// Every event from every state, against the table.
+/// Which `failed` is an ending, phase by phase: `setup` alone is not (the
+/// run never made its first WAL write), every other phase is.
+#[test]
+fn a_failed_is_an_ending_in_every_phase_but_setup() {
+    use crate::events::FailurePhase as P;
+    for (phase, expected) in [
+        (P::Setup, OwnershipEvent::SetupFailed),
+        (P::Reducer, OwnershipEvent::Ended(Ending::Failed)),
+        (P::HostStepBudget, OwnershipEvent::Ended(Ending::Failed)),
+        (P::Budget, OwnershipEvent::Ended(Ending::Failed)),
+        (P::LlmRequest, OwnershipEvent::Ended(Ending::Failed)),
+        (P::LlmResponse, OwnershipEvent::Ended(Ending::Failed)),
+        (P::ToolCall, OwnershipEvent::Ended(Ending::Failed)),
+        (P::ToolResult, OwnershipEvent::Ended(Ending::Failed)),
+    ] {
+        assert_eq!(OwnershipEvent::of_failed(phase), expected, "{phase:?}");
+    }
+}
+
 #[test]
 fn every_event_from_every_state_does_what_the_table_says() {
     let mut cells = 0;

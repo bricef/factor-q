@@ -125,8 +125,10 @@ impl AmbiguousReport {
 /// classification like any other, where its WAL row decides whether it
 /// resumes (`control_plane::ownership`, "A row this build cannot read").
 /// Stopping the boot for it would turn one hand-edited or newer row into
-/// a daemon that does not start, with no `fq` command left to look at
-/// the row or drop the run.
+/// a daemon that does not start, with no `fq` command left to drop the
+/// run. Booted, the operator can drop the run, which stops it; the list
+/// and detail reads of the row still fail, and the row keeps reading as
+/// it did until it is edited by hand (issue 1082).
 pub(crate) async fn reconcile_terminal_owners(
     worker_store: &WorkerStore,
     cp_store: &ControlPlaneStore,

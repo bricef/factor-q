@@ -78,9 +78,12 @@
 //! - **Conflict**: an ending that contradicts the one recorded. The
 //!   recorded ending stands, whichever came first on the stream: a run's
 //!   own ending that reaches a row an operator's drop has already ended
-//!   and archived keeps the drop, which the consumer logs at warn, since
-//!   dropping a run as it finishes is no fault. Anywhere else the run
-//!   published two endings, which is logged at error. An archive's
+//!   and archived keeps the drop. The consumer logs a conflict on
+//!   `failed·archived`, the state a drop leaves, at warn, since dropping
+//!   a run as it finishes is no fault; the worker's own failure leaves the
+//!   same state once archived, so a second ending there is a warn too.
+//!   Anywhere else, `completed·archived` included, the run published two
+//!   endings, which is logged at error. An archive's
 //!   arrival is still recorded, as the cell after `conflict:` says, and
 //!   the row then keeps its ending while the archive record holds the
 //!   other: the two disagree with no operator involved (issue 1070).
@@ -103,8 +106,9 @@
 //! A status or an archive state this build does not know, which only a
 //! hand edit or a newer build writes, cannot be moved by compare-and-set:
 //! [`apply`] answers [`OwnershipError::Unreadable`] and writes nothing.
-//! The rule is the same everywhere: the row is left as it is, the event
-//! or the run goes on without it, and nothing waits for it.
+//! The writers of the row and the paths that must not stall follow one
+//! rule: the row is left as it is, the event or the run goes on without
+//! it, and nothing waits for it. Who follows it:
 //!
 //! - **The coordination consumer** refuses the event as permanent, which
 //!   its shared loop logs at warn and acks, because a retry would hold
@@ -119,6 +123,16 @@
 //!   to apply, and the restore before a resume leaves the row as it is
 //!   and resumes the run, since the WAL, not the row, says whether a run
 //!   can be resumed. The boot goes on.
+//! - **The stuck sweep and `fq doctor`'s executions** read the row as not
+//!   closing the run (`liveness::is_closed_by_control_plane`), and go on
+//!   to the rows after it.
+//!
+//! What does not follow it yet, and fails on such a row instead: the
+//! invocation list with no status filter, `fq invocation show` of that
+//! run, the worker list and detail, `fq doctor`, and the retention sweep
+//! once a stale worker owns the row. An operator's drop of the run still
+//! stops it, but the row keeps reading as it did, and only a hand edit of
+//! the row clears it. Issue 1082 is those readers and the drop.
 
 use super::store::{
     ArchiveState, ControlPlaneStore, ControlPlaneStoreError, OwnerRow, OwnerStatus,
