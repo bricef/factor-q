@@ -1540,10 +1540,14 @@ nothing on record it writes the
 record it writes none, since requeuing that dead letter would run the
 work twice: it marks the claim, logs `not dead-lettering a trigger
 whose deliveries ran out` at warn with `consumer=fq-advisory-watch`,
-the subject, the sequence, the invocation, where the start is on
-record and what became of the claim (`claim=marked started now`,
-`already marked started`, or `not marked` with why), and counts it on
-its own line ([#967](https://github.com/bricef/factor-q/issues/967)).
+the subject (empty when the trigger's message cannot be read), the
+sequence, the invocation, where the start is on record and what became
+of the claim (`claim=marked started now`, `already marked started`, or
+`not marked` with why), and counts it on its own line
+([#967](https://github.com/bricef/factor-q/issues/967)). The watch asks
+the records before anything else, so this holds even when a dead letter
+for the trigger is already on the log, written before the start was on
+record: it stays there, and the line says one may be.
 The count moves once per verdict, so an advisory whose ack was lost
 comes back and counts its trigger twice. A run no task is driving,
 because its last delivery's task died after its first WAL write, stays
@@ -1584,7 +1588,8 @@ hung on an MCP server
 alive, so its deliveries do not run out and the watch never sees it.
 The watch logs `holding the dead-letter verdict on an exhausted
 trigger` at warn with `consumer=fq-advisory-watch`, the trigger's
-sequence and subject, the reason and the invocation the claim names:
+sequence and subject (empty when its message cannot be read), the
+reason and the invocation the claim names:
 on each held advisory's first delivery, and after that on the
 escalation this section describes, which all the watch's advisories
 share. A verdict held for long shows `fq-advisory-watch` as
@@ -1751,9 +1756,13 @@ rows all name no trigger, the listing's last line says
 reason,
 such as the broker not answering in time or the trigger stream being
 missing, the message may yet be read, so the watch holds its verdict
-and reads again when the advisory comes back; the hold line's `reason=`
-says `the trigger's message could not be read` with what the read
-answered, and its `subject=` is empty, since no message was read
+and reads again when the advisory comes back. It asks the records
+first, since they key on the advisory's sequence and need no message: a
+run that started is found at once, as above, and a verdict the records
+cannot give yet is held for their reason; only with nothing on record
+does the unreadable message hold it. That hold line's `reason=` says
+`the trigger's message could not be read` with what the read answered,
+and its `subject=` is empty, since no message was read
 ([#1066](https://github.com/bricef/factor-q/issues/1066)). A missing
 stream does not last: deleting the trigger stream normally stops the
 daemon within a second, and its next start takes the advisory as an
