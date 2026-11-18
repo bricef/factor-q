@@ -27,6 +27,12 @@
 //! run. They share this file for its harness. Both run at the default cap
 //! of 1, and the mock LLM is the oracle again: the order it was asked in
 //! is the order the runs held the one worker.
+//!
+//! The tests at the end are about what the next start does with an event
+//! the stopped daemon's coordination consumer never folded (issue 1070):
+//! a drop, or the run's own `failed`, on the stream while no daemon runs.
+//! They share this file for the same harness, and their oracles are the
+//! `system.recovery` count, the model's requests and `fq invocation show`.
 
 #![cfg(unix)]
 
@@ -1589,6 +1595,243 @@ async fn a_replay_into_an_oversized_event_fails_once_and_is_not_resumed_again() 
         "the next start reports nothing ambiguous either"
     );
 
+    mock.shutdown().await;
+}
+
+// ---- Issue 1070: what the coordination consumer had not folded when the
+// daemon stopped is folded before the next start's recovery decides ----
+
+/// Drain one probe run to a step boundary and stop the daemon, which
+/// leaves the run's WAL row in flight for the next start to resume, and
+/// say which run it was. The model was asked once.
+async fn suspend_one_run(scratch: &Scratch, nats_url: &str, mock: &MockAnthropicServer) -> String {
+    mock.push_response(sleep_for(scratch, "toolu_before_the_stop", 1));
+    let mut daemon = Daemon::spawn(scratch, nats_url, "daemon-first.log");
+    daemon
+        .await_log("- edge is listening on ", Duration::from_secs(30))
+        .await;
+    daemon.pair(scratch);
+    trigger_probe(nats_url, "run the probe").await;
+    daemon
+        .await_log(
+            "model produced tool calls; dispatching",
+            Duration::from_secs(30),
+        )
+        .await;
+    daemon.stop();
+    let log = daemon.log();
+    assert!(
+        log.contains("draining — suspending invocation at step boundary"),
+        "the drain did not suspend the run\n--- log ---\n{log}"
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        1,
+        "one turn before the stop"
+    );
+    invocation_id_from_log(&log)
+}
+
+/// Publish `payload` for the probe run `invocation_id` while no daemon
+/// runs: on the stream, and folded by no coordination consumer, which is
+/// what a daemon that died just after publishing it leaves.
+async fn publish_while_stopped(
+    nats_url: &str,
+    invocation_id: &str,
+    payload: fq_runtime::events::EventPayload,
+) {
+    let bus = fq_runtime::EventBus::connect(nats_url)
+        .await
+        .expect("connect to the test broker");
+    bus.publish(&fq_runtime::events::Event::new(
+        fq_runtime::agent::AgentId::new("resume-probe").unwrap(),
+        uuid::Uuid::parse_str(invocation_id).unwrap(),
+        payload,
+    ))
+    .await
+    .expect("publish onto the event stream");
+}
+
+/// Start the next daemon over what [`suspend_one_run`] and
+/// [`publish_while_stopped`] left, and say how many runs its recovery
+/// found in flight (`system.recovery`'s `total`). The model is given an
+/// answer that ends the run, in case it is resumed.
+async fn restart_and_count_in_flight(
+    scratch: &Scratch,
+    nats_url: &str,
+    mock: &MockAnthropicServer,
+) -> (Daemon, u64) {
+    mock.push_response(report_done("toolu_after_the_restart"));
+    let client = async_nats::connect(nats_url)
+        .await
+        .expect("connect for the recovery report");
+    let mut recovery = client
+        .subscribe("fq.system.recovery")
+        .await
+        .expect("subscribe to the recovery report");
+    client.flush().await.expect("flush the subscription");
+    let mut daemon = Daemon::spawn(scratch, nats_url, "daemon-second.log");
+    let message = tokio::time::timeout(Duration::from_secs(60), recovery.next())
+        .await
+        .expect("startup recovery reports within 60s")
+        .expect("the recovery subscription stays open");
+    let report: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+    let total = report["payload"]["payload"]["total"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("system.recovery carries a total: {report}"));
+    daemon
+        .await_log("- edge is listening on ", Duration::from_secs(30))
+        .await;
+    (daemon, total)
+}
+
+/// Wait until `fq invocation show` reports `invocation_id` failed.
+async fn await_shown_failed(scratch: &Scratch, nats_url: &str, invocation_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let show = run_fq(scratch, nats_url, &["invocation", "show", invocation_id]);
+        let text = String::from_utf8_lossy(&show.stdout).to_string();
+        if text
+            .lines()
+            .any(|l| l.trim_start().starts_with("status:") && l.contains("failed"))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the run is never shown failed:\n{text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Once the daemon has stopped: the run's WAL row is finished, or gone,
+/// since the archive hand-off deletes a finished row once the control
+/// plane has acknowledged its archive.
+async fn assert_wal_row_finished(scratch: &Scratch, invocation_id: &str) {
+    let row = fq_runtime::WorkerStore::open(
+        &fq_runtime::RuntimeDbPaths::under(&scratch.path("cache")).worker,
+    )
+    .await
+    .expect("open the worker store")
+    .get_invocation_state(invocation_id)
+    .await
+    .expect("read the run's WAL row");
+    assert!(
+        row.as_ref().is_none_or(|row| row.terminal_at.is_some()),
+        "the run's WAL row is still in flight: {row:?}"
+    );
+}
+
+/// The next start resumed nothing: no resume was logged, and the model was
+/// asked only the turn before the stop.
+async fn assert_nothing_resumed(daemon: &Daemon, mock: &MockAnthropicServer) {
+    // A resume, had one started, would have asked the model by now.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let log = daemon.log();
+    assert!(
+        !log.contains("resuming reducer invocation"),
+        "the run was resumed\n--- log ---\n{log}"
+    );
+    assert_eq!(
+        mock.received_requests().len(),
+        1,
+        "the model was asked again after the restart\n--- log ---\n{log}"
+    );
+}
+
+/// **Issue 1070, item 3: a drop on the stream that no consumer folded.**
+/// The run is suspended at a step boundary and the daemon stopped; its
+/// drop is then published while no daemon runs, as when the daemon dies
+/// just after the drop went out. The next start folds the drop before its
+/// recovery classifies anything: the drop marks the run's WAL row
+/// terminal, so recovery finds nothing in flight and resumes nothing, and
+/// the run reads failed.
+///
+/// Before, recovery classified and resumed the run first, and the
+/// coordination consumer folded the drop after, under a run already
+/// going.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_on_the_stream_is_folded_before_the_next_start_resumes_the_run() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("drop-unfolded", mock.base_url());
+
+    let invocation_id = suspend_one_run(&scratch, &nats_url, &mock).await;
+    publish_while_stopped(
+        &nats_url,
+        &invocation_id,
+        fq_runtime::events::EventPayload::InvocationOperatorRecovered(
+            fq_runtime::events::InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: Some("dropped while the daemon was down".to_string()),
+            },
+        ),
+    )
+    .await;
+
+    let (mut daemon, in_flight) = restart_and_count_in_flight(&scratch, &nats_url, &mock).await;
+    assert_eq!(
+        in_flight,
+        0,
+        "recovery found the dropped run in flight: it classified before the drop was \
+         folded\n--- log ---\n{}",
+        daemon.log()
+    );
+    await_shown_failed(&scratch, &nats_url, &invocation_id).await;
+    assert_nothing_resumed(&daemon, &mock).await;
+
+    daemon.stop();
+    assert_wal_row_finished(&scratch, &invocation_id).await;
+    mock.shutdown().await;
+}
+
+/// **Issue 1070, item 5: the run's own `failed` on the stream that no
+/// consumer folded.** A run that fails part-way through a step publishes
+/// `failed` before it marks its WAL row, and the daemon can die between.
+/// The next start folds the `failed` before its recovery classifies
+/// anything: the ownership row records the ending, recovery marks the WAL
+/// row terminal from it and resumes nothing, and the run reads failed.
+///
+/// Before, recovery resumed the run first; the consumer then folded the
+/// old `failed` under the resumed run, and the run's own later ending was
+/// refused as a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_on_the_stream_is_folded_before_the_next_start_resumes_the_run() {
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("failed-unfolded", mock.base_url());
+
+    let invocation_id = suspend_one_run(&scratch, &nats_url, &mock).await;
+    publish_while_stopped(
+        &nats_url,
+        &invocation_id,
+        fq_runtime::events::EventPayload::Failed(fq_runtime::events::FailedPayload {
+            error_kind: fq_runtime::events::FailureKind::LlmError,
+            error_message: "the provider refused the request".to_string(),
+            phase: fq_runtime::events::FailurePhase::LlmRequest,
+            partial_totals: fq_runtime::events::InvocationTotals::default(),
+            detail: None,
+        }),
+    )
+    .await;
+
+    let (mut daemon, in_flight) = restart_and_count_in_flight(&scratch, &nats_url, &mock).await;
+    assert_eq!(
+        in_flight,
+        0,
+        "recovery found the failed run in flight: it classified before the `failed` was \
+         folded\n--- log ---\n{}",
+        daemon.log()
+    );
+    await_shown_failed(&scratch, &nats_url, &invocation_id).await;
+    assert_nothing_resumed(&daemon, &mock).await;
+
+    daemon.stop();
+    assert_wal_row_finished(&scratch, &invocation_id).await;
     mock.shutdown().await;
 }
 
