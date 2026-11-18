@@ -570,9 +570,11 @@ async fn a_tool_running_when_a_live_drop_lands_finishes_and_is_recorded() {
 
 /// Guard, and the one exception to the rule. A mid-step failure publishes
 /// its `failed` before it marks the row, so a drop's mark that lands after
-/// the runner has read the row and before the event is out lets the run's
-/// own `failed` through: the run is recorded as failing with its own
-/// error. The window is between one row read and one publish.
+/// the runner has read the row and before the run's own mark lets the
+/// run's own `failed` through, and then its own `invocation.archived`,
+/// the row being finished when the run looks for it: the stream carries
+/// the run's own `failed`, with its own error. The window is one row read,
+/// one publish the broker acknowledges, and one more row read.
 #[tokio::test]
 async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_failed_out() {
     let run = a_dropped_run(
@@ -583,6 +585,11 @@ async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_faile
     )
     .await;
     assert_eq!(run.published("failed"), 1, "the run's own failed");
+    assert_eq!(
+        run.published("invocation_archived"),
+        1,
+        "and the run's own archive: the row is finished when it looks"
+    );
     let failed = run
         .events
         .iter()
