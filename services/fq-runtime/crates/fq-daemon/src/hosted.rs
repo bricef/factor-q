@@ -3,10 +3,14 @@
 //! Split from `daemon.rs`, which is now assembly only. The seam is
 //! where it is because almost every task handle is created here,
 //! awaited here, and stopped here, so the boundary carries what was
-//! *assembled* rather than what is running. `resume_handles` is the
-//! one exception — startup recovery spawns before this module is
-//! reached, so those handles ride across in `Assembled` and are joined
-//! with the rest at the end.
+//! *assembled* rather than what is running. Two things are the
+//! exception, both because startup recovery starts them before this
+//! module is reached: its resumes, whose `resume_handles` ride across
+//! in `Assembled` and are joined with the rest at the end, and the
+//! coordination consumer, which folds the stopped daemon's backlog
+//! before recovery decides (issue 1070) and is supervised and stopped
+//! here like the tasks spawned below. A `?` above the marker drops the
+//! consumer's shutdown sender, which stops it.
 //!
 //! That is also why spawn and shutdown are one module rather than two:
 //! separating them would mean handing eleven handles and their
@@ -108,6 +112,13 @@ pub(crate) struct Assembled {
     /// (#735). Announced with the startup event below.
     pub pricing_load: crate::pricing::PricingStartup,
     pub resume_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// The coordination consumer, which startup recovery started before it
+    /// decided anything, so that it decided over a folded backlog (issue
+    /// 1070). Supervised and stopped here with the rest.
+    pub coordination: crate::recovery::Coordination,
+    /// The release of the consumer's tick sweeps, held while startup
+    /// recovery decided.
+    pub sweeps: fq_runtime::control_plane::coordination_consumer::SweepRelease,
     /// The worker's provider throttle (#278): the LLM stack already
     /// takes permits from it; the dispatcher holds triggers on it and
     /// the health reports read it.
@@ -149,11 +160,18 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
         agents_loaded,
         pricing_load,
         resume_handles,
+        coordination,
+        sweeps,
         throttle,
         deferrals,
         due_resumes,
         admission,
     } = a;
+    let crate::recovery::Coordination {
+        handle: mut coord_handle,
+        shutdown: coord_shutdown_tx,
+        watermark: coordination_watermark,
+    } = coordination;
     let startup = startup_event(runtime_id, version, &config, agents_loaded, &pricing_load);
     announce_startup(&bus, runtime_id, &startup, pricing_load.signals).await?;
 
@@ -162,7 +180,6 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // values — channels, an Arc, a watch — so hoisting them costs
     // nothing and buys the ordering the edge below depends on.
     let (watermark_tx, projection_watermark) = fq_runtime::watermark::channel();
-    let (coord_watermark_tx, coordination_watermark) = fq_runtime::watermark::channel();
     let shared_registry: SharedRegistry = SharedRegistry::new(registry);
     let down_signal = DownSignal::new();
     let mut down_rx = down_signal.subscribe();
@@ -260,32 +277,11 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     let mut projection_handle =
         tokio::spawn(async move { projection_supervisor.run(proj_shutdown_rx).await });
 
-    // Spawn the coordination consumer. Subscribes to
-    // invocation lifecycle events and maintains the
-    // coordination_invocation_owner / coordination_worker
-    // state. Stale-worker sweep runs on a timer.
-    let (coord_shutdown_tx, coord_shutdown_rx) = tokio::sync::oneshot::channel();
-    let coord_consumer = fq_runtime::CoordinationConsumer::new(bus.clone(), cp_store.clone())
-        .with_runtime_id(runtime_id)
-        .with_worker_store(worker_store.clone())
-        .with_self_worker_id(worker_id.as_str().to_string())
-        // The stuck-invocation sweep (#37) rides the same tick as the
-        // stale-worker one, at the threshold derived from this
-        // daemon's call deadlines — the same number `fq doctor` and
-        // `control.status` report.
-        .with_stuck_sweep(std::sync::Arc::new(
-            fq_runtime::control_plane::liveness::StuckSweep::new(
-                bus.clone(),
-                worker_store.clone(),
-                cp_store.clone(),
-                config.stuck_after_ms(),
-            ),
-        ))
-        // The coordination half of the read horizon (Phase 3c):
-        // gated reads of the Invocation view wait on this mark too,
-        // because the fold spans stores this consumer writes.
-        .with_watermark(coord_watermark_tx);
-    let mut coord_handle = tokio::spawn(async move { coord_consumer.run(coord_shutdown_rx).await });
+    // The coordination consumer is already running: startup recovery
+    // started it (issue 1070). Its tick sweeps start here, where the
+    // consumer used to, now that recovery has decided, whether or not it
+    // held any run back.
+    sweeps.release();
 
     // Spawn the worker heartbeat consumer (control-plane side).
     // Receives `fq.worker.*.heartbeat` events and updates

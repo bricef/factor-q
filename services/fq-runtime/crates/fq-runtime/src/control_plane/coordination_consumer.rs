@@ -490,10 +490,10 @@ impl CoordinationConsumer {
 
     /// Mark the run awaiting triage, unless its row records it finished.
     ///
-    /// The event can reach this consumer after the run's ending: the next
-    /// start's recovery runs before this consumer folds what the last
-    /// process published, so a run dropped mid tool call just before a
-    /// crash is reported ambiguous after its drop on the stream; and a
+    /// The event can reach this consumer after the run's ending: a start
+    /// whose recovery stopped waiting before this consumer folded the last
+    /// process's drop of a run killed mid tool call reports that run
+    /// ambiguous after the drop on the stream (issue 1070); and a
     /// resume whose worker row cannot be read is reported though the run
     /// may have ended. The transition refuses a finished row, and the
     /// refusal is logged with the report's own fields, once per delivery.

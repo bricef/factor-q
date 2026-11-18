@@ -17,6 +17,15 @@
 //! time. That order is held by type rather than by call order: the
 //! [`TriggerClaims`] a dispatcher needs to arbitrate exist only as what the
 //! recording returns.
+//!
+//! All of it comes after the coordination consumer has folded what the
+//! stopped daemon left on the event stream (`backlog`, issue 1070): the
+//! fold writes the ownership rows and the WAL marks that reconciliation and
+//! classification read, so a drop or an ending the stopped daemon published
+//! is on record before recovery decides whether to resume its run.
+
+mod backlog;
+pub(crate) use backlog::{Coordination, fold_backlog};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -277,14 +286,15 @@ pub(crate) async fn classify_in_flight(
                     },
                 )
                 .await;
-                // The coordination consumer (spawned below)
-                // picks up the `invocation.ambiguous` event, when
-                // this start published one rather than an earlier
+                // The coordination consumer (started before this
+                // recovery) picks up the `invocation.ambiguous` event,
+                // when this start published one rather than an earlier
                 // start, and marks the
                 // coordination_invocation_owner row `ambiguous`,
                 // unless the row already records the run finished
                 // (a drop published before the last process died,
-                // say, which the consumer folds first). v1
+                // which the consumer had not folded when the wait for
+                // the backlog ran out, say). v1
                 // collapsed-process used to write directly
                 // here; that's now the consumer's job, which
                 // matches v2's split-process expectation

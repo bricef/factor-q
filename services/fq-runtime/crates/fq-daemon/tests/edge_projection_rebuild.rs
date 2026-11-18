@@ -44,9 +44,14 @@ impl ScratchDir {
             .expect("create scratch directory");
         std::fs::create_dir_all(dir.path().join("cache")).unwrap();
         std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+        // This daemon's coordination consumer halts on the older event
+        // seeded ahead of it (see `projector_halted`), so startup
+        // recovery's wait for that consumer's fold can only run out. There
+        // is nothing to recover; a zero bound decides at once rather than
+        // spending the default thirty seconds of the boot on it.
         std::fs::write(
             dir.path().join("fq.toml"),
-            "[edge]\nbind = \"127.0.0.1:0\"\n",
+            "[edge]\nbind = \"127.0.0.1:0\"\n\n[worker]\nrecovery_backlog_wait_secs = 0\n",
         )
         .unwrap();
         Self(Some(dir))
