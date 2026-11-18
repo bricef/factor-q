@@ -13,6 +13,8 @@ use std::sync::Mutex;
 
 use fq_ops::health::{ArchiveHold, ArchiveHoldReason, ArchiveSweep};
 
+use crate::events::EndingHeldReason;
+
 /// Where the operating guide says what to do about a held row.
 pub(super) const GUIDE: &str =
     "docs/guide/operating-the-daemon.md, \"When the archive sweeper holds a terminal row\"";
@@ -31,6 +33,9 @@ pub struct ArchiveHolds {
 struct State {
     rows: BTreeMap<String, ArchiveHold>,
     last_pass_at_ms: Option<i64>,
+    /// The held rows whose `invocation.ending_held` this run has sent, or
+    /// given up on for size (`super::ending_held`).
+    endings_sent: HashSet<String>,
 }
 
 impl ArchiveHolds {
@@ -86,15 +91,35 @@ impl ArchiveHolds {
 
     /// The row is no longer held: it went out this pass.
     pub(super) fn release(&self, invocation_id: &str) {
-        self.lock().rows.remove(invocation_id);
+        let state = &mut *self.lock();
+        state.rows.remove(invocation_id);
+        state.endings_sent.remove(invocation_id);
     }
 
     /// Forget every row the store no longer lists as awaiting its archive:
     /// acked and deleted, or removed by an operator.
     pub(super) fn retain_pending(&self, pending: &HashSet<&str>) {
-        self.lock()
-            .rows
-            .retain(|id, _| pending.contains(id.as_str()));
+        let state = &mut *self.lock();
+        state.rows.retain(|id, _| pending.contains(id.as_str()));
+        state
+            .endings_sent
+            .retain(|id| pending.contains(id.as_str()));
+    }
+
+    /// Why the row's held ending is owed: it is held for a reason that
+    /// keeps the run's own ending off the stream, and this run has not
+    /// sent it yet.
+    pub(super) fn ending_held_owed(&self, invocation_id: &str) -> Option<EndingHeldReason> {
+        let state = self.lock();
+        if state.endings_sent.contains(invocation_id) {
+            return None;
+        }
+        super::ending_held::reason_of(&state.rows.get(invocation_id)?.reason)
+    }
+
+    /// The row's held ending is sent, or given up on, for this run.
+    pub(super) fn ending_held_sent(&self, invocation_id: &str) {
+        self.lock().endings_sent.insert(invocation_id.to_string());
     }
 
     /// The `max_payload` the row was refused under, when it is held for an

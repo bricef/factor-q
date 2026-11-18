@@ -87,6 +87,7 @@ use crate::events::{Event, EventPayload, InvocationArchivedPayload};
 use super::WorkerId;
 use super::store::{InvocationStateRow, WorkerStore};
 
+mod ending_held;
 mod holds;
 pub use holds::ArchiveHolds;
 
@@ -216,13 +217,18 @@ impl ArchiveRetrySweeper {
         let now_ms = Utc::now().timestamp_millis();
         for row in rows {
             self.maybe_warn_once(&row, now_ms, warned);
-            if self.held_for_size(&row) {
-                continue;
+            if !self.held_for_size(&row) {
+                match self.republish(&row).await? {
+                    Some(reason) => self.report_held(&row, reason),
+                    None => {
+                        self.holds.release(&row.invocation_id);
+                        continue;
+                    }
+                }
             }
-            match self.republish(&row).await? {
-                Some(reason) => self.report_held(&row, reason),
-                None => self.holds.release(&row.invocation_id),
-            }
+            // Also for a row held for size, which sits the rest of the
+            // run out, so a bus error on its ending is tried again.
+            self.publish_held_ending(&row).await?;
         }
         // Only a pass that reached every row says what is held; one the
         // bus or the store ended early returned above.
@@ -869,13 +875,28 @@ mod tests {
             world
         }
 
-        /// The healthy row behind was archived; nothing went out for the
-        /// held row, which is unstamped, not archive-pending, its copy kept.
+        /// The healthy row behind was archived; for the held row only its
+        /// held ending went out (`ending_held`), and the row is unstamped,
+        /// not archive-pending, its copy kept.
         async fn assert_held(&self) {
             let events = self.sink.events();
-            let kinds: Vec<_> = events.iter().map(|e| event_kind_of(&e.payload)).collect();
-            assert_eq!(kinds, ["invocation_archived"], "no completed, one archived");
-            assert_eq!(events[0].envelope.invocation_id.to_string(), self.healthy);
+            let trail: Vec<_> = events
+                .iter()
+                .map(|e| {
+                    (
+                        e.envelope.invocation_id.to_string(),
+                        event_kind_of(&e.payload),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                trail,
+                [
+                    (self.bad.clone(), "invocation_ending_held"),
+                    (self.healthy.clone(), "invocation_archived")
+                ],
+                "no completed and no archive for the held row, its held ending instead"
+            );
             let held = self.store.get_invocation_state(&self.bad).await.unwrap();
             let held = held.expect("held, not dropped");
             assert_eq!(held.terminal_published_at, None, "not stamped");
@@ -1186,8 +1207,12 @@ mod tests {
         assert_eq!(trail(&sink.refused()), [(world.inv(), "completed")]);
         assert_eq!(
             trail(&sink.events()),
-            [(healthy, "invocation_archived")],
-            "no `invocation_archived` without the outcome; the row behind is swept"
+            [
+                (world.inv(), "invocation_ending_held"),
+                (healthy, "invocation_archived")
+            ],
+            "no `invocation_archived` without the outcome, its held ending instead; the row \
+             behind is swept"
         );
         let row = world
             .store
