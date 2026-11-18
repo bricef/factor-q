@@ -647,7 +647,7 @@ async fn mark_with_retries(
     let mut pauses = MARK_RETRY_PAUSES.iter();
     loop {
         let err = match store.mark_trigger_started(key, &named).await {
-            Ok(()) => return Ok(refused),
+            Ok(_) => return Ok(refused),
             Err(err) => err,
         };
         let in_budget = |pause: &&Duration| began.elapsed() + **pause < MARK_RETRY_BUDGET;
