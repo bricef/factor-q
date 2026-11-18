@@ -1584,6 +1584,32 @@ line reads "not started from the trigger stream, its claim was released
 or taken over before the run's first durable write, or the claim is
 older than its retention window".
 
+A run that did start from the trigger stream can be on no claim too,
+though one daemon does not reach it today, and the line above does not
+name it. When the dispatcher marks a run's start, the mark can find no
+claim naming the run, because something changed the claim underneath
+it. It then records the start by what the claim holds, acks the
+delivery keeping the claim, and logs one line at error
+([#1046](https://github.com/bricef/factor-q/issues/1046)):
+
+- `the claim of a trigger whose run started was gone when its start was
+  marked`: a claim recording the start was written, so the run has its
+  claim.
+- `the claim of a trigger whose run started named another invocation,
+  not started`: the start was recorded on it in that invocation's place
+  (`claim_invocation_id`), so the run has its claim and that invocation
+  has none.
+- `the claim of a trigger whose run started already records another
+  run's start`: the trigger ran twice, and the claim is left naming the
+  other run (`started_invocation_id`); this run is on no claim.
+- `could not record the durable start of a trigger whose claim does not
+  name its run`: the claim store refused the write, with its `error`,
+  and this run is on no claim. A replay of the trigger, or a copy a lost
+  ack brings back, would start it again.
+
+Each line carries `stream_seq`, `invocation_id`, `trigger_id` and the
+subject.
+
 `fq invocation list` does not carry it. The claim table has no index on
 the invocation id, so a lookup per listed row would read the whole table
 (every claim inside the retention window) once per row; the link is read

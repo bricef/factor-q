@@ -39,9 +39,11 @@
 //!    that landed after a re-take would delete the new claim, since it
 //!    matches the row by its sequence alone (issue 1061), and only the
 //!    bound's sitting above the store's own waits keeps that out of reach
-//!    (`settlement::RELEASE_BOUND`). The copy takes the claim again under
-//!    its own invocation id, by a compare-and-set on the abandoned one, to
-//!    run the trigger once. Logged at `warn`, once, and counted
+//!    (`settlement::RELEASE_BOUND`). If it did, the re-taken run's mark
+//!    would find no claim and write one recording its start
+//!    (`claim::unmarked_start`, issue 1046). The copy takes the claim
+//!    again under its own invocation id, by a compare-and-set on the
+//!    abandoned one, to run the trigger once. Logged at `warn`, once, and counted
 //!    (`abandoned_claim_retaken`), which counts claims taken again, not
 //!    runs: the copy runs the trigger unless a drain stops it, as below, or
 //!    `handle` refuses the trigger after its claim as it would any

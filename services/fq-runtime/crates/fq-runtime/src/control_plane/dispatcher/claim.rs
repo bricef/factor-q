@@ -562,7 +562,9 @@ impl TriggerDispatcher {
     /// Ack the delivery, leaving its claim row as it is. [`Self::ack`]
     /// releases the claim first; this alone is for a run that started but
     /// whose claim could not be marked (`mark_durable_started`), or was
-    /// marked by a copy that met its own claim (`own_claim`).
+    /// marked by a copy that met its own claim (`own_claim`), or whose
+    /// start was recorded on a claim the mark did not find
+    /// (`unmarked_start`).
     pub(super) async fn ack_keeping_claim(
         &self,
         msg: &async_nats::jetstream::Message,
