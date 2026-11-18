@@ -1739,14 +1739,12 @@ async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer(
         settled_in >= took,
         "the dead letter's publish took less than {took:?}, so this test shows nothing: {sent:?}"
     );
-    if let DeadLetterPublish::SucceedsAfter(after) = publish {
-        assert!(
-            settled_in < after + Duration::from_secs(2),
-            "the delivery was settled {settled_in:?} after the run's return, too near the \
-             client's five seconds for the publish's acknowledgement to tell a publish that \
-             succeeded from one that timed out: {sent:?}"
-        );
-    }
+    // No upper bound on a slow success: before issue 1062 a publish that
+    // timed out was acked too, and only a settlement well inside the
+    // client's five seconds told the two apart. Now a timed-out publish is
+    // NAKed, so the answer itself says which it was (asserted below), and a
+    // time bound would only fail on a loaded machine (it did, once in a
+    // module run beside other suites: 4.8 s for a 2.5 s stand-in).
     let published = match publish {
         DeadLetterPublish::Lands => dead_letters_of(&pulled).await,
         DeadLetterPublish::TimesOut | DeadLetterPublish::SucceedsAfter(_) => {
