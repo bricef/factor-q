@@ -476,7 +476,11 @@ Every dead letter this build writes for a trigger of the stream the
 daemon is connected to records that stream's incarnation
 (`trigger_stream_epoch`, the value the claims key on), the dispatcher's
 and the watch's alike, so a dead letter for the message at a sequence
-can be told from one for the message an earlier stream held there. An
+can be told from one for the message an earlier stream held there. It
+is the value the daemon read when it connected, so a daemon left
+running over a recreated stream stamps the old stream's value on a new
+trigger's dead letter
+([#1065](https://github.com/bricef/factor-q/issues/1065)). An
 earlier incarnation's advisory is no longer attributed to the message
 the new stream holds at that sequence: the watch reads nothing there and writes the dead letter for
 the system with no subject, payload or trigger id, which
