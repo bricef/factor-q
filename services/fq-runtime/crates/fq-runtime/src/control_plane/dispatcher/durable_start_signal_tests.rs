@@ -187,6 +187,9 @@ enum ClaimChange {
     GoneAndRefused,
     /// Name [`ANOTHER_RUN`] on it, still `claimed`: another copy's claim.
     ClaimedByAnother,
+    /// As [`Self::ClaimedByAnother`], and make the claim store refuse every
+    /// update of a claim row from then on.
+    ClaimedByAnotherAndRefused,
     /// Name [`ANOTHER_RUN`] on it, marked `durably_started`: another run's
     /// start.
     StartedByAnother,
@@ -429,6 +432,13 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
         ClaimChange::ClaimedByAnother => {
             vec![sqlx::query("UPDATE trigger_claim SET invocation_id = ?").bind(ANOTHER_RUN)]
         }
+        ClaimChange::ClaimedByAnotherAndRefused => vec![
+            sqlx::query("UPDATE trigger_claim SET invocation_id = ?").bind(ANOTHER_RUN),
+            sqlx::query(
+                "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
+                 BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the mark'); END",
+            ),
+        ],
         ClaimChange::StartedByAnother => vec![
             sqlx::query("UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'")
                 .bind(ANOTHER_RUN),
@@ -2450,4 +2460,38 @@ async fn a_start_that_cannot_be_recorded_on_a_gone_claim_is_still_acked_once() {
         "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
     );
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
+}
+
+/// **A start that cannot be recorded on another invocation's claim leaves
+/// that claim, and the delivery is acked once (issue 1046).** The claim
+/// names another invocation, still `claimed`, when the mark comes, and the
+/// claim store refuses the update that would record this run's start on
+/// it. The delivery is acked keeping the claim: an ack that released it
+/// would delete the other invocation's claim, since a release deletes a
+/// `claimed` row whatever invocation it names.
+#[tokio::test]
+async fn a_start_that_cannot_be_recorded_on_another_invocations_claim_leaves_it() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::ClaimedByAnotherAndRefused),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let claim = the_claim(&pulled)
+        .await
+        .expect("the other invocation's claim must be left, not released");
+    assert!(
+        !claim.durably_started && claim.invocation_id.as_deref() == Some(ANOTHER_RUN),
+        "the other invocation's claim is left as it was: {claim:?}"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
 }

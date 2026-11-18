@@ -15,6 +15,7 @@ use super::own_claim::{Handled, OwnClaim};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
 mod settlement;
+mod unmarked_start;
 pub(super) use settlement::Answer;
 
 /// What the durable claim says about one delivery.
@@ -283,6 +284,11 @@ impl TriggerDispatcher {
     /// taking over from the setup's. The first goes out a tick after the
     /// mark starts, so the healthy path sends none.
     ///
+    /// **A mark that finds no claim naming the run** is not offered again,
+    /// since a claim that is gone does not come back: the start is
+    /// recorded by what the claim holds instead, and the delivery acked
+    /// keeping it (`unmarked_start`, #1046).
+    ///
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
     /// run continues, so the delivery is not redelivered. The claim is not
@@ -321,7 +327,7 @@ impl TriggerDispatcher {
         trigger_id: uuid::Uuid,
         handled: &mut Handled,
     ) {
-        let Some((store, _)) = self.claim_store.as_ref() else {
+        let Some((store, worker_id)) = self.claim_store.as_ref() else {
             self.ack(msg, Some(trigger_id), "durably started").await;
             handled.release();
             return;
@@ -337,14 +343,19 @@ impl TriggerDispatcher {
         )
         .await;
         match marked {
-            Ok(refused) => {
+            Ok(MarkLanded { marked, refused }) => {
                 if let Some(last) = refused.last() {
                     warn!(error = %last, refused = refused.len(), stream_seq, %invocation_id,
                         %trigger_id, subject = %msg.subject,
                         "marked trigger durably started after the claim store refused the \
                          attempts before it; the run carried on");
                 }
-                self.ack(msg, Some(trigger_id), "durably started").await;
+                if marked {
+                    self.ack(msg, Some(trigger_id), "durably started").await;
+                } else {
+                    self.record_unmarked_start(msg, store, worker_id, claim, trigger_id)
+                        .await;
+                }
             }
             Err(MarkRefused {
                 attempts,
@@ -620,6 +631,14 @@ impl TriggerDispatcher {
     }
 }
 
+/// An attempt `mark_with_retries` offered landed.
+struct MarkLanded {
+    /// Whether it found the claim naming the run and marked it.
+    marked: bool,
+    /// The refusals before it, none on a healthy day.
+    refused: Vec<ControlPlaneStoreError>,
+}
+
 /// Every attempt `mark_with_retries` offered was refused.
 struct MarkRefused {
     /// How many attempts were offered.
@@ -632,22 +651,24 @@ struct MarkRefused {
 
 /// Offer a durable start to the claim store, and again after each of
 /// [`MARK_RETRY_PAUSES`] while it refuses, as long as the next attempt
-/// would begin within [`MARK_RETRY_BUDGET`] of the first. `Ok` once a
-/// mark lands, with the refusals before it (none on a healthy day); `Err`
-/// once the store has refused every attempt offered. Each refusal is
-/// logged at `debug`; `mark_durable_started` logs the outcome, once.
+/// would begin within [`MARK_RETRY_BUDGET`] of the first. `Ok` once an
+/// attempt lands, saying whether it found the claim naming the run;
+/// `Err` once the store has refused every attempt offered. A mark that
+/// found no such claim is not offered again: retrying would not bring the
+/// claim back. Each refusal is logged at `debug`; `mark_durable_started`
+/// logs the outcome, once.
 async fn mark_with_retries(
     store: &ControlPlaneStore,
     key: TriggerKey<'_>,
     invocation_id: uuid::Uuid,
-) -> Result<Vec<ControlPlaneStoreError>, MarkRefused> {
+) -> Result<MarkLanded, MarkRefused> {
     let named = invocation_id.to_string();
     let began = tokio::time::Instant::now();
     let mut refused = Vec::new();
     let mut pauses = MARK_RETRY_PAUSES.iter();
     loop {
         let err = match store.mark_trigger_started(key, &named).await {
-            Ok(_) => return Ok(refused),
+            Ok(marked) => return Ok(MarkLanded { marked, refused }),
             Err(err) => err,
         };
         let in_budget = |pause: &&Duration| began.elapsed() + **pause < MARK_RETRY_BUDGET;

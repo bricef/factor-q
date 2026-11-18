@@ -1035,7 +1035,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 
 mod trigger_claim;
 pub use trigger_claim::{
-    RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey, UnsettledTriggerClaim,
+    RecordedStart, RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey, UnsettledTriggerClaim,
 };
 
 #[cfg(test)]
