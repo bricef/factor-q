@@ -432,6 +432,17 @@ whose archive record still says `completed`, and a run whose real final
 state is lost when the drop lands before the worker's archive, is
 [#1070](https://github.com/bricef/factor-q/issues/1070).
 
+A step already running when you drop the run is not interrupted. A tool
+call in flight finishes, and its result is recorded; a model call in
+flight returns, and its response, with what it cost, is recorded. But
+once the drop has reached the worker's record of the run, the run
+publishes no ending of its own: no `completed`, even if that last model
+call gave a final answer, and no `failed` if that call or tool fails
+([#1070](https://github.com/bricef/factor-q/issues/1070)). The drop is
+the outcome. The one exception is a failure published in the instant
+the drop reaches the worker, between the run reading its record and
+publishing: the run is then recorded as failing with its own error.
+
 Startup recovery also reports an invocation `ambiguous` when it resumed
 one on its own and the resume could not be carried out, leaving the
 invocation in flight (or its worker row unreadable). The event carries
