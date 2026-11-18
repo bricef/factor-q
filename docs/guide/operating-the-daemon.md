@@ -1917,7 +1917,13 @@ connected, the value its trigger claims key on. The dispatcher's own
 dead letter carries it, and so does the watch's, including one for a
 trigger whose message is gone or could not be read. It is absent from a
 dead letter for an earlier incarnation's advisory, whose incarnation
-the watch cannot know, and from one an older build wrote.
+the watch cannot know, and from one an older build wrote. An advisory
+with no timestamp the watch can read is presumed the current
+incarnation's, and its dead letter is stamped so. The value is the one
+the daemon read when it connected, and it keeps it for its whole life:
+a daemon left running over a deleted and recreated trigger stream (see
+above, [#1065](https://github.com/bricef/factor-q/issues/1065)) stamps
+the old stream's value on the dead letter of a trigger of the new one.
 `fq events get <event-id> --json` shows it; `fq dead-letters list` does
 not ([#1066](https://github.com/bricef/factor-q/issues/1066)).
 
