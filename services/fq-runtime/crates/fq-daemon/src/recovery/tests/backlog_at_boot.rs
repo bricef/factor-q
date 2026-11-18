@@ -329,6 +329,37 @@ async fn a_run_the_fold_did_not_reach_in_time_is_held_at_every_start() {
     }
 }
 
+/// **A halted consumer ends the wait at once.** The stopped daemon left
+/// an event this build cannot read ahead of a drop, so the consumer halts
+/// on it and folds nothing more in this process, however long the boot
+/// waits. With the default thirty-second bound, the start still holds the
+/// run, and returns as soon as the consumer has halted rather than when the
+/// bound runs out.
+#[tokio::test]
+async fn a_halted_consumer_ends_the_wait_at_once() {
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+    let invocation = a_run_in_flight(&worker_store).await;
+    publish_an_event_this_build_cannot_read(&bus).await;
+    publish(&bus, invocation, a_drop()).await;
+
+    let started = Instant::now();
+    let next = NextBoot::start(&bus, &cp_store, &worker_store, 30).await;
+    let took = started.elapsed();
+    assert_eq!(
+        (next.resumes(), next.holds()),
+        (Vec::new(), vec![invocation.to_string()]),
+        "the start resumes nothing and holds the run"
+    );
+    assert!(
+        took < Duration::from_secs(10),
+        "the start waited {took:?} for a consumer that had halted"
+    );
+    next.stop().await;
+}
+
 /// A `fq invocation resume` handle over these stores, its runner asking
 /// `model`.
 fn resume_control(
