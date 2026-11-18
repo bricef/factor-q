@@ -190,6 +190,10 @@ fn dead_lettered_triggers_render_with_both_next_steps() {
     );
     assert!(out.contains("fq dead-letters list"), "got: {out}");
     assert!(out.contains("fq dead-letters requeue"), "got: {out}");
+    // Requeue checks the run's records itself, and the override it takes
+    // when it cannot tell is named here.
+    assert!(out.contains("refuses a run that started"), "got: {out}");
+    assert!(out.contains("--checked-not-started"), "got: {out}");
 }
 
 #[test]

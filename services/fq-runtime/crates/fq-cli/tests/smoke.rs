@@ -332,6 +332,28 @@ fn fq_dead_letters_requeue_help_names_the_override() {
     }
 }
 
+/// The override is a word about one dead letter's run, so it is refused
+/// without the sequence that names that dead letter: without one, a
+/// requeue takes the agent's newest, which need not be the one checked.
+/// Refused here, before anything is sent.
+#[test]
+fn fq_dead_letters_requeue_override_needs_a_sequence() {
+    let (exit, stdout, stderr) = run_fq(
+        &[
+            "dead-letters",
+            "requeue",
+            "researcher",
+            "--checked-not-started",
+        ],
+        Duration::from_secs(5),
+    );
+    assert_eq!(exit, Some(2), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("--trigger-seq"),
+        "the refusal names the missing selector; got: {stderr}"
+    );
+}
+
 #[test]
 fn fq_doctor_help_lists_flags() {
     let (exit, stdout, stderr) = run_fq(&["doctor", "--help"], Duration::from_secs(5));

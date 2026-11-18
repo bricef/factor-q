@@ -3162,7 +3162,9 @@ fn golden_dead_letters_requeue_unchecked_refused_json() {
 }
 
 /// The override, given once the run is checked, lets the same dead
-/// letter through: the requeue the golden above refused.
+/// letter through: the requeue the golden above refused, named by its
+/// sequence as the refusal's command names it, since the override is a
+/// word about one dead letter's run.
 #[test]
 fn the_override_lets_an_unchecked_dead_letter_through() {
     let fixture = unchecked_dead_letter_fixture_now();
@@ -3170,6 +3172,8 @@ fn the_override_lets_an_unchecked_dead_letter_through() {
         "dead-letters",
         "requeue",
         AGENT_RESEARCHER,
+        "--trigger-seq",
+        "13",
         "--checked-not-started",
         "--json",
     ]);
