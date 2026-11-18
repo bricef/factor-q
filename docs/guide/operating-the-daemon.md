@@ -425,6 +425,19 @@ the broker refuses is for as long as it is refused
 [#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
 reported ambiguous as well, and left for an operator to triage.
 
+A report that reaches the control plane after the run is recorded
+`completed` or `failed`, a drop included, leaves the ownership row as it
+was: the run has ended, and the report came late. One way it happens:
+you drop a run with `--live` while it is inside a tool call, and the
+daemon dies before the step boundary and before it has folded the drop;
+the next start's recovery finds the run in flight with the tool handed
+off and reports it ambiguous, after the drop on the event stream. The
+daemon logs `invocation.ambiguous for a run already recorded finished;
+the ownership row keeps its status` at warn, with the status it kept
+(`recorded`), and there is nothing to triage. Before
+[#1024](https://github.com/bricef/factor-q/issues/1024)'s first change
+such a run went back to `ambiguous`.
+
 An invocation waiting for a worker permit is not being driven yet, even
 though every surface shows it as in flight (or, for one you resumed, as
 still ambiguous), so a plain `drop` takes it with no `--live` needed.
