@@ -674,9 +674,10 @@ pub enum EventPayload {
     /// so audit can filter operator-triggered terminal
     /// transitions from worker-triggered ones. The
     /// coordination consumer writes an `invocation_archive`
-    /// row and updates `coordination_invocation_owner.status`
-    /// to match `final_phase`; no ack is emitted (no worker
-    /// is waiting to clean up).
+    /// row and moves `coordination_invocation_owner` to
+    /// `final_phase` with its archive recorded, from whatever the
+    /// row held; no ack is emitted (no worker is waiting to clean
+    /// up).
     InvocationOperatorRecovered(InvocationOperatorRecoveredPayload),
 
     /// Operator-triggered interrupted-result injection for an ambiguous invocation.

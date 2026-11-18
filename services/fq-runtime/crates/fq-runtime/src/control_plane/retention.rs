@@ -160,9 +160,10 @@ pub fn owner_status_pins_worker(status: OwnerStatus) -> bool {
         // is unknown. Both are resolved by `fq invocation resume`/`drop`, which
         // reads `worker_id` back to decide what to re-drive.
         OwnerStatus::InFlight | OwnerStatus::Ambiguous => true,
-        // Terminal. The record of what happened is in
-        // `invocation_archive`; the worker row is no longer load-
-        // bearing for it.
+        // Ended. The row records how, from the moment the ending is
+        // folded, and the archive record follows when it arrives (the
+        // row's `archive_state` says whether it has); neither reads the
+        // worker row back.
         OwnerStatus::Completed | OwnerStatus::Failed => false,
     }
 }
