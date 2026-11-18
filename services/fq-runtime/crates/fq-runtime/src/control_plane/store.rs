@@ -1033,6 +1033,9 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
     }
 }
 
+mod ownership;
+pub use ownership::AmbiguousMark;
+
 mod trigger_claim;
 pub use trigger_claim::{
     RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey, UnsettledTriggerClaim,

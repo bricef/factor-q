@@ -6,8 +6,10 @@
 //!
 //! - `fq.agent.*.invocation.ambiguous` — workers publish on
 //!   recovery when their WAL has a `dispatched`-without-
-//!   `completed` row. The control-plane upserts the
-//!   `coordination_invocation_owner` row to status=ambiguous.
+//!   `completed` row. The control-plane marks the
+//!   `coordination_invocation_owner` row `ambiguous`, unless it
+//!   already records the run `completed` or `failed`: a late
+//!   report never puts a finished run back to triage.
 //! - `fq.agent.*.invocation.archived` — workers publish on
 //!   terminal handoff (step 8). The control-plane writes the
 //!   `invocation_archive` row and publishes
@@ -59,7 +61,8 @@ use super::durable_consumer::{
     run_durable_consumer_with_tick,
 };
 use super::store::{
-    ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus, WorkerStatus,
+    AmbiguousMark, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus,
+    WorkerStatus,
 };
 
 /// Name of the durable JetStream consumer the coordination
@@ -324,31 +327,51 @@ impl CoordinationConsumer {
         result.map_err(HandlerError::transient)
     }
 
+    /// Mark the run awaiting triage, unless its row records it finished.
+    ///
+    /// The event can reach this consumer after the run's ending: the next
+    /// start's recovery runs before this consumer folds what the last
+    /// process published, so a run dropped mid tool call just before a
+    /// crash is reported ambiguous after its drop on the stream; and a
+    /// resume whose worker row cannot be read is reported though the run
+    /// may have ended. The store's compare-and-set leaves a `completed` or
+    /// `failed` row as it was, and the refusal is logged here, once per
+    /// delivery. A redelivery of the same report finds the row `ambiguous`
+    /// and leaves it as the first delivery wrote it.
     pub(crate) async fn handle_invocation_ambiguous(
         &self,
         event: &Event,
         _payload: &crate::events::InvocationAmbiguousPayload,
     ) -> Result<(), CoordinationConsumerError> {
         let invocation_id = event.envelope.invocation_id.to_string();
-        debug!(
-            invocation_id = %invocation_id,
-            "marking invocation ambiguous in coordination store"
-        );
-
-        // Upsert because the trigger-dispatch path doesn't
-        // populate ownership rows yet (a later plan step). Use
-        // the event's `agent_id` as the worker_id placeholder
-        // when no row exists — later when ownership is
-        // explicitly recorded by the dispatcher, we'll have
-        // a real worker_id.
-        self.store
-            .upsert_invocation_ownership(
+        // The trigger-dispatch path writes no ownership row, so a run in
+        // flight usually has none: the event's `agent_id` stands in for
+        // the worker id of the row this writes.
+        let mark = self
+            .store
+            .mark_invocation_ambiguous(
                 &invocation_id,
                 event.envelope.agent_id.as_str(),
                 Utc::now().timestamp_millis(),
-                OwnerStatus::Ambiguous,
             )
             .await?;
+        match mark {
+            AmbiguousMark::Marked => debug!(
+                invocation_id = %invocation_id,
+                "marked invocation ambiguous in coordination store"
+            ),
+            AmbiguousMark::AlreadyAmbiguous => debug!(
+                invocation_id = %invocation_id,
+                "invocation already ambiguous; redelivered report left the row as it was"
+            ),
+            AmbiguousMark::Refused(recorded) => warn!(
+                invocation_id = %invocation_id,
+                recorded = recorded.as_str(),
+                reported = OwnerStatus::Ambiguous.as_str(),
+                "invocation.ambiguous for a run already recorded finished; the ownership row \
+                 keeps its status"
+            ),
+        }
         Ok(())
     }
 
