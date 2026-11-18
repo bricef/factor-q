@@ -218,7 +218,9 @@ A second thing follows from the same ordering, and it looks like a hang:
 > into the backlog and nobody reads them. A `fq` verb aimed at a daemon that is
 > still booting therefore **hangs until the client's own timeout** rather than
 > failing fast with a connection refusal — and a boot can be slow: a store
-> migration, a recovery scan, an unresponsive MCP server. This is the price of
+> migration, a recovery scan and its wait for the coordination backlog
+> (bounded by `[worker] recovery_backlog_wait_secs`), an unresponsive MCP
+> server. This is the price of
 > the bind being the instance lock, and it is the right trade (the alternative
 > leaves a window where a second daemon can start), but it is worth knowing
 > before concluding a daemon is wedged. The daemon's own log says which step it
@@ -517,27 +519,19 @@ with its `failed` stored in it, before it publishes the `failed`
 finished with its ending owed: the next start does not resume the run,
 and the archive sweeper publishes the stored `failed` on its first pass.
 Builds before that published first and marked after, so a run could
-publish its `failed` and die before its mark. Once the coordination
-consumer has folded such a `failed`, the ownership row records the
-ending, and the next start's recovery, which reads the ownership rows
-before it classifies anything, marks the WAL row terminal and hands it
-to the archive sweeper: the first ending stands. Before
-[#1024](https://github.com/bricef/factor-q/issues/1024) such a run was
-always resumed, and could end a second time.
-
-If the daemon died before the `failed` was folded as well, the row
-records no ending, and recovery resumes the run as it always has. The
-coordination consumer then starts and folds the old `failed`, a moment
-later, so the ownership row reads `failed` while the resumed run
-executes: `fq invocation show` shows no live execution for it, and
-`fq doctor`'s current executions and the stuck-invocation sweep pass it
-by. If the resumed run then completes, that is a second ending,
-refused, and the row stays `failed` while the run's archive record says
-`completed`. A restart while the run is still going ends it, since that
-start's recovery finds the `failed` on record. The window is the
-milliseconds between the `failed` and the WAL mark. Recovery folding
-the coordination backlog before it classifies is item 3 of
-[#1070](https://github.com/bricef/factor-q/issues/1070).
+publish its `failed` and die before its mark. The next start's
+coordination consumer folds such a `failed` before recovery reads
+anything, whether or not the daemon that died had folded it (see
+[When startup recovery holds a run](#when-startup-recovery-holds-a-run)),
+so the ownership row records the ending, and recovery, which reads the
+ownership rows before it classifies anything, marks the WAL row
+terminal and hands it to the archive sweeper: the first ending stands.
+Before [#1024](https://github.com/bricef/factor-q/issues/1024) such a
+run was always resumed, and could end a second time. Until
+[#1070](https://github.com/bricef/factor-q/issues/1070) it still was
+when the daemon had died before folding its `failed`: the resumed run
+went on under a row that read `failed`, and if it then completed, its
+archive record said `completed` under that row.
 
 A second ending that reaches the control plane is refused and logged at
 error, `two endings published for one run; the ownership row keeps the
@@ -553,10 +547,14 @@ no drop was involved.
 A report that reaches the control plane after the run is recorded
 `completed` or `failed`, a drop included, leaves the ownership row as it
 was: the run has ended, and the report came late. One way it happens:
-you drop a run with `--live` while it is inside a tool call, and the
-daemon dies before the step boundary and before it has folded the drop;
-the next start's recovery finds the run in flight with the tool handed
-off and reports it ambiguous, after the drop on the event stream. The
+you drop a run with `--live` while it is inside a tool call, the daemon
+dies before the step boundary and before it has folded the drop, and
+the next start's wait for the coordination consumer runs out before the
+consumer reaches the drop; that start's recovery then finds the run in
+flight with the tool handed off and reports it ambiguous, after the drop
+on the event stream. (When the consumer does reach the drop in time, the
+drop marks the run's WAL row terminal first, and recovery has nothing to
+report.) The
 daemon logs `event for a run already recorded finished; the ownership
 row keeps its status` at warn, with the `invocation_id`, the `agent_id`,
 the `event_type` (`invocation_ambiguous`), the state it kept
@@ -622,6 +620,89 @@ section says why, and what to do if that matters).
 A daemon that is already draining or stopping refuses the re-drive and
 says so, but the recorded results stand, so the next start resumes the
 invocation on its own.
+
+### When startup recovery holds a run
+
+A daemon can stop with events on the event stream that its
+coordination consumer has not folded yet: a drop, or a run's own
+`failed`, published just before it died. So each start begins its
+coordination consumer first, and waits for it to fold everything that
+was on the stream when the start began before recovery decides which
+runs to resume ([#1070](https://github.com/bricef/factor-q/issues/1070)).
+Normally that takes a moment. The wait is bounded by `[worker]
+recovery_backlog_wait_secs`, 30 seconds by default, and the boot, the
+edge included, waits with it.
+
+When the bound runs out, the daemon boots anyway and resumes none of the
+runs it would have resumed, since an event it has not folded may have
+ended any of them. It logs each at error, with its `invocation_id`, the
+`boot_point` (the stream's last sequence when the start began) and
+`folded_to` (how far the consumer had got):
+
+```text
+not resuming this invocation at startup: the coordination consumer had not
+folded the events on the stream within [worker] recovery_backlog_wait_secs,
+and one of them may end it. It stays in flight until a later start finds
+them folded: restart the daemon once the consumer has caught up. ...
+```
+
+**A held run waits for the next start.** Nothing in this daemon resumes
+it ([#1089](https://github.com/bricef/factor-q/issues/1089)). Restart
+the daemon once the consumer has caught up (`fq doctor` and `fq status`
+show its backlog among the consumers): that start's recovery decides
+over the folded events as usual, and resumes the run or finds it ended.
+Behind a halted consumer no restart helps until a build that reads the
+event it halted on runs; every start holds the run again until then.
+
+Only the log names a held run. What each command shows for one:
+
+- `fq status` ends `All clear.`
+- `fq doctor` counts it among the current executions, in flight. The
+  stale-worker and stuck-invocation sweeps wait only until recovery has
+  decided and then run as usual, so once a held run is past the stuck
+  threshold `fq doctor` reads it stuck and the sweep reports it, as for
+  any run that has not moved.
+- `fq invocation show` reads `in_flight`, with a live-execution block,
+  though nothing is executing the run.
+- `fq invocation resume` refuses it as live: it takes only ambiguous
+  runs, and recovery has put the held run's ownership row back to
+  `in_flight`.
+- `fq invocation drop` drops it as it drops any run nothing is driving:
+  the drop takes effect once the consumer folds it, and no later start
+  resumes the run. Behind a halted consumer the command returns a
+  receipt and then fails its read-back (`invocation.get` lagging), since
+  nothing folds the drop; the run stays held, and the drop is folded
+  when a build that reads the halting event runs.
+
+A surface that names held runs is
+[#1089](https://github.com/bricef/factor-q/issues/1089)'s too.
+
+The consumer is behind for one of these reasons:
+
+- **It halted on an event this build cannot read.** `fq doctor` says so,
+  and it folds nothing until a build that reads that event runs (see
+  [When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read));
+  every start holds the runs again until then, and a longer bound does
+  not help.
+- **Its durable was deleted and recreated**, so it reads the whole
+  stream again from the start
+  ([Deleting a durable under a running daemon restarts it](#deleting-a-durable-under-a-running-daemon-restarts-it)).
+  Restart once the replay has caught up, and that start resumes the held
+  runs.
+- **The backlog is long, or the store is slow.** A backlog that is long
+  and still moving is what a longer `recovery_backlog_wait_secs` is for.
+  A slow or contended disk slows every fold, and a longer bound only
+  waits longer for it (see
+  [#1090](https://github.com/bricef/factor-q/issues/1090)).
+
+A delivery the stopped daemon took and never acknowledged is the usual
+reason a start waits more than a moment: the consumer takes one delivery
+at a time, and the broker gives it back only when its ack window lapses.
+A clean stop can leave one too
+([#1090](https://github.com/bricef/factor-q/issues/1090)). The
+coordination consumer's window is five seconds, where other consumers
+take `[bus] ack_wait_ms` (30 seconds by default), so that wait stays
+well inside the bound.
 
 ### When the archive sweeper holds a terminal row
 
@@ -1376,6 +1457,12 @@ that reads that version: the unacked message is where the consumer
 resumes, and nothing needs resetting. The daemon log carries the same
 detail once, at error level, under `consumer=<name>`.
 
+A halted `fq-coordination` holds startup recovery too: each start waits
+`[worker] recovery_backlog_wait_secs` for it, then resumes none of the
+runs it would have resumed until a build that reads the event has folded
+past it (see
+[When startup recovery holds a run](#when-startup-recovery-holds-a-run)).
+
 **Malformed is a different fact, and reported separately.** Bytes that
 are not an event in any version — JSON that does not parse, or a
 supported version whose body does not match its shape — are logged,
@@ -1979,7 +2066,12 @@ under a running daemon now stops the daemon.** The deleted durable
 ends its consumer's message stream, the supervised arm observes the
 exit, and the process comes down. This is deliberate and matches every
 other consumer; if you need to reset a durable, stop the daemon with
-`fq down` first, delete it, and start again. The one exception is the
+`fq down` first, delete it, and start again. A reset `fq-coordination`
+reads the whole stream again at that start, before recovery decides, so
+the start is likely to hold its recovered runs, and the first start after
+the replay has caught up resumes them (see
+[When startup recovery holds a run](#when-startup-recovery-holds-a-run)).
+The one exception is the
 projector's: `fq projection rebuild` resets `fq-projector` under the
 running daemon, because the daemon stops that consumer itself before
 deleting the durable and starts it again after.
