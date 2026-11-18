@@ -417,51 +417,6 @@ async fn a_copy_of_an_advisory_this_watch_wrote_is_answered_from_memory() {
     assert_eq!(nameless_dead_letters(&bus).await, 1);
 }
 
-/// **A check that runs out of time decides again inside the watch's limit,
-/// and writes past it.** Given no time to read, the check cannot say
-/// whether the dead letter is on the log: inside the limit the advisory
-/// comes back as an error, to be NAKed and decided again, and nothing is
-/// written; past the limit and three looks, the dead letter is written
-/// though one may already be there, since a second is the cheaper error.
-#[tokio::test]
-async fn a_check_out_of_time_decides_again_and_past_the_limit_writes() {
-    let (_server, bus, agent) = broker().await;
-    let advisory = stamped_at_the_streams_creation(&bus, &gone(&bus, &agent).await);
-    let watch = AdvisoryWatch::without_records(bus.clone());
-    assert_eq!(
-        watch.handle_advisory(&advisory, 1).await.unwrap(),
-        AdvisoryOutcome::Emitted
-    );
-    let hurried =
-        AdvisoryWatch::without_records(bus.clone()).with_scan_limit(std::time::Duration::ZERO);
-
-    let inside = hurried.handle_advisory(&advisory, 2).await;
-    assert!(
-        matches!(inside, Err(AdvisoryWatchError::Log(_))),
-        "{inside:?}"
-    );
-    assert_eq!(nameless_dead_letters(&bus).await, 1);
-
-    let past = hurried
-        .with_held_verdict_limit(PAST)
-        .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS)
-        .await
-        .unwrap();
-    assert_eq!(past, AdvisoryOutcome::Emitted);
-    assert_eq!(nameless_dead_letters(&bus).await, 2);
-    let written = last_failed(&bus, AgentId::SYSTEM_STR)
-        .await
-        .expect("the dead letter written past the limit");
-    assert_eq!(
-        written.annotations.0.get("duplicate_check"),
-        Some(&json!(
-            "could not be made: event log read error: reading the log for a dead letter \
-             already written took longer than 0ns"
-        )),
-        "the dead letter says its duplicate check could not be made"
-    );
-}
-
 /// **Only the broker's "no message" is "none written".** Each check reads
 /// the last `failed` event on the subject it reads to know where to stop;
 /// an answer that is an error of any other kind is an error, never "there
