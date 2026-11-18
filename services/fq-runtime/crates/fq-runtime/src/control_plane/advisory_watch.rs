@@ -412,18 +412,17 @@ impl AdvisoryWatch {
         // written as a dead letter, after a last look for a start on record.
         let looked_long_enough =
             advisory.looked_long_enough(delivered, self.held_verdict_limit, chrono::Utc::now());
-        let Named {
-            agent_id,
-            subject: trigger_subject,
-            payload: trigger_payload,
-            trigger_id,
-            unattributed,
-        } = match self
+        let (message, unattributed) = match self
             .named_trigger(&advisory, earlier, looked_long_enough)
             .await
         {
-            Ok(named) => named,
+            Ok(Named::Trigger(message)) => (Some(message), None),
+            Ok(Named::Nothing(why)) => (None, Some(why)),
             Err(hold) => return Ok(AdvisoryOutcome::Held(hold)),
+        };
+        let (agent_id, trigger_subject, trigger_payload, trigger_id) = match message {
+            Some(m) => (m.agent_id, m.subject, m.payload, m.trigger_id),
+            None => (None, String::new(), serde_json::Value::Null, None),
         };
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses

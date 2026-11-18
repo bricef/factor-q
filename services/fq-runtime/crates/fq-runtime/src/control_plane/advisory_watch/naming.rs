@@ -27,7 +27,8 @@
 //! decides.
 //!
 //! Every dead letter that names no trigger says why, in words and as a kind
-//! ([`Unattributed`]): it is set exactly when nothing is named.
+//! ([`Unattributed`]): [`Named::Nothing`] is the only way to name nothing,
+//! and it carries both.
 
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::message::StreamMessage;
@@ -45,30 +46,31 @@ use crate::events::Event;
 use crate::trigger::{agent_id_from_subject, trigger_id_in};
 
 /// The trigger an advisory names, as its dead letter records it
-/// ([`AdvisoryWatch::named_trigger`]).
-pub(super) struct Named {
-    /// The trigger's agent, or none: the dead letter goes under the system
-    /// sentinel.
+/// ([`AdvisoryWatch::named_trigger`]): its message, or nothing and why.
+pub(super) enum Named {
+    /// The trigger's message, read off the stream.
+    Trigger(TriggerMessage),
+    /// No trigger, so no agent, subject, payload or id; and why.
+    Nothing(Unattributed),
+}
+
+impl Named {
+    /// No trigger, for the reason of `kind`.
+    fn nothing(kind: UnattributedKind, reason: String) -> Self {
+        Self::Nothing(Unattributed { kind, reason })
+    }
+}
+
+/// What the trigger's message gives its dead letter.
+pub(super) struct TriggerMessage {
+    /// The trigger's agent, or none when the subject names no valid agent:
+    /// the dead letter then goes under the system sentinel, still with the
+    /// subject and payload.
     pub(super) agent_id: Option<AgentId>,
     pub(super) subject: String,
     pub(super) payload: serde_json::Value,
     /// The id the trigger's publisher gave it, if it gave one.
     pub(super) trigger_id: Option<Uuid>,
-    /// Why no trigger is named, set exactly when none is.
-    pub(super) unattributed: Option<Unattributed>,
-}
-
-impl Named {
-    /// No trigger: no agent, subject, payload or id, and why.
-    fn unnamed(kind: UnattributedKind, reason: String) -> Self {
-        Self {
-            agent_id: None,
-            subject: String::new(),
-            payload: serde_json::Value::Null,
-            trigger_id: None,
-            unattributed: Some(Unattributed { kind, reason }),
-        }
-    }
 }
 
 /// Why a dead letter names no trigger: the kind, and the reason in words.
@@ -133,7 +135,7 @@ impl AdvisoryWatch {
                  names a message of the stream before this one, so the watch reads neither the \
                  message nor the claim this stream has at that sequence, and dead-letters it \
                  naming no trigger");
-            return Ok(Named::unnamed(
+            return Ok(Named::nothing(
                 UnattributedKind::EarlierIncarnation,
                 unattributed_reason(emitted, self.bus.trigger_stream_epoch()),
             ));
@@ -149,14 +151,13 @@ impl AdvisoryWatch {
         // dead letter says so by carrying no name, rather than
         // inventing one that matches nothing anywhere else.
         match read_trigger(&self.bus.jetstream(), advisory.stream_seq).await {
-            TriggerRead::Found(raw) => Ok(Named {
+            TriggerRead::Found(raw) => Ok(Named::Trigger(TriggerMessage {
                 agent_id: agent_id_from_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
                 subject: raw.subject.to_string(),
                 payload: serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
                 trigger_id: trigger_id_in(Some(&raw.headers)),
-                unattributed: None,
-            }),
-            TriggerRead::Gone => Ok(Named::unnamed(
+            })),
+            TriggerRead::Gone => Ok(Named::nothing(
                 UnattributedKind::MessageGone,
                 gone_reason(chrono::Utc::now(), advisory.emitted_at()),
             )),
@@ -169,7 +170,7 @@ impl AdvisoryWatch {
             TriggerRead::Unreadable {
                 answer,
                 stream_missing,
-            } => Ok(Named::unnamed(
+            } => Ok(Named::nothing(
                 UnattributedKind::MessageUnreadable,
                 unreadable_at_the_limit(&answer, stream_missing),
             )),
