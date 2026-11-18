@@ -402,4 +402,43 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         failed.payload.phase = phase_for(has_row, failed.payload.phase);
         self.publish_chained(cursor, failed.into_event()).await
     }
+
+    /// The test build's check on every event a run publishes: a `failed`
+    /// in any phase but `Setup` goes out only for a run with a WAL row.
+    /// `publish_chained` calls it, the one place the runner publishes, so
+    /// every test that drives a run to a `failed` checks the rule,
+    /// whichever path built it and whether or not it came through
+    /// [`Self::publish_failed`]. A path no test drives is not checked.
+    ///
+    /// Only tests build it. In production the stored terminal can go out
+    /// from `finish` after the archive sweeper has already republished it
+    /// and the archive's acknowledgement has deleted the row; that event
+    /// was first published with its row, and this check would misread it.
+    /// No test in this crate runs a sweeper while a run is live. A store
+    /// that cannot be read is left to the test that broke it.
+    #[cfg(test)]
+    pub(super) async fn check_failed_phase(&self, event: &Event) {
+        let crate::events::EventPayload::Failed(failed) = &event.payload else {
+            return;
+        };
+        if matches!(failed.phase, FailurePhase::Setup) {
+            return;
+        }
+        let invocation_id = event.envelope.invocation_id;
+        let Ok(row) = self
+            .config
+            .store
+            .get_invocation_state(&invocation_id.to_string())
+            .await
+        else {
+            return;
+        };
+        assert!(
+            row.is_some(),
+            "a `failed` in phase {:?} for invocation {invocation_id}, which has no WAL \
+             row: readers would take it for a start that never happened ({})",
+            failed.phase,
+            failed.error_message
+        );
+    }
 }

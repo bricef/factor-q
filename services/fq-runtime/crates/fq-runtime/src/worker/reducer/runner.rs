@@ -1901,6 +1901,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             event.envelope.parent_event_id = Some(parent);
         }
         let id = event.envelope.event_id;
+        #[cfg(test)]
+        self.check_failed_phase(&event).await;
         debug!(event_type = ?event.payload, "publishing event");
         self.config
             .sink
