@@ -1703,3 +1703,22 @@ async fn a_running_recovered_run_is_dropped_only_with_live() {
 // What recovery reports about a resume that returned an error (issue 1005),
 // on the same next start as the tests above.
 mod resume_errors;
+
+// A drop published before the daemon died and folded only after the next
+// start's recovery reported the same run ambiguous (issue 1024).
+mod drop_before_restart;
+
+/// The control-plane and worker stores a daemon keeps under `dir`.
+///
+/// Here rather than in the file that uses it: the store-open gate
+/// (`tests/store_open_gate.rs`) exempts a module's sibling `tests.rs`, and
+/// not the files declared below it.
+async fn stores_under(dir: &std::path::Path) -> (Arc<ControlPlaneStore>, Arc<WorkerStore>) {
+    let cp_store = ControlPlaneStore::open(&dir.join("control-plane.db"))
+        .await
+        .expect("open the control-plane store");
+    let worker_store = WorkerStore::open(&dir.join("worker.db"))
+        .await
+        .expect("open the worker store");
+    (Arc::new(cp_store), Arc::new(worker_store))
+}
