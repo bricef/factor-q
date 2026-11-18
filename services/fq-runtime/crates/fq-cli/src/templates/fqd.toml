@@ -614,13 +614,17 @@ models = ["claude-haiku-4-5"]
 # coordination and heartbeat handlers are single SQLite writes.
 # Default 30000.
 #
-# Two durables do not take this value, both deliberately. The
+# Three durables do not take this value, all deliberately (and the
+# maintenance consumer has its own, under `[maintenance]`). The
 # summariser calls a model inline, so its window is `[worker]
 # llm_timeout_secs` plus this one — otherwise a slow summary is
 # redelivered behind the one still generating it and paid for twice.
-# And the trigger consumer carries a retry backoff schedule, which
+# The trigger consumer carries a retry backoff schedule, which
 # JetStream uses to *replace* a consumer's ack window with the
-# schedule's first entry.
+# schedule's first entry. And the coordination consumer's window is
+# five seconds: it takes one delivery at a time, so a delivery a
+# stopped daemon left unacknowledged holds everything behind it, gated
+# reads included, until the window lapses (#1070).
 # ack_wait_ms = 30000
 #
 # Floor on the gap between two error lines about one consumer's

@@ -32,7 +32,9 @@ pub struct BusConfig {
     pub nak_max_ms: u64,
     /// Explicit `ack_wait` on every durable, in milliseconds: how long
     /// the server waits for an ack before redelivering by itself. Size
-    /// it so a healthy handler never trips it.
+    /// it so a healthy handler never trips it. The summariser, the
+    /// trigger consumer and the coordination consumer take their own
+    /// (the last [`crate::control_plane::coordination_consumer::ACK_WAIT`]).
     #[serde(default = "default_ack_wait_ms")]
     pub ack_wait_ms: u64,
     /// Floor on the gap between two error lines about one consumer's
