@@ -1951,12 +1951,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// original `terminal_at` so the archive timestamp matches
     /// the first observation of terminal.
     ///
-    /// Reads the row first to preserve every other column
-    /// (state_blob, step_index, started_at, etc.); the
-    /// `upsert_invocation_state` UPDATE arm overwrites them
-    /// otherwise. The pattern is "read-modify-write" rather
-    /// than a partial UPDATE so the existing row-shaped
-    /// abstraction stays the single SQL surface.
+    /// Reads the row first to preserve every other column, and
+    /// writes it back with `update_invocation_state`, which lands
+    /// only on a row still in flight: a row a drop finished, or
+    /// that its hand-off deleted, between the read and the write
+    /// is left as it is, never re-created (issue 1070). The row-
+    /// shaped write stays the single SQL surface.
     async fn ensure_terminal(
         &self,
         phase_label: &str,
@@ -1984,7 +1984,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         row.updated_at = terminal_at_ms;
         self.config
             .store
-            .upsert_invocation_state(&row)
+            .update_invocation_state(&row)
             .await
             .map_err(map_store_err)?;
         Ok(())
