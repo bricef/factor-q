@@ -5,4 +5,4 @@
       payload: null
       names no trigger: the broker answered that the trigger stream held no message at this sequence when the watch last read it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: the stream keeps a message 24h after its publish, so it most likely aged out, or was deleted sooner; the broker answers the same for a message it cannot load; `fq dead-letters requeue` refuses it
 
--> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one
+-> none of these names its trigger, so `fq dead-letters requeue` refuses each

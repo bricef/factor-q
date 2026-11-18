@@ -88,8 +88,29 @@ pub(crate) async fn list_dead_letters(
     for d in &dead {
         print!("{}", dead_letter_lines(d));
     }
-    println!("\n-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one");
+    println!("\n{}", footer(&dead));
     Ok(())
+}
+
+/// The listing's last line: how to re-run a dead letter, fitted to the page.
+/// `fq dead-letters requeue` refuses one that names no trigger, so a page
+/// holding only those does not offer it, and a page holding some says which
+/// it takes.
+fn footer(dead: &[&fq_ops::dead_letter::DeadLetter]) -> &'static str {
+    let refused = dead.iter().filter(|d| names_no_trigger(d)).count();
+    if refused == 0 {
+        "-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one"
+    } else if refused == dead.len() {
+        "-> none of these names its trigger, so `fq dead-letters requeue` refuses each"
+    } else {
+        "-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one that names its trigger"
+    }
+}
+
+/// Whether `d` names no trigger: it says why, or it records no subject, as a
+/// dead letter an older build wrote for a trigger that had aged out does.
+fn names_no_trigger(d: &fq_ops::dead_letter::DeadLetter) -> bool {
+    d.unattributed.is_some() || d.trigger_subject.is_empty()
 }
 
 /// One dead letter's lines in the listing.
@@ -116,7 +137,11 @@ pub(crate) async fn list_dead_letters(
 /// be requeued, so no requeue checks its run: its line says how to tell
 /// whether the run started from what `fq invocation show` prints, the
 /// `Live execution:` block included, since a run still going in this daemon
-/// has no coordination row.
+/// has no coordination row, and that a copy can still start the run after
+/// you look. With no run named either, its `seq=` is still the handle
+/// `fq doctor`'s stranded trigger claims are listed by. An earlier
+/// incarnation's carries no mark, since the watch consulted no claim for
+/// it, so its own line says the start was not checked.
 fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
     let seq = d
         .trigger_stream_seq
@@ -136,6 +161,14 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
             "      names no trigger: {why}; `fq dead-letters requeue` refuses it\n"
         ));
     }
+    if d.start_unchecked.is_none()
+        && d.unattributed_kind == Some(fq_ops::dead_letter::UnattributedKind::EarlierIncarnation)
+    {
+        out.push_str(
+            "      start not checked: its sequence is an earlier stream's, so the watch consulted \
+             no claim; its run may have started\n",
+        );
+    }
     if let Some(unchecked) = &d.start_unchecked {
         out.push_str(&format!(
             "      start not checked: {}; its run may have started\n",
@@ -148,12 +181,14 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
                 "      -> it cannot be requeued; to tell whether its run started, run `fq \
                  invocation show {id}`: it started if that shows a `Live execution:` block, an \
                  `archived:` line, a `status:` other than `(no coordination row)` or a trigger \
-                 line saying `durably started`\n"
+                 line saying `durably started`; a copy can still start it after you look\n"
             ),
-            (None, Some(_)) => "      -> it cannot be requeued, and it names neither the trigger \
-                 nor its run (the claim, or this mark, could not be read), so nothing on it tells \
-                 whether the run started\n"
-                .to_string(),
+            (None, Some(_)) => format!(
+                "      -> it cannot be requeued, and it names neither the trigger nor its run (the \
+                 claim, or this mark, could not be read); if `fq doctor` lists a stranded trigger \
+                 claim at seq {seq}, that claim names the invocation id its delivery reserved and \
+                 says whether a run is on record\n"
+            ),
             (Some(id), None) => format!(
                 "      -> `fq dead-letters requeue` checks the run's records first and refuses one \
                  that started; if it cannot tell, it refuses unless given --checked-not-started, \
@@ -243,7 +278,7 @@ mod tests {
                  started, run `fq invocation show 019a0000-0000-7000-8000-000000000001`: it \
                  started if that shows a `Live execution:` block, an `archived:` line, a \
                  `status:` other than `(no coordination row)` or a trigger line saying `durably \
-                 started`\n"
+                 started`; a copy can still start it after you look\n"
             ),
             "got:\n{named}"
         );
@@ -251,12 +286,78 @@ mod tests {
         assert!(
             unnamed.ends_with(
                 "      -> it cannot be requeued, and it names neither the trigger nor its run (the \
-                 claim, or this mark, could not be read), so nothing on it tells whether the run \
-                 started\n"
+                 claim, or this mark, could not be read); if `fq doctor` lists a stranded trigger \
+                 claim at seq 12, that claim names the invocation id its delivery reserved and \
+                 says whether a run is on record\n"
             ),
             "got:\n{unnamed}"
         );
         assert!(!unnamed.contains("before requeueing"), "got:\n{unnamed}");
+    }
+
+    /// One from an earlier incarnation of the trigger stream says its start
+    /// was not checked, since the watch consulted no claim for it, though it
+    /// carries no mark; other nameless forms do not get that line unless
+    /// they are marked.
+    #[test]
+    fn an_earlier_incarnations_dead_letter_says_its_start_was_not_checked() {
+        let nameless = |kind| fq_ops::dead_letter::DeadLetter {
+            agent_id: "system".to_string(),
+            trigger_subject: String::new(),
+            trigger_payload: serde_json::Value::Null,
+            unattributed: Some("why".to_string()),
+            unattributed_kind: Some(kind),
+            ..dead(None)
+        };
+        let earlier = dead_letter_lines(&nameless(
+            fq_ops::dead_letter::UnattributedKind::EarlierIncarnation,
+        ));
+        assert!(
+            earlier.ends_with(
+                "refuses it\n      start not checked: its sequence is an earlier stream's, so the \
+                 watch consulted no claim; its run may have started\n"
+            ),
+            "got:\n{earlier}"
+        );
+        let gone = dead_letter_lines(&nameless(
+            fq_ops::dead_letter::UnattributedKind::MessageGone,
+        ));
+        assert!(!gone.contains("start not checked"), "got:\n{gone}");
+    }
+
+    /// The footer offers a requeue only for what it would take: the usual
+    /// line under a page of dead letters that name their triggers, none
+    /// under a page of ones that name none, and which ones under a page of
+    /// both.
+    #[test]
+    fn the_footer_fits_the_page() {
+        let named = dead(None);
+        let nameless = fq_ops::dead_letter::DeadLetter {
+            agent_id: "system".to_string(),
+            trigger_subject: String::new(),
+            trigger_payload: serde_json::Value::Null,
+            unattributed: Some("why".to_string()),
+            ..dead(None)
+        };
+        let older = fq_ops::dead_letter::DeadLetter {
+            agent_id: "system".to_string(),
+            trigger_subject: String::new(),
+            trigger_payload: serde_json::Value::Null,
+            ..dead(None)
+        };
+        assert_eq!(
+            footer(&[&named]),
+            "-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one"
+        );
+        assert_eq!(
+            footer(&[&nameless, &older]),
+            "-> none of these names its trigger, so `fq dead-letters requeue` refuses each"
+        );
+        assert_eq!(
+            footer(&[&named, &nameless]),
+            "-> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one that names its \
+             trigger"
+        );
     }
 
     /// A dead letter whose start was checked reads as it always has.
