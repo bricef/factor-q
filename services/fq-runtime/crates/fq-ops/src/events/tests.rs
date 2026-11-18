@@ -2217,3 +2217,76 @@ fn the_largest_state_a_stock_broker_and_the_dogfood_broker_archive() {
         assert!(counted_by_the_broker(&production_archive(vec![b'o'; largest + 1])) > max_payload);
     }
 }
+
+/// The cost a run's ending carries, in the form every cost on the wire
+/// takes: an `f64` written as JSON's shortest round-trip decimal.
+fn completed_costing(total_cost: f64) -> Event {
+    Event::new(
+        AgentId::new("researcher").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::Completed(CompletedPayload {
+            task_status: Default::default(),
+            result_summary: None,
+            total_llm_calls: 3,
+            total_tool_calls: 0,
+            total_cost,
+            total_duration_ms: 10,
+        }),
+    )
+}
+
+/// **A cost reads back off the wire as it was written** (#1099): to the
+/// bit, so a figure read and written again, by a republish or a reader
+/// that re-serialises, is the figure the producer wrote. Three call costs
+/// a run sums, left to right, to 1.5229507399999997: a fast float parser
+/// reads that back as 1.5229507399999995.
+#[test]
+fn a_run_s_summed_cost_reads_back_off_the_wire_as_written() {
+    let cost: f64 = [0.386611969, 0.434366916, 0.7019718549999999].iter().sum();
+    let bytes = serde_json::to_vec(&completed_costing(cost)).unwrap();
+    let EventPayload::Completed(read) = Event::from_wire(&bytes).unwrap().payload else {
+        panic!("a completed reads back as one");
+    };
+    assert_eq!(
+        read.total_cost.to_bits(),
+        cost.to_bits(),
+        "written {cost:?}, read back {:?}",
+        read.total_cost
+    );
+}
+
+/// A cost of any size a call has, spread evenly over the decades from a
+/// ten-millionth of a dollar to a million: a uniform draw over the range
+/// would try only costs in the thousands, never one of the size a call
+/// has, nor one below 1e-5, which JSON writes with an exponent.
+fn a_call_cost() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::strategy::Strategy;
+    (-7i32..6, 1.0f64..10.0).prop_map(|(decade, mantissa)| mantissa * 10f64.powi(decade))
+}
+
+/// What `cost` reads back as, off the wire.
+fn read_back(cost: f64) -> f64 {
+    let bytes = serde_json::to_vec(&completed_costing(cost)).unwrap();
+    let EventPayload::Completed(read) = Event::from_wire(&bytes).unwrap().payload else {
+        panic!("a completed reads back as one");
+    };
+    read.total_cost
+}
+
+proptest::proptest! {
+    /// Any one call's cost reads back as written.
+    #[test]
+    fn any_call_cost_reads_back_off_the_wire_as_written(cost in a_call_cost()) {
+        proptest::prop_assert_eq!(read_back(cost).to_bits(), cost.to_bits());
+    }
+
+    /// Any run's cost, its calls' costs summed in order as the runner
+    /// sums them, reads back as written.
+    #[test]
+    fn any_run_s_summed_cost_reads_back_off_the_wire_as_written(
+        calls in proptest::collection::vec(a_call_cost(), 1..30)
+    ) {
+        let cost: f64 = calls.iter().sum();
+        proptest::prop_assert_eq!(read_back(cost).to_bits(), cost.to_bits());
+    }
+}

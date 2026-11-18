@@ -631,6 +631,34 @@ mod tests {
         );
     }
 
+    /// A stored ending the sweeper republishes carries the cost it was
+    /// written with, to the bit (#1099): it is the run's own figure, and a
+    /// figure misread on the way back from `worker.db` would put a second
+    /// one on the stream for the same run. Three call costs summed left to
+    /// right, as a run sums them, to one a fast float parser misreads.
+    #[tokio::test]
+    async fn a_republished_ending_carries_the_cost_it_was_written_with() {
+        let cost: f64 = [0.386611969, 0.434366916, 0.7019718549999999].iter().sum();
+        let world = LostTerminal::storing("completed", |inv| {
+            let mut event = completed_event(inv);
+            if let EventPayload::Completed(completed) = &mut event.payload {
+                completed.total_cost = cost;
+            }
+            event
+        })
+        .await;
+        world.sweeper.sweep_once(&mut HashSet::new()).await.unwrap();
+        let EventPayload::Completed(published) = &world.sink.events()[0].payload else {
+            panic!("the stored completed goes out first");
+        };
+        assert_eq!(
+            published.total_cost.to_bits(),
+            cost.to_bits(),
+            "the run wrote {cost:?}, the sweeper published {:?}",
+            published.total_cost
+        );
+    }
+
     #[tokio::test]
     async fn sweep_leaves_a_published_terminal_event_alone() {
         let world = LostTerminal::new().await;
