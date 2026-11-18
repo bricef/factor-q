@@ -269,11 +269,14 @@ impl ControlPlaneStore {
             == 1)
     }
 
+    /// Record on the claim for `key` that the run `invocation_id` names has
+    /// durably started. Returns whether it marked the claim, which it
+    /// reports whatever the update matched (issue 1046).
     pub async fn mark_trigger_started(
         &self,
         key: TriggerKey<'_>,
         invocation_id: &str,
-    ) -> Result<(), ControlPlaneStoreError> {
+    ) -> Result<bool, ControlPlaneStoreError> {
         sqlx::query(
             "UPDATE trigger_claim SET state = 'durably_started', invocation_id = ? \
              WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
@@ -284,7 +287,7 @@ impl ControlPlaneStore {
         .bind(key.stream_seq as i64)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Record that the run a `claimed` row names has durably started, if

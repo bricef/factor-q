@@ -85,6 +85,24 @@ const MARK_HEALED: &str = "marked trigger durably started after the claim store 
 const MARK_GAVE_UP: &str = "could not mark trigger durably started";
 /// The line for an ack the client could not send.
 const ACK_FAILED: &str = "failed to ack trigger message";
+/// The start of the line for a mark that found its claim gone and wrote
+/// one recording the start.
+const CLAIM_WRITTEN: &str =
+    "the claim of a trigger whose run started was gone when its start was marked";
+/// The start of the line for a mark that found another invocation's
+/// claim, not started, and recorded this run's start on it.
+const CLAIM_WRITTEN_OVER: &str =
+    "the claim of a trigger whose run started named another invocation, not started";
+/// The start of the line for a mark that found another run's start on the
+/// claim, and left it.
+const CLAIM_STARTED_BY_ANOTHER: &str =
+    "the claim of a trigger whose run started already records another run's start";
+/// The start of the line for a start the store would not record on a
+/// claim the mark did not find.
+const START_NOT_RECORDED: &str =
+    "could not record the durable start of a trigger whose claim does not name its run";
+/// The invocation a changed claim names ([`ClaimChange`]).
+const ANOTHER_RUN: &str = "another-run";
 
 /// How long a test waits for a line, a delivery or the dispatcher.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -206,6 +224,23 @@ enum Script {
     /// Makes the claim store refuse every mark, and closes the connection
     /// the dispatcher answers its deliveries on.
     RefusedMarksAndClosedConnection,
+    /// Changes the claim row as the [`ClaimChange`] says, so the mark
+    /// meets a claim that does not name the run.
+    ChangedClaim(ClaimChange),
+}
+
+/// How [`Script::ChangedClaim`] changes the claim before the mark.
+#[derive(Clone, Copy)]
+enum ClaimChange {
+    /// Deletes it.
+    Gone,
+    /// Deletes it, and makes the store refuse every insert and update of a
+    /// claim row.
+    GoneAndRefused,
+    /// Names [`ANOTHER_RUN`] on it, still `claimed`.
+    ClaimedByAnother,
+    /// Names [`ANOTHER_RUN`] on it, marked `durably_started`.
+    StartedByAnother,
 }
 
 /// Which attempts to mark the claim the store refuses.
@@ -258,6 +293,7 @@ impl Worker for Stub {
                 refuse_claim_marks(&self.claim_db, Refusals::Every).await;
                 close(&self.connection).await;
             }
+            Script::ChangedClaim(change) => change_the_claim(&self.claim_db, change).await,
         }
         durable_start.fire();
         // One more turn of `handle`'s loop, which marks and acks on the
@@ -351,6 +387,40 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
     let mut conn = claim_db_connection(claim_db).await;
     for statement in statements {
         sqlx::query(statement)
+            .execute(&mut conn)
+            .await
+            .expect("install the refusal");
+    }
+    conn.close().await.expect("close the claim store's file");
+}
+
+/// Change the one claim row as `change` says.
+async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
+    let mut conn = claim_db_connection(claim_db).await;
+    let refuse = [
+        "CREATE TRIGGER refuse_claim_inserts BEFORE INSERT ON trigger_claim \
+         BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the write'); END",
+        "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
+         BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the mark'); END",
+    ];
+    let (statement, then): (&'static str, &[&'static str]) = match change {
+        ClaimChange::Gone => ("DELETE FROM trigger_claim", &[]),
+        ClaimChange::GoneAndRefused => ("DELETE FROM trigger_claim", &refuse),
+        ClaimChange::ClaimedByAnother => ("UPDATE trigger_claim SET invocation_id = ?", &[]),
+        ClaimChange::StartedByAnother => (
+            "UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'",
+            &[],
+        ),
+    };
+    let query = sqlx::query(statement);
+    let query = if statement.contains('?') {
+        query.bind(ANOTHER_RUN)
+    } else {
+        query
+    };
+    query.execute(&mut conn).await.expect("change the claim");
+    for statement in then {
+        sqlx::query(*statement)
             .execute(&mut conn)
             .await
             .expect("install the refusal");
@@ -870,5 +940,111 @@ async fn a_failed_ack_after_a_refused_mark_is_one_error_line_naming_the_trigger(
             .len(),
         1,
         "the refused mark is logged once"
+    );
+}
+
+/// The one line `message` names for `daemon`'s trigger, checked to be an
+/// `error` that names the run, the trigger and the sequence, and that no
+/// line says the mark was given up: the mark landed, matching nothing.
+fn the_one_error_line_naming_the_run(
+    daemon: &Daemon,
+    message: &str,
+    (trigger_id, invocation_id): (Uuid, Uuid),
+) -> Line {
+    let lines = daemon
+        .log
+        .lines(|line| about(line, message, &daemon.subject));
+    assert_eq!(lines.len(), 1, "the case is logged once: {lines:#?}");
+    let line = lines[0].clone();
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert_eq!(
+        line.field("invocation_id"),
+        Some(invocation_id.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("trigger_id"),
+        Some(trigger_id.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert!(line.field("stream_seq").is_some(), "{line:#?}");
+    assert!(
+        daemon
+            .log
+            .lines(|line| about(line, MARK_GAVE_UP, &daemon.subject))
+            .is_empty(),
+        "the mark was not refused, so nothing says it was given up"
+    );
+    line
+}
+
+/// **A mark that found its claim gone, and wrote one recording the start,
+/// is one `error` line naming the run, the trigger and the sequence**
+/// (issue 1046). Something deleted a claim that a run which started still
+/// held, and the line is the only record of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mark_that_found_its_claim_gone_is_one_error_line_naming_the_run() {
+    let mut daemon = Daemon::new("claim-gone", Script::ChangedClaim(ClaimChange::Gone)).await;
+    let named = daemon.run_one().await;
+
+    the_one_error_line_naming_the_run(&daemon, CLAIM_WRITTEN, named);
+}
+
+/// **A mark that found another invocation's claim, not started, and
+/// recorded this run's start on it, is one `error` line naming both
+/// invocations** (issue 1046).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mark_that_wrote_over_another_invocations_claim_is_one_error_line_naming_both() {
+    let mut daemon = Daemon::new(
+        "claim-of-another",
+        Script::ChangedClaim(ClaimChange::ClaimedByAnother),
+    )
+    .await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, CLAIM_WRITTEN_OVER, named);
+    assert_eq!(
+        line.field("claim_invocation_id"),
+        Some(ANOTHER_RUN),
+        "{line:#?}"
+    );
+}
+
+/// **A mark that found another run's start on the claim is one `error`
+/// line naming both runs**, since the trigger has run twice (issue 1046).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mark_that_found_another_runs_start_is_one_error_line_naming_both() {
+    let mut daemon = Daemon::new(
+        "started-by-another",
+        Script::ChangedClaim(ClaimChange::StartedByAnother),
+    )
+    .await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, CLAIM_STARTED_BY_ANOTHER, named);
+    assert_eq!(
+        line.field("started_invocation_id"),
+        Some(ANOTHER_RUN),
+        "{line:#?}"
+    );
+}
+
+/// **A start the claim store would not record, on a claim the mark did not
+/// find, is one `error` line naming the run and the store's error** (issue
+/// 1046). No claim records the run's start, and this line is what says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_could_not_be_recorded_is_one_error_line_naming_the_run() {
+    let mut daemon = Daemon::new(
+        "start-not-recorded",
+        Script::ChangedClaim(ClaimChange::GoneAndRefused),
+    )
+    .await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, START_NOT_RECORDED, named);
+    assert!(
+        line.field("error")
+            .is_some_and(|error| error.contains("injected")),
+        "{line:#?}"
     );
 }

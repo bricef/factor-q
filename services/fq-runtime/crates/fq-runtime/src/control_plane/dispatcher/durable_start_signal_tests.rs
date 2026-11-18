@@ -32,6 +32,14 @@
 //! restart to a replayed copy of its trigger, where startup recovery's
 //! marking of finished runs takes over.
 //!
+//! **A mark that finds its claim changed (#1046).** The stub changes the
+//! claim row through a connection of its own just before the signal
+//! fires ([`change_the_claim`]): it deletes it, or names another
+//! invocation on it, claimed or started. The mark then matches no claim
+//! naming its run, and these tests pin what the claim and the delivery
+//! end as: a claim recording a start, which refuses a copy that comes
+//! back, and one ack that releases nothing.
+//!
 //! **A long setup (#967).** From the worker permit to the durable start a
 //! run provisions its workspace, starts its per-invocation MCP servers
 //! and publishes `triggered`, and that can take longer than the
@@ -162,7 +170,30 @@ enum Resolve {
     /// to mark the claim blocks on the lock and is refused once it gets
     /// through.
     FireIntoLockedStore(Duration),
+    /// Change the claim row as the [`ClaimChange`] says, then fire it: the
+    /// first WAL write has landed, and the mark meets a claim that no
+    /// longer names the run.
+    FireOnAChangedClaim(ClaimChange),
 }
+
+/// How [`Resolve::FireOnAChangedClaim`] changes the claim before the mark.
+#[derive(Clone, Copy)]
+enum ClaimChange {
+    /// Delete it, as a release an earlier copy gave up on deletes it when
+    /// it lands after this copy took the claim again (issue 1061).
+    Gone,
+    /// Delete it, and make the claim store refuse every insert and update
+    /// of a claim row from then on.
+    GoneAndRefused,
+    /// Name [`ANOTHER_RUN`] on it, still `claimed`: another copy's claim.
+    ClaimedByAnother,
+    /// Name [`ANOTHER_RUN`] on it, marked `durably_started`: another run's
+    /// start.
+    StartedByAnother,
+}
+
+/// The invocation a changed claim names ([`ClaimChange`]).
+const ANOTHER_RUN: &str = "another-run";
 
 /// Which attempts to mark the claim the store refuses.
 #[derive(Clone, Copy)]
@@ -281,6 +312,10 @@ impl Worker for ResolvesThenReturns {
                 lock_claim_store(&self.claim_db, held_for).await;
                 durable_start.fire();
             }
+            Resolve::FireOnAChangedClaim(change) => {
+                change_the_claim(&self.claim_db, change).await;
+                durable_start.fire();
+            }
         }
         match self.turn {
             Turn::Later => tokio::task::yield_now().await,
@@ -366,6 +401,44 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
             .execute(&mut conn)
             .await
             .expect("install the refusal");
+    }
+    conn.close().await.expect("close the claim store's file");
+}
+
+/// Change the one claim row as `change` says, through a connection of its
+/// own to the store's file.
+async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the claim store's file");
+    let statements: Vec<sqlx::query::Query<'_, sqlx::Sqlite, _>> = match change {
+        ClaimChange::Gone => vec![sqlx::query("DELETE FROM trigger_claim")],
+        ClaimChange::GoneAndRefused => vec![
+            sqlx::query("DELETE FROM trigger_claim"),
+            sqlx::query(
+                "CREATE TRIGGER refuse_claim_inserts BEFORE INSERT ON trigger_claim \
+                 BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the write'); END",
+            ),
+            sqlx::query(
+                "CREATE TRIGGER refuse_claim_marks BEFORE UPDATE ON trigger_claim \
+                 BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the mark'); END",
+            ),
+        ],
+        ClaimChange::ClaimedByAnother => {
+            vec![sqlx::query("UPDATE trigger_claim SET invocation_id = ?").bind(ANOTHER_RUN)]
+        }
+        ClaimChange::StartedByAnother => vec![
+            sqlx::query("UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'")
+                .bind(ANOTHER_RUN),
+        ],
+    };
+    for statement in statements {
+        statement
+            .execute(&mut conn)
+            .await
+            .expect("change the claim");
     }
     conn.close().await.expect("close the claim store's file");
 }
@@ -2188,4 +2261,193 @@ async fn a_failed_mark_after_a_transient_error_in_the_same_poll_acks_and_keeps_t
     pulled.handle().await;
 
     assert_acked_with_the_claim_kept(&mut pulled).await;
+}
+
+/// The claim on this delivery's identity, read without writing.
+async fn the_claim(pulled: &Pulled) -> Option<crate::control_plane::store::TriggerClaimRow> {
+    pulled
+        .claims
+        .trigger_claim(test_key(&pulled.bus, pulled.stream_seq()))
+        .await
+        .expect("read the claim")
+}
+
+/// The signal fires on a run whose claim the mark finds as it should: it
+/// names the run and is `claimed`. The claim ends recording the run's
+/// start under the run's own id, and the delivery is acked once with
+/// nothing else sent but keepalives (#1046: what the mark's report must
+/// not change).
+#[tokio::test]
+async fn a_mark_that_finds_its_claim_marks_it_for_its_run_and_acks_once() {
+    let mut pulled = Pulled::new(Resolve::Fire, Turn::Later, Returns::Completed).await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let (_, run) = pulled.named();
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: run.to_string()
+        },
+        "the claim records the run's start under the run's own id"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// **A mark that finds its claim gone writes one recording the start
+/// (issue 1046).** The run made its first WAL write, and by the time the
+/// dispatcher marks it its claim is gone, as a release an earlier copy
+/// gave up on leaves it when it lands after this copy took the claim again
+/// (issue 1061). The mark matches nothing. The run started, and the claim
+/// is what refuses a copy of the trigger that comes back, so the claim the
+/// mark expected is written, recording the run's start under its id, and
+/// the delivery is acked once, releasing nothing. Before issue 1046 the
+/// mark reported success and the delivery was acked with no claim at all,
+/// so a lost ack or a replay of the stream started the trigger again.
+#[tokio::test]
+async fn a_mark_that_finds_its_claim_gone_writes_one_recording_the_start_and_acks_once() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireOnAChangedClaim(ClaimChange::Gone),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    assert!(
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on"
+    );
+    let (_, run) = pulled.named();
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: run.to_string()
+        },
+        "the run started with its claim gone, so a claim recording its start must be written, \
+         and a copy of the trigger that comes back refused by it"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
+}
+
+/// **A mark that finds its claim naming another invocation, not started,
+/// records this run's start on it (issue 1046).** The run started, and by
+/// the time the dispatcher marks it the claim names another invocation,
+/// still `claimed`: a copy that claimed the trigger afresh after this
+/// copy's claim was deleted underneath it. That copy's run may never
+/// start, and its release would then delete the trigger's only claim, so
+/// this run's start is recorded on the claim in that invocation's place,
+/// and the delivery is acked once. The mark did the same before issue 1046,
+/// without saying so; the test pins that its report does not lose it.
+#[tokio::test]
+async fn a_mark_that_finds_another_invocations_claim_records_this_start_on_it() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::ClaimedByAnother),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let (_, run) = pulled.named();
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: run.to_string()
+        },
+        "the claim must record this run's start, which the other copy's release cannot delete"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// **A mark that finds another run's start on its claim leaves it (issue
+/// 1046).** Two runs of the trigger have started, and the other's start is
+/// on the claim already, which is all a copy that comes back needs to be
+/// refused. The claim is left naming that run, where the mark before issue
+/// 1046 moved it to this one without saying so, and the delivery is acked
+/// once, releasing nothing.
+#[tokio::test]
+async fn a_mark_that_finds_another_runs_start_leaves_the_claim_and_acks_once() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::StartedByAnother),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: ANOTHER_RUN.to_string()
+        },
+        "the claim records another run's start, and must be left naming it"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// **A start that cannot be recorded on a gone claim is still acked once,
+/// and the run runs on (issue 1046).** The claim is gone when the mark
+/// comes, and the claim store refuses the write that would record the
+/// start. The run started, so the delivery is acked, keeping it from being
+/// redelivered and run again now, and the run is not stopped; no claim
+/// records the start, which only the log line says.
+#[tokio::test]
+async fn a_start_that_cannot_be_recorded_on_a_gone_claim_is_still_acked_once() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireOnAChangedClaim(ClaimChange::GoneAndRefused),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    assert!(
+        pulled.ran_to_end(),
+        "the invocation was stopped instead of driven on"
+    );
+    assert_eq!(
+        the_claim(&pulled).await,
+        None,
+        "the store refused every write, so no claim is left"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
 }

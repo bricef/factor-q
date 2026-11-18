@@ -782,6 +782,66 @@ async fn a_claim_is_marked_started_by_its_key_while_it_names_the_run() {
     );
 }
 
+/// **The dispatcher's mark of a durable start says whether it marked the
+/// claim (issue 1046).** It marks the claim that names its run, and says
+/// so again for a claim already marked for that run, as a retry of a mark
+/// that landed finds it. A key with no row, or a row naming another
+/// invocation, is reported as not marked, and the row is left as it is.
+#[tokio::test]
+async fn a_durable_start_mark_reports_whether_it_marked_the_claim_naming_its_run() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-run", 100)
+        .await
+        .unwrap();
+    assert!(
+        store.mark_trigger_started(key(1), "inv-run").await.unwrap(),
+        "the claim naming the run is marked"
+    );
+    assert!(
+        store.mark_trigger_started(key(1), "inv-run").await.unwrap(),
+        "a claim already marked for the run is reported marked, as a retry finds it"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(1), "worker-b", "inv-copy", 101)
+            .await
+            .unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-run".to_string()
+        },
+        "a copy meets the run's start"
+    );
+
+    assert!(
+        !store.mark_trigger_started(key(2), "inv-run").await.unwrap(),
+        "a key with no row is reported as not marked"
+    );
+    assert_eq!(
+        store.trigger_claim(key(2)).await.unwrap(),
+        None,
+        "and the mark writes no row"
+    );
+
+    store
+        .claim_trigger(key(3), "worker-a", "inv-other", 100)
+        .await
+        .unwrap();
+    assert!(
+        !store.mark_trigger_started(key(3), "inv-run").await.unwrap(),
+        "a claim naming another invocation is reported as not marked"
+    );
+    let other = store
+        .trigger_claim(key(3))
+        .await
+        .unwrap()
+        .expect("the claim is still there");
+    assert!(
+        !other.durably_started && other.invocation_id.as_deref() == Some("inv-other"),
+        "and is left as it is: {other:?}"
+    );
+}
+
 /// **A recreated stream starts a new claim space.** JetStream restarts
 /// sequences at 1 when a stream is rebuilt, so a claim table keyed on
 /// the name and sequence alone would answer `Started` to the first N
