@@ -860,6 +860,13 @@ mod tests {
             "with the trigger gone there is no name to record, and this \
              watch does not invent one"
         );
+        let why = crate::dead_letter::from_event(&event)
+            .and_then(|dead| dead.unattributed)
+            .expect("it says why it names no trigger");
+        assert!(
+            why.contains("for an advisory that carries no timestamp the watch can read"),
+            "{why}"
+        );
     }
 
     /// The exact payload shape the server emits (captured from a live

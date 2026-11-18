@@ -239,7 +239,10 @@ async fn a_trigger_that_stays_unreadable_is_dead_lettered_at_the_limit_saying_wh
 /// **A trigger whose message is gone from the stream is dead-lettered as
 /// before**, at once and naming nothing: the broker says there is no
 /// message at that sequence, and no later read can name it. Here the
-/// message was deleted; aged out, it answers the same.
+/// message was deleted; aged out, it answers the same. The dead letter
+/// says why it names nothing, with when the watch read the stream and when
+/// the advisory was emitted, as one from an earlier incarnation does, so
+/// `unattributed` absent means the dead letter names its trigger.
 #[tokio::test]
 async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once() {
     let (_server, bus, agent) = broker().await;
@@ -266,4 +269,21 @@ async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once
     assert_eq!(dead.trigger_stream_seq, Some(published.stream_seq));
     assert_eq!(dead.trigger_payload, serde_json::Value::Null);
     assert_eq!(event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY), None);
+    let emitted = serde_json::from_slice::<serde_json::Value>(&advisory).unwrap()["timestamp"]
+        .as_str()
+        .map(|at| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        })
+        .expect("the broker stamps its advisory");
+    let why = dead.unattributed.expect("it says why it names no trigger");
+    assert!(
+        why.starts_with(
+            "the trigger's message was no longer on the trigger stream when the watch read it, at "
+        ) && why.contains(&format!("for an advisory emitted at {emitted}"))
+            && why.contains("24h after its publish"),
+        "{why}"
+    );
 }
