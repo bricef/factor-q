@@ -227,7 +227,11 @@ async fn a_trigger_that_stays_unreadable_is_dead_lettered_at_the_limit_saying_wh
     assert_eq!(event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY), None);
     let why = dead.unattributed.expect("it says why it names no trigger");
     assert!(
-        why.starts_with("the trigger's message could not be read"),
+        why.starts_with(
+            "the trigger's message could not be read by the watch's limit: the trigger stream \
+             was missing (the last read answered: "
+        ) && why.contains("error code 10059")
+            && !why.contains("may still be on the stream"),
         "{why}"
     );
 }

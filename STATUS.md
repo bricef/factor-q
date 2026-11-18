@@ -472,11 +472,12 @@ it names no trigger
 ([#1054](https://github.com/bricef/factor-q/issues/1054)). A
 redelivered advisory writes such a dead letter twice, as it does the
 form for a trigger that aged out of the stream, and that form carries no
-reason. The watch writes that form only when the stream no longer holds
-the trigger's message: a read that fails for any other reason holds the
-verdict, as unreadable records do, and past the hour and three looks
-the dead letter is written naming no trigger and saying the message
-could not be read
+reason. The watch writes that form only when the broker answers that it
+holds no message at the trigger's sequence: a read that fails for any
+other reason holds the verdict, as unreadable records do, and past the
+hour and three looks, unless a last look at the records finds the run
+started, the dead letter is written naming no trigger and saying the
+message could not be read; a redelivery writes that one twice too
 ([#1066](https://github.com/bricef/factor-q/issues/1066)). Two readings
 of an advisory's incarnation still attribute it to the message at its
 sequence. One with no timestamp the watch can read is taken as the

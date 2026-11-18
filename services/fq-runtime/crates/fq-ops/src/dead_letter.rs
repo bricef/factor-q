@@ -76,8 +76,9 @@ pub struct DeadLetter {
     /// trigger. Or the watch could not read the trigger's message off the
     /// stream, for a reason other than its absence, before its limit ran
     /// out (an hour after the advisory, and three looks): the reason gives
-    /// what the last read answered, and the message may still be on the
-    /// stream at `trigger_stream_seq`. Either way the dead letter is
+    /// what the last read answered, and, unless that was that the trigger
+    /// stream is missing, says the message may still be on the stream at
+    /// `trigger_stream_seq`. Either way the dead letter is
     /// recorded under the system sentinel with no subject, payload or
     /// trigger id, and `dead_letter.requeue` refuses it. Absent on every
     /// other dead letter, including one written under the system sentinel

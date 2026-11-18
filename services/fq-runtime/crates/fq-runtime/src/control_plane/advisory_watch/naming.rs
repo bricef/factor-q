@@ -10,8 +10,10 @@
 //! - the message;
 //! - no message at that sequence, the client's
 //!   `RawMessageErrorKind::NoMessageFound` (the broker's error code 10037):
-//!   it aged out of the stream, was deleted, or never was. No later read can
-//!   name the trigger, so the dead letter is written at once, naming none;
+//!   the broker's word for a message that aged out of the stream, was
+//!   deleted, or never was, and also for one its store failed to load,
+//!   which the client cannot tell apart. The watch takes it as gone and
+//!   writes the dead letter at once, naming none;
 //! - anything else: the request timed out, the stream is missing (code
 //!   10059), the broker erred. The message may well be on the stream, and a
 //!   later read may name it, so the verdict is held, as one is when the
@@ -23,6 +25,7 @@
 //! (`get_stream_no_info`), so the read is one request and its one answer
 //! decides.
 
+use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::message::StreamMessage;
 use async_nats::jetstream::stream::RawMessageErrorKind;
 use tracing::info;
@@ -125,14 +128,17 @@ impl AdvisoryWatch {
                 unattributed: None,
             }),
             TriggerRead::Gone => Ok(Named::nothing()),
-            TriggerRead::Unreadable(err) if !looked_long_enough => Err(Hold {
-                why: held_while_unreadable(&err),
+            TriggerRead::Unreadable { answer, .. } if !looked_long_enough => Err(Hold {
+                why: held_while_unreadable(&answer),
                 stream_seq: advisory.stream_seq,
                 subject: String::new(),
                 invocation_id: None,
             }),
-            TriggerRead::Unreadable(err) => Ok(Named {
-                unattributed: Some(unreadable_at_the_limit(&err)),
+            TriggerRead::Unreadable {
+                answer,
+                stream_missing,
+            } => Ok(Named {
+                unattributed: Some(unreadable_at_the_limit(&answer, stream_missing)),
                 ..Named::nothing()
             }),
         }
@@ -163,22 +169,41 @@ pub(super) fn unattributed_reason(
 enum TriggerRead {
     /// The message.
     Found(StreamMessage),
-    /// The stream holds no message at that sequence, and never will.
+    /// The broker says the stream holds no message at that sequence.
     Gone,
-    /// The read failed for another reason, given: decide again later.
-    Unreadable(String),
+    /// The read failed for another reason: decide again later.
+    Unreadable {
+        /// What the read answered.
+        answer: String,
+        /// Whether the answer was that the trigger stream is missing (code
+        /// 10059), which leaves no message to find on it.
+        stream_missing: bool,
+    },
 }
 
 /// Read the message at `stream_seq` on the trigger stream.
 async fn read_trigger(jetstream: &async_nats::jetstream::Context, stream_seq: u64) -> TriggerRead {
     let stream = match jetstream.get_stream_no_info(TRIGGER_STREAM_NAME).await {
         Ok(stream) => stream,
-        Err(err) => return TriggerRead::Unreadable(err.to_string()),
+        Err(err) => {
+            return TriggerRead::Unreadable {
+                answer: err.to_string(),
+                stream_missing: false,
+            };
+        }
     };
     match stream.get_raw_message(stream_seq).await {
         Ok(raw) => TriggerRead::Found(raw),
-        Err(err) if err.kind() == RawMessageErrorKind::NoMessageFound => TriggerRead::Gone,
-        Err(err) => TriggerRead::Unreadable(err.to_string()),
+        Err(err) => match err.kind() {
+            RawMessageErrorKind::NoMessageFound => TriggerRead::Gone,
+            kind => TriggerRead::Unreadable {
+                answer: err.to_string(),
+                stream_missing: matches!(
+                    kind,
+                    RawMessageErrorKind::JetStream(js) if js.error_code() == ErrorCode::STREAM_NOT_FOUND
+                ),
+            },
+        },
     }
 }
 
@@ -189,11 +214,20 @@ fn held_while_unreadable(err: &str) -> String {
 }
 
 /// Why a dead letter written at the watch's limit, with the trigger's
-/// message still unreadable, names no trigger.
-fn unreadable_at_the_limit(err: &str) -> String {
-    format!(
-        "the trigger's message could not be read off the trigger stream by the watch's limit \
-         (the last read answered: {err}), so the trigger is not named, though its message may \
-         still be on the stream"
-    )
+/// message still unreadable, names no trigger: `answer` is what the last
+/// read answered. The message may still be on the stream unless the answer
+/// was that the stream is missing, and only then does the reason say so.
+pub(super) fn unreadable_at_the_limit(answer: &str, stream_missing: bool) -> String {
+    if stream_missing {
+        format!(
+            "the trigger's message could not be read by the watch's limit: the trigger stream \
+             was missing (the last read answered: {answer}), so the trigger is not named"
+        )
+    } else {
+        format!(
+            "the trigger's message could not be read off the trigger stream by the watch's limit \
+             (the last read answered: {answer}), so the trigger is not named, though its message \
+             may still be on the stream"
+        )
+    }
 }

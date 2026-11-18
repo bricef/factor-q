@@ -1522,22 +1522,33 @@ its run after it, which is why the dead letter is marked.
 
 **A trigger whose message cannot be read is held too.** To name the dead
 letter, the watch reads the trigger's message at the advisory's
-sequence. If the stream no longer holds it (it ages out a day after its
-publish, or was deleted), the dead letter is written at once for the
-system with no subject, payload or trigger id. If the read fails for
-another reason, such as the broker not answering in time or the trigger
-stream being missing, the message may still be there, so the watch
-holds its verdict and reads again when the advisory comes back; the
-hold line's `reason=` says `the trigger's message could not be read`
-with what the read answered
-([#1066](https://github.com/bricef/factor-q/issues/1066)). The hold ends
-as above, about an hour after the advisory and after three looks: unless
-a last look at the records finds the run started, the watch writes the
-dead letter for the system, and `fq dead-letters list` gives it
-`names no trigger: the trigger's message could not be read off the
-trigger stream by the watch's limit (the last read answered: …)`. Its
-message may still be on the stream at its `seq=`, and
-`fq dead-letters requeue` refuses it.
+sequence. If the broker answers that it holds no message there, which it
+does for one that aged out a day after its publish or was deleted, and
+also for one its store failed to load, which the watch cannot tell
+apart, the dead letter is written at once for the system with no
+subject, payload or trigger id. If the read fails for another reason,
+such as the broker not answering in time or the trigger stream being
+missing, the message may yet be read, so the watch holds its verdict
+and reads again when the advisory comes back; the hold line's `reason=`
+says `the trigger's message could not be read` with what the read
+answered, and its `subject=` is empty, since no message was read
+([#1066](https://github.com/bricef/factor-q/issues/1066)). A missing
+stream does not last: deleting the trigger stream normally stops the
+daemon within a second, and its next start takes the advisory as an
+earlier incarnation's. The hold ends as above, about an hour after the
+advisory and after three looks: unless a last look at the records finds
+the run started, the watch writes the dead letter for the system, and
+`fq dead-letters list` gives it `names no trigger: the trigger's message
+could not be read off the trigger stream by the watch's limit (the last
+read answered: …), so the trigger is not named, though its message may
+still be on the stream`, or, when the last read found the trigger stream
+missing, `the trigger's message could not be read by the watch's limit:
+the trigger stream was missing (…)`. `fq dead-letters requeue` refuses
+it. An advisory first seen after its hour still gets its three looks,
+about three seconds, or about half a minute when each read times out,
+and is then written off this way: unlike a verdict held on the records,
+which ends in a dead letter marked `start not checked` that names its
+trigger, this one names none.
 
 **An advisory from an earlier incarnation of the trigger stream names no
 trigger.** A recreated trigger stream numbers its messages from 1 again,
