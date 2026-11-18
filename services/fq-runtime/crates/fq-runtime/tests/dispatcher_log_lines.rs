@@ -94,6 +94,9 @@ const MARK_GAVE_UP: &str = "could not mark trigger durably started";
 const ACK_FAILED: &str = "failed to ack trigger message";
 /// The line for a claim's release the claim store refused.
 const RELEASE_FAILED: &str = "failed to release unfinished trigger claim";
+/// The start of the line for a release that found no claim of its own to
+/// give back.
+const RELEASED_NOTHING: &str = "released no trigger claim";
 /// The start of the line for a mark that found its claim gone and wrote
 /// one recording the start.
 const CLAIM_WRITTEN: &str =
@@ -253,6 +256,10 @@ enum Script {
     /// rate limit does; its resume then finds the run already ended, as
     /// an operator's drop folded while it slept leaves it.
     DeferredThenEndedBeforeItsResume,
+    /// Names [`ANOTHER_RUN`] on the claim, still `claimed`, then ends the
+    /// run with a transient error before its first WAL write: the claim's
+    /// release before the NAK finds no claim of its own to give back.
+    FailsBeforeStartWithTheClaimTakenAway,
 }
 
 /// How [`Script::ChangedClaim`] changes the claim before the mark.
@@ -332,8 +339,13 @@ impl Worker for Stub {
                 self.ended.notify_one();
                 return Err(ExecutorError::WorkerStore(TRANSIENT_FAILURE.to_string()));
             }
-            Script::FailsBeforeStartWithReleasesRefused => {
-                refuse_claim_releases(&self.claim_db).await;
+            Script::FailsBeforeStartWithReleasesRefused
+            | Script::FailsBeforeStartWithTheClaimTakenAway => {
+                if matches!(self.script, Script::FailsBeforeStartWithReleasesRefused) {
+                    refuse_claim_releases(&self.claim_db).await;
+                } else {
+                    change_the_claim(&self.claim_db, ClaimChange::ClaimedByAnother).await;
+                }
                 drop(durable_start);
                 self.ended.notify_one();
                 return Err(ExecutorError::WorkerStore(
@@ -1424,4 +1436,56 @@ async fn a_deferred_run_that_ended_before_its_resume_is_one_info_line() {
         names(line) && matches!(line.level, tracing::Level::WARN | tracing::Level::ERROR)
     });
     assert!(alarms.is_empty(), "nothing at warn or above: {alarms:#?}");
+}
+
+/// **A release that finds no claim of its own to give back is one `warn`
+/// line naming the invocation that gave it back, the delivery, and the
+/// claim as it stands now** (issue 1055). Every release is made by a copy
+/// whose claim is `claimed` under its own invocation, so one that removes
+/// nothing means something changed the claim underneath it; after a
+/// landed mark there is no release at all. Here the claim names another
+/// invocation by the time the run fails before its first WAL write. What
+/// the claim holds now is what tells the causes apart, so the line says
+/// it, and it carries the subject, trigger and answer the NAK's lines
+/// carry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_that_gives_nothing_back_is_one_warn_line_naming_the_invocation() {
+    let mut daemon = Daemon::new(
+        "release-gives-nothing",
+        Script::FailsBeforeStartWithTheClaimTakenAway,
+    )
+    .await;
+    let (_, invocation_id) = daemon.run_one().await;
+    let invocation_id = invocation_id.to_string();
+    let named = |line: &Line| {
+        line.message.contains(RELEASED_NOTHING)
+            && line.field("invocation_id") == Some(invocation_id.as_str())
+    };
+    daemon
+        .log
+        .wait_for("for the release that gave nothing back", named)
+        .await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::WARN, "{line:#?}");
+    assert!(line.field("stream_seq").is_some(), "{line:#?}");
+    assert_eq!(
+        line.field("subject"),
+        Some(daemon.subject.as_str()),
+        "{line:#?}"
+    );
+    assert!(
+        line.field("trigger_id").is_some_and(|id| id != "-"),
+        "{line:#?}"
+    );
+    assert!(line.field("context").is_some(), "{line:#?}");
+    assert_eq!(line.field("claim_state"), Some("claimed"), "{line:#?}");
+    assert_eq!(
+        line.field("claim_invocation_id"),
+        Some(ANOTHER_RUN),
+        "{line:#?}"
+    );
+    assert!(line.field("claimant").is_some(), "{line:#?}");
 }
