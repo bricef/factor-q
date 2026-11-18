@@ -954,6 +954,38 @@ mod tests {
         );
     }
 
+    /// The reason a dead letter whose message the broker says is gone
+    /// names no trigger gives what the broker answered and when the watch
+    /// last read the stream, then what the watch makes of it, with the
+    /// advisory's time when it can read one.
+    #[test]
+    fn a_gone_messages_dead_letter_says_what_the_broker_answered() {
+        let time = |at: &str| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(
+            naming::gone_reason(
+                time("2026-11-18T09:30:00.125Z"),
+                Some(time("2026-11-18T09:29:58Z"))
+            ),
+            "the broker answered that the trigger stream held no message at this sequence when \
+             the watch last read it, at 2026-11-18T09:30:00.125Z, for an advisory emitted at \
+             2026-11-18T09:29:58Z: the stream keeps a message 24h after its publish, so it most \
+             likely aged out, or was deleted sooner; the broker answers the same for a message \
+             it cannot load"
+        );
+        assert_eq!(
+            naming::gone_reason(time("2026-11-18T09:30:00Z"), None),
+            "the broker answered that the trigger stream held no message at this sequence when \
+             the watch last read it, at 2026-11-18T09:30:00Z, for an advisory that carries no \
+             timestamp the watch can read: the stream keeps a message 24h after its publish, so \
+             it most likely aged out, or was deleted sooner; the broker answers the same for a \
+             message it cannot load"
+        );
+    }
+
     /// The reason an earlier incarnation's dead letter names no trigger
     /// gives both times, so an operator can tell when the stream was
     /// recreated, and says the sequence is not this stream's.

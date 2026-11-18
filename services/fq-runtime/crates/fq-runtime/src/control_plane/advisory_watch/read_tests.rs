@@ -285,7 +285,8 @@ async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once
     let why = dead.unattributed.expect("it says why it names no trigger");
     assert!(
         why.starts_with(
-            "the trigger's message was no longer on the trigger stream when the watch read it, at "
+            "the broker answered that the trigger stream held no message at this sequence when \
+             the watch last read it, at "
         ) && why.contains(&format!("for an advisory emitted at {emitted}"))
             && why.contains("24h after its publish"),
         "{why}"

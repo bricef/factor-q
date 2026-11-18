@@ -3,6 +3,6 @@
   2026-01-02 03:04:05  system  seq=4 via advisory
       trigger exhausted after 5 deliveries (limit 5) [advisory]
       payload: null
-      names no trigger: the trigger's message was no longer on the trigger stream when the watch read it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: the stream keeps a message 24h after its publish, so it had aged out, unless it was deleted sooner; `fq dead-letters requeue` refuses it
+      names no trigger: the broker answered that the trigger stream held no message at this sequence when the watch last read it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: the stream keeps a message 24h after its publish, so it most likely aged out, or was deleted sooner; the broker answers the same for a message it cannot load; `fq dead-letters requeue` refuses it
 
 -> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one
