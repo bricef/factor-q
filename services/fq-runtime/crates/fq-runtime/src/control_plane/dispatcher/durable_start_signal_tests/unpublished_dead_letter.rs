@@ -18,7 +18,11 @@
 //! behaviour the design rests on, against the pinned broker: a NAK with no
 //! delay raises the advisory at once, and one that carries a delay, even of
 //! zero, does not, because the broker counts that delay from the consumer's
-//! first ack window and then waits out the ladder's last entry.
+//! first ack window and then waits out the ladder's last entry. "At once"
+//! needs a pull waiting on the consumer, which the dispatcher's consume loop
+//! keeps while it runs (pinned through the real loop in
+//! `tests/dispatcher_log_lines.rs`); the second test pins what happens with
+//! none: nothing until the next pull, which then raises it.
 //!
 //! **What is real:** the dispatcher's `handle`, its claim store, the
 //! broker, the advisory capture stream, and the dead-letter watch, run as
@@ -41,14 +45,20 @@
 use std::time::Duration;
 
 use async_nats::jetstream::AckKind;
+use async_nats::jetstream::consumer::PullConsumer;
+use futures::StreamExt;
 use serde_json::json;
 use tokio::sync::oneshot;
 
 use super::{
-    CapturedAdvisory, Pulled, Resolve, Returns, Turn, captured_advisory_within, dead_letters_of,
-    test_key, within_the_test_deadline,
+    CapturedAdvisory, Pulled, RELEASE_HELD_FOR, Resolve, Returns, SHORT_ACK_WINDOW, Setup, Turn,
+    captured_advisory_on, captured_advisory_within, dead_letters_of, test_key, unique_agent_id,
+    unique_consumer_name, within_the_test_deadline,
 };
-use crate::bus::{ADVISORY_STREAM_NAME, EventBus, STREAM_NAME};
+use crate::agent::AgentId;
+use crate::bus::{
+    ADVISORY_STREAM_NAME, EventBus, NATS_DEFAULT_MAX_ACK_PENDING, STREAM_NAME, TRIGGER_MAX_DELIVER,
+};
 use crate::control_plane::advisory_watch::{
     AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER,
 };
@@ -57,6 +67,7 @@ use crate::dead_letter::{
     DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
 };
 use crate::events::{Event, EventPayload, FailureKind, subjects};
+use crate::test_support::nats::test_nats;
 use crate::trigger::agent_id_from_subject;
 
 /// How soon after the NAK that ends a trigger's last delivery the broker
@@ -192,6 +203,162 @@ async fn the_broker_raises_the_advisory_at_once_only_for_a_nak_with_no_delay() {
     .await;
 }
 
+/// One delivery off `consumer`, by a pull for one message that ends with it,
+/// so no pull is left waiting at the broker afterwards.
+async fn pull_one(consumer: &PullConsumer) -> async_nats::jetstream::Message {
+    let mut batch = consumer
+        .batch()
+        .max_messages(1)
+        .expires(Duration::from_secs(5))
+        .messages()
+        .await
+        .expect("pull one delivery");
+    batch
+        .next()
+        .await
+        .expect("a delivery within the pull's five seconds")
+        .expect("a delivery")
+}
+
+/// **With no pull waiting, a bare NAK on a last delivery raises nothing
+/// until the consumer next pulls; the trigger stays pending meanwhile, and
+/// that pull raises the advisory at once.** This is what a daemon that has
+/// stopped pulling leaves behind (its consume loop ended on a drain or a
+/// shutdown while the delivery was being settled): the broker reports the
+/// trigger at the next start's first pull, and does not lose it.
+///
+/// On a durable configured as the dispatcher's, each delivery is taken by a
+/// pull for one message, which ends with it, so nothing is waiting when the
+/// fifth and last is NAKed. No advisory comes for [`NONE_COMES`] and the
+/// delivery is still pending; a further pull delivers nothing and raises
+/// the advisory within [`AT_ONCE`] of being sent.
+#[tokio::test]
+async fn a_bare_nak_with_no_pull_waiting_is_reported_at_the_next_pull() {
+    within_the_test_deadline(async {
+        let server = test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let agent = unique_agent_id("no-pull-waiting");
+        let name = unique_consumer_name();
+        let mut consumer = bus
+            .trigger_consumer_with_filter(
+                &name,
+                &subjects::trigger(&agent),
+                NATS_DEFAULT_MAX_ACK_PENDING,
+            )
+            .await
+            .expect("a durable configured as the dispatcher's");
+        bus.publish_trigger(&AgentId::new(&agent).unwrap(), &json!({"input": "hi"}))
+            .await
+            .expect("publish the trigger");
+        let mut last = pull_one(&consumer).await;
+        while last.info().expect("a JetStream delivery").delivered < TRIGGER_MAX_DELIVER {
+            last.ack_with(AckKind::Nak(None))
+                .await
+                .expect("redeliver the trigger");
+            last = pull_one(&consumer).await;
+        }
+        let state = consumer.info().await.expect("the durable's state").clone();
+        assert_eq!(state.num_waiting, 0, "a pull is waiting: {state:?}");
+
+        last.ack_with(AckKind::Nak(None))
+            .await
+            .expect("NAK the last delivery");
+
+        assert!(
+            captured_advisory_on(&bus, &name, NONE_COMES)
+                .await
+                .is_none(),
+            "the broker raised the advisory with no pull waiting"
+        );
+        let state = consumer.info().await.expect("the durable's state").clone();
+        assert_eq!(
+            state.num_ack_pending, 1,
+            "the trigger is no longer pending, with no advisory: {state:?}"
+        );
+        let pulled_at = chrono::Utc::now();
+        let mut batch = consumer
+            .batch()
+            .max_messages(1)
+            .expires(Duration::from_secs(1))
+            .messages()
+            .await
+            .expect("pull again");
+        if let Some(Ok(delivered)) = batch.next().await {
+            panic!(
+                "the pull got a delivery: {:?}",
+                delivered.info().map(|info| info.delivered)
+            );
+        }
+        let advisory = captured_advisory_on(&bus, &name, AT_ONCE)
+            .await
+            .expect("the next pull raised no advisory");
+        assert_raised_at_once_by(&advisory, pulled_at);
+        let state = consumer.info().await.expect("the durable's state").clone();
+        assert_eq!(
+            state.num_ack_pending, 0,
+            "the advisory came and the trigger is still pending: {state:?}"
+        );
+    })
+    .await;
+}
+
+/// **A hand-over gives the claim back before its NAK.** The NAK makes the
+/// broker raise its advisory at once, and the watch that reads it should
+/// find no claim and write the dead letter on its first look; a NAK sent
+/// before the release would let the watch find the claim still `claimed`
+/// and hold its verdict once. The release is held up: the claim store's
+/// write lock is taken as the run returns and kept for
+/// [`RELEASE_HELD_FOR`], so the release lands only after that, and the
+/// bare NAK has to come after it. The delivery is kept alive meanwhile.
+#[tokio::test]
+async fn a_hand_over_gives_the_claim_back_before_its_nak() {
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up_with_a_held_release(
+            Setup::Instant,
+            Resolve::Drop,
+            Turn::Later,
+            Returns::TransientError,
+        )
+        .await;
+        pulled.redeliver_until_the_last().await;
+        pulled
+            .bus
+            .jetstream()
+            .delete_stream(STREAM_NAME)
+            .await
+            .expect("delete the events stream");
+        let mut answers = pulled.watch_answers().await;
+
+        pulled.handle_within(Duration::from_secs(20)).await;
+
+        let returned = pulled.first_returned_at();
+        let sent = answers.sent().await;
+        let naked_in = sent.settled_at() - returned;
+        assert!(
+            naked_in >= RELEASE_HELD_FOR,
+            "the NAK went out {naked_in:?} after the run returned, while the claim store's lock, \
+             held for {RELEASE_HELD_FOR:?}, still kept the claim's release from landing: {sent:?}"
+        );
+        assert_naked_once_with_no_delay(&sent);
+        let silence = sent.longest_silence_from(returned);
+        assert!(
+            silence < SHORT_ACK_WINDOW,
+            "the delivery went {silence:?} without an answer while its release waited: {sent:?}"
+        );
+        let key = test_key(&pulled.bus, pulled.stream_seq());
+        assert!(
+            pulled
+                .claims
+                .trigger_claim(key)
+                .await
+                .expect("read the claim")
+                .is_none(),
+            "the claim was not given back"
+        );
+    })
+    .await;
+}
+
 /// **A last delivery whose dead letter cannot be published is NAKed, not
 /// acked, the broker reports the trigger exhausted at once, and the
 /// dead-letter watch writes one dead letter naming the trigger once the
@@ -253,10 +420,12 @@ async fn a_last_delivery_whose_dead_letter_cannot_be_published_is_dead_lettered_
                 .await
                 .expect("read the claim")
                 .is_none(),
-            "the claim was given back before the NAK, so the watch finds nothing on record"
+            "the claim was given back, so the watch finds nothing on record (that it goes \
+             before the NAK is pinned by `a_hand_over_gives_the_claim_back_before_its_nak`)"
         );
 
-        // The watch tried, and NAKed the advisory to try again.
+        // The watch tried, and NAKed the advisory to try again: the advisory
+        // is still in its hands, not consumed by a look that could not write.
         let mut watch_consumer = pulled
             .bus
             .jetstream()
@@ -267,22 +436,26 @@ async fn a_last_delivery_whose_dead_letter_cannot_be_published_is_dead_lettered_
             .await
             .expect("the watch's consumer");
         let retried_by = tokio::time::Instant::now() + WRITTEN_WITHIN;
-        while watch_consumer
-            .info()
-            .await
-            .expect("the watch consumer's state")
-            .num_redelivered
-            == 0
-        {
+        let retried = loop {
+            let state = watch_consumer
+                .info()
+                .await
+                .expect("the watch consumer's state")
+                .clone();
+            if state.num_redelivered > 0 {
+                break state;
+            }
             assert!(
                 tokio::time::Instant::now() < retried_by,
                 "the watch never tried the advisory again while the events stream was gone"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(
-            last_failed(&pulled).await.is_none(),
-            "nothing was written while the events stream was gone"
+        };
+        assert_eq!(
+            (retried.num_ack_pending, retried.ack_floor.stream_sequence),
+            (1, 0),
+            "the watch let the advisory go while the events stream was gone, with nothing \
+             written: {retried:?}"
         );
 
         EventBus::connect(&pulled.url)

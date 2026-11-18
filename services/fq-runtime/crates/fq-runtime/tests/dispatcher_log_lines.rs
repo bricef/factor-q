@@ -32,7 +32,10 @@
 //! whether a mark landed, what it sent the broker — is pinned where the
 //! decision is made, without reading a log
 //! (`control_plane::dispatcher::duplicate_drop_tests` and
-//! `durable_start_signal_tests`).
+//! `durable_start_signal_tests`). One test here reads the broker instead:
+//! that the consume loop's hand-over of an unpublishable dead letter raises
+//! the broker's advisory at once, which only a test running the real loop
+//! can show.
 //!
 //! The dispatcher runs as the daemon runs it, [`TriggerDispatcher::run`]
 //! on its own durable consumer, against a private broker and a real claim
@@ -48,7 +51,8 @@ use std::time::Duration;
 use async_nats::jetstream::{self, AckKind};
 use fq_runtime::agent::{Agent, AgentId, AgentRegistry};
 use fq_runtime::bus::{
-    EventBus, NATS_DEFAULT_MAX_ACK_PENDING, STREAM_NAME, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
+    ADVISORY_STREAM_NAME, EventBus, NATS_DEFAULT_MAX_ACK_PENDING, STREAM_NAME, TRIGGER_MAX_DELIVER,
+    TRIGGER_STREAM_NAME,
 };
 use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, TriggerClaims};
 use fq_runtime::control_plane::store::TriggerKey;
@@ -654,6 +658,23 @@ impl Daemon {
         }
     }
 
+    /// Publish a trigger, spend all but its last delivery
+    /// ([`Self::spend_all_but_the_last_delivery`]) and delete the events
+    /// stream. Once the consume loop starts, the dispatcher's first delivery
+    /// is the trigger's last; with [`Script::FailsTransiently`] its run fails
+    /// before its first WAL write and its dead letter finds no stream, so the
+    /// dispatcher hands the trigger to the dead-letter watch.
+    async fn an_unpublishable_last_delivery(&self) -> PublishedTrigger {
+        let published = self.publish().await;
+        self.spend_all_but_the_last_delivery().await;
+        self.bus
+            .jetstream()
+            .delete_stream(STREAM_NAME)
+            .await
+            .expect("delete the events stream");
+        published
+    }
+
     /// Run one trigger whose run follows the worker's script, and return
     /// its trigger id and invocation id once every line is in.
     async fn run_one(&mut self) -> (Uuid, Uuid) {
@@ -1152,26 +1173,18 @@ async fn a_mark_refused_then_matching_nothing_is_not_logged_as_marked() {
 /// delivery** (issue 1062). The dispatcher NAKs such a delivery instead of
 /// acking it, and the dead-letter watch writes the dead letter from the
 /// broker's advisory; that dead letter does not carry the run's error, so
-/// this line is the one record of it that names the trigger, and its
-/// fields are what match it to the dead letter: the trigger's sequence and
-/// id.
+/// this line is the one record of it that names the trigger. Its
+/// `stream_seq` is what matches it to that dead letter; its `trigger_id`
+/// does too when the publisher named the trigger, as this test's does, and
+/// otherwise names the id the dispatcher gave the delivery, which no dead
+/// letter carries.
 ///
-/// Four of the trigger's deliveries are spent on the dispatcher's durable
-/// before it runs, and the events stream is deleted, so the dispatcher's
-/// first delivery is the last, its run fails transiently before its first
-/// WAL write, and its dead letter finds no stream.
+/// The trigger is set up by [`Daemon::an_unpublishable_last_delivery`].
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unpublished_dead_letter_is_one_error_line_naming_the_trigger_and_its_last_error() {
     let mut daemon = Daemon::new("dead-letter-unpublished", Script::FailsTransiently).await;
     let log = daemon.log;
-    let published = daemon.publish().await;
-    daemon.spend_all_but_the_last_delivery().await;
-    daemon
-        .bus
-        .jetstream()
-        .delete_stream(STREAM_NAME)
-        .await
-        .expect("delete the events stream");
+    let published = daemon.an_unpublishable_last_delivery().await;
     daemon.start("binary-1").await;
     let subject = daemon.subject.clone();
     let unpublished = |line: &Line| about(line, DEAD_LETTER_UNPUBLISHED, &subject);
@@ -1203,5 +1216,79 @@ async fn an_unpublished_dead_letter_is_one_error_line_naming_the_trigger_and_its
     assert!(
         line.field("error").is_some_and(|error| !error.is_empty()),
         "the line carries why the publish failed: {line:#?}"
+    );
+}
+
+/// How soon after the consume loop starts on a trigger's unpublishable last
+/// delivery the broker has to emit its max-deliveries advisory. The run
+/// fails at once and the dead letter finds no stream at once, so the
+/// hand-over's NAK goes out within milliseconds; three seconds leaves room
+/// for a loaded machine and stays far inside the twelve minutes of a last
+/// delivery's ack window.
+const HANDED_OVER_WITHIN: Duration = Duration::from_secs(3);
+
+/// **The consume loop hands an unpublishable dead letter's trigger over at
+/// once** (issue 1062): the broker's max-deliveries advisory for
+/// `fq-dispatcher` reaches the advisory stream within [`HANDED_OVER_WITHIN`]
+/// of the loop's start.
+///
+/// It reads the broker, not the log, and is here because this file is the
+/// one that runs the dispatcher's own consume loop. The hand-over is a NAK
+/// with no delay, which the broker answers at once only while a pull is
+/// waiting on the consumer: the loop's pull of one message at a time is
+/// re-issued as the loop goes round, so one is waiting whenever a delivery
+/// is settled while the loop runs. A loop that stopped pulling while
+/// deliveries settle would leave the advisory to its next pull. Without a
+/// pull at all the broker waits, which
+/// `durable_start_signal_tests::unpublished_dead_letter` pins on the
+/// broker alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_consume_loop_hands_an_unpublishable_dead_letter_over_at_once() {
+    let mut daemon = Daemon::new("dead-letter-handed-over", Script::FailsTransiently).await;
+    let published = daemon.an_unpublishable_last_delivery().await;
+    let started = chrono::Utc::now();
+    daemon.start("binary-1").await;
+    let subject =
+        format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{CONSUMER_NAME}");
+    let advisories = daemon
+        .bus
+        .jetstream()
+        .get_stream(ADVISORY_STREAM_NAME)
+        .await
+        .expect("the advisory stream");
+    let deadline = tokio::time::Instant::now() + HANDED_OVER_WITHIN;
+    let advisory = loop {
+        if let Ok(raw) = advisories.get_last_raw_message_by_subject(&subject).await {
+            break serde_json::from_slice::<serde_json::Value>(&raw.payload)
+                .expect("the advisory parses");
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the advisory stream held no max-deliveries advisory for `{CONSUMER_NAME}` within \
+             {HANDED_OVER_WITHIN:?} of the consume loop's start"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    daemon.stop().await;
+
+    let emitted = advisory["timestamp"]
+        .as_str()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .expect("the broker stamps its advisory")
+        .with_timezone(&chrono::Utc);
+    let after = (emitted - started).to_std().unwrap_or_default();
+    assert!(
+        emitted >= started && after < HANDED_OVER_WITHIN,
+        "the advisory was emitted {after:?} after the loop's start: {advisory}"
+    );
+    assert_eq!(
+        advisory["stream_seq"],
+        json!(published.stream_seq),
+        "{advisory}"
+    );
+    assert_eq!(
+        advisory["deliveries"],
+        json!(TRIGGER_MAX_DELIVER),
+        "{advisory}"
     );
 }
