@@ -67,6 +67,7 @@ pub mod heartbeat_consumer;
 pub mod liveness;
 pub mod maintenance;
 pub mod operator;
+pub mod ownership;
 pub mod projection;
 pub mod retention;
 pub mod store;
