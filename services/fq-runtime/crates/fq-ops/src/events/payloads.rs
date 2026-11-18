@@ -439,13 +439,12 @@ pub enum FailureDetail {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePhase {
-    /// The worker's WAL held no row for the run when the `failed` was
-    /// published: the run failed before its first WAL write, so it has no
-    /// start on record, or an operator's live drop had already ended it
-    /// and its archive had been handed off, so the drop is its recorded
-    /// outcome. Every other phase is published only for a run with a row.
-    /// That holds for events from builds that read the phase from the WAL;
-    /// an earlier build could publish another phase for a run with no row.
+    /// The run failed before its first write to the worker's WAL, so it
+    /// has no start on record. Every other phase is published only for a
+    /// run whose WAL row is in flight; a run whose row an operator's drop
+    /// finished publishes no `failed` at all. That holds for events from
+    /// builds that read the phase from the WAL; an earlier build could
+    /// publish another phase for a run with no row.
     Setup,
     Reducer,
     HostStepBudget,

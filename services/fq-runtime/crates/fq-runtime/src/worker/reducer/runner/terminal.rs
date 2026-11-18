@@ -329,13 +329,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// reducer decides is stored with the loop's terminal upsert instead,
     /// #946), so this is the point at which `invocation_state` is marked
     /// terminal, after the publish: a lost `failed` leaves the row in
-    /// flight for recovery. Idempotent: a no-op on the row if it is
-    /// already terminal (an operator transition got there first). The
-    /// `failed` goes out through `publish_failed`, so a run with no row
-    /// when it is published fails in `Setup`, whatever phase the caller
-    /// built it with: a reducer whose first step errors, before the step's
-    /// row is written, and a run whose row an operator's live drop and the
-    /// archive hand-off behind it removed while a step was in flight.
+    /// flight for recovery. The `failed` goes out through
+    /// `publish_failed`, so a run that never wrote its row (a reducer whose
+    /// first step errors) fails in `Setup`, whatever phase the caller built
+    /// it with, and a run whose row an operator's drop already finished, or
+    /// finished and handed off, publishes nothing and stops with
+    /// `ExecutorError::FinishedElsewhere` before the row is touched (issue
+    /// 1070; `own_row.rs`). The mark is still a no-op on a row that turned
+    /// terminal between that check and here.
     pub(super) async fn end_mid_step(
         &self,
         cursor: &mut Option<Uuid>,

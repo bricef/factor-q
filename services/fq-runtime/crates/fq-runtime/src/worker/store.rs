@@ -44,6 +44,7 @@ use crate::db::schema::{self, Migration, SchemaError};
 
 mod durable_starts;
 mod llm_origin;
+mod state_update;
 pub(crate) mod terminal_outcome;
 // The verdict type and its check are the kit's; re-exported so the
 // tests and `crate::worker` keep the path they had when the copy lived

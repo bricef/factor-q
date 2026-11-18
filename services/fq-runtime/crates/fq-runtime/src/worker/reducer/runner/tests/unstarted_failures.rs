@@ -32,7 +32,8 @@
 //! `failed` in the phase of the refused event; refused once the row is
 //! terminal, no `failed`. Beyond these tests, every event a runner
 //! publishes in the test build passes a check that a `failed` in any
-//! phase but `Setup` has a WAL row (`check_failed_phase` in
+//! phase but `Setup` has a WAL row, and that one in `Setup` comes from a
+//! drive that never wrote its row (`check_ending` in
 //! `publish_failure.rs`), so every test that drives a run to such a
 //! `failed` fails, whichever path built it.
 
@@ -450,6 +451,10 @@ async fn a_run_whose_row_a_drop_handed_off_publishes_no_failed() {
         )
         .await
         .expect_err("the run stops without an outcome of its own");
+    assert!(
+        matches!(err, ExecutorError::FinishedElsewhere { .. }),
+        "{err}"
+    );
     assert!(!err.is_transient(), "nothing retries it: {err}");
     assert!(
         started.try_recv().is_ok(),

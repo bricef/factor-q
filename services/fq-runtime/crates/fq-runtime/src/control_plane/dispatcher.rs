@@ -738,6 +738,10 @@ impl TriggerDispatcher {
             ExecutorError::InvocationFailed { kind, message } => {
                 error!(kind = ?kind, error = %message, "invocation failed during dispatch")
             }
+            // An operator's drop ended it: not an error of the run.
+            ExecutorError::FinishedElsewhere { .. } => {
+                info!(error = %err, "dispatched invocation stopped")
+            }
         }
     }
 }
@@ -980,6 +984,20 @@ mod tests {
             trigger_fate(&permanent(), TRIGGER_MAX_DELIVER as u32),
             TriggerFate::Consume
         );
+        // Nor does a run an operator's drop ended (issue 1070): it is
+        // neither retried nor dead-lettered, at any attempt.
+        for attempt in [1, TRIGGER_MAX_DELIVER as u32] {
+            assert_eq!(
+                trigger_fate(
+                    &Err(ExecutorError::FinishedElsewhere {
+                        invocation_id: Uuid::now_v7(),
+                    }),
+                    attempt
+                ),
+                TriggerFate::Consume,
+                "attempt {attempt}"
+            );
+        }
         // A clean return consumes.
         assert_eq!(
             trigger_fate(
