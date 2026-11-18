@@ -158,7 +158,12 @@ async fn a_refused_ending_goes_out_once_per_daemon_run() {
             started_at_ms: 1_000,
             worker_id: WorkerId::new(WORKER).unwrap(),
             reason: EndingHeldReason::StoredEventRefused,
-            totals: None,
+            // A row with no model or tool calls on record.
+            totals: Some(crate::events::RecordedTotals {
+                total_llm_calls: 0,
+                total_tool_calls: 0,
+                total_cost: 0.0,
+            }),
         }
     );
     assert_eq!(
@@ -204,6 +209,11 @@ async fn a_too_large_ending_goes_out_on_the_pass_that_holds_it() {
     let held = held_payload(&held[0]);
     assert_eq!(held.outcome, HeldOutcome::Completed);
     assert_eq!(held.reason, EndingHeldReason::PayloadTooLarge);
+    assert_eq!(
+        held.totals, None,
+        "the stored completed reports a model call the rows do not hold: no figure rather \
+         than a second one"
+    );
     assert_eq!(
         fixture.held_endings()[0].envelope.invocation_id,
         invocation_id
@@ -412,4 +422,126 @@ fn only_a_held_ending_s_own_holds_send_one() {
         }),
         None
     );
+}
+
+/// A size-held row whose per-call rows agree with its stored ending: the
+/// held ending carries the recorded totals, which are the stored ending's.
+#[tokio::test]
+async fn a_too_large_ending_carries_the_totals_its_stored_ending_agrees_with() {
+    let fixture = Fixture::new().await;
+    fixture.sink.set_max_payload(2_048);
+    let invocation_id = fixture
+        .finished_row("completed", |id| {
+            let mut event = completed_of(id, 4_096);
+            if let EventPayload::Completed(completed) = &mut event.payload {
+                completed.total_llm_calls = 2;
+                completed.total_tool_calls = 1;
+                completed.total_cost = 0.1 + 0.2;
+            }
+            event
+        })
+        .await;
+    let inv = invocation_id.to_string();
+    for (n, cost) in [(0, 0.1), (1, 0.2)] {
+        let request = format!("call-{n}");
+        let origin = crate::events::LlmCallOrigin::AgentTurn;
+        let store = &fixture.store;
+        store
+            .write_llm_intent(&inv, &request, "claude-sim", "{}", &origin, 1_000 + n)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv, &request, 1_100 + n)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(&inv, &request, "{}", false, cost, 1_200 + n)
+            .await
+            .unwrap();
+    }
+    fixture
+        .store
+        .write_tool_intent(&inv, "tool-0", "sim_tool", "{}", 1_300)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .write_tool_dispatched(&inv, "tool-0", 1_400)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .write_tool_completed(&inv, "tool-0", "{}", false, 1_500)
+        .await
+        .unwrap();
+
+    pass(&fixture.sweeper()).await.unwrap();
+    let held = fixture.held_endings();
+    assert_eq!(
+        held_payload(&held[0]).totals,
+        Some(crate::events::RecordedTotals {
+            total_llm_calls: 2,
+            total_tool_calls: 1,
+            total_cost: 0.1 + 0.2,
+        })
+    );
+}
+
+/// A stored ending whose summed cost a fast float parser would misread:
+/// three calls whose costs sum, left to right, to 1.5229507399999997,
+/// which serde_json without `float_roundtrip` read back as
+/// 1.5229507399999995. With it, the stored figure reads back as written,
+/// so the rows agree with the stored ending exactly and the held ending
+/// carries the figure the run published, to the bit.
+#[tokio::test]
+async fn totals_agree_with_a_stored_cost_a_fast_parser_would_misread() {
+    let costs = [0.386611969, 0.434366916, 0.7019718549999999];
+    let total: f64 = costs.iter().sum();
+    let read_back: f64 = serde_json::from_str(&serde_json::to_string(&total).unwrap()).unwrap();
+    assert_eq!(
+        total.to_bits(),
+        read_back.to_bits(),
+        "the figure reads back as it was written"
+    );
+
+    let fixture = Fixture::new().await;
+    fixture.sink.set_max_payload(2_048);
+    let invocation_id = fixture
+        .finished_row("completed", |id| {
+            let mut event = completed_of(id, 4_096);
+            if let EventPayload::Completed(completed) = &mut event.payload {
+                completed.total_llm_calls = 3;
+                completed.total_tool_calls = 0;
+                completed.total_cost = total;
+            }
+            event
+        })
+        .await;
+    let inv = invocation_id.to_string();
+    for (n, cost) in costs.into_iter().enumerate() {
+        let request = format!("call-{n}");
+        let at = 1_000 + n as i64;
+        let origin = crate::events::LlmCallOrigin::AgentTurn;
+        let store = &fixture.store;
+        store
+            .write_llm_intent(&inv, &request, "claude-sim", "{}", &origin, at)
+            .await
+            .unwrap();
+        store
+            .write_llm_dispatched(&inv, &request, at)
+            .await
+            .unwrap();
+        store
+            .write_llm_completed(&inv, &request, "{}", false, cost, at)
+            .await
+            .unwrap();
+    }
+
+    pass(&fixture.sweeper()).await.unwrap();
+    let held = fixture.held_endings();
+    let totals = held_payload(&held[0])
+        .totals
+        .expect("the rows agree with the stored ending");
+    assert_eq!(totals.total_cost.to_bits(), total.to_bits());
+    assert_eq!(totals.total_llm_calls, 3);
 }
