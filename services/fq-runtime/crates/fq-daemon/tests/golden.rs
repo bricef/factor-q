@@ -31,8 +31,9 @@ use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_runtime::bus::TRIGGER_STREAM_NAME;
+use fq_runtime::control_plane::ownership::RowState;
 use fq_runtime::control_plane::store::{
-    ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey, WorkerStatus,
+    ArchiveState, ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey, WorkerStatus,
 };
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
@@ -568,35 +569,51 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     assert!(cp.mark_worker_stale("worker-alpha").await.unwrap());
     cp.mark_worker_shutdown("worker-omega").await.unwrap();
 
-    for (invocation, agent, status, at) in [
+    // The ownership rows as the coordination consumer leaves them: the two
+    // finished runs with no archive record read their archive pending (a
+    // run's ending moves its row before its archive arrives); the one
+    // whose archive is seeded below reads archived.
+    for (invocation, agent, status, archive, at) in [
         (
             INV_COMPLETED,
             AGENT_RESEARCHER,
             OwnerStatus::Completed,
+            ArchiveState::Pending,
             base_ms + 5_000,
         ),
         (
             INV_FAILED,
             AGENT_FIXER,
             OwnerStatus::Failed,
+            ArchiveState::Pending,
             base_ms + 12_000,
         ),
         (
             INV_INFLIGHT,
             AGENT_RESEARCHER,
             OwnerStatus::InFlight,
+            ArchiveState::NotDue,
             base_ms + 20_000,
         ),
         (
             INV_ARCHIVED,
             AGENT_FIXER,
             OwnerStatus::Completed,
+            ArchiveState::Archived,
             base_ms + 31_000,
         ),
     ] {
-        cp.upsert_invocation_ownership(invocation, agent, at, status)
+        assert!(
+            cp.compare_and_set_ownership(
+                invocation,
+                None,
+                RowState { status, archive },
+                Some(agent),
+                Some(at),
+            )
             .await
-            .unwrap();
+            .unwrap()
+        );
     }
 
     cp.insert_archive(&InvocationArchiveRow {

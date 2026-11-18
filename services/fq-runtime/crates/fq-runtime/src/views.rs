@@ -155,6 +155,7 @@ impl From<OwnerRow> for InvocationSummaryView {
             assigned_at_ms: r.assigned_at,
             started_at_ms: r.assigned_at,
             archived: false,
+            archive_state: r.archive_state.into(),
             summary: None,
         }
     }
@@ -639,6 +640,7 @@ impl Views {
                     assigned_at_ms: arc.archived_at,
                     started_at_ms: arc.started_at,
                     archived: true,
+                    archive_state: InvocationArchiveState::Archived,
                     summary: None,
                 });
             }
@@ -788,6 +790,7 @@ impl Views {
             summary,
             cost,
             trigger,
+            archive_hold: None,
         }))
     }
 }

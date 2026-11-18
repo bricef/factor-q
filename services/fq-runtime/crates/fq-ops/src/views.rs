@@ -189,10 +189,41 @@ pub struct InvocationSummaryView {
     /// True when the row came from `invocation_archive` (no live
     /// ownership row remains).
     pub archived: bool,
+    /// Whether the control plane holds the invocation's archive. A run
+    /// reads as finished from the moment its ending is folded, and this
+    /// says whether its archive followed: `pending` until it does, `held`
+    /// while the worker's archive sweeper is holding it back.
+    #[serde(default)]
+    pub archive_state: InvocationArchiveState,
     /// One-line operator summary; see
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+/// Whether the control plane holds an invocation's archive record, as the
+/// invocation list and detail show it.
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationArchiveState {
+    /// The run has not ended, so no archive is due.
+    #[default]
+    NotDue,
+    /// The run has ended, and its archive has not reached the control
+    /// plane: it is on its way, or its worker is gone.
+    Pending,
+    /// The run has ended, and the worker's archive sweeper is holding its
+    /// archive back: an event too large for the broker, a stored event
+    /// this build will not republish, or ids that cannot go on an event.
+    /// The detail names the reason and what lifts it. Read from the
+    /// sweeper's memory of its current run, so not known until its first
+    /// pass after a start, when the archive reads `pending`.
+    Held,
+    /// The archive record was written: from the worker's archive, or by an
+    /// operator's drop.
+    Archived,
 }
 
 // A trigger delivery and the dispatcher's claim on it — its own module,
@@ -449,6 +480,11 @@ pub struct InvocationDetailView {
     /// the id.
     #[serde(default)]
     pub trigger: Option<TriggerDeliveryView>,
+    /// Why the worker's archive sweeper is holding this invocation's
+    /// archive back, and what lifts the hold, when the owner's
+    /// `archive_state` is `held`.
+    #[serde(default)]
+    pub archive_hold: Option<crate::health::ArchiveHold>,
 }
 
 /// One operator signal as the pane's list shows it: the OperatorSignal

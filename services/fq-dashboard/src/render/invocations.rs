@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use fq_ops::views::{ActiveInvocationView, InvocationSummaryView};
+use fq_ops::views::{ActiveInvocationView, InvocationArchiveState, InvocationSummaryView};
 
 use super::{age, agent_link, display_cap, esc, inv_link, liveness_badge, short, status_span};
 
@@ -196,7 +196,7 @@ pub fn invocations(
         return b;
     }
     b.push_str(
-        "<table><tr><th>invocation</th><th>status</th><th>summary</th><th>started</th><th>agent</th><th>worker</th><th>archived</th></tr>",
+        "<table><tr><th>invocation</th><th>status</th><th>summary</th><th>started</th><th>agent</th><th>worker</th><th>archive</th></tr>",
     );
     for i in items {
         b.push_str(&format!(
@@ -216,9 +216,22 @@ pub fn invocations(
                 None => r#"<span class="muted">?</span>"#.to_string(),
             },
             short(&i.worker_id),
-            if i.archived { "yes" } else { "no" }
+            archive_cell(i.archive_state)
         ));
     }
     b.push_str("</table>");
     b
+}
+
+/// The archive column: whether the control plane holds the run's archive.
+/// A run reads finished from its ending; this says whether the archive
+/// followed, and marks the one the worker's archive sweeper is holding
+/// back, which waits for an operator (the health page lists why).
+fn archive_cell(state: InvocationArchiveState) -> &'static str {
+    match state {
+        InvocationArchiveState::NotDue => r#"<span class="muted">—</span>"#,
+        InvocationArchiveState::Pending => "pending",
+        InvocationArchiveState::Held => r#"<span class="warn">held</span>"#,
+        InvocationArchiveState::Archived => "yes",
+    }
 }
