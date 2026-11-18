@@ -378,7 +378,25 @@ count it, and `fq invocation show <id>` shows its live execution
 ([#721](https://github.com/bricef/factor-q/issues/721) is the open
 question of a row from the run's start). A run that has ended reads
 `completed` or `failed` from the moment its ending is folded, whether or
-not its archive has reached the control plane yet.
+not its archive has reached the control plane yet, and the list's
+`archive` column says which: `pending` until it has, `held` while the
+worker's archive sweeper is holding it back (see
+[When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)),
+`yes` once it has, and `-` for a run that has not ended. `fq invocation
+show` says the same, with the hold's reason and remedy, and the JSON of
+both, and of `fq workers show`'s owned rows, carries it as
+`archive_state`. The column replaced `arch`, which said something else:
+whether the row was read from the archive table alone, because no
+ownership row the list included names the run. The JSON still carries
+that as `archived`, so a row can read `"archived": false` beside
+`"archive_state": "archived"`.
+
+The list is ordered by the time each run's row was first written,
+newest first: when the run ended, for a run started from a trigger, or
+the run's start, for one startup recovery restored. A later move keeps
+that time, so a resumed run that ends, or an old ambiguous run you drop,
+keeps its place rather than rising to the top, and with `--limit` it
+can fall outside the list; `fq invocation show <id>` finds any run.
 
 If the coordination consumer reads the event stream again from its
 start, because its durable was deleted and recreated, it meets the
@@ -476,8 +494,9 @@ A resumed run that ends is not one of these, even when it ends in
 and the daemon logs `resume returned an error, but the invocation has
 ended; not reporting it ambiguous` at warn, with the error. Its
 ownership row reads `failed` from the moment the `failed` is folded,
-whether or not the archive is ever delivered
-([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
+whether or not the archive is ever delivered, and `fq invocation list`
+shows its archive `pending`, or `held` while the archive sweeper holds
+it ([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
 [#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
 reported ambiguous as well, and left for an operator to triage.
 
@@ -580,8 +599,9 @@ reasons below. It publishes nothing more for a held row, leaves the row
 in `worker.db` exactly as it is, and carries on with every other row.
 Until the hold is lifted, the control plane sees that invocation as not
 archived. It does see it as finished, once the run's terminal event is
-folded: the ownership row reads `completed` or `failed`, with its
-archive still pending, so `fq invocation list` shows the run ended. Not
+folded: the ownership row reads `completed` or `failed` with its
+archive `pending`, `fq invocation list` shows `held` in its `archive`
+column, and `fq invocation show` prints the reason and the remedy. Not
 every held run reads that way. A row held because its stored terminal
 event will not be republished, or because its ids cannot go on an
 event, never tells the control plane that the run ended, so its
@@ -1104,8 +1124,8 @@ mostly, took more than a quarter of it. A run that ended at a refused
 `tool.result` or terminal event does not hold that event in its state,
 so it archives unless the conversation before it was already too
 large. Such a run reads `failed` in `fq invocation list` once its
-`failed` is folded, and the held row in `fq doctor` gives the reason
-and the remedy
+`failed` is folded, with `held` in its `archive` column, and `fq
+invocation show` and `fq doctor` give the reason and the remedy
 ([#1024](https://github.com/bricef/factor-q/issues/1024)).
 
 ## When an invocation stops making progress
