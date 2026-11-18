@@ -1,14 +1,13 @@
-//! A `failed` is in the `Setup` phase exactly when its run has no WAL row
-//! as it is published (issue 1024): before the run's first WAL write, or
-//! after an operator's live drop whose archive was handed off, which
-//! deletes the row.
+//! A `failed` is in the `Setup` phase exactly when its run never made its
+//! first WAL write (issue 1024). A run that did, and whose row a drop then
+//! finished or handed off, publishes no `failed` at all (issue 1070;
+//! `dropped_mid_step.rs`).
 //!
 //! Readers take `Setup` to mean the run has no start on record: the
 //! control plane records no start for it, so its trigger's claim is not
 //! marked started and a copy of the trigger can still run. Any other
 //! phase on a run that never started would record a start that never
-//! happened; `Setup` on a run with a row would hide one that did. After a
-//! live drop, the drop is already the run's recorded outcome.
+//! happened; `Setup` on a run with a row would hide one that did.
 //!
 //! Every test publishes through [`WalWitness`], which notes for each
 //! event whether the run had a WAL row at that moment, and each `failed`
@@ -21,9 +20,9 @@
 //!   refusal's own `failed` is refused. The sweep's first publish,
 //!   `triggered`, comes here too, but a refused `triggered` is named
 //!   `Setup` by its event type, so a bypass would not show there.
-//! - `end_mid_step` with no row: the reducer whose first step errors, and
-//!   the run dropped live mid-call. The sweep's refusals after the first
-//!   WAL write come here with a row, where a bypass would not show.
+//! - `end_mid_step` with no row: the reducer whose first step errors. The
+//!   sweep's refusals after the first WAL write come here with a row,
+//!   where a bypass would not show.
 //! - `refuse_for_unavailable_mcp`: builds its `failed` in `Setup`, so a
 //!   bypass would publish the same event and nothing would show.
 //!
@@ -375,20 +374,19 @@ async fn a_reducer_failing_its_first_step_fails_in_setup() {
     assert_eq!((unstarted, started), (1, 0));
 }
 
-/// The one way a run that started publishes its `failed` with no WAL row.
-/// An operator drops the run live while its model call is in flight: the
-/// coordination consumer marks the row terminal, the archive sweeper hands
-/// the terminal row off, and the archive's acknowledgement deletes it. The
-/// runner only notices at its next step boundary, so when the call then
-/// fails, the `failed` goes out with no row, in `Setup`.
+/// A run that started and whose row a drop finished and handed off
+/// publishes no `failed` at all. An operator drops the run while its model
+/// call is in flight: the coordination consumer marks the row terminal,
+/// the archive sweeper hands the terminal row off, and the archive's
+/// acknowledgement deletes it. When the call then fails, the run finds its
+/// row gone after having written it in this drive, so the drop ended it,
+/// and it publishes no ending of its own (issue 1070). Its `llm.failure`,
+/// the call's own record, still goes out.
 ///
-/// That is the rule as the schema states it, not a slip: `Setup` says the
-/// run had no WAL row when its `failed` was published, and here the drop is
-/// already the run's recorded outcome, with its start, so this `failed`
-/// has nothing left to say about one. Before the phase was read from the
-/// row, this `failed` carried `llm_request`.
+/// Before that rule this `failed` went out with no row, in `Setup`, and
+/// before the phase was read from the row, in `llm_request`.
 #[tokio::test]
-async fn a_run_whose_row_a_live_drop_handed_off_fails_in_setup() {
+async fn a_run_whose_row_a_drop_handed_off_publishes_no_failed() {
     struct DroppedMidCall {
         store: Arc<WorkerStore>,
         invocation_id: Uuid,
@@ -437,7 +435,7 @@ async fn a_run_whose_row_a_live_drop_handed_off_fails_in_setup() {
         invocation_id,
     };
     let (durable_start, mut started) = DurableStart::channel(invocation_id);
-    runner
+    let err = runner
         .run_signalling(
             &agent("unstarted-dropped"),
             &llm,
@@ -451,7 +449,8 @@ async fn a_run_whose_row_a_live_drop_handed_off_fails_in_setup() {
             durable_start,
         )
         .await
-        .expect_err("the model call's error ends the run");
+        .expect_err("the run stops without an outcome of its own");
+    assert!(!err.is_transient(), "nothing retries it: {err}");
     assert!(
         started.try_recv().is_ok(),
         "the dispatcher was told the run durably started"
@@ -465,9 +464,14 @@ async fn a_run_whose_row_a_live_drop_handed_off_fails_in_setup() {
             ),
         "the run made its first WAL write before its model call"
     );
-    let context = "dropped live mid-call, then the call failed";
-    assert_eq!(check_failures(&published, context), (1, 0), "{context}");
-    assert_eq!(failed_phases(&published), ["setup"], "{context}");
+    assert!(
+        published
+            .iter()
+            .any(|(event, _)| matches!(event.payload, EventPayload::LlmFailure(_))),
+        "the call's own record goes out"
+    );
+    let context = "dropped mid-call and handed off, then the call failed";
+    assert_eq!(check_failures(&published, context), (0, 0), "{context}");
 }
 
 /// A run refused for an unavailable MCP server never starts, and its
