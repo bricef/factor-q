@@ -441,10 +441,12 @@ pub enum FailureDetail {
 pub enum FailurePhase {
     /// The run failed before its first write to the worker's WAL, so it
     /// has no start on record. Every other phase is published only for a
-    /// run whose WAL row is in flight; a run whose row an operator's drop
-    /// finished publishes no `failed` at all. That holds for events from
-    /// builds that read the phase from the WAL; an earlier build could
-    /// publish another phase for a run with no row.
+    /// run that made its first WAL write: its row is in flight, or the run
+    /// itself has just finished it. A run whose row an operator's drop
+    /// finished publishes no `failed` of its own, outside the one narrow
+    /// window the event schema names. That holds for events from builds
+    /// that read the phase from the WAL; an earlier build could publish
+    /// another phase for a run with no row.
     Setup,
     Reducer,
     HostStepBudget,
