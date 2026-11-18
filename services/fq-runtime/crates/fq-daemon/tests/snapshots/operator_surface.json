@@ -71,7 +71,7 @@
             "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
           },
           "archived": {
-            "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+            "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation, either because the invocation has none or because its\nrow fell outside the list's limit. It says where the row came\nfrom, not whether the archive record was written, which is\n`archive_state` (`archived` on every archive-only row).",
             "type": "boolean"
           },
           "assigned_at_ms": {
@@ -438,7 +438,7 @@
                 "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
               },
               "archived": {
-                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation, either because the invocation has none or because its\nrow fell outside the list's limit. It says where the row came\nfrom, not whether the archive record was written, which is\n`archive_state` (`archived` on every archive-only row).",
                 "type": "boolean"
               },
               "assigned_at_ms": {
@@ -1073,7 +1073,7 @@
                 "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
               },
               "archived": {
-                "description": "True when the row came from `invocation_archive` (no live\nownership row remains).",
+                "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation, either because the invocation has none or because its\nrow fell outside the list's limit. It says where the row came\nfrom, not whether the archive record was written, which is\n`archive_state` (`archived` on every archive-only row).",
                 "type": "boolean"
               },
               "assigned_at_ms": {

@@ -219,7 +219,7 @@ pub fn operator_registry(
 
     crate::invocation_view::register_invocation_view(&mut registry, views, &deps.facts)?;
     crate::active_report::register_active_report(&mut registry, active_views, stuck_after_ms)?;
-    register_worker_view(&mut registry, worker_views)?;
+    register_worker_view(&mut registry, worker_views, &deps.facts)?;
     register_agent_view(&mut registry, agent_registry)?;
     crate::event_atom::register_event_atom(&mut registry, event_bus, event_views)?;
     crate::dead_letter_atom::register_dead_letter_atom(&mut registry, dead_letter_bus)?;
@@ -384,9 +384,11 @@ pub fn operator_registry(
 fn register_worker_view(
     registry: &mut fq_edge::EdgeRegistry,
     views: Arc<Views>,
+    facts: &DaemonFacts,
 ) -> anyhow::Result<()> {
     use fq_edge::wire::WireError;
 
+    let holds = facts.archive_holds.clone();
     let worker_get_views = views.clone();
     let worker_list_views = views;
 
@@ -411,8 +413,9 @@ fn register_worker_view(
             decl,
             move |key: WorkerViewKey| {
                 let views = worker_get_views.clone();
+                let holds = holds.clone();
                 async move {
-                    views
+                    let mut detail = views
                         .worker(&key.worker_id)
                         .await
                         .map_err(|e| WireError::Internal {
@@ -421,7 +424,10 @@ fn register_worker_view(
                         .ok_or_else(|| WireError::NotFound {
                             op: "worker.get".into(),
                             message: format!("no worker `{}`", key.worker_id),
-                        })
+                        })?;
+                    // The same `held` the invocation list shows.
+                    crate::invocation_view::mark_held(&mut detail.owned, &holds.snapshot());
+                    Ok(detail)
                 }
             },
             move |filter: WorkerListFilter| {
