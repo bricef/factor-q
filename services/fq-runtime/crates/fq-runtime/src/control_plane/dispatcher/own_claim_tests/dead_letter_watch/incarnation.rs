@@ -19,8 +19,9 @@ use super::{
     stamped_at_the_streams_creation, watch,
 };
 use crate::agent::AgentId;
-use crate::bus::{EventBus, STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::bus::{EventBus, TRIGGER_STREAM_NAME};
 use crate::control_plane::TriggerKey;
+use crate::control_plane::advisory_watch::test_kit;
 use crate::control_plane::advisory_watch::{AdvisoryOutcome, AdvisoryWatch};
 use crate::control_plane::dispatcher::tests::registry_with;
 use crate::dead_letter::{DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY, from_event};
@@ -52,16 +53,7 @@ fn restamped(advisory: &[u8], timestamp: Option<&str>) -> Vec<u8> {
 
 /// The last dead letter the watch wrote under the system sentinel, if any.
 async fn system_dead_letter(arena: &Arena) -> Option<Event> {
-    let raw = arena
-        .bus
-        .jetstream()
-        .get_stream(STREAM_NAME)
-        .await
-        .expect("the event stream")
-        .get_last_raw_message_by_subject(&subjects::agent_failed(AgentId::system().as_str()))
-        .await
-        .ok()?;
-    Some(serde_json::from_slice(&raw.payload).expect("the event parses"))
+    test_kit::last_failed(&arena.bus, AgentId::SYSTEM_STR).await
 }
 
 /// The dead letter names the trigger this stream holds at [`SEQ`]: its

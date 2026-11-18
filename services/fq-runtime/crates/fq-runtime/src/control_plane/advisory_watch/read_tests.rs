@@ -13,17 +13,13 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
 use serde_json::json;
 
+use super::test_kit::{PAST, exhaust, last_failed, stamped_at_the_streams_creation};
 use super::*;
 use crate::dead_letter::from_event;
 use crate::test_support::nats::{NatsServer, test_nats};
 use crate::trigger::PublishedTrigger;
-
-/// A limit an advisory stamped at the stream's creation is past by the time
-/// its trigger is exhausted: that takes two one-second ack windows.
-const PAST: Duration = Duration::from_millis(500);
 
 /// A broker, a bus on it, and an agent name of the test's own.
 async fn broker() -> (NatsServer, EventBus, String) {
@@ -33,78 +29,14 @@ async fn broker() -> (NatsServer, EventBus, String) {
     (server, bus, agent)
 }
 
-/// Publish a trigger for `agent`, exhaust it on a scratch durable that never
-/// acks, and return it with the broker's MAX_DELIVERIES advisory for it as
-/// the watch's stream captured it.
+/// Publish a trigger for `agent` and exhaust it, and return it with the
+/// broker's MAX_DELIVERIES advisory for it.
 async fn exhausted(bus: &EventBus, agent: &str) -> (PublishedTrigger, Vec<u8>) {
     let published = bus
         .publish_trigger(&AgentId::new(agent).unwrap(), &json!({ "input": "work" }))
         .await
         .expect("publish the trigger");
-    let name = format!("exhaust-{}", Uuid::now_v7().simple());
-    let consumer = bus
-        .jetstream()
-        .get_stream(TRIGGER_STREAM_NAME)
-        .await
-        .expect("the trigger stream")
-        .create_consumer(async_nats::jetstream::consumer::pull::Config {
-            durable_name: Some(name.clone()),
-            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-            filter_subject: subjects::trigger(agent),
-            max_deliver: 2,
-            ack_wait: Duration::from_secs(1),
-            ..Default::default()
-        })
-        .await
-        .expect("a scratch durable");
-    let mut messages = consumer.messages().await.expect("its messages");
-    for delivery in 1..=2 {
-        let _unacked = tokio::time::timeout(Duration::from_secs(5), messages.next())
-            .await
-            .unwrap_or_else(|_| panic!("delivery {delivery} within 5s"))
-            .expect("the durable is open")
-            .expect("a delivery");
-    }
-    let subject =
-        format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{name}");
-    let advisories = bus
-        .jetstream()
-        .get_stream(ADVISORY_STREAM_NAME)
-        .await
-        .expect("the advisory stream");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Ok(raw) = advisories.get_last_raw_message_by_subject(&subject).await {
-            return (published, raw.payload.to_vec());
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the broker's MAX_DELIVERIES advisory never came"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// The advisory, stamped at the moment the trigger stream was created: as
-/// old as an advisory of this incarnation can be, so past [`PAST`].
-fn stamped_at_the_streams_creation(bus: &EventBus, advisory: &[u8]) -> Vec<u8> {
-    let mut stamped: serde_json::Value = serde_json::from_slice(advisory).unwrap();
-    let created = chrono::DateTime::from_timestamp_nanos(bus.trigger_stream_epoch());
-    stamped["timestamp"] = json!(created.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
-    serde_json::to_vec(&stamped).unwrap()
-}
-
-/// The last `failed` event under `agent`, if any.
-async fn last_failed(bus: &EventBus, agent: &str) -> Option<Event> {
-    let raw = bus
-        .jetstream()
-        .get_stream(STREAM_NAME)
-        .await
-        .expect("the event stream")
-        .get_last_raw_message_by_subject(&subjects::agent_failed(agent))
-        .await
-        .ok()?;
-    Some(serde_json::from_slice(&raw.payload).expect("the event parses"))
+    (published, exhaust(bus, agent).await)
 }
 
 /// **What the broker answers for a message that is not there.** A sequence

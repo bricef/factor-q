@@ -21,7 +21,8 @@ use serde_json::json;
 
 use super::{Arena, Run, SEQ, arena, exec, heal, refuse_updates};
 use crate::agent::AgentId;
-use crate::bus::{ADVISORY_STREAM_NAME, STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::bus::{ADVISORY_STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::control_plane::advisory_watch::test_kit::{self, PAST};
 use crate::control_plane::advisory_watch::{
     AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER, HELD_VERDICT_MIN_LOOKS,
 };
@@ -57,52 +58,9 @@ async fn publish(arena: &Arena) -> PublishedTrigger {
 
 /// Exhaust the published trigger on a scratch durable that never acks,
 /// and return the broker's MAX_DELIVERIES advisory as the watch's stream
-/// captured it.
+/// captured it ([`test_kit::exhaust`]).
 async fn exhaust(arena: &Arena) -> Vec<u8> {
-    let name = format!("exhaust-{}", uuid::Uuid::now_v7().simple());
-    let consumer = arena
-        .bus
-        .jetstream()
-        .get_stream(TRIGGER_STREAM_NAME)
-        .await
-        .expect("the trigger stream")
-        .create_consumer(async_nats::jetstream::consumer::pull::Config {
-            durable_name: Some(name.clone()),
-            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-            filter_subject: subjects::trigger(&arena.agent),
-            max_deliver: 2,
-            ack_wait: Duration::from_secs(1),
-            ..Default::default()
-        })
-        .await
-        .expect("a scratch durable");
-    let mut messages = consumer.messages().await.expect("its messages");
-    for delivery in 1..=2 {
-        let _unacked = tokio::time::timeout(Duration::from_secs(5), messages.next())
-            .await
-            .unwrap_or_else(|_| panic!("delivery {delivery} within 5s"))
-            .expect("the durable is open")
-            .expect("a delivery");
-    }
-    let subject =
-        format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{name}");
-    let advisories = arena
-        .bus
-        .jetstream()
-        .get_stream(ADVISORY_STREAM_NAME)
-        .await
-        .expect("the advisory stream");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Ok(raw) = advisories.get_last_raw_message_by_subject(&subject).await {
-            return raw.payload.to_vec();
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the broker's MAX_DELIVERIES advisory never came"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    test_kit::exhaust(&arena.bus, &arena.agent).await
 }
 
 /// The real watch, consulting the arena's dispatcher.
@@ -112,16 +70,7 @@ fn watch(arena: &Arena) -> AdvisoryWatch {
 
 /// The trigger's dead letter, if one was written.
 async fn dead_letter(arena: &Arena) -> Option<Event> {
-    let raw = arena
-        .bus
-        .jetstream()
-        .get_stream(STREAM_NAME)
-        .await
-        .expect("the event stream")
-        .get_last_raw_message_by_subject(&subjects::agent_failed(&arena.agent))
-        .await
-        .ok()?;
-    Some(serde_json::from_slice(&raw.payload).expect("the event parses"))
+    test_kit::last_failed(&arena.bus, &arena.agent).await
 }
 
 /// How many exhausted triggers the watch kept out of the dead letters.
@@ -704,20 +653,11 @@ async fn the_watch_asks_whether_a_copy_is_handling_the_claim_before_it_reads_the
     );
 }
 
-/// The advisory, stamped at the moment the trigger stream was created: as
-/// old as an advisory of this incarnation can be, a few seconds by the
-/// time a test has exhausted its trigger. Past a limit shorter than that,
-/// without sleeping.
+/// The advisory, stamped at the moment the trigger stream was created
+/// ([`test_kit::stamped_at_the_streams_creation`]).
 fn stamped_at_the_streams_creation(arena: &Arena, advisory: &[u8]) -> Vec<u8> {
-    let mut stamped: serde_json::Value = serde_json::from_slice(advisory).unwrap();
-    let created = chrono::DateTime::from_timestamp_nanos(arena.bus.trigger_stream_epoch());
-    stamped["timestamp"] = json!(created.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
-    serde_json::to_vec(&stamped).unwrap()
+    test_kit::stamped_at_the_streams_creation(&arena.bus, advisory)
 }
-
-/// A limit the stamped advisory is past: exhausting a trigger takes two
-/// one-second ack windows.
-const PAST: Duration = Duration::from_millis(500);
 
 /// **A verdict held past the limit, with a copy still handling the claim,
 /// ends in a dead letter marked as unchecked.** A held verdict must end on
