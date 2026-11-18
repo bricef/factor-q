@@ -1398,12 +1398,17 @@ subject, which names the agent, the claim's age (`claim_age_ms`) and the
 invocation id the claim names: `claim_invocation_id`, or, on a re-take,
 `abandoned_invocation_id` beside the new `invocation_id`. The failure
 before a re-take is logged at error: `failed to release unfinished
-trigger claim`, with the error and `stream_seq`, or, when settling
-stopped waiting for the release after 40 seconds and answered the
-delivery without it, `gave up waiting for the claim store to release a
-trigger's claim`, with `stream_seq`, the subject, `trigger_id`, what the
-delivery was being answered for (`context`) and how long it waited
-(`waited_ms`); a task that died, or a drain, leaves no such line. The
+trigger claim`, with the error, `stream_seq` and `invocation_id`, or,
+when settling stopped waiting for the release after 40 seconds and
+answered the delivery without it, `gave up waiting for the claim store
+to release a trigger's claim`, with `stream_seq`, `invocation_id`, the
+subject, `trigger_id`, what the delivery was being answered for
+(`context`) and how long it waited (`waited_ms`); a task that died, or a
+drain, leaves no such line. Either line's `invocation_id` is the
+re-take's `abandoned_invocation_id`. A release given up on can still
+land after the re-take, and then removes nothing: a release removes only
+the claim of the invocation giving it back
+([#1061](https://github.com/bricef/factor-q/issues/1061)). The
 drop says
 why it dropped the copy, and on the trigger's fifth and last delivery
 it says that no copy follows. A drop before a start was recorded costs
@@ -1874,11 +1879,12 @@ or taken over before the run's first durable write, or the claim is
 older than its retention window".
 
 A run that did start from the trigger stream can be on no claim too,
-and the line above does not name it. One daemon reaches it only through
-a release that settling gave up waiting for, which has to stall about 70
-seconds outside SQLite's lock waits and then land after a copy took the
-claim again ([#1061](https://github.com/bricef/factor-q/issues/1061)),
-and then only with a refused write or a replay of the stream on top. When the dispatcher marks a run's start, the mark can find no
+and the line above does not name it. One daemon does not reach it: its
+one route, a release that settling gave up waiting for, which stalled
+about 70 seconds outside SQLite's lock waits and then landed after a
+copy took the claim again, closed when a release was scoped to its own
+invocation ([#1061](https://github.com/bricef/factor-q/issues/1061)).
+When the dispatcher marks a run's start, the mark can find no
 claim naming the run, because something changed the claim underneath
 it. It then records the start by what the claim holds, acks the
 delivery keeping the claim, and logs one line at error
