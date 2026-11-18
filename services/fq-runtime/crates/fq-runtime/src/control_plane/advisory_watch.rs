@@ -663,6 +663,9 @@ fn delivered(msg: &async_nats::jetstream::Message) -> Option<u64> {
 mod read_tests;
 
 #[cfg(test)]
+pub(crate) mod test_kit;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
