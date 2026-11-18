@@ -745,6 +745,9 @@ fn delivered(msg: &async_nats::jetstream::Message) -> Option<u64> {
 mod once_tests;
 
 #[cfg(test)]
+mod named_once_tests;
+
+#[cfg(test)]
 mod read_tests;
 
 #[cfg(test)]
@@ -943,6 +946,14 @@ mod tests {
             None,
             "with the trigger gone there is no name to record, and this \
              watch does not invent one"
+        );
+        assert_eq!(
+            event.annotations.0.get("duplicate_check"),
+            Some(&json!(
+                "could not be made: its advisory carries no id, so a dead letter already \
+                 written for it cannot be told from another's"
+            )),
+            "with no id to look for, the check cannot be made, and the dead letter says so"
         );
         let why = crate::dead_letter::from_event(&event)
             .and_then(|dead| dead.unattributed)

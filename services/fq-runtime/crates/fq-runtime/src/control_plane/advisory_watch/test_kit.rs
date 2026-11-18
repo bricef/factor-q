@@ -1,7 +1,8 @@
 //! What the watch's broker-backed tests share: exhausting a trigger so the
 //! broker emits its MAX_DELIVERIES advisory, stamping that advisory at the
-//! stream's creation, and reading back the dead letter written. Used by the
-//! watch's own tests and by the dispatcher's dead-letter watch tests.
+//! stream's creation, writing a `failed` event this build cannot read, and
+//! reading back the dead letter written. Used by the watch's own tests and
+//! by the dispatcher's dead-letter watch tests.
 
 use std::time::Duration;
 
@@ -10,8 +11,11 @@ use futures::StreamExt;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::AgentId;
 use crate::bus::{ADVISORY_STREAM_NAME, EventBus, STREAM_NAME, TRIGGER_STREAM_NAME};
-use crate::events::{Event, subjects};
+use crate::events::{
+    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
+};
 
 /// A limit an advisory stamped at the stream's creation is past by the time
 /// its trigger is exhausted: that takes two one-second ack windows.
@@ -75,6 +79,52 @@ pub(crate) fn stamped_at_the_streams_creation(bus: &EventBus, advisory: &[u8]) -
     let created = chrono::DateTime::from_timestamp_nanos(bus.trigger_stream_epoch());
     stamped["timestamp"] = json!(created.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
     serde_json::to_vec(&stamped).unwrap()
+}
+
+/// Publish under `agent` a `failed` event this build cannot read: a dead
+/// letter but for its failure kind, one a later build might add.
+pub(crate) async fn unreadable_failure(bus: &EventBus, agent: &str) {
+    fn replace(value: &mut serde_json::Value, key: &str, new: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(slot) = map.get_mut(key) {
+                    *slot = new.clone();
+                    return true;
+                }
+                map.values_mut().any(|v| replace(v, key, new))
+            }
+            _ => false,
+        }
+    }
+    let payload = EventPayload::Failed(FailedPayload {
+        error_kind: FailureKind::TriggerExhausted,
+        error_message: "a failure this build cannot read".to_string(),
+        phase: FailurePhase::Setup,
+        partial_totals: InvocationTotals::default(),
+        detail: None,
+    });
+    let event = if agent == AgentId::SYSTEM_STR {
+        Event::system(Uuid::now_v7(), payload)
+    } else {
+        Event::new(AgentId::new(agent).unwrap(), Uuid::now_v7(), payload)
+    };
+    let mut wire = serde_json::to_value(&event).unwrap();
+    assert!(replace(
+        &mut wire,
+        "error_kind",
+        &json!("a_kind_a_later_build_added")
+    ));
+    let payload = serde_json::to_vec(&wire).unwrap();
+    assert!(
+        Event::from_wire(&payload).is_err(),
+        "this build cannot read it"
+    );
+    bus.jetstream()
+        .publish(subjects::agent_failed(agent), payload.into())
+        .await
+        .expect("publish")
+        .await
+        .expect("acked");
 }
 
 /// The last `failed` event under `agent`, or `None` when the broker says

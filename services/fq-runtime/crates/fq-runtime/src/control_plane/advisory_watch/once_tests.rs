@@ -14,15 +14,14 @@
 use futures::StreamExt;
 use serde_json::json;
 
-use super::test_kit::{PAST, exhaust, last_failed, stamped_at_the_streams_creation};
+use super::test_kit::{
+    PAST, exhaust, last_failed, stamped_at_the_streams_creation, unreadable_failure,
+};
 use super::*;
 use crate::agent::AgentId;
 use crate::dead_letter::from_event;
 use crate::event_tail::TailedMessage;
 use crate::events::subjects;
-use crate::events::{
-    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
-};
 use crate::test_support::nats::{NatsServer, test_nats};
 
 /// A broker, a bus on it, and an agent name of the test's own.
@@ -208,50 +207,6 @@ async fn a_dead_letter_naming_the_trigger_may_follow_a_nameless_one() {
     assert_eq!(nameless_dead_letters(&bus).await, 1);
 }
 
-/// Publish under the system sentinel a `failed` event this build cannot
-/// read: its failure kind is one a later build might add.
-async fn unreadable_failure(bus: &EventBus) {
-    fn replace(value: &mut serde_json::Value, key: &str, new: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let Some(slot) = map.get_mut(key) {
-                    *slot = new.clone();
-                    return true;
-                }
-                map.values_mut().any(|v| replace(v, key, new))
-            }
-            _ => false,
-        }
-    }
-    let event = Event::system(
-        Uuid::now_v7(),
-        EventPayload::Failed(FailedPayload {
-            error_kind: FailureKind::TriggerExhausted,
-            error_message: "a failure this build cannot read".to_string(),
-            phase: FailurePhase::Setup,
-            partial_totals: InvocationTotals::default(),
-            detail: None,
-        }),
-    );
-    let mut wire = serde_json::to_value(&event).unwrap();
-    assert!(replace(
-        &mut wire,
-        "error_kind",
-        &json!("a_kind_a_later_build_added")
-    ));
-    let payload = serde_json::to_vec(&wire).unwrap();
-    assert!(
-        Event::from_wire(&payload).is_err(),
-        "this build cannot read it"
-    );
-    bus.jetstream()
-        .publish(subjects::agent_failed(AgentId::SYSTEM_STR), payload.into())
-        .await
-        .expect("publish")
-        .await
-        .expect("acked");
-}
-
 /// **An event under the system sentinel this build cannot read is skipped**,
 /// not taken as a failed read: one sits between the advisory and its dead
 /// letter, and on the advisory's redelivery the dead letter is still found.
@@ -259,7 +214,7 @@ async fn unreadable_failure(bus: &EventBus) {
 async fn an_event_this_build_cannot_read_does_not_stop_the_check() {
     let (_server, bus, agent) = broker().await;
     let advisory = gone(&bus, &agent).await;
-    unreadable_failure(&bus).await;
+    unreadable_failure(&bus, AgentId::SYSTEM_STR).await;
     let watch = AdvisoryWatch::without_records(bus.clone());
 
     let first = watch.handle_advisory(&advisory, 1).await.unwrap();
@@ -307,10 +262,9 @@ async fn a_trigger_whose_subject_names_no_agent_is_written_once() {
 }
 
 /// **The read starts at the advisory.** A dead letter for an advisory cannot
-/// be older than the advisory, so the system sentinel's dead letters from
-/// before it are not read: one carrying the same id from before the
-/// advisory was emitted (which no watch writes) is not found, and the dead
-/// letter is written.
+/// be older than the advisory, so the `failed` events from before it are
+/// not read: one carrying the same id from before the advisory was emitted
+/// (which no watch writes) is not found, and the dead letter is written.
 #[tokio::test]
 async fn the_read_starts_at_the_advisory() {
     let (_server, bus, agent) = broker().await;
@@ -369,8 +323,8 @@ async fn the_read_starts_at_the_advisory_though_newer_events_follow() {
 }
 
 /// **A read the broker answers with an error decides again**, as one out of
-/// time does: the events stream is gone, so the read of the system
-/// sentinel's last dead letter is answered at once with an error. Inside
+/// time does: the events stream is gone, so the read of the last `failed`
+/// event is answered at once with an error. Inside
 /// the limit the advisory comes back as that error, to be NAKed and decided
 /// again; the watch does not take it as "not written" and go on to publish.
 #[tokio::test]
@@ -495,12 +449,23 @@ async fn a_check_out_of_time_decides_again_and_past_the_limit_writes() {
         .unwrap();
     assert_eq!(past, AdvisoryOutcome::Emitted);
     assert_eq!(nameless_dead_letters(&bus).await, 2);
+    let written = last_failed(&bus, AgentId::SYSTEM_STR)
+        .await
+        .expect("the dead letter written past the limit");
+    assert_eq!(
+        written.annotations.0.get("duplicate_check"),
+        Some(&json!(
+            "could not be made: event log read error: reading the log for a dead letter \
+             already written took longer than 0ns"
+        )),
+        "the dead letter says its duplicate check could not be made"
+    );
 }
 
-/// **Only the broker's "no message" is "none written".** The check reads
-/// the last of the system sentinel's dead letters to know where to stop; an
-/// answer that is an error of any other kind is an error, never "there are
-/// none".
+/// **Only the broker's "no message" is "none written".** Each check reads
+/// the last `failed` event on the subject it reads to know where to stop;
+/// an answer that is an error of any other kind is an error, never "there
+/// are none".
 #[test]
 fn only_no_message_is_none() {
     use async_nats::jetstream::stream::{RawMessageError, RawMessageErrorKind};
