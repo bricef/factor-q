@@ -1568,8 +1568,11 @@ or taken over before the run's first durable write, or the claim is
 older than its retention window".
 
 A run that did start from the trigger stream can be on no claim too,
-though one daemon does not reach it today, and the line above does not
-name it. When the dispatcher marks a run's start, the mark can find no
+and the line above does not name it. One daemon reaches it only through
+a release that settling gave up waiting for, which has to stall about 70
+seconds outside SQLite's lock waits and then land after a copy took the
+claim again ([#1061](https://github.com/bricef/factor-q/issues/1061)),
+and then only with a refused write or a replay of the stream on top. When the dispatcher marks a run's start, the mark can find no
 claim naming the run, because something changed the claim underneath
 it. It then records the start by what the claim holds, acks the
 delivery keeping the claim, and logs one line at error
@@ -1586,12 +1589,24 @@ delivery keeping the claim, and logs one line at error
   run's start`: the trigger ran twice, and the claim is left naming the
   other run (`started_invocation_id`); this run is on no claim.
 - `could not record the durable start of a trigger whose claim does not
-  name its run`: the claim store refused the write, with its `error`,
-  and this run is on no claim. A replay of the trigger, or a copy a lost
-  ack brings back, would start it again.
+  name its run`: the claim store refused the write on every attempt,
+  with its last `error`, how many attempts it was offered (`attempts`)
+  and over how long (`elapsed_ms`), and this run is on no claim. A replay
+  of the trigger, or a copy a lost ack brings back, would start it
+  again.
+- `the claim of a trigger whose run started named the run on a second
+  look`, at warn: the record found the claim naming the run after all,
+  and marked it, so the run has its claim. Something changed the claim
+  between the mark and the record; nothing in one daemon is expected to.
 
-Each line carries `stream_seq`, `invocation_id`, `trigger_id` and the
-subject.
+The record is offered again on the mark's own schedule, keeping the
+delivery alive meanwhile. Each line carries `stream_seq`,
+`invocation_id`, `trigger_id`, the subject and how many attempts at the
+mark the store refused before the one that found no claim naming the
+run (`refused_marks`); every line but the refused record's also says how
+many attempts at the record it refused before the one that landed
+(`refused_records`).
+A mark refused and then finding no such claim is not logged as marked.
 
 `fq invocation list` does not carry it. The claim table has no index on
 the invocation id, so a lookup per listed row would read the whole table

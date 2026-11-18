@@ -18,10 +18,12 @@
 //! `ack` and `nak` are [`TriggerDispatcher::settle`]'s two shapes, so the
 //! refusals at the front of `handle`, admission's, the agent cap's, the
 //! pre-start settlement and the ack after a durable start all do, and the
-//! dead-letter path hands `settle` its publish to run first. Three answers
+//! dead-letter path hands `settle` its publish to run first. Four answers
 //! that keep the claim do not: the ack after a mark refused on every
 //! attempt (`mark_durable_started`), which follows the mark's own
-//! renewals with no store write between; the ack of a copy whose run has a
+//! renewals with no store write between; the ack after the record of a
+//! start the mark found no claim for (`unmarked_start`), which follows the
+//! record's own renewals likewise; the ack of a copy whose run has a
 //! start on record (`own_claim`), which follows a mark of its own that
 //! nothing renews; and the ack of a copy of a started run in
 //! `claim_delivery`, which follows only the claim's read.
