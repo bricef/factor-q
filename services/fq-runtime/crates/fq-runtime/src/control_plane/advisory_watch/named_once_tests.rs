@@ -623,3 +623,112 @@ async fn a_failure_that_is_not_a_dead_letter_does_not_stand_for_one() {
     assert_eq!(outcome, AdvisoryOutcome::Emitted);
     assert_eq!(dead_letters(&bus, &agent).await, 1);
 }
+
+/// The broker's answers to which incarnation the trigger stream is
+/// (`STREAM.INFO` on it), as a second connection sees the requests for
+/// them, counted without waiting on a clock. The broker writes to a
+/// connection in order, so a flush of this one (a PING, answered by a
+/// PONG) returns only once every request routed to it before has been
+/// read, and the client hands each to the subscription as it reads it. A
+/// request the watch made was routed here before the watch had its
+/// answer, so before the flush that follows.
+struct IncarnationReads {
+    client: async_nats::Client,
+    asked: async_nats::Subscriber,
+}
+
+impl IncarnationReads {
+    async fn watch(url: &str) -> Self {
+        let client = async_nats::connect(url).await.expect("a second connection");
+        let asked = client
+            .subscribe(format!("$JS.API.STREAM.INFO.{TRIGGER_STREAM_NAME}"))
+            .await
+            .expect("subscribe to the requests");
+        client.flush().await.expect("the subscription in place");
+        IncarnationReads { client, asked }
+    }
+
+    /// How many were asked since the last count.
+    async fn since(&mut self) -> usize {
+        use futures::FutureExt;
+        self.client.flush().await.expect("flush");
+        let mut asked = 0;
+        while let Some(Some(_)) = self.asked.next().now_or_never() {
+            asked += 1;
+        }
+        asked
+    }
+}
+
+/// **The broker is asked which incarnation the trigger stream is only to
+/// confirm a match made without a trigger id**, once per such match, the
+/// requests counted on the broker. Not for a trigger with an id, whose id
+/// confirms the match; not when no dead letter is found, nor before one is
+/// looked for; not for a copy the watch answers from memory. Asked on
+/// every advisory, the check would cost a request each, none of which
+/// changes an answer.
+#[tokio::test]
+async fn the_broker_is_asked_for_the_streams_incarnation_only_to_confirm_an_id_less_match() {
+    let (server, bus, _) = broker().await;
+    let mut asked = IncarnationReads::watch(server.url()).await;
+    let agent = || format!("named-once-{}", Uuid::now_v7().simple());
+
+    // A trigger with an id, its dead letter on the log, behind another
+    // failure: found, and the id confirms it.
+    let named = agent();
+    let published = trigger(&bus, &named).await;
+    let advisory = exhaust(&bus, &named).await;
+    dispatcher_dead_letter(&bus, &named, published.stream_seq, published.id).await;
+    another_failure(&bus, &named).await;
+    asked.since().await;
+    assert_eq!(
+        restarted(&bus).handle_advisory(&advisory, 1).await.unwrap(),
+        AdvisoryOutcome::AlreadySurfaced
+    );
+    assert_eq!(asked.since().await, 0, "an id confirms the match");
+
+    // The same with no id: found, and confirmed by one request.
+    let id_less = agent();
+    let seq = untagged_trigger(&bus, &id_less).await;
+    let advisory = exhaust(&bus, &id_less).await;
+    dispatcher_dead_letter(&bus, &id_less, seq, Uuid::now_v7()).await;
+    another_failure(&bus, &id_less).await;
+    asked.since().await;
+    assert_eq!(
+        restarted(&bus).handle_advisory(&advisory, 1).await.unwrap(),
+        AdvisoryOutcome::AlreadySurfaced
+    );
+    assert_eq!(
+        asked.since().await,
+        1,
+        "one request confirms an id-less match"
+    );
+
+    // No id and nothing written: nothing to confirm, and the watch writes.
+    let unwritten = agent();
+    untagged_trigger(&bus, &unwritten).await;
+    let advisory = exhaust(&bus, &unwritten).await;
+    another_failure(&bus, &unwritten).await;
+    let watch = restarted(&bus);
+    asked.since().await;
+    assert_eq!(
+        watch.handle_advisory(&advisory, 1).await.unwrap(),
+        AdvisoryOutcome::Emitted
+    );
+    assert_eq!(asked.since().await, 0, "nothing found, nothing to confirm");
+
+    // A copy to the same watch is answered from memory, before any read.
+    assert_eq!(
+        watch.handle_advisory(&advisory, 2).await.unwrap(),
+        AdvisoryOutcome::AlreadySurfaced
+    );
+    assert_eq!(asked.since().await, 0, "answered from memory");
+
+    // A copy to a watch made afresh finds the watch's own dead letter, no
+    // id on it either, and confirms it by one request.
+    assert_eq!(
+        restarted(&bus).handle_advisory(&advisory, 3).await.unwrap(),
+        AdvisoryOutcome::AlreadySurfaced
+    );
+    assert_eq!(asked.since().await, 1, "one request after a restart");
+}
