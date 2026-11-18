@@ -207,6 +207,12 @@ enum ClaimChange {
     /// one state in which the ack after the record could tell keeping the
     /// claim from releasing it.
     UpdatesSkipped,
+    /// Leave it, and make every mark put the row straight back to
+    /// `claimed`: the mark lands and reports it, and the row it leaves is
+    /// still `claimed` under the run. A real store does not undo a mark;
+    /// this stages the one state in which the ack after a landed mark could
+    /// tell keeping the claim from releasing it.
+    MarkUndone,
 }
 
 /// The invocation a changed claim names ([`ClaimChange`]).
@@ -474,6 +480,11 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
         ClaimChange::UpdatesSkipped => vec![sqlx::query(
             "CREATE TRIGGER skip_claim_updates BEFORE UPDATE ON trigger_claim \
              BEGIN SELECT RAISE(IGNORE); END",
+        )],
+        ClaimChange::MarkUndone => vec![sqlx::query(
+            "CREATE TRIGGER undo_the_mark AFTER UPDATE OF state ON trigger_claim \
+             WHEN NEW.state = 'durably_started' \
+             BEGIN UPDATE trigger_claim SET state = 'claimed' WHERE rowid = NEW.rowid; END",
         )],
     };
     for statement in statements {
@@ -2875,4 +2886,42 @@ async fn a_release_landing_after_its_claim_was_taken_again_leaves_the_new_claim(
         assert_eq!(pulled.starts(), 1, "the trigger ran once");
     })
     .await;
+}
+
+/// **The ack after a mark that landed gives nothing back (issue 1055).**
+/// The run's start is marked, so the claim is the run's record of it, and
+/// the delivery is acked keeping it: a release could only fail to match a
+/// marked claim, and would wait on the store's write lock to do it
+/// (issue 1037 counts that as a store write per trigger). It is staged
+/// with a mark the store puts straight back to `claimed`
+/// ([`ClaimChange::MarkUndone`]), the one state in which keeping the claim
+/// and giving it back differ. Before issue 1055 the ack released, and
+/// deleted the run's only claim.
+#[tokio::test]
+async fn the_ack_after_a_landed_mark_gives_nothing_back() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::MarkUndone),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let (_, run) = pulled.named();
+    let claim = the_claim(&pulled)
+        .await
+        .expect("the ack after a landed mark must not give the run's claim back");
+    assert!(
+        claim.state == ClaimState::Claimed
+            && claim.invocation_id.as_deref() == Some(run.to_string().as_str()),
+        "the run's claim is left as the mark left it: {claim:?}"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
 }
