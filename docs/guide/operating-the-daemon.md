@@ -629,9 +629,11 @@ coordination consumer has not folded yet: a drop, or a run's own
 coordination consumer first, and waits for it to fold everything that
 was on the stream when the start began before recovery decides which
 runs to resume ([#1070](https://github.com/bricef/factor-q/issues/1070)).
-Normally that takes a moment. The wait is bounded by `[worker]
-recovery_backlog_wait_secs`, 30 seconds by default, and the boot, the
-edge included, waits with it.
+Normally that takes a moment. Events that aged out of the stream's
+retention while no daemon ran are not waited for: once the broker has
+nothing left to deliver to the consumer, it counts as caught up. The
+wait is bounded by `[worker] recovery_backlog_wait_secs`, 30 seconds by
+default, and the boot, the edge included, waits with it.
 
 When the bound runs out, the daemon boots anyway and resumes none of the
 runs it would have resumed, since an event it has not folded may have
