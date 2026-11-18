@@ -1907,6 +1907,20 @@ and the watch then attributes an advisory emitted before the recreate
 to the message at its sequence in the new stream
 ([#1065](https://github.com/bricef/factor-q/issues/1065)).
 
+**Every dead letter says which incarnation its trigger was on.** Since a
+recreated trigger stream numbers its messages from 1 again, a trigger
+sequence names one message only within one incarnation. Every dead
+letter this build writes for a trigger of the stream the daemon is
+connected to carries `trigger_stream_epoch`: that stream's creation
+time, in nanoseconds since 1970, as the daemon read it when it
+connected, the value its trigger claims key on. The dispatcher's own
+dead letter carries it, and so does the watch's, including one for a
+trigger whose message is gone or could not be read. It is absent from a
+dead letter for an earlier incarnation's advisory, whose incarnation
+the watch cannot know, and from one an older build wrote.
+`fq events get <event-id> --json` shows it; `fq dead-letters list` does
+not ([#1066](https://github.com/bricef/factor-q/issues/1066)).
+
 **A dead letter filed for the system is written once.** One that names
 no trigger, in any of the forms above, or whose trigger's subject names
 no legal agent, has no agent to look under, so it carries the broker's
