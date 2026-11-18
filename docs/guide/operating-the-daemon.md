@@ -1525,8 +1525,24 @@ letter, the watch reads the trigger's message at the advisory's
 sequence. If the broker answers that it holds no message there, which it
 does for one that aged out a day after its publish or was deleted, and
 also for one its store failed to load, which the watch cannot tell
-apart, the dead letter is written at once for the system with no
-subject, payload or trigger id. If the read fails for another reason,
+apart, the dead letter is written for the system with no subject,
+payload or trigger id, without holding for the message, and
+`fq dead-letters list` says why: `names no trigger: the broker answered
+that the trigger stream held no message at this sequence when the watch
+last read it, at …, for an advisory emitted at …: the stream keeps a
+message 24h after its publish, so it most likely aged out, or was
+deleted sooner; the broker answers the same for a message it cannot
+load`. The time is the read the dead letter was written on, which for a
+verdict held on the records is the last of them. Every dead letter this
+build's watch writes naming no trigger says why on such a line, and
+`--json` gives its kind as `unattributed_kind`: `message_gone`,
+`earlier_incarnation` or `message_unreadable`, or `unknown` to a client
+older than the build that wrote it. One an older build wrote for a
+trigger that had aged out carries no reason, and stays on the log for
+the events stream's 30 days as a bare `system` row. Under a page whose
+rows all name no trigger, the listing's last line says
+`fq dead-letters requeue` refuses each. If the read fails for another
+reason,
 such as the broker not answering in time or the trigger stream being
 missing, the message may yet be read, so the watch holds its verdict
 and reads again when the advisory comes back; the hold line's `reason=`
@@ -1546,9 +1562,16 @@ missing, `the trigger's message could not be read by the watch's limit:
 the trigger stream was missing (…)`. `fq dead-letters requeue` refuses
 it. An advisory first seen after its hour still gets its three looks,
 about three seconds, or about half a minute when each read times out,
-and is then written off this way: unlike a verdict held on the records,
-which ends in a dead letter marked `start not checked` that names its
-trigger, this one names none.
+and is then written off this way. A verdict held on the records ends
+instead in a dead letter marked `start not checked`, which names its
+trigger when its message was read. When the records cannot be decided
+and the message is gone or cannot be read either, one dead letter is
+both, naming no trigger and marked unchecked, and the listing's check
+says it cannot be requeued: with the run named, the `fq invocation
+show` check for whether it started, and that a copy can still start it
+after you look; with no run named, that if `fq doctor` lists a stranded
+trigger claim at its `seq=`, that claim names the invocation id its
+delivery reserved and says whether a run is on record.
 
 **An advisory from an earlier incarnation of the trigger stream names no
 trigger.** A recreated trigger stream numbers its messages from 1 again,
@@ -1576,14 +1599,16 @@ it names nothing:
       was created at 2026-11-17T08:00:00Z), so its sequence is that
       stream's, whose messages went with it; `fq dead-letters requeue`
       refuses it
+      start not checked: its sequence is an earlier stream's, so the
+      watch consulted no claim; its run may have started
 ```
 
 Its `seq=` is the earlier stream's and says nothing about the trigger at
 that sequence today, and since the claims were not consulted, the
 trigger it records may have started its run before the stream was
-recreated. A redelivered advisory writes it a second time, as it does
-the form for a trigger that aged out, and that form says nothing of
-why ([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
+recreated, as its `start not checked` line says. A redelivered advisory writes it a second time, as it does
+the form for a trigger that aged out
+([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
 with no timestamp the watch can read is taken as the current
 incarnation's, though the broker always stamps one.
 
