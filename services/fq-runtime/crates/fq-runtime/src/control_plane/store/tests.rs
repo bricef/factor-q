@@ -947,6 +947,100 @@ async fn a_start_the_mark_did_not_find_is_recorded_by_what_the_claim_holds() {
             invocation_id: "inv-run".to_string()
         }
     );
+
+    assert_eq!(
+        store
+            .record_trigger_start(key(4), "worker-a", "inv-run", 700)
+            .await
+            .unwrap(),
+        RecordedStart::Marked,
+        "a row already recording the run's own start: marked, not another run's start"
+    );
+}
+
+/// How many keys [`the_record_of_a_start_holds_the_write_lock_against_racing_writers`]
+/// races, and how long it may take.
+const RACED_KEYS: u64 = 200;
+const RACE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// **The record of a start holds the write lock from its read to its write
+/// (issue 1046).** For each key the record races a claim, a release and a
+/// re-take, on a pool of its own connections; half the keys start with
+/// another invocation's claim. Every record must land and leave the key
+/// recording the run's start. A record that read in a deferred transaction
+/// and then wrote would be refused by SQLite with `SQLITE_BUSY` whenever a
+/// racing writer committed between its read and its write, since a read
+/// transaction cannot become a writer over a newer snapshot; `BEGIN
+/// IMMEDIATE` takes the lock before the read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_record_of_a_start_holds_the_write_lock_against_racing_writers() {
+    let (store, _dir) = open_fresh().await;
+    let store = std::sync::Arc::new(store);
+    let raced = async {
+        for seq in 1..=RACED_KEYS {
+            if seq % 2 == 1 {
+                store
+                    .claim_trigger(key(seq), "worker-a", "inv-other", 100)
+                    .await
+                    .unwrap();
+            }
+            let record = tokio::spawn({
+                let store = std::sync::Arc::clone(&store);
+                async move {
+                    store
+                        .record_trigger_start(key(seq), "worker-a", "inv-run", 300)
+                        .await
+                }
+            });
+            let claim = tokio::spawn({
+                let store = std::sync::Arc::clone(&store);
+                async move {
+                    store
+                        .claim_trigger(key(seq), "worker-a", "inv-copy", 200)
+                        .await
+                }
+            });
+            let release = tokio::spawn({
+                let store = std::sync::Arc::clone(&store);
+                async move { store.release_trigger_claim(key(seq)).await }
+            });
+            let retake = tokio::spawn({
+                let store = std::sync::Arc::clone(&store);
+                async move {
+                    store
+                        .retake_trigger_claim(key(seq), "worker-a", "inv-other", "inv-again", 250)
+                        .await
+                }
+            });
+            let recorded = record.await.unwrap();
+            // The racing claim's own result is not what this pins: a claim
+            // that loses its insert reads the row back in a second
+            // statement, and a release landing between the two leaves it
+            // nothing to read.
+            let _ = claim.await.unwrap();
+            release.await.unwrap().expect("the racing release lands");
+            retake.await.unwrap().expect("the racing re-take lands");
+            let recorded = recorded.unwrap_or_else(|err| {
+                panic!("key {seq}: the record was refused while writers raced it: {err}")
+            });
+            assert!(
+                !matches!(recorded, RecordedStart::AlreadyStarted { .. }),
+                "key {seq}: nothing else starts a run, yet the record found {recorded:?}"
+            );
+            let row = store
+                .trigger_claim(key(seq))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("key {seq}: no claim after {recorded:?}"));
+            assert!(
+                row.durably_started && row.invocation_id.as_deref() == Some("inv-run"),
+                "key {seq}: {recorded:?} left {row:?}"
+            );
+        }
+    };
+    tokio::time::timeout(RACE_DEADLINE, raced)
+        .await
+        .expect("the race finishes inside its deadline");
 }
 
 /// **A recreated stream starts a new claim space.** JetStream restarts

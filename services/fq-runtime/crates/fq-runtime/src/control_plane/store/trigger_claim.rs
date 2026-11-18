@@ -77,7 +77,9 @@ pub struct TriggerClaimRow {
     /// `state = 'durably_started'`; otherwise the row is `claimed`.
     pub durably_started: bool,
     /// Nullable in the schema: a claim written before claims named their
-    /// invocation at claim time has none until it is marked.
+    /// invocation at claim time has none. An adoption names one, as does a
+    /// start recorded over it ([`ControlPlaneStore::record_trigger_start`]);
+    /// the mark never matches such a row and so never names one.
     pub invocation_id: Option<String>,
     pub claimed_at: i64,
 }
@@ -331,7 +333,8 @@ impl ControlPlaneStore {
     ///   A start is on record for the trigger already, which is all a copy
     ///   that comes back needs to be refused.
     /// - **A row naming the run,** in either state: marks it, as the mark
-    ///   would have.
+    ///   would have, changing only its state. Already started for the run,
+    ///   it is still this run's start, not another's.
     ///
     /// The start this records is a fact: the run has made its first WAL
     /// write. The claim is what refuses a redelivered or replayed copy of
@@ -361,6 +364,9 @@ impl ControlPlaneStore {
         let recorded = match found {
             Some((_, Some(named))) if named == invocation_id => RecordedStart::Marked,
             Some((true, started)) => {
+                // Read only; rolled back here rather than when the
+                // transaction is dropped, so the write lock goes now.
+                tx.rollback().await?;
                 return Ok(RecordedStart::AlreadyStarted {
                     invocation_id: started,
                 });
@@ -368,8 +374,8 @@ impl ControlPlaneStore {
             Some((false, claimed_for)) => RecordedStart::WrittenOver { claimed_for },
             None => RecordedStart::Written,
         };
-        let write = if recorded == RecordedStart::Written {
-            sqlx::query(
+        let write = match &recorded {
+            RecordedStart::Written => sqlx::query(
                 "INSERT INTO trigger_claim \
                  (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at) \
                  VALUES (?, ?, ?, ?, 'durably_started', ?, ?)",
@@ -379,20 +385,31 @@ impl ControlPlaneStore {
             .bind(key.stream_seq as i64)
             .bind(claimant)
             .bind(invocation_id)
-            .bind(now_ms)
-        } else {
-            // The row keeps its `claimed_at`: the retention sweep counts a
-            // claim's age from it, and it is never later than this.
-            sqlx::query(
-                "UPDATE trigger_claim \
-                 SET claimant = ?, invocation_id = ?, state = 'durably_started' \
+            .bind(now_ms),
+            // The row names the run already, and this daemon's claim of it
+            // wrote that name: only its state changes.
+            RecordedStart::Marked => sqlx::query(
+                "UPDATE trigger_claim SET state = 'durably_started' \
                  WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+            )
+            .bind(key.stream)
+            .bind(key.stream_epoch)
+            .bind(key.stream_seq as i64),
+            // `WrittenOver` (`AlreadyStarted` returned above): the row now
+            // records this run's start, which this daemon claimed, so it
+            // names this daemon as the claimant too. It keeps its
+            // `claimed_at`: the retention sweep counts a claim's age from
+            // it, and it is never later than this.
+            _ => sqlx::query(
+                "UPDATE trigger_claim \
+                     SET claimant = ?, invocation_id = ?, state = 'durably_started' \
+                     WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
             )
             .bind(claimant)
             .bind(invocation_id)
             .bind(key.stream)
             .bind(key.stream_epoch)
-            .bind(key.stream_seq as i64)
+            .bind(key.stream_seq as i64),
         };
         write.execute(&mut *tx).await?;
         tx.commit().await?;
