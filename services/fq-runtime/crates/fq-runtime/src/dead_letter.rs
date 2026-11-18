@@ -375,10 +375,10 @@ mod tests {
     }
 
     /// An exhaustion the emitter could not fully describe is still one
-    /// the operator must see — the advisory path loses the payload
-    /// (and with it the trigger sequence) when the trigger has aged
-    /// out, and a listing that dropped those rows would hide exactly
-    /// the failures that took longest to surface.
+    /// the operator must see — the advisory path has no payload to record
+    /// when the trigger's message is gone, and a listing that dropped
+    /// rows missing an annotation would hide exactly the failures that
+    /// took longest to surface.
     #[test]
     fn a_dead_letter_with_no_annotations_is_still_a_dead_letter() {
         let dead = from_event(&failed(FailureKind::TriggerExhausted)).expect("a dead letter");

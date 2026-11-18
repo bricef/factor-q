@@ -102,18 +102,27 @@ event's `trigger_id` annotation when a trigger exhausts its deliveries —
 recorded a name for it: one recorded before triggers were named, or one
 the advisory path records for a trigger it cannot read a name off, since
 it reads the identity rather than inventing one. That is a trigger
-published without the header, which the dispatcher names only when it
+published without the header, or with a value that is not a readable
+UUID, which reads as absent; the dispatcher names it only when it
 handles a copy, so the advisory path finds no name on the message though
-it records the agent, subject and payload; one the advisory path
-reconstructs after the original has already aged off the trigger stream;
-or one it records for an advisory from an earlier incarnation of the
-trigger stream, whose sequence names a message of the stream before it
-rather than the one the stream holds at that sequence now. In the last two
-it has no payload to record either. Such a dead letter still lists, but it
+it records the agent, subject and payload; one the advisory path records
+when the broker no longer holds the original at its sequence (it most
+likely aged out); one whose message it could not read by its limit,
+though the message may still be on the stream; or one it records for an
+advisory from an earlier incarnation of the trigger stream, whose
+sequence names a message of the stream before it rather than the one the
+stream holds at that sequence now. In the last three it has no payload
+to record either, and, when this build's watch wrote it, it says why in
+the dead letter's `unattributed` annotation. Such a dead letter still
+lists, but it
 cannot be requeued idempotently —
 there would be nothing to refuse a second attempt on — so `dead_letter.requeue`
 refuses it and re-running it means `trigger.publish`, as new work with a new
-name.
+name. A trigger whose subject names no agent is dead-lettered under the
+`system` sentinel with that subject and its payload. With no trigger id it is
+refused the same way, and its work is published afresh to the agent it was
+meant for; with one, `dead_letter.requeue` publishes it to `system` rather than
+to its subject ([#1098](https://github.com/bricef/factor-q/issues/1098)).
 
 It is also the identity the operator surface knows a trigger by: `trigger.get`
 takes it, `trigger.publish` returns it in its receipt, and the record it

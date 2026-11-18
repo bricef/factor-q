@@ -439,8 +439,10 @@ watch writes the dead letter anyway, logs it at error, and marks it in
 reason and the invocation the claim names. That dead letter can be
 false, since the run may have started, or may start after the hour, and
 requeuing it then would run the work twice. So `fq dead-letters requeue`
-takes the verdict itself, for every dead letter, marked or not, before
-it reserves or publishes anything, asking the records the watch asks
+takes the verdict itself, for every dead letter that carries a trigger
+id, marked or not, before it reserves or publishes anything (one with
+no trigger id it refuses before reading any record), asking the records
+the watch asks
 ([#1059](https://github.com/bricef/factor-q/issues/1059)): the
 trigger's claim and the run it names and, when that cannot tell, the run
 a marked dead letter names, by its own id. A run with a start on record
@@ -497,8 +499,15 @@ this build writes naming no trigger says why, and of what kind
 build wrote for an aged-out trigger stays a bare `system` row for the
 events stream's 30 days. The listing also says when such a dead
 letter's start was not checked, which is always so for an earlier
-incarnation's, and offers `fq dead-letters requeue` only for the rows it
-takes. The watch writes that form only when the broker answers that it
+incarnation's, and does not offer `fq dead-letters requeue` for a row
+that names no trigger. It still offers it for a header-less row, one the
+watch wrote for a trigger published without an id, which lists like a
+requeueable one and is refused
+([#1080](https://github.com/bricef/factor-q/issues/1080)), and for a
+row under `system` whose trigger's subject names no agent, which records
+that subject and its payload: refused when it carries no trigger id, and
+requeued to `system` rather than to its subject when it carries one
+([#1098](https://github.com/bricef/factor-q/issues/1098)). The watch writes the aged-out form only when the broker answers that it
 holds no message at the trigger's sequence: a read that fails for any
 other reason holds the verdict, as unreadable records do, and past the
 hour and three looks, unless a last look at the records finds the run

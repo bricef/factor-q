@@ -199,8 +199,12 @@ it. Like a drain that lands between a trigger's pull and its dispatch, this
 costs the trigger one of its five deliveries. A trigger caught in setup on its
 fifth and last delivery is not redelivered: when that delivery's window lapses,
 the advisory watch dead-letters it as `trigger_exhausted`, although it never
-ran, and `fq dead-letters requeue <agent>` puts it back
-([#974](https://github.com/bricef/factor-q/issues/974)).
+ran, and `fq dead-letters requeue <agent>` puts it back when the trigger
+carried an id and its message could still be read; otherwise it refuses
+the dead letter, which carries no trigger id, and the work is published
+again as new work with `fq trigger`
+([#974](https://github.com/bricef/factor-q/issues/974),
+[#1080](https://github.com/bricef/factor-q/issues/1080)).
 
 > **Give the old daemon its port back before starting the new one.** The
 > daemon's bound edge listener is its single-instance lock: it is taken before
@@ -1884,8 +1888,10 @@ Such a dead letter can be false: the run may have started already,
 when the records could not be read, or a copy still handling the claim
 may yet start it. `fq dead-letters requeue` does not take the mark's
 word either way. Before it reserves or publishes anything, it asks the
-records the watch asks, for this dead letter as for any other, marked
-or not
+records the watch asks, for this dead letter as for any other that
+carries a trigger id, marked or not; one that carries none, it refuses
+before reading any record, and its work is run again only as new work,
+so check its run yourself first
 ([#1059](https://github.com/bricef/factor-q/issues/1059)):
 
 - **A start on record is refused**, naming the invocation, whatever you
@@ -2162,7 +2168,12 @@ already written for the same exhaustion
   letter that
   names the trigger may still follow one written because the trigger's
   message could not be read, if the advisory comes back and the read
-  then succeeds, since that is the one that can be requeued.
+  then succeeds, since that is the one that can be requeued. One for a
+  subject that names no agent records that subject and its payload:
+  `fq dead-letters requeue` refuses it when it carries no trigger id,
+  and the work is published afresh with `fq trigger` to the agent it was
+  meant for; when it carries one, the requeue publishes it to `system`
+  rather than to its subject ([#1098](https://github.com/bricef/factor-q/issues/1098)).
 
 Wherever a check cannot be certain, the watch writes the dead letter: a
 second one is the cheaper error, and no answer the checks give loses
@@ -2414,7 +2425,10 @@ name the horizon.
   is deliverable and did not come back within the redelivery window, in
   which case its last delivery was most likely dead-lettered. The claim
   cannot see whether the same work ran under another delivery. Requeue
-  it from `fq dead-letters list` if it is there: `fq dead-letters
+  it from `fq dead-letters list` if it is there and carries a trigger
+  id (a dead letter that names no trigger, or one for a trigger
+  published without an id, is refused, and its work is published again
+  with `fq trigger`): `fq dead-letters
   requeue` checks the run's records first, refuses a run that started,
   and when it cannot tell refuses until you have checked the run it
   names and pass `--checked-not-started`; a dead letter is
@@ -2690,7 +2704,7 @@ exist today but do not yet have an out-of-band producer.
 | `fq doctor`: stuck consumers | Alert | `fq doctor` | None; use the named durable and its reported error to restore consumption. A stuck `fq-advisory-watch` can be a held dead-letter verdict instead, which ends about an hour after its advisory, once the watch has looked at it three times. |
 | `fq doctor`: unavailable shared MCP servers | Alert when required work is blocked; otherwise notification | `fq doctor` | The supervisor retries startup; if required work remains blocked, fix the server or its configuration. |
 | `fq doctor`: throttled models or agents at concurrency caps | Notification | `fq doctor` | Provider backoff and available agent slots release held work automatically. |
-| `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. One `fq dead-letters list` marks `start not checked` may be false: `fq dead-letters requeue` checks the run's records and refuses a run that started, and when it cannot tell, it refuses unless you pass `--checked-not-started` after checking the run its refusal names (a run still going shows in `fq invocation show` only as a `Live execution:` block). |
+| `fq doctor`: dead letters | Notification | `fq doctor` | None for the exhausted trigger; inspect and re-submit it after fixing the cause. One `fq dead-letters list` marks `start not checked` may be false: `fq dead-letters requeue` checks the run's records and refuses a run that started, and when it cannot tell, it refuses unless you pass `--checked-not-started` after checking the run its refusal names (a run still going shows in `fq invocation show` only as a `Live execution:` block). One with no trigger id it refuses outright, and its refusal says how to check its run before you publish the work again, or that no check can show the run did not start, when nothing on it says what to look for. |
 | `fq doctor`: stranded trigger claims | Notification | `fq doctor` | One awaiting redelivery is adopted if the broker redelivers it, and a never-started line ages out at `[state] trigger_claim_retention_days`, when the sweep deletes its claim; otherwise none: requeue or re-publish the work of a delivery that never started a run. A run that started is not dead-lettered while the watch can read its records; a dead letter for one that `fq invocation show` says started (a `Live execution:` block counts) was written before the watch consulted the records, or when it could not and marked it `start not checked`, and is not to be requeued: `fq dead-letters requeue` refuses it while the run's claim is kept. |
 | Pricing change refused by the drift bound (#735) | Notification | None (producer in #735) | The last accepted pricing remains in use; review and accept the change during normal hours. |
 | Pricing data stale (#735) | Alert | None (producer in #735) | None once the safe staleness limit is exhausted; restore the pricing source or provide an override. |
