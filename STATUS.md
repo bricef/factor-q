@@ -471,9 +471,18 @@ the system with no subject, payload or trigger id, which
 it names no trigger
 ([#1054](https://github.com/bricef/factor-q/issues/1054)). A
 redelivered advisory writes such a dead letter twice, as it does the
-form for a trigger that aged out of the stream, and that form carries no
-reason. The watch writes that form only when the broker answers that it
-holds no message at the trigger's sequence: a read that fails for any
+form for a trigger that aged out of the stream. That form now says why
+it names no trigger too: what the broker answered and when the watch
+last read the stream, when the advisory was emitted, and that the
+message most likely aged out. So every dead letter this build writes
+naming no trigger says why, and of what kind (`unattributed_kind` in
+`fq dead-letters list --json`); one an older build wrote for an aged-out
+trigger stays a bare `system` row for the events stream's 30 days. The
+listing also says when such a dead letter's start was not checked,
+which is always so for an earlier incarnation's, and offers
+`fq dead-letters requeue` only for the rows it takes. The watch writes
+that form only when the broker answers that it holds no message at the
+trigger's sequence: a read that fails for any
 other reason holds the verdict, as unreadable records do, and past the
 hour and three looks, unless a last look at the records finds the run
 started, the dead letter is written naming no trigger and saying the
