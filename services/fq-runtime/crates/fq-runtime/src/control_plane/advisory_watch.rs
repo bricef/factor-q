@@ -555,6 +555,7 @@ impl AdvisoryWatch {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id,
+                    unattributed = unattributed.as_deref(),
                     limit_secs = self.held_verdict_limit.as_secs(),
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its verdict could not be taken within the watch's limit and its \
@@ -564,6 +565,7 @@ impl AdvisoryWatch {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id, looks = delivered,
+                    unattributed = unattributed.as_deref(),
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its advisory carries no timestamp the watch can read, so its age \
                      cannot be told and it was held only for the watch's first looks, and the \
