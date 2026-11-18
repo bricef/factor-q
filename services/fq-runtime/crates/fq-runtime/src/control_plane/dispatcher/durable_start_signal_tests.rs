@@ -110,7 +110,8 @@ use crate::llm::fixture::FixtureClient;
 use crate::test_support::nats::{NatsServer, test_nats};
 use crate::trigger::{Trigger, agent_id_from_subject};
 use crate::worker::{
-    BoundaryStop, DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
+    BoundaryStop, DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, WalRun,
+    Worker,
 };
 
 mod unpublished_dead_letter;
@@ -280,6 +281,11 @@ struct ResolvesThenReturns {
     release_held_for: Option<Duration>,
     /// When each run returned, in order.
     run_returns: Mutex<Vec<tokio::time::Instant>>,
+    /// Whether the stub's WAL answers that it holds no run, rather than
+    /// that it cannot say, as a worker that does not read its WAL does.
+    /// With an answer, a copy that meets a claim no copy is handling, and
+    /// whose run is on no record, takes it again (`own_claim`).
+    nothing_in_the_wal: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -355,6 +361,15 @@ impl Worker for ResolvesThenReturns {
                 stopped_by: BoundaryStop::Drain,
             }),
         }
+    }
+
+    async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        if self.nothing_in_the_wal.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        Err(ExecutorError::WorkerStore(format!(
+            "this stub cannot say whether its WAL holds invocation {invocation_id}"
+        )))
     }
 
     async fn request_drain(&self, _req: DrainRequest) {}
@@ -695,6 +710,7 @@ impl Pulled {
             drained_at: Mutex::new(None),
             release_held_for,
             run_returns: Mutex::new(Vec::new()),
+            nothing_in_the_wal: AtomicBool::new(false),
         });
         let dispatcher = TriggerDispatcher::new(
             bus.clone(),
@@ -2216,6 +2232,7 @@ async fn a_run_whose_mark_was_refused_is_not_started_again_by_a_replay_after_a_r
         drained_at: Mutex::new(None),
         release_held_for: None,
         run_returns: Mutex::new(Vec::new()),
+        nothing_in_the_wal: AtomicBool::new(false),
     });
     let dispatcher = TriggerDispatcher::new(
         pulled.bus.clone(),
@@ -2699,4 +2716,114 @@ async fn a_write_of_a_start_refused_throughout_is_offered_on_the_schedule_and_gi
         elapsed >= MARK_RETRY_PAUSES.iter().sum::<Duration>() && elapsed < MARK_RETRY_BUDGET,
         "the attempts follow the pauses and end inside the budget: {elapsed:?}"
     );
+}
+
+/// How long the run of the copy that takes the claim again sets up, in
+/// [`a_release_landing_after_its_claim_was_taken_again_leaves_the_new_claim`]:
+/// long enough for the earlier copy's release to land while it does.
+const RETAKEN_SETUP: Duration = Duration::from_secs(1);
+
+/// **A release that lands after its claim was taken again leaves the new
+/// claim (issue 1061).** The order the issue gives, through the real
+/// `handle`:
+///
+/// 1. A first copy claimed the trigger, and its run failed before its
+///    first WAL write; its release was given up on at the settlement's
+///    bound, and its `handle` returned. Here its claim is written as
+///    `claim_delivery` writes one, under an invocation id no copy is
+///    handling.
+/// 2. The delivery comes back to `handle`, meets that claim with no copy
+///    handling it and nothing on record (the stub's WAL holds no run), and
+///    takes it again under a new invocation id (`own_claim`).
+/// 3. The first copy's release lands while the new run sets up: the
+///    dispatcher's own release, of the first copy's claim.
+/// 4. The new run makes its first WAL write, and its start is marked.
+///
+/// The release must remove nothing, the claim taken again must still be
+/// there after it, and the start must be marked on it. Before issue 1061
+/// a release deleted the `claimed` row for its sequence whatever
+/// invocation it named, so step 3 deleted the claim taken again.
+///
+/// Step 3 runs the release at the moment it would land rather than
+/// leaving it to wait on a held lock: the copy's claim in step 2 would wait
+/// on the same lock, and which of two waiting writers SQLite lets in first
+/// is not up to the test.
+#[tokio::test]
+async fn a_release_landing_after_its_claim_was_taken_again_leaves_the_new_claim() {
+    within_the_test_deadline(async {
+        let pulled = Pulled::setting_up(
+            Setup::Takes(RETAKEN_SETUP),
+            Resolve::Fire,
+            Turn::Later,
+            Returns::Completed,
+        )
+        .await;
+        pulled
+            .worker
+            .nothing_in_the_wal
+            .store(true, Ordering::SeqCst);
+        let first = super::claim::Claimed {
+            stream_seq: pulled.stream_seq(),
+            invocation_id: Uuid::now_v7(),
+        };
+        let first_named = first.invocation_id.to_string();
+        pulled
+            .claims
+            .claim_trigger(
+                test_key(&pulled.bus, pulled.stream_seq()),
+                "worker-a",
+                &first_named,
+                0,
+            )
+            .await
+            .expect("the first copy's claim");
+
+        let late_release = async {
+            let deadline = tokio::time::Instant::now() + RETAKEN_SETUP;
+            let taken_again = loop {
+                let claim = the_claim(&pulled).await.expect("the claim is there");
+                if claim.invocation_id.as_deref() != Some(first_named.as_str()) {
+                    break claim;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the copy did not take the claim again within its setup: {claim:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            pulled.dispatcher.release_unstarted_claim(&first).await;
+            (taken_again, the_claim(&pulled).await)
+        };
+        let ((), (taken_again, after_the_release)) = tokio::join!(
+            pulled.handle_within(RETAKEN_SETUP + Duration::from_secs(5)),
+            late_release
+        );
+
+        let (_, run) = pulled.named();
+        assert_eq!(
+            taken_again.invocation_id.as_deref(),
+            Some(run.to_string().as_str()),
+            "the copy took the claim again for the run it started: {taken_again:?}"
+        );
+        let after_the_release =
+            after_the_release.map(|claim| (claim.invocation_id, claim.claimed_at));
+        assert_eq!(
+            after_the_release,
+            Some((taken_again.invocation_id.clone(), taken_again.claimed_at)),
+            "the first copy's release landed after the claim was taken again and must leave \
+             it: it is no longer that copy's claim"
+        );
+        // Marked on the claim taken again, not written afresh: a claim the
+        // run's mark found gone would be written with the time of the mark.
+        let marked = the_claim(&pulled).await.expect("the run's claim");
+        assert!(
+            marked.durably_started
+                && marked.invocation_id.as_deref() == Some(run.to_string().as_str())
+                && marked.claimed_at == taken_again.claimed_at,
+            "the run's start is marked on the claim taken again, which keeps its age \
+             ({taken_again:?}): {marked:?}"
+        );
+        assert_eq!(pulled.starts(), 1, "the trigger ran once");
+    })
+    .await;
 }
