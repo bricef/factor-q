@@ -842,6 +842,113 @@ async fn a_durable_start_mark_reports_whether_it_marked_the_claim_naming_its_run
     );
 }
 
+/// **A start the mark did not find a claim for is recorded by what the
+/// claim holds (issue 1046).** No row: one is written, started, naming the
+/// run. Another invocation's claim, not started: the start is recorded on
+/// it in that invocation's place, keeping its age. Another run's start: left
+/// as it is. A row naming the run: marked. Every key ends with a start on
+/// record, which is what refuses a copy of the trigger.
+#[tokio::test]
+async fn a_start_the_mark_did_not_find_is_recorded_by_what_the_claim_holds() {
+    let (store, _dir) = open_fresh().await;
+
+    assert_eq!(
+        store
+            .record_trigger_start(key(1), "worker-a", "inv-run", 500)
+            .await
+            .unwrap(),
+        RecordedStart::Written,
+        "no row: one is written"
+    );
+    let written = store.trigger_claim(key(1)).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            written.durably_started,
+            written.invocation_id.as_deref(),
+            written.claimant.as_str(),
+            written.claimed_at
+        ),
+        (true, Some("inv-run"), "worker-a", 500),
+        "{written:?}"
+    );
+
+    store
+        .claim_trigger(key(2), "worker-a", "inv-other", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .record_trigger_start(key(2), "worker-a", "inv-run", 500)
+            .await
+            .unwrap(),
+        RecordedStart::WrittenOver {
+            claimed_for: Some("inv-other".to_string())
+        },
+        "another invocation's claim, not started: the start is recorded on it"
+    );
+    let over = store.trigger_claim(key(2)).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            over.durably_started,
+            over.invocation_id.as_deref(),
+            over.claimed_at
+        ),
+        (true, Some("inv-run"), 100),
+        "named for the run, keeping the claim's age: {over:?}"
+    );
+
+    store
+        .claim_trigger(key(3), "worker-a", "inv-other", 100)
+        .await
+        .unwrap();
+    store
+        .mark_trigger_started(key(3), "inv-other")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .record_trigger_start(key(3), "worker-a", "inv-run", 500)
+            .await
+            .unwrap(),
+        RecordedStart::AlreadyStarted {
+            invocation_id: Some("inv-other".to_string())
+        },
+        "another run's start: left"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(3), "worker-b", "inv-copy", 600)
+            .await
+            .unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-other".to_string()
+        },
+        "still naming the other run"
+    );
+
+    store
+        .claim_trigger(key(4), "worker-a", "inv-run", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .record_trigger_start(key(4), "worker-a", "inv-run", 500)
+            .await
+            .unwrap(),
+        RecordedStart::Marked,
+        "a row naming the run: marked"
+    );
+    assert_eq!(
+        store
+            .claim_trigger(key(4), "worker-b", "inv-copy", 600)
+            .await
+            .unwrap(),
+        TriggerClaim::Started {
+            invocation_id: "inv-run".to_string()
+        }
+    );
+}
+
 /// **A recreated stream starts a new claim space.** JetStream restarts
 /// sequences at 1 when a stream is rebuilt, so a claim table keyed on
 /// the name and sequence alone would answer `Started` to the first N

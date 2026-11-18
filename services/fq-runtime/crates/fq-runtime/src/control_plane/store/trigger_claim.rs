@@ -52,6 +52,21 @@ pub enum TriggerClaim {
     },
 }
 
+/// What [`ControlPlaneStore::record_trigger_start`] found on the claim, and
+/// so what it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedStart {
+    /// A row naming the run: marked, as the mark would have.
+    Marked,
+    /// No row: one recording the start was written.
+    Written,
+    /// A `claimed` row naming another invocation, or none: the start was
+    /// recorded on it in that invocation's place.
+    WrittenOver { claimed_for: Option<String> },
+    /// A row recording another run's start: left as it is.
+    AlreadyStarted { invocation_id: Option<String> },
+}
+
 /// One claim row, read back whole for an operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerClaimRow {
@@ -270,24 +285,118 @@ impl ControlPlaneStore {
     }
 
     /// Record on the claim for `key` that the run `invocation_id` names has
-    /// durably started. Returns whether it marked the claim, which it
-    /// reports whatever the update matched (issue 1046).
+    /// durably started, if the claim names that run. Returns whether it
+    /// did: `false` when no row for `key` names `invocation_id`, because
+    /// the row is gone or names another invocation, which this leaves as it
+    /// is (issue 1046).
+    ///
+    /// The dispatcher calls it at a run's first WAL write, for the claim
+    /// that delivery wrote naming the run. A claim already marked for the
+    /// run is matched too, so a retry of a mark that landed but was reported
+    /// as refused says it marked. For a mark that matched nothing, the
+    /// dispatcher records the start with [`Self::record_trigger_start`].
     pub async fn mark_trigger_started(
         &self,
         key: TriggerKey<'_>,
         invocation_id: &str,
     ) -> Result<bool, ControlPlaneStoreError> {
-        sqlx::query(
-            "UPDATE trigger_claim SET state = 'durably_started', invocation_id = ? \
-             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+        Ok(sqlx::query(
+            "UPDATE trigger_claim SET state = 'durably_started' \
+             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? AND invocation_id = ?",
         )
-        .bind(invocation_id)
         .bind(key.stream)
         .bind(key.stream_epoch)
         .bind(key.stream_seq as i64)
+        .bind(invocation_id)
         .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Record that the run `invocation_id` names has durably started, for a
+    /// trigger whose claim [`Self::mark_trigger_started`] did not find
+    /// naming that run. What it does depends on what the claim for `key`
+    /// holds, read and written in one transaction that holds the write lock
+    /// throughout:
+    ///
+    /// - **No row:** writes one, `durably_started`, naming the run and
+    ///   held by `claimant`.
+    /// - **A `claimed` row naming another invocation, or none:** records
+    ///   this run's start on it in that invocation's place, held by
+    ///   `claimant`. Left `claimed`, it could be released from under a run
+    ///   that started, by the copy that holds it if that copy's own run
+    ///   never starts.
+    /// - **A `durably_started` row naming another invocation:** leaves it.
+    ///   A start is on record for the trigger already, which is all a copy
+    ///   that comes back needs to be refused.
+    /// - **A row naming the run,** in either state: marks it, as the mark
+    ///   would have.
+    ///
+    /// The start this records is a fact: the run has made its first WAL
+    /// write. The claim is what refuses a redelivered or replayed copy of
+    /// its trigger, so a claim that does not record a start the run made
+    /// lets the trigger run again (issue 1046).
+    pub async fn record_trigger_start(
+        &self,
+        key: TriggerKey<'_>,
+        claimant: &str,
+        invocation_id: &str,
+        now_ms: i64,
+    ) -> Result<RecordedStart, ControlPlaneStoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT state, invocation_id FROM trigger_claim \
+             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+        )
+        .bind(key.stream)
+        .bind(key.stream_epoch)
+        .bind(key.stream_seq as i64)
+        .fetch_optional(&mut *tx)
         .await?;
-        Ok(true)
+        let found = row.map(|row| {
+            let started = row.get::<String, _>("state") == "durably_started";
+            (started, row.get::<Option<String>, _>("invocation_id"))
+        });
+        let recorded = match found {
+            Some((_, Some(named))) if named == invocation_id => RecordedStart::Marked,
+            Some((true, started)) => {
+                return Ok(RecordedStart::AlreadyStarted {
+                    invocation_id: started,
+                });
+            }
+            Some((false, claimed_for)) => RecordedStart::WrittenOver { claimed_for },
+            None => RecordedStart::Written,
+        };
+        let write = if recorded == RecordedStart::Written {
+            sqlx::query(
+                "INSERT INTO trigger_claim \
+                 (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at) \
+                 VALUES (?, ?, ?, ?, 'durably_started', ?, ?)",
+            )
+            .bind(key.stream)
+            .bind(key.stream_epoch)
+            .bind(key.stream_seq as i64)
+            .bind(claimant)
+            .bind(invocation_id)
+            .bind(now_ms)
+        } else {
+            // The row keeps its `claimed_at`: the retention sweep counts a
+            // claim's age from it, and it is never later than this.
+            sqlx::query(
+                "UPDATE trigger_claim \
+                 SET claimant = ?, invocation_id = ?, state = 'durably_started' \
+                 WHERE stream = ? AND stream_epoch = ? AND stream_seq = ?",
+            )
+            .bind(claimant)
+            .bind(invocation_id)
+            .bind(key.stream)
+            .bind(key.stream_epoch)
+            .bind(key.stream_seq as i64)
+        };
+        write.execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(recorded)
     }
 
     /// Record that the run a `claimed` row names has durably started, if
