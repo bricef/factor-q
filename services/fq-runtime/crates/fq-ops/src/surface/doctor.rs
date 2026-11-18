@@ -68,12 +68,13 @@ pub struct DoctorExecutions {
     pub stuck_after_ms: i64,
 }
 
-/// Dead-lettered triggers: transient pre-WAL failures that
-/// exhausted the trigger consumer's delivery bound. The dispatcher
-/// consumes the exhausted trigger and emits a terminal `failed` event
-/// with the dead-letter kind; this counts that bucket, so the
-/// report needs no extra query. The event's annotations carry the
-/// trigger subject and payload for requeue/diagnosis.
+/// Dead-lettered triggers: triggers that exhausted the trigger
+/// consumer's delivery bound. The dispatcher, or the dead-letter watch
+/// when the dispatcher did not, records each as a terminal `failed` event
+/// of the dead-letter kind; this counts those events, so the report needs
+/// no extra query. It counts dead letters, not triggers: one exhaustion
+/// can be recorded twice. `dead_letter.list` gives each with what it
+/// records of its trigger; one with no trigger id cannot be requeued.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct DoctorDeadLetters {
     pub exhausted_triggers: i64,

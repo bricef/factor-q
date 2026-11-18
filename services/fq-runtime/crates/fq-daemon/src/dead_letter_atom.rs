@@ -29,9 +29,9 @@ const DEAD_LETTER_LIST_DEFAULT_LIMIT: u32 = 50;
 ///
 /// **Not** the trigger sequence the human listing prints and
 /// `dead_letter.requeue` selects by — that is a coordinate on the
-/// trigger stream, is not unique across agents, and is absent whenever
-/// the trigger aged out before the advisory landed. See
-/// [`DeadLetterState`] for the full reasoning.
+/// trigger stream, and is not unique: a recreated stream starts again
+/// at 1, and one exhaustion can have two dead letters at the same
+/// sequence. See [`DeadLetterState`] for the full reasoning.
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DeadLetterKey {
     pub(crate) seq: u64,
@@ -130,14 +130,27 @@ pub(crate) fn register_dead_letter_atom(
          the `failed` event that recorded the exhaustion — the same cursor \
          receipts, `min_seq` gates and the Event and Turn atoms speak. \
          `trigger_stream_seq` is a different number entirely (the original \
-         trigger's, on the trigger stream) and may be absent. List answers \
+         trigger's, on the trigger stream), which no dead letter either emitter \
+         writes lacks. List answers \
          with the most recent `limit` matching dead letters in sequence \
          order, bounded by the tip observed at entry; Stream long-polls via \
          next_batch from a sequence, and `from_seq = u64::MAX` seeks the tail. \
          Visibility is bounded by event-stream retention (30 days by default). \
-         A row carries the trigger's payload, which is what `dead_letter.requeue` \
-         re-publishes — it reads this record and never the trigger stream, so a \
-         dead letter is requeueable for as long as it is listable.",
+         A row carries the trigger's payload as recorded, which is what \
+         `dead_letter.requeue` re-publishes — it reads this record and never \
+         the trigger stream, so the trigger stream's retention does not bound \
+         a requeue. A dead letter with no trigger id cannot be requeued at \
+         all: one that names no trigger, which says why in `unattributed` when \
+         this build's watch wrote it; one for a trigger whose subject names no \
+         legal agent, filed under `system` with that subject and its payload; \
+         and one the advisory watch wrote for a trigger published without a \
+         readable id, which records its agent, subject and payload. The event \
+         behind a row records more than the row: the trigger's id when it has \
+         one (`trigger_id`), which incarnation of the trigger stream its \
+         trigger was on (`trigger_stream_epoch`), the advisory it was written for \
+         (`advisory_id`), and, when the watch could not tell whether this \
+         exhaustion's dead letter was already on the log, `duplicate_check`; \
+         `fq events get <event-id> --json` shows them.",
     );
 
     let get_bus = bus.clone();

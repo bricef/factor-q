@@ -634,7 +634,10 @@ pub struct ProjectionRebuild {
 /// to (P11), not when a field looks plausible.
 #[derive(Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeadLetterFilter {
-    /// One agent's dead letters. Absent reads every agent's.
+    /// One agent's dead letters. Absent reads every agent's. A dead letter
+    /// that names no trigger, or whose trigger's subject names no legal
+    /// agent, is filed under `system`, so it is on no agent's page but
+    /// that one.
     #[serde(default)]
     pub agent: Option<String>,
     /// Cap on one List page — the most recent N matching dead

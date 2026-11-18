@@ -81,8 +81,11 @@ struct RequeueCommandInput {
     /// agent's most recent dead letter.
     ///
     /// A position, not an identity: it is a coordinate on a different
-    /// stream, it is not unique across agents, and it can be absent
-    /// altogether, which is why it selects rather than keys.
+    /// stream, and it is not unique, since a recreated stream numbers its
+    /// messages from 1 again and one exhaustion can have two dead letters
+    /// at the same sequence, which is why it selects rather than keys. Of
+    /// two of the agent's dead letters at the sequence, the most recent is
+    /// taken, and nothing selects the older.
     #[serde(default)]
     trigger_seq: Option<u64>,
     /// Set only once you have checked that the trigger's run did not
@@ -141,11 +144,17 @@ fn requeue_declaration() -> fq_ops::Command {
          name for its trigger: anything dead-lettered before triggers were \
          named, and, since the advisory path reads the identity and never \
          invents one, what it records for a trigger it cannot read a name off: \
-         one published without an `Fq-Trigger-Id` header (its agent, subject \
-         and payload are still recorded), one that had aged off the trigger \
-         stream, and one from an earlier incarnation of the trigger stream, \
-         whose advisory's sequence names a message of the stream before it \
-         rather than the one this stream holds at that sequence. Such a dead \
+         one whose `Fq-Trigger-Id` header was missing or not a UUID (its \
+         agent, subject and payload are still recorded), one whose message \
+         the broker no longer held at its sequence (it most likely aged out), \
+         one whose message the watch could not read by its limit, and one \
+         from an earlier incarnation of the trigger stream, whose advisory's \
+         sequence names a message of the stream before it rather than the one \
+         this stream holds at that sequence; each of the last three, when this \
+         build's watch wrote it, says why in `unattributed`, which the refusal \
+         quotes. A trigger whose subject names no legal agent is dead-lettered \
+         under `system` with that subject and its payload, and with no id it \
+         is refused too. Such a dead \
          letter can only be re-run as new work, with `trigger.publish`, and \
          that is deliberately your call to make rather than this command's: \
          requeueing it would hand back the guarantee's name without the \
@@ -183,7 +192,8 @@ fn requeue_declaration() -> fq_ops::Command {
         "The payload is the dead letter's own record of the trigger, verbatim. \
          `trigger_seq` selects which dead letter by the original's trigger-\
          stream position (what `dead_letter.list` prints); absent takes the \
-         agent's most recent. If the broker times out before acknowledging the \
+         agent's most recent. Of two of the agent's dead letters at one \
+         sequence, the most recent is taken, and nothing selects the older. If the broker times out before acknowledging the \
          publish, its outcome is unknown: the requeue remains claimed because \
          the trigger may have been stored. Check it with `trigger.get` and wait \
          for the dispatcher before retrying; broker deduplication makes a retry \
