@@ -640,3 +640,95 @@ async fn a_dropped_run_whose_call_is_then_rate_limited_is_not_deferred() {
         }
     }
 }
+
+/// A call that comes back empty, and is billed for its prompt.
+fn billed_but_empty() -> First {
+    First::Answers(ChatResponse {
+        parts: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
+        },
+        reported_cost_usd: None,
+    })
+}
+
+/// Guard. The issue's "the failure's usage still reaches the stream", for
+/// a failure that was billed: a drop's mark on a runner holding no halt,
+/// during a call that comes back empty but charged for its prompt. The
+/// run stops without an ending, and the call's `llm.failure` carries its
+/// usage and its cost, row marked or handed off.
+#[tokio::test]
+async fn a_dropped_runs_billed_failure_keeps_its_usage_and_cost() {
+    for drop in [NO_HALT, NO_HALT_HANDED_OFF] {
+        let run = a_dropped_run(
+            drop,
+            During::ModelCall,
+            billed_but_empty(),
+            SinkKind::Recording,
+        )
+        .await;
+        run.assert_stopped_without_an_ending();
+        let failure = run
+            .events
+            .iter()
+            .find(|event| matches!(event.payload, EventPayload::LlmFailure(_)))
+            .expect("the call's llm.failure");
+        let EventPayload::LlmFailure(payload) = &failure.payload else {
+            unreachable!()
+        };
+        assert_eq!(
+            payload.usage.map(|usage| usage.input_tokens),
+            Some(1_000),
+            "{drop:?}: the call's usage"
+        );
+        let cost = failure.envelope.cost.as_ref().expect("the call is priced");
+        assert!(cost.total_cost > 0.0, "{drop:?}: the call's cost: {cost:?}");
+    }
+}
+
+/// Guard: a resumed drive notes its row. A run rate-limited at its first
+/// call is deferred, and its drive ends with the row in flight. The real
+/// `resume` drives it again; a drop marks the row and its hand-off
+/// deletes it during the resumed drive's model call, which then fails.
+/// The resumed drive began from a row of its own, so the missing row is
+/// a hand-off, not a run that never started: no `failed` (in `setup` or
+/// otherwise), the call's `llm.failure` out, `FinishedElsewhere`, no row,
+/// and the note gone once the drive ends.
+#[tokio::test]
+async fn a_resumed_run_whose_row_a_drop_handed_off_publishes_no_failed() {
+    let world = a_world(None, SinkKind::Recording).await;
+    let deferred = world
+        .run(&world.model(None, First::Fails(rate_limited)))
+        .await;
+    assert!(
+        matches!(deferred, Ok(InvocationOutcome::Deferred { .. })),
+        "{deferred:?}"
+    );
+    assert!(
+        !world.runner.live.wrote_row(world.invocation_id),
+        "the first drive's note went with it"
+    );
+
+    let from = world.recording.events().len();
+    let llm = world.model(NO_HALT_HANDED_OFF, First::Fails(refused_key));
+    let outcome = world
+        .runner
+        .resume(&world.agent, &llm, world.invocation_id)
+        .await;
+    let noted_after = world.runner.live.wrote_row(world.invocation_id);
+    let run = world.left(outcome, from, &llm).await;
+    run.assert_stopped_without_an_ending();
+    assert_eq!(run.published("llm_failure"), 1, "the call's own record");
+    assert!(run.row.is_none(), "no row is re-created");
+    assert!(
+        !noted_after,
+        "the note is forgotten when the resumed drive ends"
+    );
+}
