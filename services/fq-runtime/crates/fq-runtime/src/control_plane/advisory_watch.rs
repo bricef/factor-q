@@ -672,6 +672,9 @@ fn delivered(msg: &async_nats::jetstream::Message) -> Option<u64> {
 }
 
 #[cfg(test)]
+mod once_tests;
+
+#[cfg(test)]
 mod read_tests;
 
 #[cfg(test)]
