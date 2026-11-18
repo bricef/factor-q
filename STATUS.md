@@ -644,11 +644,16 @@ backlog before it classifies is item 3 of
 [#1070](https://github.com/bricef/factor-q/issues/1070). A run still
 running from a trigger has no row yet, so it is not in
 `fq invocation list`; `fq doctor`'s current executions count it
-([#721](https://github.com/bricef/factor-q/issues/721)). Still open:
-a run whose stored terminal event this build will not republish, or
-whose row's ids cannot go on an event, never tells the control plane
-that it ended, so its row stays as it was
-([#1071](https://github.com/bricef/factor-q/issues/1071)); a row that
+([#721](https://github.com/bricef/factor-q/issues/721)). A run whose
+stored terminal event the archive sweeper holds, because this build
+will not republish it or the broker refuses it for its size, reads
+finished too: the sweeper publishes `invocation.ending_held` in its
+place, folded as that ending
+([#1071](https://github.com/bricef/factor-q/issues/1071)). Still open: a run whose row's ids cannot go on an
+event can publish nothing, so its row stays as it was; the readers that
+key on a run's own `completed` or `failed`, the summariser's outcome
+line and the turn list among them, do not read a held ending yet
+([#1100](https://github.com/bricef/factor-q/issues/1100)); a row that
 read `in_flight` before this change for a run that had already ended
 keeps reading so until the run's archive arrives, or for good if the
 archive is held, since a build before this one consumed that ending
