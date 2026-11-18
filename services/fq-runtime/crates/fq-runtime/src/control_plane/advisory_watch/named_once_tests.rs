@@ -28,7 +28,7 @@ use crate::events::subjects;
 use crate::test_support::nats::{NatsServer, test_nats};
 
 /// A broker, a bus on it, and an agent name of the test's own.
-async fn broker() -> (NatsServer, EventBus, String) {
+pub(super) async fn broker() -> (NatsServer, EventBus, String) {
     let server = test_nats();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let agent = format!("named-once-{}", Uuid::now_v7().simple());
@@ -54,7 +54,12 @@ fn failed(agent: &str, kind: FailureKind) -> Event {
 /// shaped as it writes one: under the agent, with the trigger's subject,
 /// payload, sequence, the id it handled the delivery under, and the
 /// incarnation of the trigger stream `bus` connected to.
-async fn dispatcher_dead_letter(bus: &EventBus, agent: &str, stream_seq: u64, trigger_id: Uuid) {
+pub(super) async fn dispatcher_dead_letter(
+    bus: &EventBus,
+    agent: &str,
+    stream_seq: u64,
+    trigger_id: Uuid,
+) {
     marked_dead_letter(
         bus,
         agent,
@@ -114,7 +119,7 @@ async fn trigger(bus: &EventBus, agent: &str) -> crate::trigger::PublishedTrigge
 
 /// Publish a trigger for `agent` with no id, as `fq-cron` does; its
 /// sequence.
-async fn untagged_trigger(bus: &EventBus, agent: &str) -> u64 {
+pub(super) async fn untagged_trigger(bus: &EventBus, agent: &str) -> u64 {
     bus.jetstream()
         .publish(
             subjects::trigger(agent),
