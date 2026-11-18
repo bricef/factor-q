@@ -478,6 +478,24 @@ fn exemplars() -> Vec<Event> {
                 retry_after_ms: 300_000,
             }),
         ),
+        // The ending of a run whose own ending the worker holds (#1071),
+        // with its recomputed totals: the sweeper publishes it outside
+        // the run's chain, so it has no parent.
+        agent_event(
+            31,
+            EventPayload::InvocationEndingHeld(InvocationEndingHeldPayload {
+                outcome: HeldOutcome::Failed,
+                ended_at_ms: 1_788_000_026_000,
+                started_at_ms: 1_788_000_000_000,
+                worker_id: worker(),
+                reason: EndingHeldReason::StoredEventRefused,
+                totals: Some(RecordedTotals {
+                    total_llm_calls: 2,
+                    total_tool_calls: 1,
+                    total_cost: 0.125,
+                }),
+            }),
+        ),
         // The maintenance outcome (#257) — a system event with no
         // agent and no invocation, like the startup/shutdown pair.
         system_event(

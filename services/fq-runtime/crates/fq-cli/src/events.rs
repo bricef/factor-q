@@ -193,6 +193,10 @@ fn event_summary(event: &Event) -> String {
             p.model,
             p.retry_after_ms / 1000
         ),
+        EventPayload::InvocationEndingHeld(p) => format!(
+            "invocation.ending_held outcome={:?} reason={:?} worker_id={}",
+            p.outcome, p.reason, p.worker_id
+        ),
         EventPayload::InvocationArchived(p) => format!(
             "invocation.archived worker_id={} phase={}",
             p.worker_id, p.final_phase

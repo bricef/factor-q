@@ -132,6 +132,9 @@ pub(super) fn extract_fields(event: &Event) -> Fields {
         EventPayload::InvocationStuck(_) => Fields::default(),
         EventPayload::InvocationDeferred(_) => Fields::default(),
         EventPayload::InvocationArchived(_) => Fields::default(),
+        // No cost, no duration: its totals are a recomputed run-level
+        // copy, and a column here could be summed beside the calls'.
+        EventPayload::InvocationEndingHeld(_) => Fields::default(),
         EventPayload::InvocationArchiveAcked(_) => Fields::default(),
         EventPayload::ToolResult(p) => Fields {
             error_kind: p.error_kind.map(serialized_name),

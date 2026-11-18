@@ -137,6 +137,13 @@ pub fn agent_invocation_deferred(agent_id: &str) -> String {
     format!("fq.agent.{agent_id}.invocation.deferred")
 }
 
+/// Emitted by the worker's archive sweeper for a finished run whose own
+/// ending it holds (issue 1071). Inside `fq.agent.*.invocation.*`, so a
+/// coordination consumer filtered to that namespace sees it too.
+pub fn agent_invocation_ending_held(agent_id: &str) -> String {
+    format!("fq.agent.{agent_id}.invocation.ending_held")
+}
+
 /// Worker → control-plane archive hand-off (step 8 of
 /// data-architecture.md). Emitted by the worker after an
 /// invocation reaches terminal state, carrying the final
