@@ -214,17 +214,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // is `Setup`, as built here.
         self.publish_failed(
             &mut cursor,
-            invocation_id,
-            Event::new(
-                agent_id,
+            super::terminal::failed_event(
+                &agent_id,
                 invocation_id,
-                EventPayload::Failed(crate::events::FailedPayload {
-                    error_kind: kind,
-                    error_message: message.clone(),
-                    phase: FailurePhase::Setup,
-                    partial_totals: totals,
-                    detail: None,
-                }),
+                kind,
+                message.clone(),
+                FailurePhase::Setup,
+                totals,
+                None,
             ),
         )
         .await?;

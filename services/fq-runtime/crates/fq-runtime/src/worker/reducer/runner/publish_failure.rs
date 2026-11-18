@@ -106,13 +106,12 @@ use uuid::Uuid;
 
 use serde_json::json;
 
-use super::{ReducerRunner, map_store_err, terminal};
+use super::terminal::{self, FailedEvent};
+use super::{ReducerRunner, map_store_err};
 use crate::agent::{Agent, AgentId};
 use crate::bus::{BusError, EventSink};
 use crate::dead_letter::{DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY};
-use crate::events::{
-    Event, EventKind, EventPayload, FailureDetail, FailureKind, FailurePhase, InvocationTotals,
-};
+use crate::events::{Event, EventKind, FailureDetail, FailureKind, FailurePhase, InvocationTotals};
 use crate::trigger::Trigger;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::{ExecutorError, InvocationOutcome};
@@ -180,7 +179,7 @@ impl Refused {
         agent_id: &AgentId,
         invocation_id: Uuid,
         partial_totals: InvocationTotals,
-    ) -> Event {
+    ) -> FailedEvent {
         warn!(
             agent_id = %agent_id,
             invocation_id = %invocation_id,
@@ -310,10 +309,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // size. The fresh path's `triggered` ends in
             // `end_unstarted_on_refusal` instead, which also names the
             // trigger.
-            self.publish_failed(cursor, invocation_id, failed).await?;
+            self.publish_failed(cursor, failed).await?;
             return Err(refused.failure());
         }
-        self.end_mid_step(cursor, invocation_id, failed).await?;
+        self.end_mid_step(cursor, failed).await?;
         if let Err(err) = self
             .publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
             .await
@@ -359,36 +358,48 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if let Some(subject) = &trigger.subject {
             failed = failed.annotate(DEAD_LETTER_SUBJECT_KEY, json!(subject));
         }
-        self.publish_failed(&mut None, invocation_id, failed)
-            .await?;
+        self.publish_failed(&mut None, failed).await?;
         Err(refused.failure())
     }
 
-    /// Publish `failed` for `invocation_id`, its phase stamped from the
-    /// run's WAL row as it stands ([`phase_for`]): `Setup` when there is no
-    /// row, whatever the run was doing, and never `Setup` when there is
-    /// one. Every `failed` the runner publishes comes through here except
-    /// the terminal event a step stores in its row (`terminal.rs`), whose
-    /// run has a row by then. The row is read before the publish, and
-    /// nothing else creates it meanwhile: only this run's own loop writes
-    /// a first row, and it is the caller. A store that cannot be read
-    /// returns its error, transient, and nothing is published.
+    /// Publish `failed`, its phase stamped from its run's WAL row as it
+    /// stands ([`phase_for`]): `Setup` when there is no row, whatever the
+    /// run was doing, and never `Setup` when there is one. A run has no
+    /// row before its first WAL write, and none after a live drop whose
+    /// archive has been handed off, which deletes it; in that second case
+    /// the drop is the run's recorded outcome, and the module doc says why
+    /// `Setup` is still right. Every `failed` the runner publishes comes
+    /// through here except the terminal event a step stores in its row
+    /// (`terminal.rs`), whose run has a row by then.
+    ///
+    /// The row is read before the publish, and nothing else creates it
+    /// meanwhile: only this run's own loop writes a first row, and it is
+    /// the caller. A store that cannot be read returns its error,
+    /// transient, and nothing is published. A caller that built `Setup`
+    /// for a run with a row has made a mistake the row corrects; that is
+    /// logged at warn.
     pub(super) async fn publish_failed(
         &self,
         cursor: &mut Option<Uuid>,
-        invocation_id: Uuid,
-        mut failed: Event,
+        mut failed: FailedEvent,
     ) -> Result<(), ExecutorError> {
-        let started = self
+        let invocation_id = failed.invocation_id;
+        let has_row = self
             .config
             .store
             .get_invocation_state(&invocation_id.to_string())
             .await
             .map_err(map_store_err)?
             .is_some();
-        if let EventPayload::Failed(payload) = &mut failed.payload {
-            payload.phase = phase_for(started, payload.phase);
+        if has_row && matches!(failed.payload.phase, FailurePhase::Setup) {
+            warn!(
+                invocation_id = %invocation_id,
+                "a `failed` built in phase setup for a run with a WAL row; \
+                 publishing it in phase reducer, since setup would say the \
+                 run never started"
+            );
         }
-        self.publish_chained(cursor, failed).await
+        failed.payload.phase = phase_for(has_row, failed.payload.phase);
+        self.publish_chained(cursor, failed.into_event()).await
     }
 }
