@@ -78,7 +78,11 @@ serde = { version = "1", features = ["derive"] }
 # how the `fq init` template gate tells "the daemon accepts this file"
 # from "the daemon reads every key in it".
 serde_ignored = "0.1"
-serde_json = "1"
+# `float_roundtrip`: a float reads back exactly as it was written (#1099).
+# Costs travel as JSON numbers, and the default parser reads some back
+# one unit in the last place off, so a cost read and written again, by a
+# republish or a reader that re-serialises, would change in its last digit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 strum = { version = "0.28", features = ["derive"] }
 tarpc = { version = "0.38", features = [
