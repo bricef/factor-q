@@ -10,13 +10,14 @@ fn format_invocation_list_row_human_renders_short_id_and_truncated_fields() {
         assigned_at_ms: 1_700_000_000_000,
         started_at_ms: 1_700_000_000_000,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: None,
     };
     let line = format_invocation_list_row_human(&item);
     assert!(line.starts_with("019e3b32"), "expected 8-char id prefix");
     assert!(line.contains("ambiguous"));
     assert!(line.contains("worker-42"));
-    assert!(line.contains("no"));
+    assert!(line.contains(" - "), "no archive due: {line:?}");
     // Agent string was truncated to 22 chars.
     assert!(line.contains(&"a".repeat(22)));
     assert!(!line.contains(&"a".repeat(23)));
@@ -34,6 +35,7 @@ fn format_invocation_list_row_human_renders_summary_last() {
         assigned_at_ms: 0,
         started_at_ms: 0,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: Some("Fixing #7: editing widget.rs".to_string()),
     };
     let line = format_invocation_list_row_human(&item);
@@ -62,6 +64,7 @@ fn format_invocation_list_row_human_marks_archived() {
         assigned_at_ms: 0,
         started_at_ms: 0,
         archived: true,
+        archive_state: fq_ops::views::InvocationArchiveState::Archived,
         summary: None,
     };
     let line = format_invocation_list_row_human(&item);
@@ -86,6 +89,7 @@ fn invocation_summary_view_serialises_to_stable_json_shape() {
         assigned_at_ms: 42,
         started_at_ms: 41,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: None,
     };
     let v = serde_json::to_value(&item).unwrap();
@@ -147,5 +151,77 @@ fn format_resume_accepted_names_the_worker_cap_and_the_agent_cap_it_is_not_held_
          back by it, so the agent can be over its limit until one of its invocations ends.\n\
          Follow with `fq invocation show 019a2b3c-0000-7000-8000-000000000001` or \
          `fq invocation transcript 019a2b3c-0000-7000-8000-000000000001`.\n"
+    );
+}
+
+/// The list's archive column, one label per state.
+#[test]
+fn the_archive_column_names_each_state() {
+    use fq_ops::views::InvocationArchiveState as S;
+    assert_eq!(
+        [S::NotDue, S::Pending, S::Held, S::Archived].map(archive_label),
+        ["-", "pending", "held", "yes"]
+    );
+}
+
+fn detail_with(
+    archive_state: fq_ops::views::InvocationArchiveState,
+    archive_hold: Option<fq_ops::health::ArchiveHold>,
+) -> fq_ops::views::InvocationDetailView {
+    fq_ops::views::InvocationDetailView {
+        invocation_id: "inv".to_string(),
+        agent_id: None,
+        owner: Some(fq_ops::views::InvocationSummaryView {
+            invocation_id: "inv".to_string(),
+            agent_id: None,
+            worker_id: "w".to_string(),
+            status: "failed".to_string(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            archive_state,
+            summary: None,
+        }),
+        archive: None,
+        live: None,
+        recent_events: Vec::new(),
+        has_transcript: false,
+        summary: None,
+        cost: None,
+        trigger: None,
+        archive_hold,
+    }
+}
+
+/// `show` says when a finished run's archive has not arrived, and why
+/// when the sweeper holds it; it says nothing for a run with no archive
+/// due or one already archived.
+#[test]
+fn show_names_a_pending_or_held_archive() {
+    use fq_ops::views::InvocationArchiveState as S;
+    assert_eq!(format_archive_state(&detail_with(S::NotDue, None)), None);
+    assert_eq!(format_archive_state(&detail_with(S::Archived, None)), None);
+    assert_eq!(
+        format_archive_state(&detail_with(S::Pending, None)).as_deref(),
+        Some("pending: the run has ended and its archive has not reached the control plane")
+    );
+    let hold = fq_ops::health::ArchiveHold {
+        invocation_id: "inv".to_string(),
+        agent_id: "a".to_string(),
+        reason: fq_ops::health::ArchiveHoldReason::PayloadTooLarge {
+            event_type: "invocation_archived".to_string(),
+            size_bytes: 2_000_000,
+            limit_bytes: 1_048_576,
+        },
+        remedy: "raise the broker's max_payload".to_string(),
+    };
+    let held = format_archive_state(&detail_with(S::Held, Some(hold))).unwrap();
+    assert!(
+        held.starts_with("held by the worker's archive sweeper: "),
+        "{held}"
+    );
+    assert!(
+        held.ends_with("-> raise the broker's max_payload"),
+        "{held}"
     );
 }

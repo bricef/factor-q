@@ -9,6 +9,7 @@
     "assigned_at_ms": 1767323050000,
     "started_at_ms": 1767323050000,
     "archived": false,
+    "archive_state": "pending",
     "summary": null
   },
   "archive": null,
@@ -83,5 +84,6 @@
     "state": "durably_started",
     "claimant": "worker-alpha",
     "claimed_at_ms": 1767323044000
-  }
+  },
+  "archive_hold": null
 }

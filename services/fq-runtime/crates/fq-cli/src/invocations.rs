@@ -25,7 +25,7 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
     let agent = item.agent_id.as_deref().unwrap_or("?");
     let agent_trim: String = agent.chars().take(22).collect();
     let worker_trim: String = item.worker_id.chars().take(22).collect();
-    let archived_flag = if item.archived { "yes" } else { "no" };
+    let archive = archive_label(item.archive_state);
     // The one-line summary (#216) rides last: it is the only
     // variable-width column, truncated char-wise so a long line
     // cannot wrap the table.
@@ -39,9 +39,45 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
         None => "—".to_string(),
     };
     format!(
-        "{:<11} {:<10} {:<24} {:<24} {:<5} {}",
-        inv_short, item.status, agent_trim, worker_trim, archived_flag, summary
+        "{:<11} {:<10} {:<24} {:<24} {:<8} {}",
+        inv_short, item.status, agent_trim, worker_trim, archive, summary
     )
+}
+
+/// The list's `archive` column: whether the control plane holds the run's
+/// archive. A run reads finished from its ending, and this says whether
+/// the archive followed. Pure; covered by unit tests.
+fn archive_label(state: fq_ops::views::InvocationArchiveState) -> &'static str {
+    match state {
+        fq_ops::views::InvocationArchiveState::NotDue => "-",
+        fq_ops::views::InvocationArchiveState::Pending => "pending",
+        fq_ops::views::InvocationArchiveState::Held => "held",
+        fq_ops::views::InvocationArchiveState::Archived => "yes",
+    }
+}
+
+/// The `archive:` line of `fq invocation show`, for a run that has ended
+/// and whose archive has not reached the control plane: pending, or held
+/// by the worker's archive sweeper with the reason and what lifts it.
+/// `None` otherwise. Pure; covered by unit tests.
+fn format_archive_state(detail: &fq_ops::views::InvocationDetailView) -> Option<String> {
+    let owner = detail.owner.as_ref()?;
+    match (owner.archive_state, &detail.archive_hold) {
+        (fq_ops::views::InvocationArchiveState::Held, Some(hold)) => Some(format!(
+            "held by the worker's archive sweeper: {}\n            -> {}",
+            hold.reason.summary(),
+            hold.remedy
+        )),
+        (
+            fq_ops::views::InvocationArchiveState::Pending
+            | fq_ops::views::InvocationArchiveState::Held,
+            _,
+        ) => Some(
+            "pending: the run has ended and its archive has not reached the control plane"
+                .to_string(),
+        ),
+        _ => None,
+    }
 }
 
 /// The `trigger:` line of `fq invocation show` (#954): which delivery on
@@ -113,8 +149,8 @@ pub(crate) async fn invocation_list(
         println!("0 invocations {what}— nothing to list.");
     } else {
         println!(
-            "{:<11} {:<10} {:<24} {:<24} {:<5} summary",
-            "invocation", "status", "agent", "worker", "arch"
+            "{:<11} {:<10} {:<24} {:<24} {:<8} summary",
+            "invocation", "status", "agent", "worker", "archive"
         );
         for item in &items {
             println!("{}", format_invocation_list_row_human(item));
@@ -160,6 +196,9 @@ pub(crate) async fn invocation_show(
             println!("  worker:   {}", o.worker_id);
         } else {
             println!("  status:   (no coordination row)");
+        }
+        if let Some(archive) = format_archive_state(&detail) {
+            println!("  archive:  {archive}");
         }
         if let Some(a) = &detail.archive {
             println!(

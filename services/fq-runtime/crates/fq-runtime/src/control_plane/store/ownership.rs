@@ -76,6 +76,19 @@ impl ArchiveState {
     }
 }
 
+/// The stored state as the invocation views show it. `held` is not
+/// stored: the daemon reads it from the archive sweeper where it builds a
+/// report.
+impl From<ArchiveState> for fq_ops::views::InvocationArchiveState {
+    fn from(state: ArchiveState) -> Self {
+        match state {
+            ArchiveState::NotDue => Self::NotDue,
+            ArchiveState::Pending => Self::Pending,
+            ArchiveState::Archived => Self::Archived,
+        }
+    }
+}
+
 impl ControlPlaneStore {
     /// Move `invocation_id`'s ownership row to `to`, only from `expected`:
     /// insert it when `expected` is no row, and update it when the row

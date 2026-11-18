@@ -388,6 +388,7 @@ fn summary_column_renders_escaped_with_fallback() {
         assigned_at_ms: 0,
         started_at_ms: 0,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: Some("Fixing #7: <script>alert(1)</script>".into()),
     }];
     let descriptions = std::collections::HashMap::from([(
@@ -463,6 +464,7 @@ fn summary_renders_on_detail_and_transcript_pages() {
             total_reasoning_tokens: None,
         }),
         trigger: None,
+        archive_hold: None,
     };
     let html = invocation_detail(&detail, 1_000);
     assert_eq!(
@@ -533,6 +535,7 @@ fn active_table_omitted_when_nothing_in_flight() {
         assigned_at_ms: 0,
         started_at_ms: 0,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::Archived,
         summary: None,
     }];
     assert_eq!(active(&[], &Default::default(), 1_000), "");
@@ -1066,6 +1069,7 @@ fn invocation_surfaces_link_agent_names() {
             assigned_at_ms: 0,
             started_at_ms: 0,
             archived: false,
+            archive_state: fq_ops::views::InvocationArchiveState::Archived,
             summary: None,
         },
         fq_ops::views::InvocationSummaryView {
@@ -1076,6 +1080,7 @@ fn invocation_surfaces_link_agent_names() {
             assigned_at_ms: 0,
             started_at_ms: 0,
             archived: false,
+            archive_state: fq_ops::views::InvocationArchiveState::Archived,
             summary: None,
         },
     ];
@@ -1127,6 +1132,7 @@ fn invocation_filters_hide_terminal_rows_and_compose_links() {
         assigned_at_ms: 0,
         started_at_ms: 0,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: None,
     };
     let items = vec![
@@ -1312,6 +1318,7 @@ fn liveness_and_status_carry_the_health_palette() {
         cost: None,
         has_transcript: false,
         trigger: None,
+        archive_hold: None,
     };
     let html = invocation_detail(&detail, 1_000);
     assert!(
@@ -1357,6 +1364,7 @@ fn invocation_rows_escape_link_and_show_start() {
         assigned_at_ms: 600_000,
         started_at_ms: 600_000,
         archived: false,
+        archive_state: fq_ops::views::InvocationArchiveState::NotDue,
         summary: None,
     }];
     let html = invocations(
@@ -1650,6 +1658,7 @@ fn invocation_detail_names_reasoning_only_when_reported() {
             total_reasoning_tokens: reasoning,
         }),
         trigger: None,
+        archive_hold: None,
     };
     let html = invocation_detail(&detail(Some(12_500)), 1_000);
     assert!(html.contains(" · 12.5K reasoning</span>"), "got: {html}");
@@ -1777,4 +1786,63 @@ fn a_counts_read_that_failed_says_unknown_rather_than_zero() {
     // The rest of the health view still renders: the row degrades, the
     // page does not.
     assert!(unknown.contains("2 in-flight (1 working"), "got: {unknown}");
+}
+
+/// The list's archive column says whether a finished run's archive
+/// followed it: pending, held (marked, since it waits for an operator),
+/// or archived; a run that has not ended has none due.
+#[test]
+fn the_invocation_list_shows_each_archive_state() {
+    use fq_ops::views::InvocationArchiveState as S;
+    let mk = |id: &str, status: &str, archive_state| fq_ops::views::InvocationSummaryView {
+        invocation_id: id.into(),
+        agent_id: Some("a".into()),
+        worker_id: "w".into(),
+        status: status.into(),
+        assigned_at_ms: 0,
+        started_at_ms: 0,
+        archived: false,
+        archive_state,
+        summary: None,
+    };
+    let items = vec![
+        mk("inv-running", "in_flight", S::NotDue),
+        mk("inv-pending", "failed", S::Pending),
+        mk("inv-held", "completed", S::Held),
+        mk("inv-archived", "completed", S::Archived),
+    ];
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_000,
+    );
+    assert!(html.contains("<th>archive</th>"), "got: {html}");
+    let row = |id: &str| {
+        let start = html
+            .find(id)
+            .unwrap_or_else(|| panic!("{id} listed: {html}"));
+        let end = html[start..].find("</tr>").unwrap() + start;
+        html[start..end].to_string()
+    };
+    assert!(
+        row("inv-running").ends_with(r#"<span class="muted">—</span></td>"#),
+        "{}",
+        row("inv-running")
+    );
+    assert!(
+        row("inv-pending").ends_with("<td>pending</td>"),
+        "{}",
+        row("inv-pending")
+    );
+    assert!(
+        row("inv-held").ends_with(r#"<span class="warn">held</span></td>"#),
+        "{}",
+        row("inv-held")
+    );
+    assert!(
+        row("inv-archived").ends_with("<td>yes</td>"),
+        "{}",
+        row("inv-archived")
+    );
 }

@@ -280,3 +280,129 @@ async fn an_archive_too_large_for_the_broker_is_held_and_reported() {
         "one error line per run\n--- daemon log ---\n{text}"
     );
 }
+
+async fn invoke(
+    client: &fq_edge::EdgeClient,
+    op: OpId,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op,
+                version: 1,
+                input,
+                min_seq: None,
+            },
+        )
+        .await
+        .expect("rpc")
+        .map(|r| r.output)
+        .expect("the op answers")
+}
+
+/// **A run whose ending reached the control plane and whose archive is
+/// held reads finished, with its archive held, in `invocation.list` and
+/// `invocation.get`.** The row stores a `completed` the run never got
+/// out: the sweeper publishes it first, the coordination consumer moves
+/// the ownership row to `completed` with its archive pending, and the
+/// archive behind it is too large for the broker. The list and the
+/// detail read the hold from the sweeper where they are built; the
+/// detail names the reason and what lifts it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_run_reads_finished_with_its_archive_held() {
+    let server = fq_test_support::NatsServer::start();
+    let scratch = scratch();
+    let paths = RuntimeDbPaths::under(&scratch.path().join("cache"));
+    let store = WorkerStore::open(&paths.worker)
+        .await
+        .expect("open the worker store");
+    let completed = fq_ops::events::Event::new(
+        fq_ops::agent::AgentId::new("researcher").unwrap(),
+        uuid::Uuid::parse_str(OVERSIZED).unwrap(),
+        fq_ops::events::EventPayload::Completed(fq_ops::events::CompletedPayload {
+            task_status: Default::default(),
+            result_summary: Some("done".to_string()),
+            total_llm_calls: 1,
+            total_tool_calls: 0,
+            total_cost: 0.0,
+            total_duration_ms: 10,
+        }),
+    );
+    let mut row = terminal_row(OVERSIZED, vec![200; STATE]);
+    row.terminal_outcome = Some(serde_json::to_string(&completed).unwrap());
+    store.upsert_invocation_state(&row).await.unwrap();
+
+    let log = scratch.path().join("fqd.log");
+    let log_file = std::fs::File::create(&log).expect("create daemon log");
+    let child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
+        .env("FQ_DAEMON_CONFIG", scratch.path().join("fqd.toml"))
+        .env("FQ_NATS_URL", server.url())
+        .env("FQ_CACHE_DIR", scratch.path().join("cache"))
+        .env("FQ_STATE_DIR", scratch.path().join("state"))
+        .env("FQ_AGENTS_DIR", scratch.path().join("agents"))
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn();
+    let mut daemon = Daemon { child, log };
+
+    let log_path = &daemon.log.clone();
+    let addr = daemon
+        .wait_for("the edge to listen", move || async move {
+            let log = std::fs::read_to_string(log_path).ok()?;
+            log.lines()
+                .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+                .map(|a| a.trim().to_string())
+        })
+        .await;
+    let state = scratch.path().join("state");
+    let client = fq_edge::EdgeClient::connect(
+        &addr,
+        parse_fingerprint(&fq_test_support::edge_fingerprint(&state)),
+        &fq_test_support::admin_token(&state),
+    )
+    .await
+    .expect("connect edge");
+    let client = &client;
+
+    let listed = daemon
+        .wait_for("the run listed with its archive held", move || async move {
+            let items = invoke(
+                client,
+                OpId::List(fq_ops::Domain::Invocation),
+                serde_json::json!({ "include_archived": false, "limit": 50 }),
+            )
+            .await;
+            let item = items
+                .as_array()?
+                .iter()
+                .find(|item| item["invocation_id"] == OVERSIZED)?
+                .clone();
+            (item["archive_state"] == "held").then_some(item)
+        })
+        .await;
+    assert_eq!(listed["status"], "completed", "{listed}");
+
+    let detail = invoke(
+        client,
+        OpId::Get(fq_ops::Domain::Invocation),
+        serde_json::json!({ "invocation_id": OVERSIZED }),
+    )
+    .await;
+    assert_eq!(detail["owner"]["status"], "completed", "{detail}");
+    assert_eq!(detail["owner"]["archive_state"], "held", "{detail}");
+    let hold = &detail["archive_hold"];
+    assert_eq!(hold["invocation_id"], OVERSIZED, "{detail}");
+    assert_eq!(
+        hold["reason"]["payload_too_large"]["event_type"], "invocation_archived",
+        "{detail}"
+    );
+    assert!(
+        hold["remedy"]
+            .as_str()
+            .is_some_and(|remedy| remedy.contains("restart fqd")),
+        "{detail}"
+    );
+}

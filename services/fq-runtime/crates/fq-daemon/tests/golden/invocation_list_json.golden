@@ -7,6 +7,7 @@
     "assigned_at_ms": 1767323076000,
     "started_at_ms": 1767323076000,
     "archived": false,
+    "archive_state": "archived",
     "summary": null
   },
   {
@@ -17,6 +18,7 @@
     "assigned_at_ms": 1767323065000,
     "started_at_ms": 1767323065000,
     "archived": false,
+    "archive_state": "not_due",
     "summary": null
   },
   {
@@ -27,6 +29,7 @@
     "assigned_at_ms": 1767323057000,
     "started_at_ms": 1767323057000,
     "archived": false,
+    "archive_state": "pending",
     "summary": null
   },
   {
@@ -37,6 +40,7 @@
     "assigned_at_ms": 1767323050000,
     "started_at_ms": 1767323050000,
     "archived": false,
+    "archive_state": "pending",
     "summary": "Fixture run finished clean."
   }
 ]

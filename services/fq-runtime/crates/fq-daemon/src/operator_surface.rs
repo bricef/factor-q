@@ -217,7 +217,7 @@ pub fn operator_registry(
         })
     }));
 
-    crate::invocation_view::register_invocation_view(&mut registry, views, stuck_after_ms)?;
+    crate::invocation_view::register_invocation_view(&mut registry, views, &deps.facts)?;
     crate::active_report::register_active_report(&mut registry, active_views, stuck_after_ms)?;
     register_worker_view(&mut registry, worker_views)?;
     register_agent_view(&mut registry, agent_registry)?;
