@@ -92,7 +92,10 @@ pub async fn drop_invocation(
             // `delete_invocation_owner` tells them apart by whether it
             // actually removed a row: a truly-unknown id must still error
             // rather than emit a phantom operator-recovered event
-            // (ADR-0026 — the event log is the system of record).
+            // (ADR-0026 — the event log is the system of record). This is
+            // the one delete of an ownership row outside the transition
+            // table (`control_plane::ownership`); the drop's fold writes
+            // the row again, `failed` with its archive recorded.
             if !control_store.delete_invocation_owner(invocation_id).await? {
                 return Err(DropError::UnknownInvocation(invocation_id.to_string()));
             }

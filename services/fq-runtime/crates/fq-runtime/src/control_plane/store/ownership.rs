@@ -13,8 +13,17 @@ use crate::control_plane::ownership::RowState;
 /// finished status, and each wrote the archive record first.
 ///
 /// Its number is where `MIGRATIONS` lists it, so a change that adds a
-/// rung before it renumbers it by that one line.
-pub(super) const ARCHIVE_STATE_V3_SQL: &str = r#"
+/// rung before it renumbers it by that one line; nothing else names it.
+///
+/// The `CHECK` covers the column's values, not which pairs of status and
+/// archive state a row may hold (`RowState::is_valid`). A check across
+/// both columns would need the table rebuilt, since SQLite adds no table
+/// constraint to an existing table; the pairs are kept by the writers
+/// instead. `control_plane::ownership::apply` is the one production
+/// writer and moves only between valid pairs, and the seeding helpers
+/// tests use (`assign_invocation`, `upsert_invocation_ownership`) write
+/// valid pairs too.
+pub(super) const ARCHIVE_STATE_SQL: &str = r#"
 ALTER TABLE coordination_invocation_owner
     ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'not_due'
     CHECK (archive_state IN ('not_due', 'pending', 'archived'));
@@ -57,8 +66,9 @@ impl ArchiveState {
     }
 
     /// The archive's state of a row with `status` written before the
-    /// column existed: what the schema's third rung gives such a row.
-    pub fn recorded_before_v3(status: OwnerStatus) -> Self {
+    /// column existed: what the rung that adds it (`ARCHIVE_STATE_SQL`)
+    /// gives such a row.
+    pub fn before_the_column(status: OwnerStatus) -> Self {
         match status {
             OwnerStatus::InFlight | OwnerStatus::Ambiguous => ArchiveState::NotDue,
             OwnerStatus::Completed | OwnerStatus::Failed => ArchiveState::Archived,
