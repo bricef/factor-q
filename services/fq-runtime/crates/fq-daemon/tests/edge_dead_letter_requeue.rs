@@ -39,6 +39,7 @@ use fq_runtime::control_plane::{OwnerStatus, TriggerKey};
 use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
     DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
+    DEAD_LETTER_UNATTRIBUTED_KEY, DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
 };
 use fq_runtime::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
@@ -763,14 +764,68 @@ async fn requeueing_the_same_dead_letter_twice_is_refused_by_name() {
     world.shutdown();
 }
 
-/// A dead letter that names no trigger is refused with a reason of its
-/// own, and nothing is published.
-///
-/// It is `Unlocatable` and not `InvalidInput`: the dead letter exists,
-/// it lists, and the operator selected it correctly — what is missing
-/// is the identity the guarantee is keyed on, and no edit to the
-/// request can supply one. Requeueing it anyway would hand back the
-/// guarantee's name without the guarantee.
+/// The refusal of a dead letter with no trigger id, as a test reads it.
+async fn refused(world: &World, input: serde_json::Value) -> String {
+    let err = world
+        .invoke(REQUEUE, input)
+        .await
+        .expect_err("a dead letter with no trigger id cannot be requeued idempotently");
+    let fq_edge::wire::WireError::Unlocatable { op, message } = err else {
+        panic!("expected an Unlocatable — the dead letter is here, its name is not; got {err:?}");
+    };
+    assert_eq!(op, "dead_letter.requeue");
+    message
+}
+
+/// Assert `message` says each of `expected`, and none of `not`.
+fn says(message: &str, expected: &[&str], not: &[&str]) {
+    for expected in expected {
+        assert!(
+            message.contains(expected),
+            "the refusal must say `{expected}`; got {message}"
+        );
+    }
+    for not in not {
+        assert!(
+            !message.contains(not),
+            "the refusal must not say `{not}`; got {message}"
+        );
+    }
+}
+
+/// A dead letter as the watch writes one that names no trigger: under the
+/// system sentinel, with no subject, no payload and no trigger id, saying
+/// why in `reason`, of `kind`.
+fn nameless(trigger_seq: u64, reason: &str, kind: &str) -> (Event, Uuid) {
+    let event = Event::system(
+        Uuid::now_v7(),
+        EventPayload::Failed(FailedPayload {
+            error_kind: FailureKind::TriggerExhausted,
+            error_message: "trigger exhausted after 5 deliveries (limit 5) [advisory]".into(),
+            phase: FailurePhase::Setup,
+            partial_totals: InvocationTotals::default(),
+            detail: None,
+        }),
+    )
+    .annotate(DEAD_LETTER_SUBJECT_KEY, json!(""))
+    .annotate(DEAD_LETTER_PAYLOAD_KEY, serde_json::Value::Null)
+    .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))
+    .annotate(DEAD_LETTER_SOURCE_KEY, json!("advisory"))
+    .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, json!(reason))
+    .annotate(DEAD_LETTER_UNATTRIBUTED_KIND_KEY, json!(kind));
+    let event_id = event.envelope.event_id;
+    (event, event_id)
+}
+
+/// A dead letter the dispatcher wrote with no trigger id is one recorded
+/// before triggers were named. It is refused, `Unlocatable` and not
+/// `InvalidInput`: the dead letter exists, it lists, and the operator
+/// selected it correctly; what is missing is the identity the guarantee is
+/// keyed on, and no edit to the request can supply one. The refusal names
+/// the dead letter as the other refusals do, by its sequence and event and
+/// as the agent's newest when no sequence was asked for, says which kind it
+/// is, and that its payload can be published as new work. Nothing is
+/// published.
 #[tokio::test]
 async fn a_dead_letter_that_names_no_trigger_is_refused() {
     let server = fq_test_support::NatsServer::start();
@@ -779,24 +834,24 @@ async fn a_dead_letter_that_names_no_trigger_is_refused() {
     let (event, event_id) = dead_letter(11, None, json!({"n": 1}));
     world.seed(&event, None).await;
 
-    let err = world
-        .invoke(REQUEUE, json!({ "agent_id": AGENT }))
-        .await
-        .expect_err("an unnamed dead letter cannot be requeued idempotently");
-    let fq_edge::wire::WireError::Unlocatable { op, message } = &err else {
-        panic!("expected an Unlocatable — the dead letter is here, its name is not; got {err:?}");
-    };
-    assert_eq!(op, "dead_letter.requeue");
-    assert!(
-        message.contains(&event_id.to_string()),
-        "the refusal must name the dead letter it is about; got {message}"
+    let message = refused(&world, json!({ "agent_id": AGENT })).await;
+
+    says(
+        &message,
+        &[
+            &event_id.to_string(),
+            "at trigger sequence 11",
+            "the newest dead letter of agent `researcher`",
+            "no trigger id",
+            "before triggers were named",
+            "trigger.publish",
+        ],
+        &[
+            "aged off",
+            "says why:",
+            "published without an `Fq-Trigger-Id` header",
+        ],
     );
-    for expected in ["names no trigger", "aged off", "trigger.publish"] {
-        assert!(
-            message.contains(expected),
-            "the refusal must say `{expected}` — why, and what to do instead; got {message}"
-        );
-    }
 
     // Nothing published: the refusal happens before the reservation,
     // which happens before the publish.
@@ -811,6 +866,316 @@ async fn a_dead_letter_that_names_no_trigger_is_refused() {
             .await
             .is_err(),
         "a refused requeue must leave the trigger stream untouched"
+    );
+
+    world.shutdown();
+}
+
+/// **A header-less dead letter whose start was not checked** is one the
+/// watch wrote for a trigger published without an `Fq-Trigger-Id` header:
+/// it records the agent, subject and payload and no trigger id. Its work
+/// can be published again, but its run may have started, so the refusal
+/// says its start was not checked, why, and to read the run it names
+/// before publishing.
+#[tokio::test]
+async fn a_header_less_unchecked_dead_letter_is_refused_with_its_run_to_check() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let (event, _) = dead_letter(21, None, json!({"work": "pay the invoice"}));
+    let event = event.annotate(DEAD_LETTER_SOURCE_KEY, json!("advisory"));
+    let run = Uuid::now_v7().to_string();
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&run),
+    );
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": AGENT, "trigger_seq": 21 })).await;
+
+    says(
+        &message,
+        &[
+            "the dead letter at trigger sequence 21",
+            "published without an `Fq-Trigger-Id` header",
+            "not a UUID",
+            "its start was not checked",
+            "a copy of the trigger is still handling its claim",
+            &format!("fq invocation show {run}"),
+            "trigger.publish",
+        ],
+        &["before triggers were named"],
+    );
+
+    world.shutdown();
+}
+
+/// **A dead letter that names no trigger and says why is refused with its
+/// own reason, quoted**, rather than with a list of what such a dead
+/// letter might be. It records no agent, subject or payload, so nothing on
+/// it can be published again: the work has to be published afresh by
+/// whatever published it. One whose message could not be read may still
+/// have that message on the trigger stream at its sequence. And this one's
+/// start was not checked either.
+#[tokio::test]
+async fn a_dead_letter_that_says_why_it_names_no_trigger_is_refused_with_that_reason() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let reason = "the trigger's message could not be read off the trigger stream by the \
+                  watch's limit (the last read answered: request timed out), so the trigger \
+                  is not named, though its message may still be on the stream";
+    let (event, event_id) = nameless(12, reason, "message_unreadable");
+    let run = Uuid::now_v7().to_string();
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&run),
+    );
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 12 })).await;
+
+    says(
+        &message,
+        &[
+            &event_id.to_string(),
+            reason,
+            "nothing on it can be published again",
+            "published afresh by whatever published it",
+            "may still be on the trigger stream at sequence 12",
+            "`trigger_stream_epoch`",
+            "on a stream created since, sequence 12 names another trigger",
+            "its start was not checked",
+            &format!("fq invocation show {run}"),
+        ],
+        &[
+            "aged off",
+            "Whatever payload it recorded",
+            "re-running it is `trigger.publish`",
+        ],
+    );
+
+    world.shutdown();
+}
+
+/// **An earlier incarnation's dead letter was never checked for a start**:
+/// the watch consulted no claim for it, and it carries no mark saying so.
+/// The refusal says its run may have started.
+#[tokio::test]
+async fn an_earlier_incarnations_dead_letter_is_refused_saying_its_run_may_have_started() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let reason = "its advisory came from an earlier incarnation of the trigger stream (emitted \
+                  2026-11-16T22:03:11Z, before the stream was created at \
+                  2026-11-17T08:00:00Z), so its sequence is that stream's, whose messages \
+                  went with it";
+    let (event, _) = nameless(3, reason, "earlier_incarnation");
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 3 })).await;
+
+    says(
+        &message,
+        &[
+            reason,
+            "consulted no claim",
+            "its run may have started",
+            "nothing on it can be published again",
+        ],
+        &["may still be on the trigger stream"],
+    );
+
+    world.shutdown();
+}
+
+/// **An empty reason is no reason**: the refusal does not quote it as
+/// "It says why: .", and says the dead letter gives none.
+#[tokio::test]
+async fn a_dead_letter_with_an_empty_reason_is_refused_as_giving_none() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let (event, _) = nameless(13, "", "message_gone");
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 13 })).await;
+
+    says(
+        &message,
+        &["gives no reason", "nothing on it can be published again"],
+        &["says why: ."],
+    );
+
+    world.shutdown();
+}
+
+/// A dead letter filed under the system sentinel with what it records of
+/// its trigger, and no reason: `subject` and `payload` as the watch read
+/// them, or an empty subject and no payload, as a build before the watch
+/// said why wrote one for a trigger it could not name.
+fn system_dead_letter(trigger_seq: u64, subject: &str, payload: serde_json::Value) -> Event {
+    Event::system(
+        Uuid::now_v7(),
+        EventPayload::Failed(FailedPayload {
+            error_kind: FailureKind::TriggerExhausted,
+            error_message: "trigger exhausted after 5 deliveries (limit 5) [advisory]".into(),
+            phase: FailurePhase::Setup,
+            partial_totals: InvocationTotals::default(),
+            detail: None,
+        }),
+    )
+    .annotate(DEAD_LETTER_SUBJECT_KEY, json!(subject))
+    .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
+    .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))
+    .annotate(DEAD_LETTER_SOURCE_KEY, json!("advisory"))
+}
+
+/// **An unchecked dead letter that names no run is not called unstarted
+/// for want of a listed claim.** `fq doctor` lists a stranded trigger claim
+/// only while it is still claimed: not one whose run started and marked it,
+/// nor one given back. So nothing listed there does not show the run did
+/// not start; for a dead letter that names its agent, the agent's
+/// `triggered` events can show it.
+#[tokio::test]
+async fn an_unchecked_dead_letter_naming_no_run_is_not_called_unstarted_for_want_of_a_claim() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let (event, _) = dead_letter(22, None, json!({"work": "pay the invoice"}));
+    let event = event.annotate(DEAD_LETTER_SOURCE_KEY, json!("advisory"));
+    let event = unchecked(event, "the claim could not be read", None);
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": AGENT, "trigger_seq": 22 })).await;
+
+    says(
+        &message,
+        &[
+            "its start was not checked",
+            "its listing none does not show that the run did not start",
+            "`fq events query --agent researcher --event-type triggered`",
+            "whose trigger subject and payload are this dead letter's",
+        ],
+        &["treat its work as possibly run"],
+    );
+
+    world.shutdown();
+}
+
+/// **A nameless unchecked dead letter that names no run** has no check on
+/// the operator's surfaces that can show its run did not start: no agent
+/// to read the `triggered` events of, and a claim `fq doctor` does not list
+/// proves nothing. The refusal says so, and that the work is to be taken as
+/// possibly run.
+#[tokio::test]
+async fn a_nameless_unchecked_dead_letter_naming_no_run_is_taken_as_possibly_run() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let reason = "the trigger's message could not be read off the trigger stream by the \
+                  watch's limit (the last read answered: request timed out), so the trigger \
+                  is not named, though its message may still be on the stream";
+    let (event, _) = nameless(14, reason, "message_unreadable");
+    let event = unchecked(event, "the claim could not be read", None);
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 14 })).await;
+
+    says(
+        &message,
+        &[
+            "its listing none does not show that the run did not start",
+            "no check on the operator's surfaces can show that its run did not start",
+            "treat its work as possibly run",
+        ],
+        &["fq events query"],
+    );
+
+    world.shutdown();
+}
+
+/// **A dead letter for a subject that names no agent is told what it is.**
+/// The watch read the trigger's message, but its subject names no legal
+/// agent, so it filed the dead letter under `system` with the subject and
+/// payload. It records no agent, and nothing can publish it again as it
+/// is: the work has to be published afresh to the agent it was meant for.
+#[tokio::test]
+async fn a_dead_letter_for_a_subject_naming_no_agent_is_refused_for_what_it_is() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let event = system_dead_letter(15, "fq.trigger.a.b", json!({"work": "lost"}));
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 15 })).await;
+
+    says(
+        &message,
+        &[
+            "`fq.trigger.a.b`",
+            "names no agent",
+            "Nothing can publish it again as it is",
+            "published afresh to the agent it was meant for",
+        ],
+        &[
+            "records its trigger's agent",
+            "re-running it is `trigger.publish`",
+        ],
+    );
+
+    world.shutdown();
+}
+
+/// **An unchecked dead letter for a subject naming no agent, that names
+/// no run**, is sent to every agent's `triggered` events, since no agent
+/// selects them: it records the subject and payload to find its run by.
+#[tokio::test]
+async fn an_unchecked_dead_letter_for_a_subject_naming_no_agent_is_sent_to_every_agents_runs() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let event = system_dead_letter(17, "fq.trigger.a.b", json!({"work": "lost"}));
+    let event = unchecked(event, "the claim could not be read", None);
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 17 })).await;
+
+    says(
+        &message,
+        &[
+            "its listing none does not show that the run did not start",
+            "`fq events query --event-type triggered`",
+            "whose trigger subject and payload are this dead letter's",
+        ],
+        &["--agent system", "treat its work as possibly run"],
+    );
+
+    world.shutdown();
+}
+
+/// **An older build's nameless dead letter** gives no reason and no kind:
+/// a build before the watch said why wrote it.
+#[tokio::test]
+async fn an_older_builds_nameless_dead_letter_is_refused_as_one() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let event = system_dead_letter(16, "", serde_json::Value::Null);
+    world.seed(&event, None).await;
+
+    let message = refused(&world, json!({ "agent_id": "system", "trigger_seq": 16 })).await;
+
+    says(
+        &message,
+        &[
+            "gives no reason",
+            "a build before the dead-letter watch said why wrote it",
+            "nothing on it can be published again",
+        ],
+        &["says why:"],
     );
 
     world.shutdown();
