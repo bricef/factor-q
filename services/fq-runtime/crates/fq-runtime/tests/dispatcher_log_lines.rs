@@ -1,6 +1,7 @@
-//! What the trigger dispatcher logs when it drops a copy of a trigger, or
-//! cannot record or acknowledge a run's durable start, read off the log of
-//! a dispatcher running its own consume loop.
+//! What the trigger dispatcher logs when it drops a copy of a trigger,
+//! cannot record or acknowledge a run's durable start, or cannot publish a
+//! trigger's dead letter, read off the log of a dispatcher running its own
+//! consume loop.
 //!
 //! **Why a binary of its own (#1031).** Whether a callsite is of interest
 //! to a subscriber is cached once for the whole process, not per thread.
@@ -46,7 +47,9 @@ use std::time::Duration;
 
 use async_nats::jetstream::{self, AckKind};
 use fq_runtime::agent::{Agent, AgentId, AgentRegistry};
-use fq_runtime::bus::{EventBus, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
+use fq_runtime::bus::{
+    EventBus, NATS_DEFAULT_MAX_ACK_PENDING, STREAM_NAME, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
+};
 use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, TriggerClaims};
 use fq_runtime::control_plane::store::TriggerKey;
 use fq_runtime::control_plane::{ControlPlaneStore, TriggerClaim};
@@ -103,6 +106,10 @@ const START_NOT_RECORDED: &str =
     "could not record the durable start of a trigger whose claim does not name its run";
 /// The invocation a changed claim names ([`ClaimChange`]).
 const ANOTHER_RUN: &str = "another-run";
+/// The start of the line for a last delivery whose dead letter the
+/// dispatcher could not publish.
+const DEAD_LETTER_UNPUBLISHED: &str =
+    "could not publish the dead letter of a trigger whose last delivery failed";
 
 /// How long a test waits for a line, a delivery or the dispatcher.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -224,6 +231,8 @@ enum Script {
     /// Makes the claim store refuse every mark, and closes the connection
     /// the dispatcher answers its deliveries on.
     RefusedMarksAndClosedConnection,
+    /// Fails with a transient error before its first WAL write.
+    FailsTransiently,
     /// Changes the claim row as the [`ClaimChange`] says, so the mark
     /// meets a claim that does not name the run.
     ChangedClaim(ClaimChange),
@@ -246,6 +255,9 @@ enum ClaimChange {
     /// naming the run.
     RefusedOnceThenAnother,
 }
+
+/// What the stub run fails with under [`Script::FailsTransiently`].
+const TRANSIENT_FAILURE: &str = "simulated transient store outage";
 
 /// Which attempts to mark the claim the store refuses.
 #[derive(Clone, Copy)]
@@ -298,6 +310,11 @@ impl Worker for Stub {
                 close(&self.connection).await;
             }
             Script::ChangedClaim(change) => change_the_claim(&self.claim_db, change).await,
+            Script::FailsTransiently => {
+                drop(durable_start);
+                self.ended.notify_one();
+                return Err(ExecutorError::WorkerStore(TRANSIENT_FAILURE.to_string()));
+            }
         }
         durable_start.fire();
         // One more turn of `handle`'s loop, which marks and acks on the
@@ -604,6 +621,37 @@ impl Daemon {
             .expect("the dispatcher stops")
             .expect("the dispatcher task joins")
             .expect("the dispatcher ran without error");
+    }
+
+    /// Spend all but the last of the published trigger's deliveries on the
+    /// dispatcher's own durable before the dispatcher runs: each is taken
+    /// here and NAKed with no delay, so the first delivery the dispatcher
+    /// gets is the trigger's last.
+    async fn spend_all_but_the_last_delivery(&self) {
+        let consumer = self
+            .bus
+            .trigger_consumer(CONSUMER_NAME, NATS_DEFAULT_MAX_ACK_PENDING)
+            .await
+            .expect("the dispatcher's durable");
+        for delivered in 1..TRIGGER_MAX_DELIVER {
+            let mut batch = consumer
+                .batch()
+                .max_messages(1)
+                .expires(PATIENCE)
+                .messages()
+                .await
+                .expect("pull a delivery");
+            let delivery = batch
+                .next()
+                .await
+                .expect("a delivery within the pull's expiry")
+                .expect("a delivery");
+            assert_eq!(delivery.info().unwrap().delivered, delivered);
+            delivery
+                .ack_with(AckKind::Nak(None))
+                .await
+                .expect("redeliver the trigger");
+        }
     }
 
     /// Run one trigger whose run follows the worker's script, and return
@@ -1097,4 +1145,63 @@ async fn a_mark_refused_then_matching_nothing_is_not_logged_as_marked() {
     let line = the_one_error_line_naming_the_run(&daemon, CLAIM_WRITTEN_OVER, named);
     assert_eq!(line.field("refused_marks"), Some("1"), "{line:#?}");
     assert_eq!(line.field("refused_records"), Some("0"), "{line:#?}");
+}
+
+/// **A last delivery whose dead letter cannot be published is one `error`
+/// line, which names the trigger and carries the error that ended the
+/// delivery** (issue 1062). The dispatcher NAKs such a delivery instead of
+/// acking it, and the dead-letter watch writes the dead letter from the
+/// broker's advisory; that dead letter does not carry the run's error, so
+/// this line is the one record of it that names the trigger, and its
+/// fields are what match it to the dead letter: the trigger's sequence and
+/// id.
+///
+/// Four of the trigger's deliveries are spent on the dispatcher's durable
+/// before it runs, and the events stream is deleted, so the dispatcher's
+/// first delivery is the last, its run fails transiently before its first
+/// WAL write, and its dead letter finds no stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpublished_dead_letter_is_one_error_line_naming_the_trigger_and_its_last_error() {
+    let mut daemon = Daemon::new("dead-letter-unpublished", Script::FailsTransiently).await;
+    let log = daemon.log;
+    let published = daemon.publish().await;
+    daemon.spend_all_but_the_last_delivery().await;
+    daemon
+        .bus
+        .jetstream()
+        .delete_stream(STREAM_NAME)
+        .await
+        .expect("delete the events stream");
+    daemon.start("binary-1").await;
+    let subject = daemon.subject.clone();
+    let unpublished = |line: &Line| about(line, DEAD_LETTER_UNPUBLISHED, &subject);
+    log.wait_for("for the unpublished dead letter", unpublished)
+        .await;
+    daemon.stop().await;
+
+    let lines = log.lines(unpublished);
+    assert_eq!(lines.len(), 1, "one line for the trigger: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    for (field, value) in [
+        ("agent_id", daemon.agent.to_string()),
+        ("stream_seq", published.stream_seq.to_string()),
+        ("trigger_id", published.id.to_string()),
+        ("delivery_attempt", TRIGGER_MAX_DELIVER.to_string()),
+    ] {
+        assert_eq!(
+            line.field(field),
+            Some(value.as_str()),
+            "`{field}` in {line:#?}"
+        );
+    }
+    assert!(
+        line.field("last_error")
+            .is_some_and(|last| last.contains(TRANSIENT_FAILURE)),
+        "the line carries the error that ended the last delivery: {line:#?}"
+    );
+    assert!(
+        line.field("error").is_some_and(|error| !error.is_empty()),
+        "the line carries why the publish failed: {line:#?}"
+    );
 }
