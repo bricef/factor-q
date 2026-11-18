@@ -30,7 +30,7 @@ use std::time::Duration;
 use fq_ops::health::{ClaimHolder, ClaimedMessage, StrandedClaimFinding, StrandedTriggerClaim};
 
 use super::{TriggerClaimState, TriggerDeliveryView, Views, ViewsError};
-use crate::control_plane::store::{RunRecords, TriggerClaimRow, UnsettledTriggerClaim};
+use crate::control_plane::store::{ClaimState, RunRecords, TriggerClaimRow, UnsettledTriggerClaim};
 use crate::worker::WalRun;
 
 /// How long an invocation's start may be on record while its claim still
@@ -118,10 +118,9 @@ impl From<TriggerClaimRow> for TriggerDeliveryView {
             stream: row.stream,
             stream_epoch: row.stream_epoch.to_string(),
             stream_seq: row.stream_seq,
-            state: if row.durably_started {
-                TriggerClaimState::DurablyStarted
-            } else {
-                TriggerClaimState::Claimed
+            state: match row.state {
+                ClaimState::Claimed => TriggerClaimState::Claimed,
+                ClaimState::DurablyStarted => TriggerClaimState::DurablyStarted,
             },
             claimant: row.claimant,
             claimed_at_ms: row.claimed_at,

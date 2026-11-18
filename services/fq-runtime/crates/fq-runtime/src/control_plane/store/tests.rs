@@ -918,7 +918,7 @@ async fn a_durable_start_mark_reports_whether_it_marked_the_claim_naming_its_run
         .unwrap()
         .expect("the claim is still there");
     assert!(
-        !other.durably_started && other.invocation_id.as_deref() == Some("inv-other"),
+        other.state == ClaimState::Claimed && other.invocation_id.as_deref() == Some("inv-other"),
         "and is left as it is: {other:?}"
     );
 }
@@ -944,7 +944,7 @@ async fn a_start_the_mark_did_not_find_is_recorded_by_what_the_claim_holds() {
     let written = store.trigger_claim(key(1)).await.unwrap().unwrap();
     assert_eq!(
         (
-            written.durably_started,
+            written.state == ClaimState::DurablyStarted,
             written.invocation_id.as_deref(),
             written.claimant.as_str(),
             written.claimed_at
@@ -970,7 +970,7 @@ async fn a_start_the_mark_did_not_find_is_recorded_by_what_the_claim_holds() {
     let over = store.trigger_claim(key(2)).await.unwrap().unwrap();
     assert_eq!(
         (
-            over.durably_started,
+            over.state == ClaimState::DurablyStarted,
             over.invocation_id.as_deref(),
             over.claimed_at
         ),
@@ -1114,7 +1114,8 @@ async fn the_record_of_a_start_holds_the_write_lock_against_racing_writers() {
                 .unwrap()
                 .unwrap_or_else(|| panic!("key {seq}: no claim after {recorded:?}"));
             assert!(
-                row.durably_started && row.invocation_id.as_deref() == Some("inv-run"),
+                row.state == ClaimState::DurablyStarted
+                    && row.invocation_id.as_deref() == Some("inv-run"),
                 "key {seq}: {recorded:?} left {row:?}"
             );
         }
@@ -1469,21 +1470,21 @@ async fn one_claim_reads_back_in_whatever_state_it_is() {
     assert_eq!(
         (
             claimed.stream_seq,
-            claimed.durably_started,
+            claimed.state,
             claimed.invocation_id.as_deref(),
             claimed.claimant.as_str(),
             claimed.claimed_at,
         ),
-        (1, false, Some("inv-claimed"), "worker-a", 100)
+        (1, ClaimState::Claimed, Some("inv-claimed"), "worker-a", 100)
     );
     let started = store.trigger_claim(key(2)).await.unwrap().expect("started");
     assert_eq!(
         (
             started.stream_seq,
-            started.durably_started,
+            started.state,
             started.invocation_id.as_deref()
         ),
-        (2, true, Some("inv-started"))
+        (2, ClaimState::DurablyStarted, Some("inv-started"))
     );
     assert_eq!(store.trigger_claim(key(3)).await.unwrap(), None);
 }

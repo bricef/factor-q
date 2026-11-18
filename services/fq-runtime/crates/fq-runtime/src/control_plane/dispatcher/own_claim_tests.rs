@@ -680,7 +680,13 @@ impl Arena {
         conn.close().await.expect("close the claim store's file");
         row.map(|(claimant, state, invocation_id)| ClaimRow {
             claimant,
-            started: state == "durably_started",
+            // Each state by name, so a state these tests do not know fails
+            // here rather than reading as `claimed`.
+            started: match state.as_str() {
+                "durably_started" => true,
+                "claimed" => false,
+                other => panic!("a claim state these tests do not read: {other}"),
+            },
             invocation_id,
         })
     }

@@ -1035,7 +1035,8 @@ pub use ownership::ArchiveState;
 
 mod trigger_claim;
 pub use trigger_claim::{
-    RecordedStart, RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey, UnsettledTriggerClaim,
+    ClaimState, RecordedStart, RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey,
+    UnsettledTriggerClaim,
 };
 
 #[cfg(test)]
