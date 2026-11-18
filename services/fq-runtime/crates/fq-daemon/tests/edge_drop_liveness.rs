@@ -244,6 +244,16 @@ impl Surface {
             fq_runtime::worker::DeferralQueue::new().0,
             fq_runtime::control_plane::dispatcher::RunAdmission::new(runner.clone(), 1),
         ));
+        // `dead_letter.requeue` asks a dispatcher's records, so the
+        // surface takes one; this probe never requeues, so it holds no
+        // claim store.
+        let dispatcher = fq_runtime::TriggerDispatcher::new(
+            bus.clone(),
+            agents.clone(),
+            runner.clone(),
+            ParkedLlm::new(),
+            1,
+        );
         let registry = fq_daemon::operator_registry(
             views,
             fq_runtime::watermark::Horizon::new(vec![watermark]),
@@ -268,6 +278,7 @@ impl Surface {
                 control_plane: control_plane.clone(),
                 runner: runner.clone(),
                 resume,
+                trigger_records: fq_daemon::TriggerRecords::of(&dispatcher),
                 agents,
                 // The machinery verbs are registered like every other
                 // op, and this probe never issues one — the stop

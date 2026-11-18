@@ -955,6 +955,15 @@ impl NextStart {
             admission.clone(),
         ));
         let (_watermark_tx, watermark) = fq_runtime::watermark::channel();
+        // `dead_letter.requeue` asks a dispatcher's records, so the surface
+        // takes one; these tests never requeue, so it holds no claim store.
+        let dispatcher = TriggerDispatcher::new(
+            self.bus.clone(),
+            agents.clone(),
+            self.runner.clone(),
+            Arc::new(FixtureClient::new()),
+            1,
+        );
         crate::operator_surface::operator_registry(
             views,
             fq_runtime::watermark::Horizon::new(vec![watermark]),
@@ -979,6 +988,7 @@ impl NextStart {
                 control_plane: self.cp_store.clone(),
                 runner: self.runner.clone(),
                 resume,
+                trigger_records: crate::TriggerRecords::of(&dispatcher),
                 agents: agents.clone(),
                 machinery: crate::control_commands::MachineryDeps {
                     agents,

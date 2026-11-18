@@ -34,6 +34,9 @@ mod version;
 mod worker_registration;
 
 pub use crate::control_commands::{DownMode, DownSignal, MachineryDeps};
+/// What `dead_letter.requeue` asks before it re-runs a trigger, out here
+/// for the reason `ResumeControl` is: `OperatorDeps` carries one.
+pub use crate::dead_letter_requeue::TriggerRecords;
 pub use crate::operator_surface::{DaemonFacts, OperatorDeps, operator_registry};
 /// The resume path's handle, out here because `OperatorDeps` carries
 /// one: a caller that assembles the operator surface — this daemon, or

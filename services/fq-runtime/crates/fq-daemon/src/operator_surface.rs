@@ -61,6 +61,12 @@ pub struct OperatorDeps {
     /// NATS request/reply on its own subject, which is why the client
     /// still linked a broker; it is a command like any other now.
     pub resume: std::sync::Arc<crate::resume::ResumeControl>,
+    /// The dispatcher's records of its triggers' runs, which
+    /// `dead_letter.requeue` asks before it re-runs a dead letter's
+    /// trigger (issue 1059). Only the dispatcher makes one
+    /// ([`crate::TriggerRecords::of`]), so the surface cannot be assembled
+    /// with a requeue that does not look.
+    pub trigger_records: crate::dead_letter_requeue::TriggerRecords,
     /// What `control.status` reports about this daemon itself.
     pub facts: DaemonFacts,
 }
@@ -221,6 +227,7 @@ pub fn operator_registry(
         &mut registry,
         requeue_bus,
         requeue_projection,
+        deps.trigger_records.clone(),
     )?;
     crate::trigger_command::register_trigger_surface(&mut registry, trigger_bus, trigger_views)?;
     crate::control_commands::register_control_commands(&mut registry, machinery)?;

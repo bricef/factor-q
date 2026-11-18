@@ -290,10 +290,17 @@ struct RequeueResult {
 /// — that write is what makes the requeue idempotent — so by the time
 /// the receipt is in hand the record is there. There is no fold to wait
 /// for and nothing to gate on.
+///
+/// **The verdict is the daemon's** (issue 1059). This client never holds
+/// the dead letter, so it cannot check whether the trigger's run started;
+/// the daemon does, with the dead letter in hand, and its refusal is
+/// printed as it gives it. `checked_not_started` is the operator's word,
+/// passed through; the daemon decides what it is worth.
 pub(crate) async fn requeue_dead_letter(
     global: &GlobalArgs,
     agent: &str,
     trigger_seq: Option<u64>,
+    checked_not_started: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     // Answered offline, in the same breath as `fq agent validate`,
@@ -305,7 +312,11 @@ pub(crate) async fn requeue_dead_letter(
     let receipt = client
         .invoke(
             fq_ops::OpId::Verb(fq_ops::VerbId::DeadLetter(fq_ops::DeadLetter::Requeue)),
-            serde_json::json!({ "agent_id": agent, "trigger_seq": trigger_seq }),
+            serde_json::json!({
+                "agent_id": agent,
+                "trigger_seq": trigger_seq,
+                "checked_not_started": checked_not_started,
+            }),
         )
         .await?
         .map_err(|e| anyhow::anyhow!("{e}"))?;
