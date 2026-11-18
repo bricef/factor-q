@@ -94,6 +94,7 @@ async fn attributed_to(arena: &Arena, published: &PublishedTrigger) {
     assert_eq!(
         keys,
         [
+            "advisory_id",
             "dead_letter_source",
             "trigger_id",
             "trigger_payload",
