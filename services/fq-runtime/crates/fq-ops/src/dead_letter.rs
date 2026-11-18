@@ -67,17 +67,21 @@ pub struct DeadLetter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_unchecked: Option<StartUnchecked>,
     /// Why this dead letter names no trigger, when the dead-letter watch
-    /// wrote it for an advisory from an earlier incarnation of the trigger
-    /// stream: one the broker emitted before the stream was last created.
-    /// It gives when the advisory was emitted and when the stream was
-    /// created. The advisory's sequence, `trigger_stream_seq` here, is a
-    /// position on that earlier stream, whose messages went with it, and
-    /// the message the stream holds at the same sequence now is another
-    /// trigger, so the dead letter names none: it is recorded under the
-    /// system sentinel with no subject, payload or trigger id, and
-    /// `dead_letter.requeue` refuses it. Absent on every other dead letter,
-    /// including one written under the system sentinel because its trigger
-    /// had aged out of the stream.
+    /// wrote it for one of two reasons. The advisory came from an earlier
+    /// incarnation of the trigger stream, one the broker emitted before the
+    /// stream was last created: the reason gives when the advisory was
+    /// emitted and when the stream was created, `trigger_stream_seq` here
+    /// is a position on that earlier stream, whose messages went with it,
+    /// and the message the stream holds at the same sequence now is another
+    /// trigger. Or the watch could not read the trigger's message off the
+    /// stream, for a reason other than its absence, before its limit ran
+    /// out (an hour after the advisory, and three looks): the reason gives
+    /// what the last read answered, and the message may still be on the
+    /// stream at `trigger_stream_seq`. Either way the dead letter is
+    /// recorded under the system sentinel with no subject, payload or
+    /// trigger id, and `dead_letter.requeue` refuses it. Absent on every
+    /// other dead letter, including one written under the system sentinel
+    /// because its trigger's message was no longer on the stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed: Option<String>,
 }

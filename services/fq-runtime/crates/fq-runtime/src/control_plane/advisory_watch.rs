@@ -48,6 +48,13 @@
 //! the stream this daemon connected to, and one with no timestamp the
 //! watch can read is taken as this incarnation's.
 //!
+//! **A trigger whose message cannot be read is held too** (issue 1066).
+//! A message the stream no longer holds names nothing, ever, and the dead
+//! letter is written at once without a name. A read that fails for any
+//! other reason may succeed later, so the verdict is held under the same
+//! limit, and past it the dead letter names no trigger and says the
+//! message could not be read (`naming`).
+//!
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash
 //! between emit and ack can duplicate one event; the shared
@@ -107,6 +114,11 @@ pub const CONSUMER_NAME: &str = "fq-advisory-watch";
 /// publish (holds and a daemon that was down can make it later). Otherwise
 /// the message is gone and the dead letter is written without them,
 /// attributed to the system, a form `fq dead-letters requeue` refuses.
+///
+/// The same limit ends a verdict held because the trigger's message cannot
+/// be read for a reason other than its absence (issue 1066): past it, the
+/// dead letter is written in that form, saying the message could not be
+/// read.
 ///
 /// Measured from the advisory's own timestamp, so a restart does not reset
 /// it, against this daemon's clock: a daemon clock ahead of the broker's by
@@ -393,13 +405,24 @@ impl AdvisoryWatch {
         // from before the stream was last created is not this stream's.
         let earlier = advisory.emitted_before(self.bus.trigger_stream_epoch());
         let this_incarnation = earlier.is_none();
+        // Looked at long enough, a verdict that still cannot be taken, on
+        // the records or on a trigger whose message cannot be read, is
+        // written as a dead letter, after a last look for a start on record.
+        let looked_long_enough =
+            advisory.looked_long_enough(delivered, self.held_verdict_limit, chrono::Utc::now());
         let Named {
             agent_id,
             subject: trigger_subject,
             payload: trigger_payload,
             trigger_id,
             unattributed,
-        } = self.named_trigger(&advisory, earlier).await?;
+        } = match self
+            .named_trigger(&advisory, earlier, looked_long_enough)
+            .await
+        {
+            Ok(named) => named,
+            Err(hold) => return Ok(AdvisoryOutcome::Held(hold)),
+        };
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
@@ -423,11 +446,8 @@ impl AdvisoryWatch {
         // does not carry: one emitted before the stream was last created
         // names a message of the old stream, and today's claim at that
         // sequence says nothing about it, so the claims are not consulted.
-        // Looked at long enough, a verdict that still cannot be taken is
-        // written as a dead letter marked unchecked, after a last look for
-        // a start on record.
-        let looked_long_enough =
-            advisory.looked_long_enough(delivered, self.held_verdict_limit, chrono::Utc::now());
+        // Past the limit the verdict is a last look, and one that still
+        // cannot be taken marks the dead letter unchecked.
         let mut unchecked = None;
         if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
             let verdict = if looked_long_enough {
@@ -487,9 +507,9 @@ impl AdvisoryWatch {
         });
         let event = match &agent_id {
             Some(agent) => Event::new(agent.clone(), Uuid::now_v7(), payload),
-            // No trigger named (it aged out of the stream, or the advisory
-            // is an earlier incarnation's): the agent is unknowable, but
-            // the exhaustion still counts.
+            // No trigger named (it aged out of the stream, could not be read
+            // by the limit, or the advisory is an earlier incarnation's): the
+            // agent is unknowable, but the exhaustion still counts.
             None => Event::system(Uuid::now_v7(), payload),
         }
         .annotate(

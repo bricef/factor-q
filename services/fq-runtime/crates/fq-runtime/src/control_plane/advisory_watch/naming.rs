@@ -1,12 +1,34 @@
 //! Which trigger an advisory names, as its dead letter records it: the
 //! message at the advisory's sequence on the trigger stream, or nothing,
-//! and why. Moved out of `advisory_watch.rs` as it stood, to keep that
-//! file inside its size budget.
+//! and why.
+//!
+//! An advisory from an earlier incarnation of the stream is not read at
+//! all (issue 1054). For one of this incarnation, the broker answers the
+//! read in one of three ways (pinned against a real broker in
+//! `read_tests`), and they mean different things (issue 1066):
+//!
+//! - the message;
+//! - no message at that sequence, the client's
+//!   `RawMessageErrorKind::NoMessageFound` (the broker's error code 10037):
+//!   it aged out of the stream, was deleted, or never was. No later read can
+//!   name the trigger, so the dead letter is written at once, naming none;
+//! - anything else: the request timed out, the stream is missing (code
+//!   10059), the broker erred. The message may well be on the stream, and a
+//!   later read may name it, so the verdict is held, as one is when the
+//!   records cannot be read, and bounded the same way: past the watch's
+//!   limit the dead letter is written naming no trigger, and says the
+//!   message could not be read.
+//!
+//! The stream handle is made without asking the broker
+//! (`get_stream_no_info`), so the read is one request and its one answer
+//! decides.
 
+use async_nats::jetstream::message::StreamMessage;
+use async_nats::jetstream::stream::RawMessageErrorKind;
 use tracing::info;
 use uuid::Uuid;
 
-use super::{AdvisoryWatch, AdvisoryWatchError, CONSUMER_NAME, MaxDeliverAdvisory};
+use super::{AdvisoryWatch, CONSUMER_NAME, Hold, MaxDeliverAdvisory};
 use crate::agent::AgentId;
 use crate::bus::TRIGGER_STREAM_NAME;
 use crate::trigger::{agent_id_from_subject, trigger_id_in};
@@ -22,7 +44,8 @@ pub(super) struct Named {
     /// The id the trigger's publisher gave it, if it gave one.
     pub(super) trigger_id: Option<Uuid>,
     /// Why no trigger is named, when the advisory came from an earlier
-    /// incarnation of the stream
+    /// incarnation of the stream or the trigger's message could not be read
+    /// by the watch's limit
     /// ([`crate::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY`]).
     pub(super) unattributed: Option<String>,
 }
@@ -56,11 +79,18 @@ impl AdvisoryWatch {
     /// names no trigger, as one whose message aged out of the stream does,
     /// and says why ([`crate::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY`]),
     /// and the exhaustion is still recorded.
+    ///
+    /// A message the read cannot get, for any reason but its absence (issue
+    /// 1066), may still be on the stream, so the verdict is held (the
+    /// `Err`) until the watch has looked `looked_long_enough`: then the
+    /// trigger is not named, and the dead letter says the message could not
+    /// be read.
     pub(super) async fn named_trigger(
         &self,
         advisory: &MaxDeliverAdvisory,
         earlier: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Named, AdvisoryWatchError> {
+        looked_long_enough: bool,
+    ) -> Result<Named, Hold> {
         if let Some(emitted) = earlier {
             info!(consumer = CONSUMER_NAME, stream_seq = advisory.stream_seq,
                 timestamp = ?advisory.timestamp,
@@ -79,31 +109,33 @@ impl AdvisoryWatch {
         // The original trigger: subject → agent, payload → annotation.
         // Triggers age out after 24h — an older advisory still
         // surfaces, attributed to the system sentinel.
-        let trigger = self
-            .bus
-            .jetstream()
-            .get_stream(TRIGGER_STREAM_NAME)
-            .await
-            .map_err(|err| AdvisoryWatchError::Stream(err.to_string()))?
-            .get_raw_message(advisory.stream_seq)
-            .await
-            .ok();
+        //
         // The identity is read, never assigned. This watch did not
         // dispatch the trigger, so it has no standing to name it: if
         // the publisher stamped a header the id is recorded, and if the
         // trigger arrived unnamed (or has aged out of the stream) the
         // dead letter says so by carrying no name, rather than
         // inventing one that matches nothing anywhere else.
-        Ok(match trigger {
-            Some(raw) => Named {
+        match read_trigger(&self.bus.jetstream(), advisory.stream_seq).await {
+            TriggerRead::Found(raw) => Ok(Named {
                 agent_id: agent_id_from_subject(&raw.subject).and_then(|id| AgentId::new(id).ok()),
                 subject: raw.subject.to_string(),
                 payload: serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
                 trigger_id: trigger_id_in(Some(&raw.headers)),
                 unattributed: None,
-            },
-            None => Named::nothing(),
-        })
+            }),
+            TriggerRead::Gone => Ok(Named::nothing()),
+            TriggerRead::Unreadable(err) if !looked_long_enough => Err(Hold {
+                why: held_while_unreadable(&err),
+                stream_seq: advisory.stream_seq,
+                subject: String::new(),
+                invocation_id: None,
+            }),
+            TriggerRead::Unreadable(err) => Ok(Named {
+                unattributed: Some(unreadable_at_the_limit(&err)),
+                ..Named::nothing()
+            }),
+        }
     }
 }
 
@@ -124,5 +156,44 @@ pub(super) fn unattributed_reason(
          with it",
         at(emitted),
         at(chrono::DateTime::from_timestamp_nanos(stream_epoch)),
+    )
+}
+
+/// What reading the trigger's message gave.
+enum TriggerRead {
+    /// The message.
+    Found(StreamMessage),
+    /// The stream holds no message at that sequence, and never will.
+    Gone,
+    /// The read failed for another reason, given: decide again later.
+    Unreadable(String),
+}
+
+/// Read the message at `stream_seq` on the trigger stream.
+async fn read_trigger(jetstream: &async_nats::jetstream::Context, stream_seq: u64) -> TriggerRead {
+    let stream = match jetstream.get_stream_no_info(TRIGGER_STREAM_NAME).await {
+        Ok(stream) => stream,
+        Err(err) => return TriggerRead::Unreadable(err.to_string()),
+    };
+    match stream.get_raw_message(stream_seq).await {
+        Ok(raw) => TriggerRead::Found(raw),
+        Err(err) if err.kind() == RawMessageErrorKind::NoMessageFound => TriggerRead::Gone,
+        Err(err) => TriggerRead::Unreadable(err.to_string()),
+    }
+}
+
+/// Why the watch holds its verdict while the trigger's message cannot be
+/// read, `err` being what the read answered.
+fn held_while_unreadable(err: &str) -> String {
+    format!("the trigger's message could not be read: {err}")
+}
+
+/// Why a dead letter written at the watch's limit, with the trigger's
+/// message still unreadable, names no trigger.
+fn unreadable_at_the_limit(err: &str) -> String {
+    format!(
+        "the trigger's message could not be read off the trigger stream by the watch's limit \
+         (the last read answered: {err}), so the trigger is not named, though its message may \
+         still be on the stream"
     )
 }

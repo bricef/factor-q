@@ -89,6 +89,10 @@ pub const DEAD_LETTER_START_UNCHECKED_KEY: &str = "start_unchecked";
 /// advisory was emitted and when the stream was created; [`from_event`]
 /// lifts it into [`DeadLetter::unattributed`], so a listing can say why a
 /// dead letter names nothing and that its sequence is not this stream's.
+///
+/// Also set on one the watch wrote naming no trigger because the trigger's
+/// message could not be read, for a reason other than its absence, by its
+/// limit (issue 1066): the reason then gives what the last read answered.
 pub const DEAD_LETTER_UNATTRIBUTED_KEY: &str = "unattributed";
 
 /// Recognise a dead letter in one recorded event, or decline.
