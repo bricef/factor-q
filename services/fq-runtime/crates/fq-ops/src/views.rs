@@ -188,10 +188,12 @@ pub struct InvocationSummaryView {
     pub started_at_ms: i64,
     /// True for an archive-only row: one the merged list read from
     /// `invocation_archive` because no ownership row it listed names the
-    /// invocation, either because the invocation has none or because its
-    /// row fell outside the list's limit. It says where the row came
-    /// from, not whether the archive record was written, which is
-    /// `archive_state` (`archived` on every archive-only row).
+    /// invocation. That is when the invocation has no ownership row, when
+    /// its row fell outside the list's limit, or when a status filter left
+    /// its row out, since the archive half of the list takes no filter.
+    /// It says where the row came from, not whether the archive record was
+    /// written, which is `archive_state` (`archived` on every archive-only
+    /// row).
     pub archived: bool,
     /// Whether the control plane holds the invocation's archive. A run
     /// reads as finished from the moment its ending is folded, and this

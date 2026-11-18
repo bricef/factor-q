@@ -585,10 +585,11 @@ hand-off of its archive
 ending when it is folded, and a new `archive_state` column beside the
 status records whether the control plane holds the run's archive
 (`pending` until it does), so a run whose archive is late, refused or
-held reads as finished. `fq invocation list` and `show`, the worker
-detail's owned rows and the dashboard show the archive's state, and
-`held`, with the reason and remedy, while the worker's archive sweeper
-holds it. Every move of the
+held reads as finished. `fq invocation list` and the dashboard show
+the archive's state, `held` included while the worker's archive sweeper
+holds it; `fq invocation show` adds the hold's reason and remedy; and
+the JSON of the worker detail's owned rows carries the state. Every
+move of the
 row is decided by one transition function and written as a
 compare-and-set on the state it was decided from: a late
 `invocation.ambiguous` never puts a finished run back to triage, an

@@ -406,3 +406,114 @@ async fn a_held_run_reads_finished_with_its_archive_held() {
         "{detail}"
     );
 }
+
+/// **The worker view reads `held` as the invocation list does.** A row
+/// startup recovery restored sits under the worker's own id, so the run is
+/// among that worker's owned rows; when the run's archive is held, the
+/// owned row reads `held` too, not `pending`. Seeded as a restore leaves a
+/// row (in flight, under a registered worker), over a terminal WAL row
+/// that stores a `completed` and holds too much state for the broker, so
+/// no model is needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_worker_view_reads_held_for_a_row_its_worker_owns() {
+    use fq_runtime::control_plane::store::{ControlPlaneStore, OwnerStatus};
+    const WORKER: &str = "worker-omega";
+    let server = fq_test_support::NatsServer::start();
+    let scratch = scratch();
+    let paths = RuntimeDbPaths::under(&scratch.path().join("cache"));
+    {
+        let store = WorkerStore::open(&paths.worker)
+            .await
+            .expect("open the worker store");
+        let completed = fq_ops::events::Event::new(
+            fq_ops::agent::AgentId::new("researcher").unwrap(),
+            uuid::Uuid::parse_str(OVERSIZED).unwrap(),
+            fq_ops::events::EventPayload::Completed(fq_ops::events::CompletedPayload {
+                task_status: Default::default(),
+                result_summary: Some("done".to_string()),
+                total_llm_calls: 1,
+                total_tool_calls: 0,
+                total_cost: 0.0,
+                total_duration_ms: 10,
+            }),
+        );
+        let mut row = terminal_row(OVERSIZED, vec![200; STATE]);
+        row.terminal_outcome = Some(serde_json::to_string(&completed).unwrap());
+        store.upsert_invocation_state(&row).await.unwrap();
+        let control_plane = ControlPlaneStore::open(&paths.control_plane)
+            .await
+            .expect("open the control-plane store");
+        control_plane
+            .register_worker(WORKER, "probe-host", 1_000)
+            .await
+            .unwrap();
+        control_plane.mark_worker_shutdown(WORKER).await.unwrap();
+        control_plane
+            .upsert_invocation_ownership(OVERSIZED, WORKER, 1_000, OwnerStatus::InFlight)
+            .await
+            .unwrap();
+    }
+
+    let log = scratch.path().join("fqd.log");
+    let log_file = std::fs::File::create(&log).expect("create daemon log");
+    let child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
+        .env("FQ_DAEMON_CONFIG", scratch.path().join("fqd.toml"))
+        .env("FQ_NATS_URL", server.url())
+        .env("FQ_CACHE_DIR", scratch.path().join("cache"))
+        .env("FQ_STATE_DIR", scratch.path().join("state"))
+        .env("FQ_AGENTS_DIR", scratch.path().join("agents"))
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn();
+    let mut daemon = Daemon { child, log };
+
+    let log_path = &daemon.log.clone();
+    let addr = daemon
+        .wait_for("the edge to listen", move || async move {
+            let log = std::fs::read_to_string(log_path).ok()?;
+            log.lines()
+                .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+                .map(|a| a.trim().to_string())
+        })
+        .await;
+    let state = scratch.path().join("state");
+    let client = fq_edge::EdgeClient::connect(
+        &addr,
+        parse_fingerprint(&fq_test_support::edge_fingerprint(&state)),
+        &fq_test_support::admin_token(&state),
+    )
+    .await
+    .expect("connect edge");
+    let client = &client;
+
+    // Once the list says held, the hold is in the sweeper's memory, where
+    // the worker view reads it too.
+    daemon
+        .wait_for("the run listed with its archive held", move || async move {
+            let items = invoke(
+                client,
+                OpId::List(fq_ops::Domain::Invocation),
+                serde_json::json!({ "include_archived": false, "limit": 50 }),
+            )
+            .await;
+            items
+                .as_array()?
+                .iter()
+                .any(|item| item["invocation_id"] == OVERSIZED && item["archive_state"] == "held")
+                .then_some(())
+        })
+        .await;
+    let detail = invoke(
+        client,
+        OpId::Get(fq_ops::Domain::Worker),
+        serde_json::json!({ "worker_id": WORKER }),
+    )
+    .await;
+    let owned = &detail["owned"][0];
+    assert_eq!(owned["invocation_id"], OVERSIZED, "{detail}");
+    assert_eq!(owned["status"], "completed", "{detail}");
+    assert_eq!(
+        owned["archive_state"], "held",
+        "the worker view reads held as the list does: {detail}"
+    );
+}
