@@ -38,11 +38,15 @@ impl TriggerDispatcher {
                 .defer(invocation_id, agent_id, resume_after, slot),
             Ok(_) => {}
             Err(err) => {
-                warn!(
-                    agent_id = %agent_id,
-                    error = %err,
-                    "executor returned an error for NATS-triggered run"
-                );
+                // A drop's stop is not an error of the run: its own info
+                // line is the only one (issue 1070).
+                if !matches!(err, ExecutorError::FinishedElsewhere { .. }) {
+                    warn!(
+                        agent_id = %agent_id,
+                        error = %err,
+                        "executor returned an error for NATS-triggered run"
+                    );
+                }
                 self.log_executor_error(&err);
             }
         }
@@ -98,11 +102,13 @@ impl TriggerDispatcher {
                 "deferred invocation resumed to an outcome"
             ),
             Err(err) => {
-                warn!(
-                    invocation_id = %invocation_id,
-                    error = %err,
-                    "deferred invocation's resume returned an error"
-                );
+                if !matches!(err, ExecutorError::FinishedElsewhere { .. }) {
+                    warn!(
+                        invocation_id = %invocation_id,
+                        error = %err,
+                        "deferred invocation's resume returned an error"
+                    );
+                }
                 self.log_executor_error(&err);
             }
         }

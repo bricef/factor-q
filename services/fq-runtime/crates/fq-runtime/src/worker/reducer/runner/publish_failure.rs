@@ -327,11 +327,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
         let failed = refused.failed_event(agent_id, invocation_id, totals);
         if row.is_none() {
-            // Nothing durable, so nothing to mark or archive: a host
-            // notice queued before the first step and refused for its
-            // size, which only tests do today. The fresh path's
-            // `triggered` ends in `end_unstarted_on_refusal` instead,
-            // which also names the trigger.
+            // No row to mark or archive. Either nothing durable yet (a
+            // host notice queued before the first step and refused for
+            // its size, which only tests do: the fresh path's `triggered`
+            // ends in `end_unstarted_on_refusal`, which names the
+            // trigger), or a row this drive wrote that a drop finished
+            // and its hand-off deleted, which `publish_failed` turns into
+            // `FinishedElsewhere` without publishing (issue 1070).
             self.publish_failed(cursor, failed).await?;
             return Err(refused.failure());
         }
