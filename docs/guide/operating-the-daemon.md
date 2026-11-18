@@ -1447,6 +1447,25 @@ sooner and writing fewer of these dead letters, not a point after which
 a held verdict cannot resolve: a copy still handling its claim can start
 its run after it, which is why the dead letter is marked.
 
+**A trigger whose message cannot be read is held too.** To name the dead
+letter, the watch reads the trigger's message at the advisory's
+sequence. If the stream no longer holds it (it ages out a day after its
+publish, or was deleted), the dead letter is written at once for the
+system with no subject, payload or trigger id. If the read fails for
+another reason, such as the broker not answering in time or the trigger
+stream being missing, the message may still be there, so the watch
+holds its verdict and reads again when the advisory comes back; the
+hold line's `reason=` says `the trigger's message could not be read`
+with what the read answered
+([#1066](https://github.com/bricef/factor-q/issues/1066)). The hold ends
+as above, about an hour after the advisory and after three looks: unless
+a last look at the records finds the run started, the watch writes the
+dead letter for the system, and `fq dead-letters list` gives it
+`names no trigger: the trigger's message could not be read off the
+trigger stream by the watch's limit (the last read answered: …)`. Its
+message may still be on the stream at its `seq=`, and
+`fq dead-letters requeue` refuses it.
+
 **An advisory from an earlier incarnation of the trigger stream names no
 trigger.** A recreated trigger stream numbers its messages from 1 again,
 and the advisory stream keeps an advisory for a day, so the watch can be
@@ -1480,8 +1499,7 @@ that sequence today, and since the claims were not consulted, the
 trigger it records may have started its run before the stream was
 recreated. A redelivered advisory writes it a second time, as it does
 the form for a trigger that aged out, and that form says nothing of
-why, though the watch writes it on any failure to read the message
-([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
+why ([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
 with no timestamp the watch can read is taken as the current
 incarnation's, though the broker always stamps one.
 
