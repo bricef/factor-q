@@ -97,26 +97,26 @@
 //! happened, mark the trigger's claim started, and drop every copy of the
 //! trigger after it (issue 1024).
 //!
-//! A run has no row in two cases. Before its first WAL write, there are
-//! four ways to fail: a `triggered` or a host notice too large for the
-//! broker, a reducer step that errors before the step's row is written,
-//! and a refusal for an unavailable MCP server, whose own events can be
-//! refused for size too. Before the rule, a refused `triggered` and the
-//! refusal's own `failed` were already `Setup`; a refused host notice,
-//! the reducer's error, and the `failed` that replaced a refusal's own
-//! refused `failed` carried `Reducer`. And after it started, a run has no
-//! row once an operator has dropped it live and the archive sweeper has
-//! handed the dropped row off and had it acknowledged, which deletes it,
-//! while a step was still in flight: when that step then fails, its
-//! `failed` goes out in `Setup` where it used to carry the step's phase.
-//! The drop is the run's recorded outcome by then, with its start, so
-//! that `failed` says nothing the control plane acts on; reading whether
-//! the run started from the runner's own memory instead would be a second
-//! record of it, kept for this one case.
+//! Before its first WAL write, a run has four ways to fail: a `triggered`
+//! or a host notice too large for the broker, a reducer step that errors
+//! before the step's row is written, and a refusal for an unavailable MCP
+//! server, whose own events can be refused for size too. Before the rule,
+//! a refused `triggered` and the refusal's own `failed` were already
+//! `Setup`; a refused host notice, the reducer's error, and the `failed`
+//! that replaced a refusal's own refused `failed` carried `Reducer`.
+//!
+//! A run that started can also find its row terminal or gone when it
+//! comes to publish a `failed`: an operator's drop, folded into this
+//! worker's store, finished it, and the archive hand-off may have deleted
+//! it since. That run publishes no `failed` at all, and stops with
+//! `ExecutorError::FinishedElsewhere` (issue 1070; `own_row.rs`). A
+//! missing row is told apart from one never written by the drive's own
+//! knowledge of its own write, which the live registry keeps for the
+//! drive's length.
 //!
 //! [`ReducerRunner::publish_failed`] takes a `FailedEvent`, so nothing
 //! but a `failed` reaches it. Nothing makes a new failure path go through
-//! it; what catches one that does not is `check_failed_phase`, the test
+//! it; what catches one that does not is `check_ending`, the test
 //! build's check on every publish, which fails any test that drives a run
 //! to a `failed` in a phase other than `Setup` with no WAL row. A path no
 //! test drives is not checked.
@@ -388,13 +388,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Publish `failed`, its phase stamped from its run's WAL row as it
-    /// stands ([`phase_for`]): `Setup` when there is no row, whatever the
-    /// run was doing, and never `Setup` when there is one. A run has no
-    /// row before its first WAL write, and none after a live drop whose
-    /// archive has been handed off, which deletes it; in that second case
-    /// the drop is the run's recorded outcome, and the module doc says why
-    /// `Setup` is still right. Every `failed` the runner publishes comes
-    /// through here except the terminal event a step stores in its row
+    /// stands ([`phase_for`]): `Setup` when the run never wrote a row,
+    /// whatever it was doing, and never `Setup` when there is one. A row
+    /// that is terminal, or missing after this drive wrote it, was finished
+    /// by someone else, an operator's drop: nothing is published, and the
+    /// run stops with `ExecutorError::FinishedElsewhere` (issue 1070;
+    /// `own_row.rs`). Every `failed` the runner publishes comes through
+    /// here except the terminal event a step stores in its row
     /// (`terminal.rs`), whose run has a row by then.
     ///
     /// The row is read before the publish, and nothing else creates it
@@ -409,13 +409,25 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         mut failed: FailedEvent,
     ) -> Result<(), ExecutorError> {
         let invocation_id = failed.invocation_id;
-        let has_row = self
+        let row = self
             .config
             .store
             .get_invocation_state(&invocation_id.to_string())
             .await
-            .map_err(map_store_err)?
-            .is_some();
+            .map_err(map_store_err)?;
+        // Someone else finished the run (`own_row.rs`): the run marks its
+        // own row only after publishing its `failed`, so a terminal row is
+        // not its own, and a missing one after this drive wrote it was
+        // handed off. No `failed` goes out.
+        let has_row = match row {
+            Some(row) if row.terminal_at.is_some() => {
+                return Err(self.finished_elsewhere(invocation_id, "its row is terminal"));
+            }
+            None if self.live.wrote_row(invocation_id) => {
+                return Err(self.finished_elsewhere(invocation_id, "its row is gone"));
+            }
+            row => row.is_some(),
+        };
         if has_row && matches!(failed.payload.phase, FailurePhase::Setup) {
             warn!(
                 invocation_id = %invocation_id,
@@ -428,12 +440,19 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         self.publish_chained(cursor, failed.into_event()).await
     }
 
-    /// The test build's check on every event a run publishes: a `failed`
-    /// in any phase but `Setup` goes out only for a run with a WAL row.
-    /// `publish_chained` calls it, the one place the runner publishes, so
-    /// every test that drives a run to a `failed` checks the rule,
-    /// whichever path built it and whether or not it came through
-    /// [`Self::publish_failed`]. A path no test drives is not checked.
+    /// The test build's check on every event a run publishes, the one
+    /// place the runner publishes being `publish_chained`, so every test
+    /// that drives a run to an ending checks it, whichever path built the
+    /// ending. A path no test drives is not checked. Three rules:
+    ///
+    /// - a `failed` in any phase but `Setup` goes out only for a run with
+    ///   a WAL row (issue 1024);
+    /// - a `failed` in `Setup` goes out only for a run whose drive has not
+    ///   written its row (issue 1070: a started run whose row is gone
+    ///   publishes no `failed`);
+    /// - a `completed` or a `failed` for a run whose row is terminal is the
+    ///   row's own stored terminal event: no ending goes out for a run
+    ///   whose row someone else finished (issue 1070).
     ///
     /// Only tests build it. In production the stored terminal can go out
     /// from `finish` after the archive sweeper has already republished it
@@ -442,11 +461,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// No test in this crate runs a sweeper while a run is live. A store
     /// that cannot be read is left to the test that broke it.
     #[cfg(test)]
-    pub(super) async fn check_failed_phase(&self, event: &Event) {
-        let crate::events::EventPayload::Failed(failed) = &event.payload else {
-            return;
-        };
-        if matches!(failed.phase, FailurePhase::Setup) {
+    pub(super) async fn check_ending(&self, event: &Event) {
+        use crate::events::EventPayload;
+        if !matches!(
+            event.payload,
+            EventPayload::Completed(_) | EventPayload::Failed(_)
+        ) {
             return;
         }
         let invocation_id = event.envelope.invocation_id;
@@ -458,6 +478,30 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         else {
             return;
         };
+        if let Some(row) = row.as_ref().filter(|row| row.terminal_at.is_some()) {
+            let stored = row
+                .terminal_outcome
+                .as_deref()
+                .and_then(|json| Event::from_wire(json.as_bytes()).ok());
+            assert!(
+                stored.is_some_and(|stored| stored.envelope.event_id == event.envelope.event_id),
+                "a `{}` for invocation {invocation_id}, whose row someone else finished: \
+                 the run published an ending of its own over the drop's",
+                event.payload.event_type()
+            );
+        }
+        let EventPayload::Failed(failed) = &event.payload else {
+            return;
+        };
+        if matches!(failed.phase, FailurePhase::Setup) {
+            assert!(
+                !self.live.wrote_row(invocation_id),
+                "a `failed` in setup for invocation {invocation_id}, whose drive wrote its \
+                 row: a started run whose row is gone publishes no `failed` ({})",
+                failed.error_message
+            );
+            return;
+        }
         assert!(
             row.is_some(),
             "a `failed` in phase {:?} for invocation {invocation_id}, which has no WAL \

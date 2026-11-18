@@ -43,6 +43,13 @@ pub(crate) struct LiveRegistry {
     /// invocation after the operator-drop event reconciles its durable
     /// row.
     halt_requested: Mutex<HashSet<Uuid>>,
+    /// Invocations whose WAL row this drive has written, or found
+    /// written when it resumed. A run in this set whose row is gone was
+    /// finished and handed off by someone else, not one that never
+    /// started (issue 1070): the drive's own knowledge of its own write,
+    /// the same fact its `DurableStart` holds, kept where the failure
+    /// paths can read it.
+    wrote_row: Mutex<HashSet<Uuid>>,
 }
 
 impl LiveRegistry {
@@ -78,6 +85,23 @@ impl LiveRegistry {
             .expect("halt set poisoned")
             .insert(invocation_id);
         true
+    }
+
+    /// Note that this drive's run has a WAL row of its own: its first
+    /// write landed, or it resumed from one.
+    pub(crate) fn note_row_written(&self, invocation_id: Uuid) {
+        self.wrote_row
+            .lock()
+            .expect("written set poisoned")
+            .insert(invocation_id);
+    }
+
+    /// Whether this drive's run has had a WAL row of its own.
+    pub(crate) fn wrote_row(&self, invocation_id: Uuid) -> bool {
+        self.wrote_row
+            .lock()
+            .expect("written set poisoned")
+            .contains(&invocation_id)
     }
 
     /// Consume a halt, if one is armed.
@@ -141,6 +165,11 @@ impl Drop for ActiveInvocation<'_> {
             .halt_requested
             .lock()
             .expect("halt set poisoned")
+            .remove(&self.id);
+        self.live
+            .wrote_row
+            .lock()
+            .expect("written set poisoned")
             .remove(&self.id);
         self.rounds.forget(self.id);
         self.timeouts.forget(self.id);

@@ -354,6 +354,10 @@ async fn redrive(
                 %invocation_id,
                 "operator-resumed invocation ended before its turn to resume; nothing to resume"
             ),
+            // An operator's drop ended it while it ran (issue 1070).
+            Err(err @ ExecutorError::FinishedElsewhere { .. }) => {
+                tracing::info!(error = %err, %invocation_id, "operator-resumed invocation stopped");
+            }
             Err(err) => {
                 tracing::error!(error = %err, %invocation_id, "operator resume failed");
             }

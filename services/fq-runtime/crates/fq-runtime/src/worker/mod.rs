@@ -135,6 +135,12 @@ impl DurableStart {
         self.invocation_id
     }
 
+    /// Whether the invocation's first WAL write has landed: in this drive
+    /// once the signal has fired, or in an earlier one for a resume.
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
+    }
+
     /// Signal that the invocation has durably started. Idempotent: the
     /// first call notifies the waiter; later calls (and a `noop`) notify
     /// nobody. A dropped receiver (the dispatcher already acked and
@@ -194,7 +200,11 @@ pub enum InvocationOutcome {
         cost: f64,
     },
     /// The invocation suspended at a step boundary in response to a
-    /// drain (ADR-0027). **Not a terminal outcome:** its state is
+    /// drain (ADR-0027), or to an operator's halt, the first half of a live
+    /// drop, whose fold then marks the row terminal so nothing resumes it.
+    /// A run that finds its row finished by a drop without having been
+    /// halted returns [`ExecutorError::FinishedElsewhere`] instead.
+    /// **For a drain, not a terminal outcome:** its state is
     /// already checkpointed to the WAL and the row stays in-flight, so
     /// the next binary's recovery resumes it. No `Completed`/`Failed`
     /// event is emitted — the durable state is bit-identical to a crash
@@ -307,6 +317,19 @@ pub enum ExecutorError {
         kind: crate::events::FailureKind,
         message: String,
     },
+
+    /// Someone else finished the invocation's WAL row before the run
+    /// could: an operator's drop, folded into this worker's store, marked
+    /// it terminal, or its hand-off then deleted it. The run stopped where
+    /// it noticed (a write of its row that did not land, or a `failed` it
+    /// was about to publish) and published no ending of its own: whoever
+    /// marks the row first decides the outcome, and the drop did (issue
+    /// 1070). Not a failure of the run, and nothing to retry.
+    #[error(
+        "invocation {invocation_id}'s row was finished by someone else (an operator's drop); \
+         it stopped without an ending of its own"
+    )]
+    FinishedElsewhere { invocation_id: Uuid },
 }
 
 impl ExecutorError {
@@ -344,6 +367,9 @@ impl ExecutorError {
             // (budget, max-iterations, validation, …); retrying the same
             // trigger just reproduces it.
             ExecutorError::InvocationFailed { .. } => false,
+            // The drop is the run's outcome; running it again would run
+            // what an operator stopped.
+            ExecutorError::FinishedElsewhere { .. } => false,
         }
     }
 }

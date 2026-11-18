@@ -532,6 +532,10 @@ pub(crate) async fn spawn_resume_tasks(
                     invocation_id = %inv_id,
                     "recovered invocation ended before its turn to resume; nothing to resume"
                 ),
+                // An operator's drop ended it while it ran (issue 1070).
+                Err(err @ ExecutorError::FinishedElsewhere { .. }) => {
+                    tracing::info!(error = %err, invocation_id = %inv_id, "recovered invocation stopped");
+                }
                 Err(err) => {
                     let row = ResumedRow::read(wstore.as_ref(), &inv_id.to_string()).await;
                     report_resume_error(row, wstore.as_ref(), &bus, agent_id, inv_id, err).await;

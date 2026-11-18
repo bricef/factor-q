@@ -677,7 +677,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         llm: &dyn LlmClient,
         invocation_id: Uuid,
     ) -> Result<InvocationOutcome, ExecutorError> {
-        let _active = self.mark_active(invocation_id, agent.id().clone());
+        let _active = self.mark_resumed(invocation_id, agent.id().clone());
         let inv_str = invocation_id.to_string();
         let state_row = self
             .config
@@ -1182,9 +1182,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 *cursor,
             )?;
             let phase_label = terminal.as_ref().map_or(phase_label, Terminal::phase);
-            self.config
-                .store
-                .upsert_invocation_state(&InvocationStateRow {
+            // The first write creates the row; a later one that does not
+            // land stops the run (issue 1070; `runner/own_row.rs`).
+            self.write_own_row(
+                &InvocationStateRow {
                     invocation_id: invocation_id.to_string(),
                     agent_id: agent_id.as_str().to_string(),
                     schema_version: 1,
@@ -1205,9 +1206,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     trigger_payload: Some(trigger.payload.to_string()),
                     terminal_outcome: terminal.as_ref().map(Terminal::outcome),
                     terminal_published_at: None,
-                })
-                .await
-                .map_err(map_store_err)?;
+                },
+                !durable_start.has_started(),
+                invocation_id,
+            )
+            .await?;
             state = output.state;
 
             // First durable (WAL) write for this invocation has landed:
@@ -1902,7 +1905,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         }
         let id = event.envelope.event_id;
         #[cfg(test)]
-        self.check_failed_phase(&event).await;
+        self.check_ending(&event).await;
         debug!(event_type = ?event.payload, "publishing event");
         self.config
             .sink
@@ -2441,6 +2444,7 @@ mod deferral;
 mod failure;
 mod llm;
 mod mcp;
+mod own_row;
 mod publish_failure;
 mod replay;
 mod request_caps;

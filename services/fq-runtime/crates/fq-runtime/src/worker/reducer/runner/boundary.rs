@@ -27,7 +27,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// operator halt (`invocation.drop --live`) is invocation-scoped: the
     /// coordination consumer records the drop from the operator-drop
     /// event (marking the WAL row terminal, when there is one), so the
-    /// halt only stops the in-memory driver.
+    /// halt only stops the in-memory driver. A run holding no halt that
+    /// the drop's mark reaches stops at its next write of the row instead
+    /// (`own_row.rs`).
     /// A drain (ADR-0027) stops every invocation on this worker. The halt
     /// is asked first, and consumed when it is.
     ///

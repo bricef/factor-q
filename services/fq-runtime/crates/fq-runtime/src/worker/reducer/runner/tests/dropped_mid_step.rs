@@ -214,6 +214,10 @@ impl Dropped {
             .outcome
             .as_ref()
             .expect_err("the run stopped without an outcome of its own");
+        assert!(
+            matches!(err, ExecutorError::FinishedElsewhere { .. }),
+            "{err}"
+        );
         assert!(!err.is_transient(), "nothing retries it: {err}");
     }
 }
