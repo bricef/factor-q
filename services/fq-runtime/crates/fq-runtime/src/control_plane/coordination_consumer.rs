@@ -780,6 +780,9 @@ mod ambiguous_tests;
 mod outcome_tests;
 
 #[cfg(test)]
+mod ack_wait_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::AgentId;
