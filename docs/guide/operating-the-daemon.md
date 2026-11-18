@@ -1765,20 +1765,17 @@ trigger whose deliveries ran out through the broker's advisory
 
 **A trigger can get two dead letters.** If the dispatcher's publish did
 reach the events stream and only its acknowledgement was lost, the watch
-usually finds that dead letter as the agent's most recent failure and
-writes no second one, logging `exhausted trigger already surfaced
-inline` at info. It writes a second one, under the same sequence, when
-another failure of the same agent was recorded in between; when it could
-not read the events stream at that moment, since its look for an earlier
-dead letter takes a failed read as none (unlike its read of the
-trigger's message, below, which holds the verdict), and its own publish
-then landed; or when the dispatcher's publish reached the stream only
-after the watch had looked.
-The same holds, as before, for a dead letter the dispatcher published
-whose delivery's ack never reached the broker. `fq dead-letters requeue`
-runs a trigger id at most once, so a requeue does not run the work
-twice; `fq dead-letters list` shows both, and `fq doctor` counts both
-([#1066](https://github.com/bricef/factor-q/issues/1066)).
+finds that dead letter among the agent's failures since the trigger was
+published, however many came in between, and writes no second one,
+logging `a dead letter naming this trigger is already on the log` at
+info; a read it cannot make decides again, as below. It writes a second
+one, under the same sequence, when the dispatcher's publish reached the
+stream only after the watch had looked, or when its check could not be
+made by its limit. The same holds, as before, for a dead letter the
+dispatcher published whose delivery's ack never reached the broker.
+`fq dead-letters list` shows both, and `fq doctor` counts both; what a
+requeue then does is below
+([#1091](https://github.com/bricef/factor-q/issues/1091)).
 
 **The dead-letter watch decides by the records, and counts the triggers
 it keeps.** When a trigger's fifth and last delivery lapses with no
@@ -2108,52 +2105,141 @@ the old stream's value on the dead letter of a trigger of the new one.
 `fq events get <event-id> --json` shows it; `fq dead-letters list` does
 not ([#1066](https://github.com/bricef/factor-q/issues/1066)).
 
-**A dead letter filed for the system is written once.** One that names
-no trigger, in any of the forms above, or whose trigger's subject names
-no legal agent, has no agent to look under, so it carries the broker's
-id for its advisory: `fq events get <event-id> --json` shows it as the
-`advisory_id` annotation. The watch remembers the advisories it has
-written a dead letter for since it started, so a copy of one, such as a
-redelivery that waited in its buffer while it handled others, logs
-`this watch already wrote a dead letter for this advisory` at info and
-writes none, without reading the log. For one it does not remember,
-because the daemon started again since, the watch reads the system's
-dead letters since the advisory was emitted for that id, passing over
-any event this build cannot read, and when it finds it, logs `a dead
-letter filed under the system sentinel was already written for this
-advisory` at info and writes none
-([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
-with no id, or an empty one, cannot be told apart from another and is
-written every time. The read's cost follows how many dead letters the
-system got since the advisory, at most the advisory stream's day of
-them; it reads from the system's first dead letter instead, which costs
-more and answers the same, for an advisory with no timestamp the watch
-can read, and when the client has to set up its read again before the
-first message. A backlog of advisories met after a restart costs about
-the square of its size, each read passing the dead letters written for
-those before it; nothing is lost by it
-([#1087](https://github.com/bricef/factor-q/issues/1087)). A read the
-watch cannot make, or one that takes longer than ten seconds, leaves the
-advisory to be decided again: the watch logs `advisory handling failed;
-nak for retry` at warn with `event log read error: …` (for one out of
-time, `reading the system's dead letters took longer than 10s`), and
-`fq-advisory-watch` shows as stuck once the advisory has been
-redelivered `stuck_after_redeliveries` times. Past the hour and three
-looks that end every held verdict, the dead letter is written anyway,
-and its error line carries `duplicate_check=could not be made: …`: it
-may then be a second one, for a dead letter written before the daemon
-last started, never none. A dead letter that names the trigger may
-still follow one written because the trigger's message could not be
-read, if the advisory comes back and the read then succeeds, since that
-is the one that can be requeued. And one that names no trigger can still
-follow one that named it: the named one carries no advisory id, so if
-its advisory's ack was lost and the trigger's message is gone when the
-advisory comes back to a watch that started again, this check does not
-find it. The events stream
-keeps an event for 30 days by default, longer than the advisory stream
-keeps an advisory; with `[events] max_age` set below a day, a dead
-letter can age out of the events stream before its advisory does, and a
-redelivery after that writes it again.
+**One exhaustion gets one dead letter, whichever form came first.**
+Every dead letter the watch writes carries the broker's id for its
+advisory: `fq events get <event-id> --json` shows it as the
+`advisory_id` annotation, the event id being the `event_id` that
+`fq dead-letters list --json` gives each row (the text listing does not
+show it). Before writing one, the watch looks for one
+already written for the same exhaustion
+([#1066](https://github.com/bricef/factor-q/issues/1066)):
+
+- **One it wrote itself since it started.** The watch remembers the
+  advisories it has written a dead letter for, so a copy of one, such as
+  a redelivery that waited in its buffer while it handled others, logs
+  `this watch already wrote a dead letter for this advisory` at info
+  and writes none, without reading the log. A dead letter that names
+  the trigger may still follow a nameless one it wrote.
+- **One that names its trigger.** It reads the trigger's agent's
+  `failed` events since the trigger's message was published, for a dead
+  letter at the trigger's sequence that records the incarnation of the
+  stream the daemon is connected to (`trigger_stream_epoch`, above) and,
+  when the trigger was published with an id, names that id. One that
+  records no incarnation, written before dead letters recorded it, is
+  never taken, so at worst a second is written. That finds the
+  dispatcher's own dead letter (its publish landed and only its
+  acknowledgement was lost) and one the watch wrote before it started
+  again, however many other failures of the agent came in between. A
+  trigger published without an id is matched by its sequence and
+  incarnation alone, since the dispatcher gives such a trigger an id of
+  its own for each delivery; before it trusts that, the watch asks the
+  broker whether the trigger stream is still the incarnation it holds,
+  for a daemon left running over a recreated stream holds the old one,
+  and its dispatcher can write the old message's dead letter at a
+  sequence the new stream reuses. That is one request, made only for
+  such a match. So an earlier stream's dead letter at the same sequence
+  is not taken for a new trigger's, with one exception: a match on the
+  trigger's id is not asked about, so a daemon left running over a
+  recreated stream takes an earlier stream's dead letter that names an
+  id for that id published again at the same sequence of the new
+  stream, and writes none. `fq dead-letters requeue` is keyed on the
+  id, so the work stays requeueable from the earlier one. When it finds
+  one, the watch logs `a dead letter naming this trigger is already on
+  the log` at info and writes none.
+- **One filed for the system**, naming no trigger in any of the forms
+  above, or naming a trigger whose subject names no legal agent. It
+  reads every agent's `failed` events since the advisory was emitted for
+  one carrying the advisory's id: its own, and one that named the
+  trigger, written before the trigger's message went. When it finds one,
+  it logs `a dead letter was already written for this advisory` at info
+  and writes none. An advisory with no id, or an empty one, cannot be
+  told apart from another, so its dead letter is written every time and
+  says its check could not be made (`duplicate_check`, below). A dead
+  letter that
+  names the trigger may still follow one written because the trigger's
+  message could not be read, if the advisory comes back and the read
+  then succeeds, since that is the one that can be requeued.
+
+Wherever a check cannot be certain, the watch writes the dead letter: a
+second one is the cheaper error, and no answer the checks give loses
+one. Both reads pass over any event this build cannot read. Their cost
+follows how many `failed` events came since the trigger's publish (that
+agent's) or since the advisory (every agent's), at most the advisory
+stream's day of them: a release build read 100,000 in about half a
+second, and ran out of its ten seconds at two million. A read starts at
+the subject's first event instead, costing more and answering the same,
+for an advisory with no timestamp the watch can read and when the
+client has to set up its read again before the first message. A backlog
+of advisories met after a restart costs about the square of its size,
+each read passing the dead letters written for those before it; nothing
+is lost by it while the backlog clears within the advisory stream's
+day, after which an advisory still waiting ages out with no dead letter
+([#1087](https://github.com/bricef/factor-q/issues/1087)).
+A read the watch cannot make, or one that takes longer than ten seconds,
+leaves the advisory to be decided again: the watch logs `advisory
+handling failed; nak for retry` at warn with `event log read error: …`
+(for one out of time, `reading the log for a dead letter already
+written took longer than 10s`), or with `trigger stream read error:
+reading its creation: …` when the broker could not say which
+incarnation the trigger stream is, and `fq-advisory-watch` shows as stuck
+once the advisory has been redelivered `stuck_after_redeliveries` times.
+Past the hour and three looks that end every held verdict, the dead
+letter is written anyway, and says so: it carries a `duplicate_check`
+annotation, `could not be made: …` with why, and its error line a
+`duplicate_check=` field with the same text. `fq events get <event-id>
+--json` shows the annotation; `fq dead-letters list` does not show it
+yet. On seeing it there is nothing to recover: no dead letter was lost,
+but this one may be a second for its exhaustion, one written before the
+daemon last started or the dispatcher's. Look in `fq dead-letters list`
+for another at the same `seq=`. For a trigger published with an id,
+both carry it, and `fq dead-letters requeue` runs a trigger at most
+once, so requeuing either does not run the work twice. For a trigger
+published without one, the dispatcher's dead letter carries the id it
+gave the trigger and the watch's carries none: `fq dead-letters requeue
+--trigger-seq N` takes the most recent dead letter at that sequence,
+the watch's, and refuses it, and nothing selects the dispatcher's
+([#1091](https://github.com/bricef/factor-q/issues/1091)); publish the
+work again as new work with `fq trigger`. A pair that names no trigger
+cannot be requeued at all. The events stream keeps an event for 30 days
+by default, longer than the advisory stream keeps an advisory; with
+`[events] max_age` set below a day, a dead letter can age out of the
+events stream before its advisory does, and a redelivery after that
+writes it again.
+
+No known path loses a dead letter to these checks. These cases still
+write a second one
+([#1091](https://github.com/bricef/factor-q/issues/1091)):
+
+- **The dispatcher publishes its own dead letter after the watch has
+  looked.** If the dispatcher's dead letter reaches the events stream
+  only after the watch has read the log for it, both are written.
+- **A nameless one after the dispatcher's own named one.** The
+  dispatcher's dead letter carries no advisory id, so if the trigger's
+  message is already gone when the watch first looks at its advisory
+  (the watch down for about a day, or the message deleted), the watch
+  adds a dead letter that names no trigger.
+- **A check that cannot be made in time.** Past the hour and three
+  looks the dead letter is written anyway, so one that a run of the
+  daemon before this one wrote is written again.
+- **An advisory with no id.** Its nameless dead letter is written each
+  time the advisory comes back to a watch that does not remember it.
+- **A daemon left running while its trigger stream is recreated**
+  ([#1065](https://github.com/bricef/factor-q/issues/1065)). It goes on holding
+  the earlier stream's incarnation. For a trigger published without an
+  id whose dead letter is already on the log, stamped with that earlier
+  incarnation, its watch writes a second; a watch started after the
+  recreate takes neither for the trigger's and writes a third.
+- **Clocks.** A skew between the servers' clocks, or the broker's clock
+  stepping back, can make a dead letter look older than where a read
+  starts.
+
+What the checks take on trust is which message the advisory names: an
+advisory with no timestamp the watch can read is taken as the current
+incarnation's, and a daemon left running over a recreated stream reads
+an earlier stream's advisory at its sequence in the new one (above,
+[#1065](https://github.com/bricef/factor-q/issues/1065)). In both, the
+check looks for the dead letter of the message it takes the advisory to
+name.
 
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
