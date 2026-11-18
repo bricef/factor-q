@@ -504,12 +504,23 @@ writes a `trigger_exhausted` for a trigger already dealt with
 release no longer leads there, since the delivery is kept alive until
 its answer is published
 ([#1057](https://github.com/bricef/factor-q/issues/1057)); only a lost
-answer does. And a trigger that fails transiently before its first WAL
+answer does. A trigger that fails transiently before its first WAL
 write on its last delivery, and whose dead letter the dispatcher cannot
-publish, is
-acked all the same, which also stops the broker's advisory to the
-watch, so it is consumed with no run and no dead letter from either
-([#1062](https://github.com/bricef/factor-q/issues/1062)). Outside
+publish, is no longer acked: the dispatcher gives its claim back and
+NAKs the delivery with no delay, the broker reports the trigger
+exhausted at once, and the watch, finding nothing on record for it,
+writes the dead letter, trying again until the events stream takes it,
+for as long as the advisory stream keeps the advisory, a day
+([#1062](https://github.com/bricef/factor-q/issues/1062)). Two things
+stay open there. The watch's dead letter does not carry the error that
+ended the last delivery: the dispatcher's error line records it beside
+the trigger's sequence and id, the one record of it that names the
+trigger. And a dead letter whose publish
+reached the events stream and lost only its acknowledgement is found by
+the watch and not written again, unless another `failed` event of the
+same agent was recorded in between: the trigger then has two dead
+letters under one trigger id, which `fq dead-letters requeue` runs at
+most once. Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered

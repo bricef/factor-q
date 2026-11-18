@@ -1323,13 +1323,55 @@ as it adopts it (`the claim it met changed before this daemon could
 adopt it`). The same fields name it. One daemon has nothing that
 changes such a row in that moment, so the line is not expected.
 
+**A last delivery whose dead letter cannot be published goes to the
+watch.** On a trigger's fifth and last delivery, a run that fails
+transiently before its first durable write is dead-lettered by the
+dispatcher itself: it publishes the `trigger_exhausted` dead letter,
+gives the claim back and acks the delivery, and the ack keeps the broker
+from reporting the trigger exhausted. When that publish fails, because
+the events stream is unavailable or does not acknowledge it within five
+seconds, the dispatcher does not ack. It gives the claim back and NAKs
+the delivery with no delay, and the broker, having no delivery left to
+make, reports the trigger exhausted at once. The dead-letter watch
+(below) finds nothing on record for the trigger and writes the dead
+letter, trying again on the bus's escalating delay (one second, then
+two, doubling up to a minute by default) until the events stream takes
+it ([#1062](https://github.com/bricef/factor-q/issues/1062)). The
+dispatcher logs `could not publish the dead letter of a trigger whose
+last delivery failed` once, at error, with the agent, the subject, the
+sequence (`stream_seq`), `trigger_id`, the attempt, why the publish
+failed (`error`) and the error that ended the delivery (`last_error`).
+That line is the one record of the last error that names the trigger
+(the run's own error lines, `executor returned an error for
+NATS-triggered run` among them, name no trigger): the watch's dead
+letter says only that it was surfaced from the MAX_DELIVERIES advisory,
+and its `seq=` and trigger id are what match it to the line. While the
+events stream refuses the watch's dead letter, nothing in `fq status`
+or `fq doctor` names the trigger: `fq-advisory-watch` has the advisory in
+hand, and shows as stuck once it has been redelivered more than
+`[bus] stuck_after_redeliveries` times, and the watch logs `advisory
+handling failed; nak for retry` at warn. If the dispatcher's publish did
+reach the events stream and only its acknowledgement was lost, the watch
+finds that dead letter as the agent's most recent failure and writes no
+second one, logging `exhausted trigger already surfaced inline` at info;
+if another failure of the same agent was recorded in between, it does
+not find it, and the trigger has two dead letters under one trigger id,
+which `fq dead-letters requeue` runs at most once. A daemon that stops
+after the NAK and before the broker reports the trigger leaves that to
+its next start's first pull, and one that stops before the watch has
+written the dead letter leaves the advisory in its stream, which keeps
+it for a day, for the next start's watch. If the events stream stays
+unusable for longer than that day, the advisory ages out and the
+trigger is left with no dead letter.
+
 **The dead-letter watch decides by the records, and counts the triggers
 it keeps.** When a trigger's fifth and last delivery lapses with no
-answer reaching the broker, the broker reports the trigger exhausted
-and `fq-advisory-watch` decides whether to dead-letter it. It looks at
-the trigger's claim, and through it at what is on record for the run:
-the claim marked started, or the run in the worker's WAL or on the
-control plane's ownership table. With nothing on record it writes the
+answer reaching the broker, or is handed over as above, the broker
+reports the trigger exhausted and `fq-advisory-watch` decides whether
+to dead-letter it. It looks at the trigger's claim, and through it at
+what is on record for the run: the claim marked started, or the run in
+the worker's WAL or on the control plane's ownership table. With
+nothing on record it writes the
 `trigger_exhausted` dead letter as it always has. With a start on
 record it writes none, since requeuing that dead letter would run the
 work twice: it marks the claim, logs `not dead-lettering a trigger

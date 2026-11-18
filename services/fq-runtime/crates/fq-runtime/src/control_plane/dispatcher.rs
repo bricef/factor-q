@@ -118,7 +118,9 @@ fn trigger_retry_backoff(delivery_attempt: u32) -> std::time::Duration {
 enum TriggerFate {
     /// Transient failure with retries remaining: NAK with this delay.
     Retry(std::time::Duration),
-    /// Transient failure on the final delivery: dead-letter, then ack.
+    /// Transient failure on the final delivery: dead-letter, then ack; or,
+    /// when the dead letter cannot be published, NAK with no delay so the
+    /// dead-letter watch writes it (issue 1062).
     DeadLetter,
     /// Permanent failure, a clean return, or an operator halt before the
     /// first WAL write, whose drop is its outcome: ack, nothing to retry.
@@ -1936,7 +1938,7 @@ You are a test agent."#
         let trigger_subject = crate::events::subjects::trigger(&agent_id_str);
         let trigger_payload = json!({"input": "hi"});
         let trigger_id = Uuid::now_v7();
-        dispatcher
+        let published = dispatcher
             .dead_letter_exhausted(
                 &agent_id,
                 &trigger_subject,
@@ -1947,6 +1949,7 @@ You are a test agent."#
                 &ExecutorError::WorkerStore("simulated persistent outage".to_string()),
             )
             .await;
+        assert!(published, "the dead letter says it was published");
 
         let stream = bus
             .jetstream()
