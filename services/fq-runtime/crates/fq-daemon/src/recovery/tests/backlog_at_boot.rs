@@ -360,6 +360,68 @@ async fn a_halted_consumer_ends_the_wait_at_once() {
     next.stop().await;
 }
 
+/// **A tail that aged out while the daemon was down is not waited for.**
+/// Every stop leaves events its coordination consumer never folded: a
+/// clean stop's own `system.shutdown`, at least. Once the stream's
+/// retention ages them out, the stream's last sequence lies past anything
+/// the durable will ever be delivered, and its acknowledged floor stays
+/// where the last consumer left it, so the two never meet. The broker then
+/// reports nothing pending and nothing unacknowledged for the durable:
+/// folded as far as it can be. The next start does not wait out its
+/// bound, and resumes the run, which nothing on the stream can end.
+#[tokio::test]
+async fn a_start_after_the_unfolded_tail_aged_out_does_not_wait() {
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+
+    // A first start creates the durable and folds; then the daemon stops
+    // and events it never folded follow.
+    publish(&bus, Uuid::now_v7(), its_own_failed()).await;
+    NextBoot::start(&bus, &cp_store, &worker_store, 30)
+        .await
+        .stop()
+        .await;
+    for _ in 0..3 {
+        publish(&bus, Uuid::now_v7(), its_own_failed()).await;
+    }
+
+    // They age out.
+    let mut stream = bus
+        .jetstream()
+        .get_stream(fq_runtime::bus::STREAM_NAME)
+        .await
+        .expect("the event stream");
+    let mut config = stream.info().await.expect("stream info").config.clone();
+    config.max_age = Duration::from_secs(1);
+    config.duplicate_window = Duration::from_secs(1);
+    bus.jetstream()
+        .update_stream(config)
+        .await
+        .expect("shorten retention");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stream.info().await.expect("stream info").state.messages > 0 {
+        assert!(Instant::now() < deadline, "the tail never aged out");
+        tokio::time::sleep(POLL).await;
+    }
+
+    let invocation = a_run_in_flight(&worker_store).await;
+    let started = Instant::now();
+    let next = NextBoot::start(&bus, &cp_store, &worker_store, 10).await;
+    let took = started.elapsed();
+    assert_eq!(
+        (next.resumes(), next.holds()),
+        (vec![invocation.to_string()], Vec::new()),
+        "nothing left on the stream can end the run, so it is resumed"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "the start waited {took:?} for events that had aged out"
+    );
+    next.stop().await;
+}
+
 /// A `fq invocation resume` handle over these stores, its runner asking
 /// `model`.
 fn resume_control(
