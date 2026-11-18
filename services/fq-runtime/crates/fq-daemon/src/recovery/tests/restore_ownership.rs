@@ -7,6 +7,8 @@
 //! run resumed, since the WAL decides that. The first two tests drive
 //! `classify_in_flight` alone, so each answer is reached through the
 //! restore itself and not through `reconcile_terminal_owners` before it.
+//! The third runs the two in the order the boot does, over a row this
+//! build cannot read: the boot goes on.
 
 use super::*;
 use fq_runtime::control_plane::{ControlPlaneStoreError, OwnerStatus};
@@ -100,6 +102,50 @@ async fn a_row_this_build_cannot_read_is_left_as_it_is_and_its_run_resumed() {
             .collect::<Vec<_>>(),
         [invocation.as_str()],
         "the WAL, not the row, says the run can be resumed"
+    );
+    assert!(
+        unreadable(&cp_store, &invocation).await,
+        "the row is left as it is"
+    );
+}
+
+#[tokio::test]
+async fn the_boot_goes_on_past_a_row_this_build_cannot_read() {
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+    let invocation = in_flight_run(&worker_store).await;
+    cp_store
+        .upsert_invocation_ownership(&invocation, "the-last-daemon", 1_000, OwnerStatus::InFlight)
+        .await
+        .unwrap();
+    assert!(
+        cp_store
+            .overwrite_owner_status_for_test(&invocation, "weird")
+            .await
+            .unwrap()
+    );
+
+    // The boot's order: reconcile, then classify.
+    reconcile_terminal_owners(
+        &worker_store,
+        &cp_store,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .expect("reconciliation logs the row and goes on");
+    let recovered = next_start(&bus, &cp_store, &worker_store).await;
+
+    assert_eq!(recovered.recoverable.len(), 1, "the run is resumed");
+    let wal = worker_store
+        .get_invocation_state(&invocation)
+        .await
+        .unwrap()
+        .expect("the WAL row stays");
+    assert!(
+        wal.terminal_at.is_none(),
+        "reconciliation found no ending to apply"
     );
     assert!(
         unreadable(&cp_store, &invocation).await,

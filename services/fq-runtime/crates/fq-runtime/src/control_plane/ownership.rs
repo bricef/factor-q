@@ -75,13 +75,27 @@
 //! and recovery's restore re-owns the run for this daemon from the run's
 //! start ([`Owner::TakeBoth`]).
 //!
-//! A row this build cannot read (a status or an archive state it does
-//! not know, which only a hand edit or a newer build writes) cannot be
-//! moved by compare-and-set: [`apply`] answers
-//! [`OwnershipError::Unreadable`] and writes nothing. The coordination
-//! consumer logs that event at error and acks it, leaving the row as it
-//! is, because retrying would hold every later event behind it on that
-//! strict-order consumer for good.
+//! ## A row this build cannot read
+//!
+//! A status or an archive state this build does not know, which only a
+//! hand edit or a newer build writes, cannot be moved by compare-and-set:
+//! [`apply`] answers [`OwnershipError::Unreadable`] and writes nothing.
+//! The rule is the same everywhere: the row is left as it is, the event
+//! or the run goes on without it, and nothing waits for it.
+//!
+//! - **The coordination consumer** refuses the event as permanent, which
+//!   its shared loop logs at warn and acks, because a retry would hold
+//!   every later event behind it on that strict-order consumer for good.
+//!   What the event does besides moving the row still happens:
+//!   `invocation.archived` writes the archive record and is acknowledged
+//!   to the worker, so the worker lets its terminal row go; an operator's
+//!   drop writes its archive record, with the drop's time as the run's
+//!   start, and marks the worker's WAL row terminal.
+//! - **Startup recovery** logs the row at error and classifies the run
+//!   from its WAL row alone: `reconcile_terminal_owners` finds no ending
+//!   to apply, and the restore before a resume leaves the row as it is
+//!   and resumes the run, since the WAL, not the row, says whether a run
+//!   can be resumed. The boot goes on.
 
 use super::store::{
     ArchiveState, ControlPlaneStore, ControlPlaneStoreError, OwnerRow, OwnerStatus,
