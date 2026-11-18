@@ -17,18 +17,29 @@
 //! - when it cannot tell, the request is refused unless it says the
 //!   operator has checked the run (`checked_not_started`).
 //!
-//! **Which records, by what key.** The claim table keys a delivery on the
+//! **What is read.** The trigger's claim, and for the run the claim names
+//! the worker's WAL and the ownership table, as the check reads them for
+//! the watch. When that leaves it unable to tell (no claim is there to
+//! consult, the claims cannot be read, or a copy still handles the claim)
+//! and the dead letter's mark names a run, those two records are read for
+//! that run too, by its own id ([`ExhaustionCheck::start_of_run`]). A start
+//! found in any of them is a start on record; only a start found counts,
+//! so a read that fails is no answer, and the verdict stays "cannot tell".
+//!
+//! **Which claim, by what key.** The claim table keys a delivery on the
 //! trigger stream, the stream's incarnation and the sequence. A dead letter
 //! carries the sequence; the incarnation is the one the check's claims are
 //! keyed on, the dispatcher's. A dead letter written before that
-//! incarnation was created names a sequence of the earlier stream, at which
-//! this one's claim is another trigger's, so its claim is not consulted: it
-//! has none to consult. (One the watch wrote for an advisory of an earlier
-//! incarnation, or for a trigger that had aged out of the stream, names no
-//! trigger at all, and the command refuses it before it gets here.) The
-//! comparison is the dead letter's timestamp, this daemon's clock when it
-//! was written, against the stream's creation, the broker's: a skew
-//! between the two clocks moves the line by that much, near a recreation.
+//! incarnation was created names a sequence of the earlier stream, and the
+//! claim this one holds at that sequence, if any, is another trigger's, so
+//! no claim is consulted: it has none to consult. (One the watch wrote for
+//! an advisory of an earlier incarnation, or for a trigger that had aged
+//! out of the stream, names no trigger at all, and the command refuses it
+//! before it gets here.) The comparison is the dead letter's timestamp,
+//! this daemon's clock when it was written, against the stream's creation,
+//! the broker's: a skew between the two clocks moves the line by that much,
+//! near a recreation. Issue 1077 is to record the incarnation on the dead
+//! letter instead.
 //!
 //! **A claim that is gone.** A claim given back before its run started
 //! leaves no row, and so does one the retention sweep deleted, `claimed`
@@ -43,16 +54,24 @@
 //!   claim with no start and no copy handling it. No delivery follows the
 //!   last one, so a run starts after it only by a copy its writer did not
 //!   see, such as a replay of the stream, and that run's claim is marked
-//!   started: requeue refuses it while the claim is kept, which is at
-//!   least two days and ninety by default. Past that, the claim is gone
-//!   and the dead letter reads as nothing on record; the residue is
-//!   stated where the guide and `STATUS.md` say what stays open.
-//! - **A marked one cannot be told.** Its writer could not check, so
-//!   nothing says what was on record when it was written, and a claim
-//!   absent now is either one given back without a start or one swept
-//!   after a start. The sweep can come within days of the dead letter,
-//!   since the claim may be older than it by as long as the watch held
-//!   its verdict and the daemon was down.
+//!   started: requeue refuses it while the claim is kept. A dead letter is
+//!   an event, kept for `[events] max_age` (30 days by default), and a
+//!   claim is kept for `[state] trigger_claim_retention_days` (90 by
+//!   default, two at least), so with the defaults a dead letter leaves the
+//!   log long before its claim can be swept. Only a claim window set below
+//!   the event log's, or an event log kept longer than the claims, leaves
+//!   a dead letter whose run's claim has gone, and that one reads as
+//!   nothing on record (issue 1076).
+//! - **A marked one cannot be told**, unless the run its mark names has a
+//!   start on record by its own id. Its writer could not check, so nothing
+//!   says what was on record when it was written, and a claim absent now
+//!   is either one given back without a start or one swept after a start.
+//!   With the windows above, the sweep can come while the dead letter is
+//!   still listed only when the claim window is set below the event log's
+//!   (near its two-day floor, within days of the dead letter, since the
+//!   claim may be older than it by as long as the watch held its verdict
+//!   and the daemon was down). The rule does not depend on which: a row
+//!   absent for either reason looks the same.
 //!
 //! The dispatcher's own dead letter, written on the fifth failed delivery,
 //! is the first kind: its claim is released as the delivery is answered,
@@ -60,11 +79,11 @@
 //! after any sweep. In the moment between the dead letter's publish and
 //! that release, a copy is still handling the claim, and requeue says so.
 //!
-//! **The look.** [`ExhaustionCheck::last_look`], not `verdict`: the watch
-//! takes it when it is about to act on a verdict it could not take, and
-//! requeue is always there, since it acts on its answer at once and has no
-//! later look to wait for. It adds one read of the worker's WAL for the run
-//! the claim names, and trusts only a start found, so it can only turn
+//! **The look.** [`ExhaustionCheck::last_look`], not the bare verdict: the
+//! watch takes it when it is about to act on a verdict it could not take,
+//! and requeue is always there, since it acts on its answer at once and has
+//! no later look to wait for. It adds one read of the worker's WAL for the
+//! run the claim names, and trusts only a start found, so it can only turn
 //! "cannot tell" into a refusal the override does not pass.
 //!
 //! **The mark.** A start the check finds in the records, on a claim still
@@ -78,7 +97,8 @@
 //! leaves a claim given back, taken again or marked already as it is, and
 //! the refusal says what became of it. Not marking would mean a second
 //! decision beside the check's, and the hazard left in place until the
-//! daemon next starts.
+//! daemon next starts. A start found by the run's own id marks nothing: no
+//! claim was read.
 
 use fq_edge::wire::WireError;
 use fq_runtime::TriggerDispatcher;
@@ -138,7 +158,9 @@ enum Verdict {
     Started {
         invocation_id: String,
         on_record: String,
-        mark: ClaimMark,
+        /// What became of the claim, or `None` for a start found by the
+        /// run's own id, when no claim was read.
+        mark: Option<ClaimMark>,
     },
     /// Cannot tell: requeue it only on the operator's word.
     CannotTell {
@@ -146,8 +168,8 @@ enum Verdict {
         /// The run to check: the one the claim names, else the one the
         /// dead letter's mark names.
         invocation_id: Option<String>,
-        /// Whether the reason can clear, so that asking again later lets
-        /// the daemon take the verdict itself.
+        /// Whether the reason can clear, so that asking again later may
+        /// let the daemon take the verdict itself.
         may_clear: bool,
     },
 }
@@ -155,7 +177,8 @@ enum Verdict {
 /// Why a dead letter written before the stream the claims are keyed on
 /// has no claim to consult.
 const EARLIER_STREAM: &str = "it was written before the trigger stream was last created, so its \
-     sequence is the earlier stream's and the claim at that sequence now is another trigger's";
+     sequence is the earlier stream's, and the claim at that sequence now, if there is one, is \
+     another trigger's";
 
 /// Why a dead letter that records no sequence has no claim to consult.
 const NO_SEQUENCE: &str =
@@ -175,22 +198,41 @@ pub(super) async fn admit(
     selected: bool,
     checked_not_started: bool,
 ) -> Result<(), WireError> {
-    match verdict_on(dead, look(records, dead).await) {
+    let mut verdict = verdict_on(dead, look(records, dead).await);
+    if matches!(verdict, Verdict::CannotTell { .. }) {
+        verdict = with_the_marked_run(verdict, marked_run_start(records, dead).await);
+    }
+    match verdict {
         Verdict::Proceed => Ok(()),
         Verdict::Started {
             invocation_id,
             on_record,
             mark,
         } => {
+            let claim = mark.as_ref().map_or_else(
+                || "not read: found by the run's own id".to_string(),
+                ClaimMark::to_string,
+            );
             tracing::warn!(op = OP, event_id = %dead.event_id, agent_id = %dead.agent_id,
                 trigger_stream_seq = ?dead.trigger_stream_seq, %invocation_id, run = %on_record,
-                claim = %mark, "refused to requeue a dead letter whose trigger's run has a start \
-                 on record");
-            Err(started(dead, selected, &invocation_id, &on_record, &mark))
+                %claim, checked_not_started, "refused to requeue a dead letter whose trigger's \
+                 run has a start on record");
+            Err(started(
+                dead,
+                selected,
+                &invocation_id,
+                &on_record,
+                mark.as_ref(),
+            ))
         }
-        Verdict::CannotTell { .. } if checked_not_started => {
+        // The only record that an operator overrode a verdict the daemon
+        // could not take: why it could not, and the run it named.
+        Verdict::CannotTell {
+            why, invocation_id, ..
+        } if checked_not_started => {
             tracing::warn!(op = OP, event_id = %dead.event_id, agent_id = %dead.agent_id,
-                trigger_stream_seq = ?dead.trigger_stream_seq,
+                trigger_stream_seq = ?dead.trigger_stream_seq, reason = %why,
+                invocation_id = %invocation_id.as_deref().unwrap_or("none"),
                 "requeueing a dead letter whose trigger's start the records cannot tell, on the \
                  operator's word that its run did not start");
             Ok(())
@@ -227,25 +269,59 @@ async fn look(records: &TriggerRecords, dead: &DeadLetter) -> Found {
     Found::Look(check.last_look(stream_seq).await)
 }
 
-/// The verdict on `dead`, from what its trigger's records hold. Pure, so
-/// every arm is tested without a store.
+/// The run `dead`'s mark names and where its start is on record, if the
+/// records hold one by that run's own id.
+async fn marked_run_start(records: &TriggerRecords, dead: &DeadLetter) -> Option<(String, String)> {
+    let check = records.check.as_ref()?;
+    let run = dead.start_unchecked.as_ref()?.invocation_id.clone()?;
+    let on_record = check.start_of_run(&run).await?;
+    Some((run, on_record))
+}
+
+/// A verdict that could not be taken from the claim, given what the
+/// records hold by the id of the run the dead letter's mark names: a start
+/// found there is a start on record. Pure, so it is tested without a store.
+fn with_the_marked_run(verdict: Verdict, marked_run: Option<(String, String)>) -> Verdict {
+    match (verdict, marked_run) {
+        (Verdict::CannotTell { .. }, Some((invocation_id, on_record))) => Verdict::Started {
+            invocation_id,
+            on_record,
+            mark: None,
+        },
+        (verdict, _) => verdict,
+    }
+}
+
+/// The verdict on `dead`, from what its trigger's claim and the run the
+/// claim names hold. Pure, so every arm is tested without a store.
 fn verdict_on(dead: &DeadLetter, found: Found) -> Verdict {
     let mark = dead.start_unchecked.as_ref();
     let marked_invocation = || mark.and_then(|m| m.invocation_id.clone());
     // No claim to consult: nothing on record for an unmarked dead letter,
     // whose writer found none; cannot tell for a marked one, whose writer
-    // could not look (the module doc has the why).
+    // could not look, unless the run its mark names is found started by
+    // its own id (`with_the_marked_run`; the module doc has the why).
     let claim_gone = |why: &str| match mark {
         None => Verdict::Proceed,
         Some(mark) => Verdict::CannotTell {
             why: format!(
-                "it is marked `start_unchecked` ({}), and {why}",
-                mark.reason
+                "it is marked `start_unchecked` ({}), and {why}; {}",
+                mark.reason,
+                if mark.invocation_id.is_some() {
+                    "nothing was found on record under the run its mark names"
+                } else {
+                    "its mark names no run to look up"
+                }
             ),
             invocation_id: mark.invocation_id.clone(),
             may_clear: false,
         },
     };
+    // Exhaustive on purpose. Issue 1055's claim of a trigger consumed
+    // without its run starting cannot arrive as `NothingOnRecord`, since
+    // the watch dead-letters on that: it will need an `Exhausted` variant
+    // of its own, and this match an arm for it. It never ran, so that arm
+    // proceeds.
     match found {
         Found::NoRecords => Verdict::CannotTell {
             why: "this daemon's dispatcher holds no claim store, so there are no records to \
@@ -257,9 +333,6 @@ fn verdict_on(dead: &DeadLetter, found: Found) -> Verdict {
         Found::NoClaimToConsult(why) => claim_gone(why),
         Found::Look(Exhausted::NoClaim) => claim_gone(NO_CLAIM),
         // A claim is there, and nothing of the run it names is on record.
-        // This is also where a claim of a trigger consumed without its run
-        // starting lands, when the claim table records one (issue 1055): it
-        // never ran, so it proceeds.
         Found::Look(Exhausted::NothingOnRecord) => Verdict::Proceed,
         Found::Look(Exhausted::Started {
             invocation_id,
@@ -268,7 +341,7 @@ fn verdict_on(dead: &DeadLetter, found: Found) -> Verdict {
         }) => Verdict::Started {
             invocation_id,
             on_record,
-            mark,
+            mark: Some(mark),
         },
         Found::Look(Exhausted::Undecided { why, invocation_id }) => Verdict::CannotTell {
             why,
@@ -297,17 +370,21 @@ fn which(dead: &DeadLetter, selected: bool) -> String {
     }
 }
 
-/// The command that requeues `dead` on the operator's word.
-fn override_command(dead: &DeadLetter) -> String {
+/// What the operator does once they have checked the run: the command
+/// that requeues `dead` on their word, which names it by its sequence.
+fn on_your_word(dead: &DeadLetter) -> String {
     match dead.trigger_stream_seq {
         Some(seq) => format!(
-            "fq dead-letters requeue {} --trigger-seq {seq} --checked-not-started",
+            "Once you have checked that it did not start, ask again with `checked_not_started` \
+             set: `fq dead-letters requeue {} --trigger-seq {seq} --checked-not-started`.",
             dead.agent_id
         ),
-        None => format!(
-            "fq dead-letters requeue {} --checked-not-started",
-            dead.agent_id
-        ),
+        // The override names its dead letter by sequence, and this one has
+        // none to be named by.
+        None => "It records no trigger sequence, so the override, which names its dead letter \
+                 by sequence, cannot reach it: once you have checked that the run did not start, \
+                 publish the work again as new work with `trigger.publish`."
+            .to_string(),
     }
 }
 
@@ -324,8 +401,14 @@ fn started(
     selected: bool,
     invocation_id: &str,
     on_record: &str,
-    mark: &ClaimMark,
+    mark: Option<&ClaimMark>,
 ) -> WireError {
+    let claim = match mark {
+        Some(mark) => format!("Its claim: {mark}."),
+        None => "No claim answered for the trigger, so this was found under the run's own id, \
+                 the one the dead letter's mark names, and no claim was marked."
+            .to_string(),
+    };
     WireError::Conflict {
         op: OP.into(),
         message: format!(
@@ -334,8 +417,7 @@ fn started(
              published, and `checked_not_started` (`--checked-not-started`) does not change \
              that: it is for a run the daemon cannot tell about, never one with a start on \
              record. Read the run with `fq invocation show {invocation_id}` (`invocation.get`). \
-             To run the work again anyway, publish it as new work with `trigger.publish`. Its \
-             claim: {mark}.",
+             To run the work again anyway, publish it as new work with `trigger.publish`. {claim}",
             which(dead, selected)
         ),
     }
@@ -351,18 +433,29 @@ fn cannot_tell(
     invocation_id: Option<&str>,
     may_clear: bool,
 ) -> WireError {
-    let clears = if may_clear {
-        " That can clear: asked again once it has, the daemon takes the verdict itself."
-    } else {
-        ""
+    // What asking again can do. For a marked dead letter it is less than
+    // it looks: if the claim is given back meanwhile, the next answer is
+    // "cannot tell" again, for the claim being gone.
+    let clears = match (may_clear, dead.start_unchecked.is_some()) {
+        (false, _) => "",
+        (true, false) => {
+            " That can clear: asked again once it has, the daemon takes the verdict \
+             itself."
+        }
+        (true, true) => {
+            " That can clear, but asked again once it has, the daemon takes the \
+             verdict itself only while the claim is there: if the claim has been given back by \
+             then, a dead letter marked like this one is still one it cannot tell about, unless \
+             the run its mark names is on record."
+        }
     };
     let check = match invocation_id {
         Some(id) => format!("Check the run with `fq invocation show {id}`: {STARTED_IF}."),
         None => format!(
-            "No run is named, since the claim, or the dead letter's mark, could not be read: \
-             list the agent's runs with `fq events query --agent {agent} --type triggered`, find \
-             the one whose trigger payload is this dead letter's with `fq events get \
-             <event-id>`, and check it with `fq invocation show <id>`: {STARTED_IF}.",
+            "No run is named, since no claim naming one could be read and the dead letter's mark \
+             names none: list the agent's runs with `fq events query --agent {agent} --type \
+             triggered`, find the one whose trigger payload is this dead letter's with `fq \
+             events get <event-id>`, and check it with `fq invocation show <id>`: {STARTED_IF}.",
             agent = dead.agent_id
         ),
     };
@@ -372,10 +465,9 @@ fn cannot_tell(
             "{} may be for a trigger whose run started, and the daemon cannot tell: {why}. \
              Requeueing it would run the work twice if the run started, so nothing was reserved \
              or published.{clears} {check} A copy of the trigger can still start the run after \
-             you look. Once you have checked that it did not start, ask again with \
-             `checked_not_started` set: `{}`. A start on record is refused whatever you pass.",
+             you look. {} A start on record is refused whatever you pass.",
             which(dead, selected),
-            override_command(dead)
+            on_your_word(dead)
         ),
     }
 }
