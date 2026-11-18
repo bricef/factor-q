@@ -749,6 +749,7 @@ fn render_recovery_guidance_for_stale_only() {
     let out = render_recovery_guidance(0, 2);
     assert!(out.contains("Stale workers: 2"));
     assert!(out.contains("fq workers list --stale-only"));
+    // allow-dead-command: `fq workers prune` was retired; this test keeps it out of advice.
     // Inspection is offered; removal is not. The retired `fq workers
     // prune` must not come back as advice.
     assert!(!out.contains("prune"), "got: {out:?}");
