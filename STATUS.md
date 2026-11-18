@@ -483,7 +483,13 @@ text, four bytes on the wire for three of state where it was about four
 for one, so a run holding up to about 786,000 bytes of state (two tool
 results at the default cap) archives on a stock 1 MiB broker. An ended
 run whose archive is held still reads `in_flight` in the ownership
-table ([#1024](https://github.com/bricef/factor-q/issues/1024)). And an
+table ([#1024](https://github.com/bricef/factor-q/issues/1024)). An
+`invocation.ambiguous` that reaches the control plane after a run is
+recorded `completed` or `failed`, an operator's drop included, no
+longer puts its ownership row back to `ambiguous`: the move is a
+compare-and-set that refuses to leave a finished status, and the
+refusal is logged (the first change of
+[#1024](https://github.com/bricef/factor-q/issues/1024)). And an
 event the broker refuses for its size now ends its run
 ([#828](https://github.com/bricef/factor-q/issues/828)): one terminal
 `failed` of kind `payload_too_large` names the refused event, its size
