@@ -93,21 +93,30 @@ impl FoldProbe {
     /// How far the consumer has folded: its mark, or its durable's ack
     /// floor where that is further. The mark moves only with an event this
     /// process folded, so a durable that had folded everything before the
-    /// last daemon stopped is read from the broker; an unreadable durable
-    /// counts as not there yet.
+    /// last daemon stopped is read from the broker.
+    ///
+    /// A durable the broker reports nothing pending and nothing
+    /// unacknowledged for has folded everything the stream still holds,
+    /// whatever its floor says, and counts as folded to the boot point.
+    /// That is the case once the events past its floor have aged out while
+    /// no daemon ran: the stream's last sequence then lies past anything
+    /// the durable will ever be delivered, and the floor never meets it.
+    /// An unreadable durable counts as not there yet.
     pub async fn folded_to(&self) -> u64 {
         let mark = self.watermark.current();
         if mark >= self.boot_point {
             return mark;
         }
-        let floor = match self.bus.jetstream().get_stream(STREAM_NAME).await {
-            Ok(stream) => match stream.consumer_info(&self.durable).await {
-                Ok(info) => info.ack_floor.stream_sequence,
-                Err(_) => 0,
-            },
-            Err(_) => 0,
+        let Ok(stream) = self.bus.jetstream().get_stream(STREAM_NAME).await else {
+            return mark;
         };
-        mark.max(floor)
+        let Ok(info) = stream.consumer_info(&self.durable).await else {
+            return mark;
+        };
+        if info.num_pending == 0 && info.num_ack_pending == 0 {
+            return mark.max(self.boot_point);
+        }
+        mark.max(info.ack_floor.stream_sequence)
     }
 }
 
