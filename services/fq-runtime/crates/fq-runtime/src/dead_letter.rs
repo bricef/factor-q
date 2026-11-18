@@ -151,8 +151,9 @@ pub fn from_event(event: &Event) -> Option<DeadLetter> {
         // Present in any form, it still says the dead letter names nothing.
         unattributed: annotation(DEAD_LETTER_UNATTRIBUTED_KEY)
             .map(|why| why.as_str().map_or_else(|| why.to_string(), str::to_string)),
-        // A kind this build does not know is dropped; the reason still says
-        // why.
+        // Read as a client reads it: a kind this build does not know is
+        // `Unknown`, and the reason still says why. One that is not a kind
+        // at all is dropped.
         unattributed_kind: annotation(DEAD_LETTER_UNATTRIBUTED_KIND_KEY)
             .and_then(|kind| serde_json::from_value(kind.clone()).ok()),
     })
@@ -245,8 +246,8 @@ mod tests {
     }
 
     /// The kind of the reason is lifted beside it, as the shape's enum; a
-    /// kind this build does not know is dropped, and the reason still says
-    /// why.
+    /// kind this build does not know reads as `unknown`, one that is not a
+    /// kind at all is dropped, and the reason still says why.
     #[test]
     fn an_unattributed_dead_letters_kind_is_lifted() {
         let event = failed(FailureKind::TriggerExhausted)
@@ -266,8 +267,17 @@ mod tests {
                 serde_json::json!("later"),
             );
         let dead = from_event(&unknown).expect("a dead letter");
-        assert_eq!(dead.unattributed_kind, None);
+        assert_eq!(dead.unattributed_kind, Some(UnattributedKind::Unknown));
         assert_eq!(dead.unattributed, Some("why".to_string()));
+        let garbled = failed(FailureKind::TriggerExhausted)
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::json!("why"))
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KIND_KEY, serde_json::json!(7));
+        assert_eq!(
+            from_event(&garbled)
+                .expect("a dead letter")
+                .unattributed_kind,
+            None
+        );
     }
 
     /// One whose annotation cannot be read still says its start was not
