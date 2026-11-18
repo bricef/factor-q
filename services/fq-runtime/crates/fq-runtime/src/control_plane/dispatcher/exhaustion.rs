@@ -95,7 +95,7 @@ use std::sync::Arc;
 
 use crate::bus::TRIGGER_STREAM_NAME;
 use crate::control_plane::store::RunRecords;
-use crate::control_plane::{ControlPlaneStore, TriggerKey};
+use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerKey};
 use crate::worker::{WalRun, Worker};
 
 use super::TriggerDispatcher;
@@ -197,7 +197,7 @@ impl ExhaustionCheck {
 
     /// The verdict on the trigger at `stream_seq` of the stream this
     /// dispatcher consumes.
-    pub async fn verdict(&self, stream_seq: u64) -> Exhausted {
+    pub(crate) async fn verdict(&self, stream_seq: u64) -> Exhausted {
         let key = self.key(stream_seq);
         let row = match self.store.trigger_claim(key).await {
             Ok(row) => row,
@@ -357,7 +357,7 @@ impl ExhaustionCheck {
     /// letter it could not check: the verdict taken again and, if it still
     /// cannot be taken, the worker's WAL read once for the run the claim
     /// names. Only a start found counts. An empty read is never taken for
-    /// "not started", for the reason [`Self::verdict`] asks about a copy
+    /// "not started", for the reason `verdict` asks about a copy
     /// still handling the claim before it reads the records: that copy can
     /// make its first WAL write just after the read. A start found here
     /// marks the claim as any other does.
@@ -383,6 +383,34 @@ impl ExhaustionCheck {
             },
             verdict => verdict,
         }
+    }
+
+    /// Where the run `invocation_id` has a start on record, looked up by
+    /// its own id rather than through a claim, or `None` when no record
+    /// shows one. `dead_letter.requeue` asks it about the run a dead
+    /// letter's `start_unchecked` mark names when no claim answers (issue
+    /// 1059). The worker's WAL is read first and then the ownership row,
+    /// as every reader of [`RunRecords`] reads them, so an archive landing
+    /// between the two reads cannot hide the run. As in the last look, only
+    /// a start found counts: a read that fails says nothing. The ownership
+    /// row counts by its presence, so one whose status this build cannot
+    /// read is a start all the same. Nothing is marked: no claim was read.
+    pub async fn start_of_run(&self, invocation_id: &str) -> Option<String> {
+        let wal = self.worker.wal_run(invocation_id).await.ok().flatten();
+        let owner_row_status = match self.store.get_invocation_owner(invocation_id).await {
+            Ok(row) => row.map(|row| row.status.as_str().to_string()),
+            // Only a row it fetched and could not parse makes this read
+            // `Malformed`: the row is there.
+            Err(ControlPlaneStoreError::Malformed(_)) => {
+                Some("a status this build cannot read".to_string())
+            }
+            Err(_) => None,
+        };
+        RunRecords {
+            wal,
+            owner_row_status,
+        }
+        .where_on_record()
     }
 }
 
