@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::agent::AgentId;
+use crate::control_plane::store::OwnerStatus;
 use crate::events::{
     InvocationAmbiguousPayload, InvocationArchivedPayload, InvocationOperatorRecoveredPayload,
 };

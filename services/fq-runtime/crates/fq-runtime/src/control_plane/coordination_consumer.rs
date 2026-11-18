@@ -2,19 +2,29 @@
 //! by subscribing to invocation lifecycle events from workers.
 //!
 //! Per data-architecture.md §7.2, the control-plane on
-//! restart subscribes to:
+//! restart subscribes to the events that move a run's
+//! `coordination_invocation_owner` row. What each one does to
+//! the row is [`super::ownership`]'s transition table, applied
+//! as a compare-and-set; here is what else each handler does:
 //!
+//! - `fq.agent.*.completed` and `fq.agent.*.failed` — a run's
+//!   ending. The row follows it when it is folded, with its
+//!   archive pending, so a run whose archive is late, refused or
+//!   held reads as finished (issue 1024). A `failed` in `setup`
+//!   belongs to a run that never started and writes nothing.
 //! - `fq.agent.*.invocation.ambiguous` — workers publish on
 //!   recovery when their WAL has a `dispatched`-without-
-//!   `completed` row. The control-plane marks the
-//!   `coordination_invocation_owner` row `ambiguous`, unless it
-//!   already records the run `completed` or `failed`: a late
-//!   report never puts a finished run back to triage.
+//!   `completed` row. A late report never puts a finished run
+//!   back to triage.
 //! - `fq.agent.*.invocation.archived` — workers publish on
 //!   terminal handoff (step 8). The control-plane writes the
-//!   `invocation_archive` row and publishes
-//!   `invocation.archive_acked` back on the worker-scoped
+//!   `invocation_archive` row, records the archive on the
+//!   ownership row, and publishes `invocation.archive_acked`
+//!   back on the worker-scoped
 //!   `fq.worker.{worker_id}.invocation.archive_acked` subject.
+//! - `fq.agent.*.invocation.operator_recovered` — an operator's
+//!   drop: the archive row, the ownership row, and the worker's
+//!   WAL row when this process hosts it.
 //!
 //! The consumer also runs a periodic stale-worker sweep:
 //! workers whose `last_heartbeat` is older than the
@@ -32,12 +42,16 @@
 //!
 //! Delivery semantics (the loop and ack policy live in
 //! [`super::durable_consumer`]):
-//! - **At-least-once** from JetStream. Coordination updates
-//!   are idempotent (upsert by primary key), so re-delivery
-//!   is safe.
+//! - **At-least-once** from JetStream. Every event applied twice
+//!   leaves the row as once (the transition table's duplicates),
+//!   and the archive insert is `ON CONFLICT DO NOTHING`, so
+//!   re-delivery is safe.
 //! - **Parse errors** are logged and acked.
 //! - **Store errors** are transient handler errors: NAK'd to
-//!   trigger redelivery.
+//!   trigger redelivery. An ownership row this build cannot read
+//!   is the exception: the event is logged and acked, because a
+//!   row that cannot be read cannot be moved, and retrying would
+//!   hold every later event behind it.
 //!
 //! The consumer is single-process in v1; v2 splits it onto
 //! the dedicated control-plane node.
@@ -52,7 +66,7 @@ use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
 use crate::events::{
-    Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload,
+    Event, EventPayload, FailurePhase, InvocationArchiveAckedPayload, InvocationArchivedPayload,
     WorkerOrphanedPayload,
 };
 
@@ -60,23 +74,28 @@ use super::durable_consumer::{
     DeliverFrom, DurableConsumerConfig, DurableConsumerError, HandlerError,
     run_durable_consumer_with_tick,
 };
-use super::store::{
-    AmbiguousMark, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, OwnerStatus,
-    WorkerStatus,
+use super::ownership::{
+    self, Applied, Ending, OwnerFacts, OwnershipError, OwnershipEvent, RowState,
 };
+use super::store::{ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, WorkerStatus};
 
 /// Name of the durable JetStream consumer the coordination
 /// consumer creates. Distinct from the projection consumer's
 /// durable name so they advance independently.
 pub const CONSUMER_NAME: &str = "fq-coordination";
 
-/// Subject filter for the coordination consumer's durable
-/// subscription. Matches every invocation lifecycle event
-/// across all agents. Note: NATS subject wildcards use `*`
-/// for one token and `>` for one-or-more, so this matches
-/// `fq.agent.<id>.invocation.<kind>` for any single id and
-/// any single kind.
-pub const FILTER_SUBJECT: &str = "fq.agent.*.invocation.*";
+/// Subject filters for the coordination consumer's durable
+/// subscription when it carries no watermark (a consumer with one
+/// reads the whole stream). They match every invocation lifecycle
+/// event across all agents, and every run's ending. Note: NATS
+/// subject wildcards use `*` for one token and `>` for one-or-more,
+/// so the first matches `fq.agent.<id>.invocation.<kind>` for any
+/// single id and any single kind.
+pub const FILTER_SUBJECTS: [&str; 3] = [
+    "fq.agent.*.invocation.*",
+    "fq.agent.*.completed",
+    "fq.agent.*.failed",
+];
 
 /// Default time after which a worker without a fresh
 /// heartbeat is considered stale (30 seconds).
@@ -105,9 +124,10 @@ pub struct CoordinationConsumer {
     /// [`Self::with_test_consumer_name`].
     test_consumer_name: Option<String>,
     /// Test-only override for the JetStream filter subject.
-    /// When `Some`, used in place of [`FILTER_SUBJECT`] so the
+    /// When `Some`, used in place of [`FILTER_SUBJECTS`] so the
     /// test consumer only receives events for one agent's
-    /// invocations. Without this, parallel acceptance tests
+    /// invocations (`fq.agent.<id>.>`, which takes in its
+    /// endings). Without this, parallel acceptance tests
     /// cross-contaminate via the ack subject (one test's CP
     /// ack-then-delete races another test's sweeper).
     test_filter_subject: Option<String>,
@@ -210,9 +230,10 @@ impl CoordinationConsumer {
 
     /// Narrow the JetStream filter subject for this consumer.
     /// Test-only — the acceptance harness sets this to
-    /// `fq.agent.<test_agent_id>.invocation.*` so parallel
-    /// tests' CP consumers don't pick up each other's events
-    /// (and don't race on the worker-scoped ack subject).
+    /// `fq.agent.<test_agent_id>.>` so parallel tests' CP
+    /// consumers don't pick up each other's events (and don't
+    /// race on the worker-scoped ack subject), while still seeing
+    /// the agent's `completed` and `failed`.
     pub fn with_test_filter_subject(mut self, filter: String) -> Self {
         self.test_filter_subject = Some(filter);
         self
@@ -239,14 +260,10 @@ impl CoordinationConsumer {
         // forever). Non-matching events resolve as no-ops and advance
         // the mark. Without a mark, the #118 filter optimisation
         // stands.
-        let filter = if self.watermark.is_some() {
-            None
-        } else {
-            Some(
-                self.test_filter_subject
-                    .clone()
-                    .unwrap_or_else(|| FILTER_SUBJECT.to_string()),
-            )
+        let filter_subjects: Vec<String> = match (&self.watermark, &self.test_filter_subject) {
+            (Some(_), _) => Vec::new(),
+            (None, Some(test)) => vec![test.clone()],
+            (None, None) => FILTER_SUBJECTS.iter().map(|s| s.to_string()).collect(),
         };
         // A test-name override pairs with deliver-from-new so
         // each test gets a fresh cursor on the shared stream
@@ -257,7 +274,7 @@ impl CoordinationConsumer {
         };
         let config = DurableConsumerConfig {
             durable_name,
-            filter_subjects: filter.into_iter().collect(),
+            filter_subjects,
             deliver_from,
             // The mark's contract needs resolved-contiguous delivery;
             // without a mark the extra strictness buys nothing.
@@ -301,8 +318,8 @@ impl CoordinationConsumer {
     }
 
     /// Dispatch one invocation lifecycle event to its handler.
-    /// The shared loop owns the ack: `Ok` acks, a transient
-    /// error NAKs for redelivery.
+    /// The shared loop owns the ack: `Ok` acks, a transient error
+    /// NAKs for redelivery, and a permanent one is logged and acked.
     async fn handle_event(&self, event: Event) -> Result<(), HandlerError> {
         let result = match &event.payload {
             EventPayload::InvocationAmbiguous(payload) => {
@@ -315,6 +332,26 @@ impl CoordinationConsumer {
                 self.handle_invocation_operator_recovered(&event, payload)
                     .await
             }
+            // A run's ending moves its row when it is folded, not when its
+            // archive arrives (issue 1024).
+            EventPayload::Completed(_) => {
+                self.handle_ending(&event, OwnershipEvent::Ended(Ending::Completed))
+                    .await
+            }
+            // A `failed` in `setup` is published only for a run that never
+            // made its first WAL write: the runner stamps that phase from
+            // the WAL row itself, in one place, and its tests refuse every
+            // publish of a run in turn to keep it so. The transition ignores
+            // it, because a row is what recovery, the dispatcher and the
+            // dead-letter watch read as "the run started" (`RunRecords`).
+            EventPayload::Failed(payload) => {
+                let what = if matches!(payload.phase, FailurePhase::Setup) {
+                    OwnershipEvent::SetupFailed
+                } else {
+                    OwnershipEvent::Ended(Ending::Failed)
+                };
+                self.handle_ending(&event, what).await
+            }
             EventPayload::InvocationOperatorResumed(_) => Ok(()),
             _ => {
                 // Unknown invocation event variant — ack and
@@ -324,7 +361,99 @@ impl CoordinationConsumer {
                 Ok(())
             }
         };
-        result.map_err(HandlerError::transient)
+        result.map_err(|err| match err {
+            // A row this build cannot read cannot be moved by
+            // compare-and-set, and a retry would hold every later event
+            // behind this one on a strict-order consumer: say so once,
+            // ack, and leave the row as it is.
+            CoordinationConsumerError::Ownership(
+                unreadable @ OwnershipError::Unreadable { .. },
+            ) => HandlerError::permanent(unreadable),
+            other => HandlerError::transient(other),
+        })
+    }
+
+    /// Apply `what` to `event`'s run's ownership row, `worker_id` standing
+    /// for the worker on a row the move creates or one that takes it, and
+    /// say what happened: debug for a move or a duplicate, warn for a
+    /// refusal (the row records the run finished, and the event would put
+    /// it back in progress), error for a conflicting ending (two endings
+    /// were published for one run). `report` is a late
+    /// `invocation.ambiguous`'s own fields, which tell startup
+    /// categorisation (`stuck_entity` a dispatch kind) from a resume that
+    /// could not be carried out (`recovery`, with the error in `note`).
+    async fn move_row(
+        &self,
+        event: &Event,
+        what: OwnershipEvent,
+        worker_id: &str,
+        report: Option<&crate::events::InvocationAmbiguousPayload>,
+    ) -> Result<Applied, CoordinationConsumerError> {
+        let invocation_id = event.envelope.invocation_id.to_string();
+        let applied = ownership::apply(
+            self.store.as_ref(),
+            &invocation_id,
+            what,
+            OwnerFacts {
+                worker_id,
+                at_ms: Utc::now().timestamp_millis(),
+            },
+        )
+        .await?;
+        let agent_id = event.envelope.agent_id.as_str();
+        let event_type = event.payload.event_type();
+        let stuck_entity = report.map(|report| report.stuck_entity.as_str());
+        let note = report.map(|report| report.note.as_str());
+        match applied {
+            Applied::Ignored => {}
+            Applied::Moved { from, to } => debug!(
+                invocation_id,
+                agent_id,
+                event_type,
+                from = from.map(RowState::name),
+                to = to.name(),
+                "ownership row moved"
+            ),
+            Applied::Duplicate { at } => debug!(
+                invocation_id,
+                agent_id,
+                event_type,
+                at = at.name(),
+                "ownership row already says what the event says; left as it was"
+            ),
+            Applied::Refused { recorded } => warn!(
+                invocation_id,
+                agent_id,
+                event_type,
+                recorded = recorded.name(),
+                stuck_entity,
+                note,
+                "event for a run already recorded finished; the ownership row keeps its status"
+            ),
+            Applied::Conflict { recorded, moved_to } => error!(
+                invocation_id,
+                agent_id,
+                event_type,
+                recorded = recorded.name(),
+                moved_to = moved_to.map(RowState::name),
+                "a second ending published for one run; the ownership row keeps the first"
+            ),
+        }
+        Ok(applied)
+    }
+
+    /// A run's ending, `completed` or `failed`: the row follows it, with
+    /// its archive pending until `invocation.archived` arrives. A triggered
+    /// run has no row yet, and the event's agent id stands in for the
+    /// worker's until the archive names it.
+    async fn handle_ending(
+        &self,
+        event: &Event,
+        what: OwnershipEvent,
+    ) -> Result<(), CoordinationConsumerError> {
+        self.move_row(event, what, event.envelope.agent_id.as_str(), None)
+            .await?;
+        Ok(())
     }
 
     /// Mark the run awaiting triage, unless its row records it finished.
@@ -334,50 +463,26 @@ impl CoordinationConsumer {
     /// process published, so a run dropped mid tool call just before a
     /// crash is reported ambiguous after its drop on the stream; and a
     /// resume whose worker row cannot be read is reported though the run
-    /// may have ended. The store's compare-and-set leaves a `completed` or
-    /// `failed` row as it was, and the refusal is logged here, once per
-    /// delivery. A redelivery of the same report finds the row `ambiguous`
-    /// and leaves it as the first delivery wrote it.
+    /// may have ended. The transition refuses a finished row, and the
+    /// refusal is logged with the report's own fields, once per delivery.
+    /// A redelivery of the same report finds the row `ambiguous` and
+    /// leaves it as the first delivery wrote it, and a row recovery
+    /// restored keeps the worker id it names.
     pub(crate) async fn handle_invocation_ambiguous(
         &self,
         event: &Event,
         payload: &crate::events::InvocationAmbiguousPayload,
     ) -> Result<(), CoordinationConsumerError> {
-        let invocation_id = event.envelope.invocation_id.to_string();
         // The trigger-dispatch path writes no ownership row, so a run in
         // flight usually has none: the event's `agent_id` stands in for
         // the worker id of the row this writes.
-        let mark = self
-            .store
-            .mark_invocation_ambiguous(
-                &invocation_id,
-                event.envelope.agent_id.as_str(),
-                Utc::now().timestamp_millis(),
-            )
-            .await?;
-        match mark {
-            AmbiguousMark::Marked => debug!(
-                invocation_id = %invocation_id,
-                "marked invocation ambiguous in coordination store"
-            ),
-            AmbiguousMark::AlreadyAmbiguous => debug!(
-                invocation_id = %invocation_id,
-                "invocation already ambiguous; redelivered report left the row as it was"
-            ),
-            // The report's own fields say which report came late: startup
-            // categorisation (`stuck_entity` a dispatch kind) or a resume
-            // that could not be carried out (`recovery`, with the error in
-            // `note`).
-            AmbiguousMark::Refused(recorded) => warn!(
-                invocation_id = %invocation_id,
-                agent_id = %event.envelope.agent_id,
-                recorded = recorded.as_str(),
-                stuck_entity = %payload.stuck_entity,
-                note = %payload.note,
-                "invocation.ambiguous for a run already recorded finished; the ownership row \
-                 keeps its status"
-            ),
-        }
+        self.move_row(
+            event,
+            OwnershipEvent::Ambiguous,
+            event.envelope.agent_id.as_str(),
+            Some(payload),
+        )
+        .await?;
         Ok(())
     }
 
@@ -386,8 +491,13 @@ impl CoordinationConsumer {
     /// 1. Write the archive row (idempotent on `invocation_id`
     ///    via `ON CONFLICT DO NOTHING` — a redelivery is a
     ///    no-op).
-    /// 2. Mark the ownership row `completed` so the worker
-    ///    drops out of "in-flight" accounting.
+    /// 2. Record the archive on the ownership row, which also takes
+    ///    the worker's id. A row that has not ended takes the ending
+    ///    `final_phase` names; a row that has keeps its ending, and an
+    ///    archive naming another is a second ending, logged at error.
+    ///    An operator's drop before the archive arrived therefore
+    ///    stands (what that leaves in the archive record is issue
+    ///    1070's).
     /// 3. Publish `invocation.archive_acked` on
     ///    `fq.worker.{worker_id}.invocation.archive_acked` so
     ///    the originating worker can delete its local row.
@@ -420,37 +530,13 @@ impl CoordinationConsumer {
             })
             .await?;
 
-        // The owning worker no longer carries this invocation
-        // as in-flight. Upsert because the dispatcher does not
-        // yet populate ownership rows for happy-path triggers
-        // (handled in a later plan step) — when it does, this
-        // becomes a pure status flip.
-        //
-        // Don't downgrade an already-terminal status: if the
-        // operator dropped this invocation before the worker
-        // managed to publish `invocation.archived`, the owner
-        // row is `Failed` and the operator's decision sticks.
-        // Step-9 risk: race between `fq invocation drop` and
-        // a late-finishing worker.
-        let current_owner = self.store.get_invocation_owner(&invocation_id).await?;
-        let already_terminal = matches!(
-            current_owner.as_ref().map(|o| o.status),
-            Some(OwnerStatus::Failed | OwnerStatus::Completed)
-        );
-        if !already_terminal {
-            let new_status = match payload.final_phase.as_str() {
-                "failed" => OwnerStatus::Failed,
-                _ => OwnerStatus::Completed,
-            };
-            self.store
-                .upsert_invocation_ownership(
-                    &invocation_id,
-                    payload.worker_id.as_str(),
-                    now_ms,
-                    new_status,
-                )
-                .await?;
-        }
+        self.move_row(
+            event,
+            OwnershipEvent::Archived(Ending::of_archived_phase(&payload.final_phase)),
+            payload.worker_id.as_str(),
+            None,
+        )
+        .await?;
 
         let ack = Event::new(
             event.envelope.agent_id.clone(),
@@ -468,15 +554,14 @@ impl CoordinationConsumer {
     /// 1. Write the archive row (idempotent on `invocation_id`).
     ///    State blob is empty in v1 — the CP doesn't have the
     ///    worker's state for an ambiguous invocation.
-    /// 2. Update the ownership row's status to match
-    ///    `final_phase`. Always overrides the previous status
-    ///    (including any prior terminal status), so an operator
-    ///    can correct a wrong worker outcome if they need to.
+    /// 2. Move the ownership row to `final_phase` with its archive
+    ///    written, from every state: an operator's word wins over a
+    ///    worker's outcome, finished or not, so an operator can
+    ///    correct a wrong one. The row keeps the worker id it names.
     /// 3. **No ack** — unlike `invocation.archived`, no worker
     ///    is waiting to clean up. If the worker is still alive
     ///    and emits `invocation.archived` afterwards, the
-    ///    archive's status update is guarded against
-    ///    downgrading a terminal owner status (see
+    ///    archive's arrival keeps the operator's ending (see
     ///    `handle_invocation_archived`).
     pub(crate) async fn handle_invocation_operator_recovered(
         &self,
@@ -492,21 +577,13 @@ impl CoordinationConsumer {
             "applying operator-recovered terminal transition"
         );
 
-        let final_status = match payload.final_phase.as_str() {
-            "completed" => OwnerStatus::Completed,
-            // v1 always emits "failed"; treat unknown phases as
-            // failed too so an audit trail is preserved.
-            _ => OwnerStatus::Failed,
-        };
-
-        // Preserve the existing worker_id if the owner row
-        // exists; otherwise use the agent_id as a placeholder
-        // (mirrors the ambiguous handler's behaviour).
-        let existing = self.store.get_invocation_owner(&invocation_id).await?;
-        let worker_id = existing
-            .as_ref()
-            .map(|o| o.worker_id.clone())
-            .unwrap_or_else(|| event.envelope.agent_id.as_str().to_string());
+        // The run's start, for the archive record, when a row records one.
+        let started_at = self
+            .store
+            .get_invocation_owner(&invocation_id)
+            .await?
+            .map(|owner| owner.assigned_at)
+            .unwrap_or(now_ms);
 
         self.store
             .insert_archive(&InvocationArchiveRow {
@@ -514,15 +591,21 @@ impl CoordinationConsumer {
                 agent_id: event.envelope.agent_id.as_str().to_string(),
                 final_phase: payload.final_phase.clone(),
                 final_state_blob: Vec::new(),
-                started_at: existing.as_ref().map(|o| o.assigned_at).unwrap_or(now_ms),
+                started_at,
                 terminal_at: now_ms,
                 archived_at: now_ms,
             })
             .await?;
 
-        self.store
-            .upsert_invocation_ownership(&invocation_id, &worker_id, now_ms, final_status)
-            .await?;
+        // v1 always emits "failed"; an unknown phase is a failure too,
+        // so an audit trail is preserved.
+        self.move_row(
+            event,
+            OwnershipEvent::OperatorEnded(Ending::of_operator_phase(&payload.final_phase)),
+            event.envelope.agent_id.as_str(),
+            None,
+        )
+        .await?;
 
         if let Some(worker_store) = &self.worker_store {
             worker_store
@@ -602,6 +685,9 @@ pub enum CoordinationConsumerError {
     #[error("worker store error: {0}")]
     WorkerStore(#[from] crate::worker::store::WorkerStoreError),
 
+    #[error("ownership row: {0}")]
+    Ownership(#[from] OwnershipError),
+
     #[error("jetstream message stream error: {0}")]
     Stream(String),
 }
@@ -625,6 +711,7 @@ mod outcome_tests;
 mod tests {
     use super::*;
     use crate::agent::AgentId;
+    use crate::control_plane::store::OwnerStatus;
     use futures::StreamExt;
 
     #[tokio::test]
@@ -1224,6 +1311,23 @@ mod tests {
             .unwrap();
         assert_eq!(archive.agent_id, rt.agent_id().as_str());
         assert_eq!(archive.final_phase, "completed");
+
+        // The ownership row followed the `completed`, then recorded the
+        // archive, under the worker's own id (issue 1024).
+        let owner = rt
+            .cp_store()
+            .get_invocation_owner(&invocation_id.to_string())
+            .await
+            .unwrap()
+            .expect("the run's ending wrote its ownership row");
+        assert_eq!(
+            (owner.status, owner.archive_state),
+            (
+                OwnerStatus::Completed,
+                crate::control_plane::store::ArchiveState::Archived
+            )
+        );
+        assert_eq!(owner.worker_id, rt.worker_id().as_str());
 
         // Drain captured events; verify completed precedes
         // invocation_archived.

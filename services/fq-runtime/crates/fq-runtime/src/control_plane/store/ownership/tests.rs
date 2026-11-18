@@ -1,147 +1,71 @@
-//! What [`ControlPlaneStore::mark_invocation_ambiguous`] answers, and what
-//! it leaves the row as, from every status the row can hold.
-//!
-//! The answer is the seam the coordination consumer logs from: `Marked`
-//! and `AlreadyAmbiguous` quietly, `Refused` as a warning naming the
-//! status kept. A wrong answer would log a refusal as a mark, or warn on
-//! every redelivery, with the row itself still right; so each case below
-//! pins the answer and the row together.
-//!
-//! The archive's state the row keeps beside its status, and the rung that
-//! adds it, are tested below them.
+//! Tests for the ownership row's storage: the archive's state beside the
+//! status, the rung that adds it, and the compare-and-set every move goes
+//! through. What [`crate::control_plane::ownership::apply`] answers, from
+//! every state, is pinned beside it.
 
 use super::super::{MIGRATIONS, SCHEMA_CLASS};
 use super::*;
+use crate::control_plane::ownership::{Ending, RowState};
 use crate::db::schema;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use tempfile::tempdir;
 
-const ID: &str = "019a0000-0000-7000-8000-000000001024";
-
-async fn store() -> (ControlPlaneStore, tempfile::TempDir) {
+/// The write lands only on the state it expects, and writes nothing
+/// otherwise: not over another state, not over a row that is not there,
+/// and no second insert over a row that is.
+#[tokio::test]
+async fn a_compare_and_set_lands_only_on_the_state_it_expects() {
     let dir = tempdir().unwrap();
     let store = ControlPlaneStore::open(&dir.path().join("control-plane.db"))
         .await
         .unwrap();
-    (store, dir)
-}
-
-async fn row(store: &ControlPlaneStore) -> Option<super::super::OwnerRow> {
-    store.get_invocation_owner(ID).await.unwrap()
-}
-
-#[tokio::test]
-async fn no_row_is_marked_and_written() {
-    let (store, _dir) = store().await;
-    assert_eq!(
-        store
-            .mark_invocation_ambiguous(ID, "agent", 10)
-            .await
-            .unwrap(),
-        AmbiguousMark::Marked
-    );
-    let row = row(&store).await.expect("the mark writes the row");
-    assert_eq!(
-        (row.worker_id.as_str(), row.assigned_at, row.status),
-        ("agent", 10, OwnerStatus::Ambiguous)
-    );
-}
-
-/// The worker id and time this move writes over the row's are not pinned
-/// here: that is known and not intended, and the next change of issue
-/// 1024 keeps the row's.
-#[tokio::test]
-async fn an_in_flight_row_is_marked() {
-    let (store, _dir) = store().await;
-    store
-        .upsert_invocation_ownership(ID, "worker-real", 50, OwnerStatus::InFlight)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .mark_invocation_ambiguous(ID, "agent", 60)
-            .await
-            .unwrap(),
-        AmbiguousMark::Marked
-    );
-    assert_eq!(
-        row(&store).await.map(|row| row.status),
-        Some(OwnerStatus::Ambiguous)
-    );
-}
-
-#[tokio::test]
-async fn an_ambiguous_row_is_already_ambiguous_and_left_alone() {
-    let (store, _dir) = store().await;
-    store
-        .upsert_invocation_ownership(ID, "agent", 10, OwnerStatus::Ambiguous)
-        .await
-        .unwrap();
-    let before = row(&store).await;
-    assert_eq!(
-        store
-            .mark_invocation_ambiguous(ID, "other", 20)
-            .await
-            .unwrap(),
-        AmbiguousMark::AlreadyAmbiguous
-    );
-    assert_eq!(row(&store).await, before);
-}
-
-#[tokio::test]
-async fn a_finished_row_is_refused_with_its_status_and_left_alone() {
-    for finished in [OwnerStatus::Completed, OwnerStatus::Failed] {
-        let (store, _dir) = store().await;
-        store
-            .upsert_invocation_ownership(ID, "worker-real", 30, finished)
-            .await
-            .unwrap();
-        let before = row(&store).await;
-        assert_eq!(
-            store
-                .mark_invocation_ambiguous(ID, "agent", 40)
-                .await
-                .unwrap(),
-            AmbiguousMark::Refused(finished),
-            "from {}",
-            finished.as_str()
-        );
-        assert_eq!(row(&store).await, before, "from {}", finished.as_str());
-    }
-}
-
-/// A status this build cannot read is an error, so the event is retried
-/// rather than acked, and the row is left as it was.
-#[tokio::test]
-async fn an_unknown_status_is_an_error_and_left_alone() {
-    let (store, _dir) = store().await;
-    store
-        .upsert_invocation_ownership(ID, "worker-real", 30, OwnerStatus::Failed)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE coordination_invocation_owner SET status = 'weird' WHERE invocation_id = ?",
-    )
-    .bind(ID)
-    .execute(&store.pool)
-    .await
-    .unwrap();
-    let err = store
-        .mark_invocation_ambiguous(ID, "agent", 70)
-        .await
-        .unwrap_err();
+    let pending = RowState::ended(Ending::Failed, ArchiveState::Pending);
+    let archived = RowState::ended(Ending::Failed, ArchiveState::Archived);
     assert!(
-        matches!(err, ControlPlaneStoreError::Malformed(_)),
-        "{err:?}"
+        !store
+            .compare_and_set_ownership("inv", Some(RowState::IN_FLIGHT), pending, None, None)
+            .await
+            .unwrap(),
+        "no row to update"
     );
-    let status: String = sqlx::query_scalar(
-        "SELECT status FROM coordination_invocation_owner WHERE invocation_id = ?",
-    )
-    .bind(ID)
-    .fetch_one(&store.pool)
-    .await
-    .unwrap();
-    assert_eq!(status, "weird");
+    assert!(
+        store
+            .compare_and_set_ownership("inv", None, RowState::IN_FLIGHT, Some("w"), Some(1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .compare_and_set_ownership("inv", None, pending, Some("x"), Some(2))
+            .await
+            .unwrap(),
+        "no second insert"
+    );
+    assert!(
+        !store
+            .compare_and_set_ownership("inv", Some(RowState::AMBIGUOUS), pending, None, None)
+            .await
+            .unwrap(),
+        "not from a state the row is not in"
+    );
+    assert!(
+        store
+            .compare_and_set_ownership("inv", Some(RowState::IN_FLIGHT), pending, None, None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .compare_and_set_ownership("inv", Some(pending), archived, Some("real"), None)
+            .await
+            .unwrap()
+    );
+    let row = store.get_invocation_owner("inv").await.unwrap().unwrap();
+    assert_eq!(
+        (row.worker_id.as_str(), row.assigned_at, row.state()),
+        ("real", 1, archived),
+        "the worker given replaces the row's, the time not given is kept"
+    );
 }
 
 /// A control plane at schema version 2, holding one row of each status,

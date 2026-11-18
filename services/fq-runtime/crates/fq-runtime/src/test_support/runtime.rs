@@ -190,7 +190,7 @@ impl TestRuntimeBuilder {
             // worker-scoped ack subject (one CP would
             // otherwise ack another test's archive, racing
             // its sweeper).
-            let filter = format!("fq.agent.{}.invocation.*", agent_id.as_str());
+            let filter = format!("fq.agent.{}.>", agent_id.as_str());
             let consumer = CoordinationConsumer::new(bus.clone(), cp_store.clone())
                 .with_test_consumer_name(consumer_name)
                 .with_test_filter_subject(filter)
@@ -459,7 +459,7 @@ impl TestRuntime {
         }
         let (tx, rx) = oneshot::channel();
         let consumer_name = format!("fq-coordination-e2e-{}", Uuid::now_v7().simple());
-        let filter = format!("fq.agent.{}.invocation.*", self.agent_id.as_str());
+        let filter = format!("fq.agent.{}.>", self.agent_id.as_str());
         let consumer = CoordinationConsumer::new(self.bus.clone(), self.cp_store.clone())
             .with_test_consumer_name(consumer_name)
             .with_test_filter_subject(filter)

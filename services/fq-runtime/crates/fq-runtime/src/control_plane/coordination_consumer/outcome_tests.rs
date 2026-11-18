@@ -9,6 +9,7 @@
 use super::*;
 use crate::agent::AgentId;
 use crate::control_plane::store::OwnerRow;
+use crate::control_plane::store::{ArchiveState, OwnerStatus};
 use crate::events::{
     CompletedPayload, FailedPayload, FailureKind, FailurePhase, InvocationAmbiguousPayload,
     InvocationArchivedPayload, InvocationOperatorRecoveredPayload, InvocationTotals,
@@ -151,7 +152,16 @@ async fn a_failed_run_whose_archive_has_not_arrived_reads_failed() {
     let fixture = Fixture::new().await;
     fixture.restored_in_flight().await;
     fixture.failed(FailurePhase::LlmRequest).await;
-    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+    let row = fixture.row().await.expect("the run is on record");
+    assert_eq!(
+        (row.status, row.archive_state),
+        (OwnerStatus::Failed, ArchiveState::Pending)
+    );
+    assert_eq!(
+        row.worker_id,
+        fixture.worker_id.as_str(),
+        "the ending keeps the worker recovery restored the row under"
+    );
 }
 
 /// The same for `completed`, on a triggered run that had no row: the
@@ -161,7 +171,11 @@ async fn a_completed_run_whose_archive_has_not_arrived_reads_completed() {
     let fixture = Fixture::new().await;
     assert_eq!(fixture.row().await, None);
     fixture.completed().await;
-    assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
+    let row = fixture.row().await.expect("the ending writes the row");
+    assert_eq!(
+        (row.status, row.archive_state),
+        (OwnerStatus::Completed, ArchiveState::Pending)
+    );
 }
 
 /// The archive arriving later moves the row on, and keeps the ending.
@@ -169,9 +183,16 @@ async fn a_completed_run_whose_archive_has_not_arrived_reads_completed() {
 async fn a_run_whose_archive_arrives_later_keeps_its_ending() {
     let fixture = Fixture::new().await;
     fixture.failed(FailurePhase::ToolCall).await;
+    assert_eq!(
+        fixture.row().await.map(|row| row.archive_state),
+        Some(ArchiveState::Pending)
+    );
     fixture.archived("failed").await;
     let row = fixture.row().await.expect("the run is on record");
-    assert_eq!(row.status, OwnerStatus::Failed);
+    assert_eq!(
+        (row.status, row.archive_state),
+        (OwnerStatus::Failed, ArchiveState::Archived)
+    );
     assert_eq!(
         row.worker_id,
         fixture.worker_id.as_str(),
@@ -227,4 +248,47 @@ async fn ambiguous_keeps_the_worker_recovery_restored() {
     let row = fixture.row().await.expect("the run is on record");
     assert_eq!(row.status, OwnerStatus::Ambiguous);
     assert_eq!(row.worker_id, fixture.worker_id.as_str());
+}
+
+/// A row this build cannot read is not moved, and its event is acked as
+/// a permanent failure rather than retried: a retry would hold every
+/// later event behind it on the daemon's strict-order consumer.
+#[tokio::test]
+async fn an_event_for_a_row_this_build_cannot_read_is_acked_and_the_row_left_alone() {
+    let fixture = Fixture::new().await;
+    fixture.restored_in_flight().await;
+    let by_hand = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        fixture._dir.path().join("control-plane.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("UPDATE coordination_invocation_owner SET status = 'weird'")
+        .execute(&by_hand)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::Completed(CompletedPayload {
+                task_status: Default::default(),
+                result_summary: None,
+                total_llm_calls: 1,
+                total_tool_calls: 0,
+                total_cost: 0.0,
+                total_duration_ms: 10,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM coordination_invocation_owner")
+        .fetch_one(&by_hand)
+        .await
+        .unwrap();
+    assert_eq!(status, "weird");
 }
