@@ -2609,14 +2609,10 @@ You are a test agent."#
                 .unwrap()
         };
         let seq = msg.info().unwrap().stream_sequence;
+        let original = Uuid::now_v7().to_string();
         assert_eq!(
             store
-                .claim_trigger(
-                    test_key(&bus, seq),
-                    "worker-a",
-                    &Uuid::now_v7().to_string(),
-                    0
-                )
+                .claim_trigger(test_key(&bus, seq), "worker-a", &original, 0)
                 .await
                 .unwrap(),
             crate::control_plane::TriggerClaim::Won
@@ -2630,10 +2626,12 @@ You are a test agent."#
 
         // Once the original owner gives the unfinished claim back, that
         // same delivery remains runnable and starts exactly once.
-        store
-            .release_trigger_claim(test_key(&bus, seq))
-            .await
-            .unwrap();
+        assert!(
+            store
+                .release_trigger_claim(test_key(&bus, seq), &original)
+                .await
+                .unwrap()
+        );
         dispatcher.handle(&msg).await;
         assert_eq!(worker.starts.lock().unwrap().len(), 1);
 

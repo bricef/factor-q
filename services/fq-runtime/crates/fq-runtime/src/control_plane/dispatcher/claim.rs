@@ -386,17 +386,24 @@ impl TriggerDispatcher {
         handled.release();
     }
 
-    /// Give back the claim `claim` names, if it is still `claimed`.
+    /// Give back `claim`, if it is still `claimed` and still names the
+    /// invocation it was taken for. It removes nothing once the claim is
+    /// marked started, which is every ack after a durable start, or once
+    /// another copy has taken it again (issue 1061).
     pub(super) async fn release_unstarted_claim(&self, claim: &Claimed) {
         let Some((store, _)) = self.claim_store.as_ref() else {
             return;
         };
-        if let Err(err) = store
-            .release_trigger_claim(self.trigger_key(claim.stream_seq))
+        let invocation_id = claim.invocation_id.to_string();
+        match store
+            .release_trigger_claim(self.trigger_key(claim.stream_seq), &invocation_id)
             .await
         {
-            error!(error = %err, stream_seq = claim.stream_seq,
-                "failed to release unfinished trigger claim");
+            Ok(true) => {}
+            Ok(false) => debug!(stream_seq = claim.stream_seq, %invocation_id,
+                "released no trigger claim: none is still `claimed` under this invocation"),
+            Err(err) => error!(error = %err, stream_seq = claim.stream_seq, %invocation_id,
+                "failed to release unfinished trigger claim"),
         }
     }
 
