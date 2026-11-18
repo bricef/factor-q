@@ -433,8 +433,12 @@ daemon dies before the step boundary and before it has folded the drop;
 the next start's recovery finds the run in flight with the tool handed
 off and reports it ambiguous, after the drop on the event stream. The
 daemon logs `invocation.ambiguous for a run already recorded finished;
-the ownership row keeps its status` at warn, with the status it kept
-(`recorded`), and there is nothing to triage. Before
+the ownership row keeps its status` at warn, with the `invocation_id`,
+the `agent_id`, the status it kept (`recorded`) and the late report's
+`stuck_entity` and `note`, which say whether it came from startup
+categorisation (a dispatch kind) or from a resume that could not be
+carried out (`recovery`, with the error). There is nothing to triage.
+Before
 [#1024](https://github.com/bricef/factor-q/issues/1024)'s first change
 such a run went back to `ambiguous`.
 

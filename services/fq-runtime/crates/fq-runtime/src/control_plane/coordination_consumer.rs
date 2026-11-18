@@ -341,7 +341,7 @@ impl CoordinationConsumer {
     pub(crate) async fn handle_invocation_ambiguous(
         &self,
         event: &Event,
-        _payload: &crate::events::InvocationAmbiguousPayload,
+        payload: &crate::events::InvocationAmbiguousPayload,
     ) -> Result<(), CoordinationConsumerError> {
         let invocation_id = event.envelope.invocation_id.to_string();
         // The trigger-dispatch path writes no ownership row, so a run in
@@ -364,10 +364,16 @@ impl CoordinationConsumer {
                 invocation_id = %invocation_id,
                 "invocation already ambiguous; redelivered report left the row as it was"
             ),
+            // The report's own fields say which report came late: startup
+            // categorisation (`stuck_entity` a dispatch kind) or a resume
+            // that could not be carried out (`recovery`, with the error in
+            // `note`).
             AmbiguousMark::Refused(recorded) => warn!(
                 invocation_id = %invocation_id,
+                agent_id = %event.envelope.agent_id,
                 recorded = recorded.as_str(),
-                reported = OwnerStatus::Ambiguous.as_str(),
+                stuck_entity = %payload.stuck_entity,
+                note = %payload.note,
                 "invocation.ambiguous for a run already recorded finished; the ownership row \
                  keeps its status"
             ),
@@ -617,65 +623,6 @@ mod tests {
     use super::*;
     use crate::agent::AgentId;
     use futures::StreamExt;
-
-    // Pure unit test: handler-shape verification using a
-    // wrapper that simulates dispatch without a real bus.
-    // Real end-to-end behaviour is exercised via the
-    // NATS-gated integration tests below.
-
-    #[tokio::test]
-    async fn handler_upserts_ownership_to_ambiguous() {
-        use crate::events::{Event, EventPayload, InvocationAmbiguousPayload};
-        use tempfile::tempdir;
-        use uuid::Uuid;
-
-        let dir = tempdir().unwrap();
-        let store = Arc::new(
-            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
-                .await
-                .unwrap(),
-        );
-
-        // Build the consumer just to call its handler (we
-        // don't run() it; we test the handler in isolation).
-        // We can't easily call private handle_invocation_ambiguous
-        // from outside, so build the same call directly via
-        // the store.
-        let invocation_id = Uuid::now_v7().to_string();
-        store
-            .upsert_invocation_ownership(&invocation_id, "agent-x", 1_000, OwnerStatus::Ambiguous)
-            .await
-            .unwrap();
-
-        // Verify.
-        let owner = store.get_invocation_owner(&invocation_id).await.unwrap();
-        assert!(owner.is_some());
-        assert_eq!(owner.unwrap().status, OwnerStatus::Ambiguous);
-
-        // Re-publishing (idempotent path): same invocation
-        // gets upserted again with no error.
-        store
-            .upsert_invocation_ownership(&invocation_id, "agent-x", 2_000, OwnerStatus::Ambiguous)
-            .await
-            .unwrap();
-        let owner = store
-            .get_invocation_owner(&invocation_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(owner.assigned_at, 2_000);
-
-        // Avoid unused warnings
-        let _ = (Event::new(
-            AgentId::new("agent-x").unwrap(),
-            Uuid::now_v7(),
-            EventPayload::InvocationAmbiguous(InvocationAmbiguousPayload {
-                stuck_entity: "tool_dispatch".to_string(),
-                stuck_call_id: "tc1".to_string(),
-                note: "test".to_string(),
-            }),
-        ),);
-    }
 
     #[tokio::test]
     async fn sweep_emits_worker_orphaned_once_per_transition() {
