@@ -351,6 +351,15 @@ pub struct WorkerConfig {
     /// those are what should move.
     #[serde(default)]
     pub stuck_threshold_override_secs: Option<u64>,
+    /// How long startup recovery waits, in seconds, for the coordination
+    /// consumer to fold the events already on the stream before it decides
+    /// which invocations to resume (issue 1070). Default 30. The boot, the
+    /// edge included, waits with it. A run the wait could not check is not
+    /// resumed at that start: it is logged at error, and a later start
+    /// resumes it once the consumer has folded that far. Zero decides at
+    /// once, holding every run whose events are not folded yet.
+    #[serde(default = "default_recovery_backlog_wait_secs")]
+    pub recovery_backlog_wait_secs: u64,
     /// How many requests — sampling and elicitation together — an MCP
     /// server may send back to the host while one of its tools runs
     /// (#831). Past it the server is declined before any model call,
@@ -366,6 +375,10 @@ pub struct WorkerConfig {
 
 fn default_max_concurrent_invocations() -> usize {
     1
+}
+
+fn default_recovery_backlog_wait_secs() -> u64 {
+    30
 }
 
 fn default_max_server_requests_per_tool_call() -> u32 {
@@ -403,6 +416,7 @@ impl Default for WorkerConfig {
             llm_connect_timeout_secs: default_llm_connect_timeout_secs(),
             max_concurrent_invocations: default_max_concurrent_invocations(),
             stuck_threshold_override_secs: None,
+            recovery_backlog_wait_secs: default_recovery_backlog_wait_secs(),
             max_server_requests_per_tool_call: default_max_server_requests_per_tool_call(),
             max_server_requests_per_invocation: default_max_server_requests_per_invocation(),
         }
@@ -410,6 +424,11 @@ impl Default for WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// [`Self::recovery_backlog_wait_secs`] as the bound on the wait.
+    pub fn recovery_backlog_wait(&self) -> Duration {
+        Duration::from_secs(self.recovery_backlog_wait_secs)
+    }
+
     /// The two server-request caps as the runner takes them (#831).
     pub fn server_request_limits(&self) -> crate::worker::reducer::runner::ServerRequestLimits {
         crate::worker::reducer::runner::ServerRequestLimits {
@@ -879,6 +898,25 @@ mod tests {
             assert!(err.contains(&format!("[worker] {key}")), "{key}: {err}");
             assert!(err.contains("greater than zero"), "{key}: {err}");
         }
+    }
+
+    /// Issue 1070: how long startup recovery waits for the coordination
+    /// consumer to fold the backlog is a `[worker]` key, thirty seconds by
+    /// default, and zero is a value, not an error: decide at once.
+    #[test]
+    fn recovery_backlog_wait_defaults_and_parses() {
+        let config = Config::from_toml_str("").unwrap();
+        assert_eq!(
+            config.worker.recovery_backlog_wait(),
+            Duration::from_secs(30)
+        );
+        let config = Config::from_toml_str("[worker]\nrecovery_backlog_wait_secs = 2\n").unwrap();
+        assert_eq!(
+            config.worker.recovery_backlog_wait(),
+            Duration::from_secs(2)
+        );
+        let config = Config::from_toml_str("[worker]\nrecovery_backlog_wait_secs = 0\n").unwrap();
+        assert_eq!(config.worker.recovery_backlog_wait(), Duration::ZERO);
     }
 
     /// #546: the call deadlines and the `Retry-After` cap are `[worker]`

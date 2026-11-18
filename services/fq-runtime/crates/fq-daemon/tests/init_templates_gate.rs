@@ -140,6 +140,11 @@ fn the_daemon_template_teaches_settings_the_daemon_reads() {
     );
     assert_eq!(config.state.sweep_interval_seconds, 3_600);
     assert_eq!(config.worker.max_concurrent_invocations, 1);
+    assert_eq!(
+        config.worker.recovery_backlog_wait_secs,
+        fq_runtime::config::WorkerConfig::default().recovery_backlog_wait_secs,
+        "the template's recovery_backlog_wait_secs example must show the default"
+    );
     assert_eq!(config.tools.exec.max_timeout_secs, 600);
     assert!(config.workspace.path.is_some());
     // The second provider is documented as configuration-only — no
