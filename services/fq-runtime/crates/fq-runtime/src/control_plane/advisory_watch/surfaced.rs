@@ -532,3 +532,6 @@ fn exhausted(event: &Event) -> bool {
         EventPayload::Failed(p) if matches!(p.error_kind, FailureKind::TriggerExhausted)
     )
 }
+
+#[cfg(test)]
+mod tests;
