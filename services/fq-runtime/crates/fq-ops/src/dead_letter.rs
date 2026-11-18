@@ -182,6 +182,21 @@ pub struct StartUnchecked {
     pub invocation_id: Option<String>,
 }
 
+/// Why `fq doctor` not listing a stranded trigger claim for a dead letter
+/// does not show that its run did not start, in the words
+/// `dead_letter.requeue`'s refusal and `fq dead-letters list` both give
+/// it: the report lists a claim only while it is held and judged
+/// stranded, and a run that started marks its claim.
+pub const AN_UNLISTED_CLAIM_SHOWS_NOTHING: &str = "`fq doctor` lists only a claim still held and \
+     judged stranded, never one whose run started and marked it, so its listing none does not \
+     show that the run did not start";
+
+/// What is left for a dead letter whose start was not checked and that
+/// records nothing to find its run by, in the same words on both
+/// surfaces.
+pub const NOTHING_SHOWS_IT_DID_NOT_START: &str = "no check on the operator's surfaces can show \
+     that its run did not start: treat its work as possibly run";
+
 /// A dead letter addressed by its event-log sequence — the universal
 /// cursor (P5): the same number that cursors `dead_letter.stream` and
 /// feeds `min_seq` gates.

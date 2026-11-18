@@ -2033,9 +2033,13 @@ and the message is gone or cannot be read either, one dead letter is
 both, naming no trigger and marked unchecked, and the listing's check
 says it cannot be requeued: with the run named, the `fq invocation
 show` check for whether it started, and that a copy can still start it
-after you look; with no run named, that if `fq doctor` lists a stranded
-trigger claim at its `seq=`, that claim names the invocation id its
-delivery reserved and says whether a run is on record.
+after you look; with no run named, that a stranded trigger claim
+`fq doctor` lists at its `seq=` names the invocation id its delivery
+reserved and says whether a run is on record, but that `fq doctor`
+lists only a claim still held, never one whose run started and marked
+it, so its listing none does not show that the run did not start, and
+that with nothing on the dead letter to find its run by, nothing can:
+its work is to be treated as possibly run.
 
 **An advisory from an earlier incarnation of the trigger stream names no
 trigger.** A recreated trigger stream numbers its messages from 1 again,

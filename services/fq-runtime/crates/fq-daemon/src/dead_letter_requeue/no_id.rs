@@ -3,6 +3,7 @@
 //! is, from what it records; whether its run may have started; and what
 //! can be done with its work.
 
+use fq_ops::dead_letter::{AN_UNLISTED_CLAIM_SHOWS_NOTHING, NOTHING_SHOWS_IT_DID_NOT_START};
 use fq_runtime::dead_letter::{DeadLetter, UnattributedKind};
 
 use super::verdict::STARTED_IF;
@@ -102,17 +103,16 @@ fn start(dead: &DeadLetter) -> Option<String> {
 /// events can, for a dead letter that records what its run would have
 /// been triggered with.
 fn no_run_named(dead: &DeadLetter) -> String {
-    let claims = "it names no run. A trigger claim `fq doctor` lists at its sequence carries the \
-                  id its delivery reserved for the run, to read with `fq invocation show`, but \
-                  `fq doctor` lists only a claim still held and judged stranded, never one whose \
-                  run started and marked it, so its listing none does not show that the run did \
-                  not start";
+    let claims = format!(
+        "it names no run. A trigger claim `fq doctor` lists at its sequence carries the id its \
+         delivery reserved for the run, to read with `fq invocation show`, but \
+         {AN_UNLISTED_CLAIM_SHOWS_NOTHING}"
+    );
     let runs = match (dead.trigger_subject.is_empty(), dead.agent_id.as_str()) {
         (true, _) => {
             return format!(
                 "{claims}. With no subject or payload on it to match among the `triggered` \
-                 events, no check on the operator's surfaces can show that its run did not \
-                 start: treat its work as possibly run"
+                 events, {NOTHING_SHOWS_IT_DID_NOT_START}"
             );
         }
         (false, fq_runtime::AgentId::SYSTEM_STR) => {
