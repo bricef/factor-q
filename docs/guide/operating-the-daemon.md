@@ -1332,37 +1332,72 @@ from reporting the trigger exhausted. When that publish fails, because
 the events stream is unavailable or does not acknowledge it within five
 seconds, the dispatcher does not ack. It gives the claim back and NAKs
 the delivery with no delay, and the broker, having no delivery left to
-make, reports the trigger exhausted at once. The dead-letter watch
-(below) finds nothing on record for the trigger and writes the dead
-letter, trying again on the bus's escalating delay (one second, then
-two, doubling up to a minute by default) until the events stream takes
-it ([#1062](https://github.com/bricef/factor-q/issues/1062)). The
-dispatcher logs `could not publish the dead letter of a trigger whose
+make, reports the trigger exhausted as soon as the dispatcher's consumer
+next asks for a message. While the dispatcher is consuming it keeps such
+a request waiting, bar the instants between one and the next and the
+half second it pauses after a failed one, so that is at once. A daemon
+that drains or shuts down while a last delivery is being settled has
+stopped asking: its NAK lands with no request waiting, or only the
+loop's last one until that expires, and the broker reports the trigger
+at the next start's first pull. Nothing is lost either way. The
+dead-letter watch (below) finds nothing on record for the trigger and
+writes the dead letter, trying again on the bus's escalating delay (one
+second, then two, doubling up to a minute by default) until the events
+stream takes it ([#1062](https://github.com/bricef/factor-q/issues/1062)).
+A daemon that stops before the watch has written the dead letter leaves
+the advisory in its stream, which keeps it for a day, for the next
+start's watch. If the events stream stays unusable for longer than that
+day, the advisory ages out and the trigger is left with no dead letter.
+
+The dispatcher logs `could not publish the dead letter of a trigger whose
 last delivery failed` once, at error, with the agent, the subject, the
 sequence (`stream_seq`), `trigger_id`, the attempt, why the publish
 failed (`error`) and the error that ended the delivery (`last_error`).
 That line is the one record of the last error that names the trigger
 (the run's own error lines, `executor returned an error for
 NATS-triggered run` among them, name no trigger): the watch's dead
-letter says only that it was surfaced from the MAX_DELIVERIES advisory,
-and its `seq=` and trigger id are what match it to the line. While the
-events stream refuses the watch's dead letter, nothing in `fq status`
-or `fq doctor` names the trigger: `fq-advisory-watch` has the advisory in
-hand, and shows as stuck once it has been redelivered more than
-`[bus] stuck_after_redeliveries` times, and the watch logs `advisory
-handling failed; nak for retry` at warn. If the dispatcher's publish did
+letter says only that it was surfaced from the MAX_DELIVERIES advisory.
+Match the two by the sequence: the line's `stream_seq` is the dead
+letter's `seq=`. The line's `trigger_id` is also the dead letter's
+trigger id when the trigger was published with one. A trigger published
+without one, as `fq-cron` publishes them
+([#1080](https://github.com/bricef/factor-q/issues/1080)), is given an
+id by the dispatcher for each delivery; the line carries it and no dead
+letter does. The watch does not invent one, so its dead letter carries
+no trigger id, `fq dead-letters requeue` refuses it, and the way to run
+the work again is as new work, `fq trigger <agent> '<payload>'` with the
+payload the dead letter records. Had the dispatcher's own publish
+succeeded, its dead letter would have carried the id and could have been
+requeued.
+
+While the events stream refuses the watch's dead letter, nothing in
+`fq status` or `fq doctor` names the trigger: `fq-advisory-watch` has
+the advisory in hand, and shows as stuck once it has been redelivered at
+least `[bus] stuck_after_redeliveries` times, and the watch logs
+`advisory handling failed; nak for retry` at warn. After the hand-over,
+`fq-dispatcher` itself can read as stuck in `fq status` and `fq doctor`
+while its next trigger is in hand, although it is consuming: the rule
+counts the last delivery, which was never acked, until an ack with
+nothing else pending moves the consumer's floor. The same follows any
+trigger whose deliveries ran out through the broker's advisory
+([#1079](https://github.com/bricef/factor-q/issues/1079)).
+
+**A trigger can get two dead letters.** If the dispatcher's publish did
 reach the events stream and only its acknowledgement was lost, the watch
-finds that dead letter as the agent's most recent failure and writes no
-second one, logging `exhausted trigger already surfaced inline` at info;
-if another failure of the same agent was recorded in between, it does
-not find it, and the trigger has two dead letters under one trigger id,
-which `fq dead-letters requeue` runs at most once. A daemon that stops
-after the NAK and before the broker reports the trigger leaves that to
-its next start's first pull, and one that stops before the watch has
-written the dead letter leaves the advisory in its stream, which keeps
-it for a day, for the next start's watch. If the events stream stays
-unusable for longer than that day, the advisory ages out and the
-trigger is left with no dead letter.
+usually finds that dead letter as the agent's most recent failure and
+writes no second one, logging `exhausted trigger already surfaced
+inline` at info. It writes a second one, under the same sequence, when
+another failure of the same agent was recorded in between; when it could
+not read the events stream at that moment, since its look for an earlier
+dead letter takes a failed read as none (unlike its read of the
+trigger's message, below, which holds the verdict), and its own publish
+then landed; or when the dispatcher's publish reached the stream only
+after the watch had looked.
+The same holds, as before, for a dead letter the dispatcher published
+whose delivery's ack never reached the broker. `fq dead-letters requeue`
+runs a trigger id at most once, so a requeue does not run the work
+twice; `fq dead-letters list` shows both, and `fq doctor` counts both
+([#1066](https://github.com/bricef/factor-q/issues/1066)).
 
 **The dead-letter watch decides by the records, and counts the triggers
 it keeps.** When a trigger's fifth and last delivery lapses with no

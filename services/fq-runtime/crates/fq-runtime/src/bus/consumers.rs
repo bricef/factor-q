@@ -474,8 +474,10 @@ impl EventBus {
                 // for the floor rationale).
                 max_ack_pending,
                 // Never retry a poison trigger indefinitely. The dispatcher
-                // emits a terminal failure on the last delivery before
-                // acknowledging it.
+                // emits a terminal failure on the last delivery and then
+                // acknowledges it, or, when that failure cannot be
+                // published, NAKs it so the broker's max-deliveries
+                // advisory hands the trigger to the dead-letter watch.
                 max_deliver: TRIGGER_MAX_DELIVER,
                 // Paces ack-wait redelivery (a crashed dispatcher never
                 // reaches the explicit NAK delay in the handle path).
