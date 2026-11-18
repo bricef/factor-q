@@ -1462,7 +1462,7 @@
               },
               {
                 "const": "message_unreadable",
-                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out. Unless the last read\nfound the trigger stream missing, it may still be on the stream.",
                 "type": "string"
               },
               {
@@ -1621,7 +1621,7 @@
               },
               {
                 "const": "message_unreadable",
-                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out. Unless the last read\nfound the trigger stream missing, it may still be on the stream.",
                 "type": "string"
               },
               {

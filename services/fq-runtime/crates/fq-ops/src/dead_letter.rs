@@ -119,8 +119,8 @@ pub enum UnattributedKind {
     /// so its sequence is not a position on this one.
     EarlierIncarnation,
     /// The trigger's message could not be read, for a reason other than
-    /// its absence, before the watch's limit ran out; it may still be on
-    /// the stream.
+    /// its absence, before the watch's limit ran out. Unless the last read
+    /// found the trigger stream missing, it may still be on the stream.
     MessageUnreadable,
     /// A kind this build does not know, written by a later one; the reason
     /// says why in words.
