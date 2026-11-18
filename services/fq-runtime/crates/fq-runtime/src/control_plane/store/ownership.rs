@@ -23,22 +23,33 @@ impl ControlPlaneStore {
     /// finished.
     ///
     /// One conditional write decides: it inserts the row as `ambiguous`
-    /// when there is none, and moves it there only from `in_flight`, taking
-    /// `worker_id` and `assigned_at` as it does. Any other row is left as
-    /// it was. A finished run is never put back to triage: an
-    /// `invocation.ambiguous` can reach the control plane after the run's
-    /// ending, and the ending stands. When the write changes nothing, the
-    /// row's status is read in the same transaction, which the write has
-    /// already made a write transaction, so no other writer can move the
-    /// row between the two and the answer names the status that refused
-    /// the move.
+    /// when there is none, and moves it there only from `in_flight`. Any
+    /// other row is left as it was. A finished run is never put back to
+    /// triage: an `invocation.ambiguous` can reach the control plane after
+    /// the run's ending, and the ending stands. When the write changes
+    /// nothing, the row's status is read in the same transaction, so the
+    /// answer names the status that refused the move.
+    ///
+    /// The move from `in_flight` also writes `worker_id` and `assigned_at`
+    /// over the row's, so a row startup recovery restored under this
+    /// daemon's worker id ends up naming the agent id the caller passes
+    /// in its place. That is known and not intended: the next change of
+    /// issue 1024 keeps the row's worker id and time on such a move.
     pub async fn mark_invocation_ambiguous(
         &self,
         invocation_id: &str,
         worker_id: &str,
         assigned_at: i64,
     ) -> Result<AmbiguousMark, ControlPlaneStoreError> {
-        let mut tx = self.pool.begin().await?;
+        // `BEGIN IMMEDIATE` takes the write lock before the first
+        // statement, so no other writer can move the row between the write
+        // and the read that explains it, whatever the first statement is.
+        // A deferred `BEGIN` would hold only while the write comes first: a
+        // read placed ahead of it would make the write a read-to-write
+        // upgrade, which SQLite fails at once under contention instead of
+        // waiting out the busy timeout (`db/schema.rs` says the same of
+        // the schema lock).
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let written = sqlx::query(
             "INSERT INTO coordination_invocation_owner \
                  (invocation_id, worker_id, assigned_at, status) \
@@ -69,7 +80,19 @@ impl ControlPlaneStore {
             let status: String = row.get("status");
             match OwnerStatus::parse(&status) {
                 Some(OwnerStatus::Ambiguous) => AmbiguousMark::AlreadyAmbiguous,
-                Some(finished) => AmbiguousMark::Refused(finished),
+                Some(finished @ (OwnerStatus::Completed | OwnerStatus::Failed)) => {
+                    AmbiguousMark::Refused(finished)
+                }
+                // The write moves an `in_flight` row, so a row that reads
+                // `in_flight` after it changed nothing contradicts the
+                // write. An error, not a refusal: the caller's event is
+                // retried rather than acked with the report lost.
+                Some(OwnerStatus::InFlight) => {
+                    return Err(ControlPlaneStoreError::Backend(format!(
+                        "the ownership row of {invocation_id} reads in_flight after the write \
+                         that moves an in_flight row changed nothing"
+                    )));
+                }
                 None => {
                     return Err(ControlPlaneStoreError::Malformed(format!(
                         "unknown owner status `{status}`"
@@ -81,3 +104,6 @@ impl ControlPlaneStore {
         Ok(mark)
     }
 }
+
+#[cfg(test)]
+mod tests;
