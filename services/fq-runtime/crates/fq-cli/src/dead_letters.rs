@@ -202,6 +202,47 @@ mod tests {
         );
     }
 
+    /// One that names no trigger and whose start was not checked either
+    /// (the trigger's message and its run's records both unreadable past
+    /// the limit) cannot be requeued, so its check is not offered as one to
+    /// make "before requeueing": it says how to tell whether the run started,
+    /// and, with no run named, that nothing on it can tell.
+    #[test]
+    fn a_nameless_unchecked_dead_letter_is_not_offered_a_requeue_check() {
+        let nameless = |invocation_id: Option<&str>| fq_ops::dead_letter::DeadLetter {
+            agent_id: "system".to_string(),
+            trigger_subject: String::new(),
+            trigger_payload: serde_json::Value::Null,
+            unattributed: Some("the trigger's message could not be read".to_string()),
+            ..dead(Some(fq_ops::dead_letter::StartUnchecked {
+                reason: "the worker could not say whether its WAL holds the run".to_string(),
+                invocation_id: invocation_id.map(str::to_string),
+            }))
+        };
+        let named = dead_letter_lines(&nameless(Some("019a0000-0000-7000-8000-000000000001")));
+        assert!(
+            named.ends_with(
+                "      start not checked: the worker could not say whether its WAL holds the run; \
+                 its run may have started\n      -> it cannot be requeued; to tell whether its run \
+                 started, run `fq invocation show 019a0000-0000-7000-8000-000000000001`: it \
+                 started if that shows a `Live execution:` block, an `archived:` line, a \
+                 `status:` other than `(no coordination row)` or a trigger line saying `durably \
+                 started`\n"
+            ),
+            "got:\n{named}"
+        );
+        let unnamed = dead_letter_lines(&nameless(None));
+        assert!(
+            unnamed.ends_with(
+                "      -> it cannot be requeued, and it names neither the trigger nor its run (the \
+                 claim, or this mark, could not be read), so nothing on it tells whether the run \
+                 started\n"
+            ),
+            "got:\n{unnamed}"
+        );
+        assert!(!unnamed.contains("before requeueing"), "got:\n{unnamed}");
+    }
+
     /// A dead letter whose start was checked reads as it always has.
     #[test]
     fn a_checked_dead_letter_has_no_warning_line() {
