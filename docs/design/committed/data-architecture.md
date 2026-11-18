@@ -561,7 +561,10 @@ Crash semantics:
   one that is neither `completed` nor `failed`. The sweeper
   publishes neither the stored event nor `invocation.archived` for
   a held row, logs it at error level once per daemon run, and
-  carries on with the other rows. Archiving without it would
+  carries on with the other rows. It publishes
+  `invocation.ending_held` in their place, once per daemon run,
+  which the control plane folds as the ending the row's phase names
+  ([#1071](https://github.com/bricef/factor-q/issues/1071)). Archiving without it would
   discard the only copy of the outcome. No later build reads an
   older event version, so the hold lasts **until an operator
   releases the row**. The procedure is in
@@ -572,7 +575,9 @@ Crash semantics:
   whether the stored terminal event or `invocation.archived`,
   which carries the whole state blob, **holds** its row the same
   way: the row stays whole, the pass goes on to the rows behind
-  it, and the hold is logged once per daemon run. A size refusal
+  it, and the hold is logged once per daemon run. A hold of the
+  stored terminal event publishes `invocation.ending_held` in its
+  place, as above. A size refusal
   is the only publish error treated per row; any other ends the
   pass, since a broker that is down refuses every row alike. The
   held row is not serialised again in that run, because the bus

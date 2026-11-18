@@ -395,7 +395,8 @@ that as `archived`, so a row can read `"archived": false` beside
 
 The list is ordered by the time each run's row was first written,
 newest first: when the run ended, for a run started from a trigger, or
-the run's start, for one startup recovery restored. A later move keeps
+the run's start, for one startup recovery restored or whose ending the
+archive sweeper held. A later move keeps
 that time, except recovery's restore, which sets it to the run's start
 again. So a resumed run that ends, or an old ambiguous run you drop,
 keeps its place rather than rising to the top, and with `--limit` it
@@ -733,26 +734,47 @@ default) once the broker takes events again, or at the next start,
 publishes it.
 
 A row the sweeper cannot publish, it **holds**, for one of the three
-reasons below. It publishes nothing more for a held row, leaves the row
-in `worker.db` exactly as it is, and carries on with every other row.
-Until the hold is lifted, the control plane sees that invocation as not
-archived. It does see it as finished, once the run's terminal event is
-folded: the ownership row reads `completed` or `failed` with its
-archive `pending`, `fq invocation list` shows `held` in its `archive`
-column, and `fq invocation show` prints the reason and the remedy. Not
-every held run reads that way. A row held because its stored terminal
-event will not be republished, or because its ids cannot go on an
-event, never tells the control plane that the run ended, so its
-ownership row stays as it was, absent or `in_flight`
-([#1071](https://github.com/bricef/factor-q/issues/1071)). So does a
-run that ended, and was held, before the daemon was upgraded to a build
-that moves the row on a run's ending: the older build consumed that
-ending without moving the row, and it is not folded again. `fq doctor`
-lists every held row whatever its ownership row says. The daemon log
-reports a held row once per daemon run, at
-error level, and `fq doctor` and `fq status` list every held row with
-its invocation, the reason and the remedy. `fq doctor` counts each one
-as an issue, because none lifts on its own:
+reasons below. It publishes nothing more of the row's own, leaves the
+row in `worker.db` exactly as it is, and carries on with every other
+row. Until the hold is lifted, the control plane sees that invocation
+as not archived. It does see it as finished, once the run's terminal
+event is folded: the ownership row reads `completed` or `failed` with
+its archive `pending`, `fq invocation list` shows `held` in its
+`archive` column, and `fq invocation show` prints the reason and the
+remedy.
+
+When the hold is of the run's terminal event itself, because this build
+will not republish it or the broker refuses it for its size, that event
+never reaches the control plane. The sweeper then publishes
+`invocation.ending_held` in its place: the run's outcome, when it
+started and ended, and its model-call count, tool-call count and cost
+as the worker's rows record them, with nothing copied from the stored
+event
+([#1071](https://github.com/bricef/factor-q/issues/1071)).
+The coordination consumer folds it as the ending it stands for, so the
+run reads finished and held like any other, and `fq invocation show`
+lists the event among the run's recent events. The task status,
+summary or error message are inside the stored event only, so `show`
+has none of them, and the readers that key on a run's own `completed`
+or `failed`, such as the summariser's outcome line, do not read the
+held ending yet
+([#1100](https://github.com/bricef/factor-q/issues/1100)). The daemon log says `published the held row's
+ending, so the control plane reads the run as ended` once per daemon
+run for each such row. No cost report counts the event: every model
+call's cost is already on record from its own `llm.response` or
+`llm.failure`.
+
+Two kinds of held run still do not read finished. A row whose ids
+cannot go on an event can publish nothing at all, this event included,
+so its ownership row stays as it was, absent or `in_flight`. So does a
+run whose terminal event went out, and whose archive was then held,
+before the daemon was upgraded to a build that moves the row on a run's
+ending: the older build consumed that ending without moving the row,
+and it is not folded again. `fq doctor` lists every held row whatever
+its ownership row says. The daemon log reports a held row once per
+daemon run, at error level, and `fq doctor` and `fq status` list every
+held row with its invocation, the reason and the remedy. `fq doctor`
+counts each one as an issue, because none lifts on its own:
 
 ```text
 Archive holds: 1 — finished runs the archive sweeper will not archive until an operator acts; the control plane sees each as not archived
@@ -784,7 +806,10 @@ id lowers them slightly. In tool output that means a run that read two
 results at the default 256 KiB cap archives on a stock broker and one
 that read three does not (see
 [When a tool returns too much](#when-a-tool-returns-too-much)). The
-stored terminal event can be refused the same way. The sweeper used to
+stored terminal event can be refused the same way, and then the
+sweeper publishes `invocation.ending_held` in its place, as above. When
+the limit is raised and the stored event goes out, it folds as the
+same ending. The sweeper used to
 stop its pass at such a row, on every pass, so no row behind it was archived
 either ([#981](https://github.com/bricef/factor-q/issues/981)). Now it
 holds the row, and the log line is `an event this row must publish is
@@ -821,10 +846,12 @@ event-schema bump. Republished, it would halt every durable consumer on
 the stream (see
 [When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read)).
 So the sweeper holds the row instead, publishing neither the stored
-event nor `invocation.archived`. The log line is `stored terminal event
-cannot be republished; holding the row unarchived until an operator
-releases it`, with the `invocation_id` and the reason (for example, the
-`schema_version` it found and the versions this build reads).
+event nor `invocation.archived`, but `invocation.ending_held` in its
+place, so the control plane reads the run as ended. The log line is
+`stored terminal event cannot be republished; holding the row
+unarchived until an operator releases it`, with the `invocation_id` and
+the reason (for example, the `schema_version` it found and the versions
+this build reads).
 
 Nothing releases such a row on its own. No later build reads an older
 event version, so the hold lasts until you release the row. Releasing
@@ -849,7 +876,8 @@ sqlite3 -cmd '.timeout 5000' "$db" \
 
 The sweeper reads every row afresh on each pass (every 10 s by default),
 so the next pass archives the released row, and the control plane's ack
-deletes it as usual.
+deletes it as usual. The ownership row keeps the ending the held ending
+gave it and records the archive.
 
 **A row whose ids cannot go on an event.** Every event names its agent
 and its invocation, so nothing can be published for a row whose

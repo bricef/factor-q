@@ -24,13 +24,16 @@
 //! still reads as one event.
 //!
 //! Some rows cannot go out, and the sweeper **holds** them: it publishes
-//! nothing more for the row, leaves it in the store exactly as it was, and
-//! carries on to the rows behind it. A hold is one `error!` per daemon run,
-//! and [`ArchiveHolds`] lists it for `control.status` and `control.doctor`
-//! with the reason and what lifts it. While a row is held, the control
-//! plane sees that invocation as not archived. Three causes hold a row
-//! (`docs/guide/operating-the-daemon.md`, "When the archive sweeper holds a
-//! terminal row"):
+//! nothing more of the row's own, leaves it in the store exactly as it
+//! was, and carries on to the rows behind it. A hold is one `error!` per
+//! daemon run, and [`ArchiveHolds`] lists it for `control.status` and
+//! `control.doctor` with the reason and what lifts it. While a row is
+//! held, the control plane sees that invocation as not archived. When the
+//! hold keeps the run's own ending off the stream, the sweeper publishes
+//! `invocation.ending_held` in its place, once per daemon run, so the
+//! control plane still reads the run as ended (`ending_held`). Three
+//! causes hold a row (`docs/guide/operating-the-daemon.md`, "When the
+//! archive sweeper holds a terminal row"):
 //!
 //! - Ids that cannot go on an event: an `agent_id` that is not a subject
 //!   token, or an `invocation_id` that is not a UUID. The runtime never
