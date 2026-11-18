@@ -267,6 +267,7 @@ fn phase_of(event_type: EventKind) -> FailurePhase {
         | EventKind::InvocationAmbiguous
         | EventKind::InvocationStuck
         | EventKind::InvocationArchived
+        | EventKind::InvocationEndingHeld
         | EventKind::InvocationArchiveAcked
         | EventKind::InvocationOperatorRecovered
         | EventKind::InvocationOperatorResumed

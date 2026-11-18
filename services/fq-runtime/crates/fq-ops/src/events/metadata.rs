@@ -19,6 +19,7 @@ impl EventPayload {
             Self::InvocationAmbiguous(_) => subjects::agent_invocation_ambiguous(agent),
             Self::InvocationStuck(_) => subjects::agent_invocation_stuck(agent),
             Self::InvocationDeferred(_) => subjects::agent_invocation_deferred(agent),
+            Self::InvocationEndingHeld(_) => subjects::agent_invocation_ending_held(agent),
             Self::InvocationArchived(_) => subjects::agent_invocation_archived(agent),
             Self::InvocationOperatorRecovered(_) => {
                 subjects::agent_invocation_operator_recovered(agent)
@@ -63,6 +64,7 @@ impl EventPayload {
             Self::InvocationAmbiguous(_) => "factor-q/invocation_ambiguous@1",
             Self::InvocationStuck(_) => "factor-q/invocation_stuck@1",
             Self::InvocationDeferred(_) => "factor-q/invocation_deferred@1",
+            Self::InvocationEndingHeld(_) => "factor-q/invocation_ending_held@1",
             Self::InvocationArchived(_) => "factor-q/invocation_archived@1",
             Self::InvocationArchiveAcked(_) => "factor-q/invocation_archive_acked@1",
             Self::InvocationOperatorRecovered(_) => "factor-q/invocation_operator_recovered@1",

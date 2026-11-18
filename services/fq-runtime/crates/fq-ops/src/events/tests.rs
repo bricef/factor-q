@@ -185,6 +185,80 @@ fn invocation_deferred_is_agent_scoped_and_names_its_reason() {
     assert_eq!(json["payload"]["retry_after_ms"], 300_000);
 }
 
+fn held_ending(
+    totals: Option<crate::events::RecordedTotals>,
+) -> crate::events::InvocationEndingHeldPayload {
+    crate::events::InvocationEndingHeldPayload {
+        outcome: crate::events::HeldOutcome::Failed,
+        ended_at_ms: 2_000,
+        started_at_ms: 1_000,
+        worker_id: crate::worker::WorkerId::new("daemon-1").unwrap(),
+        reason: crate::events::EndingHeldReason::PayloadTooLarge,
+        totals,
+    }
+}
+
+/// `invocation.ending_held` lands inside `fq.agent.*.invocation.*`,
+/// where the coordination consumer reads, names the run on the envelope,
+/// and is history rather than transient signal. A new kind is additive:
+/// its envelope declares the version every other event does, and the
+/// version stays 3 (`schema_version_constant_is_three`), so a reader of
+/// this version reads it and a build without the kind lands it on
+/// `Unknown` rather than halting.
+#[test]
+fn a_held_ending_is_agent_scoped_and_keeps_the_envelope_version() {
+    let invocation_id = Uuid::now_v7();
+    let event = Event::new(
+        AgentId::new("researcher").unwrap(),
+        invocation_id,
+        EventPayload::InvocationEndingHeld(held_ending(Some(crate::events::RecordedTotals {
+            total_llm_calls: 3,
+            total_tool_calls: 2,
+            total_cost: 0.25,
+        }))),
+    );
+    assert_eq!(
+        event.subject(),
+        "fq.agent.researcher.invocation.ending_held"
+    );
+    assert_eq!(
+        event.envelope.schema_id,
+        "factor-q/invocation_ending_held@1"
+    );
+    assert_eq!(event.payload.event_type(), "invocation_ending_held");
+    assert_eq!(event.envelope.invocation_id, invocation_id);
+    assert!(!event.payload.is_transient(), "a run's ending is history");
+    assert_eq!(event.envelope.schema_version, 3);
+    assert_eq!(event.envelope.schema_version, SCHEMA_VERSION);
+
+    let json = serde_json::to_value(&event.payload).unwrap();
+    assert_eq!(json["event_type"], "invocation_ending_held");
+    assert_eq!(json["payload"]["outcome"], "failed");
+    assert_eq!(json["payload"]["reason"], "payload_too_large");
+    assert_eq!(json["payload"]["worker_id"], "daemon-1");
+    assert_eq!(json["payload"]["totals"]["total_llm_calls"], 3);
+    assert!(
+        json["payload"]["totals"].get("total_duration_ms").is_none(),
+        "the totals carry no duration: the rows do not hold the one a run's ending carries"
+    );
+
+    // Without totals the field is absent, and absent reads back as none.
+    let bare = serde_json::to_value(held_ending(None)).unwrap();
+    assert!(bare.get("totals").is_none(), "{bare}");
+    let back: crate::events::InvocationEndingHeldPayload = serde_json::from_value(bare).unwrap();
+    assert_eq!(back, held_ending(None));
+}
+
+/// A reason a newer build adds reads as `Unknown` here, so one new
+/// reason never makes the whole event unreadable.
+#[test]
+fn a_held_ending_reads_a_reason_it_does_not_know() {
+    let mut json = serde_json::to_value(held_ending(None)).unwrap();
+    json["reason"] = json!("a_reason_from_a_newer_build");
+    let back: crate::events::InvocationEndingHeldPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(back.reason, crate::events::EndingHeldReason::Unknown);
+}
+
 /// An operator signal is daemon-scoped: one `fq.system.*` subject
 /// whatever its source, the runtime on the envelope, and what it
 /// concerns in the payload. The three co-located derivations —
@@ -1436,6 +1510,7 @@ fn schema_id_for_every_payload_variant() {
             model: String::new(),
             retry_after_ms: 0,
         }),
+        EventPayload::InvocationEndingHeld(held_ending(None)),
         EventPayload::SystemStartup(SystemStartupPayload {
             runtime_id: inv,
             version: String::new(),

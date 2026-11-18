@@ -25,6 +25,10 @@ use crate::worker::WorkerId;
 /// `with` module for [`InvocationArchivedPayload::final_state_blob`].
 mod state_blob;
 
+/// `invocation.ending_held`'s payload and the shapes it carries.
+mod ending_held;
+pub use ending_held::*;
+
 /// The fixed sentinel every host-notice body is wrapped in
 /// (`<host-notice>…</host-notice>`) — one marker for every producer,
 /// forever (#88). It separates "runtime ambient info" from "principal

@@ -563,6 +563,14 @@ pub enum EventPayload {
     /// is the cause; this is the decision.
     InvocationDeferred(InvocationDeferredPayload),
 
+    /// Worker → control plane: a finished run whose own `completed` or
+    /// `failed` the archive sweeper holds, because this build refuses to
+    /// republish the stored event or the broker refuses it for its size.
+    /// Folded into the ownership row as the ending it stands for, so the
+    /// row does not read `in_flight` while the worker's row is finished.
+    /// Published once per daemon run for each such row.
+    InvocationEndingHeld(InvocationEndingHeldPayload),
+
     /// Worker → control-plane archive hand-off (step 8 of
     /// data-architecture.md). Emitted after an invocation
     /// reaches terminal state with the final reducer-state blob
