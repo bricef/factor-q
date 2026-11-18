@@ -7,7 +7,8 @@
 //! broker (2026-07-14; the NAK re-probed on the pinned broker for issue
 //! 1062):
 //!
-//! - NAK with no delay on the final delivery → advisory fires at once;
+//! - NAK with no delay on the final delivery → advisory fires at once
+//!   while a pull is waiting on the consumer, else at its next pull;
 //!   with a delay, even zero, the trigger consumer's backoff puts it
 //!   eleven and a half minutes out, so a dead letter the dispatcher could
 //!   not publish is handed here with a bare NAK (issue 1062)
@@ -432,10 +433,13 @@ impl AdvisoryWatch {
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
-        // ack sliver, or a publish that landed with its acknowledgement
-        // lost, which the dispatcher hands here (issue 1062); if the
-        // agent's most recent failed event already carries this stream
-        // sequence, skip. A later failure of the agent hides it.
+        // ack sliver (or a lost ack), or a publish that landed with its
+        // acknowledgement lost, which the dispatcher hands here (issue
+        // 1062); if the agent's most recent failed event already carries
+        // this stream sequence, skip. It misses, and a second dead letter
+        // is written, when a later failure of the agent hides it, when the
+        // read fails (taken as "not surfaced"), or when the dispatcher's
+        // publish lands after this look (de-duplication: issue 1066).
         if let Some(agent) = &agent_id
             && self.already_surfaced(agent, advisory.stream_seq).await
         {

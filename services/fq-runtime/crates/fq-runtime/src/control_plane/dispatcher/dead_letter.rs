@@ -34,15 +34,24 @@ impl TriggerDispatcher {
     /// dead letter from the durable capture stream, as it does for
     /// exhaustion this dispatcher never observes (a crash during the final
     /// delivery; a pre-bound poison trigger at upgrade time). The two
-    /// emitters overlap only where a publish that failed here had in fact
-    /// reached the stream; the shared `trigger_stream_seq` annotation
-    /// reconciles them, and the watch skips a trigger whose dead letter is
-    /// the agent's most recent `failed` event.
+    /// emitters overlap where a publish that failed here had in fact
+    /// reached the stream, and, as before issue 1062, where a published
+    /// dead letter's ack never reached the broker. The watch skips a
+    /// trigger whose dead letter is the agent's most recent `failed` event,
+    /// but writes a second one when another failure of the agent came in
+    /// between, when it cannot read the events stream at that moment, or
+    /// when a publish from here lands only after it looked; the shared
+    /// `trigger_stream_seq` annotation reconciles the two (de-duplication
+    /// is issue 1066).
     ///
     /// A publish that fails is logged here, once, at error, with what the
     /// watch's dead letter will not carry: the error that ended the last
-    /// delivery (`last_error`), beside the trigger's sequence and id, which
-    /// match the line to that dead letter.
+    /// delivery (`last_error`), beside the trigger's sequence, which
+    /// matches the line to that dead letter. The line's trigger id matches
+    /// it too only when the publisher named the trigger: for one published
+    /// without a name, the id is the one the dispatcher gave this
+    /// delivery, and the watch, which does not invent one, writes a dead
+    /// letter with no trigger id, which a requeue refuses (issue 1080).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn dead_letter_exhausted(
         &self,
@@ -116,9 +125,15 @@ impl TriggerDispatcher {
     /// answers a NAK with no delay by putting the message back to be
     /// delivered, finding its deliveries spent when the consumer next pulls,
     /// and raising its MAX_DELIVERIES advisory, which the advisory stream
-    /// captures. The consume loop always has a pull waiting, so that is at
-    /// once; a daemon that stops in between leaves it to the next start's
-    /// first pull. A NAK carrying a delay, even of zero, would not do: on the
+    /// captures. While the consume loop runs it has a pull waiting, bar the
+    /// instants between one pull and the next and the half second it pauses
+    /// after a failed one, so that is at once
+    /// (`tests/dispatcher_log_lines.rs` pins it through the real loop). Once
+    /// the loop has ended, on a drain or a shutdown, it pulls no more: the
+    /// NAK finds no pull waiting, or only the loop's last one until that
+    /// expires, and the advisory comes at the next start's first pull, not
+    /// lost (`unpublished_dead_letter` pins the broker's side). A NAK
+    /// carrying a delay, even of zero, would not do: on the
     /// trigger consumer, whose `backoff` is the retry ladder, the broker
     /// dates such a delivery back by the first ack window and then waits
     /// for the ladder's last entry, so the advisory would come eleven and a

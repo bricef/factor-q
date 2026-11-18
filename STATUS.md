@@ -511,16 +511,30 @@ NAKs the delivery with no delay, the broker reports the trigger
 exhausted at once, and the watch, finding nothing on record for it,
 writes the dead letter, trying again until the events stream takes it,
 for as long as the advisory stream keeps the advisory, a day
-([#1062](https://github.com/bricef/factor-q/issues/1062)). Two things
+([#1062](https://github.com/bricef/factor-q/issues/1062)). Three things
 stay open there. The watch's dead letter does not carry the error that
 ended the last delivery: the dispatcher's error line records it beside
-the trigger's sequence and id, the one record of it that names the
-trigger. And a dead letter whose publish
-reached the events stream and lost only its acknowledgement is found by
-the watch and not written again, unless another `failed` event of the
-same agent was recorded in between: the trigger then has two dead
-letters under one trigger id, which `fq dead-letters requeue` runs at
-most once. Outside
+the trigger's sequence, the one record of it that names the trigger. A
+trigger published without a trigger id, as `fq-cron` publishes them
+([#1080](https://github.com/bricef/factor-q/issues/1080)), is given one
+by the dispatcher for each delivery, and the dispatcher's own dead letter
+would have carried it; the watch does not invent one, so its dead letter
+names no trigger id, `fq dead-letters requeue` refuses it, and the work
+is run again as new work with `fq trigger`; the id on the dispatcher's
+error line then matches no dead letter, and only the sequence ties the
+two. And a trigger can get two dead letters, one from each emitter,
+under one sequence: the watch looks for the dispatcher's dead letter
+only as the agent's most recent `failed` event, and takes any failure to
+read it as none, so a dispatcher dead letter that reached the events
+stream with its publish's acknowledgement lost is written again when
+another `failed` event of the agent was recorded in between, when the
+watch could not read the stream at that moment and its own publish then
+landed, or when the dispatcher's publish reached the stream only after
+the watch had looked; the same holds, as before, for a dead letter the
+dispatcher published whose delivery's ack never reached the broker. A
+requeue runs a trigger id at most once, and de-duplicating the dead
+letters is [#1066](https://github.com/bricef/factor-q/issues/1066).
+Outside
 ADR-0032, startup recovery's resumes and `fq invocation resume` now wait
 for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered
