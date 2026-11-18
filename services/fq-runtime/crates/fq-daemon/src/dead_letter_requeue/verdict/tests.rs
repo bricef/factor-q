@@ -19,6 +19,7 @@ fn dead(marked: bool) -> DeadLetter {
             invocation_id: Some(MARKED_RUN.to_string()),
         }),
         unattributed: None,
+        unattributed_kind: None,
     }
 }
 

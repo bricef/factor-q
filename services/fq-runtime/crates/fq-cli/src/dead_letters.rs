@@ -109,11 +109,14 @@ pub(crate) async fn list_dead_letters(
 /// carry its payload: `fq invocation list` reads only ownership rows, so
 /// it misses a run still going in this daemon.
 ///
-/// A dead letter the watch wrote for an advisory from an earlier
-/// incarnation of the trigger stream (issue 1054) gets a line saying why it
-/// names no trigger: listed under the system sentinel with no payload, it
-/// would read like one whose trigger aged out, and its `seq=` like a
-/// position on the stream as it is now.
+/// A dead letter the watch wrote naming no trigger (issues 1054, 1066) gets
+/// a line saying why: listed under the system sentinel with no payload, its
+/// forms would read alike, and an earlier incarnation's `seq=` like a
+/// position on the stream as it is now. One that is also unchecked cannot
+/// be requeued, so no requeue checks its run: its line says how to tell
+/// whether the run started from what `fq invocation show` prints, the
+/// `Live execution:` block included, since a run still going in this daemon
+/// has no coordination row.
 fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
     let seq = d
         .trigger_stream_seq
@@ -138,13 +141,25 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
             "      start not checked: {}; its run may have started\n",
             unchecked.reason
         ));
-        out.push_str(&match &unchecked.invocation_id {
-            Some(id) => format!(
+        out.push_str(&match (&unchecked.invocation_id, &d.unattributed) {
+            // It names no trigger, so there is no requeue to check before:
+            // only whether the work ran.
+            (Some(id), Some(_)) => format!(
+                "      -> it cannot be requeued; to tell whether its run started, run `fq \
+                 invocation show {id}`: it started if that shows a `Live execution:` block, an \
+                 `archived:` line, a `status:` other than `(no coordination row)` or a trigger \
+                 line saying `durably started`\n"
+            ),
+            (None, Some(_)) => "      -> it cannot be requeued, and it names neither the trigger \
+                 nor its run (the claim, or this mark, could not be read), so nothing on it tells \
+                 whether the run started\n"
+                .to_string(),
+            (Some(id), None) => format!(
                 "      -> `fq dead-letters requeue` checks the run's records first and refuses one \
                  that started; if it cannot tell, it refuses unless given --checked-not-started, \
                  which is for once `fq invocation show {id}` shows the run did not start\n"
             ),
-            None => format!(
+            (None, None) => format!(
                 "      -> no run is named (the trigger's claim, or this mark, could not be read): \
                  `fq dead-letters requeue` checks the run's records first and refuses one that \
                  started; if it cannot tell, it refuses unless given --checked-not-started, which \
@@ -176,6 +191,7 @@ mod tests {
             error_message: "trigger exhausted after 5 deliveries (limit 5)".to_string(),
             start_unchecked,
             unattributed: None,
+            unattributed_kind: None,
         }
     }
 

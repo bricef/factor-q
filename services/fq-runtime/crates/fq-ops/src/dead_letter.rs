@@ -66,25 +66,55 @@ pub struct DeadLetter {
     /// other dead letter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_unchecked: Option<StartUnchecked>,
-    /// Why this dead letter names no trigger, when the dead-letter watch
-    /// wrote it for one of two reasons. The advisory came from an earlier
-    /// incarnation of the trigger stream, one the broker emitted before the
-    /// stream was last created: the reason gives when the advisory was
-    /// emitted and when the stream was created, `trigger_stream_seq` here
-    /// is a position on that earlier stream, whose messages went with it,
-    /// and the message the stream holds at the same sequence now is another
-    /// trigger. Or the watch could not read the trigger's message off the
-    /// stream, for a reason other than its absence, before its limit ran
-    /// out (an hour after the advisory, and three looks): the reason gives
-    /// what the last read answered, and, unless that was that the trigger
-    /// stream is missing, says the message may still be on the stream at
-    /// `trigger_stream_seq`. Either way the dead letter is
-    /// recorded under the system sentinel with no subject, payload or
-    /// trigger id, and `dead_letter.requeue` refuses it. Absent on every
-    /// other dead letter, including one written under the system sentinel
-    /// because its trigger's message was no longer on the stream.
+    /// Why this dead letter names no trigger, in words; `unattributed_kind`
+    /// gives the same as a kind to match on. The dead-letter watch sets it
+    /// on every dead letter it writes without a trigger, which it records
+    /// under the system sentinel with no subject, payload or trigger id,
+    /// and which `dead_letter.requeue` refuses. There are three reasons.
+    /// The broker answered that the trigger stream holds no message at the
+    /// trigger's sequence: the reason gives when the watch read the stream,
+    /// when the advisory was emitted and how long the stream keeps a
+    /// message, since the message aged out unless it was deleted sooner
+    /// (the broker answers the same for a message it cannot load). The
+    /// advisory came from an earlier incarnation of the trigger stream, one
+    /// the broker emitted before the stream was last created: the reason
+    /// gives when the advisory was emitted and when the stream was created,
+    /// `trigger_stream_seq` here is a position on that earlier stream,
+    /// whose messages went with it, and the message the stream holds at
+    /// the same sequence now is another trigger. Or the watch could not
+    /// read the trigger's message, for a reason other than its absence,
+    /// before its limit ran out (an hour after the advisory, and three
+    /// looks): the reason gives what the last read answered and, unless
+    /// that was that the trigger stream is missing, says the message may
+    /// still be on the stream at `trigger_stream_seq`. Absent on a dead
+    /// letter that names its trigger, and on one an older build wrote
+    /// without a trigger before it recorded why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed: Option<String>,
+    /// The kind of `unattributed`'s reason, set with it: `message_gone`,
+    /// `earlier_incarnation` or `message_unreadable`. Absent when
+    /// `unattributed` is, and on a dead letter an older build wrote before
+    /// it recorded the kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattributed_kind: Option<UnattributedKind>,
+}
+
+/// Why a dead letter names no trigger, as a kind a reader can match on
+/// without parsing the reason ([`DeadLetter::unattributed_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnattributedKind {
+    /// The broker answered that the trigger stream holds no message at the
+    /// trigger's sequence: it aged out, was deleted, or could not be
+    /// loaded.
+    MessageGone,
+    /// The advisory came from an earlier incarnation of the trigger stream,
+    /// so its sequence is not a position on this one.
+    EarlierIncarnation,
+    /// The trigger's message could not be read, for a reason other than
+    /// its absence, before the watch's limit ran out; it may still be on
+    /// the stream.
+    MessageUnreadable,
 }
 
 /// Why a dead letter's trigger was not checked for a start, and where to

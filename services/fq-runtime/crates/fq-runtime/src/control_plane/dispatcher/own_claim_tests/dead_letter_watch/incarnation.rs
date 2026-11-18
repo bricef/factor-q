@@ -152,6 +152,10 @@ async fn an_advisory_from_an_earlier_incarnation_names_no_trigger_of_the_current
         "{why}"
     );
     assert_eq!(
+        dead.unattributed_kind,
+        Some(crate::dead_letter::UnattributedKind::EarlierIncarnation)
+    );
+    assert_eq!(
         claim(&arena).await,
         Some((true, Some(run))),
         "the current trigger's claim is untouched"
