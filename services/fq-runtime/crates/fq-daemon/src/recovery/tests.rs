@@ -1722,6 +1722,10 @@ mod drop_before_restart;
 // terminal, and the next start (issue 1024).
 mod ended_before_restart;
 
+// The restore of an ownership row before a resume, and a row this build
+// cannot read, at the next start (issue 1024).
+mod restore_ownership;
+
 /// The control-plane and worker stores a daemon keeps under `dir`.
 ///
 /// Here rather than in the file that uses it: the store-open gate

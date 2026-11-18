@@ -127,6 +127,25 @@ impl ControlPlaneStore {
         };
         Ok(written.rows_affected() == 1)
     }
+
+    /// Write `status`, any text, over `invocation_id`'s ownership row, as a
+    /// hand edit or a newer build would: how a test holds a row this build
+    /// cannot read. True when a row was there to write over.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn overwrite_owner_status_for_test(
+        &self,
+        invocation_id: &str,
+        status: &str,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        let written = sqlx::query(
+            "UPDATE coordination_invocation_owner SET status = ? WHERE invocation_id = ?",
+        )
+        .bind(status)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(written.rows_affected() == 1)
+    }
 }
 
 #[cfg(test)]
