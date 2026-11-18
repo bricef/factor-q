@@ -67,54 +67,16 @@ impl RoundLedger {
 
     /// Seed from the WAL's completed-call rows on resume, returning
     /// the agent-call count plus total and server-origin cost buckets —
-    /// one pass serves the round ledger and invocation totals.
-    ///
-    /// The counters have different filters on purpose. `calls`
-    /// feeds `total_llm_calls`, which counts turns that produced an
-    /// outcome, so errored rows are excluded. `cost` sums *every*
-    /// completed row: since #447 an errored row can carry real spend
-    /// (an empty completion still bills for the prefill), and dropping
-    /// it here would forget that money on every resume — the budget
-    /// accumulator is reconstituted from exactly this column. The Round
-    /// seed likewise counts every completed agent-turn row, because a
-    /// failed agent call consumes a Round. Server-origin calls consume
-    /// cost but are nested inside tools, so they consume no reducer Round.
+    /// one pass serves the round ledger and invocation totals
+    /// ([`totals_of_llm_rows`]).
     pub(crate) fn seed_from_wal(
         &self,
         invocation_id: Uuid,
         llms: &[crate::worker::store::LlmDispatchRow],
     ) -> InvocationTotals {
-        use crate::worker::store::DispatchStatus;
-        let mut calls = 0u32;
-        let mut rounds = 0u64;
-        let mut total_cost = 0.0f64;
-        let mut sampling_cost = 0.0f64;
-        let mut elicitation_cost = 0.0f64;
-        for row in llms {
-            if row.status != DispatchStatus::Completed {
-                continue;
-            }
-            let cost = row.cost_usd.unwrap_or(0.0);
-            total_cost += cost;
-            match &row.origin {
-                LlmCallOrigin::AgentTurn => {
-                    rounds += 1;
-                    if row.is_error != Some(true) {
-                        calls += 1;
-                    }
-                }
-                LlmCallOrigin::Sampling { .. } => sampling_cost += cost,
-                LlmCallOrigin::Elicitation { .. } => elicitation_cost += cost,
-            }
-        }
+        let (totals, rounds) = totals_of_llm_rows(llms);
         self.seed(invocation_id, rounds);
-        InvocationTotals {
-            total_llm_calls: calls,
-            total_cost,
-            sampling_cost,
-            elicitation_cost,
-            ..InvocationTotals::default()
-        }
+        totals
     }
 
     /// Drop the counter when the invocation leaves the runner.
@@ -124,6 +86,57 @@ impl RoundLedger {
             .expect("rounds lock poisoned")
             .remove(&invocation_id);
     }
+}
+
+/// What a run's model-call rows in the WAL add up to: its totals, with
+/// the agent-call count and the total and server-origin cost buckets, and
+/// the Rounds its agent turns consumed. A resume seeds its totals from
+/// this.
+///
+/// The counters have different filters on purpose. `calls`
+/// feeds `total_llm_calls`, which counts turns that produced an
+/// outcome, so errored rows are excluded. `cost` sums *every*
+/// completed row: since #447 an errored row can carry real spend
+/// (an empty completion still bills for the prefill), and dropping
+/// it here would forget that money on every resume — the budget
+/// accumulator is reconstituted from exactly this column. The Round
+/// seed likewise counts every completed agent-turn row, because a
+/// failed agent call consumes a Round. Server-origin calls consume
+/// cost but are nested inside tools, so they consume no reducer Round.
+pub(crate) fn totals_of_llm_rows(
+    llms: &[crate::worker::store::LlmDispatchRow],
+) -> (InvocationTotals, u64) {
+    use crate::worker::store::DispatchStatus;
+    let mut calls = 0u32;
+    let mut rounds = 0u64;
+    let mut total_cost = 0.0f64;
+    let mut sampling_cost = 0.0f64;
+    let mut elicitation_cost = 0.0f64;
+    for row in llms {
+        if row.status != DispatchStatus::Completed {
+            continue;
+        }
+        let cost = row.cost_usd.unwrap_or(0.0);
+        total_cost += cost;
+        match &row.origin {
+            LlmCallOrigin::AgentTurn => {
+                rounds += 1;
+                if row.is_error != Some(true) {
+                    calls += 1;
+                }
+            }
+            LlmCallOrigin::Sampling { .. } => sampling_cost += cost,
+            LlmCallOrigin::Elicitation { .. } => elicitation_cost += cost,
+        }
+    }
+    let totals = InvocationTotals {
+        total_llm_calls: calls,
+        total_cost,
+        sampling_cost,
+        elicitation_cost,
+        ..InvocationTotals::default()
+    };
+    (totals, rounds)
 }
 
 #[cfg(test)]

@@ -105,3 +105,23 @@ fn the_resume_seed_matches_the_live_ledger() {
     assert_eq!(resumed.current(resumed_id), live.current(live_id));
     assert_eq!(resumed.next(resumed_id), live.next(live_id));
 }
+
+/// An errored agent turn, an empty completion say, cost money and took a
+/// Round but produced no outcome, so it is not a call; a call still open
+/// is none of the three. The rule a resume seeds a run's totals from.
+#[test]
+fn an_errored_agent_turn_costs_and_takes_a_round_but_is_not_a_call() {
+    let mut open = completed(LlmCallOrigin::AgentTurn, 0.0, false);
+    open.status = DispatchStatus::Dispatched;
+    open.cost_usd = None;
+    open.is_error = None;
+    let rows = vec![
+        completed(LlmCallOrigin::AgentTurn, 1.0, false),
+        completed(LlmCallOrigin::AgentTurn, 0.5, true),
+        open,
+    ];
+    let (totals, rounds) = totals_of_llm_rows(&rows);
+    assert_eq!(totals.total_llm_calls, 1);
+    assert_eq!(totals.total_cost, 1.5);
+    assert_eq!(rounds, 2);
+}
