@@ -114,16 +114,19 @@ fn requeue_declaration() -> fq_ops::Command {
          Unlike `trigger.publish`, the record exists before this answers, so \
          the key resolves with no wait and there is no watermark to gate on. ",
         "A DEAD LETTER WITH NO `trigger_id` IS REFUSED, `Unlocatable`, and \
-         nothing is published. Three kinds have none: anything dead-lettered \
-         before triggers were named; one the advisory path recorded after the \
-         original had aged off the trigger stream; and one it recorded for an \
-         advisory from an earlier incarnation of the trigger stream, whose \
-         sequence names a message of the stream before it rather than the one \
-         this stream holds at that sequence — the advisory path reads the \
-         identity and never invents one. Such a dead letter can only be re-run as new \
-         work, with `trigger.publish`, and that is deliberately your call to \
-         make rather than this command's: requeueing it would hand back the \
-         guarantee's name without the guarantee. ",
+         nothing is published. A dead letter has none when nothing recorded a \
+         name for its trigger: anything dead-lettered before triggers were \
+         named, and, since the advisory path reads the identity and never \
+         invents one, what it records for a trigger it cannot read a name off: \
+         one published without an `Fq-Trigger-Id` header (its agent, subject \
+         and payload are still recorded), one that had aged off the trigger \
+         stream, and one from an earlier incarnation of the trigger stream, \
+         whose advisory's sequence names a message of the stream before it \
+         rather than the one this stream holds at that sequence. Such a dead \
+         letter can only be re-run as new work, with `trigger.publish`, and \
+         that is deliberately your call to make rather than this command's: \
+         requeueing it would hand back the guarantee's name without the \
+         guarantee. ",
         "The payload is the dead letter's own record of the trigger, verbatim. \
          `trigger_seq` selects which dead letter by the original's trigger-\
          stream position (what `dead_letter.list` prints); absent takes the \
@@ -301,12 +304,14 @@ fn unnamed(event: &Event) -> WireError {
         message: format!(
             "the dead letter recorded by event `{}` names no trigger, so it cannot be requeued \
              idempotently — there would be nothing to refuse a second attempt on, and requeueing \
-             it twice would run the agent twice. Three dead letters are like this and none is a \
-             defect: one recorded before triggers were named; one the advisory path built \
-             after the original had already aged off the trigger stream; and one it built for \
-             an advisory from an earlier incarnation of the trigger stream, whose sequence \
-             names a message of the stream before it. The advisory path reads the identity \
-             and never invents one. Whatever payload it recorded is on the record \
+             it twice would run the agent twice. A dead letter is like this when nothing \
+             recorded a name for its trigger, and that is not a defect: one recorded before \
+             triggers were named, or one the advisory path built for a trigger it could not \
+             read a name off, since it reads the identity and never invents one. That is a \
+             trigger published without an `Fq-Trigger-Id` header, one that had already aged \
+             off the trigger stream, or one from an earlier incarnation of the trigger \
+             stream, whose advisory's sequence names a message of the stream before it. \
+             Whatever payload it recorded is on the record \
              (`dead_letter.list`), so re-running it is `trigger.publish` — new work, named \
              honestly as new work.",
             event.envelope.event_id
