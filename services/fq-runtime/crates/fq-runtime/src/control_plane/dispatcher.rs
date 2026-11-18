@@ -456,7 +456,11 @@ impl TriggerDispatcher {
     /// Its own function because `handle` is at the 250-line cap and this
     /// is the part of it with no bearing on anything after: two
     /// validations that either yield an `AgentId` or end the delivery.
-    async fn addressee(&self, msg: &async_nats::jetstream::Message) -> Option<AgentId> {
+    async fn addressee(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        claim: &claim::Claimed,
+    ) -> Option<AgentId> {
         let Some(agent_id_str) = agent_id_from_subject(&msg.subject) else {
             warn!(
                 subject = %msg.subject,
@@ -464,6 +468,7 @@ impl TriggerDispatcher {
             );
             self.ack(
                 msg,
+                claim,
                 crate::trigger::trigger_id_in(msg.headers.as_ref()),
                 "bad subject",
             )
@@ -480,6 +485,7 @@ impl TriggerDispatcher {
                 );
                 self.ack(
                     msg,
+                    claim,
                     crate::trigger::trigger_id_in(msg.headers.as_ref()),
                     "invalid agent id",
                 )
@@ -519,9 +525,10 @@ impl TriggerDispatcher {
             return;
         }
 
-        let Some(agent_id) = self.addressee(msg).await else {
+        let Some(agent_id) = self.addressee(msg, &claim).await else {
             return;
         };
+        let header_id = crate::trigger::trigger_id_in(msg.headers.as_ref());
         // Read the registry through the swappable handle. Cloning the
         // inner Arc under a short read lock gives this invocation a
         // stable snapshot for its whole lifetime: a concurrent reload
@@ -535,12 +542,7 @@ impl TriggerDispatcher {
                     agent_id = %agent_id,
                     "trigger for unknown agent, dropping"
                 );
-                self.ack(
-                    msg,
-                    crate::trigger::trigger_id_in(msg.headers.as_ref()),
-                    "unknown agent",
-                )
-                .await;
+                self.ack(msg, &claim, header_id, "unknown agent").await;
                 return;
             }
         };
@@ -549,7 +551,6 @@ impl TriggerDispatcher {
         // trigger is held here, un-acked, un-started and owning no
         // worker permit, until the pause ends; a drain or shutdown
         // meanwhile leaves it for the next binary.
-        let header_id = crate::trigger::trigger_id_in(msg.headers.as_ref());
         if self.admit(msg, loaded.agent.model(), header_id).await
             == admission::Admission::Interrupted
         {
@@ -559,7 +560,7 @@ impl TriggerDispatcher {
         // Before the per-agent cap below, so a poison payload is refused
         // now rather than after occupying a hold for however long the
         // agent stays full.
-        let Some(payload) = self.parse_payload(msg, &agent_id).await else {
+        let Some(payload) = self.parse_payload(msg, &claim, &agent_id).await else {
             return;
         };
 
@@ -568,7 +569,7 @@ impl TriggerDispatcher {
         // the rest of `handle` and comes back through `Drop` — except on
         // a deferral, where `conclude` hands it on.
         let Some(agent_slot) = self
-            .admit_agent_slot(msg, &agent_id, header_id, &payload)
+            .admit_agent_slot(msg, &claim, &agent_id, header_id, &payload)
             .await
         else {
             return;
@@ -592,7 +593,8 @@ impl TriggerDispatcher {
         // as the first attempt it still is; requeueing is how it keeps
         // doing so.
         let Some(_permit) = self.acquire_run_permit(Some(msg), header_id).await else {
-            self.requeue_held(msg, &agent_id, header_id, &payload).await;
+            self.requeue_held(msg, &claim, &agent_id, header_id, &payload)
+                .await;
             return;
         };
 
@@ -712,10 +714,10 @@ impl TriggerDispatcher {
         if !durable_start_observed {
             self.settle_before_durable_start(
                 msg,
+                &claim,
                 &agent_id,
                 trigger_id,
                 &trigger_payload,
-                delivery_attempt,
                 &result,
             )
             .await;
@@ -3150,11 +3152,22 @@ You are a test agent."#
                 .unwrap()
         };
         let seq = msg.info().unwrap().stream_sequence;
+        let held = claim::Claimed {
+            stream_seq: seq,
+            invocation_id: Uuid::now_v7(),
+        };
         store
-            .claim_trigger(test_key(&bus, seq), "worker-a", "held-invocation", 0)
+            .claim_trigger(
+                test_key(&bus, seq),
+                "worker-a",
+                &held.invocation_id.to_string(),
+                0,
+            )
             .await
             .unwrap();
-        dispatcher.requeue_held(&msg, &agent, None, &payload).await;
+        dispatcher
+            .requeue_held(&msg, &held, &agent, None, &payload)
+            .await;
         assert_eq!(
             store
                 .claim_trigger(test_key(&bus, seq), "worker-a", "probe", 1)

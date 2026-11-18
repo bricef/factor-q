@@ -328,7 +328,8 @@ impl TriggerDispatcher {
         handled: &mut Handled,
     ) {
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
-            self.ack(msg, Some(trigger_id), "durably started").await;
+            self.ack(msg, claim, Some(trigger_id), "durably started")
+                .await;
             handled.release();
             return;
         };
@@ -356,7 +357,8 @@ impl TriggerDispatcher {
                         "marked trigger durably started after the claim store refused the \
                          attempts before it; the run carried on");
                 }
-                self.ack(msg, Some(trigger_id), "durably started").await;
+                self.ack(msg, claim, Some(trigger_id), "durably started")
+                    .await;
             }
             Ok(Landed {
                 value: false,
@@ -384,15 +386,16 @@ impl TriggerDispatcher {
         handled.release();
     }
 
-    pub(super) async fn release_unstarted_claim(&self, msg: &async_nats::jetstream::Message) {
-        let (Some((store, _)), Ok(info)) = (self.claim_store.as_ref(), msg.info()) else {
+    /// Give back the claim `claim` names, if it is still `claimed`.
+    pub(super) async fn release_unstarted_claim(&self, claim: &Claimed) {
+        let Some((store, _)) = self.claim_store.as_ref() else {
             return;
         };
         if let Err(err) = store
-            .release_trigger_claim(self.trigger_key(info.stream_sequence))
+            .release_trigger_claim(self.trigger_key(claim.stream_seq))
             .await
         {
-            error!(error = %err, stream_seq = info.stream_sequence,
+            error!(error = %err, stream_seq = claim.stream_seq,
                 "failed to release unfinished trigger claim");
         }
     }
@@ -559,11 +562,12 @@ impl TriggerDispatcher {
     pub(super) async fn ack(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         trigger_id: Option<uuid::Uuid>,
         context: &str,
     ) {
         let answer = Answer::Ack { context };
-        self.settle(msg, trigger_id, std::future::ready(answer))
+        self.settle(msg, claim, trigger_id, std::future::ready(answer))
             .await;
     }
 
@@ -601,12 +605,13 @@ impl TriggerDispatcher {
     pub(super) async fn nak(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         trigger_id: uuid::Uuid,
         delay: std::time::Duration,
         context: &str,
     ) {
         let answer = Answer::Nak { delay, context };
-        self.settle(msg, Some(trigger_id), std::future::ready(answer))
+        self.settle(msg, claim, Some(trigger_id), std::future::ready(answer))
             .await;
     }
 

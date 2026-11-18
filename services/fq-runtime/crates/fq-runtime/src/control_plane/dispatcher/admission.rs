@@ -68,6 +68,7 @@ use async_nats::jetstream::AckKind;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, info, warn};
 
+use super::claim::Claimed;
 use super::run_admission::Waiter;
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
@@ -151,6 +152,7 @@ impl TriggerDispatcher {
     pub(super) async fn parse_payload(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         agent: &AgentId,
     ) -> Option<serde_json::Value> {
         if msg.payload.is_empty() {
@@ -166,6 +168,7 @@ impl TriggerDispatcher {
                 );
                 self.ack(
                     msg,
+                    claim,
                     crate::trigger::trigger_id_in(msg.headers.as_ref()),
                     "invalid payload",
                 )

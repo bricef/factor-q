@@ -10,7 +10,7 @@
 
 use tracing::info;
 
-use super::claim::Answer;
+use super::claim::{Answer, Claimed};
 use super::{TriggerDispatcher, TriggerFate, trigger_fate};
 use crate::agent::AgentId;
 use crate::worker::{ExecutorError, InvocationOutcome};
@@ -47,15 +47,21 @@ impl TriggerDispatcher {
     ///   new id and starts the trigger once (`claim_delivery`). Adoption
     ///   writes the new invocation's id over the old one, so the log line
     ///   here is what links the abandoned invocation to the delivery.
+    ///
+    /// Which delivery of the trigger this is comes off `msg`, as the
+    /// number `handle` hands the run does (`claim_delivery`).
     pub(super) async fn settle_before_durable_start(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         agent_id: &AgentId,
         trigger_id: uuid::Uuid,
         trigger_payload: &serde_json::Value,
-        delivery_attempt: u32,
         result: &Result<InvocationOutcome, ExecutorError>,
     ) {
+        let delivery_attempt = msg
+            .info()
+            .map_or(1, |info| u32::try_from(info.delivered).unwrap_or(1));
         match (trigger_fate(result, delivery_attempt), result) {
             (TriggerFate::DeadLetter, Err(err)) => {
                 // The dead letter is published inside the settlement, so
@@ -84,11 +90,12 @@ impl TriggerDispatcher {
                         }
                     }
                 };
-                self.settle(msg, Some(trigger_id), answer).await;
+                self.settle(msg, claim, Some(trigger_id), answer).await;
             }
             (TriggerFate::Retry(delay), _) => {
                 self.nak(
                     msg,
+                    claim,
                     trigger_id,
                     delay,
                     "transient failure before first WAL write",
@@ -116,6 +123,7 @@ impl TriggerDispatcher {
             _ => {
                 self.ack(
                     msg,
+                    claim,
                     Some(trigger_id),
                     "invocation returned before durable start (permanent)",
                 )

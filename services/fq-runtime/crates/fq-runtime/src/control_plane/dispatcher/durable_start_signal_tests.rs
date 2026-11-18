@@ -1553,13 +1553,16 @@ async fn a_release_that_outlasts_its_bound_is_given_up_and_the_delivery_naked() 
             Returns::TransientError,
         )
         .await;
-        let named = Uuid::now_v7().to_string();
+        let held = super::claim::Claimed {
+            stream_seq: pulled.stream_seq(),
+            invocation_id: Uuid::now_v7(),
+        };
         pulled
             .claims
             .claim_trigger(
                 test_key(&pulled.bus, pulled.stream_seq()),
                 "worker-a",
-                &named,
+                &held.invocation_id.to_string(),
                 0,
             )
             .await
@@ -1575,9 +1578,13 @@ async fn a_release_that_outlasts_its_bound_is_given_up_and_the_delivery_naked() 
         };
         tokio::time::timeout(
             bound * 2,
-            pulled
-                .dispatcher
-                .settle_within(&pulled.msg, None, std::future::ready(answer), bound),
+            pulled.dispatcher.settle_within(
+                &pulled.msg,
+                &held,
+                None,
+                std::future::ready(answer),
+                bound,
+            ),
         )
         .await
         .expect("settling returns at its bound, before the lock goes");
