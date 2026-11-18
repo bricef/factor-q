@@ -436,7 +436,7 @@ impl AdvisoryWatch {
                 records.verdict(advisory.stream_seq).await
             };
             match verdict {
-                Exhausted::NothingOnRecord => {}
+                Exhausted::NoClaim | Exhausted::NothingOnRecord => {}
                 Exhausted::Started {
                     invocation_id,
                     on_record,

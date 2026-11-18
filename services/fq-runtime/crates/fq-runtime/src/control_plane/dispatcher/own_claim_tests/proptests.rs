@@ -216,7 +216,7 @@ async fn deliver(
                 .expect("the arena's dispatcher holds claims");
             let verdict = check.verdict(SEQ).await;
             match &verdict {
-                Exhausted::NothingOnRecord => prop_assert!(
+                Exhausted::NoClaim | Exhausted::NothingOnRecord => prop_assert!(
                     !started_after,
                     "the watch would dead-letter a trigger whose run has a start on record"
                 ),
