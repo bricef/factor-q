@@ -642,8 +642,9 @@ the daemon died: startup recovery now decides only after the consumer
 has folded what was on the event stream when the start began, so a
 `failed` or a drop the dying daemon published is on record first
 ([#1070](https://github.com/bricef/factor-q/issues/1070)). The wait is
-bounded by `[worker] recovery_backlog_wait_secs` (30 seconds); a run it
-could not check is logged at error and left in flight for a later start
+bounded by `[worker] recovery_backlog_wait_secs` (30 seconds), and ends
+at once if the consumer halts on an event this build cannot read; a run
+it could not check is logged at error and left in flight for a later start
 to resume once the fold has caught up (resuming it without a restart is
 [#1089](https://github.com/bricef/factor-q/issues/1089)), and the
 consumer's tick sweeps wait until recovery has decided. A delivery the stopped daemon left unacknowledged holds the

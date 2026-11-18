@@ -15,7 +15,10 @@
 //!
 //! When the bound is hit, the boot goes on and recovery decides as before,
 //! except that it resumes none of the runs it would have: it cannot tell
-//! which of them the unfolded events end. They are logged at error and
+//! which of them the unfolded events end. A consumer that halts on an event
+//! this build does not read ends the wait at once: it folds nothing more in
+//! this process however long the boot waits, so the boot goes on the same
+//! way without spending the bound. The held runs are logged at error and
 //! stay in flight until a later start finds the events folded, which is
 //! the way out: a restart once the consumer has caught up. Nothing in this
 //! process resumes them (issue 1089), and no operator command does:
@@ -113,6 +116,9 @@ pub(crate) struct Backlog {
     probe: FoldProbe,
     /// `None`: folded to the boot point. `Some`: how far it got.
     behind: Option<u64>,
+    /// The wait ended because the consumer halted on an event this build
+    /// does not read.
+    halted: bool,
     sweeps: SweepRelease,
 }
 
@@ -176,6 +182,7 @@ pub(crate) async fn fold_backlog(
     };
     let bound = config.worker.recovery_backlog_wait();
     let started = tokio::time::Instant::now();
+    let mut halted = false;
     let behind = loop {
         let folded_to = probe.folded_to().await;
         if folded_to >= boot_point {
@@ -187,6 +194,21 @@ pub(crate) async fn fold_backlog(
                  recovery decides"
             );
             break None;
+        }
+        // A consumer halted on an event this build does not read folds
+        // nothing more in this process, however long the boot waits. It has
+        // said why at error, and `fq doctor` reports it from the ledger.
+        if let Some(on) = bus.consumer_ledger().record(CONSUMER_NAME).halted_on {
+            tracing::warn!(
+                boot_point,
+                folded_to,
+                halted_at = on.stream_seq.unwrap_or(0),
+                schema_version = on.schema_version,
+                "the coordination consumer halted on an event this build does not read; \
+                 startup recovery stops waiting for it"
+            );
+            halted = true;
+            break Some(folded_to);
         }
         // A consumer that stopped folds nothing more; `run_hosted` reports
         // its exit as a task failure.
@@ -203,6 +225,7 @@ pub(crate) async fn fold_backlog(
     let backlog = Backlog {
         probe,
         behind,
+        halted,
         sweeps,
     };
     Ok((coordination, backlog))
@@ -221,17 +244,24 @@ impl Backlog {
         let Backlog {
             probe,
             behind,
+            halted,
             sweeps,
         } = self;
         let Some(folded_to) = behind else {
             return (recoverable, sweeps);
         };
+        let why = if halted {
+            "the coordination consumer halted on an event this build does not read before it \
+             had folded the events on the stream"
+        } else {
+            "the coordination consumer had not folded the events on the stream within \
+             [worker] recovery_backlog_wait_secs"
+        };
         if recoverable.is_empty() {
             tracing::warn!(
                 boot_point = probe.boot_point,
                 folded_to,
-                "the coordination consumer had not folded the events on the stream within \
-                 [worker] recovery_backlog_wait_secs; startup recovery had nothing to resume"
+                "{why}; startup recovery had nothing to resume"
             );
         }
         for run in &recoverable {
@@ -240,12 +270,11 @@ impl Backlog {
                 agent_id = %run.state.agent_id,
                 boot_point = probe.boot_point,
                 folded_to,
-                "not resuming this invocation at startup: the coordination consumer had not \
-                 folded the events on the stream within [worker] recovery_backlog_wait_secs, \
-                 and one of them may end it. It stays in flight until a later start finds them \
-                 folded: restart the daemon once the consumer has caught up. If `fq doctor` \
-                 reports the coordination consumer halted, no restart helps until a build that \
-                 reads the event it halted on runs"
+                "not resuming this invocation at startup: {why}, and one of them may end it. \
+                 It stays in flight until a later start finds them folded: restart the daemon \
+                 once the consumer has caught up. If `fq doctor` reports the coordination \
+                 consumer halted, no restart helps until a build that reads the event it halted \
+                 on runs"
             );
         }
         (Vec::new(), sweeps)
