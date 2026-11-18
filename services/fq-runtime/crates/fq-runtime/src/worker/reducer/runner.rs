@@ -931,26 +931,27 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if let Some(budget) = agent.budget()
             && totals.total_cost > budget
         {
-            let kind = FailureKind::BudgetExceeded;
-            self.emit_failed(
-                &agent_id,
-                invocation_id,
-                kind,
-                format!(
-                    "cost ${:.6} exceeded budget ${budget:.2} (detected on resume)",
-                    totals.total_cost
-                ),
-                FailurePhase::Budget,
-                totals,
-                &mut cursor,
-            )
-            .await?;
-            // Terminal outcome on the resume path — the early return
-            // must still release the re-attached workspace (issue #116).
-            let outcome = Ok(InvocationOutcome::BudgetExceeded {
-                invocation_id,
-                cost: totals.total_cost,
-            });
+            let message = format!(
+                "cost ${:.6} exceeded budget ${budget:.2} (detected on resume)",
+                totals.total_cost
+            );
+            let outcome = self
+                .emit_failed(
+                    &agent_id,
+                    invocation_id,
+                    FailureKind::BudgetExceeded,
+                    message,
+                    FailurePhase::Budget,
+                    totals,
+                    &mut cursor,
+                )
+                .await
+                .map(|()| InvocationOutcome::BudgetExceeded {
+                    invocation_id,
+                    cost: totals.total_cost,
+                });
+            // The early return must still release the re-attached
+            // workspace (issue #116), a drop's FinishedElsewhere included.
             self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
                 .await;
             return outcome;
