@@ -99,6 +99,10 @@ impl TriggerDispatcher {
             crate::dead_letter::DEAD_LETTER_SOURCE_KEY,
             serde_json::Value::String("inline".to_string()),
         );
+        // The incarnation of the stream this dispatcher reads, the one its
+        // claims key on: a sequence names one message only within it.
+        let event =
+            crate::dead_letter::with_stream_epoch(event, Some(self.bus.trigger_stream_epoch()));
         if let Err(publish_err) = self.bus.publish(&event).await {
             error!(agent_id = %agent_id, subject = trigger_subject, stream_seq, %trigger_id,
                 delivery_attempt, error = %publish_err, last_error = %err,

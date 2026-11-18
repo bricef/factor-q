@@ -472,8 +472,13 @@ clocks moves that line by as much
 emitted before the trigger stream was last created is dead-lettered
 without a look at the claims, since its sequence names a message of the
 old stream, so its dead letter may record a trigger whose run started.
-It is no longer attributed to the message the new stream holds at that
-sequence: the watch reads nothing there and writes the dead letter for
+Every dead letter this build writes for a trigger of the stream the
+daemon is connected to records that stream's incarnation
+(`trigger_stream_epoch`, the value the claims key on), the dispatcher's
+and the watch's alike, so a dead letter for the message at a sequence
+can be told from one for the message an earlier stream held there. An
+earlier incarnation's advisory is no longer attributed to the message
+the new stream holds at that sequence: the watch reads nothing there and writes the dead letter for
 the system with no subject, payload or trigger id, which
 `fq dead-letters requeue` refuses, and `fq dead-letters list` says why
 it names no trigger

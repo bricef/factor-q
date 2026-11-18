@@ -86,7 +86,7 @@ use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck, TriggerDispat
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
     DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
-    StartUnchecked,
+    StartUnchecked, with_stream_epoch,
 };
 use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
@@ -608,6 +608,9 @@ impl AdvisoryWatch {
             Some(why) => why.annotate(event),
             None => event,
         };
+        // The incarnation the trigger was on, when the advisory is this one's.
+        let epoch = this_incarnation.then_some(self.bus.trigger_stream_epoch());
+        let event = with_stream_epoch(event, epoch);
         let event = match agent_id {
             Some(_) => event,
             None => with_advisory_id(event, &advisory),

@@ -113,6 +113,36 @@ pub const DEAD_LETTER_UNATTRIBUTED_KIND_KEY: &str = "unattributed_kind";
 /// [`DeadLetter`]: it is the watch's key, not a fact about the trigger.
 pub const DEAD_LETTER_ADVISORY_ID_KEY: &str = "advisory_id";
 
+/// The incarnation of the trigger stream the dead letter's trigger was on:
+/// the stream's creation time, in nanoseconds since 1970, as the daemon that
+/// wrote the dead letter read it when it connected, the value the
+/// dispatcher keys its trigger claims on (issue 1066). Written as a decimal
+/// string, as the trigger-claim view writes the same value: it is an
+/// identity compared for equality, and its values are past what a JSON
+/// number read as a double holds exactly. A trigger sequence
+/// names one message only within one incarnation, since a recreated stream
+/// numbers its messages from 1 again, so this is what tells a dead letter
+/// for the message a stream holds at a sequence from one for the message an
+/// earlier stream held there. Both emitters set it: the dispatcher on every
+/// dead letter it writes, and the advisory watch on every one whose advisory
+/// was emitted for the stream it is connected to. So it is absent from a
+/// dead letter for an earlier incarnation's advisory, whose incarnation the
+/// watch cannot know, and from one an older build wrote. Not lifted onto
+/// [`DeadLetter`]: `fq events get <event-id> --json` shows it.
+pub const DEAD_LETTER_STREAM_EPOCH_KEY: &str = "trigger_stream_epoch";
+
+/// `event`, a dead letter, recording the incarnation of the trigger stream
+/// its trigger was on ([`DEAD_LETTER_STREAM_EPOCH_KEY`]), when it is known.
+pub(crate) fn with_stream_epoch(event: Event, epoch: Option<i64>) -> Event {
+    match epoch {
+        Some(epoch) => event.annotate(
+            DEAD_LETTER_STREAM_EPOCH_KEY,
+            serde_json::Value::String(epoch.to_string()),
+        ),
+        None => event,
+    }
+}
+
 /// Recognise a dead letter in one recorded event, or decline.
 ///
 /// This is the whole of the atom's definition: a `Failed` event whose
