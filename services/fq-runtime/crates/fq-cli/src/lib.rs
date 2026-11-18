@@ -111,8 +111,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             DeadLetterCommands::Requeue {
                 agent,
                 trigger_seq,
+                checked_not_started,
                 json,
-            } => requeue_dead_letter(&cli.global, &agent, trigger_seq, json).await?,
+            } => {
+                requeue_dead_letter(&cli.global, &agent, trigger_seq, checked_not_started, json)
+                    .await?
+            }
         },
         Commands::Agent { command } => match command {
             AgentCommands::List => list_agents(&cli.global).await?,

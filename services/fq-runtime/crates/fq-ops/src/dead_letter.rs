@@ -54,12 +54,16 @@ pub struct DeadLetter {
     /// between two reads of it, until the advisory was an hour old and the
     /// watch had looked at it three times; a last look then found no start
     /// either. Such a dead letter may be false, since the run may have
-    /// started or may yet start. Before requeueing it, check the
-    /// invocation it names: the run started if `fq invocation show` gives
-    /// a `Live execution:` block, an `archived:` line, a `status:` other
-    /// than `(no coordination row)` or a trigger line saying
-    /// `durably started`. With no invocation named, find the run among the
-    /// agent's `triggered` events. Absent on every other dead letter.
+    /// started or may yet start. `dead_letter.requeue` checks the records
+    /// again before it re-runs it: it refuses a start on record, proceeds
+    /// with nothing on record, and when it still cannot tell (this mark's
+    /// claim gone included) refuses unless told the run was checked. That
+    /// check is of the invocation named here: the run started if
+    /// `fq invocation show` gives a `Live execution:` block, an
+    /// `archived:` line, a `status:` other than `(no coordination row)` or
+    /// a trigger line saying `durably started`. With no invocation named,
+    /// find the run among the agent's `triggered` events. Absent on every
+    /// other dead letter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_unchecked: Option<StartUnchecked>,
     /// Why this dead letter names no trigger, when the dead-letter watch
@@ -90,8 +94,9 @@ pub struct StartUnchecked {
     /// so here instead.
     pub reason: String,
     /// The invocation the trigger's claim named when the watch last read
-    /// it: the run to check (`fq invocation show`) before requeueing.
-    /// Absent when the claim, or this mark, could not be read.
+    /// it: the run to check (`fq invocation show`) when
+    /// `dead_letter.requeue` cannot tell whether it started. Absent when
+    /// the claim, or this mark, could not be read.
     pub invocation_id: Option<String>,
 }
 

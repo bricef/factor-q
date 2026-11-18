@@ -1865,17 +1865,22 @@ impl EdgeFixture {
     /// a test can withhold one event and watch what stops rendering.
     fn start_with_events(events: Vec<Event>) -> Self {
         let fixture = Self::start();
+        fixture.publish(&events);
+        fixture
+    }
+
+    /// Publish `events` on the fixture's broker.
+    fn publish(&self, events: &[Event]) {
         tokio::runtime::Runtime::new()
             .expect("conversation runtime")
             .block_on(async {
-                let bus = fq_runtime::EventBus::connect(fixture.broker.url())
+                let bus = fq_runtime::EventBus::connect(self.broker.url())
                     .await
                     .expect("connect bus");
-                for event in &events {
+                for event in events {
                     bus.publish(event).await.expect("publish conversation");
                 }
             });
-        fixture
     }
 
     fn run_fq(&self, args: &[&str]) -> (Option<i32>, String, String) {
@@ -3050,26 +3055,32 @@ fn requeueing_twice_is_refused_and_names_the_first_trigger() {
 // harness asserts stdout is empty in both.
 // ------------------------------------------------------------------
 
-/// The unchecked dead letter of the listing's fixture, written now rather
-/// than in January: so it is the current trigger stream's, and what makes
-/// it "cannot tell" is the case an operator meets, a dead letter marked
-/// `start_unchecked` whose claim is no longer there to consult. The
-/// fixture's broker has no claim at its sequence.
-fn unchecked_dead_letter_events_now() -> Vec<Event> {
-    unchecked_dead_letter_events()
-        .into_iter()
-        .map(|mut event| {
-            event.envelope.timestamp = chrono::Utc::now();
-            event
-        })
-        .collect()
+/// The unchecked dead letter of the listing's fixture, written once the
+/// fixture's broker has created its trigger stream rather than in January:
+/// so it is that stream's, and what makes it "cannot tell" is the case an
+/// operator meets, a dead letter marked `start_unchecked` whose claim is no
+/// longer there to consult. The fixture has no claim at its sequence.
+fn unchecked_dead_letter_fixture_now() -> EdgeFixture {
+    let fixture = EdgeFixture::start();
+    fixture.publish(
+        &unchecked_dead_letter_events()
+            .into_iter()
+            .map(|mut event| {
+                event.envelope.timestamp = chrono::Utc::now();
+                event
+            })
+            .collect::<Vec<_>>(),
+    );
+    fixture
 }
 
-/// A dead letter whose trigger's run has a start on record: written now,
-/// on the fixture broker's own trigger stream, at a sequence whose claim
-/// is marked durably started and names [`INV_STARTED`].
+/// A dead letter whose trigger's run has a start on record: written once
+/// the fixture's broker has created its trigger stream, at a sequence of
+/// that stream whose claim is marked durably started and names
+/// [`INV_STARTED`].
 fn started_dead_letter_fixture() -> EdgeFixture {
-    let fixture = EdgeFixture::start_with_events(vec![dead_letter_event(
+    let fixture = EdgeFixture::start();
+    fixture.publish(&[dead_letter_event(
         AGENT_RESEARCHER,
         14,
         Some(fixed_uuid(DEAD_LETTER_TRIGGER_STARTED)),
@@ -3132,7 +3143,7 @@ fn check_golden_requeue_refused(fixture: &EdgeFixture, name: &str, args: &[&str]
 /// tell, naming the run to check and the override.
 #[test]
 fn golden_dead_letters_requeue_unchecked_refused_human() {
-    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    let fixture = unchecked_dead_letter_fixture_now();
     check_golden_requeue_refused(
         &fixture,
         "dead_letters_requeue_unchecked_refused_human",
@@ -3142,7 +3153,7 @@ fn golden_dead_letters_requeue_unchecked_refused_human() {
 
 #[test]
 fn golden_dead_letters_requeue_unchecked_refused_json() {
-    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    let fixture = unchecked_dead_letter_fixture_now();
     check_golden_requeue_refused(
         &fixture,
         "dead_letters_requeue_unchecked_refused_json",
@@ -3154,7 +3165,7 @@ fn golden_dead_letters_requeue_unchecked_refused_json() {
 /// letter through: the requeue the golden above refused.
 #[test]
 fn the_override_lets_an_unchecked_dead_letter_through() {
-    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    let fixture = unchecked_dead_letter_fixture_now();
     let (exit, stdout, stderr) = fixture.run_fq(&[
         "dead-letters",
         "requeue",

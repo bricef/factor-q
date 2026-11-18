@@ -44,6 +44,14 @@
 //! the ack there would have a caller gate a read on a log the reader
 //! never consults. Here there is not even a wait to gate: the record
 //! exists before this command answers, so the key resolves immediately.
+//!
+//! # It takes the verdict before it reserves anything
+//!
+//! A dead letter says a trigger ran out of deliveries, not that its run
+//! never started, and requeueing one whose run started runs the work
+//! twice. So between finding the dead letter and reserving the requeue,
+//! the command asks the records the dead-letter watch asks (issue 1059):
+//! [`verdict`] has the mapping, and why each answer is safe.
 
 use std::sync::Arc;
 
@@ -54,6 +62,10 @@ use fq_runtime::events::{Event, subjects};
 use fq_runtime::trigger::Trigger;
 
 use crate::trigger_command::TriggerKey;
+
+mod verdict;
+
+pub use verdict::TriggerRecords;
 
 /// The op's rendered name, quoted in every refusal it makes.
 const OP: &str = "dead_letter.requeue";
@@ -72,6 +84,13 @@ struct RequeueCommandInput {
     /// altogether, which is why it selects rather than keys.
     #[serde(default)]
     trigger_seq: Option<u64>,
+    /// Set only once you have checked that the trigger's run did not
+    /// start: the invocation a refusal names, read with `invocation.get`
+    /// or `fq invocation show`. It lets a requeue through when the daemon
+    /// cannot tell from its records whether the run started. It never gets
+    /// past a start on record. Absent means false.
+    #[serde(default)]
+    checked_not_started: bool,
 }
 
 fn internal(e: impl std::fmt::Display) -> WireError {
@@ -127,6 +146,27 @@ fn requeue_declaration() -> fq_ops::Command {
          that is deliberately your call to make rather than this command's: \
          requeueing it would hand back the guarantee's name without the \
          guarantee. ",
+        "REFUSED WHEN THE TRIGGER'S RUN STARTED, AND WHEN THAT CANNOT BE TOLD \
+         UNLESS `checked_not_started` IS SET. A dead letter says a trigger ran \
+         out of deliveries, not that its run never started, and requeueing one \
+         whose run started runs the work twice. So before anything is reserved \
+         or published this asks the records the dead-letter watch asks: the \
+         trigger's claim, the worker's WAL and the ownership table. A start on \
+         record is refused with a `Conflict` naming the invocation, whatever \
+         `checked_not_started` says; a start found in the records on a claim \
+         still reading `claimed` is marked on the claim, as startup recovery \
+         marks it, and the refusal says so. Nothing on record proceeds, whether \
+         or not the dead letter carries `start_unchecked`. When it cannot tell, \
+         it is refused with `InvalidInput` unless `checked_not_started` is \
+         true: the records cannot be read, a copy of the trigger is still \
+         handling its claim, the claim changed while it was read, or the dead \
+         letter carries `start_unchecked` and no claim of the current trigger \
+         stream names its delivery (the claim was given back or deleted by the \
+         retention sweep, which look the same, or the dead letter was written \
+         before the stream was last created). The refusal names the invocation \
+         to check and what in it says the run started. Every refusal names the \
+         dead letter by its trigger sequence and event id, and says when it \
+         was the agent's newest, taken because `trigger_seq` was absent. ",
         "The payload is the dead letter's own record of the trigger, verbatim. \
          `trigger_seq` selects which dead letter by the original's trigger-\
          stream position (what `dead_letter.list` prints); absent takes the \
@@ -138,11 +178,13 @@ fn requeue_declaration() -> fq_ops::Command {
     ))
 }
 
-/// Register `dead_letter.requeue` on the daemon's edge.
+/// Register `dead_letter.requeue` on the daemon's edge, asking `records`
+/// whether a dead letter's trigger started its run before it re-runs it.
 pub(crate) fn register_dead_letter_requeue(
     registry: &mut fq_edge::EdgeRegistry,
     bus: fq_runtime::EventBus,
     projection: Arc<ProjectionStore>,
+    records: TriggerRecords,
 ) -> anyhow::Result<()> {
     registry
         .command::<RequeueCommandInput, _, _>(
@@ -150,7 +192,8 @@ pub(crate) fn register_dead_letter_requeue(
             move |input: RequeueCommandInput| {
                 let bus = bus.clone();
                 let projection = projection.clone();
-                async move { requeue(&bus, &projection, input).await }
+                let records = records.clone();
+                async move { requeue(&bus, &projection, &records, input).await }
             },
         )
         .map_err(|e| anyhow::anyhow!("operator registry: {e}"))?;
@@ -161,6 +204,7 @@ pub(crate) fn register_dead_letter_requeue(
 async fn requeue(
     bus: &fq_runtime::EventBus,
     projection: &ProjectionStore,
+    records: &TriggerRecords,
     input: RequeueCommandInput,
 ) -> Result<fq_ops::Receipt, WireError> {
     // The daemon validates what it is asked to select by: an id the
@@ -178,6 +222,20 @@ async fn requeue(
     // second place for the payload to come from and therefore no second
     // answer it could disagree with.
     let original = fq_runtime::trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
+
+    // Whether the trigger's run started, asked of the records after the
+    // refusal above (a dead letter that names no trigger is refused
+    // whatever they hold) and before anything is reserved or published,
+    // so a refusal leaves nothing behind.
+    let dead = dead_letter_from_event(&event)
+        .ok_or_else(|| internal("the selected event is not a dead letter"))?;
+    verdict::admit(
+        records,
+        &dead,
+        input.trigger_seq.is_some(),
+        input.checked_not_started,
+    )
+    .await?;
 
     let requeued = Trigger::requeue_of(&original, fq_runtime::trigger::subject(&agent));
     let claimed = projection
@@ -404,6 +462,13 @@ mod tests {
             // The refusal a caller cannot otherwise anticipate.
             "Unlocatable",
             "trigger.publish",
+            // The verdict it takes before re-running anything, and the
+            // override that lets "cannot tell" through and nothing else.
+            "start on record",
+            "checked_not_started",
+            "start_unchecked",
+            "InvalidInput",
+            "newest",
             // A timed-out acknowledgement is not proof the publish failed.
             "outcome is unknown",
             "trigger.get",

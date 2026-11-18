@@ -90,6 +90,16 @@ async fn operator_surface_matches_the_committed_snapshot() {
         fq_runtime::worker::DeferralQueue::new().0,
         fq_runtime::control_plane::dispatcher::RunAdmission::new(runner.clone(), 1),
     ));
+    // `dead_letter.requeue` asks a dispatcher's records, so the surface
+    // takes one. This one holds no claim store, which declares the
+    // command just as well as a dispatcher that does.
+    let dispatcher = fq_runtime::TriggerDispatcher::new(
+        bus.clone(),
+        agents.clone(),
+        runner.clone(),
+        Arc::new(UnusedLlm),
+        1,
+    );
     let registry = fq_daemon::operator_registry(
         views,
         fq_runtime::watermark::Horizon::new(vec![watermark]),
@@ -114,6 +124,7 @@ async fn operator_surface_matches_the_committed_snapshot() {
             control_plane: control_plane_store,
             runner: runner.clone(),
             resume,
+            trigger_records: fq_daemon::TriggerRecords::of(&dispatcher),
             // The Agent view's source. Empty here: the snapshot
             // describes the surface's shape, and a registry's contents
             // are data, not declaration.

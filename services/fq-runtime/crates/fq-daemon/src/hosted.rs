@@ -183,6 +183,20 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             .with_retry_interval_ms(config.worker.archive_retry_interval_ms)
             .with_warn_after_ms(config.worker.archive_warn_after_ms);
 
+    // The trigger dispatcher: built before the edge, whose requeue asks its
+    // records (issue 1059), and spawned below. Its concurrency bound is
+    // config (#70); its throttle and deferral queue are shared (#278).
+    let dispatcher = TriggerDispatcher::new(
+        bus.clone(),
+        shared_registry.clone(),
+        resume_runner.clone(),
+        llm.clone(),
+        config.worker.max_concurrent_invocations,
+    )
+    .with_throttle(throttle.clone())
+    .with_caps_and_claims(admission.clone(), claims, worker_id.as_str())
+    .with_deferrals(deferrals, due_resumes);
+
     // The authenticated operator edge (ADR-0006 + ADR-0031, plan
     // Phase 2): TLS + capability tokens over tarpc
     // `invoke`/`next_batch`. Identity (certificate + token root)
@@ -218,6 +232,7 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
             // whether the target is live, and arms its halt.
             runner: resume_runner.clone(),
             resume: resume_control.clone(),
+            trigger_records: crate::TriggerRecords::of(&dispatcher),
             // The same hot-swapped handle `fq reload` updates and
             // the dispatcher reads, so `fq agent list` answers
             // with the definitions this daemon would run.
@@ -384,22 +399,8 @@ pub(crate) async fn run_hosted(a: Assembled) -> anyhow::Result<()> {
     // command on the edge now, so this is built here and the registry
     // below holds it — there is no listener left to hand it to.
 
-    // Spawn the trigger dispatcher. Its concurrency bound (#70) is
-    // config, default 1 (serial) until the Phase-2 concurrency gate.
+    // Spawn the trigger dispatcher built above.
     let (disp_shutdown_tx, disp_shutdown_rx) = tokio::sync::oneshot::channel();
-    // The throttle it holds paused models' triggers on is the one the
-    // LLM stack takes permits from, and the deferral queue it drains is
-    // the one every resume path puts invocations down into (#278).
-    let dispatcher = TriggerDispatcher::new(
-        bus.clone(),
-        shared_registry.clone(),
-        resume_runner.clone(),
-        llm,
-        config.worker.max_concurrent_invocations,
-    )
-    .with_throttle(throttle)
-    .with_caps_and_claims(admission, claims, worker_id.as_str())
-    .with_deferrals(deferrals, due_resumes);
     // Spawn the advisory watch (#169). Drains the captured JetStream
     // MAX_DELIVERIES advisories for the trigger stream and emits the
     // dead-letter events the dispatcher's inline path cannot, except for

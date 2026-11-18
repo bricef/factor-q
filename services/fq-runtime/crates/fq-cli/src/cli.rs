@@ -392,6 +392,10 @@ pub(crate) enum DeadLetterCommands {
     /// refusal names the trigger the first call made.
     /// A dead letter recorded without a trigger id cannot be requeued — re-run
     /// it as new work with `fq trigger` instead.
+    /// The daemon first checks whether the trigger's run started: one with a
+    /// start on record is refused, naming the run; when it cannot tell, it is
+    /// refused unless --checked-not-started is given, and the refusal names
+    /// the run to check with `fq invocation show`.
     Requeue {
         /// Agent whose dead letter to requeue
         agent: String,
@@ -399,6 +403,12 @@ pub(crate) enum DeadLetterCommands {
         /// (see `fq dead-letters list`); default: the most recent
         #[arg(long)]
         trigger_seq: Option<u64>,
+        /// You have checked that the trigger's run did not start (`fq
+        /// invocation show` on the run a refusal names). Lets a requeue
+        /// through when the daemon cannot tell from its records whether the
+        /// run started; never past a start on record.
+        #[arg(long)]
+        checked_not_started: bool,
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
         json: bool,
