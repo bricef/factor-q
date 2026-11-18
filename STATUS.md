@@ -411,22 +411,34 @@ false, since the run may have started, or may start after the hour, and
 requeuing it then would run the work twice. So `fq dead-letters requeue`
 takes the verdict itself, for every dead letter, marked or not, before
 it reserves or publishes anything, asking the records the watch asks
-([#1059](https://github.com/bricef/factor-q/issues/1059)): a run with a
-start on record is refused, naming it, whatever the operator passes;
+([#1059](https://github.com/bricef/factor-q/issues/1059)): the
+trigger's claim and the run it names and, when that cannot tell, the run
+a marked dead letter names, by its own id. A run with a start on record
+in any of them is refused, naming it, whatever the operator passes;
 nothing on record is requeued; and when it cannot tell (the records
 cannot be read, a copy is still handling the claim, or a marked dead
-letter's claim is gone, given back or swept, which look the same) it is
-refused unless the operator passes `--checked-not-started` after
-checking the run it names. What stays open is narrow. That flag is the
-operator's word, and a copy still handling the claim can start the run
-after they look. A claim is kept for
-`[state] trigger_claim_retention_days`, 90 days by default and never
-under two, so an unmarked dead letter whose run started after it was
-written, by a copy its writer did not see such as a replay of the
-stream, is refused until its claim is swept and then reads as nothing on
-record. And a dead letter written before the trigger stream was last
-created is not judged by the stream's claims, which key on its
-incarnation, so an unmarked one is requeued without a look. An advisory
+letter's claim is gone, given back or swept, which look the same, with
+nothing found under the run it names) it is refused unless the operator
+passes `--checked-not-started`, with the dead letter's `--trigger-seq`,
+after checking the run it names. What stays open is narrow. That flag is
+the operator's word, and a copy still handling the claim can start the
+run after they look. An unmarked dead letter whose run started after it
+was written, by a copy its writer did not see such as a replay of the
+stream, is refused while its claim is kept and reads as nothing on
+record once the claim is swept. With the defaults that cannot happen to
+a dead letter still listed: a dead letter is an event, kept for
+`[events] max_age` (30 days), and a claim for
+`[state] trigger_claim_retention_days` (90 days, never under two), so
+the dead letter leaves the log first. It can happen when the claim
+window is set below the event log's, or the event log kept longer than
+the claims ([#1076](https://github.com/bricef/factor-q/issues/1076)).
+And a dead letter written before the trigger stream was last created is
+not judged by the stream's claims, which key on its incarnation, so an
+unmarked one is requeued without a look. Which incarnation a dead letter
+belongs to is told by comparing its timestamp, this daemon's clock,
+with the stream's creation, the broker's, so a skew between the two
+clocks moves that line by as much
+([#1077](https://github.com/bricef/factor-q/issues/1077)). An advisory
 emitted before the trigger stream was last created is dead-lettered
 without a look at the claims, since its sequence names a message of the
 old stream, so its dead letter may record a trigger whose run started.

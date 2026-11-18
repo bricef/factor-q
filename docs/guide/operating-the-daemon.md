@@ -1412,13 +1412,18 @@ or not
 ([#1059](https://github.com/bricef/factor-q/issues/1059)):
 
 - **A start on record is refused**, naming the invocation, whatever you
-  pass: the trigger's claim is marked durably started, or the run is in
-  the worker's WAL or the control plane's ownership table. Requeuing it
-  would run the work twice. A start found in the records on a claim that
-  still reads `claimed` is marked on the claim, as startup recovery would
-  mark it, and the refusal says so. That is also how a dead letter the
-  watch wrote unmarked is caught when a copy it did not see, a replay of
-  the stream, starts the run afterwards.
+  pass. What is read: the trigger's claim, which may be marked durably
+  started, and the worker's WAL and the control plane's ownership table
+  for the run the claim names; and, when those cannot tell and the dead
+  letter's mark names a run, the WAL and the ownership table for that
+  run, by its own id, which is how a run that finished and was archived
+  after the watch gave up is found once its claim is gone. Requeuing it
+  would run the work twice. A start found on a claim that still reads
+  `claimed` is marked on the claim, as startup recovery would mark it,
+  and the refusal says so; one found by the run's own id marks nothing.
+  That is also how a dead letter the watch wrote unmarked is caught when
+  a copy it did not see, a replay of the stream, starts the run
+  afterwards.
 - **Nothing on record is requeued**, marked or not: the claim is still
   there, no copy of the trigger is handling it, and neither record holds
   the run. This is the check this section used to ask you to make by
@@ -1426,15 +1431,29 @@ or not
 - **When it cannot tell, it refuses** and says why: the records cannot
   be read, a copy of the trigger is still handling its claim, or the
   claim changed while it was read, which can clear, so asking again
-  later lets the daemon decide; or the dead letter is marked and no claim
-  of the current trigger stream names its delivery any more. A claim
-  given back before its run started leaves no row, and so does one the
-  retention sweep deleted after its run started, so the two look the
-  same; a dead letter written before the trigger stream was last created
-  has no claim of this stream to consult either, since the claim the
-  stream holds at its sequence is another trigger's. An unmarked dead
-  letter whose claim is gone is requeued: its writer found nothing on
-  record, and no delivery follows the last one.
+  later can let the daemon decide; or the dead letter is marked, no claim
+  of the current trigger stream names its delivery any more, and nothing
+  is found under the run its mark names. A claim given back before its
+  run started leaves no row, and so does one the retention sweep deleted
+  after its run started, so the two look the same; a dead letter written
+  before the trigger stream was last created has no claim of this stream
+  to consult either, since the claim the stream holds at its sequence, if
+  any, is another trigger's. Which stream a dead letter belongs to is
+  told by comparing its timestamp, this daemon's clock, with the
+  stream's creation, the broker's, so a skew between the two clocks moves
+  that line by as much
+  ([#1077](https://github.com/bricef/factor-q/issues/1077)). A marked
+  dead letter whose claim is given back while you wait is "cannot tell"
+  again on the next ask. An unmarked dead letter whose claim is gone is
+  requeued: its writer found nothing on record, and no delivery follows
+  the last one. A run that started after such a dead letter was written
+  is refused while its claim is kept and not after. With the defaults the
+  dead letter is gone first: it is an event, kept for `[events] max_age`
+  (30 days), and a claim is kept for
+  `[state] trigger_claim_retention_days` (90 days); a claim window set
+  below the event log's, or an event log kept longer than the claims,
+  leaves that gap open
+  ([#1076](https://github.com/bricef/factor-q/issues/1076)).
 
 What still needs a person is the last case. The refusal names the
 invocation to check. In `fq invocation show <id>`, the run started if
@@ -1451,12 +1470,15 @@ answers `no invocation found with id=…`, or shows none of the four,
 only a `trigger:` line saying `claimed, start not recorded` or
 `none recorded`, and its events: its `triggered` event at most, and a
 `failed` one if it was refused in setup. Then requeue it with
-`--checked-not-started` (`checked_not_started` on
-`dead_letter.requeue`). The flag is your word that the run did not
-start: it lets a requeue through only when the daemon cannot tell, and
+`--trigger-seq <N> --checked-not-started` (`checked_not_started` on
+`dead_letter.requeue`, which needs `trigger_seq`); the refusal prints
+that command. The flag is your word that the run of that one dead letter
+did not start, which is why it needs the sequence: without one, a
+requeue takes whichever dead letter is the agent's newest when it
+arrives. It lets a requeue through only when the daemon cannot tell, and
 never past a start on record. A copy still handling the claim can start
-the run after you look. With no invocation named, the claim itself
-could not be read, or the dead letter's own mark could not: list the
+the run after you look. With no invocation named, no claim naming one
+could be read and the dead letter's mark names none: list the
 agent's runs with `fq events query --agent <agent> --type triggered`,
 read each with `fq events get <event-id>` to find the one whose trigger
 payload is this dead letter's, and check that run with
