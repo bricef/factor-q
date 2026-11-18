@@ -443,6 +443,9 @@ pub enum ArchiveRetryError {
 }
 
 #[cfg(test)]
+mod ending_held_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::{
