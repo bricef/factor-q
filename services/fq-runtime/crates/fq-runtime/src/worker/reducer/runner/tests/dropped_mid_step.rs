@@ -82,11 +82,31 @@ impl Dropper {
     }
 }
 
-/// A model dropped during its first call, which then answers `first` (or
-/// fails, when `first` is `None`). Every later call gives the final answer.
+/// What the call the drop lands in returns.
+enum First {
+    Answers(ChatResponse),
+    Fails(fn() -> crate::llm::LlmError),
+}
+
+/// The provider refuses the call outright: no usage, nothing billed.
+fn refused_key() -> crate::llm::LlmError {
+    crate::llm::LlmError::Auth("provider refused the key".into())
+}
+
+/// The provider rate-limits the call for longer than the retry policy
+/// waits, so the run is deferred (#278).
+fn rate_limited() -> crate::llm::LlmError {
+    crate::llm::LlmError::RateLimited {
+        model: "claude-haiku".into(),
+        retry_after: Some(std::time::Duration::from_secs(600)),
+    }
+}
+
+/// A model dropped during its first call, which then returns `first`.
+/// Every later call gives the final answer.
 struct DroppedDuringCall {
     dropper: Dropper,
-    first: Option<ChatResponse>,
+    first: First,
     calls: AtomicUsize,
 }
 
@@ -100,9 +120,10 @@ impl crate::llm::LlmClient for DroppedDuringCall {
             return Ok(canned("done", 10, 5));
         }
         self.dropper.drop_now().await;
-        self.first
-            .clone()
-            .ok_or_else(|| crate::llm::LlmError::Auth("provider refused the key".into()))
+        match &self.first {
+            First::Answers(response) => Ok(response.clone()),
+            First::Fails(error) => Err(error()),
+        }
     }
 }
 
@@ -222,15 +243,19 @@ impl Dropped {
     }
 }
 
-/// Drive one fresh run dropped during its first model call, which then
-/// answers `first` (or fails, when `None`), or during `DROPPED_TOOL` when
-/// `first` asks for it.
-async fn a_dropped_run(
-    drop: Option<Drop>,
-    during: During,
-    first: Option<ChatResponse>,
-    sink: SinkKind,
-) -> Dropped {
+/// One run's runner, store and agent, its drop done during `DROPPED_TOOL`
+/// when `in_tool` says so.
+struct World {
+    runner: Arc<ReducerRunner<Harness>>,
+    store: Arc<WorkerStore>,
+    recording: Arc<RecordingSink>,
+    agent: Agent,
+    invocation_id: Uuid,
+    dropper: Dropper,
+    dir: tempfile::TempDir,
+}
+
+async fn a_world(in_tool: Option<Drop>, sink: SinkKind) -> World {
     let dir = tempdir().unwrap();
     let store = Arc::new(
         WorkerStore::open(&dir.path().join("events.db"))
@@ -243,11 +268,7 @@ async fn a_dropped_run(
         runner: handle.clone(),
         store: store.clone(),
         invocation_id,
-        drop,
-    };
-    let (in_call, in_tool) = match during {
-        During::ModelCall => (drop, None),
-        During::Tool => (None, drop),
+        drop: None,
     };
     let mut tools = ToolRegistry::with_builtins();
     tools.register_fixture(Arc::new(DroppedDuringTool {
@@ -277,14 +298,6 @@ async fn a_dropped_run(
         Harness::new(),
     ));
     handle.set(runner.clone()).ok().expect("set once");
-    let llm = DroppedDuringCall {
-        dropper: Dropper {
-            drop: in_call,
-            ..dropper
-        },
-        first,
-        calls: AtomicUsize::new(0),
-    };
     let agent = Agent::builder()
         .id(unique_agent_id("dropped-mid-step"))
         .model("claude-haiku")
@@ -293,32 +306,88 @@ async fn a_dropped_run(
         .budget(1.0)
         .build()
         .unwrap();
-    let (durable_start, _started) = DurableStart::channel(invocation_id);
-    let outcome = runner
-        .run_signalling(
-            &agent,
-            &llm,
-            Trigger::named(
-                Uuid::now_v7(),
-                TriggerSource::Manual,
-                None,
-                json!({"input": "go"}),
-            ),
-            Some(1),
-            durable_start,
-        )
-        .await;
-    let row = store
-        .get_invocation_state(&invocation_id.to_string())
-        .await
-        .unwrap();
-    Dropped {
-        outcome,
-        events: recording.events(),
-        row,
-        model_calls: llm.calls.load(Ordering::SeqCst),
-        _dir: dir,
+    World {
+        runner,
+        store,
+        recording,
+        agent,
+        invocation_id,
+        dropper,
+        dir,
     }
+}
+
+impl World {
+    /// A model that does `drop` during its first call, which returns `first`.
+    fn model(&self, drop: Option<Drop>, first: First) -> DroppedDuringCall {
+        DroppedDuringCall {
+            dropper: Dropper {
+                drop,
+                ..self.dropper.clone()
+            },
+            first,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// The run's fresh drive, asking `llm`.
+    async fn run(&self, llm: &DroppedDuringCall) -> Result<InvocationOutcome, ExecutorError> {
+        let (durable_start, _started) = DurableStart::channel(self.invocation_id);
+        self.runner
+            .run_signalling(
+                &self.agent,
+                llm,
+                Trigger::named(
+                    Uuid::now_v7(),
+                    TriggerSource::Manual,
+                    None,
+                    json!({"input": "go"}),
+                ),
+                Some(1),
+                durable_start,
+            )
+            .await
+    }
+
+    /// What the run left: its outcome, the events published from the
+    /// `from`th on, and its row.
+    async fn left(
+        self,
+        outcome: Result<InvocationOutcome, ExecutorError>,
+        from: usize,
+        llm: &DroppedDuringCall,
+    ) -> Dropped {
+        let row = self
+            .store
+            .get_invocation_state(&self.invocation_id.to_string())
+            .await
+            .unwrap();
+        Dropped {
+            outcome,
+            events: self.recording.events().split_off(from),
+            row,
+            model_calls: llm.calls.load(Ordering::SeqCst),
+            _dir: self.dir,
+        }
+    }
+}
+
+/// Drive one fresh run dropped during its first model call, which then
+/// returns `first`, or during `DROPPED_TOOL` when `first` asks for it.
+async fn a_dropped_run(
+    drop: Option<Drop>,
+    during: During,
+    first: First,
+    sink: SinkKind,
+) -> Dropped {
+    let (in_call, in_tool) = match during {
+        During::ModelCall => (drop, None),
+        During::Tool => (None, drop),
+    };
+    let world = a_world(in_tool, sink).await;
+    let llm = world.model(in_call, first);
+    let outcome = world.run(&llm).await;
+    world.left(outcome, 0, &llm).await
 }
 
 /// Where in the step the drop lands.
@@ -335,12 +404,12 @@ enum SinkKind {
     MarksOnFailed,
 }
 
-fn final_answer() -> Option<ChatResponse> {
-    Some(canned("done", 10, 5))
+fn final_answer() -> First {
+    First::Answers(canned("done", 10, 5))
 }
 
-fn a_tool_request(name: &str) -> Option<ChatResponse> {
-    Some(tool_use(name, "tc-0", json!({}), (10, 5)))
+fn a_tool_request(name: &str) -> First {
+    First::Answers(tool_use(name, "tc-0", json!({}), (10, 5)))
 }
 
 const LIVE: Option<Drop> = Some(Drop {
@@ -457,7 +526,13 @@ async fn a_drop_without_a_halt_whose_row_is_handed_off_re_creates_no_row() {
 /// `llm.failure`, the record of what it cost, still goes out.
 #[tokio::test]
 async fn a_live_drop_then_a_failing_call_publishes_no_failed() {
-    let run = a_dropped_run(LIVE, During::ModelCall, None, SinkKind::Recording).await;
+    let run = a_dropped_run(
+        LIVE,
+        During::ModelCall,
+        First::Fails(refused_key),
+        SinkKind::Recording,
+    )
+    .await;
     run.assert_stopped_without_an_ending();
     assert_eq!(run.published("llm_failure"), 1, "the call's own record");
 }
@@ -500,7 +575,13 @@ async fn a_tool_running_when_a_live_drop_lands_finishes_and_is_recorded() {
 /// error. The window is between one row read and one publish.
 #[tokio::test]
 async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_failed_out() {
-    let run = a_dropped_run(None, During::ModelCall, None, SinkKind::MarksOnFailed).await;
+    let run = a_dropped_run(
+        None,
+        During::ModelCall,
+        First::Fails(refused_key),
+        SinkKind::MarksOnFailed,
+    )
+    .await;
     assert_eq!(run.published("failed"), 1, "the run's own failed");
     let failed = run
         .events
@@ -521,4 +602,41 @@ async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_faile
         ("failed", Some(7_000)),
         "the drop's mark landed first, and the run's own did not land over it"
     );
+}
+
+/// Red before the rule reached deferrals. A drop's mark on a runner
+/// holding no halt, during a model call the provider then rate-limits past
+/// the retry policy: the run stops without an ending, and announces no
+/// deferral. Before, it published `invocation.deferred` and returned
+/// `Deferred`, and the dispatcher then queued a resume that could only
+/// find the row finished, holding the agent's concurrency slot for the
+/// whole delay. Handed off as well, the run re-creates no row.
+#[tokio::test]
+async fn a_dropped_run_whose_call_is_then_rate_limited_is_not_deferred() {
+    for drop in [NO_HALT, NO_HALT_HANDED_OFF] {
+        let run = a_dropped_run(
+            drop,
+            During::ModelCall,
+            First::Fails(rate_limited),
+            SinkKind::Recording,
+        )
+        .await;
+        assert_eq!(
+            run.published("invocation_deferred"),
+            0,
+            "{drop:?}: no deferral is announced"
+        );
+        run.assert_stopped_without_an_ending();
+        match drop.map(|drop| drop.handed_off) {
+            Some(true) => assert!(run.row.is_none(), "no row is re-created"),
+            _ => {
+                let row = run.row.as_ref().expect("the drop's row");
+                assert_eq!(
+                    (row.phase.as_str(), row.terminal_at),
+                    ("failed", Some(7_000)),
+                    "the row is the drop's"
+                );
+            }
+        }
+    }
 }
