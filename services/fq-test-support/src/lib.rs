@@ -242,42 +242,44 @@ impl NatsServer {
     /// while, for a test of what a client does then. Dropping a paused
     /// server still kills it.
     ///
-    /// Returns once every thread of the server has stopped. `kill` returns
-    /// as soon as the signal is sent, and a server that has not yet stopped
-    /// answers a request made just after, so a test that went on at once
-    /// would find the broker answering now and then.
+    /// Returns once the server has stopped, as its parent is told: `kill`
+    /// returns as soon as the signal is sent, and a server that has not yet
+    /// stopped answers a request made just after, so a test that went on at
+    /// once would find the broker answering now and then.
     #[cfg(unix)]
     pub fn pause(&self) {
         self.signal(libc::SIGSTOP);
-        #[cfg(target_os = "linux")]
         self.await_stopped();
     }
 
-    /// Block until every thread of the server reports itself stopped in
-    /// `/proc/<pid>/task/*/stat`, whose third field is the state (`T`).
-    #[cfg(target_os = "linux")]
+    /// Block until the server has stopped: `waitid` with `WSTOPPED` reports
+    /// the child only once the whole of it, every thread, has stopped, and
+    /// `WNOWAIT` leaves its status for Drop's own wait. A server continued
+    /// since an earlier pause is not reported stopped until it stops again.
+    #[cfg(unix)]
     fn await_stopped(&self) {
-        let tasks = PathBuf::from(format!("/proc/{}/task", self.child.id()));
-        let stopped = || {
-            std::fs::read_dir(&tasks).is_ok_and(|threads| {
-                threads.flatten().all(|thread| {
-                    std::fs::read_to_string(thread.path().join("stat")).is_ok_and(|stat| {
-                        // The command name, in parentheses, can hold spaces:
-                        // the state is the first field after its closing one.
-                        stat.rsplit_once(')')
-                            .and_then(|(_, rest)| rest.split_whitespace().next())
-                            .is_some_and(|state| state == "T")
-                    })
-                })
-            })
-        };
-        let deadline = Instant::now() + READY_TIMEOUT;
-        while !stopped() {
-            assert!(
-                Instant::now() < deadline,
-                "nats-server did not stop within {READY_TIMEOUT:?} of SIGSTOP"
+        loop {
+            // SAFETY: `siginfo_t` is a plain C struct for which all zeroes
+            // is a valid value, and `waitid` only writes into it. The pid is
+            // this guard's own child, which Drop has not reaped.
+            let waited = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    &mut info,
+                    libc::WSTOPPED | libc::WNOWAIT,
+                )
+            };
+            if waited == 0 {
+                return;
+            }
+            let err = std::io::Error::last_os_error();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::Interrupted,
+                "waiting for nats-server to stop: {err}"
             );
-            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -377,6 +379,35 @@ mod tests {
             client.connection_state(),
             async_nats::connection::State::Connected
         );
+    }
+
+    /// A paused server answers nothing until it is resumed, and a second
+    /// pause waits for the new stop, not the one the first reported: the
+    /// server's own JetStream API is asked each time, on one connection.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_paused_server_answers_nothing_until_it_is_resumed() {
+        let server = test_nats();
+        let client = async_nats::connect(server.url()).await.expect("connect");
+        for round in 1..=3 {
+            server.pause();
+            let paused = tokio::time::timeout(
+                Duration::from_millis(300),
+                client.request("$JS.API.INFO", "".into()),
+            )
+            .await;
+            assert!(paused.is_err(), "round {round}: answered while paused");
+            server.resume();
+            let resumed = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.request("$JS.API.INFO", "".into()),
+            )
+            .await;
+            assert!(
+                matches!(resumed, Ok(Ok(_))),
+                "round {round}: no answer once resumed: {resumed:?}"
+            );
+        }
     }
 
     #[tokio::test]
