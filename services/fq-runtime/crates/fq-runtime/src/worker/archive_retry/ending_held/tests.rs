@@ -545,3 +545,92 @@ async fn totals_agree_with_a_stored_cost_a_fast_parser_would_misread() {
     assert_eq!(totals.total_cost.to_bits(), total.to_bits());
     assert_eq!(totals.total_llm_calls, 3);
 }
+
+/// A broker whose `max_payload` refuses even the held ending: the pass
+/// does not end at that row. Held rows sort first, so a refusal that ended
+/// the pass would leave every row behind it unarchived, on every pass. The
+/// refused held ending is not offered again in the run; the row behind is
+/// archived on each pass.
+#[tokio::test]
+async fn a_held_ending_too_large_itself_does_not_end_the_pass() {
+    let fixture = Fixture::new().await;
+    // An agent id long enough that the held row's held ending is over the
+    // limit, while the healthy row's archive, under a short one, is not.
+    let long_agent = "a".repeat(1_200);
+    let held = Uuid::now_v7();
+    let mut row = InvocationStateRow {
+        invocation_id: held.to_string(),
+        agent_id: long_agent.clone(),
+        schema_version: 1,
+        phase: "failed".to_string(),
+        state_blob: vec![1, 2, 3],
+        step_index: 2,
+        started_at: 1_000,
+        updated_at: 5_000,
+        terminal_at: Some(5_000),
+        workspace_ref: None,
+        archive_status: None,
+        archive_published_at: None,
+        trigger_source: None,
+        trigger_subject: None,
+        trigger_payload: None,
+        terminal_outcome: None,
+        terminal_published_at: None,
+    };
+    let mut stored = unreadable_failed(held);
+    stored.envelope.agent_id = AgentId::new(long_agent).unwrap();
+    row.terminal_outcome = Some(terminal_outcome::encode(&stored).unwrap());
+    fixture.store.upsert_invocation_state(&row).await.unwrap();
+    let healthy = Uuid::now_v7();
+    let mut healthy_row = row.clone();
+    healthy_row.invocation_id = healthy.to_string();
+    healthy_row.agent_id = AGENT.to_string();
+    healthy_row.terminal_outcome = None;
+    fixture
+        .store
+        .upsert_invocation_state(&healthy_row)
+        .await
+        .unwrap();
+    // Archived once already and awaiting its ack, so it sorts behind the
+    // held row, which never was.
+    fixture
+        .store
+        .set_archive_pending(&healthy.to_string(), 1_000)
+        .await
+        .unwrap();
+    let order = fixture.store.list_archive_pending().await.unwrap();
+    assert_eq!(
+        order[0].invocation_id,
+        held.to_string(),
+        "the held row first"
+    );
+    fixture.sink.set_max_payload(1_024);
+
+    let sweeper = fixture.sweeper();
+    for _ in 0..3 {
+        pass(&sweeper)
+            .await
+            .expect("a refused held ending does not end the pass");
+    }
+    let refused: Vec<_> = fixture
+        .sink
+        .refused()
+        .iter()
+        .map(|event| (event.envelope.invocation_id, event.payload.event_type()))
+        .collect();
+    assert_eq!(
+        refused,
+        [(held, "invocation_ending_held")],
+        "offered once in the run, and refused"
+    );
+    let archived = fixture
+        .sink
+        .events()
+        .iter()
+        .filter(|event| {
+            event.envelope.invocation_id == healthy
+                && matches!(event.payload, EventPayload::InvocationArchived(_))
+        })
+        .count();
+    assert_eq!(archived, 3, "the row behind is archived on every pass");
+}
