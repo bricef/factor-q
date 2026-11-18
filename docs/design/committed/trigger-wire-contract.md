@@ -136,7 +136,12 @@ record, and the header carries the identity alone — but it is what makes the
 verb idempotent: one requeue per original, and a second attempt is refused
 with the name of the trigger the first one made. Re-publishing under the
 original's id would have recorded nothing, since the trigger's row is keyed on
-the identity, so there would have been nothing to refuse on.
+the identity, so there would have been nothing to refuse on. A requeue is also
+refused, before anything is published, when the trigger's run has a start on
+record, and, unless the request says the operator checked the run, when the
+daemon cannot tell from its records whether it started
+([#1059](https://github.com/bricef/factor-q/issues/1059)); neither refusal
+changes anything on the wire, and the operator guide has both.
 
 ### The payload
 

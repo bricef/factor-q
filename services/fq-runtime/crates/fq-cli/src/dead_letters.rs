@@ -96,22 +96,18 @@ pub(crate) async fn list_dead_letters(
 ///
 /// A dead letter the watch wrote without checking whether the trigger's
 /// run started (issue 967) gets two lines of its own: that it was not
-/// checked, and how to check it. It may be false, and requeuing a trigger
-/// whose run started runs the work twice. This listing is where an
-/// operator decides whether to requeue, so the check is here.
+/// checked, and what a requeue of it does. It may be false, and requeuing
+/// a trigger whose run started runs the work twice, so
+/// `fq dead-letters requeue` checks the run's records first (issue 1059):
+/// it refuses a start on record, requeues with nothing on record, and
+/// when it still cannot tell, refuses unless given
+/// `--checked-not-started`. The second line says so, and names the run to
+/// check by hand for that last case: its refusal gives the check itself.
 ///
-/// The check reads what `fq invocation show` prints. A run still going in
-/// this daemon has no coordination row (ownership rows are written when a
-/// run turns ambiguous, is archived or dropped, and by startup recovery),
-/// so `status:   (no coordination row)` alone does not mean it never
-/// started: its `Live execution:` block, from the worker's WAL, says it
-/// did. For the same reason `fq invocation list`, which reads only
-/// ownership rows, misses it, and `fq doctor`'s `Current executions` only
-/// counts the runs in flight, so a dead letter that names no run (its
-/// claim, or its mark, could not be read) points at the agent's
-/// `triggered` events, which name each run and carry its payload. A look
-/// is a moment: a copy can still start the run after it, and both lines
-/// say so.
+/// A dead letter that names no run (its claim, or its mark, could not be
+/// read) points at the agent's `triggered` events, which name each run and
+/// carry its payload: `fq invocation list` reads only ownership rows, so
+/// it misses a run still going in this daemon.
 ///
 /// A dead letter the watch wrote for an advisory from an earlier
 /// incarnation of the trigger stream (issue 1054) gets a line saying why it
@@ -144,18 +140,17 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
         ));
         out.push_str(&match &unchecked.invocation_id {
             Some(id) => format!(
-                "      -> before requeueing, run `fq invocation show {id}`: it started if that \
-                 shows a `Live execution:` block, an `archived:` line, a `status:` other than \
-                 `(no coordination row)` or a trigger line saying `durably started`; a copy can \
-                 still start it after you look\n"
+                "      -> `fq dead-letters requeue` checks the run's records first and refuses one \
+                 that started; if it cannot tell, it refuses unless given --checked-not-started, \
+                 which is for once `fq invocation show {id}` shows the run did not start\n"
             ),
             None => format!(
                 "      -> no run is named (the trigger's claim, or this mark, could not be read): \
-                 before requeueing, list {agent}'s runs with `fq events query --agent {agent} \
-                 --type triggered`, find the one with this payload by `fq events get <event-id>`, \
-                 and check it with `fq invocation show <id>`; `fq doctor`'s `Current executions` \
-                 only counts the runs in flight and names the stuck ones; a copy can still start \
-                 the run after you look\n",
+                 `fq dead-letters requeue` checks the run's records first and refuses one that \
+                 started; if it cannot tell, it refuses unless given --checked-not-started, which \
+                 is for once you have found the run among {agent}'s `triggered` events \
+                 (`fq events query --agent {agent} --type triggered`) and `fq invocation show \
+                 <id>` shows it did not start\n",
                 agent = d.agent_id
             ),
         });
@@ -218,13 +213,12 @@ mod tests {
     }
 
     /// One the watch wrote without checking the trigger's start says so,
-    /// with the reason, and gives the check to make before a requeue: what
-    /// in `fq invocation show`'s output says the run started, the live
-    /// block of a run still going included; with no invocation named, how
-    /// to find the run from the agent's `triggered` events, and what
-    /// `fq doctor` cannot tell.
+    /// with the reason, and says what a requeue of it does: the daemon
+    /// checks the records first and refuses a run that started, and the
+    /// override is for when it cannot tell, once the run it names is
+    /// checked; with no invocation named, where to find the run.
     #[test]
-    fn an_unchecked_dead_letter_says_so_and_gives_the_check() {
+    fn an_unchecked_dead_letter_says_so_and_what_a_requeue_does() {
         let named = dead_letter_lines(&dead(Some(fq_ops::dead_letter::StartUnchecked {
             reason: "a copy of the trigger is still handling its claim".to_string(),
             invocation_id: Some("019a0000-0000-7000-8000-000000000001".to_string()),
@@ -232,11 +226,10 @@ mod tests {
         assert!(
             named.ends_with(
                 "      start not checked: a copy of the trigger is still handling its claim; its \
-                 run may have started\n      -> before requeueing, run `fq invocation show \
-                 019a0000-0000-7000-8000-000000000001`: it started if that shows a `Live \
-                 execution:` block, an `archived:` line, a `status:` other than `(no \
-                 coordination row)` or a trigger line saying `durably started`; a copy can still \
-                 start it after you look\n"
+                 run may have started\n      -> `fq dead-letters requeue` checks the run's \
+                 records first and refuses one that started; if it cannot tell, it refuses \
+                 unless given --checked-not-started, which is for once `fq invocation show \
+                 019a0000-0000-7000-8000-000000000001` shows the run did not start\n"
             ),
             "got:\n{named}"
         );
@@ -246,13 +239,13 @@ mod tests {
         })));
         assert!(
             unnamed.contains(
-                "list researcher's runs with `fq events query --agent researcher --type \
-                 triggered`"
+                "found the run among researcher's `triggered` events (`fq events query --agent \
+                 researcher --type triggered`)"
             ),
             "got:\n{unnamed}"
         );
         assert!(
-            unnamed.contains("`fq doctor`'s `Current executions` only counts the runs in flight"),
+            unnamed.contains("refuses unless given --checked-not-started"),
             "got:\n{unnamed}"
         );
     }
