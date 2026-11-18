@@ -178,10 +178,13 @@ so a reader can tell the shipped part from the reserved part.
 | `sources_considered` | array of `Citation` | Reserved — no writer | Sources looked at but not directly used in the payload. Sources actually used belong in a typed `Citation[]` field on the payload. |
 | `flags` | array of strings | **Runtime writes this** | Markers the producer wants downstream humans (or a meta-agent) to see. |
 
-The host also writes `dead_letter_*` keys (trigger id, payload, stream
-sequence, source) on dead-letter events. Those are runtime bookkeeping
-rather than commentary, and are deliberately not part of the reserved
-vocabulary above.
+The host also writes its own keys on dead-letter events:
+`trigger_subject`, `trigger_payload`, `trigger_stream_seq`,
+`trigger_stream_epoch`, `trigger_id`, `dead_letter_source`, and, from
+the advisory watch, `advisory_id`, `unattributed`, `unattributed_kind`,
+`start_unchecked` and `duplicate_check` (`fq-runtime`'s `dead_letter.rs`
+defines each). Those are runtime bookkeeping rather than commentary,
+and are deliberately not part of the reserved vocabulary above.
 
 > **Known divergence:** the runtime's one `flags` writer — the
 > context-pressure warning in `worker/reducer/runner/llm.rs` — emits an

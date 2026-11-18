@@ -373,8 +373,11 @@ the daemon. Two checks first, every time:
    start runs it from the beginning as its next attempt. On the
    trigger's fifth and last delivery it is dead-lettered as
    `trigger_exhausted` instead, although it never ran;
-   `fq dead-letters requeue <agent>` puts it back
-   ([#974](https://github.com/bricef/factor-q/issues/974)).
+   `fq dead-letters requeue <agent>` puts it back when the trigger
+   carried an id and its message could still be read, and otherwise
+   refuses it, and the work is published again with `fq trigger`
+   ([#974](https://github.com/bricef/factor-q/issues/974),
+   [#1080](https://github.com/bricef/factor-q/issues/1080)).
 2. **Disk.** `df -h /` and `docker system df`. Per-invocation
    workspaces and the build caches fill the volume; a full disk killed
    the daemon on 2026-07-20. `build/` and terminal workspaces are
