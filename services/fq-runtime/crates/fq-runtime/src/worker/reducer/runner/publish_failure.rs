@@ -56,9 +56,9 @@
 //! **What recovery reports.** A run that ends here on a resume returns an
 //! error from the resume; startup recovery reads the worker row, finds it
 //! terminal, logs that at warn and publishes nothing ambiguous (#1005).
-//! The control plane's ownership row reads `in_flight` until the archive
-//! is acknowledged, which for a held row is until an operator acts
-//! (#1024); the held row in `fq doctor` is how an operator finds the run.
+//! The control plane's ownership row reads `failed` from the moment the
+//! `failed` is folded, with its archive pending while the archive sweeper
+//! holds the row; `fq doctor` lists the hold with its remedy (#1024).
 //!
 //! **Two resume paths do not come here.** `resume` returns early for a
 //! budget found exceeded on resume and for a provider failure whose

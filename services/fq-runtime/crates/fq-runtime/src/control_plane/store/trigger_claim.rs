@@ -97,8 +97,9 @@ impl TriggerClaimRow {
 
 /// A `claimed` row, with the coordination status of the invocation it
 /// names when the control plane records one. An ownership row is written
-/// when an invocation is archived, found ambiguous or dropped, and is
-/// never swept, so its presence says the run got that far.
+/// when an invocation ends (a `completed`, or a `failed` outside `setup`),
+/// is archived, found ambiguous or dropped, and is never swept, so its
+/// presence says the run got that far.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsettledTriggerClaim {
     pub claim: TriggerClaimRow,
@@ -142,9 +143,12 @@ impl UnsettledTriggerClaim {
 ///
 /// A run has a start on record when either record holds it. The WAL holds
 /// it from its first WAL write until the control plane acknowledges its
-/// archive; the archive hand-off writes the ownership row first, and
-/// nothing sweeps that row, so a run that has left the WAL is on the
-/// ownership table. An operator's drop writes an ownership row too, even
+/// archive; the run's ending writes the ownership row, and the archive
+/// hand-off writes it before the acknowledgement if the ending did not,
+/// and nothing sweeps that row, so a run that has left the WAL is on the
+/// ownership table. A `failed` in `setup`, published only while the run's
+/// WAL holds no row, writes no row, so it records no start.
+/// An operator's drop writes an ownership row too, even
 /// for a run that never made its first WAL write, which counts it as
 /// started on purpose: a dropped run must not be run again. A reader of
 /// both records reads the WAL first, so an archive landing between the two

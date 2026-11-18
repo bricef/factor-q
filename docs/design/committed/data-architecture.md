@@ -1077,9 +1077,14 @@ CREATE TABLE coordination_invocation_owner (
     invocation_id    TEXT PRIMARY KEY,
     worker_id        TEXT NOT NULL,
     assigned_at      INTEGER NOT NULL,
-    status           TEXT NOT NULL,             -- 'in_flight' | 'completed' | 'ambiguous'
+    status           TEXT NOT NULL,             -- 'in_flight' | 'ambiguous' | 'completed' | 'failed'
+    archive_state    TEXT NOT NULL,             -- 'not_due' | 'pending' | 'archived'
     INDEX(worker_id, status)
 );
+-- The row follows the run's outcome: a run's ending moves it, and
+-- archive_state says separately whether the archive has reached the
+-- control plane. Every move is one transition table
+-- (control_plane/ownership.rs), written as a compare-and-set.
 
 -- Pending external waits: approvals, time waits, webhook receivers.
 CREATE TABLE pending_wait (

@@ -200,8 +200,15 @@ async fn a_run_whose_archive_arrives_later_keeps_its_ending() {
     );
 }
 
-/// A `failed` in `setup` is published only for a run that never made its
-/// first WAL write, and a row would record a start that never happened.
+/// A `failed` in `setup` is published only while the run's WAL holds no
+/// row: before its first WAL write, where a row would record a start that
+/// never happened (a reducer whose first step errors is one, and the
+/// runner's archive step after it still logs `archive publish skipped:
+/// invocation_state row missing` at warn), or after a live drop whose
+/// archive was handed off, where the drop is already on record. An
+/// earlier build's `failed` in another phase for such a run does write a
+/// row when a consumer replays it; that is not tested here, since it is
+/// the table's `failed` row, not a decision of its own.
 #[tokio::test]
 async fn a_failure_in_setup_never_writes_a_row() {
     let fixture = Fixture::new().await;

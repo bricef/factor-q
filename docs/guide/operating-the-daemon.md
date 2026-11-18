@@ -369,6 +369,29 @@ fq invocation list --status=in_flight
 fq invocation show <invocation-id>
 ```
 
+`fq invocation list` reads the control plane's ownership rows, and a run
+started from a trigger gets its row when it ends, or when something
+else happens to it first: startup recovery restores it, it is reported
+ambiguous, or you drop it. **A run still running is therefore not in the
+list**, `--status=in_flight` included. `fq doctor`'s current executions
+count it, and `fq invocation show <id>` shows its live execution
+([#721](https://github.com/bricef/factor-q/issues/721) is the open
+question of a row from the run's start). A run that has ended reads
+`completed` or `failed` from the moment its ending is folded, whether or
+not its archive has reached the control plane yet.
+
+If the coordination consumer reads the event stream again from its
+start, because its durable was deleted and recreated, it meets the
+`failed` events of builds before
+[#1024](https://github.com/bricef/factor-q/issues/1024) too. Some of
+those name a phase other than `setup` for a run that never started,
+and each such run gets a `failed` row whose archive never arrives,
+which reads as a start on record. A row this build cannot read, a
+status or archive state written by hand or by a newer build, is left as
+it is: events for it are logged at warn and passed over, and startup
+recovery logs it at error and decides from the worker's WAL whether to
+resume the run.
+
 `ambiguous` is the state that needs a decision: the daemon knows a tool
 dispatch was issued but not whether it took effect, so it will not replay
 on its own. Two verbs settle it, and which one you want depends on
@@ -389,6 +412,14 @@ fq invocation drop <invocation-id>
 `drop`, unless you pass `--live`, which halts it at its next step
 boundary first. `fq doctor` composes the same signals into one report if
 you would rather start from a summary.
+
+A drop ends the run as `failed` from whatever its ownership row says, a
+finished run included, and writes the run's archive record itself, with
+no state. A worker's archive that arrives after the drop keeps the
+drop's ending. What that leaves inconsistent, a dropped completed run
+whose archive record still says `completed`, and a run whose real final
+state is lost when the drop lands before the worker's archive, is
+[#1070](https://github.com/bricef/factor-q/issues/1070).
 
 Startup recovery also reports an invocation `ambiguous` when it resumed
 one on its own and the resume could not be carried out, leaving the
@@ -418,12 +449,44 @@ A resumed run that ends is not one of these, even when it ends in
 `failed` and the resume returns an error. Its `failed` is published,
 and the daemon logs `resume returned an error, but the invocation has
 ended; not reporting it ambiguous` at warn, with the error. Its
-ownership row reads `failed` once its `invocation.archived` is
-acknowledged, and `in_flight` until then, which for a run whose archive
-the broker refuses is for as long as it is refused
+ownership row reads `failed` from the moment the `failed` is folded,
+whether or not the archive is ever delivered
 ([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
 [#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
 reported ambiguous as well, and left for an operator to triage.
+
+A run that published its `failed` and died before marking its WAL row
+terminal is not resumed at the next start. A run that fails part-way
+through a step publishes `failed` before it marks its WAL row, so the
+daemon can die in between. Once the coordination consumer has folded
+that `failed`, the ownership row records the ending, and the next
+start's recovery, which reads the ownership rows before it classifies
+anything, marks the WAL row terminal and hands it to the archive
+sweeper: the first ending stands. Before
+[#1024](https://github.com/bricef/factor-q/issues/1024) such a run was
+always resumed, and could end a second time.
+
+If the daemon died before the `failed` was folded as well, the row
+records no ending, and recovery resumes the run as it always has. The
+coordination consumer then starts and folds the old `failed`, a moment
+later, so the ownership row reads `failed` while the resumed run
+executes: `fq invocation show` shows no live execution for it, and
+`fq doctor`'s current executions and the stuck-invocation sweep pass it
+by. If the resumed run then completes, that is a second ending,
+refused, and the row stays `failed` while the run's archive record says
+`completed`. A restart while the run is still going ends it, since that
+start's recovery finds the `failed` on record. The window is the
+milliseconds between the `failed` and the WAL mark. Recovery folding
+the coordination backlog before it classifies is item 3 of
+[#1070](https://github.com/bricef/factor-q/issues/1070).
+
+A second ending that reaches the control plane is refused and logged at
+error, `two endings published for one run; the ownership row keeps the
+ending it recorded`, with the ending `recorded`, the one `reported`, and
+the event type. When the recorded ending is an operator's drop whose
+archive is already written, as when you drop a run as it finishes, the
+same refusal is logged at warn instead: `an ending reached a run whose
+recorded ending is already archived, as after an operator's drop`.
 
 A report that reaches the control plane after the run is recorded
 `completed` or `failed`, a drop included, leaves the ownership row as it
@@ -432,9 +495,10 @@ you drop a run with `--live` while it is inside a tool call, and the
 daemon dies before the step boundary and before it has folded the drop;
 the next start's recovery finds the run in flight with the tool handed
 off and reports it ambiguous, after the drop on the event stream. The
-daemon logs `invocation.ambiguous for a run already recorded finished;
-the ownership row keeps its status` at warn, with the `invocation_id`,
-the `agent_id`, the status it kept (`recorded`) and the late report's
+daemon logs `event for a run already recorded finished; the ownership
+row keeps its status` at warn, with the `invocation_id`, the `agent_id`,
+the `event_type` (`invocation_ambiguous`), the state it kept
+(`recorded`, as `status/archive_state`) and the late report's
 `stuck_entity` and `note`, which say whether it came from startup
 categorisation (a dispatch kind) or from a resume that could not be
 carried out (`recovery`, with the error). There is nothing to triage.
@@ -486,7 +550,15 @@ A row the sweeper cannot publish, it **holds**, for one of the three
 reasons below. It publishes nothing more for a held row, leaves the row
 in `worker.db` exactly as it is, and carries on with every other row.
 Until the hold is lifted, the control plane sees that invocation as not
-archived. The daemon log reports a held row once per daemon run, at
+archived. It does see it as finished, once the run's terminal event is
+folded: the ownership row reads `completed` or `failed`, with its
+archive still pending, so `fq invocation list` shows the run ended. A
+row held
+because its stored terminal event will not be republished, or because
+its ids cannot go on an event, never tells the control plane that the
+run ended, so its ownership row stays as it was, absent or `in_flight`
+([#1071](https://github.com/bricef/factor-q/issues/1071)); `fq doctor`
+lists it. The daemon log reports a held row once per daemon run, at
 error level, and `fq doctor` and `fq status` list every held row with
 its invocation, the reason and the remedy. `fq doctor` counts each one
 as an issue, because none lifts on its own:
@@ -999,12 +1071,10 @@ the same limit unless the rest of the request, its tool definitions
 mostly, took more than a quarter of it. A run that ended at a refused
 `tool.result` or terminal event does not hold that event in its state,
 so it archives unless the conversation before it was already too
-large. Until a held row's
-archive is acknowledged, the run's ownership row reads `in_flight`, so
-`fq invocation list` shows a run that has ended as still in flight
-until an operator acts on the hold
-([#1024](https://github.com/bricef/factor-q/issues/1024), open); the
-held row in `fq doctor` is how to find it.
+large. Such a run reads `failed` in `fq invocation list` once its
+`failed` is folded, and the held row in `fq doctor` gives the reason
+and the remedy
+([#1024](https://github.com/bricef/factor-q/issues/1024)).
 
 ## When an invocation stops making progress
 
@@ -1479,8 +1549,8 @@ WAL holds the run, in flight or finished and not yet archived), an
 `archived:` line, a `status:` other than `(no coordination row)`, or a
 `trigger:` line saying `durably started`. A run still going in this
 daemon has no coordination row, since ownership rows are written only
-when a run turns ambiguous, is archived or is dropped, and by startup
-recovery: for it the output says `status:   (no coordination row)` and
+when a run ends (a `completed`, or a `failed` outside `setup`), turns
+ambiguous, is archived or is dropped, and by startup recovery: for it the output says `status:   (no coordination row)` and
 then shows the `Live execution:` block, so that status alone does not
 mean the run never started. The run has not started if the command
 answers `no invocation found with id=…`, or shows none of the four,
