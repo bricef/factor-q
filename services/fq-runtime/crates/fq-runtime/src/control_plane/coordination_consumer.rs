@@ -38,7 +38,8 @@
 //! question: a healthy worker can host a wedged invocation, and
 //! the roster cannot see that. One timer for both, because they
 //! are one finding — nothing has moved for too long — read from
-//! two different stores.
+//! two different stores. Both wait while startup recovery decides
+//! ([`hold_sweeps`]).
 //!
 //! Delivery semantics (the loop and ack policy live in
 //! [`super::durable_consumer`]):
@@ -83,7 +84,9 @@ use super::store::{
 
 mod ack_wait;
 mod operator_recovered;
+mod sweep_hold;
 pub use ack_wait::ACK_WAIT;
+pub use sweep_hold::{SweepHold, SweepRelease, hold_sweeps};
 
 /// Name of the durable JetStream consumer the coordination
 /// consumer creates. Distinct from the projection consumer's
@@ -156,6 +159,9 @@ pub struct CoordinationConsumer {
     /// worker WAL to read, and in the unit tests that only exercise the
     /// handler.
     stuck_sweep: Option<Arc<super::liveness::StuckSweep>>,
+    /// Holds both sweeps until startup recovery has decided, when the
+    /// daemon starts this consumer before it ([`hold_sweeps`]).
+    sweeps_held: Option<SweepHold>,
 }
 
 impl CoordinationConsumer {
@@ -172,7 +178,14 @@ impl CoordinationConsumer {
             runtime_id: Uuid::now_v7(),
             watermark: None,
             stuck_sweep: None,
+            sweeps_held: None,
         }
+    }
+
+    /// Sweep nothing on a tick until `hold` is released (issue 1070).
+    pub fn with_sweeps_held(mut self, hold: SweepHold) -> Self {
+        self.sweeps_held = Some(hold);
+        self
     }
 
     /// Run the stuck-invocation sweep on this consumer's tick (#37).
@@ -313,6 +326,9 @@ impl CoordinationConsumer {
             },
             Duration::from_millis(self.sweep_interval_ms),
             || async move {
+                if this.sweeps_held.as_ref().is_some_and(SweepHold::is_held) {
+                    return;
+                }
                 if let Err(err) = this.sweep_stale_workers().await {
                     warn!(error = %err, "stale-worker sweep failed");
                 }
@@ -699,6 +715,9 @@ mod outcome_tests;
 
 #[cfg(test)]
 mod ack_wait_tests;
+
+#[cfg(test)]
+mod sweep_hold_tests;
 
 #[cfg(test)]
 mod tests {
