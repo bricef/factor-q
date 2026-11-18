@@ -111,7 +111,7 @@ async fn another_failure(bus: &EventBus, agent: &str) {
 }
 
 /// Publish a trigger for `agent` with an id of its own.
-async fn trigger(bus: &EventBus, agent: &str) -> crate::trigger::PublishedTrigger {
+pub(super) async fn trigger(bus: &EventBus, agent: &str) -> crate::trigger::PublishedTrigger {
     bus.publish_trigger(&AgentId::new(agent).unwrap(), &json!({ "input": "work" }))
         .await
         .expect("publish the trigger")
@@ -322,58 +322,6 @@ async fn a_nameless_dead_letter_does_not_follow_a_named_one() {
     assert_eq!(
         dead_letters_on(&bus, &subjects::agent_failed(AgentId::SYSTEM_STR)).await,
         0
-    );
-}
-
-/// **A search for a dead letter that names the trigger that runs out of
-/// time decides again inside the limit, and writes past it.** The agent
-/// failed again after the dispatcher's dead letter, so the watch has to
-/// read the agent's failures since the trigger was published, and here it
-/// is given no time to. Inside the limit the advisory comes back as an
-/// error, to be NAKed and decided again, and nothing is written; past the
-/// limit the dead letter is written, a second one, saying the check could
-/// not be made.
-#[tokio::test]
-async fn a_search_out_of_time_decides_again_and_past_the_limit_writes() {
-    let (_server, bus, agent) = broker().await;
-    let published = trigger(&bus, &agent).await;
-    let advisory = stamped_at_the_streams_creation(&bus, &exhaust(&bus, &agent).await);
-    dispatcher_dead_letter(&bus, &agent, published.stream_seq, published.id).await;
-    another_failure(&bus, &agent).await;
-    let hurried =
-        AdvisoryWatch::without_records(bus.clone()).with_scan_limit(std::time::Duration::ZERO);
-
-    let inside = hurried.handle_advisory(&advisory, 1).await;
-    assert!(
-        matches!(inside, Err(AdvisoryWatchError::Log(_))),
-        "{inside:?}"
-    );
-    assert_eq!(dead_letters(&bus, &agent).await, 1);
-
-    let past = hurried
-        .with_held_verdict_limit(PAST)
-        .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS)
-        .await
-        .unwrap();
-    assert_eq!(past, AdvisoryOutcome::Emitted);
-    assert_eq!(dead_letters(&bus, &agent).await, 2);
-    let written = super::test_kit::last_failed(&bus, &agent)
-        .await
-        .expect("the dead letter written past the limit");
-    assert_eq!(
-        written.annotations.0.get("duplicate_check"),
-        Some(&json!(
-            "could not be made: event log read error: reading the log for a dead letter \
-             already written took longer than 0ns"
-        )),
-        "the dead letter says its duplicate check could not be made"
-    );
-    assert_eq!(
-        written
-            .annotations
-            .0
-            .get(crate::dead_letter::DEAD_LETTER_TRIGGER_ID_KEY),
-        Some(&json!(published.id.to_string()))
     );
 }
 
