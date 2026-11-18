@@ -81,6 +81,23 @@
 //! path's loop; [`ReducerRunner::end_unstarted_on_refusal`] at the fresh
 //! path's two points before its first WAL write, its own `triggered` and
 //! the unavailable-MCP refusal's, where the trigger is in hand.
+//!
+//! **The phase of a `failed` says whether the run started.** This module
+//! also holds [`ReducerRunner::publish_failed`], which every `failed` the
+//! runner publishes goes through, except the terminal event a step stores
+//! in its WAL row (a run with a row has started by definition). It stamps
+//! the phase from the run's WAL row at that moment: `Setup` when there is
+//! no row, whatever the run was doing, and never `Setup` when there is
+//! one. Readers take `Setup` to mean that the run never made its first WAL
+//! write, so it has no start on record, and a `failed` that said
+//! otherwise would let the control plane record a start that never
+//! happened, mark the trigger's claim started, and drop every copy of the
+//! trigger after it (issue 1024). Before the first WAL write there are
+//! four ways to fail: a `triggered` or a host notice too large for the
+//! broker, a reducer step that errors before the step's row is written,
+//! and a refusal for an unavailable MCP server, whose own events can be
+//! refused for size too. Each used to carry the phase of what it was
+//! doing, and only the first was `Setup`.
 
 use std::time::Instant;
 
@@ -93,7 +110,9 @@ use super::{ReducerRunner, map_store_err, terminal};
 use crate::agent::{Agent, AgentId};
 use crate::bus::{BusError, EventSink};
 use crate::dead_letter::{DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY};
-use crate::events::{Event, EventKind, FailureDetail, FailureKind, FailurePhase, InvocationTotals};
+use crate::events::{
+    Event, EventKind, EventPayload, FailureDetail, FailureKind, FailurePhase, InvocationTotals,
+};
 use crate::trigger::Trigger;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::{ExecutorError, InvocationOutcome};
@@ -186,11 +205,26 @@ impl Refused {
     }
 }
 
+/// The phase a `failed` carries: `Setup` exactly when its run has no WAL
+/// row (`started` is false), and otherwise `doing`, the phase of what the
+/// run was doing when it failed. A run with a row that names `Setup` is a
+/// caller's mistake, and gets `Reducer`, the phase of the loop itself,
+/// since `Setup` would tell every reader the run never started.
+pub(super) fn phase_for(started: bool, doing: FailurePhase) -> FailurePhase {
+    match (started, doing) {
+        (false, _) => FailurePhase::Setup,
+        (true, FailurePhase::Setup) => FailurePhase::Reducer,
+        (true, doing) => doing,
+    }
+}
+
 /// The phase a run is in when it publishes an event of this type, for
 /// the `failed` that event's refusal ends it with. Every type is named so
 /// that a new one has to be placed here; the types the runner never
 /// publishes for an invocation fall to `Reducer`, the phase of the loop
-/// itself.
+/// itself. Whether the run had started decides over this
+/// ([`phase_for`]): a run publishes `triggered` only before its first
+/// WAL write, so its arm agrees.
 fn phase_of(event_type: EventKind) -> FailurePhase {
     match event_type {
         EventKind::Triggered => FailurePhase::Setup,
@@ -271,10 +305,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         totals.total_duration_ms = start.elapsed().as_millis() as u64;
         let failed = refused.failed_event(agent_id, invocation_id, totals);
         if row.is_none() {
-            // Nothing durable, so nothing to mark or archive. No path
-            // reaches this today: the fresh path's `triggered` ends in
-            // `end_unstarted_on_refusal`, which also names the trigger.
-            self.publish_chained(cursor, failed).await?;
+            // Nothing durable, so nothing to mark or archive: a host
+            // notice queued before the first step and refused for its
+            // size. The fresh path's `triggered` ends in
+            // `end_unstarted_on_refusal` instead, which also names the
+            // trigger.
+            self.publish_failed(cursor, invocation_id, failed).await?;
             return Err(refused.failure());
         }
         self.end_mid_step(cursor, invocation_id, failed).await?;
@@ -323,7 +359,36 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if let Some(subject) = &trigger.subject {
             failed = failed.annotate(DEAD_LETTER_SUBJECT_KEY, json!(subject));
         }
-        self.publish_chained(&mut None, failed).await?;
+        self.publish_failed(&mut None, invocation_id, failed)
+            .await?;
         Err(refused.failure())
+    }
+
+    /// Publish `failed` for `invocation_id`, its phase stamped from the
+    /// run's WAL row as it stands ([`phase_for`]): `Setup` when there is no
+    /// row, whatever the run was doing, and never `Setup` when there is
+    /// one. Every `failed` the runner publishes comes through here except
+    /// the terminal event a step stores in its row (`terminal.rs`), whose
+    /// run has a row by then. The row is read before the publish, and
+    /// nothing else creates it meanwhile: only this run's own loop writes
+    /// a first row, and it is the caller. A store that cannot be read
+    /// returns its error, transient, and nothing is published.
+    pub(super) async fn publish_failed(
+        &self,
+        cursor: &mut Option<Uuid>,
+        invocation_id: Uuid,
+        mut failed: Event,
+    ) -> Result<(), ExecutorError> {
+        let started = self
+            .config
+            .store
+            .get_invocation_state(&invocation_id.to_string())
+            .await
+            .map_err(map_store_err)?
+            .is_some();
+        if let EventPayload::Failed(payload) = &mut failed.payload {
+            payload.phase = phase_for(started, payload.phase);
+        }
+        self.publish_chained(cursor, failed).await
     }
 }

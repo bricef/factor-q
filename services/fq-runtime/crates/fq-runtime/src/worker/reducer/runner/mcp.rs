@@ -209,9 +209,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // archive. Routing through it would read the store for a row
         // that cannot exist and warn that it was missing, calling a
         // documented logic bug on a path where the absence is the
-        // point.
-        self.publish_chained(
+        // point. The `failed` still goes out through `publish_failed`,
+        // the one place a `failed`'s phase is decided: with no row it
+        // is `Setup`, as built here.
+        self.publish_failed(
             &mut cursor,
+            invocation_id,
             Event::new(
                 agent_id,
                 invocation_id,
