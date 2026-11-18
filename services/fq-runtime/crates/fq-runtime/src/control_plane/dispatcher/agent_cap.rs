@@ -95,6 +95,7 @@
 
 use tracing::{debug, info, warn};
 
+use super::claim::Claimed;
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
@@ -120,12 +121,13 @@ impl TriggerDispatcher {
     pub(super) async fn admit_agent_slot(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
         payload: &serde_json::Value,
     ) -> Option<AgentSlot> {
         let Declared::Cap(cap) = self.declared(agent).await else {
-            return self.refuse_removed(msg, agent, trigger_id).await;
+            return self.refuse_removed(msg, claim, agent, trigger_id).await;
         };
         if let Some(slot) = self.agent_caps.try_enter(agent, cap) {
             return Some(slot);
@@ -142,13 +144,14 @@ impl TriggerDispatcher {
         );
         loop {
             if !self.hold_tick(msg, trigger_id).await {
-                self.requeue_held(msg, agent, trigger_id, payload).await;
+                self.requeue_held(msg, claim, agent, trigger_id, payload)
+                    .await;
                 return None;
             }
             // Re-read every tick: a slot may have freed, `fq reload` may
             // have changed the cap, and it may have taken the agent away.
             let Declared::Cap(cap) = self.declared(agent).await else {
-                return self.refuse_removed(msg, agent, trigger_id).await;
+                return self.refuse_removed(msg, claim, agent, trigger_id).await;
             };
             let Some(slot) = self.agent_caps.try_enter(agent, cap) else {
                 continue;
@@ -202,6 +205,7 @@ impl TriggerDispatcher {
     pub(super) async fn requeue_held(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
         payload: &serde_json::Value,
@@ -222,7 +226,7 @@ impl TriggerDispatcher {
                     "drain or shutdown while the trigger waited; requeued it \
                      for the next binary as its first delivery"
                 );
-                self.ack(msg, Some(id), "requeued from a hold").await;
+                self.ack(msg, claim, Some(id), "requeued from a hold").await;
             }
             Err(err) => warn!(
                 agent_id = %agent,
@@ -263,6 +267,7 @@ impl TriggerDispatcher {
     async fn refuse_removed(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         agent: &AgentId,
         trigger_id: Option<uuid::Uuid>,
     ) -> Option<AgentSlot> {
@@ -272,7 +277,7 @@ impl TriggerDispatcher {
             "agent was removed while its trigger was held; dropping the trigger \
              rather than running a definition that is no longer loaded"
         );
-        self.ack(msg, trigger_id, "agent removed during a cap hold")
+        self.ack(msg, claim, trigger_id, "agent removed during a cap hold")
             .await;
         None
     }

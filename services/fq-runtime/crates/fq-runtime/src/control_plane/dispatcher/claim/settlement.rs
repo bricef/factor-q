@@ -52,7 +52,7 @@ use std::time::Duration;
 use tracing::error;
 
 use super::super::{TriggerDispatcher, trigger_name};
-use super::keeping_alive;
+use super::{Claimed, keeping_alive};
 
 /// How long settling waits for the claim's release before answering the
 /// delivery without it.
@@ -106,10 +106,11 @@ impl TriggerDispatcher {
     pub(in crate::control_plane::dispatcher) async fn settle<'a>(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         trigger_id: Option<uuid::Uuid>,
         answer: impl Future<Output = Answer<'a>>,
     ) {
-        self.settle_within(msg, trigger_id, answer, RELEASE_BOUND)
+        self.settle_within(msg, claim, trigger_id, answer, RELEASE_BOUND)
             .await;
     }
 
@@ -118,15 +119,16 @@ impl TriggerDispatcher {
     pub(in crate::control_plane::dispatcher) async fn settle_within<'a>(
         &self,
         msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
         trigger_id: Option<uuid::Uuid>,
         answer: impl Future<Output = Answer<'a>>,
         release_bound: Duration,
     ) {
         keeping_alive(msg, trigger_id, async {
             let answer = answer.await;
-            let released = tokio::time::timeout(release_bound, self.release_unstarted_claim(msg));
+            let released = tokio::time::timeout(release_bound, self.release_unstarted_claim(claim));
             if released.await.is_err() {
-                let stream_seq = msg.info().map_or(0, |info| info.stream_sequence);
+                let stream_seq = claim.stream_seq;
                 error!(stream_seq, subject = %msg.subject, trigger_id = %trigger_name(trigger_id),
                     context = answer.context(), waited_ms = release_bound.as_millis() as u64,
                     "gave up waiting for the claim store to release a trigger's claim; answering \
