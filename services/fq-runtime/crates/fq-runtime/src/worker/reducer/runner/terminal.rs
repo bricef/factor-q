@@ -294,14 +294,17 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// #946), so this is the point at which `invocation_state` is marked
     /// terminal, after the publish: a lost `failed` leaves the row in
     /// flight for recovery. Idempotent: a no-op on the row if it is
-    /// already terminal (an operator transition got there first).
+    /// already terminal (an operator transition got there first). The
+    /// `failed` goes out through `publish_failed`, so a run that fails
+    /// before its first row is written (a reducer whose first step errors)
+    /// fails in `Setup`, whatever phase the caller built it with.
     pub(super) async fn end_mid_step(
         &self,
         cursor: &mut Option<Uuid>,
         invocation_id: Uuid,
         failed: Event,
     ) -> Result<(), ExecutorError> {
-        self.publish_chained(cursor, failed).await?;
+        self.publish_failed(cursor, invocation_id, failed).await?;
         let terminal_at_ms = self.config.clock.unix_now_ms();
         self.ensure_terminal("failed", invocation_id, terminal_at_ms)
             .await

@@ -301,3 +301,28 @@ async fn a_refusal_for_an_unavailable_mcp_server_fails_in_setup_at_each_publish(
         );
     }
 }
+
+/// The rule itself, both ways round. No caller builds a `Setup` failure
+/// for a run with a row today; if one did, the run would read as never
+/// started, so the rule gives it the phase of the loop instead.
+#[test]
+fn the_phase_is_setup_exactly_when_the_run_has_no_wal_row() {
+    use super::super::publish_failure::phase_for;
+    for doing in [
+        FailurePhase::Setup,
+        FailurePhase::Reducer,
+        FailurePhase::HostStepBudget,
+        FailurePhase::Budget,
+        FailurePhase::LlmRequest,
+        FailurePhase::LlmResponse,
+        FailurePhase::ToolCall,
+        FailurePhase::ToolResult,
+    ] {
+        assert!(matches!(phase_for(false, doing), FailurePhase::Setup));
+        assert!(!matches!(phase_for(true, doing), FailurePhase::Setup));
+    }
+    assert!(matches!(
+        phase_for(true, FailurePhase::ToolCall),
+        FailurePhase::ToolCall
+    ));
+}
