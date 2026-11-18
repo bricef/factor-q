@@ -282,16 +282,24 @@ mod tests {
             ),
             "got:\n{named}"
         );
+        // With no run named, a claim `fq doctor` does not list shows
+        // nothing, and nothing on the dead letter finds its run: the line
+        // says both, in the words of `dead_letter.requeue`'s refusal.
         let unnamed = dead_letter_lines(&nameless(None));
         assert!(
             unnamed.ends_with(
                 "      -> it cannot be requeued, and it names neither the trigger nor its run (the \
-                 claim, or this mark, could not be read); if `fq doctor` lists a stranded trigger \
-                 claim at seq 12, that claim names the invocation id its delivery reserved and \
-                 says whether a run is on record\n"
+                 claim, or this mark, could not be read). A stranded trigger claim `fq doctor` \
+                 lists at seq 12 names the invocation id its delivery reserved and says whether a \
+                 run is on record, but `fq doctor` lists only a claim still held and judged \
+                 stranded, never one whose run started and marked it, so its listing none does \
+                 not show that the run did not start; and with no subject or payload on it to \
+                 match among the `triggered` events, no check on the operator's surfaces can \
+                 show that its run did not start: treat its work as possibly run\n"
             ),
             "got:\n{unnamed}"
         );
+        assert!(!unnamed.contains("if `fq doctor` lists"), "got:\n{unnamed}");
         assert!(!unnamed.contains("before requeueing"), "got:\n{unnamed}");
     }
 
