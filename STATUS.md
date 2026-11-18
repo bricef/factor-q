@@ -406,12 +406,27 @@ since an advisory dropped while held would leave no dead letter at
 all: a last look then counts any start it finds, and otherwise the
 watch writes the dead letter anyway, logs it at error, and marks it in
 `fq dead-letters list` as one whose start was not checked, with the
-reason and the check to make before a requeue. What stays open is
-narrow. That dead letter can be false, since the run may have started,
-or may start after the hour, and requeuing it then runs the work twice;
-the mark is there so that the run is checked first, and
-`fq dead-letters requeue` does not refuse one
-([#1059](https://github.com/bricef/factor-q/issues/1059)). An advisory
+reason and the invocation the claim names. That dead letter can be
+false, since the run may have started, or may start after the hour, and
+requeuing it then would run the work twice. So `fq dead-letters requeue`
+takes the verdict itself, for every dead letter, marked or not, before
+it reserves or publishes anything, asking the records the watch asks
+([#1059](https://github.com/bricef/factor-q/issues/1059)): a run with a
+start on record is refused, naming it, whatever the operator passes;
+nothing on record is requeued; and when it cannot tell (the records
+cannot be read, a copy is still handling the claim, or a marked dead
+letter's claim is gone, given back or swept, which look the same) it is
+refused unless the operator passes `--checked-not-started` after
+checking the run it names. What stays open is narrow. That flag is the
+operator's word, and a copy still handling the claim can start the run
+after they look. A claim is kept for
+`[state] trigger_claim_retention_days`, 90 days by default and never
+under two, so an unmarked dead letter whose run started after it was
+written, by a copy its writer did not see such as a replay of the
+stream, is refused until its claim is swept and then reads as nothing on
+record. And a dead letter written before the trigger stream was last
+created is not judged by the stream's claims, which key on its
+incarnation, so an unmarked one is requeued without a look. An advisory
 emitted before the trigger stream was last created is dead-lettered
 without a look at the claims, since its sequence names a message of the
 old stream, so its dead letter may record a trigger whose run started.

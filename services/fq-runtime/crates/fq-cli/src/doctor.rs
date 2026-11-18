@@ -150,9 +150,10 @@ fn render_doctor_report_human(report: &DoctorReport) -> String {
             report.dead_letters.exhausted_triggers
         ));
         out.push_str(
-            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run, \
-             but for one the listing marks `start not checked` make the check it gives first: a \
-             run still going shows in `fq invocation show` only as a `Live execution:` block\n",
+            "  -> `fq dead-letters list` to inspect; `fq dead-letters requeue <agent>` to re-run: \
+             it checks the run's records first, refuses a run that started, and when it cannot \
+             tell (the listing marks some `start not checked`) refuses unless given \
+             --checked-not-started after you check the run its refusal names\n",
         );
     } else {
         out.push_str("Dead-letters: none\n");

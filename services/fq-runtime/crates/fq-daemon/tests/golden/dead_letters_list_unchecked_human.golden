@@ -4,6 +4,6 @@
       trigger exhausted after 5 deliveries (limit 5) [advisory]
       payload: {"n":3}
       start not checked: a copy of the trigger is still handling its claim; its run may have started
-      -> before requeueing, run `fq invocation show 6b000000-0000-7000-8000-000000000006`: it started if that shows a `Live execution:` block, an `archived:` line, a `status:` other than `(no coordination row)` or a trigger line saying `durably started`; a copy can still start it after you look
+      -> `fq dead-letters requeue` checks the run's records first and refuses one that started; if it cannot tell, it refuses unless given --checked-not-started, which is for once `fq invocation show 6b000000-0000-7000-8000-000000000006` shows the run did not start
 
 -> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one

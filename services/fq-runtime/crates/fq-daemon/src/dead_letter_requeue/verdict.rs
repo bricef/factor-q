@@ -47,12 +47,12 @@
 //!   least two days and ninety by default. Past that, the claim is gone
 //!   and the dead letter reads as nothing on record; the residue is
 //!   stated where the guide and `STATUS.md` say what stays open.
-//! - **A marked one cannot be told.** Its writer could not check, so the
-//!   claim it names was in hand then, and its absence now is either a
-//!   claim given back without a start or one swept after a start, which
-//!   can be within days of the dead letter, since the claim may be older
-//!   than it by as long as the watch held its verdict and the daemon was
-//!   down.
+//! - **A marked one cannot be told.** Its writer could not check, so
+//!   nothing says what was on record when it was written, and a claim
+//!   absent now is either one given back without a start or one swept
+//!   after a start. The sweep can come within days of the dead letter,
+//!   since the claim may be older than it by as long as the watch held
+//!   its verdict and the daemon was down.
 //!
 //! The dispatcher's own dead letter, written on the fifth failed delivery,
 //! is the first kind: its claim is released as the delivery is answered,
