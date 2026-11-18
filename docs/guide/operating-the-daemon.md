@@ -439,9 +439,13 @@ once the drop has reached the worker's record of the run, the run
 publishes no ending of its own: no `completed`, even if that last model
 call gave a final answer, and no `failed` if that call or tool fails
 ([#1070](https://github.com/bricef/factor-q/issues/1070)). The drop is
-the outcome. The one exception is a failure published in the instant
-the drop reaches the worker, between the run reading its record and
-publishing: the run is then recorded as failing with its own error.
+the outcome. The one exception is a failure in the instant the drop
+reaches the worker, after the run has read its record to publish that
+failure and before it marks the record itself: a window about as long
+as one message to the broker and back. The run then publishes its own
+`failed`, with its own error, and its own archive, after the drop. The
+drop's ending and archive record stand, as above, and both say
+`failed`.
 
 Startup recovery also reports an invocation `ambiguous` when it resumed
 one on its own and the resume could not be carried out, leaving the

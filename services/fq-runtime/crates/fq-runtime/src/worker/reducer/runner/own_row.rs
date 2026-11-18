@@ -41,10 +41,22 @@
 //! hand off from the row the drop finished.
 //!
 //! **The one exception.** A mid-step `failed` is published before the run
-//! marks its row, so a drop's mark that lands between `publish_failed`'s
-//! read of the row and the publish lets the run's own `failed` through:
-//! the run is recorded as failing with its own error. The window is one
-//! row read and one publish wide.
+//! marks its row (`end_mid_step`, `terminal.rs`), so a drop's mark that
+//! lands after `publish_failed` has read the row and before the run's own
+//! mark (`ensure_terminal`) lets the run's own `failed` through, and then
+//! its own `invocation.archived`, which `publish_archived_and_mark_pending`
+//! publishes for the row it finds finished. The stream then carries the
+//! run's own `failed`, with its own error, after the drop; the ownership
+//! row and the archive record keep the drop's ending, which the drop's
+//! fold wrote before its mark. The window is one row read, one publish the
+//! broker acknowledges (as long as a round trip to the broker takes), and
+//! one more row read. Both the drop and the run say `failed`, so the
+//! record does not contradict itself. It is not closed here: closing it means
+//! making the run's mark come first, conditional, with the `failed` stored
+//! in it, and deciding from whether it landed, as a `failed` the reducer
+//! decides already is. That reverses the mid-step order (publish, then
+//! mark) and is a change of its own, needed before a run's own ending may
+//! replace a drop's on the ownership row.
 //!
 //! **Telling "never started" from "started, then handed off".** A run with
 //! no row may be one that never made its first write, whose `failed` is
