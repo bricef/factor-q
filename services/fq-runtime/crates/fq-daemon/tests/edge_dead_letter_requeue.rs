@@ -403,9 +403,28 @@ impl World {
     }
 
     /// Ask for a requeue that must be refused, and check it left nothing
-    /// behind: no trigger published, no reservation of `original`.
+    /// behind: no trigger published, no reservation of `original`, and,
+    /// when it could not tell, the claim at the requested sequence as it
+    /// was. (A start found in the records may mark the claim; that refusal
+    /// says so, and the tests that reach it check the mark.)
     async fn refused(&self, input: serde_json::Value, original: Uuid) -> fq_edge::wire::WireError {
         let tip = self.trigger_tip().await;
+        let claim = |input: &serde_json::Value| {
+            let seq = input["trigger_seq"].as_u64();
+            async move {
+                match seq {
+                    Some(seq) => format!(
+                        "{:?}",
+                        self.control_plane()
+                            .await
+                            .trigger_claim(self.claim_key(seq))
+                            .await
+                    ),
+                    None => String::new(),
+                }
+            }
+        };
+        let claim_before = claim(&input).await;
         let err = self
             .invoke(REQUEUE, input.clone())
             .await
@@ -420,7 +439,59 @@ impl World {
             None,
             "a refused requeue must reserve nothing; it answered {err:?}"
         );
+        if matches!(err, fq_edge::wire::WireError::InvalidInput { .. }) {
+            assert_eq!(
+                claim(&input).await,
+                claim_before,
+                "a requeue refused for want of a verdict must leave the claim as it was"
+            );
+        }
         err
+    }
+
+    /// A row in the daemon's worker WAL for `invocation`, in flight: the
+    /// record a run's first WAL write leaves.
+    async fn wal_row(&self, invocation: &str, agent: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        fq_runtime::WorkerStore::open(&self.stores().worker)
+            .await
+            .expect("open the daemon's worker store")
+            .upsert_invocation_state(&fq_runtime::worker::InvocationStateRow {
+                invocation_id: invocation.to_string(),
+                agent_id: agent.to_string(),
+                schema_version: 1,
+                phase: "running".to_string(),
+                state_blob: b"{}".to_vec(),
+                step_index: 0,
+                started_at: now,
+                updated_at: now,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: Some("subject".to_string()),
+                trigger_subject: None,
+                trigger_payload: None,
+                terminal_outcome: None,
+                terminal_published_at: None,
+            })
+            .await
+            .expect("write the WAL row");
+    }
+
+    /// An ownership row for `invocation`, completed: the record an
+    /// archived run leaves, which nothing sweeps.
+    async fn owner_row(&self, invocation: &str) {
+        self.control_plane()
+            .await
+            .upsert_invocation_ownership(
+                invocation,
+                GONE_WORKER,
+                chrono::Utc::now().timestamp_millis(),
+                OwnerStatus::Completed,
+            )
+            .await
+            .expect("the run's ownership row");
     }
 
     /// Ask for a requeue that must go through, and return the trigger it
@@ -1041,11 +1112,133 @@ async fn with_no_sequence_a_refusal_names_the_dead_letter_it_took() {
         "the refusal is about the newest alone; got {err}"
     );
 
+    // **The override names its dead letter.** It is the operator's word
+    // about one dead letter's run, and with no sequence the request takes
+    // whichever is the newest when it arrives, which need not be the one
+    // they checked: refused, before anything is selected.
+    let err = world
+        .refused(
+            json!({ "agent_id": AGENT, "checked_not_started": true }),
+            newer,
+        )
+        .await;
+    let fq_edge::wire::WireError::InvalidInput { op, message } = &err else {
+        panic!("the override without a sequence is an InvalidInput; got {err:?}");
+    };
+    assert_eq!(op, "dead_letter.requeue");
+    for expected in ["checked_not_started", "trigger_seq", "--trigger-seq"] {
+        assert!(
+            message.contains(expected),
+            "the refusal must say `{expected}`; got {message}"
+        );
+    }
+
     let requeued = world
-        .requeued(json!({ "agent_id": AGENT, "checked_not_started": true }))
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 52, "checked_not_started": true }))
         .await;
     assert_eq!(requeued.requeued_from, Some(newer));
 
+    world.shutdown();
+}
+
+/// **A start under the run the mark names is a start on record.** The
+/// watch wrote this dead letter naming the run X its claim named; the copy
+/// it was waiting for then started X, which finished and was archived, so
+/// the ownership table holds X, and that row is never swept. When requeue
+/// has no claim of this stream to consult, it does not stop at "cannot
+/// tell": it asks the records by X's own id, and a start found there is
+/// refused, with or without the override. Two ways to have no claim: the
+/// claim was swept (sequence 81), and the dead letter predates the trigger
+/// stream the daemon now consumes, after the stream was recreated and the
+/// daemon restarted (sequence 82).
+#[tokio::test]
+async fn a_start_under_the_run_the_mark_names_is_refused_when_no_claim_can_be_consulted() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+    let before_this_stream = chrono::DateTime::from_timestamp_nanos(
+        world.bus.trigger_stream_epoch() - 3_600 * 1_000_000_000,
+    );
+
+    for (seq, earlier_stream) in [(81, false), (82, true)] {
+        let original = Uuid::now_v7();
+        let run = Uuid::now_v7().to_string();
+        let (event, event_id) = dead_letter(seq, Some(original), json!({ "n": seq }));
+        let mut event = unchecked(
+            event,
+            "a copy of the trigger is still handling its claim",
+            Some(&run),
+        );
+        if earlier_stream {
+            event.envelope.timestamp = before_this_stream;
+        }
+        world.seed(&event, Some(original)).await;
+        world.owner_row(&run).await;
+
+        for input in [
+            json!({ "agent_id": AGENT, "trigger_seq": seq }),
+            json!({ "agent_id": AGENT, "trigger_seq": seq, "checked_not_started": true }),
+        ] {
+            let err = world.refused(input, original).await;
+            assert_started(&err, &run, event_id, seq);
+            assert!(
+                err.to_string()
+                    .contains("on the control plane's record as completed"),
+                "the refusal says where the start is; got {err}"
+            );
+        }
+    }
+
+    world.shutdown();
+}
+
+/// **The claims cannot be read, and the WAL holds the run the mark
+/// names.** The claim that would name the run cannot be read, so the
+/// check cannot decide; the dead letter's mark names X, and the worker's
+/// WAL holds X in flight. A start found by X's own id is a start on
+/// record: refused, with or without the override.
+#[tokio::test]
+async fn when_the_claims_cannot_be_read_a_start_under_the_run_the_mark_names_is_refused() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let run = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(91, Some(original), json!({"n": 91}));
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&run),
+    );
+    world.seed(&event, Some(original)).await;
+    world.wal_row(&run, AGENT).await;
+
+    let store = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        world.stores().control_plane.display()
+    ))
+    .await
+    .expect("open the claim store");
+    sqlx::query("ALTER TABLE trigger_claim RENAME TO trigger_claim_out_of_reach")
+        .execute(&store)
+        .await
+        .expect("hide the claim table");
+
+    for input in [
+        json!({ "agent_id": AGENT, "trigger_seq": 91 }),
+        json!({ "agent_id": AGENT, "trigger_seq": 91, "checked_not_started": true }),
+    ] {
+        let err = world.refused(input, original).await;
+        assert_started(&err, &run, event_id, 91);
+        assert!(
+            err.to_string().contains("in flight in the worker's WAL"),
+            "the refusal says where the start is; got {err}"
+        );
+    }
+
+    sqlx::query("ALTER TABLE trigger_claim_out_of_reach RENAME TO trigger_claim")
+        .execute(&store)
+        .await
+        .expect("restore the claim table");
     world.shutdown();
 }
 
@@ -1231,6 +1424,46 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
     ] {
         let err = world.refused(input, first.id).await;
         assert_started(&err, &first_run, event_id, first.stream_seq);
+    }
+
+    // **Requeue takes the last look.** A third trigger is claimed and
+    // waiting for the worker, a copy still handling its claim, and the
+    // worker's WAL already holds the run its claim names. The check's
+    // verdict alone would say "cannot tell" (a copy is handling the claim)
+    // and the override would pass it; the last look reads the WAL for that
+    // run and finds the start. Refused with and without the override, and
+    // the claim is marked started, as the watch's last look marks it.
+    let third = world
+        .bus
+        .publish_trigger(&agent, &json!({"n": 3}))
+        .await
+        .expect("publish the third trigger");
+    let held = world
+        .claim_until(third.stream_seq, "claimed", |row| !row.durably_started)
+        .await;
+    let third_run = held.invocation_id.expect("a claim names its run");
+    world.wal_row(&third_run, RUNNER).await;
+    let (event, event_id) =
+        dead_letter_for(RUNNER, third.stream_seq, Some(third.id), json!({"n": 3}));
+    world.seed(&event, Some(third.id)).await;
+    for input in [
+        json!({ "agent_id": RUNNER, "trigger_seq": third.stream_seq }),
+        json!({
+            "agent_id": RUNNER,
+            "trigger_seq": third.stream_seq,
+            "checked_not_started": true,
+        }),
+    ] {
+        let err = world.refused(input, third.id).await;
+        assert_started(&err, &third_run, event_id, third.stream_seq);
+        assert!(
+            world
+                .claim_row(third.stream_seq)
+                .await
+                .expect("the claim is still there")
+                .durably_started,
+            "the last look's start marks the claim; got {err}"
+        );
     }
 
     world.kill();
