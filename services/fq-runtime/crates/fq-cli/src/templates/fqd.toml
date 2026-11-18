@@ -267,6 +267,19 @@ models = ["claude-haiku-4-5"]
 # wrong, and those are what should move. Unset by default.
 # stuck_threshold_override_secs = 4210
 #
+# How long startup recovery waits, in seconds, for the coordination
+# consumer to fold what is already on the event stream before it decides
+# which invocations to resume (#1070). The boot, the edge included, waits
+# with it; normally the fold takes a moment. An invocation the wait could
+# not check is not resumed at this start: the daemon logs it at error,
+# and a later start resumes it once the consumer has caught up. If that
+# error comes at every start, find out why before raising this. A halted
+# consumer (`fq doctor` says so) waits for a build that reads the event
+# it halted on, however long the bound; a reset durable reads the whole
+# stream again, so restart once it has caught up; a slow disk slows every
+# fold. Raise it only for a backlog that is long and moving. Default 30.
+# recovery_backlog_wait_secs = 30
+#
 # Worker-side knobs for the archive hand-off retry sweeper. The
 # sweeper republishes `invocation.archived` for any terminal row
 # whose control-plane ack hasn't arrived yet.
