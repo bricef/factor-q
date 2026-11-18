@@ -139,7 +139,10 @@ fn names_no_trigger(d: &fq_ops::dead_letter::DeadLetter) -> bool {
 /// `Live execution:` block included, since a run still going in this daemon
 /// has no coordination row, and that a copy can still start the run after
 /// you look. With no run named either, its `seq=` is still the handle
-/// `fq doctor`'s stranded trigger claims are listed by. An earlier
+/// `fq doctor`'s stranded trigger claims are listed by, but a claim the
+/// report does not list shows nothing, and nothing on such a dead letter
+/// finds its run, so its line says so in `dead_letter.requeue`'s words
+/// ([`fq_ops::dead_letter::AN_UNLISTED_CLAIM_SHOWS_NOTHING`]). An earlier
 /// incarnation's carries no mark, since the watch consulted no claim for
 /// it, so its own line says the start was not checked.
 fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
@@ -183,11 +186,17 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
                  `archived:` line, a `status:` other than `(no coordination row)` or a trigger \
                  line saying `durably started`; a copy can still start it after you look\n"
             ),
+            // The refusal's words, from one source: a claim `fq doctor`
+            // does not list shows nothing, and nothing on a nameless
+            // dead letter finds its run.
             (None, Some(_)) => format!(
                 "      -> it cannot be requeued, and it names neither the trigger nor its run (the \
-                 claim, or this mark, could not be read); if `fq doctor` lists a stranded trigger \
-                 claim at seq {seq}, that claim names the invocation id its delivery reserved and \
-                 says whether a run is on record\n"
+                 claim, or this mark, could not be read). A stranded trigger claim `fq doctor` \
+                 lists at seq {seq} names the invocation id its delivery reserved and says \
+                 whether a run is on record, but {}; and with no subject or payload on it to \
+                 match among the `triggered` events, {}\n",
+                fq_ops::dead_letter::AN_UNLISTED_CLAIM_SHOWS_NOTHING,
+                fq_ops::dead_letter::NOTHING_SHOWS_IT_DID_NOT_START,
             ),
             (Some(id), None) => format!(
                 "      -> `fq dead-letters requeue` checks the run's records first and refuses one \
