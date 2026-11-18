@@ -55,6 +55,28 @@ async fn a_compare_and_set_lands_only_on_the_state_it_expects() {
             .unwrap()
     );
     assert!(
+        !store
+            .compare_and_set_ownership(
+                "inv",
+                Some(archived),
+                RowState::ended(Ending::Completed, ArchiveState::Archived),
+                Some("other"),
+                Some(3),
+            )
+            .await
+            .unwrap(),
+        "not from the row's status with another archive state"
+    );
+    assert_eq!(
+        store.get_invocation_owner("inv").await.unwrap().map(|row| (
+            row.state(),
+            row.worker_id,
+            row.assigned_at
+        )),
+        Some((pending, "w".to_string(), 1)),
+        "a write refused for its archive state wrote nothing"
+    );
+    assert!(
         store
             .compare_and_set_ownership("inv", Some(pending), archived, Some("real"), None)
             .await
