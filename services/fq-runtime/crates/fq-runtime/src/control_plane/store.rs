@@ -46,15 +46,17 @@ pub use crate::db::schema::{Compatibility, check_compatibility};
 /// Schema class name used in the shared `schema_meta` table.
 pub const SCHEMA_CLASS: &str = "control_plane";
 
-/// Schema version this binary expects for the control-plane
-/// tables. Bump on incompatible schema changes.
-pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = 2;
+/// Schema version this binary expects for the control-plane tables: the
+/// last rung of `MIGRATIONS`, so a rung renumbered or added is the one
+/// line that moves it.
+pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
-/// The migration ladder, one rung per version. Future migrations:
-/// add a `(version, SQL)` rung and bump [`CONTROL_PLANE_SCHEMA_VERSION`].
+/// The migration ladder, one rung per version. Future migrations: add a
+/// `(version, SQL)` rung.
 const MIGRATIONS: &[Migration] = &[
     (1, CONTROL_PLANE_TABLES_V1_SQL),
     (2, TRIGGER_CLAIM_TABLE_V2_SQL),
+    (3, ownership::ARCHIVE_STATE_V3_SQL),
 ];
 
 const CONTROL_PLANE_TABLES_V1_SQL: &str = r#"
@@ -202,6 +204,7 @@ pub struct OwnerRow {
     pub worker_id: String,
     pub assigned_at: i64,
     pub status: OwnerStatus,
+    pub archive_state: ArchiveState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,7 +586,9 @@ impl ControlPlaneStore {
     /// dispatch path writes no row, so there may be none), and the archive
     /// hand-off and an operator's drop to record a run's ending. A report
     /// of ambiguity goes through `mark_invocation_ambiguous` instead, which
-    /// never moves a finished row.
+    /// never moves a finished row. The archive's state written is the one
+    /// a row with this status had before the column existed
+    /// ([`ArchiveState::recorded_before_v3`]).
     pub async fn upsert_invocation_ownership(
         &self,
         invocation_id: &str,
@@ -594,18 +599,20 @@ impl ControlPlaneStore {
         sqlx::query(
             r#"
             INSERT INTO coordination_invocation_owner
-                (invocation_id, worker_id, assigned_at, status)
-            VALUES (?, ?, ?, ?)
+                (invocation_id, worker_id, assigned_at, status, archive_state)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(invocation_id) DO UPDATE SET
                 worker_id = excluded.worker_id,
                 assigned_at = excluded.assigned_at,
-                status = excluded.status
+                status = excluded.status,
+                archive_state = excluded.archive_state
             "#,
         )
         .bind(invocation_id)
         .bind(worker_id)
         .bind(assigned_at)
         .bind(status.as_str())
+        .bind(ArchiveState::recorded_before_v3(status).as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -617,7 +624,7 @@ impl ControlPlaneStore {
     ) -> Result<Option<OwnerRow>, ControlPlaneStoreError> {
         let row = sqlx::query(
             r#"
-            SELECT invocation_id, worker_id, assigned_at, status
+            SELECT invocation_id, worker_id, assigned_at, status, archive_state
             FROM coordination_invocation_owner WHERE invocation_id = ?
             "#,
         )
@@ -636,7 +643,7 @@ impl ControlPlaneStore {
     ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT invocation_id, worker_id, assigned_at, status
+            SELECT invocation_id, worker_id, assigned_at, status, archive_state
             FROM coordination_invocation_owner WHERE worker_id = ?
             ORDER BY assigned_at
             "#,
@@ -653,7 +660,7 @@ impl ControlPlaneStore {
     ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT invocation_id, worker_id, assigned_at, status
+            SELECT invocation_id, worker_id, assigned_at, status, archive_state
             FROM coordination_invocation_owner WHERE status = ?
             ORDER BY assigned_at
             "#,
@@ -897,7 +904,7 @@ impl ControlPlaneStore {
             Some(s) => {
                 sqlx::query(
                     r#"
-                    SELECT invocation_id, worker_id, assigned_at, status
+                    SELECT invocation_id, worker_id, assigned_at, status, archive_state
                     FROM coordination_invocation_owner
                     WHERE status = ?
                     ORDER BY assigned_at DESC
@@ -912,7 +919,7 @@ impl ControlPlaneStore {
             None => {
                 sqlx::query(
                     r#"
-                    SELECT invocation_id, worker_id, assigned_at, status
+                    SELECT invocation_id, worker_id, assigned_at, status, archive_state
                     FROM coordination_invocation_owner
                     ORDER BY assigned_at DESC
                     LIMIT ?
@@ -946,11 +953,16 @@ fn row_to_owner(row: sqlx::sqlite::SqliteRow) -> Result<OwnerRow, ControlPlaneSt
     let status = OwnerStatus::parse(&status_str).ok_or_else(|| {
         ControlPlaneStoreError::Malformed(format!("unknown owner status `{status_str}`"))
     })?;
+    let archive_str: String = row.get("archive_state");
+    let archive_state = ArchiveState::parse(&archive_str).ok_or_else(|| {
+        ControlPlaneStoreError::Malformed(format!("unknown archive state `{archive_str}`"))
+    })?;
     Ok(OwnerRow {
         invocation_id: row.get("invocation_id"),
         worker_id: row.get("worker_id"),
         assigned_at: row.get("assigned_at"),
         status,
+        archive_state,
     })
 }
 
@@ -1034,7 +1046,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 }
 
 mod ownership;
-pub use ownership::AmbiguousMark;
+pub use ownership::{AmbiguousMark, ArchiveState};
 
 mod trigger_claim;
 pub use trigger_claim::{

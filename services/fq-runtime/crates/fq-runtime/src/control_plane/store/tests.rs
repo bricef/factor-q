@@ -87,26 +87,44 @@ async fn open_fresh() -> (ControlPlaneStore, tempfile::TempDir) {
     (store, dir)
 }
 
+/// A control-plane file at schema `version`, built by the ladder's first
+/// `version` rungs as a build of that version built it. A rung that is not
+/// idempotent (v3 adds a column) cannot be replayed over a file that has
+/// it, so an older file is built, not a newer one stamped back.
+async fn store_at_version(path: &Path, version: usize) -> Pool<Sqlite> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = schema::connect_store_pool(options, 1).await.unwrap();
+    schema::bootstrap_versioned(&pool, SCHEMA_CLASS, version as u32, &MIGRATIONS[..version])
+        .await
+        .expect("a store at the older version");
+    pool
+}
+
 #[tokio::test]
 async fn control_plane_ladder_upgrades_populated_database() {
-    // v1 is currently the only historical schema, and its DDL is all
-    // CREATE TABLE IF NOT EXISTS — so stamping v0 and reopening replays
-    // a no-op ladder. This pins the NeedsUpgrade dispatch, the version
-    // restamp, and row survival; when v2 adds real DDL, grow this into
-    // the per-step harness the worker store has.
+    // Pins the NeedsUpgrade dispatch, the version restamp, and row
+    // survival, over a file the first rung built. Since v3 adds a column
+    // (real DDL) the older file is built by the older ladder rather than
+    // stamped back from a current one.
     let dir = tempdir().unwrap();
     let path = dir.path().join("control-plane.db");
-    let store = ControlPlaneStore::open(&path).await.unwrap();
-    store
-        .register_worker("migration-worker", "sim-host", 1_000)
-        .await
-        .unwrap();
-    store.write_schema_version(0).await.unwrap();
-    drop(store);
+    let pool = store_at_version(&path, 1).await;
+    sqlx::query(
+        "INSERT INTO coordination_worker \
+         (worker_id, host, registered_at, last_heartbeat, status) \
+         VALUES ('migration-worker', 'sim-host', 1000, 1000, 'alive')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
 
     let store = ControlPlaneStore::open(&path)
         .await
-        .expect("reopen a v0-stamped store");
+        .expect("reopen a v1 store");
     let worker = store
         .get_worker("migration-worker")
         .await
@@ -1219,16 +1237,13 @@ async fn each_trigger_claim_sweep_takes_only_its_own_state() {
 async fn schema_v1_upgrades_to_trigger_claim_v2() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("control-plane.db");
-    let store = ControlPlaneStore::open(&path).await.unwrap();
-    sqlx::query("DROP TABLE trigger_claim")
-        .execute(&store.pool)
-        .await
-        .unwrap();
-    store.write_schema_version(1).await.unwrap();
-    drop(store);
+    store_at_version(&path, 1).await.close().await;
 
     let upgraded = ControlPlaneStore::open(&path).await.unwrap();
-    assert_eq!(upgraded.read_schema_version().await.unwrap(), Some(2));
+    assert_eq!(
+        upgraded.read_schema_version().await.unwrap(),
+        Some(CONTROL_PLANE_SCHEMA_VERSION)
+    );
     assert_eq!(
         upgraded
             .claim_trigger(key(1), "worker", "inv", 0)

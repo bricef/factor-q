@@ -6,8 +6,14 @@
 //! status kept. A wrong answer would log a refusal as a mark, or warn on
 //! every redelivery, with the row itself still right; so each case below
 //! pins the answer and the row together.
+//!
+//! The archive's state the row keeps beside its status, and the rung that
+//! adds it, are tested below them.
 
+use super::super::{MIGRATIONS, SCHEMA_CLASS};
 use super::*;
+use crate::db::schema;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use tempfile::tempdir;
 
 const ID: &str = "019a0000-0000-7000-8000-000000001024";
@@ -136,4 +142,87 @@ async fn an_unknown_status_is_an_error_and_left_alone() {
     .await
     .unwrap();
     assert_eq!(status, "weird");
+}
+
+/// A control plane at schema version 2, holding one row of each status,
+/// opened by this build: each row gets the archive's state its status had
+/// before the column existed, and the store is at the current version.
+#[tokio::test]
+async fn the_v3_rung_gives_every_existing_row_its_archive_state() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = schema::connect_store_pool(options, 1).await.unwrap();
+    schema::bootstrap_versioned(&pool, SCHEMA_CLASS, 2, &MIGRATIONS[..2])
+        .await
+        .expect("a version 2 store");
+    for status in [
+        OwnerStatus::InFlight,
+        OwnerStatus::Ambiguous,
+        OwnerStatus::Completed,
+        OwnerStatus::Failed,
+    ] {
+        sqlx::query(
+            "INSERT INTO coordination_invocation_owner \
+             (invocation_id, worker_id, assigned_at, status) VALUES (?, 'w', 1, ?)",
+        )
+        .bind(status.as_str())
+        .bind(status.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let store = ControlPlaneStore::open(&path).await.expect("migrates");
+    assert_eq!(
+        store.read_schema_version().await.unwrap(),
+        Some(super::super::CONTROL_PLANE_SCHEMA_VERSION)
+    );
+    for (status, archive) in [
+        (OwnerStatus::InFlight, ArchiveState::NotDue),
+        (OwnerStatus::Ambiguous, ArchiveState::NotDue),
+        (OwnerStatus::Completed, ArchiveState::Archived),
+        (OwnerStatus::Failed, ArchiveState::Archived),
+    ] {
+        let row = store
+            .get_invocation_owner(status.as_str())
+            .await
+            .unwrap()
+            .expect("the row survives the migration");
+        assert_eq!((row.status, row.archive_state), (status, archive));
+        assert_eq!(ArchiveState::recorded_before_v3(status), archive);
+    }
+}
+
+#[test]
+fn archive_state_round_trips() {
+    for state in [
+        ArchiveState::NotDue,
+        ArchiveState::Pending,
+        ArchiveState::Archived,
+    ] {
+        assert_eq!(ArchiveState::parse(state.as_str()), Some(state));
+    }
+    assert_eq!(ArchiveState::parse("held"), None);
+}
+
+/// The column refuses a state the runtime never writes.
+#[tokio::test]
+async fn the_column_refuses_an_unknown_archive_state() {
+    let dir = tempdir().unwrap();
+    let store = ControlPlaneStore::open(&dir.path().join("control-plane.db"))
+        .await
+        .unwrap();
+    let refused = sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES ('inv', 'w', 1, 'completed', 'held')",
+    )
+    .execute(&store.pool)
+    .await;
+    assert!(refused.is_err(), "{refused:?}");
 }
