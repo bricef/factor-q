@@ -1,21 +1,41 @@
-//! A `failed` is in the `Setup` phase exactly when its run never made its
-//! first WAL write (issue 1024).
+//! A `failed` is in the `Setup` phase exactly when its run has no WAL row
+//! as it is published (issue 1024): before the run's first WAL write, or
+//! after an operator's live drop whose archive was handed off, which
+//! deletes the row.
 //!
-//! Readers take `Setup` to mean the run never started: the control plane
-//! records no start for it, so its trigger's claim is not marked started
-//! and a copy of the trigger can still run. Any other phase on a run with
-//! no WAL row would record a start that never happened; `Setup` on a run
-//! with a row would hide one that did.
+//! Readers take `Setup` to mean the run has no start on record: the
+//! control plane records no start for it, so its trigger's claim is not
+//! marked started and a copy of the trigger can still run. Any other
+//! phase on a run that never started would record a start that never
+//! happened; `Setup` on a run with a row would hide one that did. After a
+//! live drop, the drop is already the run's recorded outcome.
 //!
 //! Every test publishes through [`WalWitness`], which notes for each
 //! event whether the run had a WAL row at that moment, and each `failed`
-//! is checked against that note. The first test is the gate: it refuses
-//! every publish of a fresh run in turn, a host notice queued before the
-//! first step included, so a publish added before the first WAL write is
-//! refused by it too, and a `failed` that does not follow the rule fails
-//! it. The other two are the failures that are not size refusals: a
-//! reducer whose first step errors, and a refusal for an unavailable MCP
-//! server, whose own events are refused in turn as well.
+//! is checked against that note. Which test holds which caller of
+//! `publish_failed`, so that bypassing it fails the test named:
+//!
+//! - `end_on_refused_publish` with no row (a host notice queued before
+//!   the first step and refused): the sweep, at its second publish.
+//! - `end_unstarted_on_refusal`: the unavailable-MCP test, when the
+//!   refusal's own `failed` is refused. The sweep's first publish,
+//!   `triggered`, comes here too, but a refused `triggered` is named
+//!   `Setup` by its event type, so a bypass would not show there.
+//! - `end_mid_step` with no row: the reducer whose first step errors, and
+//!   the run dropped live mid-call. The sweep's refusals after the first
+//!   WAL write come here with a row, where a bypass would not show.
+//! - `refuse_for_unavailable_mcp`: builds its `failed` in `Setup`, so a
+//!   bypass would publish the same event and nothing would show.
+//!
+//! The sweep also checks what each refusal ends the run in, which makes it
+//! the gate for a publish added to a run: refused before the first WAL
+//! write, a `failed` in `Setup`; refused while the row is in flight, a
+//! `failed` in the phase of the refused event; refused once the row is
+//! terminal, no `failed`. Beyond these tests, every event a runner
+//! publishes in the test build passes a check that a `failed` in any
+//! phase but `Setup` has a WAL row (`check_failed_phase` in
+//! `publish_failure.rs`), so every test that drives a run to such a
+//! `failed` fails, whichever path built it.
 
 use super::*;
 use crate::bus::{BusError, EventSink};
@@ -29,14 +49,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// The `max_payload` a refused publish is reported against.
 const LIMIT: usize = 4 * 1024;
 
+/// What the WAL held for an event's run when the event was offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAt {
+    Absent,
+    InFlight,
+    Terminal,
+}
+
 /// A sink that notes, for every event it takes, whether the event's run
 /// had a WAL row when it was published, and refuses one publish, chosen
-/// by its index, as a broker refuses an event over its `max_payload`.
+/// by its index, as a broker refuses an event over its `max_payload`,
+/// noting the refused event's type and the row it was offered with.
 struct WalWitness {
     store: Arc<WorkerStore>,
     refuse_at: Option<usize>,
     next: AtomicUsize,
     published: Mutex<Vec<(Event, bool)>>,
+    refused: Mutex<Option<(EventKind, RowAt)>>,
 }
 
 impl WalWitness {
@@ -46,11 +76,16 @@ impl WalWitness {
             refuse_at,
             next: AtomicUsize::new(0),
             published: Mutex::new(Vec::new()),
+            refused: Mutex::new(None),
         })
     }
 
     fn published(&self) -> Vec<(Event, bool)> {
         self.published.lock().unwrap().clone()
+    }
+
+    fn refused(&self) -> Option<(EventKind, RowAt)> {
+        *self.refused.lock().unwrap()
     }
 }
 
@@ -58,23 +93,29 @@ impl WalWitness {
 impl EventSink for WalWitness {
     async fn publish(&self, event: &Event) -> Result<u64, BusError> {
         let index = self.next.fetch_add(1, Ordering::SeqCst);
-        if self.refuse_at == Some(index) {
-            return Err(BusError::PayloadTooLarge {
-                event_type: EventKind::from(&event.payload),
-                size: 2 * LIMIT,
-                limit: LIMIT,
-            });
-        }
-        let started = self
+        let row = match self
             .store
             .get_invocation_state(&event.envelope.invocation_id.to_string())
             .await
             .expect("the WAL reads")
-            .is_some();
+        {
+            None => RowAt::Absent,
+            Some(row) if row.terminal_at.is_some() => RowAt::Terminal,
+            Some(_) => RowAt::InFlight,
+        };
+        let event_type = EventKind::from(&event.payload);
+        if self.refuse_at == Some(index) {
+            *self.refused.lock().unwrap() = Some((event_type, row));
+            return Err(BusError::PayloadTooLarge {
+                event_type,
+                size: 2 * LIMIT,
+                limit: LIMIT,
+            });
+        }
         self.published
             .lock()
             .unwrap()
-            .push((event.clone(), started));
+            .push((event.clone(), row != RowAt::Absent));
         Ok(index as u64)
     }
 }
@@ -150,10 +191,50 @@ fn agent(prefix: &str) -> Agent {
         .unwrap()
 }
 
+/// The phases of the `failed` events in `published`, as the wire spells
+/// them.
+fn failed_phases(published: &[(Event, bool)]) -> Vec<String> {
+    published
+        .iter()
+        .filter_map(|(event, _)| match &event.payload {
+            EventPayload::Failed(failed) => Some(
+                serde_json::to_value(failed.phase)
+                    .expect("a phase serialises")
+                    .as_str()
+                    .expect("a phase is a string")
+                    .to_string(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The phase the schema gives the `failed` that ends a run in flight when
+/// the broker refuses an event of this type, written out here rather than
+/// taken from the runner, whose mapping is what is under test.
+fn phase_when_refused_in_flight(event_type: EventKind) -> &'static str {
+    match event_type {
+        EventKind::LlmRequest => "llm_request",
+        EventKind::LlmDispatched | EventKind::LlmResponse => "llm_response",
+        EventKind::ToolCall | EventKind::ToolDispatched => "tool_call",
+        EventKind::ToolResult => "tool_result",
+        other => panic!(
+            "the sweep refused {other:?} on a run in flight; say here what phase \
+             its refusal ends the run in"
+        ),
+    }
+}
+
+/// What a sink took from one run, and what it refused.
+struct Taken {
+    published: Vec<(Event, bool)>,
+    refused: Option<(EventKind, RowAt)>,
+}
+
 /// One fresh run of a two-turn script, with a host notice queued for it
 /// before its first step, through a sink that refuses its `refuse_at`th
-/// publish. Returns what the sink took.
-async fn a_fresh_run(refuse_at: Option<usize>) -> Vec<(Event, bool)> {
+/// publish.
+async fn a_fresh_run(refuse_at: Option<usize>) -> Taken {
     let dir = tempdir().unwrap();
     let store = open_store(dir.path()).await;
     let sink = WalWitness::new(store.clone(), refuse_at);
@@ -195,37 +276,66 @@ async fn a_fresh_run(refuse_at: Option<usize>) -> Vec<(Event, bool)> {
             durable_start,
         )
         .await;
-    sink.published()
+    Taken {
+        published: sink.published(),
+        refused: sink.refused(),
+    }
 }
 
 /// The gate: every publish of a fresh run refused in turn, from its
 /// `triggered` to its archive. A refusal before the first WAL write ends
-/// the run on a `failed` in `Setup`; one after it, on a `failed` in the
-/// phase of what was refused.
+/// the run on one `failed`, in `Setup`; one while the row is in flight,
+/// on one `failed` in the phase of the refused event
+/// ([`phase_when_refused_in_flight`]); one once the row is terminal, on
+/// none, since the outcome was already decided.
 #[tokio::test]
 async fn a_run_refused_at_each_publish_fails_in_setup_only_before_its_first_wal_write() {
     let clean = a_fresh_run(None).await;
     assert!(
         clean
+            .published
             .iter()
             .any(|(event, _)| matches!(event.payload, EventPayload::Completed(_))),
         "the script completes when nothing is refused"
     );
-    let (mut unstarted, mut started) = check_failures(&clean, "nothing refused");
-    for refuse_at in 0..clean.len() {
-        let published = a_fresh_run(Some(refuse_at)).await;
-        let (u, s) = check_failures(&published, &format!("publish {refuse_at} refused"));
-        unstarted += u;
-        started += s;
+    assert_eq!(check_failures(&clean.published, "nothing refused"), (0, 0));
+    let (mut before, mut in_flight, mut terminal) = (0, 0, 0);
+    for refuse_at in 0..clean.published.len() {
+        let run = a_fresh_run(Some(refuse_at)).await;
+        let context = format!("publish {refuse_at} refused");
+        check_failures(&run.published, &context);
+        let (event_type, row) = run
+            .refused
+            .unwrap_or_else(|| panic!("{context}: the sink refused nothing"));
+        let expected: Vec<&str> = match row {
+            RowAt::Absent => {
+                before += 1;
+                vec!["setup"]
+            }
+            RowAt::InFlight => {
+                in_flight += 1;
+                vec![phase_when_refused_in_flight(event_type)]
+            }
+            RowAt::Terminal => {
+                terminal += 1;
+                vec![]
+            }
+        };
+        assert_eq!(
+            failed_phases(&run.published),
+            expected,
+            "{context}: {event_type:?}, offered with the run's row {row:?}"
+        );
     }
-    // The sweep reached both sides of the first WAL write: `triggered`
-    // and the host notice before it, and the events of the first turn
-    // after it.
+    // The sweep reached every side of the first WAL write: `triggered`
+    // and the host notice before it, the events of both turns after it,
+    // and the outcome and archive once the row is terminal.
     assert!(
-        unstarted >= 2,
-        "{unstarted} runs failed before their first WAL write"
+        before >= 2,
+        "{before} publishes refused before the first WAL write"
     );
-    assert!(started >= 2, "{started} runs failed after it");
+    assert!(in_flight >= 2, "{in_flight} refused with the row in flight");
+    assert!(terminal >= 1, "{terminal} refused with the row terminal");
 }
 
 /// A reducer that errors on its first step fails before the step's row is
@@ -263,6 +373,101 @@ async fn a_reducer_failing_its_first_step_fails_in_setup() {
         .expect_err("the reducer's error ends the run");
     let (unstarted, started) = check_failures(&sink.published(), "the first step errors");
     assert_eq!((unstarted, started), (1, 0));
+}
+
+/// The one way a run that started publishes its `failed` with no WAL row.
+/// An operator drops the run live while its model call is in flight: the
+/// coordination consumer marks the row terminal, the archive sweeper hands
+/// the terminal row off, and the archive's acknowledgement deletes it. The
+/// runner only notices at its next step boundary, so when the call then
+/// fails, the `failed` goes out with no row, in `Setup`.
+///
+/// That is the rule as the schema states it, not a slip: `Setup` says the
+/// run had no WAL row when its `failed` was published, and here the drop is
+/// already the run's recorded outcome, with its start, so this `failed`
+/// has nothing left to say about one. Before the phase was read from the
+/// row, this `failed` carried `llm_request`.
+#[tokio::test]
+async fn a_run_whose_row_a_live_drop_handed_off_fails_in_setup() {
+    struct DroppedMidCall {
+        store: Arc<WorkerStore>,
+        invocation_id: Uuid,
+    }
+    #[async_trait::async_trait]
+    impl crate::llm::LlmClient for DroppedMidCall {
+        async fn chat(
+            &self,
+            _request: crate::llm::ChatRequest,
+        ) -> Result<ChatResponse, crate::llm::LlmError> {
+            let id = self.invocation_id.to_string();
+            // What the coordination consumer does with the drop's
+            // `invocation.operator_recovered`...
+            let marked = self
+                .store
+                .mark_invocation_operator_terminal(&id, "failed", 1)
+                .await
+                .expect("the WAL writes");
+            assert_eq!(marked, 1, "the run's row was there, in flight");
+            // ...and the archive-ack consumer, once the sweeper's
+            // `invocation.archived` for the terminal row is acknowledged.
+            let deleted = self
+                .store
+                .delete_invocation_state(&id)
+                .await
+                .expect("the WAL writes");
+            assert_eq!(deleted, 1);
+            Err(crate::llm::LlmError::Auth(
+                "provider refused the key".into(),
+            ))
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let store = open_store(dir.path()).await;
+    let sink = WalWitness::new(store.clone(), None);
+    let runner = runner_over(
+        &store,
+        sink.clone(),
+        Harness::new(),
+        crate::mcp::McpServerStates::default(),
+    );
+    let invocation_id = Uuid::now_v7();
+    let llm = DroppedMidCall {
+        store: store.clone(),
+        invocation_id,
+    };
+    let (durable_start, mut started) = DurableStart::channel(invocation_id);
+    runner
+        .run_signalling(
+            &agent("unstarted-dropped"),
+            &llm,
+            Trigger::named(
+                Uuid::now_v7(),
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            ),
+            Some(1),
+            durable_start,
+        )
+        .await
+        .expect_err("the model call's error ends the run");
+    assert!(
+        started.try_recv().is_ok(),
+        "the dispatcher was told the run durably started"
+    );
+    let published = sink.published();
+    assert!(
+        published
+            .iter()
+            .any(
+                |(event, had_row)| matches!(event.payload, EventPayload::LlmRequest(_)) && *had_row
+            ),
+        "the run made its first WAL write before its model call"
+    );
+    let context = "dropped live mid-call, then the call failed";
+    assert_eq!(check_failures(&published, context), (1, 0), "{context}");
+    assert_eq!(failed_phases(&published), ["setup"], "{context}");
 }
 
 /// A run refused for an unavailable MCP server never starts, and its
