@@ -256,8 +256,10 @@ pub enum AdvisoryOutcome {
 
 /// A verdict the watch holds, with what its line names: the trigger's
 /// sequence and subject, why, and the invocation the claim names. The
-/// subject is empty when the hold is on a message the watch could not
-/// read, and the invocation is none then: the records were not read.
+/// subject is empty when the watch could not read the trigger's message,
+/// gone or unreadable; the invocation is none when the records name none,
+/// as on a hold on the unreadable message itself, which the watch takes
+/// only once the records have nothing to hold on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
     pub why: String,
@@ -452,6 +454,68 @@ impl AdvisoryWatch {
         // written as a dead letter, after a last look for a start on record.
         let looked_long_enough =
             advisory.looked_long_enough(delivered, self.held_verdict_limit, chrono::Utc::now());
+
+        // Issue 967: a trigger whose run has a start on record is not
+        // dead-lettered, and a verdict that cannot be taken yet is held.
+        // The claims key on the stream's incarnation, which the advisory
+        // does not carry: one emitted before the stream was last created
+        // names a message of the old stream, and today's claim at that
+        // sequence says nothing about it, so the claims are not consulted.
+        // Past the limit the verdict is a last look, and one that still
+        // cannot be taken marks the dead letter unchecked. The records key
+        // on the incarnation and the advisory's sequence, so they are asked
+        // first (issue 1066): before the trigger's message, which is needed
+        // only to write a dead letter and is read before that only, best
+        // effort, for the subject on the lines below; and before the check
+        // for a dead letter already written, so their verdict decides.
+        let mut unchecked = None;
+        if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
+            let verdict = if looked_long_enough {
+                records.last_look(advisory.stream_seq).await
+            } else {
+                records.verdict(advisory.stream_seq).await
+            };
+            match verdict {
+                Exhausted::NoClaim | Exhausted::NothingOnRecord => {}
+                Exhausted::Started {
+                    invocation_id,
+                    on_record,
+                    mark,
+                } => {
+                    self.bus
+                        .consumer_ledger()
+                        .note_started_not_dead_lettered(CONSUMER_NAME);
+                    let subject = self.subject_at(advisory.stream_seq).await;
+                    warn!(consumer = CONSUMER_NAME, %subject,
+                        stream_seq = advisory.stream_seq, deliveries = advisory.deliveries,
+                        %invocation_id, run = %on_record, claim = %mark,
+                        "not dead-lettering a trigger whose deliveries ran out: its run has a start \
+                         on record, so a `trigger_exhausted` dead letter would be false and \
+                         requeuing it would run the work twice; one written for it before the \
+                         start was on record may still be on the log; `claim` says what became of its \
+                         claim; if no task is driving the run, which is so when its last \
+                         delivery's task died after its first WAL write, it stays in flight until \
+                         this daemon next starts and its recovery resumes it, and shows meanwhile \
+                         among `fq doctor`'s stuck executions");
+                    return Ok(AdvisoryOutcome::RunStarted);
+                }
+                Exhausted::Undecided { why, invocation_id } => {
+                    if !looked_long_enough {
+                        return Ok(AdvisoryOutcome::Held(Hold {
+                            why,
+                            stream_seq: advisory.stream_seq,
+                            subject: self.subject_at(advisory.stream_seq).await,
+                            invocation_id,
+                        }));
+                    }
+                    unchecked = Some(StartUnchecked {
+                        reason: why,
+                        invocation_id,
+                    });
+                }
+            }
+        }
+
         let (message, unattributed) = match self
             .named_trigger(&advisory, earlier, looked_long_enough)
             .await
@@ -501,60 +565,6 @@ impl AdvisoryWatch {
                 Check::Unmade(why) => Some(format!("could not be made: {why}")),
             },
         };
-
-        // Issue 967: a trigger whose run has a start on record is not
-        // dead-lettered, and a verdict that cannot be taken yet is held.
-        // The claims key on the stream's incarnation, which the advisory
-        // does not carry: one emitted before the stream was last created
-        // names a message of the old stream, and today's claim at that
-        // sequence says nothing about it, so the claims are not consulted.
-        // Past the limit the verdict is a last look, and one that still
-        // cannot be taken marks the dead letter unchecked.
-        let mut unchecked = None;
-        if let Some(records) = self.records.as_ref().filter(|_| this_incarnation) {
-            let verdict = if looked_long_enough {
-                records.last_look(advisory.stream_seq).await
-            } else {
-                records.verdict(advisory.stream_seq).await
-            };
-            match verdict {
-                Exhausted::NoClaim | Exhausted::NothingOnRecord => {}
-                Exhausted::Started {
-                    invocation_id,
-                    on_record,
-                    mark,
-                } => {
-                    warn!(consumer = CONSUMER_NAME, subject = %trigger_subject,
-                        stream_seq = advisory.stream_seq, deliveries = advisory.deliveries,
-                        %invocation_id, run = %on_record, claim = %mark,
-                        "not dead-lettering a trigger whose deliveries ran out: its run has a start \
-                         on record, so a `trigger_exhausted` dead letter would be false and \
-                         requeuing it would run the work twice; `claim` says what became of its \
-                         claim; if no task is driving the run, which is so when its last \
-                         delivery's task died after its first WAL write, it stays in flight until \
-                         this daemon next starts and its recovery resumes it, and shows meanwhile \
-                         among `fq doctor`'s stuck executions");
-                    self.bus
-                        .consumer_ledger()
-                        .note_started_not_dead_lettered(CONSUMER_NAME);
-                    return Ok(AdvisoryOutcome::RunStarted);
-                }
-                Exhausted::Undecided { why, invocation_id } => {
-                    if !looked_long_enough {
-                        return Ok(AdvisoryOutcome::Held(Hold {
-                            why,
-                            stream_seq: advisory.stream_seq,
-                            subject: trigger_subject,
-                            invocation_id,
-                        }));
-                    }
-                    unchecked = Some(StartUnchecked {
-                        reason: why,
-                        invocation_id,
-                    });
-                }
-            }
-        }
 
         let payload = EventPayload::Failed(FailedPayload {
             error_kind: FailureKind::TriggerExhausted,
@@ -686,8 +696,8 @@ impl AdvisoryWatch {
 /// the first, then each step of the escalation, then one per interval,
 /// shared by every advisory the loop NAKs. A held verdict also gets a line
 /// of its own on the advisory's first delivery, so every held trigger is
-/// named in the log at least once, by sequence and subject, however many
-/// are held together.
+/// named in the log at least once, by sequence, and by subject when its
+/// message can be read, however many are held together.
 async fn nak_for_retry(
     msg: &async_nats::jetstream::Message,
     policy: ConsumerRedeliveryPolicy,

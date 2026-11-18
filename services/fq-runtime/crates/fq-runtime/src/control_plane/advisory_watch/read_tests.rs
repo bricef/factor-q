@@ -296,3 +296,35 @@ async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once
         Some(crate::dead_letter::UnattributedKind::MessageGone)
     );
 }
+
+/// **The subject a line names is read best-effort**: the trigger's subject
+/// when its message is on the stream, and empty when the message is gone or
+/// the stream cannot be read, since a log line is no reason to hold a
+/// verdict.
+#[tokio::test]
+async fn the_subject_for_a_line_is_the_messages_or_empty() {
+    let (_server, bus, agent) = broker().await;
+    let published = bus
+        .publish_trigger(&AgentId::new(&agent).unwrap(), &json!({ "input": "work" }))
+        .await
+        .expect("publish the trigger");
+    let watch = AdvisoryWatch::without_records(bus.clone());
+    let triggers = bus
+        .jetstream()
+        .get_stream(TRIGGER_STREAM_NAME)
+        .await
+        .expect("the trigger stream");
+
+    let found = watch.subject_at(published.stream_seq).await;
+    assert!(triggers.delete_message(published.stream_seq).await.unwrap());
+    let gone = watch.subject_at(published.stream_seq).await;
+    bus.jetstream()
+        .delete_stream(TRIGGER_STREAM_NAME)
+        .await
+        .expect("delete the trigger stream");
+    let unreadable = watch.subject_at(published.stream_seq).await;
+
+    assert_eq!(found, subjects::trigger(&agent));
+    assert_eq!(gone, "");
+    assert_eq!(unreadable, "");
+}
