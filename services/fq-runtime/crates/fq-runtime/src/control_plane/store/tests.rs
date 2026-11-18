@@ -89,8 +89,9 @@ async fn open_fresh() -> (ControlPlaneStore, tempfile::TempDir) {
 
 /// A control-plane file at schema `version`, built by the ladder's first
 /// `version` rungs as a build of that version built it. A rung that is not
-/// idempotent (v3 adds a column) cannot be replayed over a file that has
-/// it, so an older file is built, not a newer one stamped back.
+/// idempotent (the archive-state rung adds a column) cannot be replayed
+/// over a file that has it, so an older file is built, not a newer one
+/// stamped back.
 async fn store_at_version(path: &Path, version: usize) -> Pool<Sqlite> {
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -106,7 +107,7 @@ async fn store_at_version(path: &Path, version: usize) -> Pool<Sqlite> {
 #[tokio::test]
 async fn control_plane_ladder_upgrades_populated_database() {
     // Pins the NeedsUpgrade dispatch, the version restamp, and row
-    // survival, over a file the first rung built. Since v3 adds a column
+    // survival, over a file the first rung built. Since a rung adds a column
     // (real DDL) the older file is built by the older ladder rather than
     // stamped back from a current one.
     let dir = tempdir().unwrap();
@@ -407,11 +408,10 @@ async fn invocation_ownership_round_trip() {
     let ids: Vec<_> = listed.iter().map(|o| o.invocation_id.as_str()).collect();
     assert_eq!(ids, vec!["inv-A", "inv-B"]);
 
-    let updated = store
-        .update_invocation_status("inv-A", OwnerStatus::Ambiguous)
+    store
+        .upsert_invocation_ownership("inv-A", "w-1", 100, OwnerStatus::Ambiguous)
         .await
         .unwrap();
-    assert_eq!(updated, 1);
     let amb = store
         .list_invocations_with_status(OwnerStatus::Ambiguous)
         .await

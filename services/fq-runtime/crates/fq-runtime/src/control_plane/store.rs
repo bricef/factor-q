@@ -56,7 +56,7 @@ pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0
 const MIGRATIONS: &[Migration] = &[
     (1, CONTROL_PLANE_TABLES_V1_SQL),
     (2, TRIGGER_CLAIM_TABLE_V2_SQL),
-    (3, ownership::ARCHIVE_STATE_V3_SQL),
+    (3, ownership::ARCHIVE_STATE_SQL),
 ];
 
 const CONTROL_PLANE_TABLES_V1_SQL: &str = r#"
@@ -544,6 +544,8 @@ impl ControlPlaneStore {
     // Invocation ownership
     // -----------------------------------------------------------
 
+    /// Insert an in-flight row: a seeding helper for tests, as
+    /// [`Self::upsert_invocation_ownership`] is, with no production caller.
     pub async fn assign_invocation(
         &self,
         invocation_id: &str,
@@ -566,26 +568,12 @@ impl ControlPlaneStore {
         Ok(())
     }
 
-    pub async fn update_invocation_status(
-        &self,
-        invocation_id: &str,
-        status: OwnerStatus,
-    ) -> Result<u64, ControlPlaneStoreError> {
-        let res = sqlx::query(
-            "UPDATE coordination_invocation_owner SET status = ? WHERE invocation_id = ?",
-        )
-        .bind(status.as_str())
-        .bind(invocation_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected())
-    }
-
     /// Write the ownership row whatever it holds: a seeding helper for
     /// tests and fixtures. The runtime moves rows only through
     /// `control_plane::ownership::apply`, by compare-and-set. The
     /// archive's state written is the one a row with this status had
-    /// before the column existed ([`ArchiveState::recorded_before_v3`]).
+    /// before the column existed ([`ArchiveState::before_the_column`]),
+    /// so the pair is one a row may hold.
     pub async fn upsert_invocation_ownership(
         &self,
         invocation_id: &str,
@@ -609,7 +597,7 @@ impl ControlPlaneStore {
         .bind(worker_id)
         .bind(assigned_at)
         .bind(status.as_str())
-        .bind(ArchiveState::recorded_before_v3(status).as_str())
+        .bind(ArchiveState::before_the_column(status).as_str())
         .execute(&self.pool)
         .await?;
         Ok(())

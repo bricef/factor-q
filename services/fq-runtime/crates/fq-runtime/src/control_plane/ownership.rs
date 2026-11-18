@@ -23,7 +23,11 @@
 //! else happens to it first (recovery restores it, it is reported
 //! ambiguous, an operator drops it). Whether a run should have a row from
 //! its durable start is issue 721's question; it would be one more writer
-//! of the `no row → in_flight` edge below.
+//! of the `no row → in_flight` edge below. No event removes a row. The
+//! one delete is outside the table: an operator's drop of a row no
+//! projection event names an agent for, which deletes the row before the
+//! drop's own fold writes it again ([`APPLY_ATTEMPTS`] says how a move
+//! meets it). Changing what a drop does is issue 1070's.
 //!
 //! Why the archive sweeper holds a `pending` row is not stored. A hold is
 //! one daemon run's verdict, kept in the worker's memory and offered again
@@ -399,11 +403,17 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
 /// How many times [`apply`] decides and writes before it gives up on a row
 /// that keeps changing under it.
 ///
-/// Within one daemon nothing contends: the coordination consumer is the
-/// row's only writer while it runs, on one task, and startup recovery
-/// writes before that consumer starts. A lost compare-and-set means
-/// another process writes the same store, and three attempts tell a
-/// passing race from a row that will not settle. When they are spent,
+/// Within one daemon little contends: the coordination consumer is the
+/// row's only writer of moves while it runs, on one task, and startup
+/// recovery writes before that consumer starts. The one other writer is an
+/// operator's drop of a row no projection event names an agent for:
+/// `operator::drop_invocation` deletes that row itself, to tell it from an
+/// id that never existed, before it publishes the drop, whose fold writes
+/// the row again as `failed`, archived. A move decided over the row just
+/// before the delete loses its compare-and-set and is decided again from
+/// no row. Past that, a lost compare-and-set means another process writes
+/// the same store, and three attempts tell a passing race from a row that
+/// will not settle. When they are spent,
 /// [`apply`] answers [`OwnershipError::Contended`] and has written
 /// nothing. The coordination consumer takes that as a transient error: the
 /// event is redelivered after the bus's backoff and decided again from the

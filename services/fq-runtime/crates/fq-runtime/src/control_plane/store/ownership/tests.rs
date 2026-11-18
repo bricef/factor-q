@@ -90,11 +90,13 @@ async fn a_compare_and_set_lands_only_on_the_state_it_expects() {
     );
 }
 
-/// A control plane at schema version 2, holding one row of each status,
-/// opened by this build: each row gets the archive's state its status had
-/// before the column existed, and the store is at the current version.
+/// A control plane at the version before the rung that adds the column,
+/// holding one row of each status, opened by this build: each row gets
+/// the archive's state its status had before the column existed, and the
+/// store is at the current version. The rung is found by its SQL, so the
+/// test names no version number.
 #[tokio::test]
-async fn the_v3_rung_gives_every_existing_row_its_archive_state() {
+async fn the_archive_state_rung_gives_every_existing_row_its_archive_state() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("control-plane.db");
     let options = SqliteConnectOptions::new()
@@ -102,9 +104,14 @@ async fn the_v3_rung_gives_every_existing_row_its_archive_state() {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal);
     let pool = schema::connect_store_pool(options, 1).await.unwrap();
-    schema::bootstrap_versioned(&pool, SCHEMA_CLASS, 2, &MIGRATIONS[..2])
+    let rung = MIGRATIONS
+        .iter()
+        .position(|(_, sql)| *sql == ARCHIVE_STATE_SQL)
+        .expect("the ladder holds the rung");
+    let (before, _) = MIGRATIONS[rung - 1];
+    schema::bootstrap_versioned(&pool, SCHEMA_CLASS, before, &MIGRATIONS[..rung])
         .await
-        .expect("a version 2 store");
+        .expect("a store at the version before the rung");
     for status in [
         OwnerStatus::InFlight,
         OwnerStatus::Ambiguous,
@@ -140,7 +147,7 @@ async fn the_v3_rung_gives_every_existing_row_its_archive_state() {
             .unwrap()
             .expect("the row survives the migration");
         assert_eq!((row.status, row.archive_state), (status, archive));
-        assert_eq!(ArchiveState::recorded_before_v3(status), archive);
+        assert_eq!(ArchiveState::before_the_column(status), archive);
     }
 }
 
