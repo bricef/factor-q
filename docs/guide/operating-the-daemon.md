@@ -1501,7 +1501,27 @@ drain, leaves no such line. Either line's `invocation_id` is the
 re-take's `abandoned_invocation_id`. A release given up on can still
 land after the re-take, and then removes nothing: a release removes only
 the claim of the invocation giving it back
-([#1061](https://github.com/bricef/factor-q/issues/1061)). The
+([#1061](https://github.com/bricef/factor-q/issues/1061)); nothing
+watches a release given up on, so its landing is not logged. A release
+settling waits out to its end that finds no claim of its own to give
+back is logged at warn, `released no trigger claim`, with `stream_seq`,
+`invocation_id`, the subject, `trigger_id` and `context`, as the NAK or
+ack after it carries them, and the claim as it stands now:
+`claim_state`, `claimant` and `claim_invocation_id`. Every release
+answers a delivery whose run has not started, and the copy giving it
+back holds its claim, so the line means something changed the claim
+underneath it; the ack after a run's start is marked keeps the claim
+and gives nothing back
+([#1055](https://github.com/bricef/factor-q/issues/1055)). The claim's
+fields say what changed it. `durably_started`: the dead-letter watch or
+a requeue found a run under `claim_invocation_id` in the worker's WAL
+and marked the claim, so check that run with `fq invocation show`.
+`claimed` under another claimant or invocation: a second process is
+claiming from the same store, which this design does not support. `gone`:
+something deleted the row, which no part of a running daemon does
+before the claim window has passed, so a hand edit. The `invocation_id`
+itself never started, so `fq invocation show` finds nothing under it.
+The
 drop says
 why it dropped the copy, and on the trigger's fifth and last delivery
 it says that no copy follows. A drop before a start was recorded costs
