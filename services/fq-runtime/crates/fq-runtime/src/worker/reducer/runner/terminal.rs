@@ -87,13 +87,11 @@ impl Terminal {
     }
 }
 
-/// A `failed` event, shared by the writers that end a run: the run
-/// loop's stored terminal here, `emit_failed`'s mid-step publish, and
-/// the `failed` an event too large for the broker ends a run with
-/// (`publish_failure.rs`), the only one that passes a `detail` (#952).
-/// A fourth writer does not use it: `refuse_for_unavailable_mcp`
-/// (`mcp.rs`) builds its `Setup`-phase `failed` by hand, before any row
-/// exists.
+/// A `failed` event, shared by every writer that ends a run: the run
+/// loop's stored terminal here, `emit_failed`'s mid-step publish, the
+/// refusal for an unavailable MCP server (`mcp.rs`), and the `failed` an
+/// event too large for the broker ends a run with (`publish_failure.rs`),
+/// the only one that passes a `detail` (#952).
 pub(super) fn failed_event(
     agent_id: &AgentId,
     invocation_id: Uuid,
@@ -102,18 +100,53 @@ pub(super) fn failed_event(
     phase: FailurePhase,
     partial_totals: InvocationTotals,
     detail: Option<FailureDetail>,
-) -> Event {
-    Event::new(
-        agent_id.clone(),
+) -> FailedEvent {
+    FailedEvent {
+        agent_id: agent_id.clone(),
         invocation_id,
-        EventPayload::Failed(FailedPayload {
+        payload: FailedPayload {
             error_kind,
             error_message,
             phase,
             partial_totals,
             detail,
-        }),
-    )
+        },
+        annotations: Vec::new(),
+    }
+}
+
+/// A `failed` before it becomes an [`Event`]: what
+/// [`ReducerRunner::publish_failed`] takes, so nothing but a `failed` can
+/// be handed to it, and the run it ends is the one its envelope will
+/// name. The stored terminal makes its event at once ([`Self::into_event`]);
+/// `publish_failed` first sets the phase from the run's WAL row.
+pub(super) struct FailedEvent {
+    agent_id: AgentId,
+    /// The run the `failed` ends, the envelope's `invocation_id`.
+    pub(super) invocation_id: Uuid,
+    pub(super) payload: FailedPayload,
+    /// Envelope annotations, as [`Event::annotate`] takes them.
+    annotations: Vec<(String, serde_json::Value)>,
+}
+
+impl FailedEvent {
+    /// The same `failed`, with an annotation on its envelope.
+    pub(super) fn annotate(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.annotations.push((key.to_string(), value));
+        self
+    }
+
+    /// The event to publish or store.
+    pub(super) fn into_event(self) -> Event {
+        let event = Event::new(
+            self.agent_id,
+            self.invocation_id,
+            EventPayload::Failed(self.payload),
+        );
+        self.annotations
+            .into_iter()
+            .fold(event, |event, (key, value)| event.annotate(key, value))
+    }
 }
 
 /// Stamp the invocation's duration on `totals`, which the terminal event
@@ -175,7 +208,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     FailurePhase::Reducer,
                     *totals,
                     None,
-                );
+                )
+                .into_event();
                 let ending = Ending::Failed {
                     kind,
                     message: err.message.clone(),
@@ -194,7 +228,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         // the refusal's `failed` instead, decided while nothing is yet
         // terminal (#828; `publish_failure.rs`).
         if let Some(refused) = Refused::measure(&*self.config.sink, &event, encoded.len()) {
-            event = refused.failed_event(agent_id, invocation_id, *totals);
+            event = refused
+                .failed_event(agent_id, invocation_id, *totals)
+                .into_event();
             event.envelope.parent_event_id = cursor;
             encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
             ending = Ending::Failed {
@@ -278,10 +314,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         &self,
         cursor: &mut Option<Uuid>,
         agent_id: &AgentId,
-        invocation_id: Uuid,
-        failed: Event,
+        failed: FailedEvent,
     ) -> Result<(), ExecutorError> {
-        self.end_mid_step(cursor, invocation_id, failed).await?;
+        let invocation_id = failed.invocation_id;
+        self.end_mid_step(cursor, failed).await?;
         self.publish_archived_and_mark_pending(cursor, agent_id, invocation_id, "failed")
             .await
     }
@@ -295,16 +331,18 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// terminal, after the publish: a lost `failed` leaves the row in
     /// flight for recovery. Idempotent: a no-op on the row if it is
     /// already terminal (an operator transition got there first). The
-    /// `failed` goes out through `publish_failed`, so a run that fails
-    /// before its first row is written (a reducer whose first step errors)
-    /// fails in `Setup`, whatever phase the caller built it with.
+    /// `failed` goes out through `publish_failed`, so a run with no row
+    /// when it is published fails in `Setup`, whatever phase the caller
+    /// built it with: a reducer whose first step errors, before the step's
+    /// row is written, and a run whose row an operator's live drop and the
+    /// archive hand-off behind it removed while a step was in flight.
     pub(super) async fn end_mid_step(
         &self,
         cursor: &mut Option<Uuid>,
-        invocation_id: Uuid,
-        failed: Event,
+        failed: FailedEvent,
     ) -> Result<(), ExecutorError> {
-        self.publish_failed(cursor, invocation_id, failed).await?;
+        let invocation_id = failed.invocation_id;
+        self.publish_failed(cursor, failed).await?;
         let terminal_at_ms = self.config.clock.unix_now_ms();
         self.ensure_terminal("failed", invocation_id, terminal_at_ms)
             .await

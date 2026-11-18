@@ -1937,8 +1937,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             partial_totals,
             None,
         );
-        self.fail_mid_step(cursor, agent_id, invocation_id, failed)
-            .await
+        self.fail_mid_step(cursor, agent_id, failed).await
     }
 
     /// Set `terminal_at` (and update `phase`) on the worker's
