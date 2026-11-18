@@ -258,8 +258,11 @@ pub(crate) async fn classify_in_flight(
                 // The coordination consumer (spawned below)
                 // picks up the `invocation.ambiguous` event, when
                 // this start published one rather than an earlier
-                // start, and upserts the
-                // coordination_invocation_owner row. v1
+                // start, and marks the
+                // coordination_invocation_owner row `ambiguous`,
+                // unless the row already records the run finished
+                // (a drop published before the last process died,
+                // say, which the consumer folds first). v1
                 // collapsed-process used to write directly
                 // here; that's now the consumer's job, which
                 // matches v2's split-process expectation
