@@ -2926,10 +2926,11 @@ fn aged_out_dead_letter_events() -> Vec<Event> {
         .annotate(
             fq_runtime::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY,
             serde_json::json!(
-                "the trigger's message was no longer on the trigger stream when the watch read \
-                 it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: \
-                 the stream keeps a message 24h after its publish, so it had aged out, unless it \
-                 was deleted sooner"
+                "the broker answered that the trigger stream held no message at this sequence \
+                 when the watch last read it, at 2026-01-02T03:04:05Z, for an advisory emitted at \
+                 2026-01-02T03:04:01Z: the stream keeps a message 24h after its publish, so it \
+                 most likely aged out, or was deleted sooner; the broker answers the same for a \
+                 message it cannot load"
             ),
         )
         .annotate(

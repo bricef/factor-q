@@ -265,10 +265,18 @@ pub(super) fn unreadable_at_the_limit(answer: &str, stream_missing: bool) -> Str
 }
 
 /// Why a dead letter names no trigger when the broker said the stream held
-/// no message at the trigger's sequence as the watch read it, at `read_at`,
-/// for an advisory emitted at `emitted` (if the watch can read its
-/// timestamp).
-fn gone_reason(
+/// no message at the trigger's sequence as the watch last read it, at
+/// `read_at`, for an advisory emitted at `emitted` (if the watch can read
+/// its timestamp). The last read is the one the dead letter is written on:
+/// for a verdict held on the records it can be an hour after the first read
+/// that found the message gone.
+///
+/// The reason says what the broker answered, then what the watch makes of
+/// it: the broker gives the same answer for a message its store failed to
+/// load (and for a sequence the stream never held, which an advisory of
+/// this incarnation does not name), so that it aged out is the likeliest
+/// reading, not a fact.
+pub(super) fn gone_reason(
     read_at: chrono::DateTime<chrono::Utc>,
     emitted: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
@@ -280,9 +288,10 @@ fn gone_reason(
         None => "for an advisory that carries no timestamp the watch can read".to_string(),
     };
     format!(
-        "the trigger's message was no longer on the trigger stream when the watch read it, at \
-         {}, {advisory}: the stream keeps a message {}h after its publish, so it had aged out, \
-         unless it was deleted sooner",
+        "the broker answered that the trigger stream held no message at this sequence when the \
+         watch last read it, at {}, {advisory}: the stream keeps a message {}h after its \
+         publish, so it most likely aged out, or was deleted sooner; the broker answers the same \
+         for a message it cannot load",
         at(read_at),
         DEFAULT_TRIGGER_MAX_AGE.as_secs() / 3600,
     )
