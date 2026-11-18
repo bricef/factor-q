@@ -2014,7 +2014,7 @@ You are a test agent."#
         assert_eq!(
             event.annotations.0.get("trigger_stream_seq"),
             Some(&json!(4242)),
-            "the stream sequence is the inline/advisory reconciliation key"
+            "the stream sequence, with the incarnation, is the inline/advisory reconciliation key"
         );
         assert_eq!(
             event.annotations.0.get("trigger_id"),

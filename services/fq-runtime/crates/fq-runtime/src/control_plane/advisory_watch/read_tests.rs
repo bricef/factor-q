@@ -17,7 +17,9 @@ use serde_json::json;
 
 use super::test_kit::{PAST, exhaust, last_failed, stamped_at_the_streams_creation};
 use super::*;
+use crate::agent::AgentId;
 use crate::dead_letter::from_event;
+use crate::events::subjects;
 use crate::test_support::nats::{NatsServer, test_nats};
 use crate::trigger::PublishedTrigger;
 

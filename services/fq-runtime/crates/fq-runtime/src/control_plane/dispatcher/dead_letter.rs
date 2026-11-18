@@ -36,13 +36,13 @@ impl TriggerDispatcher {
     /// delivery; a pre-bound poison trigger at upgrade time). The two
     /// emitters overlap where a publish that failed here had in fact
     /// reached the stream, and, as before issue 1062, where a published
-    /// dead letter's ack never reached the broker. The watch skips a
-    /// trigger whose dead letter is the agent's most recent `failed` event,
-    /// but writes a second one when another failure of the agent came in
-    /// between, when it cannot read the events stream at that moment, or
-    /// when a publish from here lands only after it looked; the shared
-    /// `trigger_stream_seq` annotation reconciles the two (de-duplication
-    /// is issue 1066).
+    /// dead letter's ack never reached the broker. The watch looks for
+    /// this dispatcher's dead letter among the agent's `failed` events since
+    /// the trigger's publish, at its sequence and incarnation (issue 1066),
+    /// and writes a second one only when a publish from here lands after it
+    /// looked, or its check cannot be made by its limit; the shared
+    /// `trigger_stream_seq` and `trigger_stream_epoch` annotations reconcile
+    /// the two (what is left: issue 1091).
     ///
     /// A publish that fails is logged here, once, at error, with what the
     /// watch's dead letter will not carry: the error that ended the last

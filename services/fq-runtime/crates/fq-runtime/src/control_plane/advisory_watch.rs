@@ -63,11 +63,19 @@
 //! Delivery semantics: at-least-once end to end, like every producer
 //! on this bus (the archive sweeper republishes too). A watch crash
 //! between emit and ack can duplicate one event; the shared
-//! `trigger_stream_seq` annotation makes duplicates reconcilable, and
-//! checks before the write suppress the duplicate: a best-effort last-event
-//! check under the trigger's agent for a dead letter filed there, and, for
-//! one filed under the system sentinel, a read of the system sentinel's dead
-//! letters for the advisory's own id (`surfaced`, issue 1066).
+//! `trigger_stream_seq` and `trigger_stream_epoch` annotations make
+//! duplicates reconcilable, and a
+//! check before the write suppresses the duplicate, whichever form came
+//! first (`surfaced`, issue 1066): what this watch remembers writing since
+//! it started; for a dead letter that names its trigger, a read of the
+//! agent's `failed` events since the trigger's message was published, for
+//! one at its sequence that records this stream's incarnation, the
+//! dispatcher's or the watch's own; for one filed under the system
+//! sentinel, a read of every agent's since the advisory, for one carrying
+//! the advisory's id, which every dead letter the watch writes carries.
+//! Where a check cannot be certain or cannot be made, the dead letter is
+//! written: a second one, never none. What that leaves open is in
+//! `surfaced`.
 
 use std::time::Duration;
 
@@ -77,9 +85,8 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::agent::AgentId;
 use crate::bus::{
-    ADVISORY_STREAM_NAME, BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog, STREAM_NAME,
+    ADVISORY_STREAM_NAME, BusError, ConsumerRedeliveryPolicy, EventBus, RedeliveryLog,
     TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME,
 };
 use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck, TriggerDispatcher};
@@ -89,14 +96,14 @@ use crate::dead_letter::{
     StartUnchecked, with_stream_epoch,
 };
 use crate::events::{
-    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
+    Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
 };
 
 mod naming;
 mod surfaced;
 
 use naming::Named;
-use surfaced::{Check, with_advisory_id};
+use surfaced::{Check, NamedTrigger, with_advisory_id, with_duplicate_check};
 
 /// Name of the durable JetStream consumer the advisory watch creates.
 pub const CONSUMER_NAME: &str = "fq-advisory-watch";
@@ -163,8 +170,10 @@ struct MaxDeliverAdvisory {
     #[serde(default)]
     timestamp: Option<String>,
     /// The server's id for this advisory, the same on every delivery of
-    /// it: what tells a redelivered advisory's dead letter filed under the
-    /// system sentinel from another's (`surfaced`).
+    /// it: written on every dead letter the watch writes, it is how a
+    /// redelivered advisory about to be filed under the system sentinel
+    /// finds the dead letter the watch already wrote for it, in either form
+    /// (`surfaced`).
     #[serde(default)]
     id: Option<String>,
 }
@@ -227,6 +236,12 @@ pub enum AdvisoryWatchError {
     /// written already.
     #[error("event log read error: {0}")]
     Log(String),
+
+    /// The trigger stream could not be asked which incarnation it is, to
+    /// tell whether a dead letter matched without a trigger id is this
+    /// trigger's.
+    #[error("trigger stream read error: {0}")]
+    TriggerStream(String),
 }
 
 /// What handling one advisory did — returned for logs and tests.
@@ -234,9 +249,9 @@ pub enum AdvisoryWatchError {
 pub enum AdvisoryOutcome {
     /// A dead-letter event was emitted.
     Emitted,
-    /// The inline path already emitted for this stream sequence, or the
-    /// watch already filed this advisory's dead letter under the system
-    /// sentinel.
+    /// This exhaustion's dead letter is on the log already: the
+    /// dispatcher's, or one the watch wrote for this advisory before
+    /// (`surfaced`).
     AlreadySurfaced,
     /// Unparseable or foreign advisory; consumed without effect.
     Skipped,
@@ -288,8 +303,8 @@ pub struct AdvisoryWatch {
     records: Option<ExhaustionCheck>,
     /// How long a held verdict is held ([`HELD_VERDICT_LIMIT`]).
     held_verdict_limit: Duration,
-    /// How long the read for a dead letter already written under the
-    /// system sentinel may take ([`surfaced::SCAN_LIMIT`]).
+    /// How long the read of the log for a dead letter already written may
+    /// take ([`surfaced::SCAN_LIMIT`]).
     scan_limit: Duration,
     /// The advisories this watch has written a dead letter for since it
     /// started ([`surfaced::WrittenHere`]).
@@ -524,6 +539,7 @@ impl AdvisoryWatch {
             Ok(Named::Nothing(why)) => (None, Some(why)),
             Err(hold) => return Ok(AdvisoryOutcome::Held(hold)),
         };
+        let named = message.as_ref().and_then(NamedTrigger::of);
         let (agent_id, trigger_subject, trigger_payload, trigger_id) = match message {
             Some(m) => (m.agent_id, m.subject, m.payload, m.trigger_id),
             None => (None, String::new(), serde_json::Value::Null, None),
@@ -534,36 +550,16 @@ impl AdvisoryWatch {
             return Ok(AdvisoryOutcome::AlreadySurfaced);
         }
 
-        // Best-effort dedup vs the inline fast path. Its ACK suppresses
-        // the advisory, so overlap requires an emit-then-crash-before-
-        // ack sliver (or a lost ack), or a publish that landed with its
-        // acknowledgement lost, which the dispatcher hands here (issue
-        // 1062); if the agent's most recent failed event already carries
-        // this stream sequence, skip. It misses, and a second dead letter
-        // is written, when a later failure of the agent hides it, when the
-        // read fails (taken as "not surfaced"), or when the dispatcher's
-        // publish lands after this look (de-duplication: issue 1066).
-        if let Some(agent) = &agent_id
-            && self.already_surfaced(agent, advisory.stream_seq).await
+        // One exhaustion, one dead letter, whichever form came first (issue
+        // 1066); past the limit, a check that cannot be made does not hold the
+        // dead letter back, and the dead letter says so.
+        let duplicate_check = match self
+            .written_before(&advisory, named, looked_long_enough)
+            .await?
         {
-            info!(
-                consumer = CONSUMER_NAME,
-                agent_id = %agent,
-                stream_seq = advisory.stream_seq,
-                "exhausted trigger already surfaced inline; skipping"
-            );
-            return Ok(AdvisoryOutcome::AlreadySurfaced);
-        }
-        // One filed under the system sentinel is found by its advisory's id
-        // (issue 1066); past the limit, a check that cannot be made does not
-        // hold it back.
-        let duplicate_check = match agent_id {
-            Some(_) => None,
-            None => match self.written_before(&advisory, looked_long_enough).await? {
-                Check::Written => return Ok(AdvisoryOutcome::AlreadySurfaced),
-                Check::NotWritten => None,
-                Check::Unmade(why) => Some(format!("could not be made: {why}")),
-            },
+            Check::Written => return Ok(AdvisoryOutcome::AlreadySurfaced),
+            Check::NotWritten => None,
+            Check::Unmade(why) => Some(format!("could not be made: {why}")),
         };
 
         let payload = EventPayload::Failed(FailedPayload {
@@ -611,10 +607,7 @@ impl AdvisoryWatch {
         // The incarnation the trigger was on, when the advisory is this one's.
         let epoch = this_incarnation.then_some(self.bus.trigger_stream_epoch());
         let event = with_stream_epoch(event, epoch);
-        let event = match agent_id {
-            Some(_) => event,
-            None => with_advisory_id(event, &advisory),
-        };
+        let event = with_duplicate_check(with_advisory_id(event, &advisory), &duplicate_check);
         let why = unattributed.as_ref().map(naming::Unattributed::reason);
         let event = match &unchecked {
             Some(unchecked) => event.annotate(
@@ -665,29 +658,6 @@ impl AdvisoryWatch {
              dead-letter event from its MAX_DELIVERIES advisory"
         );
         Ok(AdvisoryOutcome::Emitted)
-    }
-
-    /// Whether the agent's most recent `failed` event is a dead-letter
-    /// for this stream sequence. Best-effort: any read failure means
-    /// "not surfaced", erring toward emitting (at-least-once).
-    async fn already_surfaced(&self, agent: &AgentId, stream_seq: u64) -> bool {
-        let Ok(stream) = self.bus.jetstream().get_stream(STREAM_NAME).await else {
-            return false;
-        };
-        let Ok(raw) = stream
-            .get_last_raw_message_by_subject(&subjects::agent_failed(agent.as_str()))
-            .await
-        else {
-            return false;
-        };
-        let Ok(event) = serde_json::from_slice::<Event>(&raw.payload) else {
-            return false;
-        };
-        matches!(
-            &event.payload,
-            EventPayload::Failed(p) if matches!(p.error_kind, FailureKind::TriggerExhausted)
-        ) && event.annotations.0.get(DEAD_LETTER_STREAM_SEQ_KEY)
-            == Some(&serde_json::json!(stream_seq))
     }
 }
 
@@ -756,6 +726,9 @@ pub(crate) mod test_kit;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentId;
+    use crate::bus::STREAM_NAME;
+    use crate::events::subjects;
     use serde_json::json;
     use std::time::Duration;
 
