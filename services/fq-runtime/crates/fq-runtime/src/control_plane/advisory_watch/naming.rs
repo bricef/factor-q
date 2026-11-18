@@ -71,6 +71,8 @@ pub(super) struct TriggerMessage {
     pub(super) payload: serde_json::Value,
     /// The id the trigger's publisher gave it, if it gave one.
     pub(super) trigger_id: Option<Uuid>,
+    /// When the message was published: no dead letter for it can be older.
+    pub(super) published: async_nats::datetime::DateTime,
 }
 
 /// Why a dead letter names no trigger: the kind, and the reason in words.
@@ -156,6 +158,7 @@ impl AdvisoryWatch {
                 subject: raw.subject.to_string(),
                 payload: serde_json::from_slice(&raw.payload).unwrap_or(serde_json::Value::Null),
                 trigger_id: trigger_id_in(Some(&raw.headers)),
+                published: raw.time,
             })),
             TriggerRead::Gone => Ok(Named::nothing(
                 UnattributedKind::MessageGone,

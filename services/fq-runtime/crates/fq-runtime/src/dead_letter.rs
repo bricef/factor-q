@@ -30,8 +30,10 @@ pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState, StartUnchecked, Unatt
 
 /// Annotation keys shared by the two dead-letter emitters (#49/#169):
 /// the dispatcher's inline path and the advisory watch. `trigger_*`
-/// carries what a requeue needs; `trigger_stream_seq` is the dedup /
-/// reconciliation key; `dead_letter_source` says which path emitted
+/// carries what a requeue needs; `trigger_stream_seq`, with the stream's
+/// incarnation ([`DEAD_LETTER_STREAM_EPOCH_KEY`]) and the trigger id when
+/// it has one, is the dedup / reconciliation key; `dead_letter_source` says
+/// which path emitted
 /// (`"inline"` | `"advisory"`).
 ///
 /// They live here, with the atom that reads them, rather than in
@@ -104,14 +106,27 @@ pub const DEAD_LETTER_UNATTRIBUTED_KEY: &str = "unattributed";
 /// [`DeadLetter::unattributed_kind`] so a reader can match on it.
 pub const DEAD_LETTER_UNATTRIBUTED_KIND_KEY: &str = "unattributed_kind";
 
-/// Set by the advisory watch on every dead letter it files under the system
-/// sentinel, because it names no trigger or its trigger's subject names no
-/// legal agent: the broker's id for the advisory it wrote it for (issue
-/// 1066). A redelivered advisory carries the same id, which is how the watch
-/// finds the dead letter it already wrote and does not write it again; such
-/// a dead letter has no agent of its own to look under. Not lifted onto
-/// [`DeadLetter`]: it is the watch's key, not a fact about the trigger.
+/// Set by the advisory watch on every dead letter it writes: the broker's
+/// id for the advisory it wrote it for (issue 1066). A redelivered advisory
+/// carries the same id, which is how the watch, about to file a dead letter
+/// under the system sentinel, finds one it already wrote for that advisory,
+/// under the system sentinel or under the trigger's agent before the
+/// trigger's message went. Not lifted onto [`DeadLetter`]: it is the
+/// watch's key, not a fact about the trigger.
 pub const DEAD_LETTER_ADVISORY_ID_KEY: &str = "advisory_id";
+
+/// Set by the advisory watch on a dead letter it wrote without being able
+/// to tell whether this exhaustion's dead letter was already on the log
+/// (issue 1066): past its limit, when the check could not be made in time
+/// or a read for it failed, and at once on one that names no trigger whose
+/// advisory carries no id, since nothing tells that advisory from another.
+/// Its one form is the text
+/// `could not be made: …`, with why in words after the colon, the same text
+/// as the `duplicate_check` field of the dead letter's error line. Such a
+/// dead letter may be a second one for its exhaustion; none is lost. Not
+/// lifted onto [`DeadLetter`] yet: `fq events get <event-id> --json` shows
+/// it.
+pub const DEAD_LETTER_DUPLICATE_CHECK_KEY: &str = "duplicate_check";
 
 /// The incarnation of the trigger stream the dead letter's trigger was on:
 /// the stream's creation time, in nanoseconds since 1970, as the daemon that
