@@ -265,7 +265,8 @@ impl ExhaustionCheck {
     /// is still `claimed` for the run. The mark is a compare-and-set on the
     /// state and the id, so it leaves a claim marked, given back or taken
     /// again alone, and it is safe while a copy still handles the claim:
-    /// that copy's own mark sets the row whatever it holds. A failed mark
+    /// that copy's own mark matches a claim naming its run in either state,
+    /// so it finds the row this mark left started for it. A failed mark
     /// does not change the verdict: the trigger is not dead-lettered either
     /// way, and the watch's line says so.
     async fn started(

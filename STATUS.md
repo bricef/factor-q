@@ -270,19 +270,25 @@ that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
 redelivered. ADR-0032's one edit since 2026-11-11 records the finished
 retry ladder (2026-11-14); it is not edited for the keepalive, for the
-settling of a daemon's own claims or for the dead-letter watch's
-reading of the records, so these of its statements are now out of
-date: section 5's account of the two routes to a redelivery before
-durable start, and of the replay using the second; gap 3 as a whole,
-now closed (below), its "a start that takes longer than the whole retry
-ladder" included; the row of section 2's table for a claim the same
-process holds, which "Stops" with "No log line and no count";
-section 4's "leaves no row behind", since a release the claim store
-refuses, or one settling gives up waiting for that never lands, leaves
-the claim `claimed`; and, in its part on more than one worker, "where nothing keeps it alive", "in a
-slow start", and that a trigger whose durable-start report never
-arrives "is dead-lettered as exhausted while its invocation runs",
-since the watch now holds its verdict while a copy handles the claim.
+settling of a daemon's own claims, for the dead-letter watch's reading
+of the records or for the mark's report of what it marked, so these of
+its statements are now out of date: section 5's account of the two
+routes to a redelivery before durable start, and of the replay using
+the second; gap 3 as a whole, now closed (below), its "a start that
+takes longer than the whole retry ladder" included; the row of section
+2's table for a claim the same process holds, which "Stops" with "No
+log line and no count"; section 3's "writes `durably_started` and the
+invocation id", since the mark now writes only the state, on a claim
+already naming the run; section 4's "leaves no row behind", since a
+release the claim store refuses, or one settling gives up waiting for
+that never lands, leaves the claim `claimed`; and, in its part on more
+than one worker, "where nothing keeps it alive", "in a slow start", that
+a trigger whose durable-start report never arrives "is dead-lettered as
+exhausted while its invocation runs", since the watch now holds its
+verdict while a copy handles the claim, and "`mark_trigger_started`
+updates by key alone, so A and B both mark, and the row keeps whichever
+invocation id was written last", since a mark now matches only the
+claim naming its run.
 The
 retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
@@ -356,8 +362,12 @@ error. Before, the mark reported success whatever it matched, so a
 trigger whose claim was gone was acked with no record that it had run,
 and a lost ack or a replay of the stream started it again
 ([#1046](https://github.com/bricef/factor-q/issues/1046)). One daemon
-reaches none of these today; a release given up on that lands after a
-copy took the claim again would. The dispatcher also
+reaches them only through a release settling gave up waiting for that
+lands after a copy took the claim again, which needs the release to
+stall about 70 seconds outside SQLite's lock waits; scoping the release
+to its own invocation would close that route
+([#1061](https://github.com/bricef/factor-q/issues/1061)). The
+dispatcher also
 keeps a delivery alive from its worker permit to its first WAL write,
 as the holds before it and the mark after it do, so a slow setup is no
 longer redelivered underneath its own first copy, and a setup slower
