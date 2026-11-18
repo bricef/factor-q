@@ -15,12 +15,15 @@
 //!
 //! Where the refusal lands decides what is left to do:
 //!
-//! - **Before the first WAL write** (the `triggered` event, on the
-//!   ordinary path or ahead of a refusal for an unavailable MCP server):
-//!   there is no row, so the `failed` is the whole record, and it names
-//!   the trigger (`trigger_id`, `trigger_subject`), since nothing else on
-//!   the stream would. The error is not transient, so the dispatcher
-//!   consumes the trigger.
+//! - **Before the first WAL write**: there is no row, so the `failed` is
+//!   the whole record. For the `triggered` event, on the ordinary path or
+//!   ahead of a refusal for an unavailable MCP server, it names the
+//!   trigger (`trigger_id`, `trigger_subject`), since nothing else on the
+//!   stream would. For a host notice queued before the first step, the
+//!   `triggered` is already out and names it; only tests queue a notice
+//!   that early today, since every production caller queues one on a
+//!   resume or mid-run, after the first WAL write. Either way the error is
+//!   not transient, so the dispatcher consumes the trigger.
 //! - **Mid-run**, live or after a resume's replay (every event from the
 //!   first `llm.request` on, which follows the first WAL write): the
 //!   `failed` is published, then the row is marked terminal and the
@@ -82,22 +85,41 @@
 //! path's two points before its first WAL write, its own `triggered` and
 //! the unavailable-MCP refusal's, where the trigger is in hand.
 //!
-//! **The phase of a `failed` says whether the run started.** This module
-//! also holds [`ReducerRunner::publish_failed`], which every `failed` the
-//! runner publishes goes through, except the terminal event a step stores
-//! in its WAL row (a run with a row has started by definition). It stamps
-//! the phase from the run's WAL row at that moment: `Setup` when there is
-//! no row, whatever the run was doing, and never `Setup` when there is
-//! one. Readers take `Setup` to mean that the run never made its first WAL
-//! write, so it has no start on record, and a `failed` that said
-//! otherwise would let the control plane record a start that never
+//! **The phase of a `failed` says whether the run had a WAL row.** This
+//! module also holds [`ReducerRunner::publish_failed`], which every
+//! `failed` the runner publishes goes through, except the terminal event a
+//! step stores in its WAL row (a run with a row has started by
+//! definition). It stamps the phase from the run's WAL row at that
+//! moment: `Setup` when there is no row, whatever the run was doing, and
+//! never `Setup` when there is one. Readers take `Setup` to mean the run
+//! has no start on record, and a `failed` in another phase for a run that
+//! never started would let the control plane record a start that never
 //! happened, mark the trigger's claim started, and drop every copy of the
-//! trigger after it (issue 1024). Before the first WAL write there are
+//! trigger after it (issue 1024).
+//!
+//! A run has no row in two cases. Before its first WAL write, there are
 //! four ways to fail: a `triggered` or a host notice too large for the
 //! broker, a reducer step that errors before the step's row is written,
 //! and a refusal for an unavailable MCP server, whose own events can be
-//! refused for size too. Each used to carry the phase of what it was
-//! doing, and only the first was `Setup`.
+//! refused for size too. Before the rule, a refused `triggered` and the
+//! refusal's own `failed` were already `Setup`; a refused host notice,
+//! the reducer's error, and the `failed` that replaced a refusal's own
+//! refused `failed` carried `Reducer`. And after it started, a run has no
+//! row once an operator has dropped it live and the archive sweeper has
+//! handed the dropped row off and had it acknowledged, which deletes it,
+//! while a step was still in flight: when that step then fails, its
+//! `failed` goes out in `Setup` where it used to carry the step's phase.
+//! The drop is the run's recorded outcome by then, with its start, so
+//! that `failed` says nothing the control plane acts on; reading whether
+//! the run started from the runner's own memory instead would be a second
+//! record of it, kept for this one case.
+//!
+//! [`ReducerRunner::publish_failed`] takes a `FailedEvent`, so nothing
+//! but a `failed` reaches it. Nothing makes a new failure path go through
+//! it; what catches one that does not is `check_failed_phase`, the test
+//! build's check on every publish, which fails any test that drives a run
+//! to a `failed` in a phase other than `Setup` with no WAL row. A path no
+//! test drives is not checked.
 
 use std::time::Instant;
 
@@ -207,8 +229,9 @@ impl Refused {
 /// The phase a `failed` carries: `Setup` exactly when its run has no WAL
 /// row (`started` is false), and otherwise `doing`, the phase of what the
 /// run was doing when it failed. A run with a row that names `Setup` is a
-/// caller's mistake, and gets `Reducer`, the phase of the loop itself,
-/// since `Setup` would tell every reader the run never started.
+/// caller's mistake, which `publish_failed` logs at warn, and gets
+/// `Reducer`, the phase of the loop itself, since `Setup` would tell every
+/// reader the run has no start on record.
 pub(super) fn phase_for(started: bool, doing: FailurePhase) -> FailurePhase {
     match (started, doing) {
         (false, _) => FailurePhase::Setup,
@@ -306,9 +329,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         if row.is_none() {
             // Nothing durable, so nothing to mark or archive: a host
             // notice queued before the first step and refused for its
-            // size. The fresh path's `triggered` ends in
-            // `end_unstarted_on_refusal` instead, which also names the
-            // trigger.
+            // size, which only tests do today. The fresh path's
+            // `triggered` ends in `end_unstarted_on_refusal` instead,
+            // which also names the trigger.
             self.publish_failed(cursor, failed).await?;
             return Err(refused.failure());
         }
@@ -327,12 +350,14 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         Err(refused.failure())
     }
 
-    /// The same, for a refusal before the first WAL write: the fresh
-    /// path's `triggered`, on its own or ahead of a refusal for an
-    /// unavailable MCP server. There is no row, so the `failed` is the
-    /// whole record, and with no `triggered` on the stream nothing else
-    /// would say which trigger this run answered. The `failed` names it
-    /// with the dead letter's keys, `trigger_id` and `trigger_subject`;
+    /// The same, for a refusal before the first WAL write where the
+    /// trigger is in hand: the fresh path's `triggered`, on its own or
+    /// ahead of a refusal for an unavailable MCP server, and that
+    /// refusal's own `failed`, refused in its turn. There is no row, so
+    /// the `failed` is the whole record, and with a refused `triggered`
+    /// nothing else on the stream would say which trigger this run
+    /// answered. The `failed` names it, in both cases, with the dead
+    /// letter's keys, `trigger_id` and `trigger_subject`;
     /// both readers of those keys (`dead_letter::from_event` and
     /// `trigger::from_event`) take only a `trigger_exhausted` failure, so
     /// this one is never mistaken for a dead letter. The payload is not
