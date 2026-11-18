@@ -354,7 +354,7 @@ fn verdict_on(dead: &DeadLetter, found: Found) -> Verdict {
 /// How a refusal names the dead letter it is about: its sequence and its
 /// event, and, when the request named no sequence, that it was the
 /// agent's newest.
-fn which(dead: &DeadLetter, selected: bool) -> String {
+pub(super) fn which(dead: &DeadLetter, selected: bool) -> String {
     let at = match dead.trigger_stream_seq {
         Some(seq) => format!("at trigger sequence {seq}"),
         None => "with no trigger sequence".to_string(),
@@ -389,7 +389,7 @@ fn on_your_word(dead: &DeadLetter) -> String {
 }
 
 /// What in `fq invocation show`'s output says a run started.
-const STARTED_IF: &str = "it started if that shows a `Live execution:` block, an `archived:` \
+pub(super) const STARTED_IF: &str = "it started if that shows a `Live execution:` block, an `archived:` \
      line, a `status:` other than `(no coordination row)` or a trigger line saying `durably \
      started`";
 

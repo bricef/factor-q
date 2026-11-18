@@ -63,6 +63,7 @@ use fq_runtime::trigger::Trigger;
 
 use crate::trigger_command::TriggerKey;
 
+mod no_id;
 mod verdict;
 
 pub use verdict::TriggerRecords;
@@ -236,7 +237,8 @@ async fn requeue(
     // event says about a trigger. One read, one source: there is no
     // second place for the payload to come from and therefore no second
     // answer it could disagree with.
-    let original = fq_runtime::trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
+    let original = fq_runtime::trigger::from_event(&event)
+        .ok_or_else(|| unnamed(&event, input.trigger_seq.is_some()))?;
 
     // Already requeued: answered first, with the trigger the first call
     // made, rather than with a verdict on a run the operator need not look
@@ -376,30 +378,28 @@ async fn select_dead_letter(
     })
 }
 
-/// The refusal for a dead letter that names no trigger.
+/// The refusal for a dead letter that carries no trigger id, refused before
+/// any record is read.
 ///
 /// `Unlocatable` and not `InvalidInput`, because the request was right:
 /// this dead letter exists, it lists, and the operator selected it
 /// correctly. What is missing is the identity that would make a requeue
 /// idempotent, and no edit to the request can supply one — so a verdict
-/// that invites an edit would send them in a circle.
-fn unnamed(event: &Event) -> WireError {
+/// that invites an edit would send them in a circle. It names the dead
+/// letter as the other refusals do, says which kind it is from what it
+/// records, and what can be done with its work: [`no_id`].
+fn unnamed(event: &Event, selected: bool) -> WireError {
+    let Some(dead) = dead_letter_from_event(event) else {
+        return internal("the selected event is not a dead letter");
+    };
     WireError::Unlocatable {
         op: OP.into(),
         message: format!(
-            "the dead letter recorded by event `{}` names no trigger, so it cannot be requeued \
-             idempotently — there would be nothing to refuse a second attempt on, and requeueing \
-             it twice would run the agent twice. A dead letter is like this when nothing \
-             recorded a name for its trigger, and that is not a defect: one recorded before \
-             triggers were named, or one the advisory path built for a trigger it could not \
-             read a name off, since it reads the identity and never invents one. That is a \
-             trigger published without an `Fq-Trigger-Id` header, one that had already aged \
-             off the trigger stream, or one from an earlier incarnation of the trigger \
-             stream, whose advisory's sequence names a message of the stream before it. \
-             Whatever payload it recorded is on the record \
-             (`dead_letter.list`), so re-running it is `trigger.publish` — new work, named \
-             honestly as new work.",
-            event.envelope.event_id
+            "{} carries no trigger id, so it cannot be requeued idempotently — there would be \
+             nothing to refuse a second attempt on, and requeueing it twice would run the agent \
+             twice. {}",
+            verdict::which(&dead, selected),
+            no_id::what_is_true(&dead)
         ),
     }
 }
