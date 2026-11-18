@@ -2851,7 +2851,10 @@ async fn a_release_landing_after_its_claim_was_taken_again_leaves_the_new_claim(
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             };
-            pulled.dispatcher.release_unstarted_claim(&first).await;
+            pulled
+                .dispatcher
+                .release_unstarted_claim(&pulled.msg, &first, None, "a release given up on")
+                .await;
             (taken_again, the_claim(&pulled).await)
         };
         let ((), (taken_again, after_the_release)) = tokio::join!(

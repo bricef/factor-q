@@ -4,9 +4,9 @@
 //!
 //! A delivery is renewed while its run sets up, while it waits in a hold
 //! or for a worker permit, and while its durable start is marked. Settling
-//! is the stretch after that: a run that returned before its first WAL
-//! write, a trigger refused before it ran, or a run whose start was just
-//! marked. The answer goes out only after the claim is released, a write
+//! is the stretch after that for a delivery whose run did not start: a run
+//! that returned before its first WAL write, or a trigger refused before it
+//! ran. The answer goes out only after the claim is released, a write
 //! on the claim store, and on a trigger's last delivery only after its
 //! dead letter's publish, whose outcome decides the answer (issue 1062).
 //! If that work outlasted what was left of the ack window, the broker
@@ -17,18 +17,23 @@
 //!
 //! **Which answers go through here.** Every answer that releases a claim:
 //! `ack` and `nak` are [`TriggerDispatcher::settle`] with an answer ready,
-//! so the refusals at the front of `handle`, admission's, the agent cap's,
-//! the pre-start settlement and the ack after a durable start all do; the
-//! dead-letter path hands `settle` its publish, which answers with an ack
-//! or, for a dead letter it could not publish, [`Answer::HandOver`]. Four
-//! answers that keep the claim do not: the ack after a mark refused on every
-//! attempt (`mark_durable_started`), which follows the mark's own
-//! renewals with no store write between; the ack after the record of a
-//! start the mark found no claim for (`unmarked_start`), which follows the
-//! record's own renewals likewise; the ack of a copy whose run has a
-//! start on record (`own_claim`), which follows a mark of its own that
-//! nothing renews; and the ack of a copy of a started run in
-//! `claim_delivery`, which follows only the claim's read.
+//! so the refusals at the front of `handle`, admission's, the agent cap's
+//! and the pre-start settlement all do; the dead-letter path hands `settle`
+//! its publish, which answers with an ack or, for a dead letter it could
+//! not publish, [`Answer::HandOver`]. Six answers that keep the claim do
+//! not:
+//! - the ack after a mark that landed, and the ack after a mark refused on
+//!   every attempt (`mark_durable_started`), both of which follow the
+//!   mark's own renewals with no store write between, the claim being the
+//!   run's record;
+//! - the ack of a started run with no claim store to mark it on, which
+//!   has no claim to keep and nothing to write;
+//! - the ack after the record of a start the mark found no claim for
+//!   (`unmarked_start`), which follows the record's own renewals likewise;
+//! - the ack of a copy whose run has a start on record (`own_claim`),
+//!   which follows a mark of its own that nothing renews;
+//! - and the ack of a copy of a started run in `claim_delivery`, which
+//!   follows only the claim's read.
 //!
 //! **Bounded.** The release is a single `DELETE`. The store bounds its
 //! waits by itself: up to 30 seconds for a pooled connection and up to 5
@@ -51,10 +56,11 @@
 use std::future::Future;
 use std::time::Duration;
 
-use tracing::error;
+use tracing::{error, warn};
 
 use super::super::{TriggerDispatcher, trigger_name};
 use super::{Claimed, keeping_alive};
+use crate::control_plane::{ControlPlaneStore, TriggerKey};
 
 /// How long settling waits for the claim's release before answering the
 /// delivery without it.
@@ -133,7 +139,8 @@ impl TriggerDispatcher {
     ) {
         keeping_alive(msg, trigger_id, async {
             let answer = answer.await;
-            let released = tokio::time::timeout(release_bound, self.release_unstarted_claim(claim));
+            let release = self.release_unstarted_claim(msg, claim, trigger_id, answer.context());
+            let released = tokio::time::timeout(release_bound, release);
             if released.await.is_err() {
                 let stream_seq = claim.stream_seq;
                 error!(stream_seq, invocation_id = %claim.invocation_id, subject = %msg.subject,
@@ -153,5 +160,84 @@ impl TriggerDispatcher {
             }
         })
         .await;
+    }
+
+    /// Give back `claim`, if it is still `claimed` and still names the
+    /// invocation it was taken for. Every caller answers a delivery whose
+    /// run has not started, holding the claim `claimed` under its own
+    /// invocation; an ack after a landed mark keeps the claim and gives
+    /// nothing back (issue 1055). So a release that removes nothing means
+    /// something changed the claim underneath it: a second process on the
+    /// same store, the dead-letter watch or a requeue marking it after
+    /// finding a run in the worker's WAL, or a hand edit. (A copy taking the
+    /// claim again cannot do it in one daemon: a re-take follows only a
+    /// release that settling gave up waiting for, and that release lands
+    /// unwatched.)
+    ///
+    /// That release is logged at warn with the claim as it stands now, read
+    /// again on this path only, since what it holds is what tells those
+    /// causes apart, and with the delivery's subject, trigger and answer
+    /// (`context`), as the answer's own lines carry them.
+    pub(in crate::control_plane::dispatcher) async fn release_unstarted_claim(
+        &self,
+        msg: &async_nats::jetstream::Message,
+        claim: &Claimed,
+        trigger_id: Option<uuid::Uuid>,
+        context: &str,
+    ) {
+        let Some((store, _)) = self.claim_store.as_ref() else {
+            return;
+        };
+        let invocation_id = claim.invocation_id.to_string();
+        let key = self.trigger_key(claim.stream_seq);
+        match store.release_trigger_claim(key, &invocation_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let now = ClaimNow::read(store, key).await;
+                warn!(stream_seq = claim.stream_seq, %invocation_id, subject = %msg.subject,
+                    trigger_id = %trigger_name(trigger_id), context,
+                    claim_state = %now.state, claimant = %now.claimant,
+                    claim_invocation_id = %now.invocation_id,
+                    "released no trigger claim: none is still `claimed` under the invocation \
+                     giving it back, so something changed the claim before its release; the \
+                     claim as it stands now is on this line");
+            }
+            Err(err) => error!(error = %err, stream_seq = claim.stream_seq, %invocation_id,
+                "failed to release unfinished trigger claim"),
+        }
+    }
+}
+
+/// A claim as it stands now, for the line about a release that found it
+/// changed: its state, claimant and invocation, or that it is gone or could
+/// not be read.
+struct ClaimNow {
+    state: String,
+    claimant: String,
+    invocation_id: String,
+}
+
+impl ClaimNow {
+    async fn read(store: &ControlPlaneStore, key: TriggerKey<'_>) -> Self {
+        let none = || "none".to_string();
+        match store.trigger_claim(key).await {
+            // The state as its column spells it, by `ClaimState`'s own
+            // `Display`, so a state added to the claim is named there.
+            Ok(Some(row)) => Self {
+                state: row.state.to_string(),
+                claimant: row.claimant,
+                invocation_id: row.invocation_id.unwrap_or_else(none),
+            },
+            Ok(None) => Self {
+                state: "gone".to_string(),
+                claimant: none(),
+                invocation_id: none(),
+            },
+            Err(err) => Self {
+                state: format!("unreadable: {err}"),
+                claimant: none(),
+                invocation_id: none(),
+            },
+        }
     }
 }

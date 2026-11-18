@@ -73,8 +73,9 @@ pub enum RecordedStart {
 /// has started, so that a state added later is an arm that reader has to
 /// write, not a value that reads as one of these (issue 1055). The
 /// compiler forces the readers that match: `claim_trigger`,
-/// `record_trigger_start`, the dead-letter watch's two reads of the claim
-/// and the invocation view's mapping. It does not force two others, which
+/// `record_trigger_start`, the dead-letter watch's two reads of the claim,
+/// the invocation view's mapping and the state's `Display`, which log lines
+/// name it by. It does not force two others, which
 /// a state added later has to be written into by hand: `of_column`,
 /// which reads anything but `durably_started` as `claimed`, and the SQL
 /// statements that filter on `state = '…'`, which it never sees.
@@ -97,6 +98,16 @@ impl ClaimState {
             ClaimState::DurablyStarted
         } else {
             ClaimState::Claimed
+        }
+    }
+}
+
+/// The state as the `state` column spells it, for a log line that names it.
+impl std::fmt::Display for ClaimState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimState::Claimed => f.write_str("claimed"),
+            ClaimState::DurablyStarted => f.write_str("durably_started"),
         }
     }
 }
