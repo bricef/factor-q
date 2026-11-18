@@ -2026,6 +2026,12 @@ You are a test agent."#
             event.annotations.0.get("dead_letter_source"),
             Some(&json!("inline"))
         );
+        assert_eq!(
+            event.annotations.0.get("trigger_stream_epoch"),
+            Some(&json!(bus.trigger_stream_epoch().to_string())),
+            "the dead letter says which incarnation of the trigger stream its trigger \
+             was on, the one this dispatcher reads"
+        );
     }
 
     /// #49: a durable created by a pre-bound binary gets its retry

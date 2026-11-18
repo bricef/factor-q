@@ -85,6 +85,11 @@ async fn attributed_to(arena: &Arena, published: &PublishedTrigger) {
         event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY),
         Some(&json!(published.id.to_string()))
     );
+    assert_eq!(
+        event.annotations.0.get("trigger_stream_epoch"),
+        Some(&json!(arena.bus.trigger_stream_epoch().to_string())),
+        "the incarnation of the stream its trigger was on"
+    );
     let keys: Vec<&str> = event.annotations.0.keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -92,10 +97,11 @@ async fn attributed_to(arena: &Arena, published: &PublishedTrigger) {
             "dead_letter_source",
             "trigger_id",
             "trigger_payload",
+            "trigger_stream_epoch",
             "trigger_stream_seq",
             "trigger_subject",
         ],
-        "the annotations a dead letter of this incarnation has always had, and no other"
+        "the annotations a dead letter of this incarnation has, and no other"
     );
 }
 
@@ -200,6 +206,11 @@ async fn an_advisory_from_an_earlier_incarnation_is_not_dropped_for_the_current_
     assert_eq!(
         event.annotations.0.get(DEAD_LETTER_STREAM_SEQ_KEY),
         Some(&json!(SEQ))
+    );
+    assert_eq!(
+        event.annotations.0.get("trigger_stream_epoch"),
+        None,
+        "an earlier incarnation's, which the watch cannot know"
     );
 }
 
