@@ -91,7 +91,7 @@ impl RoundLedger {
 /// What a run's model-call rows in the WAL add up to: its totals, with
 /// the agent-call count and the total and server-origin cost buckets, and
 /// the Rounds its agent turns consumed. A resume seeds its totals from
-/// this.
+/// this, and the archive sweeper's held ending reports it.
 ///
 /// The counters have different filters on purpose. `calls`
 /// feeds `total_llm_calls`, which counts turns that produced an

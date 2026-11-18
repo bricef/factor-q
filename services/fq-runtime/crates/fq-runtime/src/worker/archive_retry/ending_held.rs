@@ -17,7 +17,7 @@
 //! run, carries the same `event_id` ([`event_id`]), and the fold of a
 //! second copy finds the row already saying it.
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use fq_ops::health::ArchiveHoldReason;
@@ -26,9 +26,10 @@ use super::{ArchiveRetryError, ArchiveRetrySweeper, event_ids};
 use crate::bus::BusError;
 use crate::control_plane::ownership::Ending;
 use crate::events::{
-    EndingHeldReason, Event, EventPayload, HeldOutcome, InvocationEndingHeldPayload,
+    EndingHeldReason, Event, EventPayload, HeldOutcome, InvocationEndingHeldPayload, RecordedTotals,
 };
-use crate::worker::store::InvocationStateRow;
+use crate::worker::reducer::rounds::totals_of_llm_rows;
+use crate::worker::store::{DispatchStatus, InvocationStateRow, WorkerStore, WorkerStoreError};
 
 /// Why `hold` keeps the run's own ending off the stream, when it does.
 pub(super) fn reason_of(hold: &ArchiveHoldReason) -> Option<EndingHeldReason> {
@@ -80,7 +81,82 @@ pub(super) fn outcome_of(row: &InvocationStateRow) -> HeldOutcome {
     HeldOutcome::from(Ending::of_archived_phase(&row.phase))
 }
 
+/// The run's totals as its per-call rows in the WAL give them, by the rule
+/// a resume rebuilds them by: the model calls that produced an outcome,
+/// the cost of every completed model call, and the tool calls that
+/// completed. The rows stay until the archive is acknowledged, so a held
+/// row still has them.
+pub(super) async fn recorded_totals(
+    store: &WorkerStore,
+    invocation_id: &str,
+) -> Result<RecordedTotals, WorkerStoreError> {
+    let llms = store
+        .list_llm_dispatches_for_invocation(invocation_id)
+        .await?;
+    let tools = store
+        .list_tool_dispatches_for_invocation(invocation_id)
+        .await?;
+    let (totals, _rounds) = totals_of_llm_rows(&llms);
+    let completed_tools = tools
+        .iter()
+        .filter(|row| row.status == DispatchStatus::Completed)
+        .count();
+    Ok(RecordedTotals {
+        total_llm_calls: totals.total_llm_calls,
+        total_tool_calls: u32::try_from(completed_tools).unwrap_or(u32::MAX),
+        total_cost: totals.total_cost,
+    })
+}
+
+/// The totals the run's own ending carries, when the row stores one this
+/// build can read: a stored ending refused for size could reach the stream
+/// later, under a raised limit.
+fn stored_totals(row: &InvocationStateRow) -> Option<RecordedTotals> {
+    match row.unpublished_terminal_event().ok()??.payload {
+        EventPayload::Completed(completed) => Some(RecordedTotals {
+            total_llm_calls: completed.total_llm_calls,
+            total_tool_calls: completed.total_tool_calls,
+            total_cost: completed.total_cost,
+        }),
+        EventPayload::Failed(failed) => Some(RecordedTotals {
+            total_llm_calls: failed.partial_totals.total_llm_calls,
+            total_tool_calls: failed.partial_totals.total_tool_calls,
+            total_cost: failed.partial_totals.total_cost,
+        }),
+        _ => None,
+    }
+}
+
 impl ArchiveRetrySweeper {
+    /// The totals a held ending carries: the recorded ones, unless the run's
+    /// own stored ending, readable here, carries others. Then none: that
+    /// ending could still go out under a raised limit, and the stream would
+    /// hold two figures for one run. Exact equality, because a figure reads
+    /// back as it was written. A stored ending this build cannot read
+    /// cannot be compared; it never reaches the stream, and the recorded
+    /// totals go out uncompared.
+    async fn held_ending_totals(
+        &self,
+        row: &InvocationStateRow,
+    ) -> Result<Option<RecordedTotals>, ArchiveRetryError> {
+        let recorded = recorded_totals(&self.store, &row.invocation_id)
+            .await
+            .map_err(|err| ArchiveRetryError::Store(err.to_string()))?;
+        match stored_totals(row) {
+            Some(stored) if stored != recorded => {
+                warn!(
+                    invocation_id = %row.invocation_id,
+                    recorded = ?recorded,
+                    stored = ?stored,
+                    "the held row's recorded totals differ from its stored ending's; its held \
+                     ending carries none"
+                );
+                Ok(None)
+            }
+            _ => Ok(Some(recorded)),
+        }
+    }
+
     /// Publish a held row's ending when the hold keeps the run's own off
     /// the stream and this daemon run has not yet sent it. A bus failure
     /// ends the pass, as every other does, and the next pass sends it. A
@@ -98,6 +174,7 @@ impl ArchiveRetrySweeper {
             return Ok(());
         };
         let outcome = outcome_of(row);
+        let totals = self.held_ending_totals(row).await?;
         let mut event = Event::new(
             agent_id,
             invocation_id,
@@ -107,7 +184,7 @@ impl ArchiveRetrySweeper {
                 started_at_ms: row.started_at,
                 worker_id: self.worker_id.clone(),
                 reason,
-                totals: None,
+                totals,
             }),
         );
         event.envelope.event_id = event_id(invocation_id, ended_at_ms);
@@ -134,3 +211,6 @@ impl ArchiveRetrySweeper {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod totals_tests;
