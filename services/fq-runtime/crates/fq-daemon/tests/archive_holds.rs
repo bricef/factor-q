@@ -38,6 +38,10 @@ const STATE: usize = 1_100_000;
 const STOCK_MAX_PAYLOAD: u64 = 1024 * 1024;
 /// The start of the line the daemon logs when it holds a row for size.
 const HELD_LINE: &str = "an event this row must publish is larger than the broker's max_payload";
+/// The line the daemon logs when it publishes a held row's ending, as the
+/// operating guide quotes it.
+const HELD_ENDING_LINE: &str =
+    "published the held row's ending, so the control plane reads the run as ended";
 
 const POLL: Duration = Duration::from_millis(100);
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -523,6 +527,18 @@ async fn a_run_whose_ending_is_held_reads_finished_with_its_archive_held() {
             .as_str()
             .is_some_and(|remedy| remedy.contains("terminal_outcome")),
         "and what lifts it: {detail}"
+    );
+
+    // ---- Said once in the run, in the guide's words. ----
+    let text = daemon.log();
+    let said: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(HELD_ENDING_LINE) && l.contains(HELD))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "one line per run for the held ending\n--- daemon log ---\n{text}"
     );
 }
 
