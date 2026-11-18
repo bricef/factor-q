@@ -88,7 +88,10 @@ struct RequeueCommandInput {
     /// start: the invocation a refusal names, read with `invocation.get`
     /// or `fq invocation show`. It lets a requeue through when the daemon
     /// cannot tell from its records whether the run started. It never gets
-    /// past a start on record. Absent means false.
+    /// past a start on record, of the run the trigger's claim names or of
+    /// the run the dead letter's `start_unchecked` mark names. It needs
+    /// `trigger_seq`, naming the dead letter you checked; without one it
+    /// is refused. Absent means false.
     #[serde(default)]
     checked_not_started: bool,
 }
@@ -151,22 +154,31 @@ fn requeue_declaration() -> fq_ops::Command {
          out of deliveries, not that its run never started, and requeueing one \
          whose run started runs the work twice. So before anything is reserved \
          or published this asks the records the dead-letter watch asks: the \
-         trigger's claim, the worker's WAL and the ownership table. A start on \
-         record is refused with a `Conflict` naming the invocation, whatever \
-         `checked_not_started` says; a start found in the records on a claim \
-         still reading `claimed` is marked on the claim, as startup recovery \
-         marks it, and the refusal says so. Nothing on record proceeds, whether \
-         or not the dead letter carries `start_unchecked`. When it cannot tell, \
-         it is refused with `InvalidInput` unless `checked_not_started` is \
-         true: the records cannot be read, a copy of the trigger is still \
-         handling its claim, the claim changed while it was read, or the dead \
-         letter carries `start_unchecked` and no claim of the current trigger \
-         stream names its delivery (the claim was given back or deleted by the \
-         retention sweep, which look the same, or the dead letter was written \
-         before the stream was last created). The refusal names the invocation \
-         to check and what in it says the run started. Every refusal names the \
-         dead letter by its trigger sequence and event id, and says when it \
-         was the agent's newest, taken because `trigger_seq` was absent. ",
+         trigger's claim, and the worker's WAL and the ownership table for the \
+         run the claim names; and when that cannot tell and the dead letter's \
+         `start_unchecked` mark names a run, those two records for that run, \
+         by its own id. A start on record in any of them is refused with a \
+         `Conflict` naming the invocation, whatever `checked_not_started` says; \
+         a start found in the records on a claim still reading `claimed` is \
+         marked on the claim, as startup recovery marks it, and the refusal \
+         says so. Nothing on record proceeds, whether or not the dead letter \
+         carries `start_unchecked`. When it cannot tell, it is refused with \
+         `InvalidInput` unless `checked_not_started` is true: the records \
+         cannot be read, a copy of the trigger is still handling its claim, \
+         the claim changed while it was read, or the dead letter carries \
+         `start_unchecked` and no claim of the current trigger stream names \
+         its delivery (the claim was given back or deleted by the retention \
+         sweep, which look the same, or the dead letter was written before the \
+         stream was last created), and nothing is found under the run its mark \
+         names. That refusal names the invocation to check and what in it says \
+         the run started. `checked_not_started` without `trigger_seq` is \
+         refused, `InvalidInput`, before anything is selected: it is a word \
+         about one dead letter's run, and with no sequence the request would \
+         take whichever dead letter is the agent's newest when it arrives. The \
+         start-on-record and cannot-tell refusals name the dead letter by its \
+         trigger sequence and event id, and say when it was the agent's \
+         newest, taken because `trigger_seq` was absent. A dead letter already \
+         requeued gets the `Conflict` above first. ",
         "The payload is the dead letter's own record of the trigger, verbatim. \
          `trigger_seq` selects which dead letter by the original's trigger-\
          stream position (what `dead_letter.list` prints); absent takes the \
@@ -214,6 +226,9 @@ async fn requeue(
         op: OP.into(),
         message: format!("invalid agent name `{}`: {e}", input.agent_id),
     })?;
+    if input.checked_not_started && input.trigger_seq.is_none() {
+        return Err(override_without_a_sequence(agent.as_str()));
+    }
     let event = select_dead_letter(bus, agent.as_str(), input.trigger_seq).await?;
 
     // The identity, the subject and the payload all come off this one
@@ -223,8 +238,20 @@ async fn requeue(
     // answer it could disagree with.
     let original = fq_runtime::trigger::from_event(&event).ok_or_else(|| unnamed(&event))?;
 
+    // Already requeued: answered first, with the trigger the first call
+    // made, rather than with a verdict on a run the operator need not look
+    // at. A read: the reservation below is still what refuses a second
+    // attempt racing this one.
+    if let Some(existing) = projection
+        .requeue_of(&original.id.to_string())
+        .await
+        .map_err(internal)?
+    {
+        return Err(requeued_as(&original, existing));
+    }
+
     // Whether the trigger's run started, asked of the records after the
-    // refusal above (a dead letter that names no trigger is refused
+    // refusals above (a dead letter that names no trigger is refused
     // whatever they hold) and before anything is reserved or published,
     // so a refusal leaves nothing behind.
     let dead = dead_letter_from_event(&event)
@@ -381,17 +408,7 @@ fn unnamed(event: &Event) -> WireError {
 /// carrying the reference that makes it useful.
 async fn already_requeued(projection: &ProjectionStore, original: &Trigger) -> WireError {
     match projection.requeue_of(&original.id.to_string()).await {
-        Ok(Some(existing)) => WireError::Conflict {
-            op: OP.into(),
-            message: format!(
-                "a requeue of trigger `{}` is in flight or landed as trigger `{existing}` — \
-                 nothing was published by this attempt. Check it with `fq trigger get \
-                 {existing}` (`trigger.get`) and wait for the dispatcher before retrying. A dead letter is \
-                 requeued at most once on purpose. To run the work again anyway, publish it as \
-                 new work with `trigger.publish`.",
-                original.id
-            ),
-        },
+        Ok(Some(existing)) => requeued_as(original, existing),
         // The claim was refused and yet nothing holds it: not a state
         // this can produce, so it is reported as the fault it is
         // rather than retried into a second publish.
@@ -400,6 +417,40 @@ async fn already_requeued(projection: &ProjectionStore, original: &Trigger) -> W
             original.id
         )),
         Err(e) => internal(e),
+    }
+}
+
+/// The `Conflict` for a dead letter whose trigger was requeued already, as
+/// `existing`.
+fn requeued_as(original: &Trigger, existing: uuid::Uuid) -> WireError {
+    WireError::Conflict {
+        op: OP.into(),
+        message: format!(
+            "a requeue of trigger `{}` is in flight or landed as trigger `{existing}` — \
+             nothing was published by this attempt. Check it with `fq trigger get \
+             {existing}` (`trigger.get`) and wait for the dispatcher before retrying. A dead letter is \
+             requeued at most once on purpose. To run the work again anyway, publish it as \
+             new work with `trigger.publish`.",
+            original.id
+        ),
+    }
+}
+
+/// The refusal of the override without a sequence. The override is the
+/// operator's word about one dead letter's run, and with no sequence the
+/// request takes whichever dead letter is the agent's newest when it
+/// arrives, which may be one they never looked at.
+fn override_without_a_sequence(agent: &str) -> WireError {
+    WireError::InvalidInput {
+        op: OP.into(),
+        message: format!(
+            "`checked_not_started` (`--checked-not-started`) needs `trigger_seq` \
+             (`--trigger-seq`): it is your word that the run of one dead letter did not start, \
+             and with no sequence the request takes agent `{agent}`'s newest dead letter, \
+             whichever that is when it arrives, not necessarily the one you checked. Name the \
+             dead letter you checked by its sequence: the refusal that sent you to check it names \
+             it, and so does `fq dead-letters list`. Nothing was selected, reserved or published."
+        ),
     }
 }
 
@@ -469,6 +520,10 @@ mod tests {
             "start_unchecked",
             "InvalidInput",
             "newest",
+            // What is read for the run the mark names, and that the
+            // override names its dead letter.
+            "by its own id",
+            "`checked_not_started` without `trigger_seq` is refused",
             // A timed-out acknowledgement is not proof the publish failed.
             "outcome is unknown",
             "trigger.get",
