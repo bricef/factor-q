@@ -1478,12 +1478,23 @@ it names nothing:
 Its `seq=` is the earlier stream's and says nothing about the trigger at
 that sequence today, and since the claims were not consulted, the
 trigger it records may have started its run before the stream was
-recreated. An advisory with no timestamp the watch can read is taken as
-the current incarnation's, though the broker always stamps one. The
-watch learns the stream's incarnation when the daemon connects, so an
-advisory emitted before the stream is recreated under a running daemon
-is still attributed to the message at its sequence until the daemon
-restarts.
+recreated. A redelivered advisory writes it a second time, as it does
+the form for a trigger that aged out, and that form says nothing of
+why, though the watch writes it on any failure to read the message
+([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
+with no timestamp the watch can read is taken as the current
+incarnation's, though the broker always stamps one.
+
+The watch learns the stream's incarnation when the daemon connects.
+Deleting the trigger stream under a running daemon normally stops the
+daemon within about a second, its dispatcher's consumer gone with the
+stream, and its next start creates the stream again and learns the new
+incarnation. A stream deleted between two of the dispatcher's pulls
+instead leaves the daemon running and consuming nothing, logging
+`error reading next JetStream trigger` at warn about every 35 seconds,
+and the watch then attributes an advisory emitted before the recreate
+to the message at its sequence in the new stream
+([#1065](https://github.com/bricef/factor-q/issues/1065)).
 
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the

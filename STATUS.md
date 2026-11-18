@@ -420,13 +420,22 @@ sequence: the watch reads nothing there and writes the dead letter for
 the system with no subject, payload or trigger id, which
 `fq dead-letters requeue` refuses, and `fq dead-letters list` says why
 it names no trigger
-([#1054](https://github.com/bricef/factor-q/issues/1054)). Two readings
+([#1054](https://github.com/bricef/factor-q/issues/1054)). A
+redelivered advisory writes such a dead letter twice, as it does the
+form for a trigger that aged out of the stream, and that form carries no
+reason, though the watch writes it on any failure to read the message
+([#1066](https://github.com/bricef/factor-q/issues/1066)). Two readings
 of an advisory's incarnation still attribute it to the message at its
-sequence: one with no timestamp the watch can read is taken as the
-current incarnation's, though the broker always stamps one, and the
-incarnation is the one the daemon connected to, so an advisory emitted
-before the stream is recreated under a running daemon is read at its
-sequence until the daemon restarts. A claim written before claims named
+sequence. One with no timestamp the watch can read is taken as the
+current incarnation's, though the broker always stamps one. And the
+incarnation is the one the daemon read when it connected: deleting the
+trigger stream under a running daemon stops the daemon within about a
+second, its dispatcher's consumer gone with the stream, and the next
+start creates the stream again and reads the new incarnation; but a
+stream deleted between two of the dispatcher's pulls leaves the daemon
+running and consuming nothing, and its watch then reads an advisory
+emitted before the recreate at its sequence in the new stream
+([#1065](https://github.com/bricef/factor-q/issues/1065)). A claim written before claims named
 their run is dead-lettered without a look at the records, as before. And a trigger consumed without its run starting (it failed for
 good before its first WAL write, was refused at admission, was requeued
 from a hold, or was halted in setup, among others) has its claim
