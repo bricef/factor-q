@@ -273,6 +273,11 @@ async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once
     assert_eq!(dead.trigger_stream_seq, Some(published.stream_seq));
     assert_eq!(dead.trigger_payload, serde_json::Value::Null);
     assert_eq!(event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY), None);
+    assert_eq!(
+        event.annotations.0.get("trigger_stream_epoch"),
+        Some(&json!(bus.trigger_stream_epoch().to_string())),
+        "its advisory is this incarnation's, so its trigger was on this stream"
+    );
     let emitted = serde_json::from_slice::<serde_json::Value>(&advisory).unwrap()["timestamp"]
         .as_str()
         .map(|at| {
