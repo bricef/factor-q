@@ -34,6 +34,7 @@ use crate::events::{Event, EventPayload, FailureKind, subjects};
 use crate::trigger::PublishedTrigger;
 
 mod incarnation;
+mod unreadable;
 
 /// The delivery the tests hand the watch an advisory on: enough looks
 /// that only the advisory's age decides whether a verdict is still held.
