@@ -637,7 +637,8 @@ models = ["claude-haiku-4-5"]
 # schedule's first entry. And the coordination consumer's window is
 # five seconds: it takes one delivery at a time, so a delivery a
 # stopped daemon left unacknowledged holds everything behind it, gated
-# reads included, until the window lapses (#1070).
+# reads and the next start's recovery included, until the window
+# lapses (#1070).
 # ack_wait_ms = 30000
 #
 # Floor on the gap between two error lines about one consumer's

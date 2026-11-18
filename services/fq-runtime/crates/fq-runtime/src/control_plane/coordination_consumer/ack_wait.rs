@@ -13,7 +13,10 @@ use std::time::Duration;
 /// start folds nothing: its ownership rows stand still, and so does the
 /// coordination half of the read horizon, which gated reads of the
 /// Invocation view wait on (`fq invocation drop` reads its drop back that
-/// way).
+/// way), and startup recovery waits for this fold before it decides
+/// (`[worker] recovery_backlog_wait_secs`, 30 s by default): at the bus
+/// default a start would wait out its whole bound and hold every run it
+/// meant to resume.
 ///
 /// **A fold slower than the window.** The handler writes SQLite and
 /// returns. One that runs past the window has its event delivered again

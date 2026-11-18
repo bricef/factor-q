@@ -646,11 +646,18 @@ run that fails mid-step now marks its WAL row finished, with its
 archive sweeper's to repeat, and the mark has one winner against an
 operator's drop ([#1070](https://github.com/bricef/factor-q/issues/1070)). A run whose `failed` an older build
 published before dying unmarked is no longer resumed at the next start,
-provided the coordination consumer folded that `failed` before the
-daemon died. If it did not, the next start resumes the run, and the
-consumer then folds the old `failed`; recovery folding the coordination
-backlog before it classifies is item 3 of
-[#1070](https://github.com/bricef/factor-q/issues/1070). A run still
+whether or not the coordination consumer folded that `failed` before
+the daemon died: startup recovery now decides only after the consumer
+has folded what was on the event stream when the start began, so a
+`failed` or a drop the dying daemon published is on record first
+([#1070](https://github.com/bricef/factor-q/issues/1070)). The wait is
+bounded by `[worker] recovery_backlog_wait_secs` (30 seconds); a run it
+could not check is logged at error and left in flight for a later start
+to resume once the fold has caught up (resuming it without a restart is
+[#1089](https://github.com/bricef/factor-q/issues/1089)), and the
+consumer's tick sweeps wait until recovery has decided. A delivery the stopped daemon left unacknowledged holds the
+fold for the coordination consumer's five-second ack window, well
+inside that bound. A run still
 running from a trigger has no row yet, so it is not in
 `fq invocation list`; `fq doctor`'s current executions count it
 ([#721](https://github.com/bricef/factor-q/issues/721)). Still open:
