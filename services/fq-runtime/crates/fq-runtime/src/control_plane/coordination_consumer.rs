@@ -66,7 +66,7 @@ use uuid::Uuid;
 
 use crate::bus::{BusError, EventBus};
 use crate::events::{
-    Event, EventPayload, FailurePhase, InvocationArchiveAckedPayload, InvocationArchivedPayload,
+    Event, EventPayload, InvocationArchiveAckedPayload, InvocationArchivedPayload,
     WorkerOrphanedPayload,
 };
 
@@ -77,7 +77,9 @@ use super::durable_consumer::{
 use super::ownership::{
     self, Applied, Ending, OwnerFacts, OwnershipError, OwnershipEvent, RowState,
 };
-use super::store::{ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, WorkerStatus};
+use super::store::{
+    ArchiveState, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, WorkerStatus,
+};
 
 /// Name of the durable JetStream consumer the coordination
 /// consumer creates. Distinct from the projection consumer's
@@ -338,19 +340,11 @@ impl CoordinationConsumer {
                 self.handle_ending(&event, OwnershipEvent::Ended(Ending::Completed))
                     .await
             }
-            // A `failed` in `setup` is published only for a run that never
-            // made its first WAL write: the runner stamps that phase from
-            // the WAL row itself, in one place, and its tests refuse every
-            // publish of a run in turn to keep it so. The transition ignores
-            // it, because a row is what recovery, the dispatcher and the
-            // dead-letter watch read as "the run started" (`RunRecords`).
+            // Which `failed` is an ending is `OwnershipEvent::of_failed`'s,
+            // one arm per phase.
             EventPayload::Failed(payload) => {
-                let what = if matches!(payload.phase, FailurePhase::Setup) {
-                    OwnershipEvent::SetupFailed
-                } else {
-                    OwnershipEvent::Ended(Ending::Failed)
-                };
-                self.handle_ending(&event, what).await
+                self.handle_ending(&event, OwnershipEvent::of_failed(payload.phase))
+                    .await
             }
             EventPayload::InvocationOperatorResumed(_) => Ok(()),
             _ => {
@@ -378,9 +372,12 @@ impl CoordinationConsumer {
     /// for the worker on a row the move creates or one that takes it, and
     /// say what happened: debug for a move or a duplicate, warn for a
     /// refusal (the row records the run finished, and the event would put
-    /// it back in progress), error for a conflicting ending (two endings
-    /// were published for one run). `report` is a late
-    /// `invocation.ambiguous`'s own fields, which tell startup
+    /// it back in progress) and for an ending that reaches a row whose
+    /// ending is already archived (an operator's drop came first, which is
+    /// no fault), error for any other conflicting ending (the run
+    /// published two). `reported` on a conflict is the ending the event
+    /// names, `invocation.archived`'s `final_phase` included. `report` is
+    /// a late `invocation.ambiguous`'s own fields, which tell startup
     /// categorisation (`stuck_entity` a dispatch kind) from a resume that
     /// could not be carried out (`recovery`, with the error in `note`).
     async fn move_row(
@@ -431,14 +428,31 @@ impl CoordinationConsumer {
                 note,
                 "event for a run already recorded finished; the ownership row keeps its status"
             ),
-            Applied::Conflict { recorded, moved_to } => error!(
-                invocation_id,
-                agent_id,
-                event_type,
-                recorded = recorded.name(),
-                moved_to = moved_to.map(RowState::name),
-                "a second ending published for one run; the ownership row keeps the first"
-            ),
+            Applied::Conflict { recorded, moved_to } => {
+                let reported = what.ending().map(|ending| ending.status().as_str());
+                if recorded.archive == ArchiveState::Archived {
+                    warn!(
+                        invocation_id,
+                        agent_id,
+                        event_type,
+                        recorded = recorded.name(),
+                        reported,
+                        "an ending reached a run whose recorded ending is already archived, as \
+                         after an operator's drop; the ownership row keeps the ending it recorded"
+                    );
+                } else {
+                    error!(
+                        invocation_id,
+                        agent_id,
+                        event_type,
+                        recorded = recorded.name(),
+                        reported,
+                        moved_to = moved_to.map(RowState::name),
+                        "two endings published for one run; the ownership row keeps the ending \
+                         it recorded"
+                    );
+                }
+            }
         }
         Ok(applied)
     }

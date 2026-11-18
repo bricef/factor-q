@@ -58,9 +58,15 @@
 //! - **Refused**: the row records the run finished, and the event would
 //!   put it back in progress. A report of ambiguity, or recovery's
 //!   restore, can arrive after the run's ending; the ending stands.
-//! - **Conflict**: an ending that contradicts the one recorded, so two
-//!   endings were published for one run. The first stands; an archive's
-//!   arrival is still recorded, as the cell after `conflict:` says.
+//! - **Conflict**: an ending that contradicts the one recorded. The
+//!   recorded ending stands, whichever came first on the stream: a run's
+//!   own ending that reaches a row an operator's drop has already ended
+//!   and archived keeps the drop, which the consumer logs at warn, since
+//!   dropping a run as it finishes is no fault. Anywhere else the run
+//!   published two endings, which is logged at error. An archive's
+//!   arrival is still recorded, as the cell after `conflict:` says, and
+//!   the row then keeps its ending while the archive record holds the
+//!   other: the two disagree with no operator involved (issue 1070).
 //! - **Duplicate**: the row already says what the event says, as
 //!   at-least-once delivery makes ordinary.
 //! - **An operator's drop wins** from every state, as it always has, and
@@ -100,6 +106,7 @@
 use super::store::{
     ArchiveState, ControlPlaneStore, ControlPlaneStoreError, OwnerRow, OwnerStatus,
 };
+use crate::events::FailurePhase;
 
 /// How a run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +230,41 @@ pub enum OwnershipEvent {
 }
 
 impl OwnershipEvent {
+    /// What a `failed` in `phase` is to the row. A `failed` in `setup` is
+    /// published only while the run's WAL holds no row: before its first
+    /// WAL write, when a row here would record a start that never
+    /// happened, or after a live drop whose archive was handed off, when
+    /// the drop is already the recorded ending. Every other phase is an
+    /// ending. One arm per phase, so a phase added later has to be
+    /// placed here.
+    pub fn of_failed(phase: FailurePhase) -> Self {
+        match phase {
+            FailurePhase::Setup => OwnershipEvent::SetupFailed,
+            FailurePhase::Reducer
+            | FailurePhase::HostStepBudget
+            | FailurePhase::Budget
+            | FailurePhase::LlmRequest
+            | FailurePhase::LlmResponse
+            | FailurePhase::ToolCall
+            | FailurePhase::ToolResult => OwnershipEvent::Ended(Ending::Failed),
+        }
+    }
+
+    /// The ending the event reports, if it reports one.
+    pub fn ending(self) -> Option<Ending> {
+        match self {
+            OwnershipEvent::Ended(ending)
+            | OwnershipEvent::Archived(ending)
+            | OwnershipEvent::OperatorEnded(ending) => Some(ending),
+            OwnershipEvent::Triggered
+            | OwnershipEvent::Restored
+            | OwnershipEvent::Ambiguous
+            | OwnershipEvent::SetupFailed
+            | OwnershipEvent::ArchiveAcked
+            | OwnershipEvent::OperatorResumed => None,
+        }
+    }
+
     /// Every event, for the tests that drive each from every state.
     pub const ALL: [OwnershipEvent; 12] = [
         OwnershipEvent::Triggered,

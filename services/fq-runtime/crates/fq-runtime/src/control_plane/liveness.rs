@@ -69,8 +69,9 @@ pub fn classify_liveness(
 /// Has the control plane already closed this invocation?
 ///
 /// The worker's own `terminal_at IS NULL` is not the whole answer: a
-/// row whose archive hand-off has been acknowledged by the control
-/// plane is finished even if the local row has not been cleaned up yet.
+/// run whose ownership row records an ending, which it does from the
+/// moment the ending is folded, or whose archive record is written, is
+/// finished even if the local row has not been marked or cleaned up yet.
 /// Asking here rather than at each caller is what keeps the doctor's
 /// in-flight population and the sweep's identical.
 pub(crate) async fn is_closed_by_control_plane(
