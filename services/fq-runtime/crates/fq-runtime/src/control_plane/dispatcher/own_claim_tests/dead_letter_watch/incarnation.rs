@@ -30,14 +30,19 @@ use crate::trigger::PublishedTrigger;
 
 /// The advisory, stamped a second before the trigger stream was created:
 /// one the broker emitted for the stream before this one, at the same
-/// sequence as a message this stream holds.
+/// sequence as a message this stream holds. Another advisory, so another id
+/// of the broker's: the watch tells one advisory's dead letter from
+/// another's by it.
 pub(super) fn stamped_before_the_streams_creation(arena: &Arena, advisory: &[u8]) -> Vec<u8> {
     let created = chrono::DateTime::from_timestamp_nanos(arena.bus.trigger_stream_epoch());
     let before = created - chrono::Duration::seconds(1);
-    restamped(
+    let mut earlier: serde_json::Value = serde_json::from_slice(&restamped(
         advisory,
         Some(&before.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
-    )
+    ))
+    .unwrap();
+    earlier["id"] = json!(uuid::Uuid::now_v7().simple().to_string());
+    serde_json::to_vec(&earlier).unwrap()
 }
 
 /// The advisory with its timestamp set to `timestamp`, or taken away.

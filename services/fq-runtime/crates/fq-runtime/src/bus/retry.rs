@@ -42,11 +42,12 @@ pub const DEFAULT_NAK_MAX: Duration = Duration::from_secs(60);
 /// Sized for the handlers it actually covers — the projection,
 /// coordination and heartbeat consumers write to SQLite and return,
 /// and the advisory watch reads the trigger's claim and the worker's WAL
-/// from SQLite and publishes at most one event. **It is not a blanket
-/// claim about every durable.** The summariser's handler calls a model
-/// inline and runs under the worker's response budget, so its durable
-/// overrides this window rather than tripping it and having the summary
-/// regenerated behind the one still running
+/// from SQLite, reads the event log for a dead letter it already wrote
+/// (for at most ten seconds), and publishes at most one event. **It is
+/// not a blanket claim about every durable.** The summariser's handler
+/// calls a model inline and runs under the worker's response budget, so
+/// its durable overrides this window rather than tripping it and having
+/// the summary regenerated behind the one still running
 /// ([`crate::control_plane::summary_consumer`]); a consumer whose
 /// handler can legitimately outlast this window must do the same.
 pub const DEFAULT_ACK_WAIT: Duration = Duration::from_secs(30);

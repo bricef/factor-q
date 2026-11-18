@@ -6,7 +6,10 @@
 //! trigger, which goes under the system sentinel: a watch that stopped
 //! between publishing such a dead letter and acking its advisory wrote it
 //! again when the advisory came back. These tests hand the real
-//! [`AdvisoryWatch::handle_advisory`] the same advisory more than once.
+//! [`AdvisoryWatch::handle_advisory`] the same advisory more than once. A
+//! watch remembers what it wrote since it started, so a test that pins the
+//! read of the log hands the advisory back to a watch made afresh, as after
+//! a restart ([`restarted`]).
 
 use futures::StreamExt;
 use serde_json::json;
@@ -77,6 +80,12 @@ async fn nameless_dead_letters(bus: &EventBus) -> usize {
     written
 }
 
+/// A watch made afresh on `bus`, as the daemon makes one when it starts
+/// again: it remembers nothing it wrote, so it can only read the log.
+fn restarted(bus: &EventBus) -> AdvisoryWatch {
+    AdvisoryWatch::without_records(bus.clone())
+}
+
 /// **The same advisory handled twice writes one dead letter.** The second
 /// handling is what a watch that stopped after the publish and before the
 /// ack meets when the advisory comes back.
@@ -87,7 +96,7 @@ async fn the_same_advisory_handled_twice_writes_one_nameless_dead_letter() {
     let watch = AdvisoryWatch::without_records(bus.clone());
 
     let first = watch.handle_advisory(&advisory, 1).await.unwrap();
-    let again = watch.handle_advisory(&advisory, 2).await.unwrap();
+    let again = restarted(&bus).handle_advisory(&advisory, 2).await.unwrap();
 
     assert_eq!(first, AdvisoryOutcome::Emitted);
     assert_eq!(again, AdvisoryOutcome::AlreadySurfaced);
@@ -135,6 +144,7 @@ async fn a_redelivered_advisory_is_written_once_though_another_came_between() {
         AdvisoryOutcome::Emitted
     );
 
+    let watch = restarted(&bus);
     let again = watch.handle_advisory(&one, 2).await.unwrap();
     let last = watch.handle_advisory(&two, 2).await.unwrap();
 
@@ -253,7 +263,7 @@ async fn an_event_this_build_cannot_read_does_not_stop_the_check() {
     let watch = AdvisoryWatch::without_records(bus.clone());
 
     let first = watch.handle_advisory(&advisory, 1).await.unwrap();
-    let again = watch.handle_advisory(&advisory, 2).await.unwrap();
+    let again = restarted(&bus).handle_advisory(&advisory, 2).await.unwrap();
 
     assert_eq!(first, AdvisoryOutcome::Emitted);
     assert_eq!(again, AdvisoryOutcome::AlreadySurfaced);
@@ -283,7 +293,7 @@ async fn a_trigger_whose_subject_names_no_agent_is_written_once() {
     let watch = AdvisoryWatch::without_records(bus.clone());
 
     let first = watch.handle_advisory(&advisory, 1).await.unwrap();
-    let again = watch.handle_advisory(&advisory, 2).await.unwrap();
+    let again = restarted(&bus).handle_advisory(&advisory, 2).await.unwrap();
 
     assert_eq!(first, AdvisoryOutcome::Emitted);
     assert_eq!(again, AdvisoryOutcome::AlreadySurfaced);
@@ -294,4 +304,214 @@ async fn a_trigger_whose_subject_names_no_agent_is_written_once() {
     let dead = from_event(&event).expect("a dead letter");
     assert_eq!(dead.trigger_subject, subjects::trigger(&not_an_agent));
     assert_eq!(dead.unattributed, None);
+}
+
+/// **The read starts at the advisory.** A dead letter for an advisory cannot
+/// be older than the advisory, so the system sentinel's dead letters from
+/// before it are not read: one carrying the same id from before the
+/// advisory was emitted (which no watch writes) is not found, and the dead
+/// letter is written.
+#[tokio::test]
+async fn the_read_starts_at_the_advisory() {
+    let (_server, bus, agent) = broker().await;
+    let earlier = gone(&bus, &agent).await;
+    let watch = AdvisoryWatch::without_records(bus.clone());
+    assert_eq!(
+        watch.handle_advisory(&earlier, 1).await.unwrap(),
+        AdvisoryOutcome::Emitted
+    );
+    let later = {
+        let mut later: serde_json::Value =
+            serde_json::from_slice(&gone(&bus, &format!("{agent}-two")).await).unwrap();
+        let earlier: serde_json::Value = serde_json::from_slice(&earlier).unwrap();
+        later["id"] = earlier["id"].clone();
+        serde_json::to_vec(&later).unwrap()
+    };
+
+    let outcome = restarted(&bus).handle_advisory(&later, 1).await.unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Emitted);
+    assert_eq!(nameless_dead_letters(&bus).await, 2);
+}
+
+/// **The read starts at the advisory though newer events follow it**, so
+/// the read itself, not only the look at the subject's last event, starts
+/// there: as above, with another dead letter written after the later
+/// advisory, so the subject's last event is newer than it and the whole
+/// span is read. The earlier dead letter carrying the same id is still not
+/// found, and the later advisory's is written.
+#[tokio::test]
+async fn the_read_starts_at_the_advisory_though_newer_events_follow() {
+    let (_server, bus, agent) = broker().await;
+    let earlier = gone(&bus, &agent).await;
+    let watch = AdvisoryWatch::without_records(bus.clone());
+    assert_eq!(
+        watch.handle_advisory(&earlier, 1).await.unwrap(),
+        AdvisoryOutcome::Emitted
+    );
+    let later = {
+        let mut later: serde_json::Value =
+            serde_json::from_slice(&gone(&bus, &format!("{agent}-two")).await).unwrap();
+        let earlier: serde_json::Value = serde_json::from_slice(&earlier).unwrap();
+        later["id"] = earlier["id"].clone();
+        serde_json::to_vec(&later).unwrap()
+    };
+    let newer = gone(&bus, &format!("{agent}-three")).await;
+    assert_eq!(
+        watch.handle_advisory(&newer, 1).await.unwrap(),
+        AdvisoryOutcome::Emitted
+    );
+
+    let outcome = restarted(&bus).handle_advisory(&later, 1).await.unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Emitted);
+    assert_eq!(nameless_dead_letters(&bus).await, 3);
+}
+
+/// **A read the broker answers with an error decides again**, as one out of
+/// time does: the events stream is gone, so the read of the system
+/// sentinel's last dead letter is answered at once with an error. Inside
+/// the limit the advisory comes back as that error, to be NAKed and decided
+/// again; the watch does not take it as "not written" and go on to publish.
+#[tokio::test]
+async fn a_read_the_broker_answers_with_an_error_decides_again() {
+    let (_server, bus, agent) = broker().await;
+    let advisory = gone(&bus, &agent).await;
+    bus.jetstream()
+        .delete_stream(crate::bus::STREAM_NAME)
+        .await
+        .expect("delete the events stream");
+    let watch = AdvisoryWatch::without_records(bus.clone());
+
+    let outcome = watch.handle_advisory(&advisory, 1).await;
+
+    assert!(
+        matches!(outcome, Err(AdvisoryWatchError::Log(_))),
+        "the read's error, not the publish's: {outcome:?}"
+    );
+}
+
+/// **An advisory whose id is empty has none.** Two advisories that each
+/// carry `"id": ""` are two exhaustions, and each gets its dead letter; the
+/// empty id is not written on either, since it tells nothing apart.
+#[tokio::test]
+async fn advisories_with_an_empty_id_are_each_written() {
+    let (_server, bus, agent) = broker().await;
+    let emptied = |advisory: Vec<u8>| {
+        let mut advisory: serde_json::Value = serde_json::from_slice(&advisory).unwrap();
+        advisory["id"] = json!("");
+        serde_json::to_vec(&advisory).unwrap()
+    };
+    let one = emptied(gone(&bus, &agent).await);
+    let two = emptied(gone(&bus, &format!("{agent}-two")).await);
+    let watch = AdvisoryWatch::without_records(bus.clone());
+
+    let first = watch.handle_advisory(&one, 1).await.unwrap();
+    let second = watch.handle_advisory(&two, 1).await.unwrap();
+
+    assert_eq!(first, AdvisoryOutcome::Emitted);
+    assert_eq!(second, AdvisoryOutcome::Emitted);
+    assert_eq!(nameless_dead_letters(&bus).await, 2);
+    let last = last_failed(&bus, AgentId::SYSTEM_STR)
+        .await
+        .expect("the second dead letter");
+    assert_eq!(
+        last.annotations
+            .0
+            .get(crate::dead_letter::DEAD_LETTER_ADVISORY_ID_KEY),
+        None
+    );
+}
+
+/// **A copy of an advisory this watch wrote is answered from what it
+/// remembers.** Past the limit a check that cannot be made writes the dead
+/// letter; copies of the same advisory that were waiting in the watch's
+/// buffer meanwhile each met the same check and wrote one more. The watch
+/// remembers the advisories it wrote since it started, so a copy is
+/// answered before the log is read, here given no time to read it at all.
+#[tokio::test]
+async fn a_copy_of_an_advisory_this_watch_wrote_is_answered_from_memory() {
+    let (_server, bus, agent) = broker().await;
+    let advisory = stamped_at_the_streams_creation(&bus, &gone(&bus, &agent).await);
+    let watch = AdvisoryWatch::without_records(bus.clone())
+        .with_held_verdict_limit(PAST)
+        .with_scan_limit(std::time::Duration::ZERO);
+
+    let first = watch
+        .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS)
+        .await
+        .unwrap();
+    let copies = [
+        watch
+            .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS + 1)
+            .await
+            .unwrap(),
+        watch
+            .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS + 2)
+            .await
+            .unwrap(),
+    ];
+
+    assert_eq!(first, AdvisoryOutcome::Emitted);
+    assert_eq!(
+        copies,
+        [
+            AdvisoryOutcome::AlreadySurfaced,
+            AdvisoryOutcome::AlreadySurfaced
+        ]
+    );
+    assert_eq!(nameless_dead_letters(&bus).await, 1);
+}
+
+/// **A check that runs out of time decides again inside the watch's limit,
+/// and writes past it.** Given no time to read, the check cannot say
+/// whether the dead letter is on the log: inside the limit the advisory
+/// comes back as an error, to be NAKed and decided again, and nothing is
+/// written; past the limit and three looks, the dead letter is written
+/// though one may already be there, since a second is the cheaper error.
+#[tokio::test]
+async fn a_check_out_of_time_decides_again_and_past_the_limit_writes() {
+    let (_server, bus, agent) = broker().await;
+    let advisory = stamped_at_the_streams_creation(&bus, &gone(&bus, &agent).await);
+    let watch = AdvisoryWatch::without_records(bus.clone());
+    assert_eq!(
+        watch.handle_advisory(&advisory, 1).await.unwrap(),
+        AdvisoryOutcome::Emitted
+    );
+    let hurried =
+        AdvisoryWatch::without_records(bus.clone()).with_scan_limit(std::time::Duration::ZERO);
+
+    let inside = hurried.handle_advisory(&advisory, 2).await;
+    assert!(
+        matches!(inside, Err(AdvisoryWatchError::Log(_))),
+        "{inside:?}"
+    );
+    assert_eq!(nameless_dead_letters(&bus).await, 1);
+
+    let past = hurried
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory, HELD_VERDICT_MIN_LOOKS)
+        .await
+        .unwrap();
+    assert_eq!(past, AdvisoryOutcome::Emitted);
+    assert_eq!(nameless_dead_letters(&bus).await, 2);
+}
+
+/// **Only the broker's "no message" is "none written".** The check reads
+/// the last of the system sentinel's dead letters to know where to stop; an
+/// answer that is an error of any other kind is an error, never "there are
+/// none".
+#[test]
+fn only_no_message_is_none() {
+    use async_nats::jetstream::stream::{RawMessageError, RawMessageErrorKind};
+    assert!(matches!(
+        surfaced::last_message(Err(RawMessageError::new(
+            RawMessageErrorKind::NoMessageFound
+        ))),
+        Ok(None)
+    ));
+    assert!(matches!(
+        surfaced::last_message(Err(RawMessageError::new(RawMessageErrorKind::Other))),
+        Err(AdvisoryWatchError::Log(_))
+    ));
 }

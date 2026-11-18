@@ -104,6 +104,15 @@ pub const DEAD_LETTER_UNATTRIBUTED_KEY: &str = "unattributed";
 /// [`DeadLetter::unattributed_kind`] so a reader can match on it.
 pub const DEAD_LETTER_UNATTRIBUTED_KIND_KEY: &str = "unattributed_kind";
 
+/// Set by the advisory watch on every dead letter it files under the system
+/// sentinel, because it names no trigger or its trigger's subject names no
+/// legal agent: the broker's id for the advisory it wrote it for (issue
+/// 1066). A redelivered advisory carries the same id, which is how the watch
+/// finds the dead letter it already wrote and does not write it again; such
+/// a dead letter has no agent of its own to look under. Not lifted onto
+/// [`DeadLetter`]: it is the watch's key, not a fact about the trigger.
+pub const DEAD_LETTER_ADVISORY_ID_KEY: &str = "advisory_id";
+
 /// Recognise a dead letter in one recorded event, or decline.
 ///
 /// This is the whole of the atom's definition: a `Failed` event whose
