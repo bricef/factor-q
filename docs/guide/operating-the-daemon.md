@@ -1770,11 +1770,9 @@ it names nothing:
 Its `seq=` is the earlier stream's and says nothing about the trigger at
 that sequence today, and since the claims were not consulted, the
 trigger it records may have started its run before the stream was
-recreated, as its `start not checked` line says. A redelivered advisory writes it a second time, as it does
-the form for a trigger that aged out
-([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
-with no timestamp the watch can read is taken as the current
-incarnation's, though the broker always stamps one.
+recreated, as its `start not checked` line says. An advisory with no
+timestamp the watch can read is taken as the current incarnation's,
+though the broker always stamps one.
 
 The watch learns the stream's incarnation when the daemon connects.
 Deleting the trigger stream under a running daemon normally stops the
@@ -1786,6 +1784,53 @@ instead leaves the daemon running and consuming nothing, logging
 and the watch then attributes an advisory emitted before the recreate
 to the message at its sequence in the new stream
 ([#1065](https://github.com/bricef/factor-q/issues/1065)).
+
+**A dead letter filed for the system is written once.** One that names
+no trigger, in any of the forms above, or whose trigger's subject names
+no legal agent, has no agent to look under, so it carries the broker's
+id for its advisory: `fq events get <event-id> --json` shows it as the
+`advisory_id` annotation. The watch remembers the advisories it has
+written a dead letter for since it started, so a copy of one, such as a
+redelivery that waited in its buffer while it handled others, logs
+`this watch already wrote a dead letter for this advisory` at info and
+writes none, without reading the log. For one it does not remember,
+because the daemon started again since, the watch reads the system's
+dead letters since the advisory was emitted for that id, passing over
+any event this build cannot read, and when it finds it, logs `a dead
+letter filed under the system sentinel was already written for this
+advisory` at info and writes none
+([#1066](https://github.com/bricef/factor-q/issues/1066)). An advisory
+with no id, or an empty one, cannot be told apart from another and is
+written every time. The read's cost follows how many dead letters the
+system got since the advisory, at most the advisory stream's day of
+them; it reads from the system's first dead letter instead, which costs
+more and answers the same, for an advisory with no timestamp the watch
+can read, and when the client has to set up its read again before the
+first message. A backlog of advisories met after a restart costs about
+the square of its size, each read passing the dead letters written for
+those before it; nothing is lost by it
+([#1087](https://github.com/bricef/factor-q/issues/1087)). A read the
+watch cannot make, or one that takes longer than ten seconds, leaves the
+advisory to be decided again: the watch logs `advisory handling failed;
+nak for retry` at warn with `event log read error: …` (for one out of
+time, `reading the system's dead letters took longer than 10s`), and
+`fq-advisory-watch` shows as stuck once the advisory has been
+redelivered `stuck_after_redeliveries` times. Past the hour and three
+looks that end every held verdict, the dead letter is written anyway,
+and its error line carries `duplicate_check=could not be made: …`: it
+may then be a second one, for a dead letter written before the daemon
+last started, never none. A dead letter that names the trigger may
+still follow one written because the trigger's message could not be
+read, if the advisory comes back and the read then succeeds, since that
+is the one that can be requeued. And one that names no trigger can still
+follow one that named it: the named one carries no advisory id, so if
+its advisory's ack was lost and the trigger's message is gone when the
+advisory comes back to a watch that started again, this check does not
+find it. The events stream
+keeps an event for 30 days by default, longer than the advisory stream
+keeps an advisory; with `[events] max_age` set below a day, a dead
+letter can age out of the events stream before its advisory does, and a
+redelivery after that writes it again.
 
 **A projection rebuild does not halt on the history below its replay
 floor.** It starts at the first event this build reads and carries the
