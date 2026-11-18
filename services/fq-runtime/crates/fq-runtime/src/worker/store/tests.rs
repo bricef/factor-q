@@ -880,6 +880,73 @@ async fn operator_terminal_marker_is_sticky_against_late_upsert() {
     assert!(store.find_in_flight_invocations().await.unwrap().is_empty());
 }
 
+/// **Issue 1070: the run's later writes land only on its row in flight.**
+/// `update_invocation_state` creates no row, writes over one in flight,
+/// and leaves one someone else finished exactly as they left it, saying
+/// each time whether it landed.
+#[tokio::test]
+async fn update_invocation_state_lands_only_on_a_row_in_flight() {
+    let (store, _dir) = open_fresh().await;
+    let mut row = terminal_state_row("conditional", 0);
+    row.phase = "awaiting_model".to_string();
+    row.terminal_at = None;
+    row.updated_at = 1;
+
+    assert!(
+        !store.update_invocation_state(&row).await.unwrap(),
+        "no row: nothing lands"
+    );
+    assert!(
+        store
+            .get_invocation_state("conditional")
+            .await
+            .unwrap()
+            .is_none(),
+        "and none is created"
+    );
+
+    store.upsert_invocation_state(&row).await.unwrap();
+    row.phase = "dispatching_tools".to_string();
+    row.step_index = 1;
+    row.updated_at = 2;
+    assert!(
+        store.update_invocation_state(&row).await.unwrap(),
+        "in flight: it lands"
+    );
+    let stored = store
+        .get_invocation_state("conditional")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (stored.phase.as_str(), stored.step_index),
+        ("dispatching_tools", 1)
+    );
+
+    store
+        .mark_invocation_operator_terminal("conditional", "failed", 3)
+        .await
+        .unwrap();
+    row.phase = "completed".to_string();
+    row.step_index = 2;
+    row.updated_at = 4;
+    row.terminal_at = Some(4);
+    assert!(
+        !store.update_invocation_state(&row).await.unwrap(),
+        "finished by someone else: nothing lands"
+    );
+    let stored = store
+        .get_invocation_state("conditional")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (stored.phase.as_str(), stored.terminal_at, stored.step_index),
+        ("failed", Some(3), 1),
+        "the row is as the drop left it"
+    );
+}
+
 #[tokio::test]
 async fn delete_invocation_state_removes_row() {
     let (store, _dir) = open_fresh().await;

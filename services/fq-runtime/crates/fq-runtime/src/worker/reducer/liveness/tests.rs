@@ -69,3 +69,29 @@ fn a_halt_needs_a_live_drive_and_dies_with_it() {
     let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
     assert!(!live.take_halt(id));
 }
+
+/// The drive's note that it wrote its row (issue 1070) lives exactly as
+/// long as the drive: forgotten when the drive ends, so a daemon does not
+/// keep one id per run for its whole life, and a fresh drive of the same
+/// id starts with no note until it writes or resumes from its row.
+#[test]
+fn a_written_row_is_noted_for_the_drive_and_forgotten_with_it() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+
+    {
+        let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
+        assert!(!live.wrote_row(id), "nothing written yet");
+        live.note_row_written(id);
+        assert!(live.wrote_row(id));
+    }
+
+    assert!(
+        !live.wrote_row(id),
+        "the note must not survive the drive that wrote the row"
+    );
+    let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
+    assert!(!live.wrote_row(id), "a fresh drive starts with no note");
+}
