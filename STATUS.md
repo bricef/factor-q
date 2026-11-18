@@ -508,7 +508,17 @@ holds no message at the trigger's sequence: a read that fails for any
 other reason holds the verdict, as unreadable records do, and past the
 hour and three looks, unless a last look at the records finds the run
 started, the dead letter is written naming no trigger and saying the
-message could not be read
+message could not be read. The records are asked before the message is
+read, and before the check for a dead letter already written, since
+they key on the advisory's sequence and need neither: a run that
+started is found at once however its message reads, and settled as
+started even when a dead letter for it is already on the log. A
+verdict the records cannot give yet is now held where an advisory
+whose dead letter was already written used to be acked, and if the
+daemon started again since it wrote it and another `failed` event of
+the agent lands during that hold, the named check, which compares the
+agent's last `failed` event only, misses the first dead letter and a
+second is written
 ([#1066](https://github.com/bricef/factor-q/issues/1066)). Two readings
 of an advisory's incarnation still attribute it to the message at its
 sequence. One with no timestamp the watch can read is taken as the
