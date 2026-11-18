@@ -236,6 +236,70 @@ impl NatsServer {
         &self.url
     }
 
+    /// Stop the server's process (`SIGSTOP`) until [`Self::resume`]: it
+    /// keeps every connection open and answers nothing, so each request a
+    /// client makes meanwhile times out. A broker that cannot be read for a
+    /// while, for a test of what a client does then. Dropping a paused
+    /// server still kills it.
+    ///
+    /// Returns once every thread of the server has stopped. `kill` returns
+    /// as soon as the signal is sent, and a server that has not yet stopped
+    /// answers a request made just after, so a test that went on at once
+    /// would find the broker answering now and then.
+    #[cfg(unix)]
+    pub fn pause(&self) {
+        self.signal(libc::SIGSTOP);
+        #[cfg(target_os = "linux")]
+        self.await_stopped();
+    }
+
+    /// Block until every thread of the server reports itself stopped in
+    /// `/proc/<pid>/task/*/stat`, whose third field is the state (`T`).
+    #[cfg(target_os = "linux")]
+    fn await_stopped(&self) {
+        let tasks = PathBuf::from(format!("/proc/{}/task", self.child.id()));
+        let stopped = || {
+            std::fs::read_dir(&tasks).is_ok_and(|threads| {
+                threads.flatten().all(|thread| {
+                    std::fs::read_to_string(thread.path().join("stat")).is_ok_and(|stat| {
+                        // The command name, in parentheses, can hold spaces:
+                        // the state is the first field after its closing one.
+                        stat.rsplit_once(')')
+                            .and_then(|(_, rest)| rest.split_whitespace().next())
+                            .is_some_and(|state| state == "T")
+                    })
+                })
+            })
+        };
+        let deadline = Instant::now() + READY_TIMEOUT;
+        while !stopped() {
+            assert!(
+                Instant::now() < deadline,
+                "nats-server did not stop within {READY_TIMEOUT:?} of SIGSTOP"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Let a [paused](Self::pause) server run again (`SIGCONT`).
+    #[cfg(unix)]
+    pub fn resume(&self) {
+        self.signal(libc::SIGCONT);
+    }
+
+    #[cfg(unix)]
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: `kill` takes any pid and signal number and touches no memory
+        // of ours; the pid is this guard's own child, which Drop has not reaped.
+        let sent = unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
+        assert_eq!(
+            sent,
+            0,
+            "signal {signal} to nats-server: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
     /// Block until the ports file appears and read the client URL out of it.
     fn await_url(&mut self) -> String {
         let deadline = Instant::now() + READY_TIMEOUT;
