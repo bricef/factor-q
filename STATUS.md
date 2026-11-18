@@ -345,7 +345,19 @@ seconds, keeping the delivery alive meanwhile, and a mark still refused
 is answered by acking the delivery without releasing its claim, so the
 run carries on and is neither redelivered nor falsely dead-lettered
 ([#1021](https://github.com/bricef/factor-q/pull/1021)); the next start's
-recovery then records that run's start, as above. The dispatcher also
+recovery then records that run's start, as above. A mark that lands but
+finds no claim naming its run now says so, and the start is recorded
+all the same, since the claim is what refuses a copy of the trigger: a
+claim that is gone is written, recording the start; another
+invocation's claim that has not started has this run's start recorded
+in its place; another run's start already on the claim is left. The
+delivery is then acked keeping the claim, and each case is logged at
+error. Before, the mark reported success whatever it matched, so a
+trigger whose claim was gone was acked with no record that it had run,
+and a lost ack or a replay of the stream started it again
+([#1046](https://github.com/bricef/factor-q/issues/1046)). One daemon
+reaches none of these today; a release given up on that lands after a
+copy took the claim again would. The dispatcher also
 keeps a delivery alive from its worker permit to its first WAL write,
 as the holds before it and the mark after it do, so a slow setup is no
 longer redelivered underneath its own first copy, and a setup slower
