@@ -646,6 +646,14 @@ and one of them may end it. It stays in flight until a later start finds
 them folded: restart the daemon once the consumer has caught up. ...
 ```
 
+A consumer that halts on an event this build cannot read ends the wait
+at once, since it folds nothing more however long the start waits: the
+daemon logs `the coordination consumer halted on an event this build
+does not read; startup recovery stops waiting for it` at warn, with
+`halted_at` (that event's sequence) and its `schema_version`, and the
+line for each held run says the consumer halted instead of naming the
+bound. The start then goes on as when the bound runs out.
+
 **A held run waits for the next start.** Nothing in this daemon resumes
 it ([#1089](https://github.com/bricef/factor-q/issues/1089)). Restart
 the daemon once the consumer has caught up (`fq doctor` and `fq status`
@@ -682,8 +690,8 @@ The consumer is behind for one of these reasons:
 - **It halted on an event this build cannot read.** `fq doctor` says so,
   and it folds nothing until a build that reads that event runs (see
   [When a consumer halts on an event it cannot read](#when-a-consumer-halts-on-an-event-it-cannot-read));
-  every start holds the runs again until then, and a longer bound does
-  not help.
+  every start holds the runs again until then, and stops waiting for the
+  consumer as soon as it halts, so a longer bound changes nothing.
 - **Its durable was deleted and recreated**, so it reads the whole
   stream again from the start
   ([Deleting a durable under a running daemon restarts it](#deleting-a-durable-under-a-running-daemon-restarts-it)).
@@ -1457,10 +1465,9 @@ that reads that version: the unacked message is where the consumer
 resumes, and nothing needs resetting. The daemon log carries the same
 detail once, at error level, under `consumer=<name>`.
 
-A halted `fq-coordination` holds startup recovery too: each start waits
-`[worker] recovery_backlog_wait_secs` for it, then resumes none of the
-runs it would have resumed until a build that reads the event has folded
-past it (see
+A halted `fq-coordination` holds startup recovery too: each start stops
+waiting for it as soon as it halts, and resumes none of the runs it would
+have resumed until a build that reads the event has folded past it (see
 [When startup recovery holds a run](#when-startup-recovery-holds-a-run)).
 
 **Malformed is a different fact, and reported separately.** Bytes that

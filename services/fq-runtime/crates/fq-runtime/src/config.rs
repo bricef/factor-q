@@ -356,8 +356,9 @@ pub struct WorkerConfig {
     /// which invocations to resume (issue 1070). Default 30. The boot, the
     /// edge included, waits with it. A run the wait could not check is not
     /// resumed at that start: it is logged at error, and a later start
-    /// resumes it once the consumer has folded that far. Zero decides at
-    /// once, holding every run whose events are not folded yet.
+    /// resumes it once the consumer has folded that far. A consumer halted
+    /// on an event this build does not read ends the wait at once. Zero
+    /// decides at once, holding every run whose events are not folded yet.
     #[serde(default = "default_recovery_backlog_wait_secs")]
     pub recovery_backlog_wait_secs: u64,
     /// How many requests — sampling and elicitation together — an MCP
