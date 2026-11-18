@@ -119,6 +119,14 @@ impl AmbiguousReport {
 /// Reconcile worker rows left live by operator terminal transitions made
 /// before this binary was deployed. Runs before classification so a
 /// pre-existing orphan cannot be reported ambiguous again.
+///
+/// An ownership row this build cannot read records no ending it can act
+/// on: it is logged at error and left as it is, and the run goes on to
+/// classification like any other, where its WAL row decides whether it
+/// resumes (`control_plane::ownership`, "A row this build cannot read").
+/// Stopping the boot for it would turn one hand-edited or newer row into
+/// a daemon that does not start, with no `fq` command left to look at
+/// the row or drop the run.
 pub(crate) async fn reconcile_terminal_owners(
     worker_store: &WorkerStore,
     cp_store: &ControlPlaneStore,
@@ -129,10 +137,22 @@ pub(crate) async fn reconcile_terminal_owners(
         .await
         .context("failed to scan worker rows for terminal-owner reconciliation")?
     {
-        if let Some(owner) = cp_store
-            .get_invocation_owner(&row.invocation_id)
-            .await
-            .context("failed to read owner during worker reconciliation")?
+        let owner = match cp_store.get_invocation_owner(&row.invocation_id).await {
+            Ok(owner) => owner,
+            Err(fq_runtime::control_plane::ControlPlaneStoreError::Malformed(detail)) => {
+                tracing::error!(
+                    invocation_id = %row.invocation_id,
+                    detail = %detail,
+                    "ownership row cannot be read; leaving it as it is and classifying the run \
+                     from its WAL row"
+                );
+                None
+            }
+            Err(err) => {
+                return Err(err).context("failed to read owner during worker reconciliation");
+            }
+        };
+        if let Some(owner) = owner
             && matches!(
                 owner.status,
                 fq_runtime::control_plane::OwnerStatus::Completed

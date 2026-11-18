@@ -361,15 +361,16 @@ impl CoordinationConsumer {
                 Ok(())
             }
         };
-        result.map_err(|err| match err {
+        result.map_err(|err| {
             // A row this build cannot read cannot be moved by
             // compare-and-set, and a retry would hold every later event
-            // behind this one on a strict-order consumer: say so once,
-            // ack, and leave the row as it is.
-            CoordinationConsumerError::Ownership(
-                unreadable @ OwnershipError::Unreadable { .. },
-            ) => HandlerError::permanent(unreadable),
-            other => HandlerError::transient(other),
+            // behind this one on a strict-order consumer: the shared loop
+            // logs it at warn and acks it, and the row is left as it is.
+            if is_unreadable(&err) {
+                HandlerError::permanent(err)
+            } else {
+                HandlerError::transient(err)
+            }
         })
     }
 
@@ -504,7 +505,11 @@ impl CoordinationConsumer {
     ///
     /// If step 3 fails the message is NAK'd: insert is
     /// idempotent and the worker's retry sweeper will republish
-    /// `invocation.archived` anyway, so duplicates are safe.
+    /// `invocation.archived` anyway, so duplicates are safe. An ownership
+    /// row this build cannot read is not moved, but the archive record is
+    /// written by then, so the ack still goes out before the event is
+    /// refused as permanent: without it the worker would keep its terminal
+    /// row and republish the whole archive at every sweep, for good.
     pub(crate) async fn handle_invocation_archived(
         &self,
         event: &Event,
@@ -530,13 +535,19 @@ impl CoordinationConsumer {
             })
             .await?;
 
-        self.move_row(
-            event,
-            OwnershipEvent::Archived(Ending::of_archived_phase(&payload.final_phase)),
-            payload.worker_id.as_str(),
-            None,
-        )
-        .await?;
+        let moved = self
+            .move_row(
+                event,
+                OwnershipEvent::Archived(Ending::of_archived_phase(&payload.final_phase)),
+                payload.worker_id.as_str(),
+                None,
+            )
+            .await;
+        if let Err(err) = &moved
+            && !is_unreadable(err)
+        {
+            return moved.map(|_| ());
+        }
 
         let ack = Event::new(
             event.envelope.agent_id.clone(),
@@ -546,7 +557,7 @@ impl CoordinationConsumer {
             }),
         );
         self.bus.publish(&ack).await?;
-        Ok(())
+        moved.map(|_| ())
     }
 
     /// Step 9: operator-issued terminal transition.
@@ -563,6 +574,12 @@ impl CoordinationConsumer {
     ///    and emits `invocation.archived` afterwards, the
     ///    archive's arrival keeps the operator's ending (see
     ///    `handle_invocation_archived`).
+    ///
+    /// An ownership row this build cannot read does not stop the drop:
+    /// the archive record takes the drop's time as the run's start, the
+    /// row is left as it is, and the worker's WAL row is still marked
+    /// terminal, since the operator meant to stop the run. Then the event
+    /// is refused as permanent, as every event for such a row is.
     pub(crate) async fn handle_invocation_operator_recovered(
         &self,
         event: &Event,
@@ -577,13 +594,13 @@ impl CoordinationConsumer {
             "applying operator-recovered terminal transition"
         );
 
-        // The run's start, for the archive record, when a row records one.
-        let started_at = self
-            .store
-            .get_invocation_owner(&invocation_id)
-            .await?
-            .map(|owner| owner.assigned_at)
-            .unwrap_or(now_ms);
+        // The run's start, for the archive record, when a row records one
+        // this build can read.
+        let started_at = match self.store.get_invocation_owner(&invocation_id).await {
+            Ok(owner) => owner.map_or(now_ms, |owner| owner.assigned_at),
+            Err(ControlPlaneStoreError::Malformed(_)) => now_ms,
+            Err(err) => return Err(err.into()),
+        };
 
         self.store
             .insert_archive(&InvocationArchiveRow {
@@ -599,13 +616,19 @@ impl CoordinationConsumer {
 
         // v1 always emits "failed"; an unknown phase is a failure too,
         // so an audit trail is preserved.
-        self.move_row(
-            event,
-            OwnershipEvent::OperatorEnded(Ending::of_operator_phase(&payload.final_phase)),
-            event.envelope.agent_id.as_str(),
-            None,
-        )
-        .await?;
+        let moved = self
+            .move_row(
+                event,
+                OwnershipEvent::OperatorEnded(Ending::of_operator_phase(&payload.final_phase)),
+                event.envelope.agent_id.as_str(),
+                None,
+            )
+            .await;
+        if let Err(err) = &moved
+            && !is_unreadable(err)
+        {
+            return moved.map(|_| ());
+        }
 
         if let Some(worker_store) = &self.worker_store {
             worker_store
@@ -613,7 +636,7 @@ impl CoordinationConsumer {
                 .await?;
         }
 
-        Ok(())
+        moved.map(|_| ())
     }
 
     async fn sweep_stale_workers(&self) -> Result<(), ControlPlaneStoreError> {
@@ -699,6 +722,16 @@ impl From<DurableConsumerError> for CoordinationConsumerError {
             DurableConsumerError::Stream(err) => Self::Stream(err),
         }
     }
+}
+
+/// Whether `err` is an ownership row this build cannot read, which every
+/// handler meets the same way (`control_plane::ownership`, "A row this
+/// build cannot read").
+fn is_unreadable(err: &CoordinationConsumerError) -> bool {
+    matches!(
+        err,
+        CoordinationConsumerError::Ownership(OwnershipError::Unreadable { .. })
+    )
 }
 
 #[cfg(test)]

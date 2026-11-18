@@ -292,3 +292,165 @@ async fn an_event_for_a_row_this_build_cannot_read_is_acked_and_the_row_left_alo
         .unwrap();
     assert_eq!(status, "weird");
 }
+
+impl Fixture {
+    /// Recovery restored the run, then its row was given a status this
+    /// build cannot read.
+    async fn unreadable(&self) {
+        self.restored_in_flight().await;
+        assert!(
+            self.store
+                .overwrite_owner_status_for_test(&self.invocation_id.to_string(), "weird")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// The row's raw status, which `row()` cannot read once it is
+    /// unreadable.
+    async fn raw_status(&self) -> String {
+        let by_hand = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}",
+            self._dir.path().join("control-plane.db").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query_scalar("SELECT status FROM coordination_invocation_owner")
+            .fetch_one(&by_hand)
+            .await
+            .unwrap()
+    }
+}
+
+/// An archive for a run whose row this build cannot read is still written
+/// and still acknowledged to the worker, then refused as permanent: without
+/// the acknowledgement the worker would keep its terminal row and republish
+/// the whole archive at every sweep, for good.
+#[tokio::test]
+async fn an_archive_for_a_row_this_build_cannot_read_is_still_acked_to_the_worker() {
+    use futures::StreamExt;
+    let fixture = Fixture::new().await;
+    fixture.unreadable().await;
+    let mut acks = fixture
+        .consumer
+        .bus
+        .subscribe(format!(
+            "fq.worker.{}.invocation.archive_acked",
+            fixture.worker_id.as_str()
+        ))
+        .await
+        .expect("subscribe to the worker's acks");
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: fixture.worker_id.clone(),
+                final_phase: "failed".to_string(),
+                final_state_blob: b"{}".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried"
+    );
+    assert!(
+        fixture
+            .store
+            .get_archive(&fixture.invocation_id.to_string())
+            .await
+            .unwrap()
+            .is_some(),
+        "the archive record is written"
+    );
+    tokio::time::timeout(Duration::from_secs(5), acks.next())
+        .await
+        .expect("the worker is acknowledged")
+        .expect("an ack")
+        .expect("the ack reads");
+    assert_eq!(
+        fixture.raw_status().await,
+        "weird",
+        "the row is left as it is"
+    );
+}
+
+/// An operator's drop of a run whose row this build cannot read still
+/// stops the run: the archive record is written, with the drop's time as
+/// the run's start, and the worker's WAL row is marked terminal. The event
+/// is then refused as permanent, so the strict-order consumer goes on.
+#[tokio::test]
+async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
+    let fixture = Fixture::new().await;
+    fixture.unreadable().await;
+    let worker_store = Arc::new(
+        crate::worker::store::WorkerStore::open(&fixture._dir.path().join("worker.db"))
+            .await
+            .unwrap(),
+    );
+    let inv = fixture.invocation_id.to_string();
+    worker_store
+        .upsert_invocation_state(&crate::worker::store::InvocationStateRow {
+            invocation_id: inv.clone(),
+            agent_id: fixture.agent_id.as_str().to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".into(),
+            state_blob: vec![],
+            step_index: 3,
+            started_at: 1_000,
+            updated_at: 1_500,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
+        })
+        .await
+        .unwrap();
+    let consumer = CoordinationConsumer::new(fixture.consumer.bus.clone(), fixture.store.clone())
+        .with_worker_store(worker_store.clone());
+    let outcome = consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried: a transient error here would hold every later event"
+    );
+    let archive = fixture
+        .store
+        .get_archive(&inv)
+        .await
+        .unwrap()
+        .expect("the archive record is written");
+    assert_eq!(archive.final_phase, "failed");
+    let wal = worker_store
+        .get_invocation_state(&inv)
+        .await
+        .unwrap()
+        .expect("the WAL row is kept for the sweeper");
+    assert!(
+        wal.terminal_at.is_some(),
+        "the worker's WAL row is marked terminal"
+    );
+    assert_eq!(
+        fixture.raw_status().await,
+        "weird",
+        "the row is left as it is"
+    );
+}
