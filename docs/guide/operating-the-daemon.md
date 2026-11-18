@@ -394,7 +394,8 @@ that as `archived`, so a row can read `"archived": false` beside
 The list is ordered by the time each run's row was first written,
 newest first: when the run ended, for a run started from a trigger, or
 the run's start, for one startup recovery restored. A later move keeps
-that time, so a resumed run that ends, or an old ambiguous run you drop,
+that time, except recovery's restore, which sets it to the run's start
+again. So a resumed run that ends, or an old ambiguous run you drop,
 keeps its place rather than rising to the top, and with `--limit` it
 can fall outside the list; `fq invocation show <id>` finds any run.
 
@@ -595,7 +596,8 @@ ownership row stays as it was, absent or `in_flight`
 run that ended, and was held, before the daemon was upgraded to a build
 that moves the row on a run's ending: the older build consumed that
 ending without moving the row, and it is not folded again. `fq doctor`
-lists every held row whatever its ownership row says. The daemon log reports a held row once per daemon run, at
+lists every held row whatever its ownership row says. The daemon log
+reports a held row once per daemon run, at
 error level, and `fq doctor` and `fq status` list every held row with
 its invocation, the reason and the remedy. `fq doctor` counts each one
 as an issue, because none lifts on its own:
