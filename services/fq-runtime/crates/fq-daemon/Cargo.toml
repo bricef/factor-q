@@ -67,6 +67,10 @@ fq-test-support = { workspace = true }
 # is the difference between a template that parses and one the daemon
 # actually reads.
 serde_ignored = { workspace = true }
+# The requeue suite makes the claim store unreadable under a running
+# daemon, by renaming its table out from under it: a fault no store API
+# offers, so it is written in SQL.
+sqlx = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

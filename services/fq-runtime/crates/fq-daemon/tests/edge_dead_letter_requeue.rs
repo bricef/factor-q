@@ -13,6 +13,17 @@
 //! here is a fact about a store the daemon owns and a stream it
 //! publishes to; asserting it against anything less would be asserting
 //! the code rather than the guarantee.
+//!
+//! **Requeue takes the verdict itself** (issue 1059), and the second half
+//! of the file is that: before anything is reserved or published, the
+//! daemon asks the records the dead-letter watch asks. A start on record
+//! is refused whatever the request says; nothing on record proceeds,
+//! marked `start_unchecked` or not; and when it cannot tell, the request
+//! is refused unless it says the operator has checked
+//! (`checked_not_started`). The records are the daemon's own claim
+//! store, written here as a dispatcher would have left them, and the one
+//! state only a live dispatcher can hold, a copy of the trigger still
+//! handling its claim, is made with a real run held behind the worker cap.
 
 #![cfg(unix)]
 
@@ -22,20 +33,34 @@ use fq_test_support::TestChild;
 use std::time::Duration;
 
 use fq_ops::{DeadLetter, Domain, OpId, Receipt, VerbId};
+use fq_runtime::bus::TRIGGER_STREAM_NAME;
+use fq_runtime::control_plane::store::TriggerClaimRow;
+use fq_runtime::control_plane::{OwnerStatus, TriggerKey};
 use fq_runtime::dead_letter::{
-    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY,
-    DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
+    DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
+    DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
 };
 use fq_runtime::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
 };
+use fq_runtime::test_support::fault::MockFault;
+use fq_runtime::test_support::mock_anthropic::MockAnthropicServer;
 use fq_runtime::trigger::Trigger;
+use fq_runtime::{ControlPlaneStore, ProjectionStore, RuntimeDbPaths};
 use serde_json::json;
 use uuid::Uuid;
 
 const AGENT: &str = "researcher";
 
 const REQUEUE: OpId = OpId::Verb(VerbId::DeadLetter(DeadLetter::Requeue));
+
+/// The claimant on the claims this suite writes by hand: a daemon that
+/// has exited, as one that claimed a trigger before a restart would be.
+const GONE_WORKER: &str = "daemon-that-exited";
+
+/// The agent the running-world test registers, and its model.
+const RUNNER: &str = "held-runner";
+const MODEL: &str = "claude-haiku-4-5";
 
 fn unique_scratch() -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -73,8 +98,27 @@ fn dead_letter(
     trigger_id: Option<Uuid>,
     payload: serde_json::Value,
 ) -> (Event, Uuid) {
+    dead_letter_for(AGENT, trigger_seq, trigger_id, payload)
+}
+
+/// Mark a dead letter as the watch marks one it wrote without being able
+/// to check whether the trigger's run started.
+fn unchecked(event: Event, reason: &str, invocation_id: Option<&str>) -> Event {
+    event.annotate(
+        DEAD_LETTER_START_UNCHECKED_KEY,
+        json!({ "reason": reason, "invocation_id": invocation_id }),
+    )
+}
+
+/// [`dead_letter`], for `agent`.
+fn dead_letter_for(
+    agent: &str,
+    trigger_seq: u64,
+    trigger_id: Option<Uuid>,
+    payload: serde_json::Value,
+) -> (Event, Uuid) {
     let event = Event::new(
-        fq_runtime::AgentId::new(AGENT).unwrap(),
+        fq_runtime::AgentId::new(agent).unwrap(),
         Uuid::now_v7(),
         EventPayload::Failed(FailedPayload {
             error_kind: FailureKind::TriggerExhausted,
@@ -86,7 +130,7 @@ fn dead_letter(
     )
     .annotate(
         DEAD_LETTER_SUBJECT_KEY,
-        json!(fq_runtime::events::subjects::trigger(AGENT)),
+        json!(fq_runtime::events::subjects::trigger(agent)),
     )
     .annotate(DEAD_LETTER_PAYLOAD_KEY, payload)
     .annotate(DEAD_LETTER_STREAM_SEQ_KEY, json!(trigger_seq))
@@ -110,7 +154,33 @@ struct World {
 
 impl World {
     async fn start(nats_url: &str) -> World {
+        Self::start_in(unique_scratch(), nats_url).await
+    }
+
+    /// A daemon that runs [`RUNNER`] on the mock model at `model_url`.
+    async fn start_running(nats_url: &str, model_url: &str) -> World {
         let scratch = unique_scratch();
+        std::fs::write(
+            scratch.join("agents").join(format!("{RUNNER}.md")),
+            format!("---\nname: {RUNNER}\nmodel: {MODEL}\nbudget: 1.00\n---\n\nAnswer.\n"),
+        )
+        .unwrap();
+        // The model is declared with its price, so the daemon's pricing
+        // guarantee is met from config rather than from a network fetch.
+        std::fs::write(
+            scratch.join("fq.toml"),
+            format!(
+                "[edge]\nbind = \"127.0.0.1:0\"\n\n\
+                 [providers.anthropic]\nmodels = [\"{MODEL}\"]\nbase_url = \"{model_url}\"\n\n\
+                 [providers.anthropic.pricing.\"{MODEL}\"]\n\
+                 input_per_mtok = 1.0\noutput_per_mtok = 5.0\n"
+            ),
+        )
+        .unwrap();
+        Self::start_in(scratch, nats_url).await
+    }
+
+    async fn start_in(scratch: std::path::PathBuf, nats_url: &str) -> World {
         let log_path = scratch.join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("create daemon log");
         let log_err = log.try_clone().expect("clone log handle");
@@ -120,6 +190,7 @@ impl World {
             .env("FQ_CACHE_DIR", scratch.join("cache"))
             .env("FQ_STATE_DIR", scratch.join("state"))
             .env("FQ_AGENTS_DIR", scratch.join("agents"))
+            .env("ANTHROPIC_API_KEY", "test-key-unused-by-mock")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn();
@@ -218,6 +289,198 @@ impl World {
         let status = self.daemon.wait().expect("wait");
         assert!(status.success());
         let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+
+    /// Stop a daemon that is holding a run open: a drain would wait for
+    /// the run's held model call, so it is killed, and nothing is
+    /// asserted about how it exits.
+    fn kill(mut self) {
+        self.daemon.signal(libc::SIGKILL).expect("kill(SIGKILL)");
+        let _ = self.daemon.wait();
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+
+    /// Wait until the claim on the trigger at `stream_seq` satisfies
+    /// `done`, and return it.
+    async fn claim_until(
+        &self,
+        stream_seq: u64,
+        what: &str,
+        done: impl Fn(&TriggerClaimRow) -> bool,
+    ) -> TriggerClaimRow {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(row) = self.claim_row(stream_seq).await
+                && done(&row)
+            {
+                return row;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the claim on trigger sequence {stream_seq} never became {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The daemon's three stores.
+    fn stores(&self) -> RuntimeDbPaths {
+        RuntimeDbPaths::under(&self.scratch.join("cache"))
+    }
+
+    /// A second handle on the daemon's claim store, as a test writes to
+    /// it: the dispatcher's records, made by hand.
+    async fn control_plane(&self) -> ControlPlaneStore {
+        ControlPlaneStore::open(&self.stores().control_plane)
+            .await
+            .expect("open the daemon's control plane")
+    }
+
+    /// The claim table's key for the trigger at `stream_seq` of the
+    /// trigger stream as the daemon connected to it.
+    fn claim_key(&self, stream_seq: u64) -> TriggerKey<'static> {
+        TriggerKey {
+            stream: TRIGGER_STREAM_NAME,
+            stream_epoch: self.bus.trigger_stream_epoch(),
+            stream_seq,
+        }
+    }
+
+    /// The claim a dispatcher that has since exited left on the trigger
+    /// at `stream_seq`, naming `invocation`: `claimed`, or marked durably
+    /// started when `started`.
+    async fn claim(&self, stream_seq: u64, invocation: &str, started: bool) {
+        let cp = self.control_plane().await;
+        let key = self.claim_key(stream_seq);
+        cp.claim_trigger(
+            key,
+            GONE_WORKER,
+            invocation,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("claim");
+        if started {
+            cp.mark_trigger_started(key, invocation)
+                .await
+                .expect("mark started");
+        }
+    }
+
+    /// The claim on the trigger at `stream_seq`, as the store holds it now.
+    async fn claim_row(&self, stream_seq: u64) -> Option<TriggerClaimRow> {
+        self.control_plane()
+            .await
+            .trigger_claim(self.claim_key(stream_seq))
+            .await
+            .expect("read the claim")
+    }
+
+    /// The trigger stream's last sequence: a refused requeue must leave
+    /// it where it was.
+    async fn trigger_tip(&self) -> u64 {
+        self.bus
+            .jetstream()
+            .get_stream(TRIGGER_STREAM_NAME)
+            .await
+            .expect("trigger stream")
+            .info()
+            .await
+            .expect("stream info")
+            .state
+            .last_sequence
+    }
+
+    /// The trigger a requeue of `original` reserved, if one did. A refused
+    /// requeue must leave none.
+    async fn requeue_of(&self, original: Uuid) -> Option<Uuid> {
+        ProjectionStore::open_read_only(&self.stores().projection)
+            .await
+            .expect("open the projection")
+            .requeue_of(&original.to_string())
+            .await
+            .expect("read the requeue reservation")
+    }
+
+    /// Ask for a requeue that must be refused, and check it left nothing
+    /// behind: no trigger published, no reservation of `original`.
+    async fn refused(&self, input: serde_json::Value, original: Uuid) -> fq_edge::wire::WireError {
+        let tip = self.trigger_tip().await;
+        let err = self
+            .invoke(REQUEUE, input.clone())
+            .await
+            .expect_err(&format!("{input} must be refused"));
+        assert_eq!(
+            self.trigger_tip().await,
+            tip,
+            "a refused requeue must publish nothing; it answered {err:?}"
+        );
+        assert_eq!(
+            self.requeue_of(original).await,
+            None,
+            "a refused requeue must reserve nothing; it answered {err:?}"
+        );
+        err
+    }
+
+    /// Ask for a requeue that must go through, and return the trigger it
+    /// made.
+    async fn requeued(&self, input: serde_json::Value) -> Trigger {
+        let receipt: Receipt = serde_json::from_value(
+            self.invoke(REQUEUE, input.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{input} must be requeued; got {e:?}")),
+        )
+        .expect("a receipt");
+        self.trigger(
+            receipt.atoms[0].key["trigger_id"]
+                .as_str()
+                .expect("the receipt names a trigger"),
+        )
+        .await
+    }
+}
+
+/// A refusal because the trigger's run has a start on record: a
+/// `Conflict` naming the run, the dead letter and its sequence.
+fn assert_started(err: &fq_edge::wire::WireError, invocation: &str, event: Uuid, seq: u64) {
+    let fq_edge::wire::WireError::Conflict { op, message } = err else {
+        panic!("a start on record is a Conflict: the work ran; got {err:?}");
+    };
+    assert_eq!(op, "dead_letter.requeue");
+    for expected in [
+        invocation.to_string(),
+        format!("fq invocation show {invocation}"),
+        event.to_string(),
+        format!("trigger sequence {seq}"),
+        "start on record".to_string(),
+    ] {
+        assert!(
+            message.contains(&expected),
+            "the refusal must say `{expected}`; got {message}"
+        );
+    }
+}
+
+/// A refusal because the daemon cannot tell whether the run started: an
+/// `InvalidInput` (the request can say the operator checked), naming the
+/// dead letter, its sequence, why, and the override.
+fn assert_cannot_tell(err: &fq_edge::wire::WireError, why: &str, event: Uuid, seq: u64) {
+    let fq_edge::wire::WireError::InvalidInput { op, message } = err else {
+        panic!("cannot tell is an InvalidInput: the override is the edit; got {err:?}");
+    };
+    assert_eq!(op, "dead_letter.requeue");
+    for expected in [
+        why.to_string(),
+        event.to_string(),
+        format!("trigger sequence {seq}"),
+        "--checked-not-started".to_string(),
+        "checked_not_started".to_string(),
+    ] {
+        assert!(
+            message.contains(&expected),
+            "the refusal must say `{expected}`; got {message}"
+        );
     }
 }
 
@@ -566,4 +829,409 @@ async fn the_selectors_name_what_they_could_not_find() {
     );
 
     world.shutdown();
+}
+
+// ------------------------------------------------------------------
+// Requeue takes the verdict itself (issue 1059).
+// ------------------------------------------------------------------
+
+/// **A start on record is refused, whatever the request says.** The dead
+/// letter is one the watch marked unchecked, and its trigger's claim is
+/// marked durably started: the run started after the watch gave up
+/// waiting. Requeueing it would run the work twice, so the refusal is a
+/// `Conflict` naming the run, and `checked_not_started` does not get past
+/// it: an operator's word is not evidence against the record.
+///
+/// Then the retention sweep deletes the started claim, as it does once a
+/// claim is older than `[state] trigger_claim_retention_days`. The marked
+/// dead letter now has no claim to consult, which is "cannot tell": an
+/// absent row is a claim given back before any start or one swept after
+/// a start, and the two look the same. Refused without the override,
+/// through with it, and the requeue that goes through is also the proof
+/// that none of the refusals before it left a reservation behind.
+#[tokio::test]
+async fn an_unchecked_dead_letter_whose_run_started_is_refused_whatever_the_flag() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(21, Some(original), json!({"n": 21}));
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&invocation),
+    );
+    world.seed(&event, Some(original)).await;
+    world.claim(21, &invocation, true).await;
+
+    for input in [
+        json!({ "agent_id": AGENT, "trigger_seq": 21 }),
+        json!({ "agent_id": AGENT, "trigger_seq": 21, "checked_not_started": true }),
+    ] {
+        let err = world.refused(input, original).await;
+        assert_started(&err, &invocation, event_id, 21);
+    }
+
+    let swept = world
+        .control_plane()
+        .await
+        .sweep_started_trigger_claims(i64::MAX)
+        .await
+        .expect("sweep");
+    assert_eq!(swept, 1, "the started claim is the one swept");
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 21 }), original)
+        .await;
+    assert_cannot_tell(&err, "no claim names its delivery", event_id, 21);
+    assert!(
+        err.to_string()
+            .contains(&format!("fq invocation show {invocation}")),
+        "the refusal names the run the mark names, to check; got {err}"
+    );
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 21, "checked_not_started": true }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+
+    world.shutdown();
+}
+
+/// **An unmarked dead letter is guarded too.** It was written with
+/// nothing of the run on record, and the run started after it was
+/// written, by a copy its writer did not see (a replay of the stream,
+/// say). The claim says so now, and the claim is what requeue asks: it is
+/// refused, with or without the override, naming the run. A check of the
+/// `start_unchecked` mark alone would have let this one through.
+#[tokio::test]
+async fn an_unmarked_dead_letter_whose_run_started_after_it_was_written_is_refused() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let (event, event_id) = dead_letter(31, Some(original), json!({"n": 31}));
+    world.seed(&event, Some(original)).await;
+    let invocation = Uuid::now_v7().to_string();
+    world.claim(31, &invocation, true).await;
+
+    for input in [
+        json!({ "agent_id": AGENT, "trigger_seq": 31 }),
+        json!({ "agent_id": AGENT, "trigger_seq": 31, "checked_not_started": true }),
+    ] {
+        let err = world.refused(input, original).await;
+        assert_started(&err, &invocation, event_id, 31);
+    }
+
+    world.shutdown();
+}
+
+/// A start found in the run's records, rather than on its claim, is
+/// refused the same way: the claim still reads `claimed`, and the control
+/// plane's ownership table has the run. The claim is then marked started,
+/// as the check marks it for the dead-letter watch and as startup recovery
+/// would, so a redelivered or replayed copy of the trigger meets a marked
+/// claim and is dropped. That write is the one thing a refusal changes,
+/// and the refusal says it made it.
+#[tokio::test]
+async fn a_start_found_in_the_records_is_refused_and_marks_the_claim() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let (event, event_id) = dead_letter(32, Some(original), json!({"n": 32}));
+    world.seed(&event, Some(original)).await;
+    let invocation = Uuid::now_v7().to_string();
+    world.claim(32, &invocation, false).await;
+    world
+        .control_plane()
+        .await
+        .upsert_invocation_ownership(
+            &invocation,
+            GONE_WORKER,
+            chrono::Utc::now().timestamp_millis(),
+            OwnerStatus::Completed,
+        )
+        .await
+        .expect("the run's ownership row");
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 32 }), original)
+        .await;
+    assert_started(&err, &invocation, event_id, 32);
+    assert!(
+        err.to_string().contains("marked started now"),
+        "the refusal says it marked the claim; got {err}"
+    );
+    assert!(
+        world
+            .claim_row(32)
+            .await
+            .expect("the claim is still there")
+            .durably_started,
+        "the claim is marked started"
+    );
+
+    world.shutdown();
+}
+
+/// **Nothing on record proceeds, marked or not.** The watch marked this
+/// dead letter because a copy of the trigger was still handling its claim
+/// when it gave up; that copy has since let go without starting the run.
+/// The claim still reads `claimed`, no copy is handling it, and neither
+/// the worker's WAL nor the ownership table has the run. The daemon makes
+/// the check the guide used to ask an operator to make by hand, finds
+/// nothing, and requeues with no flag.
+#[tokio::test]
+async fn an_unchecked_dead_letter_with_nothing_on_record_is_requeued_without_the_flag() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, _) = dead_letter(41, Some(original), json!({"n": 41}));
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&invocation),
+    );
+    world.seed(&event, Some(original)).await;
+    world.claim(41, &invocation, false).await;
+
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 41 }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+    assert_eq!(requeued.payload, json!({"n": 41}));
+
+    world.shutdown();
+}
+
+/// **No sequence given.** Requeue then takes the agent's newest dead
+/// letter, and a refusal of it says which one it took: its sequence, its
+/// event, and that it was the newest, so an operator who did not choose
+/// can see what was chosen. The newest is marked unchecked and no claim
+/// names its delivery: cannot tell. The older one, unmarked, is not the
+/// one refused, and the message does not name it.
+#[tokio::test]
+async fn with_no_sequence_a_refusal_names_the_dead_letter_it_took() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let older = Uuid::now_v7();
+    let (event, older_event) = dead_letter(51, Some(older), json!({"n": 51}));
+    world.seed(&event, Some(older)).await;
+    let newer = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, newer_event) = dead_letter(52, Some(newer), json!({"n": 52}));
+    let event = unchecked(
+        event,
+        "the trigger's claim could not be read: database is locked",
+        Some(&invocation),
+    );
+    world.seed(&event, Some(newer)).await;
+
+    let err = world.refused(json!({ "agent_id": AGENT }), newer).await;
+    assert_cannot_tell(&err, "no claim names its delivery", newer_event, 52);
+    assert!(
+        err.to_string().contains("newest dead letter"),
+        "the refusal says it took the newest; got {err}"
+    );
+    assert!(
+        !err.to_string().contains(&older_event.to_string()),
+        "the refusal is about the newest alone; got {err}"
+    );
+
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "checked_not_started": true }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(newer));
+
+    world.shutdown();
+}
+
+/// **Which records, by what key.** A claim is keyed on the trigger
+/// stream's incarnation as well as the sequence, and a dead letter carries
+/// only the sequence. One written before the stream was last created names
+/// a sequence of the earlier stream, and this stream's claim at the same
+/// sequence is another trigger's: here, one whose run started. It is not
+/// consulted. A marked dead letter from the earlier stream is then "cannot
+/// tell", its own claim not there to consult, and not refused on the other
+/// trigger's start; an unmarked one proceeds, as one whose claim is gone
+/// does.
+#[tokio::test]
+async fn a_dead_letter_from_an_earlier_stream_is_not_judged_by_this_streams_claims() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let another_run = Uuid::now_v7().to_string();
+    world.claim(61, &another_run, true).await;
+    let before_this_stream = chrono::DateTime::from_timestamp_nanos(
+        world.bus.trigger_stream_epoch() - 3_600 * 1_000_000_000,
+    );
+
+    let marked = Uuid::now_v7();
+    let (event, marked_event) = dead_letter(61, Some(marked), json!({"n": 61}));
+    let mut event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        None,
+    );
+    event.envelope.timestamp = before_this_stream;
+    world.seed(&event, Some(marked)).await;
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 61 }), marked)
+        .await;
+    assert_cannot_tell(
+        &err,
+        "before the trigger stream was last created",
+        marked_event,
+        61,
+    );
+    assert!(
+        !err.to_string().contains(&another_run),
+        "this stream's claim at the sequence is another trigger's and says nothing; got {err}"
+    );
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 61, "checked_not_started": true }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(marked));
+
+    let unmarked = Uuid::now_v7();
+    let (mut event, _) = dead_letter(61, Some(unmarked), json!({"n": 62}));
+    event.envelope.timestamp = before_this_stream;
+    world.seed(&event, Some(unmarked)).await;
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 61 }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(unmarked));
+
+    world.shutdown();
+}
+
+/// **The records cannot be read: cannot tell.** The claim store answers a
+/// read with an error, here because its table was renamed out from under
+/// the daemon. The request is refused naming no run, since the claim that
+/// names one could not be read, and says where to find the run instead;
+/// the override lets it through.
+#[tokio::test]
+async fn when_the_claims_cannot_be_read_a_requeue_needs_the_flag() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let (event, event_id) = dead_letter(71, Some(original), json!({"n": 71}));
+    world.seed(&event, Some(original)).await;
+
+    let store = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        world.stores().control_plane.display()
+    ))
+    .await
+    .expect("open the claim store");
+    sqlx::query("ALTER TABLE trigger_claim RENAME TO trigger_claim_out_of_reach")
+        .execute(&store)
+        .await
+        .expect("hide the claim table");
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 71 }), original)
+        .await;
+    assert_cannot_tell(&err, "the trigger's claim could not be read", event_id, 71);
+    assert!(
+        err.to_string()
+            .contains(&format!("fq events query --agent {AGENT} --type triggered")),
+        "with no run named, the refusal says how to find it; got {err}"
+    );
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 71, "checked_not_started": true }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+
+    sqlx::query("ALTER TABLE trigger_claim_out_of_reach RENAME TO trigger_claim")
+        .execute(&store)
+        .await
+        .expect("restore the claim table");
+    world.shutdown();
+}
+
+/// **A copy of the trigger still handling its claim: cannot tell.** A real
+/// run holds the daemon's one worker, its model call held open, and a
+/// second trigger for the same agent is claimed and waiting for the
+/// worker: a copy is handling its claim and may yet start the run. A dead
+/// letter for the second trigger is refused without the override and goes
+/// through with it. A dead letter for the first, whose run started and
+/// whose claim the dispatcher marked, is refused with or without it: the
+/// start on record a real run leaves, not one written by hand.
+#[tokio::test]
+async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
+    let server = fq_test_support::NatsServer::start();
+    let model = MockAnthropicServer::start().await;
+    model.push_fault(MockFault::stall(Duration::from_secs(600)));
+    let world = World::start_running(server.url(), model.base_url()).await;
+    let agent = fq_runtime::AgentId::new(RUNNER).unwrap();
+
+    let first = world
+        .bus
+        .publish_trigger(&agent, &json!({"n": 1}))
+        .await
+        .expect("publish the first trigger");
+    let started = world
+        .claim_until(first.stream_seq, "durably started", |row| {
+            row.durably_started
+        })
+        .await;
+    let first_run = started
+        .invocation_id
+        .expect("a started claim names its run");
+    let second = world
+        .bus
+        .publish_trigger(&agent, &json!({"n": 2}))
+        .await
+        .expect("publish the second trigger");
+    world
+        .claim_until(second.stream_seq, "claimed", |row| !row.durably_started)
+        .await;
+
+    let (event, event_id) =
+        dead_letter_for(RUNNER, second.stream_seq, Some(second.id), json!({"n": 2}));
+    world.seed(&event, Some(second.id)).await;
+    let input = json!({ "agent_id": RUNNER, "trigger_seq": second.stream_seq });
+    let err = world.refused(input, second.id).await;
+    assert_cannot_tell(
+        &err,
+        "a copy of the trigger is still handling its claim",
+        event_id,
+        second.stream_seq,
+    );
+    let requeued = world
+        .requeued(json!({
+            "agent_id": RUNNER,
+            "trigger_seq": second.stream_seq,
+            "checked_not_started": true,
+        }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(second.id));
+
+    let (event, event_id) =
+        dead_letter_for(RUNNER, first.stream_seq, Some(first.id), json!({"n": 1}));
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&first_run),
+    );
+    world.seed(&event, Some(first.id)).await;
+    for input in [
+        json!({ "agent_id": RUNNER, "trigger_seq": first.stream_seq }),
+        json!({
+            "agent_id": RUNNER,
+            "trigger_seq": first.stream_seq,
+            "checked_not_started": true,
+        }),
+    ] {
+        let err = world.refused(input, first.id).await;
+        assert_started(&err, &first_run, event_id, first.stream_seq);
+    }
+
+    world.kill();
 }
