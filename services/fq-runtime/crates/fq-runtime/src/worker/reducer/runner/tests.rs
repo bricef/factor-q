@@ -33,6 +33,9 @@ use tempfile::tempdir;
 
 mod result_cap;
 
+// Whether a `failed` says its run started (issue 1024).
+mod unstarted_failures;
+
 /// Issue #9 precedence, checked at the boundary the runner uses to
 /// fill `AgentConfig.max_iterations`: per-agent override (if the
 /// definition sets one) wins; otherwise the daemon config default
