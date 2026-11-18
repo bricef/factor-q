@@ -92,15 +92,22 @@ pub struct DeadLetter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed: Option<String>,
     /// The kind of `unattributed`'s reason, set with it: `message_gone`,
-    /// `earlier_incarnation` or `message_unreadable`. Absent when
-    /// `unattributed` is, and on a dead letter an older build wrote before
-    /// it recorded the kind.
+    /// `earlier_incarnation` or `message_unreadable`. A kind a later build
+    /// added reads as `unknown` to a reader built before it, and
+    /// `unattributed` still says why in words. Absent when `unattributed`
+    /// is, and on a dead letter an older build wrote before it recorded the
+    /// kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed_kind: Option<UnattributedKind>,
 }
 
 /// Why a dead letter names no trigger, as a kind a reader can match on
 /// without parsing the reason ([`DeadLetter::unattributed_kind`]).
+///
+/// A kind this build does not know decodes as `unknown` rather than
+/// failing the whole dead letter, and with it a whole page of them: a later
+/// build may add a kind, and a client built before it still lists the dead
+/// letters, each with its reason in words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UnattributedKind {
@@ -115,6 +122,10 @@ pub enum UnattributedKind {
     /// its absence, before the watch's limit ran out; it may still be on
     /// the stream.
     MessageUnreadable,
+    /// A kind this build does not know, written by a later one; the reason
+    /// says why in words.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Why a dead letter's trigger was not checked for a start, and where to
@@ -163,4 +174,56 @@ pub struct DeadLetterState {
     /// The fact itself. Nested rather than flattened so the identity
     /// is visibly the atom's and not one of the trigger's own fields.
     pub dead_letter: DeadLetter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row of a `dead_letter.list` page, as the daemon sends it, naming
+    /// no trigger for `kind`.
+    fn nameless(kind: &str) -> serde_json::Value {
+        serde_json::json!({
+            "seq": 9,
+            "dead_letter": {
+                "event_id": "00000000-0000-7000-8000-000000001066",
+                "timestamp": "2026-01-02T03:04:05Z",
+                "agent_id": "system",
+                "trigger_subject": "",
+                "trigger_stream_seq": 4,
+                "source": "advisory",
+                "trigger_payload": null,
+                "error_message": "trigger exhausted after 5 deliveries (limit 5)",
+                "unattributed": "why, in words",
+                "unattributed_kind": kind,
+            },
+        })
+    }
+
+    /// **A page holding one dead letter of a kind this build does not know
+    /// still decodes**, as a client decodes the daemon's answer: that one
+    /// reads as `unknown`, with its reason, and the rest as they are.
+    #[test]
+    fn a_page_with_a_kind_this_build_does_not_know_decodes() {
+        let page: Vec<DeadLetterState> = serde_json::from_value(serde_json::json!([
+            nameless("message_gone"),
+            nameless("a_kind_a_later_build_added"),
+        ]))
+        .expect("the page decodes");
+        let kinds: Vec<_> = page
+            .iter()
+            .map(|state| state.dead_letter.unattributed_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(UnattributedKind::MessageGone),
+                Some(UnattributedKind::Unknown)
+            ]
+        );
+        assert_eq!(
+            page[1].dead_letter.unattributed.as_deref(),
+            Some("why, in words")
+        );
+    }
 }

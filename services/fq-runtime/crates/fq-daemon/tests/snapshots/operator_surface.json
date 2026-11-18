@@ -1413,7 +1413,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. Absent when\n`unattributed` is, and on a dead letter an older build wrote before\nit recorded the kind."
+                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. A kind a later build\nadded reads as `unknown` to a reader built before it, and\n`unattributed` still says why in words. Absent when `unattributed`\nis, and on a dead letter an older build wrote before it recorded the\nkind."
               }
             },
             "required": [
@@ -1448,7 +1448,7 @@
             "type": "object"
           },
           "UnattributedKind": {
-            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).",
+            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).\n\nA kind this build does not know decodes as `unknown` rather than\nfailing the whole dead letter, and with it a whole page of them: a later\nbuild may add a kind, and a client built before it still lists the dead\nletters, each with its reason in words.",
             "oneOf": [
               {
                 "const": "message_gone",
@@ -1463,6 +1463,11 @@
               {
                 "const": "message_unreadable",
                 "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "A kind this build does not know, written by a later one; the reason\nsays why in words.",
                 "type": "string"
               }
             ]
@@ -1567,7 +1572,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. Absent when\n`unattributed` is, and on a dead letter an older build wrote before\nit recorded the kind."
+                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. A kind a later build\nadded reads as `unknown` to a reader built before it, and\n`unattributed` still says why in words. Absent when `unattributed`\nis, and on a dead letter an older build wrote before it recorded the\nkind."
               }
             },
             "required": [
@@ -1602,7 +1607,7 @@
             "type": "object"
           },
           "UnattributedKind": {
-            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).",
+            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).\n\nA kind this build does not know decodes as `unknown` rather than\nfailing the whole dead letter, and with it a whole page of them: a later\nbuild may add a kind, and a client built before it still lists the dead\nletters, each with its reason in words.",
             "oneOf": [
               {
                 "const": "message_gone",
@@ -1617,6 +1622,11 @@
               {
                 "const": "message_unreadable",
                 "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "A kind this build does not know, written by a later one; the reason\nsays why in words.",
                 "type": "string"
               }
             ]
