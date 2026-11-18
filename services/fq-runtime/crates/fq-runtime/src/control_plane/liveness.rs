@@ -74,14 +74,24 @@ pub fn classify_liveness(
 /// finished even if the local row has not been marked or cleaned up yet.
 /// Asking here rather than at each caller is what keeps the doctor's
 /// in-flight population and the sweep's identical.
+///
+/// An ownership row this build cannot read records no ending it can act
+/// on, so it does not close the run; the archive record still can
+/// (`control_plane::ownership`, "A row this build cannot read"). Failing
+/// here instead would stop the stuck sweep at that row on every tick, so
+/// no run after it would ever be reported, and fail `fq doctor`'s
+/// executions whole.
 pub(crate) async fn is_closed_by_control_plane(
     control_plane: &ControlPlaneStore,
     invocation_id: &str,
 ) -> Result<bool, ControlPlaneStoreError> {
-    let owner_terminal = control_plane
-        .get_invocation_owner(invocation_id)
-        .await?
-        .is_some_and(|owner| matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed));
+    let owner_terminal = match control_plane.get_invocation_owner(invocation_id).await {
+        Ok(owner) => owner.is_some_and(|owner| {
+            matches!(owner.status, OwnerStatus::Completed | OwnerStatus::Failed)
+        }),
+        Err(ControlPlaneStoreError::Malformed(_)) => false,
+        Err(err) => return Err(err),
+    };
     Ok(owner_terminal || control_plane.get_archive(invocation_id).await?.is_some())
 }
 

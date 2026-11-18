@@ -461,3 +461,87 @@ async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
         "the row is left as it is"
     );
 }
+
+/// Only a row this build cannot read is refused as permanent. Every other
+/// error of a move, a row that kept changing under it and a store that
+/// failed included, is transient: the event is redelivered and decided
+/// again, not dropped.
+#[test]
+fn only_an_unreadable_row_is_refused_as_permanent() {
+    let permanent = |err| matches!(as_handler_error(err), HandlerError::Permanent(_));
+    assert!(permanent(CoordinationConsumerError::Ownership(
+        OwnershipError::Unreadable {
+            invocation_id: "inv".to_string(),
+            detail: "unknown owner status `weird`".to_string(),
+        }
+    )));
+    assert!(!permanent(CoordinationConsumerError::Ownership(
+        OwnershipError::Contended {
+            invocation_id: "inv".to_string(),
+            attempts: crate::control_plane::ownership::APPLY_ATTEMPTS,
+        }
+    )));
+    assert!(!permanent(CoordinationConsumerError::Ownership(
+        OwnershipError::Store(ControlPlaneStoreError::Backend("disk".to_string()))
+    )));
+    assert!(!permanent(CoordinationConsumerError::Store(
+        ControlPlaneStoreError::Backend("disk".to_string())
+    )));
+}
+
+/// A permanently refused event still advances the coordination
+/// watermark, so a read gated at its sequence answers at once rather than
+/// waiting for the next event on the stream: after an operator drops a
+/// run whose row this build cannot read, `fq invocation drop` reads back
+/// at the drop's receipt.
+#[tokio::test]
+async fn a_refused_event_still_advances_the_watermark() {
+    let fixture = Fixture::new().await;
+    fixture.unreadable().await;
+    let bus = fixture.consumer.bus.clone();
+    let (mark, coordination) = crate::watermark::channel();
+    let consumer =
+        CoordinationConsumer::new(bus.clone(), fixture.store.clone()).with_watermark(mark);
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(async move { consumer.run(stopped).await });
+    let warm = bus
+        .publish(&Event::new(
+            fixture.agent_id.clone(),
+            Uuid::now_v7(),
+            EventPayload::HostNotice(crate::events::HostNoticePayload {
+                kind: "test_barrier".to_string(),
+                body: String::new(),
+            }),
+        ))
+        .await
+        .expect("publish the warm-up");
+    coordination
+        .wait_for(warm, Duration::from_secs(10))
+        .await
+        .expect("the consumer is running");
+    let dropped = bus
+        .publish(&Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        ))
+        .await
+        .expect("publish the drop");
+    let waited = coordination.wait_for(dropped, Duration::from_secs(4)).await;
+    let _ = stop.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    waited.expect("a read gated at the refused drop's sequence answers");
+    assert!(
+        fixture
+            .store
+            .get_archive(&fixture.invocation_id.to_string())
+            .await
+            .unwrap()
+            .is_some(),
+        "the drop took effect"
+    );
+}

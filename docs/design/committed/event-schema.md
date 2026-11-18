@@ -623,8 +623,9 @@ the run has none, with the row's `archive_state` `pending` until
 held therefore reads as finished
 ([#1024](https://github.com/bricef/factor-q/issues/1024)). A row that
 already records another ending keeps it: the second ending is logged at
-error, or at warn when the recorded ending is an operator's drop that is
-already archived. The whole lifecycle of the row is one transition
+error, or at warn when the row records `failed` with its archive
+written, which is what an operator's drop leaves (and also what a
+worker's own failure leaves once its archive arrives). The whole lifecycle of the row is one transition
 table, in `control_plane/ownership.rs`.
 
 ### `failed`
@@ -725,7 +726,7 @@ Published by the worker after an invocation reaches terminal state, carrying the
 
   In the other direction nothing is lost: a reader in this build that re-serialises an event it read — `fq events --json`, the edge's `event.get` — writes the text form, whichever form the stream holds.
 - **Idempotent on the receiver.** The control-plane's `insert_archive` is `ON CONFLICT(invocation_id) DO NOTHING`; a redelivered `invocation.archived` is safe.
-- **The ownership row records the archive.** The coordination consumer sets the run's `coordination_invocation_owner.archive_state` to `archived` and its `worker_id` to the payload's. A row that has not recorded an ending yet takes the one `final_phase` names; a row that has keeps it, so an operator's drop that came first stands. An archive naming another ending is logged at error, or at warn when the recorded ending is a drop already archived; on a row whose archive was pending, the row then keeps its ending while the archive record holds the other, so the two disagree with no operator involved ([#1024](https://github.com/bricef/factor-q/issues/1024), [#1070](https://github.com/bricef/factor-q/issues/1070)).
+- **The ownership row records the archive.** The coordination consumer sets the run's `coordination_invocation_owner.archive_state` to `archived` and its `worker_id` to the payload's. A row that has not recorded an ending yet takes the one `final_phase` names; a row that has keeps it, so an operator's drop that came first stands. An archive naming another ending is logged at error, or at warn when the row records `failed` with its archive written, as a drop leaves it; on a row whose archive was pending, the row then keeps its ending while the archive record holds the other, so the two disagree with no operator involved ([#1024](https://github.com/bricef/factor-q/issues/1024), [#1070](https://github.com/bricef/factor-q/issues/1070)).
 
 ### `invocation.archive_acked`
 

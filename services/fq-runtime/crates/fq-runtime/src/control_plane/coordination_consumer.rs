@@ -292,13 +292,20 @@ impl CoordinationConsumer {
             shutdown,
             |delivery| async move {
                 let seq = delivery.stream_seq;
-                this.handle_event(delivery.event).await?;
+                let handled = this.handle_event(delivery.event).await;
                 // After the handler resolves: mirror the projection
-                // consumer's advance-after-commit discipline.
-                if let (Some(watermark), Some(seq)) = (&this.watermark, seq) {
+                // consumer's advance-after-commit discipline. A permanent
+                // refusal is resolved too: the loop acks it and moves on,
+                // and what the handler could do it has done (an
+                // unreadable row's drop or archive), so a read gated at
+                // its sequence must not wait for the next event. Only a
+                // transient error, redelivered, holds the mark.
+                if !matches!(handled, Err(HandlerError::Transient(_)))
+                    && let (Some(watermark), Some(seq)) = (&this.watermark, seq)
+                {
                     watermark.advance(seq);
                 }
-                Ok(())
+                handled
             },
             Duration::from_millis(self.sweep_interval_ms),
             || async move {
@@ -355,27 +362,17 @@ impl CoordinationConsumer {
                 Ok(())
             }
         };
-        result.map_err(|err| {
-            // A row this build cannot read cannot be moved by
-            // compare-and-set, and a retry would hold every later event
-            // behind this one on a strict-order consumer: the shared loop
-            // logs it at warn and acks it, and the row is left as it is.
-            if is_unreadable(&err) {
-                HandlerError::permanent(err)
-            } else {
-                HandlerError::transient(err)
-            }
-        })
+        result.map_err(as_handler_error)
     }
 
     /// Apply `what` to `event`'s run's ownership row, `worker_id` standing
     /// for the worker on a row the move creates or one that takes it, and
     /// say what happened: debug for a move or a duplicate, warn for a
     /// refusal (the row records the run finished, and the event would put
-    /// it back in progress) and for an ending that reaches a row whose
-    /// ending is already archived (an operator's drop came first, which is
-    /// no fault), error for any other conflicting ending (the run
-    /// published two). `reported` on a conflict is the ending the event
+    /// it back in progress) and for an ending that reaches a row recorded
+    /// `failed` with its archive written, the state an operator's drop
+    /// leaves (most likely the drop came first, which is no fault), error
+    /// for any other conflicting ending (the run published two). `reported` on a conflict is the ending the event
     /// names, `invocation.archived`'s `final_phase` included. `report` is
     /// a late `invocation.ambiguous`'s own fields, which tell startup
     /// categorisation (`stuck_entity` a dispatch kind) from a resume that
@@ -430,15 +427,15 @@ impl CoordinationConsumer {
             ),
             Applied::Conflict { recorded, moved_to } => {
                 let reported = what.ending().map(|ending| ending.status().as_str());
-                if recorded.archive == ArchiveState::Archived {
+                if recorded == RowState::ended(Ending::Failed, ArchiveState::Archived) {
                     warn!(
                         invocation_id,
                         agent_id,
                         event_type,
                         recorded = recorded.name(),
                         reported,
-                        "an ending reached a run whose recorded ending is already archived, as \
-                         after an operator's drop; the ownership row keeps the ending it recorded"
+                        "an ending reached a run recorded failed with its archive written, as an \
+                         operator's drop leaves it; the ownership row keeps the ending it recorded"
                     );
                 } else {
                     error!(
@@ -571,6 +568,13 @@ impl CoordinationConsumer {
             }),
         );
         self.bus.publish(&ack).await?;
+        if moved.is_err() {
+            warn!(
+                invocation_id = %invocation_id,
+                "the archive is recorded and acknowledged to the worker; the run's ownership row \
+                 cannot be read and is left as it is"
+            );
+        }
         moved.map(|_| ())
     }
 
@@ -648,6 +652,13 @@ impl CoordinationConsumer {
             worker_store
                 .mark_invocation_operator_terminal(&invocation_id, &payload.final_phase, now_ms)
                 .await?;
+        }
+        if moved.is_err() {
+            warn!(
+                invocation_id = %invocation_id,
+                "the drop took effect: its archive record is written and the worker's row marked \
+                 finished; the run's ownership row cannot be read and is left as it is"
+            );
         }
 
         moved.map(|_| ())
@@ -735,6 +746,20 @@ impl From<DurableConsumerError> for CoordinationConsumerError {
             DurableConsumerError::Bus(err) => Self::Bus(err),
             DurableConsumerError::Stream(err) => Self::Stream(err),
         }
+    }
+}
+
+/// What the shared loop does with a handler's error. A row this build
+/// cannot read cannot be moved by compare-and-set, and a retry would hold
+/// every later event behind this one on a strict-order consumer: that is
+/// permanent, which the loop logs at warn and acks, leaving the row as it
+/// is. Every other error, a contended row's included, is transient and
+/// redelivered.
+fn as_handler_error(err: CoordinationConsumerError) -> HandlerError {
+    if is_unreadable(&err) {
+        HandlerError::permanent(err)
+    } else {
+        HandlerError::transient(err)
     }
 }
 
