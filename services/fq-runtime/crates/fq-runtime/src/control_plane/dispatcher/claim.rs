@@ -267,6 +267,12 @@ impl TriggerDispatcher {
     /// delivery is acked here and the run is never stopped, because a run
     /// that started must not be redelivered.
     ///
+    /// **The ack keeps the claim**, whether the mark landed or there is no
+    /// claim store to mark: the claim is the run's record of its start, and
+    /// a release could only fail to match a marked claim, waiting on the
+    /// store's write lock to do it, a store write per trigger (issue 1055,
+    /// and issue 1037 on that write).
+    ///
     /// **A refused mark is offered again** after each of
     /// [`MARK_RETRY_PAUSES`], for as long as [`MARK_RETRY_BUDGET`] allows,
     /// so a claim store that refuses for a moment heals with nothing else
@@ -328,7 +334,7 @@ impl TriggerDispatcher {
         handled: &mut Handled,
     ) {
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
-            self.ack(msg, claim, Some(trigger_id), "durably started")
+            self.ack_keeping_claim(msg, Some(trigger_id), "durably started")
                 .await;
             handled.release();
             return;
@@ -357,7 +363,7 @@ impl TriggerDispatcher {
                         "marked trigger durably started after the claim store refused the \
                          attempts before it; the run carried on");
                 }
-                self.ack(msg, claim, Some(trigger_id), "durably started")
+                self.ack_keeping_claim(msg, Some(trigger_id), "durably started")
                     .await;
             }
             Ok(Landed {
@@ -384,27 +390,6 @@ impl TriggerDispatcher {
             }
         }
         handled.release();
-    }
-
-    /// Give back `claim`, if it is still `claimed` and still names the
-    /// invocation it was taken for. It removes nothing once the claim is
-    /// marked started, which is every ack after a durable start, or once
-    /// another copy has taken it again (issue 1061).
-    pub(super) async fn release_unstarted_claim(&self, claim: &Claimed) {
-        let Some((store, _)) = self.claim_store.as_ref() else {
-            return;
-        };
-        let invocation_id = claim.invocation_id.to_string();
-        match store
-            .release_trigger_claim(self.trigger_key(claim.stream_seq), &invocation_id)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => debug!(stream_seq = claim.stream_seq, %invocation_id,
-                "released no trigger claim: none is still `claimed` under this invocation"),
-            Err(err) => error!(error = %err, stream_seq = claim.stream_seq, %invocation_id,
-                "failed to release unfinished trigger claim"),
-        }
     }
 
     /// Claim the stable broker identity before drain, routing, or parsing,
@@ -579,11 +564,12 @@ impl TriggerDispatcher {
     }
 
     /// Ack the delivery, leaving its claim row as it is. [`Self::ack`]
-    /// releases the claim first; this alone is for a run that started but
-    /// whose claim could not be marked (`mark_durable_started`), or was
-    /// marked by a copy that met its own claim (`own_claim`), or whose
-    /// start was recorded on a claim the mark did not find
-    /// (`unmarked_start`).
+    /// releases the claim first and then calls this, from settling; called
+    /// directly, it is for a run that started: whose start was marked
+    /// (`mark_durable_started`), or could not be, or was marked by a copy
+    /// that met its own claim (`own_claim`), or whose start was recorded on
+    /// a claim the mark did not find (`unmarked_start`), and for a run with
+    /// no claim store to mark it on.
     pub(super) async fn ack_keeping_claim(
         &self,
         msg: &async_nats::jetstream::Message,

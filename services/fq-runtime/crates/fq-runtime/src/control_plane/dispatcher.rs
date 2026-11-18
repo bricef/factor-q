@@ -689,8 +689,8 @@ impl TriggerDispatcher {
                 // the durable start, or the return if none comes, the
                 // delivery is renewed on the holds' cadence, a tick after
                 // setup begins so a quick start sends nothing, and lets go
-                // on a drain or shutdown as they do. The mark and then the
-                // settlement keep it alive from the durable start to its ack.
+                // on a drain or shutdown as they do. The mark keeps it
+                // alive from the durable start to its ack.
                 () = tokio::time::sleep(admission::HOLD_KEEPALIVE),
                     if !durable_start_observed && !self.stopping() =>
                 {

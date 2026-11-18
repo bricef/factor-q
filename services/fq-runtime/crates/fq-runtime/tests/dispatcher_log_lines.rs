@@ -1489,3 +1489,26 @@ async fn a_release_that_gives_nothing_back_is_one_warn_line_naming_the_invocatio
     );
     assert!(line.field("claimant").is_some(), "{line:#?}");
 }
+
+/// **A healthy start logs no release that gave nothing back** (issue
+/// 1055). The same promise as the settling test
+/// `the_ack_after_a_landed_mark_gives_nothing_back`, pinned in a state a
+/// real store reaches: the run's mark lands, and the ack after it keeps the
+/// claim, so there is no release at all; one that removed nothing would
+/// now say so at warn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_healthy_start_logs_no_release_that_gave_nothing_back() {
+    let mut daemon = Daemon::new("healthy-start-is-quiet", Script::Nothing).await;
+    // `run_one` returns once the dispatcher has stopped and joined every
+    // delivery it was handling, so every line of this trigger's is in.
+    let (_, invocation_id) = daemon.run_one().await;
+    let invocation_id = invocation_id.to_string();
+    let lines = daemon.log.lines(|line: &Line| {
+        line.message.contains(RELEASED_NOTHING)
+            && line.field("invocation_id") == Some(invocation_id.as_str())
+    });
+    assert!(
+        lines.is_empty(),
+        "a healthy start released nothing and said so: {lines:#?}"
+    );
+}
