@@ -52,7 +52,9 @@
 //!   MAX_DELIVERIES advisories for the trigger stream and emits
 //!   the dead-letter events the dispatcher's inline path cannot
 //!   (crash during the final delivery; pre-bound poison triggers
-//!   at consumer-upgrade time). See #49 / #169.
+//!   at consumer-upgrade time; a dead letter the dispatcher could not
+//!   publish, whose delivery it NAKs instead of acking, issue 1062).
+//!   See #49 / #169.
 //!
 //! Future control-plane work (schedules, pending waits,
 //! retention sweep) lands here as the `data-architecture-v1`

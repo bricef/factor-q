@@ -563,7 +563,7 @@ impl TriggerDispatcher {
         context: &str,
     ) {
         let answer = Answer::Ack { context };
-        self.settle(msg, trigger_id, std::future::ready(()), answer)
+        self.settle(msg, trigger_id, std::future::ready(answer))
             .await;
     }
 
@@ -606,7 +606,7 @@ impl TriggerDispatcher {
         context: &str,
     ) {
         let answer = Answer::Nak { delay, context };
-        self.settle(msg, Some(trigger_id), std::future::ready(()), answer)
+        self.settle(msg, Some(trigger_id), std::future::ready(answer))
             .await;
     }
 

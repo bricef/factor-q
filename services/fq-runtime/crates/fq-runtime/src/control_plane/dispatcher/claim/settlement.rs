@@ -8,18 +8,20 @@
 //! write, a trigger refused before it ran, or a run whose start was just
 //! marked. The answer goes out only after the claim is released, a write
 //! on the claim store, and on a trigger's last delivery only after its
-//! dead letter is published. If that work outlasted what was left of the
-//! ack window, the broker redelivered, and a copy that arrived as the
-//! release landed took the freed claim and handled the trigger again. So
-//! the delivery is renewed through all of it, at the cadence every hold
-//! keeps ([`super::keeping_alive`]), and the renewals end with the answer.
+//! dead letter's publish, whose outcome decides the answer (issue 1062).
+//! If that work outlasted what was left of the ack window, the broker
+//! redelivered, and a copy that arrived as the release landed took the
+//! freed claim and handled the trigger again. So the delivery is renewed
+//! through all of it, at the cadence every hold keeps
+//! ([`super::keeping_alive`]), and the renewals end with the answer.
 //!
 //! **Which answers go through here.** Every answer that releases a claim:
-//! `ack` and `nak` are [`TriggerDispatcher::settle`]'s two shapes, so the
-//! refusals at the front of `handle`, admission's, the agent cap's, the
-//! pre-start settlement and the ack after a durable start all do, and the
-//! dead-letter path hands `settle` its publish to run first. Four answers
-//! that keep the claim do not: the ack after a mark refused on every
+//! `ack` and `nak` are [`TriggerDispatcher::settle`] with an answer ready,
+//! so the refusals at the front of `handle`, admission's, the agent cap's,
+//! the pre-start settlement and the ack after a durable start all do; the
+//! dead-letter path hands `settle` its publish, which answers with an ack
+//! or, for a dead letter it could not publish, [`Answer::HandOver`]. Four
+//! answers that keep the claim do not: the ack after a mark refused on every
 //! attempt (`mark_durable_started`), which follows the mark's own
 //! renewals with no store write between; the ack after the record of a
 //! start the mark found no claim for (`unmarked_start`), which follows the
@@ -77,44 +79,51 @@ pub(in crate::control_plane::dispatcher) enum Answer<'a> {
     Ack { context: &'a str },
     /// To be redelivered after `delay`: a NAK.
     Nak { delay: Duration, context: &'a str },
+    /// A trigger's last delivery whose dead letter could not be published,
+    /// handed to the dead-letter watch (issue 1062): a NAK with no delay,
+    /// which the broker answers at once with its max-deliveries advisory
+    /// ([`TriggerDispatcher::hand_over`]).
+    HandOver { context: &'a str },
 }
 
 impl Answer<'_> {
     /// What the delivery is being answered for, as its log lines say.
     fn context(&self) -> &str {
         match self {
-            Answer::Ack { context } | Answer::Nak { context, .. } => context,
+            Answer::Ack { context }
+            | Answer::Nak { context, .. }
+            | Answer::HandOver { context } => context,
         }
     }
 }
 
 impl TriggerDispatcher {
-    /// Settle a delivery: run `first`, release its claim, publish
-    /// `answer`, keeping the delivery in progress throughout, from now
-    /// until the answer is published.
-    pub(in crate::control_plane::dispatcher) async fn settle(
+    /// Settle a delivery: work out its `answer`, release its claim, publish
+    /// the answer, keeping the delivery in progress throughout, from now
+    /// until the answer is published. The answer is a future so that work
+    /// it waits on is kept alive too: on a trigger's last delivery, the
+    /// dead letter's publish, which decides it.
+    pub(in crate::control_plane::dispatcher) async fn settle<'a>(
         &self,
         msg: &async_nats::jetstream::Message,
         trigger_id: Option<uuid::Uuid>,
-        first: impl Future<Output = ()>,
-        answer: Answer<'_>,
+        answer: impl Future<Output = Answer<'a>>,
     ) {
-        self.settle_within(msg, trigger_id, first, answer, RELEASE_BOUND)
+        self.settle_within(msg, trigger_id, answer, RELEASE_BOUND)
             .await;
     }
 
     /// [`Self::settle`], waiting for the release for at most
     /// `release_bound`.
-    pub(in crate::control_plane::dispatcher) async fn settle_within(
+    pub(in crate::control_plane::dispatcher) async fn settle_within<'a>(
         &self,
         msg: &async_nats::jetstream::Message,
         trigger_id: Option<uuid::Uuid>,
-        first: impl Future<Output = ()>,
-        answer: Answer<'_>,
+        answer: impl Future<Output = Answer<'a>>,
         release_bound: Duration,
     ) {
         keeping_alive(msg, trigger_id, async {
-            first.await;
+            let answer = answer.await;
             let released = tokio::time::timeout(release_bound, self.release_unstarted_claim(msg));
             if released.await.is_err() {
                 let stream_seq = msg.info().map_or(0, |info| info.stream_sequence);
@@ -129,6 +138,7 @@ impl TriggerDispatcher {
                 Answer::Nak { delay, context } => {
                     self.send_nak(msg, trigger_id, delay, context).await;
                 }
+                Answer::HandOver { context } => self.hand_over(msg, trigger_id, context).await,
             }
         })
         .await;

@@ -1,13 +1,17 @@
 //! MAX_DELIVERIES advisory watch (#169): the durable backstop for
-//! trigger exhaustion the dispatcher never observes.
+//! trigger exhaustion the dispatcher never observes, or could not record.
 //!
 //! The dispatcher's inline dead-letter path (#49) ACKs the final
-//! delivery, and an ACK suppresses the server's MAX_DELIVERIES
-//! advisory — probed empirically against a live broker (2026-07-14):
+//! delivery once its dead letter is published, and an ACK suppresses the
+//! server's MAX_DELIVERIES advisory — probed empirically against a live
+//! broker (2026-07-14; the NAK re-probed on the pinned broker for issue
+//! 1062):
 //!
-//! - NAK on the final delivery → advisory fires
-//! - ACK on the final delivery → **no advisory** (the inline path and
-//!   this watch are mutually exclusive in every non-crash path)
+//! - NAK with no delay on the final delivery → advisory fires at once;
+//!   with a delay, even zero, the trigger consumer's backoff puts it
+//!   eleven and a half minutes out, so a dead letter the dispatcher could
+//!   not publish is handed here with a bare NAK (issue 1062)
+//! - ACK on the final delivery → **no advisory**
 //! - never acked (crashed dispatcher; ack_wait lapse) → advisory fires
 //! - bound lowered below an existing message's delivery count (the
 //!   consumer-upgrade scenario) → advisory fires on the next
@@ -428,8 +432,10 @@ impl AdvisoryWatch {
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
-        // ack sliver; if the agent's most recent failed event already
-        // carries this stream sequence, skip.
+        // ack sliver, or a publish that landed with its acknowledgement
+        // lost, which the dispatcher hands here (issue 1062); if the
+        // agent's most recent failed event already carries this stream
+        // sequence, skip. A later failure of the agent hides it.
         if let Some(agent) = &agent_id
             && self.already_surfaced(agent, advisory.stream_seq).await
         {
