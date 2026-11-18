@@ -148,3 +148,49 @@ async fn malformed_bytes_in_a_supported_version_still_error() {
         "and the error names the read side: {err}"
     );
 }
+
+/// **A raw tail since a time starts at the first message stored at or after
+/// it**, and one with no time at the subject's first. Two events with a
+/// moment between them: from that moment the tail yields the second first;
+/// from no time, the first.
+#[tokio::test]
+async fn a_raw_tail_since_a_time_starts_at_the_first_message_stored_then() {
+    let server = test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let agent = crate::agent::AgentId::new(format!("tail-{}", Uuid::now_v7().simple())).unwrap();
+    let subject = format!("fq.agent.{}.>", agent.as_str());
+    let first = bus
+        .publish(&triggered(&agent, Uuid::now_v7()))
+        .await
+        .expect("the first event");
+    let stored = bus
+        .jetstream()
+        .get_stream(STREAM_NAME)
+        .await
+        .expect("the event stream")
+        .get_raw_message(first)
+        .await
+        .expect("the first event as stored")
+        .time;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let between = async_nats::datetime::from_nanos(stored.unix_timestamp_nanos() + 1_000)
+        .expect("a time between the two");
+    let second = bus
+        .publish(&triggered(&agent, Uuid::now_v7()))
+        .await
+        .expect("the second event");
+
+    let mut since = bus
+        .raw_events_since(&subject, Some(between))
+        .await
+        .expect("a tail since the moment between");
+    let mut all = bus
+        .raw_events_since(&subject, None)
+        .await
+        .expect("a tail from the start");
+
+    let (seq, _) = since.next().await.expect("a message").expect("read");
+    assert_eq!(seq, second);
+    let (seq, _) = all.next().await.expect("a message").expect("read");
+    assert_eq!(seq, first);
+}

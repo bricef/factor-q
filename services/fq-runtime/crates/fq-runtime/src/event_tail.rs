@@ -15,6 +15,11 @@ use tracing::trace;
 
 pub use fq_ops::events::EventState;
 
+/// What a raw tail yields, in stream order: each message's stream sequence
+/// and its bytes, unread ([`EventBus::raw_events_since`]).
+pub(crate) type RawTail =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<(u64, bytes::Bytes), BusError>> + Send>>;
+
 /// One message off the tail: where it sits on the stream, and the
 /// event when this build can read it.
 ///
@@ -67,11 +72,6 @@ impl EventBus {
         BusError,
     > {
         use futures::StreamExt;
-        let stream = self
-            .jetstream()
-            .get_stream(STREAM_NAME)
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
         let deliver_policy = if from_seq <= 1 {
             consumer::DeliverPolicy::All
         } else {
@@ -79,25 +79,10 @@ impl EventBus {
                 start_sequence: from_seq,
             }
         };
-        let consumer = stream
-            .create_consumer(consumer::pull::OrderedConfig {
-                filter_subject: filter_subject.to_string(),
-                deliver_policy,
-                ..Default::default()
-            })
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
-        let messages = consumer
-            .messages()
-            .await
-            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let messages = self.raw_tail(filter_subject, deliver_policy).await?;
         Ok(Box::pin(messages.map(|msg| {
-            let msg = msg.map_err(|err| BusError::Stream(err.to_string()))?;
-            let seq = msg
-                .info()
-                .map_err(|err| BusError::Stream(err.to_string()))?
-                .stream_sequence;
-            match Event::from_wire(&msg.payload) {
+            let (seq, payload) = msg?;
+            match Event::from_wire(&payload) {
                 Ok(event) => Ok(TailedMessage {
                     seq,
                     event: Some(event),
@@ -117,6 +102,60 @@ impl EventBus {
                 }
                 Err(EventParseError::Malformed(err)) => Err(BusError::Deserialise(err)),
             }
+        })))
+    }
+
+    /// An ephemeral, ordered, ack-less tail over `filter_subject` from the
+    /// first message stored at or after `since` (from the subject's first
+    /// with none), yielding each message's sequence and bytes unread: for a
+    /// reader that decides for itself what to make of a message it cannot
+    /// parse, such as the dead-letter watch's search for a dead letter
+    /// already written, which skips one, and whose search is bounded by when
+    /// the thing it looks for can have been written.
+    pub(crate) async fn raw_events_since(
+        &self,
+        filter_subject: &str,
+        since: Option<async_nats::datetime::DateTime>,
+    ) -> Result<RawTail, BusError> {
+        let deliver_policy = match since {
+            Some(start_time) => consumer::DeliverPolicy::ByStartTime { start_time },
+            None => consumer::DeliverPolicy::All,
+        };
+        self.raw_tail(filter_subject, deliver_policy).await
+    }
+
+    /// The ordered consumer behind [`Self::events_from`] and
+    /// [`Self::raw_events_since`].
+    async fn raw_tail(
+        &self,
+        filter_subject: &str,
+        deliver_policy: consumer::DeliverPolicy,
+    ) -> Result<RawTail, BusError> {
+        use futures::StreamExt;
+        let stream = self
+            .jetstream()
+            .get_stream(STREAM_NAME)
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let consumer = stream
+            .create_consumer(consumer::pull::OrderedConfig {
+                filter_subject: filter_subject.to_string(),
+                deliver_policy,
+                ..Default::default()
+            })
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        let messages = consumer
+            .messages()
+            .await
+            .map_err(|err| BusError::Stream(err.to_string()))?;
+        Ok(Box::pin(messages.map(|msg| {
+            let msg = msg.map_err(|err| BusError::Stream(err.to_string()))?;
+            let seq = msg
+                .info()
+                .map_err(|err| BusError::Stream(err.to_string()))?
+                .stream_sequence;
+            Ok((seq, msg.payload.clone()))
         })))
     }
 

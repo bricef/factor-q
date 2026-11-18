@@ -64,7 +64,10 @@
 //! on this bus (the archive sweeper republishes too). A watch crash
 //! between emit and ack can duplicate one event; the shared
 //! `trigger_stream_seq` annotation makes duplicates reconcilable, and
-//! a best-effort last-event check suppresses the common overlap.
+//! checks before the write suppress the duplicate: a best-effort last-event
+//! check under the trigger's agent for a dead letter filed there, and, for
+//! one filed under the system sentinel, a read of the system sentinel's dead
+//! letters for the advisory's own id (`surfaced`, issue 1066).
 
 use std::time::Duration;
 
@@ -90,8 +93,10 @@ use crate::events::{
 };
 
 mod naming;
+mod surfaced;
 
 use naming::Named;
+use surfaced::{Check, with_advisory_id};
 
 /// Name of the durable JetStream consumer the advisory watch creates.
 pub const CONSUMER_NAME: &str = "fq-advisory-watch";
@@ -157,6 +162,11 @@ struct MaxDeliverAdvisory {
     /// When the server emitted it, RFC 3339.
     #[serde(default)]
     timestamp: Option<String>,
+    /// The server's id for this advisory, the same on every delivery of
+    /// it: what tells a redelivered advisory's dead letter filed under the
+    /// system sentinel from another's (`surfaced`).
+    #[serde(default)]
+    id: Option<String>,
 }
 
 impl MaxDeliverAdvisory {
@@ -212,6 +222,11 @@ pub enum AdvisoryWatchError {
 
     #[error("advisory stream error: {0}")]
     Stream(String),
+
+    /// The event log could not be read to tell whether a dead letter was
+    /// written already.
+    #[error("event log read error: {0}")]
+    Log(String),
 }
 
 /// What handling one advisory did — returned for logs and tests.
@@ -219,7 +234,9 @@ pub enum AdvisoryWatchError {
 pub enum AdvisoryOutcome {
     /// A dead-letter event was emitted.
     Emitted,
-    /// The inline path already emitted for this stream sequence.
+    /// The inline path already emitted for this stream sequence, or the
+    /// watch already filed this advisory's dead letter under the system
+    /// sentinel.
     AlreadySurfaced,
     /// Unparseable or foreign advisory; consumed without effect.
     Skipped,
@@ -269,6 +286,12 @@ pub struct AdvisoryWatch {
     records: Option<ExhaustionCheck>,
     /// How long a held verdict is held ([`HELD_VERDICT_LIMIT`]).
     held_verdict_limit: Duration,
+    /// How long the read for a dead letter already written under the
+    /// system sentinel may take ([`surfaced::SCAN_LIMIT`]).
+    scan_limit: Duration,
+    /// The advisories this watch has written a dead letter for since it
+    /// started ([`surfaced::WrittenHere`]).
+    written_here: surfaced::WrittenHere,
 }
 
 impl AdvisoryWatch {
@@ -292,6 +315,8 @@ impl AdvisoryWatch {
             bus,
             records,
             held_verdict_limit: HELD_VERDICT_LIMIT,
+            scan_limit: surfaced::SCAN_LIMIT,
+            written_here: surfaced::WrittenHere::default(),
         }
     }
 
@@ -303,6 +328,8 @@ impl AdvisoryWatch {
             bus,
             records: None,
             held_verdict_limit: HELD_VERDICT_LIMIT,
+            scan_limit: surfaced::SCAN_LIMIT,
+            written_here: surfaced::WrittenHere::default(),
         }
     }
 
@@ -311,6 +338,14 @@ impl AdvisoryWatch {
     #[cfg(test)]
     pub(crate) fn with_held_verdict_limit(mut self, limit: Duration) -> Self {
         self.held_verdict_limit = limit;
+        self
+    }
+
+    /// Give the read for a dead letter already written `limit` instead of
+    /// [`surfaced::SCAN_LIMIT`], so a test can run one out of time.
+    #[cfg(test)]
+    pub(crate) fn with_scan_limit(mut self, limit: Duration) -> Self {
+        self.scan_limit = limit;
         self
     }
 
@@ -429,6 +464,11 @@ impl AdvisoryWatch {
             Some(m) => (m.agent_id, m.subject, m.payload, m.trigger_id),
             None => (None, String::new(), serde_json::Value::Null, None),
         };
+        // A copy of an advisory this watch has written a dead letter for since
+        // it started is answered without reading the log (issue 1066).
+        if self.written_here.wrote(&advisory, agent_id.is_some()) {
+            return Ok(AdvisoryOutcome::AlreadySurfaced);
+        }
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
@@ -450,6 +490,17 @@ impl AdvisoryWatch {
             );
             return Ok(AdvisoryOutcome::AlreadySurfaced);
         }
+        // One filed under the system sentinel is found by its advisory's id
+        // (issue 1066); past the limit, a check that cannot be made does not
+        // hold it back.
+        let duplicate_check = match agent_id {
+            Some(_) => None,
+            None => match self.written_before(&advisory, looked_long_enough).await? {
+                Check::Written => return Ok(AdvisoryOutcome::AlreadySurfaced),
+                Check::NotWritten => None,
+                Check::Unmade(why) => Some(format!("could not be made: {why}")),
+            },
+        };
 
         // Issue 967: a trigger whose run has a start on record is not
         // dead-lettered, and a verdict that cannot be taken yet is held.
@@ -547,6 +598,10 @@ impl AdvisoryWatch {
             Some(why) => why.annotate(event),
             None => event,
         };
+        let event = match agent_id {
+            Some(_) => event,
+            None => with_advisory_id(event, &advisory),
+        };
         let why = unattributed.as_ref().map(naming::Unattributed::reason);
         let event = match &unchecked {
             Some(unchecked) => event.annotate(
@@ -556,13 +611,14 @@ impl AdvisoryWatch {
             None => event,
         };
         self.bus.publish(&event).await?;
+        self.written_here.note(&advisory, agent_id.is_some());
         if let Some(unchecked) = unchecked {
             let invocation_id = unchecked.invocation_id.as_deref().unwrap_or("none");
             if advisory.emitted_at().is_some() {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id,
-                    unattributed = why,
+                    unattributed = why, duplicate_check,
                     limit_secs = self.held_verdict_limit.as_secs(),
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its verdict could not be taken within the watch's limit and its \
@@ -572,7 +628,7 @@ impl AdvisoryWatch {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id, looks = delivered,
-                    unattributed = why,
+                    unattributed = why, duplicate_check,
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its advisory carries no timestamp the watch can read, so its age \
                      cannot be told and it was held only for the watch's first looks, and the \
@@ -591,6 +647,7 @@ impl AdvisoryWatch {
             stream_seq = advisory.stream_seq,
             deliveries = advisory.deliveries,
             unattributed = why,
+            duplicate_check,
             "trigger exhausted with nothing of its run on record, or none consulted; emitted a \
              dead-letter event from its MAX_DELIVERIES advisory"
         );
@@ -823,9 +880,13 @@ mod tests {
         );
 
         // Redelivered / overlapping advisory: suppressed by the seq
-        // dedup against the event just emitted.
+        // dedup against the event just emitted, read off the log by a watch
+        // that remembers nothing it wrote, as after a restart.
         assert_eq!(
-            watch.handle_advisory(&advisory, 1).await.unwrap(),
+            AdvisoryWatch::without_records(bus.clone())
+                .handle_advisory(&advisory, 1)
+                .await
+                .unwrap(),
             AdvisoryOutcome::AlreadySurfaced
         );
     }
@@ -893,6 +954,7 @@ mod tests {
             advisory.timestamp.as_deref(),
             Some("2026-07-14T16:18:43.605745113Z")
         );
+        assert_eq!(advisory.id.as_deref(), Some("g1ZC7klaOZ1E53SLlZN5hk"));
     }
 
     /// The incarnation an advisory belongs to is read off its timestamp:
@@ -908,6 +970,7 @@ mod tests {
             stream_seq: 1,
             deliveries: 5,
             timestamp: timestamp.map(str::to_string),
+            id: None,
         };
         let time = |at: &str| {
             chrono::DateTime::parse_from_rfc3339(at)
@@ -1023,6 +1086,7 @@ mod tests {
             stream_seq: 1,
             deliveries: 5,
             timestamp: timestamp.map(str::to_string),
+            id: None,
         };
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
             .unwrap()
