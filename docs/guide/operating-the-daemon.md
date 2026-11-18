@@ -1236,6 +1236,17 @@ coordination consumer's window is five seconds
 ([#1070](https://github.com/bricef/factor-q/issues/1070)); the others
 take `[bus] ack_wait_ms`, 30 seconds by default.
 
+The short window has a cost when the coordination consumer's store is
+slow. One fold that takes longer than five seconds is harmless: its
+event is delivered again and folded twice, which leaves the records as
+once. But while every fold takes longer than that, as on a slow or
+contended disk, each event is handled once more than the one before it
+(three events took nine handlings), and the control plane's records fall
+further behind the event stream for as long as it lasts. A fold that
+fails rather than runs slowly is retried with a growing delay instead.
+The cure is tracked in
+[#1090](https://github.com/bricef/factor-q/issues/1090).
+
 `fq status` reports the same consumers under their streams, with the
 message counts and each consumer's backlog beside them. That backlog is
 the broker's `num_pending` — the matching messages JetStream still has

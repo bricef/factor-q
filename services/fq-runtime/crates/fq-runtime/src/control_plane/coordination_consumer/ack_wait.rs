@@ -13,7 +13,17 @@ use std::time::Duration;
 /// start folds nothing: its ownership rows stand still, and so does the
 /// coordination half of the read horizon, which gated reads of the
 /// Invocation view wait on (`fq invocation drop` reads its drop back that
-/// way). The handler writes SQLite and returns; one that runs past the
-/// window has its event delivered again behind it and folded twice, which
-/// leaves the rows as once.
+/// way).
+///
+/// **A fold slower than the window.** The handler writes SQLite and
+/// returns. One that runs past the window has its event delivered again
+/// behind it and folded twice, which leaves the rows as once. But a fold
+/// that stays slower than the window, as on a slow or contended disk, is
+/// worse than that: each event is delivered again while the copy before it
+/// is still being handled, so each costs one more handling than the event
+/// before (three events took nine handlings), and the consumer falls
+/// further behind for as long as it lasts. A fold that fails instead is
+/// bounded by the retry delay its NAK asks for. The cure, an in-progress
+/// acknowledgement from the shared loop while a handler runs, is issue
+/// 1090's.
 pub const ACK_WAIT: Duration = Duration::from_secs(5);
