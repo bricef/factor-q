@@ -176,6 +176,16 @@ impl AdvisoryWatch {
             )),
         }
     }
+
+    /// The subject of the message at `stream_seq` on the trigger stream,
+    /// for a log line that names the trigger, or empty when the read does
+    /// not find one: a line is no reason to hold a verdict.
+    pub(super) async fn subject_at(&self, stream_seq: u64) -> String {
+        match read_trigger(&self.bus.jetstream(), stream_seq).await {
+            TriggerRead::Found(raw) => raw.subject.to_string(),
+            TriggerRead::Gone | TriggerRead::Unreadable { .. } => String::new(),
+        }
+    }
 }
 
 /// Why the dead letter for an advisory emitted at `emitted`, before the
