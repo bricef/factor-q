@@ -18,9 +18,13 @@
 //! this incarnation is another trigger, and dead-letters it naming no
 //! trigger (`advisory_watch`). The claim row then names the run:
 //!
-//! - **No row:** nothing claims the delivery, so every copy that claimed
-//!   it gave the claim back before any start, or none ever did. Nothing is
-//!   on record.
+//! - **No row** ([`Exhausted::NoClaim`]): nothing claims the delivery, so
+//!   every copy that claimed it gave the claim back before any start, or
+//!   none ever did. Nothing is on record. The watch takes it as it takes
+//!   [`Exhausted::NothingOnRecord`]. `dead_letter.requeue`, which asks the
+//!   same question about a dead letter that may be months old, tells the
+//!   two apart: a row it finds absent may also be one the retention sweep
+//!   deleted after its run started (issue 1059).
 //! - **A row marked `durably_started`:** a start on record.
 //! - **A `claimed` row:** first, whether a copy of the trigger is still
 //!   handling it ([`Handling`]): if so, the run may still start, and the
@@ -109,11 +113,12 @@ pub struct ExhaustionCheck {
 }
 
 /// What became of the claim of an exhausted trigger whose run has a start
-/// on record. Said on the watch's line, so an operator reading it knows
-/// whether a redelivered or replayed copy will meet a marked claim now or
-/// only after this daemon's next start.
+/// on record. Said on the watch's line, and in `dead_letter.requeue`'s
+/// refusal, so an operator reading it knows whether a redelivered or
+/// replayed copy will meet a marked claim now or only after this daemon's
+/// next start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClaimMark {
+pub enum ClaimMark {
     /// It was marked started already, by the copy that recorded the start.
     Already,
     /// This check marked it: it was `claimed` for the run.
@@ -139,10 +144,17 @@ impl std::fmt::Display for ClaimMark {
     }
 }
 
-/// The watch's verdict on one exhausted trigger.
+/// The verdict on one exhausted trigger: the watch's, before it writes a
+/// dead letter, and `dead_letter.requeue`'s, before it re-runs one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Exhausted {
-    /// Nothing of the trigger's run is on record: dead-letter it.
+pub enum Exhausted {
+    /// No claim names the delivery: every copy that claimed it gave the
+    /// claim back before any start, or none ever did, or the retention
+    /// sweep has deleted it. Nothing is on record: the watch dead-letters
+    /// it.
+    NoClaim,
+    /// A claim names the delivery and nothing of the trigger's run is on
+    /// record: dead-letter it.
     NothingOnRecord,
     /// The trigger's run has a start on record: not dead-lettered.
     Started {
@@ -174,9 +186,18 @@ impl ExhaustionCheck {
         }
     }
 
+    /// When the incarnation of the trigger stream whose claims this check
+    /// reads was created, in nanoseconds since the Unix epoch
+    /// ([`crate::bus::EventBus::trigger_stream_epoch`]). A record written
+    /// before it names a sequence of an earlier stream, and this
+    /// incarnation's claim at that sequence is another trigger's.
+    pub fn stream_epoch(&self) -> i64 {
+        self.stream_epoch
+    }
+
     /// The verdict on the trigger at `stream_seq` of the stream this
     /// dispatcher consumes.
-    pub(crate) async fn verdict(&self, stream_seq: u64) -> Exhausted {
+    pub async fn verdict(&self, stream_seq: u64) -> Exhausted {
         let key = self.key(stream_seq);
         let row = match self.store.trigger_claim(key).await {
             Ok(row) => row,
@@ -188,7 +209,7 @@ impl ExhaustionCheck {
             }
         };
         let Some(row) = row else {
-            return Exhausted::NothingOnRecord;
+            return Exhausted::NoClaim;
         };
         // A claim marked started is a start on record, whatever else the
         // row holds.
@@ -339,8 +360,12 @@ impl ExhaustionCheck {
     /// "not started", for the reason [`Self::verdict`] asks about a copy
     /// still handling the claim before it reads the records: that copy can
     /// make its first WAL write just after the read. A start found here
-    /// marks the claim as any other does ([`Self::started`]).
-    pub(crate) async fn last_look(&self, stream_seq: u64) -> Exhausted {
+    /// marks the claim as any other does.
+    ///
+    /// `dead_letter.requeue` takes this look too: it acts on its answer at
+    /// once, as the watch does past its limit, with no later look to wait
+    /// for.
+    pub async fn last_look(&self, stream_seq: u64) -> Exhausted {
         match self.verdict(stream_seq).await {
             Exhausted::Undecided {
                 why,

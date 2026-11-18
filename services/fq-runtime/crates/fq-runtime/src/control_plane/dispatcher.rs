@@ -56,8 +56,7 @@ mod own_claim;
 mod run_admission;
 
 pub use claim::TriggerClaims;
-pub(crate) use exhaustion::Exhausted;
-pub use exhaustion::ExhaustionCheck;
+pub use exhaustion::{ClaimMark, Exhausted, ExhaustionCheck};
 pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
 use std::sync::Arc;
 
