@@ -375,6 +375,15 @@ fn the_held_ending_s_id_is_the_run_s_own_and_no_other() {
             "sorts after the run's start and what it did"
         );
         assert!(seen.insert(id), "two runs, one id");
+
+        // A run that ends in the millisecond it started: the time is the
+        // invocation id's, and only the tag keeps the two ids apart. The
+        // invocation id is also every one of the run's events' trace id.
+        let same_ms = event_id(invocation_id, millis(invocation_id));
+        assert_ne!(
+            same_ms, invocation_id,
+            "a run that ended in its first millisecond"
+        );
     }
 }
 
@@ -472,6 +481,17 @@ async fn a_too_large_ending_carries_the_totals_its_stored_ending_agrees_with() {
     fixture
         .store
         .write_tool_completed(&inv, "tool-0", "{}", false, 1_500)
+        .await
+        .unwrap();
+    // A tool call that never completed: not one of the run's tool calls.
+    fixture
+        .store
+        .write_tool_intent(&inv, "tool-1", "sim_tool", "{}", 1_600)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .write_tool_dispatched(&inv, "tool-1", 1_700)
         .await
         .unwrap();
 

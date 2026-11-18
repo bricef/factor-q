@@ -87,3 +87,36 @@ fn only_a_size_hold_names_the_limit_it_was_refused_under() {
     assert_eq!(holds.too_large_under("bad"), None);
     assert_eq!(holds.too_large_under("not-held"), None);
 }
+
+/// Which held rows' endings this run has sent is pruned with the holds:
+/// a row released, or no longer pending, is forgotten, so the set never
+/// outgrows the rows the sweeper holds, and a row held again for a reason
+/// that keeps its ending off the stream owes its held ending again.
+#[test]
+fn a_sent_held_ending_is_forgotten_with_its_row() {
+    let holds = ArchiveHolds::default();
+    holds.hold("inv-1", "agent", refused());
+    holds.hold("inv-2", "agent", refused());
+    assert!(holds.ending_held_owed("inv-1").is_some(), "owed while held");
+    holds.ending_held_sent("inv-1");
+    holds.ending_held_sent("inv-2");
+    assert_eq!(
+        holds.ending_held_owed("inv-1"),
+        None,
+        "sent: not owed again"
+    );
+
+    holds.release("inv-1");
+    holds.hold("inv-1", "agent", refused());
+    assert!(
+        holds.ending_held_owed("inv-1").is_some(),
+        "released, then held again: owed again"
+    );
+
+    holds.retain_pending(&HashSet::new());
+    holds.hold("inv-2", "agent", refused());
+    assert!(
+        holds.ending_held_owed("inv-2").is_some(),
+        "no longer pending, then held again: owed again"
+    );
+}
