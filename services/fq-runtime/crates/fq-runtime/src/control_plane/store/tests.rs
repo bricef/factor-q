@@ -638,7 +638,7 @@ async fn trigger_claim_state_machine_round_trip() {
         }
     );
     // Started claims survive the release used by ordinary ACK paths.
-    store.release_trigger_claim(key(42)).await.unwrap();
+    assert!(!store.release_trigger_claim(key(42), "inv-1").await.unwrap());
     assert!(matches!(
         store
             .claim_trigger(key(42), "worker-b", "inv-b2", 104)
@@ -651,13 +651,76 @@ async fn trigger_claim_state_machine_round_trip() {
         .claim_trigger(key(43), "worker-a", "inv-c", 100)
         .await
         .unwrap();
-    store.release_trigger_claim(key(43)).await.unwrap();
+    assert!(store.release_trigger_claim(key(43), "inv-c").await.unwrap());
     assert_eq!(
         store
             .claim_trigger(key(43), "worker-a", "inv-d", 101)
             .await
             .unwrap(),
         TriggerClaim::Won
+    );
+}
+
+/// **A release gives back only the claim its invocation holds (issue
+/// 1061).** The invocation holding the claim removes it. One that no longer
+/// holds it, because the claim was taken again under another id, removes
+/// nothing and says so. A claim written before claims named their run,
+/// which no running dispatcher holds, is left too.
+#[tokio::test]
+async fn a_release_gives_back_only_the_claim_its_invocation_holds() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-first", 100)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .retake_trigger_claim(key(1), "worker-a", "inv-first", "inv-again", 200)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .release_trigger_claim(key(1), "inv-first")
+            .await
+            .unwrap(),
+        "the first invocation no longer holds the claim, so its release removes nothing"
+    );
+    assert_eq!(
+        claimed_invocation(&store, key(1)).await.as_deref(),
+        Some("inv-again"),
+        "the claim taken again is left"
+    );
+    assert!(
+        store
+            .release_trigger_claim(key(1), "inv-again")
+            .await
+            .unwrap(),
+        "the invocation holding the claim gives it back"
+    );
+    assert_eq!(store.trigger_claim(key(1)).await.unwrap(), None);
+
+    sqlx::query(
+        "INSERT INTO trigger_claim \
+         (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at) \
+         VALUES (?, ?, ?, 'old-build', 'claimed', NULL, 100)",
+    )
+    .bind(key(2).stream)
+    .bind(key(2).stream_epoch)
+    .bind(key(2).stream_seq as i64)
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    assert!(
+        !store
+            .release_trigger_claim(key(2), "inv-any")
+            .await
+            .unwrap(),
+        "a claim that names no invocation is no copy's to give back"
+    );
+    assert!(
+        store.trigger_claim(key(2)).await.unwrap().is_some(),
+        "and is left"
     );
 }
 
@@ -1020,7 +1083,7 @@ async fn the_record_of_a_start_holds_the_write_lock_against_racing_writers() {
             });
             let release = tokio::spawn({
                 let store = std::sync::Arc::clone(&store);
-                async move { store.release_trigger_claim(key(seq)).await }
+                async move { store.release_trigger_claim(key(seq), "inv-other").await }
             });
             let retake = tokio::spawn({
                 let store = std::sync::Arc::clone(&store);

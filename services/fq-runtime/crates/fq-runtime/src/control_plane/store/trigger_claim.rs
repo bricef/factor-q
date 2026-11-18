@@ -493,21 +493,38 @@ impl ControlPlaneStore {
             == 1)
     }
 
-    /// Release only unfinished claims; durable-start rows are the dedupe record.
+    /// Give back the claim for `key` that `invocation_id` holds: delete the
+    /// row while it is still `claimed` and still names that invocation.
+    /// Returns whether it did.
+    ///
+    /// A started row is never deleted: it is the dedupe record. Nor is a row
+    /// naming another invocation, however it came to (issue 1061): since a
+    /// copy that meets this daemon's own claim with nothing on record can
+    /// take it again under a new id (`own_claim`), a release that lands
+    /// late, as one the settlement gave up waiting for does, would
+    /// otherwise delete the claim of the copy that took it again. A row
+    /// written before claims named their run names no invocation, and no
+    /// copy of a running dispatcher holds one: its claims, adoptions and
+    /// re-takes all write the copy's own id. A release therefore leaves it,
+    /// to be adopted or swept.
     pub async fn release_trigger_claim(
         &self,
         key: TriggerKey<'_>,
-    ) -> Result<(), ControlPlaneStoreError> {
-        sqlx::query(
+        invocation_id: &str,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        Ok(sqlx::query(
             "DELETE FROM trigger_claim \
-             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? AND state = 'claimed'",
+             WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? AND state = 'claimed' \
+             AND invocation_id = ?",
         )
         .bind(key.stream)
         .bind(key.stream_epoch)
         .bind(key.stream_seq as i64)
+        .bind(invocation_id)
         .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// Delete every `durably_started` row claimed before `cutoff_ms`,

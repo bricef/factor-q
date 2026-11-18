@@ -92,6 +92,8 @@ const MARK_HEALED: &str = "marked trigger durably started after the claim store 
 const MARK_GAVE_UP: &str = "could not mark trigger durably started";
 /// The line for an ack the client could not send.
 const ACK_FAILED: &str = "failed to ack trigger message";
+/// The line for a claim's release the claim store refused.
+const RELEASE_FAILED: &str = "failed to release unfinished trigger claim";
 /// The start of the line for a mark that found its claim gone and wrote
 /// one recording the start.
 const CLAIM_WRITTEN: &str =
@@ -240,6 +242,11 @@ enum Script {
     /// Changes the claim row as the [`ClaimChange`] says, so the mark
     /// meets a claim that does not name the run.
     ChangedClaim(ClaimChange),
+    /// Makes the claim store refuse every delete of a claim row, then ends
+    /// the run with a transient error before its first WAL write: the
+    /// delivery is NAKed, and the claim's release before the NAK is
+    /// refused.
+    FailsBeforeStartWithReleasesRefused,
 }
 
 /// How [`Script::ChangedClaim`] changes the claim before the mark.
@@ -318,6 +325,14 @@ impl Worker for Stub {
                 drop(durable_start);
                 self.ended.notify_one();
                 return Err(ExecutorError::WorkerStore(TRANSIENT_FAILURE.to_string()));
+            }
+            Script::FailsBeforeStartWithReleasesRefused => {
+                refuse_claim_releases(&self.claim_db).await;
+                drop(durable_start);
+                self.ended.notify_one();
+                return Err(ExecutorError::WorkerStore(
+                    "simulated transient store outage before the first WAL write".to_string(),
+                ));
             }
         }
         durable_start.fire();
@@ -416,6 +431,20 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
             .await
             .expect("install the refusal");
     }
+    conn.close().await.expect("close the claim store's file");
+}
+
+/// Make every delete of a claim row fail from now on: the release is the
+/// one delete on the path from a claim to its NAK.
+async fn refuse_claim_releases(claim_db: &Path) {
+    let mut conn = claim_db_connection(claim_db).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_claim_releases BEFORE DELETE ON trigger_claim \
+         BEGIN SELECT RAISE(ABORT, 'injected: the claim store refuses the release'); END",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("install the refusal");
     conn.close().await.expect("close the claim store's file");
 }
 
@@ -1290,5 +1319,40 @@ async fn the_consume_loop_hands_an_unpublishable_dead_letter_over_at_once() {
         advisory["deliveries"],
         json!(TRIGGER_MAX_DELIVER),
         "{advisory}"
+    );
+}
+
+/// **A claim's release the claim store refuses is one `error` line naming
+/// the invocation whose claim it was** (issue 1061), beside the sequence
+/// and the store's error. The guide tells an operator to match that
+/// invocation to the `abandoned_invocation_id` of the copy that later takes
+/// the claim again, so the field is what the line is for. The run ends with
+/// a transient error before its first WAL write, and the store refuses the
+/// release before the NAK. The line names no subject, so it is found by
+/// the run's own invocation id, which no other test's run shares.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_release_is_one_error_line_naming_the_invocation_whose_claim_it_was() {
+    let mut daemon = Daemon::new(
+        "release-refused",
+        Script::FailsBeforeStartWithReleasesRefused,
+    )
+    .await;
+    let (_, invocation_id) = daemon.run_one().await;
+    let invocation_id = invocation_id.to_string();
+    let named = |line: &Line| {
+        line.message.contains(RELEASE_FAILED)
+            && line.field("invocation_id") == Some(invocation_id.as_str())
+    };
+    daemon.log.wait_for("for the refused release", named).await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "the refusal is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert!(line.field("stream_seq").is_some(), "{line:#?}");
+    assert!(
+        line.field("error")
+            .is_some_and(|error| error.contains("injected")),
+        "{line:#?}"
     );
 }

@@ -185,8 +185,8 @@ enum Resolve {
 /// How [`Resolve::FireOnAChangedClaim`] changes the claim before the mark.
 #[derive(Clone, Copy)]
 enum ClaimChange {
-    /// Delete it, as a release an earlier copy gave up on deletes it when
-    /// it lands after this copy took the claim again (issue 1061).
+    /// Delete it, as before issue 1061 a release an earlier copy gave up on
+    /// could, landing after this copy took the claim again.
     Gone,
     /// Delete it, and make the claim store refuse every insert and update
     /// of a claim row from then on.
@@ -199,6 +199,13 @@ enum ClaimChange {
     /// Name [`ANOTHER_RUN`] on it, marked `durably_started`: another run's
     /// start.
     StartedByAnother,
+    /// Leave it, and make every update of a claim row skip its row: the
+    /// mark changes nothing and reports no match, and the record that
+    /// follows finds the claim naming the run and "marks" it, changing
+    /// nothing either. A real store does not skip updates; this stages the
+    /// one state in which the ack after the record could tell keeping the
+    /// claim from releasing it.
+    UpdatesSkipped,
 }
 
 /// The invocation a changed claim names ([`ClaimChange`]).
@@ -463,6 +470,10 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
             sqlx::query("UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'")
                 .bind(ANOTHER_RUN),
         ],
+        ClaimChange::UpdatesSkipped => vec![sqlx::query(
+            "CREATE TRIGGER skip_claim_updates BEFORE UPDATE ON trigger_claim \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )],
     };
     for statement in statements {
         statement
@@ -2453,9 +2464,9 @@ async fn a_mark_that_finds_its_claim_marks_it_for_its_run_and_acks_once() {
 
 /// **A mark that finds its claim gone writes one recording the start
 /// (issue 1046).** The run made its first WAL write, and by the time the
-/// dispatcher marks it its claim is gone, as a release an earlier copy
-/// gave up on leaves it when it lands after this copy took the claim again
-/// (issue 1061). The mark matches nothing. The run started, and the claim
+/// dispatcher marks it its claim is gone, as before issue 1061 a release
+/// an earlier copy gave up on could leave it, landing after this copy took
+/// the claim again. The mark matches nothing. The run started, and the claim
 /// is what refuses a copy of the trigger that comes back, so the claim the
 /// mark expected is written, recording the run's start under its id, and
 /// the delivery is acked once, releasing nothing. Before issue 1046 the
@@ -2614,9 +2625,9 @@ async fn a_start_that_cannot_be_recorded_on_a_gone_claim_is_still_acked_once() {
 /// that claim, and the delivery is acked once (issue 1046).** The claim
 /// names another invocation, still `claimed`, when the mark comes, and the
 /// claim store refuses the update that would record this run's start on
-/// it. The delivery is acked keeping the claim: an ack that released it
-/// would delete the other invocation's claim, since a release deletes a
-/// `claimed` row whatever invocation it names.
+/// it. The delivery is acked, and the other invocation's claim is left as
+/// it was: this run has no claim to give back, and a release of this
+/// run's claim leaves a row naming another invocation.
 #[tokio::test]
 async fn a_start_that_cannot_be_recorded_on_another_invocations_claim_leaves_it() {
     let mut pulled = Pulled::new(
@@ -2635,6 +2646,42 @@ async fn a_start_that_cannot_be_recorded_on_another_invocations_claim_leaves_it(
     assert!(
         !claim.durably_started && claim.invocation_id.as_deref() == Some(ANOTHER_RUN),
         "the other invocation's claim is left as it was: {claim:?}"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// **The ack after the record of an unmarked start keeps the claim (issue
+/// 1061).** The claim still names the run and is still `claimed` when the
+/// delivery is acked: the store skipped both the mark's update and the
+/// record's ([`ClaimChange::UpdatesSkipped`]). The run started, so that
+/// claim is its only record, left for the next start's recovery to mark.
+/// It must not be released: since a release now removes the claim that
+/// names the invocation giving it back, an ack that released would delete
+/// exactly this one.
+#[tokio::test]
+async fn the_ack_after_an_unmarked_start_keeps_the_runs_own_claim() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::UpdatesSkipped),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let (_, run) = pulled.named();
+    let claim = the_claim(&pulled)
+        .await
+        .expect("the run started, so its claim must be kept, not released");
+    assert!(
+        !claim.durably_started && claim.invocation_id.as_deref() == Some(run.to_string().as_str()),
+        "the run's own claim is left as it was: {claim:?}"
     );
     pulled.wait_until_acked().await;
     let sent = answers.sent().await;

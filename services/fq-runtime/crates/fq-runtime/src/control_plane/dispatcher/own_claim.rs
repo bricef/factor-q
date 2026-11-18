@@ -35,16 +35,13 @@
 //!    took it ended before its run's first WAL write and left the delivery
 //!    unsettled, because its task died, or because the claim's release
 //!    before its NAK failed, or was given up on and had not landed
-//!    (`claim::settlement`). A release given up on is not called back: one
-//!    that landed after a re-take would delete the new claim, since it
-//!    matches the row by its sequence alone (issue 1061), and only the
-//!    bound's sitting above the store's own waits keeps that out of reach
-//!    (`settlement::RELEASE_BOUND`). If it did, the re-taken run's mark
-//!    would find no claim and write one recording its start
-//!    (`claim::unmarked_start`, issue 1046). The copy takes the claim
-//!    again under its own invocation id, by a compare-and-set on the
-//!    abandoned one, to run the trigger once. Logged at `warn`, once, and
-//!    counted (`abandoned_claim_retaken`), which counts claims taken again, not
+//!    (`claim::settlement`). A release given up on is not called back, and
+//!    may land after the re-take; it then removes nothing, since a release
+//!    removes the claim only while it still names the invocation giving it
+//!    back (issue 1061). The copy takes the claim again under its own
+//!    invocation id, by a compare-and-set on the abandoned one, to run the
+//!    trigger once. Logged at `warn`, once, and counted
+//!    (`abandoned_claim_retaken`), which counts claims taken again, not
 //!    runs: the copy runs the trigger unless a drain stops it, as below, or
 //!    `handle` refuses the trigger after its claim as it would any
 //!    delivery's. A claim a drain or a shutdown left for

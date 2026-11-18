@@ -6,14 +6,11 @@
 //! handles it (`own_claim`). So at the run's first WAL write the mark
 //! normally finds that claim and records the start on it. It can find
 //! something else only if a writer outside this copy's handling changed
-//! the row: a release an earlier copy gave up on that lands after this
-//! copy took the claim again (issue 1061), a second process adopting it,
-//! or someone editing the store by hand. In one daemon only the first is
-//! reachable, and only when the release stalls about 70 seconds outside
-//! SQLite's lock waits: past the settlement's bound, which is longer than
-//! the store's own waits, and past the 30 seconds before the copy a NAK
-//! brings back. Another invocation's claim, or another run's start, needs a
-//! replay of the stream on top.
+//! the row: a second process adopting it, or someone editing the store by
+//! hand. The daemon does neither itself. Before issue 1061 a release an
+//! earlier copy gave up on could delete it too, landing after this copy
+//! took the claim again; a release now removes only its own invocation's
+//! claim.
 //!
 //! **The run has started, whatever the claim says**, and the claim is what
 //! refuses a copy of its trigger that comes back, from a lost ack or a
@@ -29,12 +26,15 @@
 //! refused record, unlike a refused mark, is repaired by nothing later,
 //! since no claim is left naming the run for recovery to mark.
 //!
-//! **The delivery is then acked keeping the claim**, never with
-//! [`TriggerDispatcher::ack`], whose release deletes a `claimed` row
-//! whatever invocation it names. It is acked even when the store refuses
-//! the record, as it is when the store refuses the mark: the run started,
-//! and a delivery left to come back would meet no claim and start the
-//! trigger again now.
+//! **The delivery is then acked keeping the claim**, not with
+//! [`TriggerDispatcher::ack`]. After a record that landed the claim is
+//! started, which no release touches; but a claim still `claimed` and
+//! naming this run, which only a store that refused or skipped the writes
+//! leaves, is the one claim a release of this run would remove, and it is
+//! the run's only record until recovery marks it. It is acked even when the
+//! store refuses the record, as it is when the store refuses the mark: the
+//! run started, and a delivery left to come back would meet no claim and
+//! start the trigger again now.
 //!
 //! **Each case is one `error` line**, naming the run, the trigger, the
 //! sequence and the other invocation where there is one, since something
@@ -42,8 +42,8 @@
 //! at the record the store refused first. A claim found naming the run
 //! after all on the record's read is a `warn`: the start is marked, but
 //! something changed the claim between the two reads. There is no count:
-//! one daemon reaches these only by the stalled release above, and the line
-//! is what says it happened.
+//! the daemon brings none of these about itself, and the line is what says
+//! one happened.
 
 use tracing::{error, warn};
 

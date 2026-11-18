@@ -38,8 +38,10 @@
 //! a store stuck in a way neither bounds, such as storage that stops
 //! answering: settling then stops waiting and answers the delivery. It
 //! stops the wait, not the release, which it has no way to call back: the
-//! statement is already on its connection's thread, and lands when the
-//! store lets it. The dead letter's publish waits for one of the client's
+//! statement is already on its connection's thread, the bound being longer
+//! than the wait for a connection, and lands when the store lets it. Landing late does no harm, since a release removes the
+//! claim only while it still names the invocation giving it back (issue
+//! 1061). The dead letter's publish waits for one of the client's
 //! 5,000 publish permits, which only a client with that many publishes in
 //! flight waits on at all, then up to 5 seconds to queue the message and 5
 //! more for its acknowledgement. So settling holds a delivery in progress
@@ -58,18 +60,23 @@ use super::{Claimed, keeping_alive};
 /// delivery without it.
 ///
 /// Giving up stops the wait, not the release: the `DELETE` is already on
-/// its connection's thread and lands when the store lets it, after the
-/// answer. That is safe only because the bound stays above the store's own
-/// waits, sqlx's 30-second acquire timeout and 5-second busy timeout (its
-/// defaults, which `ControlPlaneStore::open` does not change). A release
-/// still unfinished at this bound has got past both, so it holds the write
-/// lock, and nothing can claim the row before it lands, or it is stuck
-/// outside SQLite's lock waits altogether; and the copy a NAK brings back
-/// comes at least 30 seconds later. Below those waits, a release given up
-/// while it still waited for the lock could land after a copy had taken
-/// the claim again, and delete that copy's claim, since a release deletes
-/// the `claimed` row by its sequence whatever invocation it names (issue
-/// 1061 is to scope it to its invocation).
+/// its connection's thread, since the bound outlasts the 30-second wait for
+/// a pooled connection (a release given up while it still waited for one
+/// would never run), and it lands when the store lets it, after the
+/// answer. Whenever it lands it does no harm: it removes the claim only
+/// while the claim is still `claimed` and still names the invocation giving
+/// it back, so it cannot delete a claim a copy has taken again since
+/// (issue 1061).
+///
+/// So the bound's length is no longer what keeps a late release safe. It is
+/// 40 seconds so that it stays above the store's own waits, sqlx's
+/// 30-second acquire timeout and 5-second busy timeout (its defaults, which
+/// `ControlPlaneStore::open` does not change): every release the store
+/// answers, landed or refused, then reaches settling before the bound and
+/// is logged as what it was, and settling gives up only on a store stuck
+/// outside those waits, which its error line then means. A shorter bound
+/// would buy no safety and would log as given up releases the store was
+/// still about to answer.
 pub(in crate::control_plane::dispatcher) const RELEASE_BOUND: Duration = Duration::from_secs(40);
 
 /// How a delivery is answered once its claim is released.
@@ -129,11 +136,13 @@ impl TriggerDispatcher {
             let released = tokio::time::timeout(release_bound, self.release_unstarted_claim(claim));
             if released.await.is_err() {
                 let stream_seq = claim.stream_seq;
-                error!(stream_seq, subject = %msg.subject, trigger_id = %trigger_name(trigger_id),
-                    context = answer.context(), waited_ms = release_bound.as_millis() as u64,
+                error!(stream_seq, invocation_id = %claim.invocation_id, subject = %msg.subject,
+                    trigger_id = %trigger_name(trigger_id), context = answer.context(),
+                    waited_ms = release_bound.as_millis() as u64,
                     "gave up waiting for the claim store to release a trigger's claim; answering \
                      the delivery without it. The release is not cancelled: it lands when the \
-                     store lets it, and until then the claim stays as it was");
+                     store lets it, removing the claim only if it still names this invocation, \
+                     and until then the claim stays as it was");
             }
             match answer {
                 Answer::Ack { context } => self.ack_keeping_claim(msg, trigger_id, context).await,
