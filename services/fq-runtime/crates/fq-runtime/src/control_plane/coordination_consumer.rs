@@ -619,6 +619,9 @@ impl From<DurableConsumerError> for CoordinationConsumerError {
 mod ambiguous_tests;
 
 #[cfg(test)]
+mod outcome_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::AgentId;

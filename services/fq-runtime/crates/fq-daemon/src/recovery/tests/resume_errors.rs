@@ -484,11 +484,12 @@ async fn a_resumed_run_that_fails_mid_step_is_not_reported_ambiguous() {
 /// `invocation.archived`, so the resume returns that bus error. The run
 /// has ended, and recovery does not report it.
 ///
-/// Its ownership row reads `in_flight`, as recovery restored it at
-/// startup. The coordination consumer moves that row on
-/// `invocation.archived`, never on `failed`, so it reads `failed` only
-/// once the archive is delivered, and until then the run is counted in
-/// flight (issue 1024). Before issue 1005 it read `ambiguous` instead.
+/// Its ownership row reads `failed` from the moment the coordination
+/// consumer folds the `failed`, with its archive pending, though recovery
+/// restored it to `in_flight` at startup and the archive never arrives
+/// (issue 1024). Before that change the row moved only on
+/// `invocation.archived`, so this run read `in_flight` for as long as the
+/// archive was refused; before issue 1005 it read `ambiguous`.
 #[tokio::test]
 async fn a_resumed_run_whose_archive_is_refused_is_not_reported_ambiguous() {
     let mut recovering = Recovering::new().await;
@@ -503,11 +504,11 @@ async fn a_resumed_run_whose_archive_is_refused_is_not_reported_ambiguous() {
         ),
         (
             vec!["failed (llm_error, llm_request)".to_string()],
-            Some(OwnerStatus::InFlight),
+            Some(OwnerStatus::Failed),
             ResumedRow::Terminal
         ),
         "the run ended in `failed`, its archive refused: no `invocation.ambiguous`, and the \
-         ownership row is left `in_flight` until an archive is delivered (issue 1024)"
+         ownership row reads `failed` though no archive was delivered (issue 1024)"
     );
     recovering.stop().await;
 }
