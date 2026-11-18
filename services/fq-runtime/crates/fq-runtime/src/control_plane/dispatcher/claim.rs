@@ -343,21 +343,29 @@ impl TriggerDispatcher {
         )
         .await;
         match marked {
-            Ok(MarkLanded { marked, refused }) => {
+            // The warn says the mark landed; a mark that found no claim
+            // naming the run did not, and its refusals go on the line
+            // `record_unmarked_start` logs instead.
+            Ok(Landed {
+                value: true,
+                refused,
+            }) => {
                 if let Some(last) = refused.last() {
                     warn!(error = %last, refused = refused.len(), stream_seq, %invocation_id,
                         %trigger_id, subject = %msg.subject,
                         "marked trigger durably started after the claim store refused the \
                          attempts before it; the run carried on");
                 }
-                if marked {
-                    self.ack(msg, Some(trigger_id), "durably started").await;
-                } else {
-                    self.record_unmarked_start(msg, store, worker_id, claim, trigger_id)
-                        .await;
-                }
+                self.ack(msg, Some(trigger_id), "durably started").await;
             }
-            Err(MarkRefused {
+            Ok(Landed {
+                value: false,
+                refused,
+            }) => {
+                self.record_unmarked_start(msg, store, worker_id, claim, trigger_id, refused.len())
+                    .await;
+            }
+            Err(Refused {
                 attempts,
                 elapsed,
                 last,
@@ -633,57 +641,79 @@ impl TriggerDispatcher {
     }
 }
 
-/// An attempt `mark_with_retries` offered landed.
-struct MarkLanded {
-    /// Whether it found the claim naming the run and marked it.
-    marked: bool,
+/// An attempt [`offer_with_retries`] offered landed.
+pub(super) struct Landed<T> {
+    /// What it returned.
+    pub(super) value: T,
     /// The refusals before it, none on a healthy day.
-    refused: Vec<ControlPlaneStoreError>,
+    pub(super) refused: Vec<ControlPlaneStoreError>,
 }
 
-/// Every attempt `mark_with_retries` offered was refused.
-struct MarkRefused {
+/// Every attempt [`offer_with_retries`] offered was refused.
+pub(super) struct Refused {
     /// How many attempts were offered.
-    attempts: usize,
+    pub(super) attempts: usize,
     /// How long they took, from the start of the first.
-    elapsed: Duration,
+    pub(super) elapsed: Duration,
     /// The last refusal.
-    last: ControlPlaneStoreError,
+    pub(super) last: ControlPlaneStoreError,
 }
 
-/// Offer a durable start to the claim store, and again after each of
-/// [`MARK_RETRY_PAUSES`] while it refuses, as long as the next attempt
-/// would begin within [`MARK_RETRY_BUDGET`] of the first. `Ok` once an
-/// attempt lands, saying whether it found the claim naming the run;
-/// `Err` once the store has refused every attempt offered. A mark that
-/// found no such claim is not offered again: retrying would not bring the
-/// claim back. Each refusal is logged at `debug`; `mark_durable_started`
-/// logs the outcome, once.
+/// Offer a durable start to the claim store's mark: [`offer_with_retries`]
+/// with [`ControlPlaneStore::mark_trigger_started`]. Landed, it says
+/// whether the mark found the claim naming the run. A mark that found no
+/// such claim is not offered again: retrying would not bring the claim
+/// back.
 async fn mark_with_retries(
     store: &ControlPlaneStore,
     key: TriggerKey<'_>,
     invocation_id: uuid::Uuid,
-) -> Result<MarkLanded, MarkRefused> {
+) -> Result<Landed<bool>, Refused> {
     let named = invocation_id.to_string();
+    offer_with_retries("mark", key, invocation_id, || {
+        store.mark_trigger_started(key, &named)
+    })
+    .await
+}
+
+/// Offer a write of a run's durable start to the claim store, the mark or
+/// the record of a start the mark did not find (`step` names which), and
+/// again after each of [`MARK_RETRY_PAUSES`] while it refuses, as long as
+/// the next attempt would begin within [`MARK_RETRY_BUDGET`] of the first.
+/// `Ok` once an attempt lands, with the refusals before it; `Err` once the
+/// store has refused every attempt offered. Each refusal is logged at
+/// `debug`; the caller logs the outcome, once. The faults the schedule is
+/// sized for, an I/O error or a pooled connection that had to be replaced,
+/// meet either write alike.
+pub(super) async fn offer_with_retries<T, F, W>(
+    step: &'static str,
+    key: TriggerKey<'_>,
+    invocation_id: uuid::Uuid,
+    mut write: F,
+) -> Result<Landed<T>, Refused>
+where
+    F: FnMut() -> W,
+    W: std::future::Future<Output = Result<T, ControlPlaneStoreError>>,
+{
     let began = tokio::time::Instant::now();
     let mut refused = Vec::new();
     let mut pauses = MARK_RETRY_PAUSES.iter();
     loop {
-        let err = match store.mark_trigger_started(key, &named).await {
-            Ok(marked) => return Ok(MarkLanded { marked, refused }),
+        let err = match write().await {
+            Ok(value) => return Ok(Landed { value, refused }),
             Err(err) => err,
         };
         let in_budget = |pause: &&Duration| began.elapsed() + **pause < MARK_RETRY_BUDGET;
         let Some(pause) = pauses.next().filter(in_budget) else {
-            return Err(MarkRefused {
+            return Err(Refused {
                 attempts: refused.len() + 1,
                 elapsed: began.elapsed(),
                 last: err,
             });
         };
-        debug!(error = %err, attempt = refused.len() + 1, stream_seq = key.stream_seq,
+        debug!(error = %err, step, attempt = refused.len() + 1, stream_seq = key.stream_seq,
             %invocation_id, retry_in_ms = pause.as_millis() as u64,
-            "the claim store refused to mark a trigger durably started; offering it again");
+            "the claim store refused a write of a trigger's durable start; offering it again");
         refused.push(err);
         tokio::time::sleep(*pause).await;
     }

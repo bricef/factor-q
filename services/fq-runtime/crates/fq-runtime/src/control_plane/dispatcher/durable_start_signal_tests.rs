@@ -90,7 +90,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
-use super::claim::{MARK_RETRY_BUDGET, MARK_RETRY_PAUSES};
+use super::claim::{MARK_RETRY_BUDGET, MARK_RETRY_PAUSES, Refused, offer_with_retries};
 use super::tests::{
     ack_pending_stays, canned_response, recovered_claims, registry_with, test_key, unique_agent_id,
     unique_consumer_name,
@@ -2428,9 +2428,12 @@ async fn a_mark_that_finds_another_runs_start_leaves_the_claim_and_acks_once() {
 /// **A start that cannot be recorded on a gone claim is still acked once,
 /// and the run runs on (issue 1046).** The claim is gone when the mark
 /// comes, and the claim store refuses the write that would record the
-/// start. The run started, so the delivery is acked, keeping it from being
-/// redelivered and run again now, and the run is not stopped; no claim
-/// records the start, which only the log line says.
+/// start. The record is offered again on the mark's own schedule, and the
+/// delivery is kept alive while it is: the pauses outlast the consumer's
+/// ack window ([`SHORT_ACK_WINDOW`]). The run started, so the delivery is
+/// then acked, keeping it from being redelivered and run again now, and the
+/// run is not stopped; no claim records the start, which only the log line
+/// says.
 #[tokio::test]
 async fn a_start_that_cannot_be_recorded_on_a_gone_claim_is_still_acked_once() {
     let mut pulled = Pulled::with_ack_window(
@@ -2458,6 +2461,10 @@ async fn a_start_that_cannot_be_recorded_on_a_gone_claim_is_still_acked_once() {
     assert!(
         sent.acks == 1 && sent.other.is_empty(),
         "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+    assert!(
+        sent.keepalives > 0,
+        "the delivery was kept alive while the record was offered again: {sent:?}"
     );
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
 }
@@ -2493,5 +2500,79 @@ async fn a_start_that_cannot_be_recorded_on_another_invocations_claim_leaves_it(
     assert!(
         sent.acks == 1 && sent.other.is_empty(),
         "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// A claim store's refusal, for the schedule's own tests.
+fn refusal() -> crate::control_plane::ControlPlaneStoreError {
+    crate::control_plane::ControlPlaneStoreError::Backend("injected: refused".to_string())
+}
+
+/// **A write of a run's start that the store refuses once is offered again
+/// and lands (issue 1046).** The mark and the record of a start the mark did
+/// not find share one schedule ([`offer_with_retries`]), so this is the
+/// record refused once and then accepted. It is staged on the schedule
+/// rather than through the claim store: the record runs in a transaction,
+/// which rolls back whatever a SQLite trigger refusing it would count, so a
+/// trigger can refuse it always or never, not once. The mark's own
+/// refused-then-accepted test drives the same schedule through `handle`.
+#[tokio::test]
+async fn a_write_of_a_start_refused_once_is_offered_again_and_lands() {
+    let attempts = AtomicUsize::new(0);
+    let key = crate::control_plane::TriggerKey {
+        stream: TRIGGER_STREAM_NAME,
+        stream_epoch: 0,
+        stream_seq: 1,
+    };
+
+    let landed = offer_with_retries("record", key, Uuid::now_v7(), || async {
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(refusal())
+        } else {
+            Ok("recorded")
+        }
+    })
+    .await;
+
+    let Ok(landed) = landed else {
+        panic!("the second attempt was accepted, so the write lands");
+    };
+    assert_eq!(landed.value, "recorded");
+    assert_eq!(landed.refused.len(), 1, "one refusal before it landed");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "offered twice");
+}
+
+/// **A write of a run's start that the store refuses throughout is offered
+/// four times within the budget, and then given up (issue 1046).** Four is
+/// what [`MARK_RETRY_PAUSES`] gives a store that refuses at once, the last
+/// attempt beginning inside [`MARK_RETRY_BUDGET`].
+#[tokio::test]
+async fn a_write_of_a_start_refused_throughout_is_offered_on_the_schedule_and_given_up() {
+    let attempts = AtomicUsize::new(0);
+    let key = crate::control_plane::TriggerKey {
+        stream: TRIGGER_STREAM_NAME,
+        stream_epoch: 0,
+        stream_seq: 1,
+    };
+
+    let refused = offer_with_retries("record", key, Uuid::now_v7(), || async {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        Err::<(), _>(refusal())
+    })
+    .await;
+
+    let Err(Refused {
+        attempts: offered,
+        elapsed,
+        ..
+    }) = refused
+    else {
+        panic!("every attempt was refused, so the write is given up");
+    };
+    assert_eq!(offered, ATTEMPTS_IF_REFUSED_AT_ONCE as usize);
+    assert_eq!(attempts.load(Ordering::SeqCst), offered);
+    assert!(
+        elapsed >= MARK_RETRY_PAUSES.iter().sum::<Duration>() && elapsed < MARK_RETRY_BUDGET,
+        "the attempts follow the pauses and end inside the budget: {elapsed:?}"
     );
 }

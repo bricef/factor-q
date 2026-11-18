@@ -8,8 +8,12 @@
 //! something else only if a writer outside this copy's handling changed
 //! the row: a release an earlier copy gave up on that lands after this
 //! copy took the claim again (issue 1061), a second process adopting it,
-//! or someone editing the store by hand. None of those is reachable in one
-//! daemon today, by the bound on a release and the one-daemon assumption.
+//! or someone editing the store by hand. In one daemon only the first is
+//! reachable, and only when the release stalls about 70 seconds outside
+//! SQLite's lock waits: past the settlement's bound, which is longer than
+//! the store's own waits, and past the 30 seconds before the copy a NAK
+//! brings back. Another invocation's claim, or another run's start, needs a
+//! replay of the stream on top.
 //!
 //! **The run has started, whatever the claim says**, and the claim is what
 //! refuses a copy of its trigger that comes back, from a lost ack or a
@@ -19,7 +23,11 @@
 //! recorded in its place, since left `claimed` it could be released from
 //! under a run that started; another run's start already on the claim is
 //! left, being all a copy needs to be refused. Retrying the mark would not
-//! do any of that: a missing row does not come back.
+//! do any of that: a missing row does not come back. The record itself is
+//! offered again on the mark's schedule while the store refuses it: the
+//! faults that schedule is sized for meet it as they meet the mark, and a
+//! refused record, unlike a refused mark, is repaired by nothing later,
+//! since no claim is left naming the run for recovery to mark.
 //!
 //! **The delivery is then acked keeping the claim**, never with
 //! [`TriggerDispatcher::ack`], whose release deletes a `claimed` row
@@ -30,20 +38,25 @@
 //!
 //! **Each case is one `error` line**, naming the run, the trigger, the
 //! sequence and the other invocation where there is one, since something
-//! changed a claim it should not have. There is no count: nothing in one
-//! daemon reaches it, and the line is what says it happened.
+//! changed a claim it should not have, with the attempts at the mark and
+//! at the record the store refused first. A claim found naming the run
+//! after all on the record's read is a `warn`: the start is marked, but
+//! something changed the claim between the two reads. There is no count:
+//! one daemon reaches these only by the stalled release above, and the line
+//! is what says it happened.
 
-use tracing::error;
+use tracing::{error, warn};
 
 use super::super::TriggerDispatcher;
-use super::{Claimed, keeping_alive};
+use super::{Claimed, Landed, Refused, keeping_alive, offer_with_retries};
 use crate::control_plane::ControlPlaneStore;
 use crate::control_plane::store::RecordedStart;
 
 impl TriggerDispatcher {
     /// Record the durable start of `claim`'s run, whose mark found no claim
-    /// naming it, then ack the delivery keeping whatever claim there is.
-    /// The delivery is kept alive while the store records it.
+    /// naming it after `refused_marks` refusals, then ack the delivery
+    /// keeping whatever claim there is. The record is offered on the mark's
+    /// own schedule, and the delivery is kept alive while it is.
     pub(super) async fn record_unmarked_start(
         &self,
         msg: &async_nats::jetstream::Message,
@@ -51,31 +64,45 @@ impl TriggerDispatcher {
         worker_id: &str,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
+        refused_marks: usize,
     ) {
         let Claimed {
             stream_seq,
             invocation_id,
         } = *claim;
+        let key = self.trigger_key(stream_seq);
         let named = invocation_id.to_string();
         let now = chrono::Utc::now().timestamp_millis();
         let recorded = keeping_alive(
             msg,
             Some(trigger_id),
-            store.record_trigger_start(self.trigger_key(stream_seq), worker_id, &named, now),
+            offer_with_retries("record", key, invocation_id, || {
+                store.record_trigger_start(key, worker_id, &named, now)
+            }),
         )
         .await;
         let subject = msg.subject.as_str();
+        let (recorded, refused_records) = match recorded {
+            Ok(Landed { value, refused }) => (Ok(value), refused.len()),
+            Err(refused) => (Err(refused), 0),
+        };
         match recorded {
-            // Marked for the run between the mark and this read.
-            Ok(RecordedStart::Marked) => {}
+            Ok(RecordedStart::Marked) => {
+                warn!(stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
+                    refused_records,
+                    "the claim of a trigger whose run started named the run on a second look, \
+                     after its mark had found it naming another or gone; marked the start on it");
+            }
             Ok(RecordedStart::Written) => {
-                error!(stream_seq, %invocation_id, %trigger_id, subject,
+                error!(stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
+                    refused_records,
                     "the claim of a trigger whose run started was gone when its start was \
                      marked; wrote one recording the start, so a copy of the trigger that comes \
                      back is refused rather than run again");
             }
             Ok(RecordedStart::WrittenOver { claimed_for }) => {
-                error!(stream_seq, %invocation_id, %trigger_id, subject,
+                error!(stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
+                    refused_records,
                     claim_invocation_id = %claimed_for.as_deref().unwrap_or("none"),
                     "the claim of a trigger whose run started named another invocation, not \
                      started, when its start was marked; recorded this run's start on it in that \
@@ -85,14 +112,20 @@ impl TriggerDispatcher {
             Ok(RecordedStart::AlreadyStarted {
                 invocation_id: started,
             }) => {
-                error!(stream_seq, %invocation_id, %trigger_id, subject,
+                error!(stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
+                    refused_records,
                     started_invocation_id = %started.as_deref().unwrap_or("none"),
                     "the claim of a trigger whose run started already records another run's \
                      start: the trigger has run twice. Left the claim naming that run, which \
                      refuses any further copy; this run is on no claim");
             }
-            Err(err) => {
-                error!(error = %err, stream_seq, %invocation_id, %trigger_id, subject,
+            Err(Refused {
+                attempts,
+                elapsed,
+                last,
+            }) => {
+                error!(error = %last, attempts, elapsed_ms = elapsed.as_millis() as u64,
+                    stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
                     "could not record the durable start of a trigger whose claim does not name \
                      its run: acking the delivery anyway and letting the run continue, so it is \
                      not redelivered now. No claim records this run's start, so a replay of the \

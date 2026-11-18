@@ -241,6 +241,10 @@ enum ClaimChange {
     ClaimedByAnother,
     /// Names [`ANOTHER_RUN`] on it, marked `durably_started`.
     StartedByAnother,
+    /// Makes the store refuse the first mark, naming [`ANOTHER_RUN`] on the
+    /// claim, still `claimed`, as it does: the retry then finds no claim
+    /// naming the run.
+    RefusedOnceThenAnother,
 }
 
 /// Which attempts to mark the claim the store refuses.
@@ -410,6 +414,19 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
         ClaimChange::StartedByAnother => (
             "UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'",
             &[],
+        ),
+        // `FAIL` keeps what the trigger did before it, the spent row and the
+        // other invocation's name, where `ABORT` would roll them back.
+        ClaimChange::RefusedOnceThenAnother => (
+            "CREATE TABLE injected_once (spent INTEGER)",
+            &[
+                "INSERT INTO injected_once VALUES (0)",
+                "CREATE TRIGGER refuse_once_naming_another BEFORE UPDATE ON trigger_claim \
+                 WHEN EXISTS (SELECT 1 FROM injected_once) \
+                 BEGIN DELETE FROM injected_once; \
+                 UPDATE trigger_claim SET invocation_id = 'another-run'; \
+                 SELECT RAISE(FAIL, 'injected: the claim store refuses the mark once'); END",
+            ],
         ),
     };
     let query = sqlx::query(statement);
@@ -1047,4 +1064,37 @@ async fn a_start_that_could_not_be_recorded_is_one_error_line_naming_the_run() {
             .is_some_and(|error| error.contains("injected")),
         "{line:#?}"
     );
+    assert_eq!(
+        line.field("attempts"),
+        Some("4"),
+        "the record is offered on the mark's own schedule, four times for a store that \
+         refuses at once: {line:#?}"
+    );
+    assert_eq!(line.field("refused_marks"), Some("0"), "{line:#?}");
+}
+
+/// **A mark refused once whose retry then finds no claim naming its run is
+/// not logged as marked** (issue 1046). The first attempt is refused, and by
+/// the retry the claim names another invocation. Nothing says the mark
+/// landed: the one line is the unmarked start's, and it carries the
+/// refused attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mark_refused_then_matching_nothing_is_not_logged_as_marked() {
+    let mut daemon = Daemon::new(
+        "refused-then-unmatched",
+        Script::ChangedClaim(ClaimChange::RefusedOnceThenAnother),
+    )
+    .await;
+    let named = daemon.run_one().await;
+
+    assert!(
+        daemon
+            .log
+            .lines(|line| about(line, MARK_HEALED, &daemon.subject))
+            .is_empty(),
+        "the mark found no claim naming its run, so nothing may say it was marked"
+    );
+    let line = the_one_error_line_naming_the_run(&daemon, CLAIM_WRITTEN_OVER, named);
+    assert_eq!(line.field("refused_marks"), Some("1"), "{line:#?}");
+    assert_eq!(line.field("refused_records"), Some("0"), "{line:#?}");
 }
