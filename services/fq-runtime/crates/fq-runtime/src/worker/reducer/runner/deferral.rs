@@ -121,10 +121,13 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Set `phase = "deferred"` on the invocation's state row, keeping
-    /// every other column. The row exists — a model call happens after
-    /// the step's upsert — and is not terminal; if either is untrue the
-    /// deferral is still announced, but a resume will find whatever the
-    /// row actually says.
+    /// every other column, while the row is still the run's. A model call
+    /// comes after the step's write, so a row that is finished, gone, or
+    /// finished before this write lands was finished by someone else (an
+    /// operator's drop, issue 1070): the run stops with
+    /// [`ExecutorError::FinishedElsewhere`] instead of announcing a
+    /// deferral that nothing will resume, and holding its agent's slot for
+    /// the whole delay.
     async fn mark_deferred(&self, invocation_id: Uuid) -> Result<(), ExecutorError> {
         let key = invocation_id.to_string();
         let row = self
@@ -133,24 +136,24 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .get_invocation_state(&key)
             .await
             .map_err(map_store_err)?;
-        let Some(mut row) = row else {
-            warn!(
-                invocation_id = %invocation_id,
-                "no state row to mark deferred; the deferral is announced anyway"
+        let Some(mut row) = row.filter(|row| row.terminal_at.is_none()) else {
+            return Err(
+                self.finished_elsewhere(invocation_id, "its row was finished at a deferral")
             );
-            return Ok(());
         };
-        if row.terminal_at.is_some() {
-            return Ok(());
-        }
         row.phase = DEFERRED_PHASE.to_string();
         // A deferral is progress: the row moved, and the stuck sweep
         // measures silence from here.
         row.updated_at = self.config.clock.unix_now_ms();
-        self.config
+        let landed = self
+            .config
             .store
-            .upsert_invocation_state(&row)
+            .update_invocation_state(&row)
             .await
-            .map_err(map_store_err)
+            .map_err(map_store_err)?;
+        if landed {
+            return Ok(());
+        }
+        Err(self.finished_elsewhere(invocation_id, "its row write did not land"))
     }
 }
