@@ -1738,8 +1738,14 @@ async fn a_running_recovered_run_is_dropped_only_with_live() {
 mod resume_errors;
 
 // A drop published before the daemon died and folded only after the next
-// start's recovery reported the same run ambiguous (issue 1024).
+// start's recovery reported the same run ambiguous (issue 1024), which is
+// what a start whose wait for the backlog runs out still does.
 mod drop_before_restart;
+
+// What the stopped daemon left unfolded on the event stream is folded
+// before the next start's recovery decides, and the runs the fold did not
+// reach in time are held for a later start (issue 1070).
+mod backlog_at_boot;
 
 // A run that published its `failed` and died before marking its WAL row
 // terminal, and the next start (issue 1024).

@@ -7,10 +7,13 @@
 //! its coordination consumer has folded the drop, nothing records the drop
 //! but the event on the stream: the worker's WAL row is still in flight,
 //! with the tool handed off and no result, and a triggered run has no
-//! ownership row. The next start's recovery runs before its coordination
-//! consumer does, so it finds the run ambiguous and publishes
-//! `invocation.ambiguous`, which lands on the stream after the drop. The
-//! consumer then folds the drop, and the report after it.
+//! ownership row. The next start waits for its coordination consumer to
+//! fold the drop before recovery decides (issue 1070, `backlog_at_boot`
+//! drives that start). When that wait runs out first, recovery finds the
+//! run ambiguous and publishes `invocation.ambiguous`, which lands on the
+//! stream after the drop; the consumer then folds the drop, and the report
+//! after it. This test drives that order: recovery over an unfolded drop,
+//! then the fold.
 
 use super::*;
 use fq_runtime::bus::STREAM_NAME;
@@ -46,8 +49,8 @@ async fn a_drop_published_before_the_daemon_died_is_not_undone_by_the_next_start
         .await
         .expect("publish the drop");
 
-    // The next start: recovery, before any consumer runs, in the order
-    // `assemble` runs it.
+    // The next start, its wait for the backlog run out: recovery over the
+    // unfolded drop, in the order `assemble` runs it.
     let runtime_id = Uuid::now_v7();
     let worker_id = WorkerId::new(runtime_id.to_string()).unwrap();
     reconcile_terminal_owners(

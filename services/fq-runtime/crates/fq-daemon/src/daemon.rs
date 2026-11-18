@@ -269,7 +269,6 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
         edge_listener,
         signals,
         agents_loaded,
-        now_ms,
     })
     .await;
     registration.settle_unclaimed().await;
@@ -277,7 +276,7 @@ pub(crate) async fn run_daemon(global: &GlobalArgs) -> anyhow::Result<()> {
 }
 
 /// Everything `run_daemon` had worked out by the time its worker row
-/// existed. One struct because the alternative is fifteen arguments,
+/// existed. One struct because the alternative is fourteen arguments,
 /// and the split exists to give the registration a single exit path
 /// rather than to give these fields a home.
 struct Registered {
@@ -295,7 +294,6 @@ struct Registered {
     edge_listener: fq_edge::EdgeListener,
     signals: crate::signals::ShutdownSignals,
     agents_loaded: u32,
-    now_ms: i64,
 }
 
 /// The rest of the assembly, and then the run. Everything here is
@@ -357,13 +355,28 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         edge_listener,
         signals,
         agents_loaded,
-        now_ms,
     } = r;
+
+    // Fold what the stopped daemon left on the event stream before recovery
+    // reads anything (issue 1070): its coordination consumer starts here,
+    // and recovery waits, bounded, for it to reach the stream's end as of
+    // now. `run_hosted` supervises it with the rest.
+    let (coordination, backlog) = crate::recovery::fold_backlog(
+        &bus,
+        &cp_store,
+        &worker_store,
+        runtime_id,
+        &worker_id,
+        &config,
+    )
+    .await?;
 
     // Reconcile worker rows left live by operator terminal transitions made
     // before this binary was deployed. Do this before recovery classification
-    // so a pre-existing orphan cannot be reported ambiguous again.
-    crate::recovery::reconcile_terminal_owners(&worker_store, &cp_store, now_ms).await?;
+    // so a pre-existing orphan cannot be reported ambiguous again. The time
+    // is taken after the wait, which can last the whole bound.
+    let reconciled_at = chrono::Utc::now().timestamp_millis();
+    crate::recovery::reconcile_terminal_owners(&worker_store, &cp_store, reconciled_at).await?;
 
     // Worker recovery: scan in-flight invocations from the worker store,
     // classify each, restore ownership for auto-resumed cases, and emit
@@ -378,6 +391,10 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         claims,
     } = crate::recovery::classify_in_flight(&worker_store, &cp_store, &bus, runtime_id, &worker_id)
         .await?;
+    // A fold that did not reach the stream's end in time leaves every run
+    // recovery would resume in flight for a later start. Recovery has
+    // decided either way: `run_hosted` releases the consumer's tick sweeps.
+    let (recoverable, sweeps) = backlog.hold(recoverable);
 
     // Load the pricing sources (LiteLLM, and OpenRouter's catalogue for
     // the models routed there), merge config overrides, and enforce the
@@ -562,6 +579,8 @@ async fn assemble(r: Registered) -> anyhow::Result<crate::hosted::Assembled> {
         agents_loaded,
         pricing_load,
         resume_handles,
+        coordination,
+        sweeps,
         throttle,
         deferrals,
         due_resumes,

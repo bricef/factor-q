@@ -1661,6 +1661,16 @@ async fn restart_and_count_in_flight(
     nats_url: &str,
     mock: &MockAnthropicServer,
 ) -> (Daemon, u64) {
+    restart_logging_to(scratch, nats_url, mock, "daemon-second.log").await
+}
+
+/// [`restart_and_count_in_flight`], logging to `log_name`.
+async fn restart_logging_to(
+    scratch: &Scratch,
+    nats_url: &str,
+    mock: &MockAnthropicServer,
+    log_name: &str,
+) -> (Daemon, u64) {
     mock.push_response(report_done("toolu_after_the_restart"));
     let client = async_nats::connect(nats_url)
         .await
@@ -1670,7 +1680,7 @@ async fn restart_and_count_in_flight(
         .await
         .expect("subscribe to the recovery report");
     client.flush().await.expect("flush the subscription");
-    let mut daemon = Daemon::spawn(scratch, nats_url, "daemon-second.log");
+    let mut daemon = Daemon::spawn(scratch, nats_url, log_name);
     let message = tokio::time::timeout(Duration::from_secs(60), recovery.next())
         .await
         .expect("startup recovery reports within 60s")
@@ -1832,6 +1842,95 @@ async fn a_failed_on_the_stream_is_folded_before_the_next_start_resumes_the_run(
 
     daemon.stop();
     assert_wal_row_finished(&scratch, &invocation_id).await;
+    mock.shutdown().await;
+}
+
+/// Publish, while no daemon runs, an event declaring a schema version this
+/// build does not read: the coordination consumer halts on it and folds
+/// nothing after it.
+async fn publish_an_event_this_build_cannot_read(nats_url: &str) {
+    let bus = fq_runtime::EventBus::connect(nats_url)
+        .await
+        .expect("connect to the test broker");
+    let mut event = serde_json::to_value(fq_runtime::events::Event::new(
+        fq_runtime::agent::AgentId::new("resume-probe").unwrap(),
+        uuid::Uuid::now_v7(),
+        fq_runtime::events::EventPayload::HostNotice(fq_runtime::events::HostNoticePayload {
+            kind: "from_a_newer_build".to_string(),
+            body: String::new(),
+        }),
+    ))
+    .unwrap();
+    event["envelope"]["schema_version"] = json!(99);
+    bus.jetstream()
+        .publish(
+            "fq.agent.resume-probe.host_notice",
+            event.to_string().into(),
+        )
+        .await
+        .expect("publish")
+        .await
+        .expect("stored");
+}
+
+/// **Issue 1070: a run the fold cannot reach in time is held, and named,
+/// at every start.** The stopped daemon left an event this build cannot
+/// read ahead of the run's drop, so the coordination consumer halts and
+/// never folds the drop. With the wait bounded at one second, the next
+/// start still boots and serves, finds the run in flight, and resumes
+/// nothing: it logs the run at error by id. The start after it, behind the
+/// same event, does the same.
+///
+/// Before, the run was resumed at once, its drop never folded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_the_fold_cannot_reach_in_time_is_held_and_named_at_every_start() {
+    use std::io::Write as _;
+
+    let server = fq_test_support::NatsServer::start();
+    let nats_url = server.url().to_string();
+    let mock = MockAnthropicServer::start().await;
+    let scratch = Scratch::new("held-unfolded", mock.base_url());
+
+    let invocation_id = suspend_one_run(&scratch, &nats_url, &mock).await;
+    publish_an_event_this_build_cannot_read(&nats_url).await;
+    publish_while_stopped(
+        &nats_url,
+        &invocation_id,
+        fq_runtime::events::EventPayload::InvocationOperatorRecovered(
+            fq_runtime::events::InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: Some("dropped while the daemon was down".to_string()),
+            },
+        ),
+    )
+    .await;
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.path("fq.toml"))
+        .expect("open fq.toml");
+    writeln!(config, "\n[worker]\nrecovery_backlog_wait_secs = 1").unwrap();
+    drop(config);
+
+    for log_name in ["daemon-second.log", "daemon-third.log"] {
+        let (mut daemon, in_flight) =
+            restart_logging_to(&scratch, &nats_url, &mock, log_name).await;
+        assert_eq!(
+            in_flight,
+            1,
+            "{log_name}: recovery finds the run in flight\n--- log ---\n{}",
+            daemon.log()
+        );
+        let log = daemon.log();
+        assert!(
+            log.lines().any(|l| l.contains(r#""level":"ERROR""#)
+                && l.contains(&invocation_id)
+                && l.contains("not resuming this invocation at startup")),
+            "{log_name}: no error line names the held run\n--- log ---\n{log}"
+        );
+        assert_nothing_resumed(&daemon, &mock).await;
+        daemon.stop();
+    }
     mock.shutdown().await;
 }
 

@@ -467,8 +467,14 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
 /// that keeps changing under it.
 ///
 /// Within one daemon little contends: the coordination consumer is the
-/// row's only writer of moves while it runs, on one task, and startup
-/// recovery writes before that consumer starts. The one other writer is an
+/// row's only writer of moves while it runs, on one task. Startup
+/// recovery's restores run beside it: the consumer starts first, so that
+/// recovery decides over a folded backlog (issue 1070), and goes on
+/// folding while recovery restores, a later event for the same run
+/// included, or one it had not reached when recovery's wait for it ran
+/// out (the held runs are restored again once it has). The compare-and-set
+/// orders the two: whichever writes second decides again from the row the
+/// first left. The one other writer is an
 /// operator's drop of a row no projection event names an agent for:
 /// `operator::drop_invocation` deletes that row itself, to tell it from an
 /// id that never existed, before it publishes the drop, whose fold writes

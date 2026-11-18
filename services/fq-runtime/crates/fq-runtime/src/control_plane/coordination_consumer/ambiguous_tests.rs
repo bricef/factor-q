@@ -4,8 +4,9 @@
 //! The event asks for a run to be triaged. It can reach the control plane
 //! after the run is recorded finished: the next start's recovery reports a
 //! run killed mid tool call whose drop was published but not yet folded
-//! when the daemon stopped (`fq-daemon`'s recovery tests drive that one
-//! end to end), and a resume whose worker row cannot be read is reported
+//! when the daemon stopped, if its wait for this consumer runs out before
+//! the drop is folded (`fq-daemon`'s recovery tests drive that one end to
+//! end), and a resume whose worker row cannot be read is reported
 //! though the run may have ended and been archived. A finished status,
 //! `completed` or `failed` and an operator's drop among them, is never
 //! left for `ambiguous`.
