@@ -31,7 +31,7 @@ use crate::trigger::PublishedTrigger;
 /// The advisory, stamped a second before the trigger stream was created:
 /// one the broker emitted for the stream before this one, at the same
 /// sequence as a message this stream holds.
-fn stamped_before_the_streams_creation(arena: &Arena, advisory: &[u8]) -> Vec<u8> {
+pub(super) fn stamped_before_the_streams_creation(arena: &Arena, advisory: &[u8]) -> Vec<u8> {
     let created = chrono::DateTime::from_timestamp_nanos(arena.bus.trigger_stream_epoch());
     let before = created - chrono::Duration::seconds(1);
     restamped(
@@ -52,7 +52,7 @@ fn restamped(advisory: &[u8], timestamp: Option<&str>) -> Vec<u8> {
 }
 
 /// The last dead letter the watch wrote under the system sentinel, if any.
-async fn system_dead_letter(arena: &Arena) -> Option<Event> {
+pub(super) async fn system_dead_letter(arena: &Arena) -> Option<Event> {
     test_kit::last_failed(&arena.bus, AgentId::SYSTEM_STR).await
 }
 
