@@ -1718,6 +1718,10 @@ mod resume_errors;
 // start's recovery reported the same run ambiguous (issue 1024).
 mod drop_before_restart;
 
+// A run that published its `failed` and died before marking its WAL row
+// terminal, and the next start (issue 1024).
+mod ended_before_restart;
+
 /// The control-plane and worker stores a daemon keeps under `dir`.
 ///
 /// Here rather than in the file that uses it: the store-open gate
