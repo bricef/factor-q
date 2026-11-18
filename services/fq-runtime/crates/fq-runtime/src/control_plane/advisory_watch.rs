@@ -140,34 +140,17 @@ struct MaxDeliverAdvisory {
 }
 
 impl MaxDeliverAdvisory {
-    /// Whether the advisory was emitted for the incarnation of the trigger
-    /// stream created at `stream_epoch` (nanoseconds) or a later one, not
-    /// for one before it. An advisory without a timestamp the watch can
-    /// read is taken as this incarnation's: the server always stamps it.
-    fn of_incarnation(&self, stream_epoch: i64) -> bool {
-        let emitted = self
-            .timestamp
-            .as_deref()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-            .and_then(|at| at.timestamp_nanos_opt());
-        emitted.is_none_or(|nanos| nanos >= stream_epoch)
-    }
-
-    /// Why the dead letter for this advisory, from an incarnation of the
-    /// trigger stream before the one created at `stream_epoch`, names no
-    /// trigger ([`DEAD_LETTER_UNATTRIBUTED_KEY`]).
-    fn unattributed_reason(&self, stream_epoch: i64) -> String {
-        let at = |time: chrono::DateTime<chrono::Utc>| {
-            time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-        };
-        format!(
-            "its advisory came from an earlier incarnation of the trigger stream (emitted {}, \
-             before the stream was created at {}), so its sequence is that stream's, whose \
-             messages went with it",
-            self.emitted_at()
-                .map_or_else(|| "at a time that cannot be read".to_string(), at),
-            at(chrono::DateTime::from_timestamp_nanos(stream_epoch)),
-        )
+    /// When the advisory was emitted, if that was before the incarnation of
+    /// the trigger stream created at `stream_epoch` (nanoseconds): an
+    /// advisory from an earlier incarnation. `None` for one emitted for that
+    /// incarnation or a later one, and for one without a timestamp the
+    /// watch can read, which is taken as this incarnation's: the server
+    /// always stamps it.
+    fn emitted_before(&self, stream_epoch: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.emitted_at().filter(|at| {
+            at.timestamp_nanos_opt()
+                .is_some_and(|nanos| nanos < stream_epoch)
+        })
     }
 
     /// When the server emitted it, if the watch can read its timestamp.
@@ -199,6 +182,22 @@ impl MaxDeliverAdvisory {
     ) -> bool {
         delivered >= HELD_VERDICT_MIN_LOOKS && !self.emitted_within(limit, now)
     }
+}
+
+/// Why the dead letter for an advisory emitted at `emitted`, before the
+/// incarnation of the trigger stream created at `stream_epoch`
+/// (nanoseconds), names no trigger ([`DEAD_LETTER_UNATTRIBUTED_KEY`]).
+fn unattributed_reason(emitted: chrono::DateTime<chrono::Utc>, stream_epoch: i64) -> String {
+    let at = |time: chrono::DateTime<chrono::Utc>| {
+        time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    };
+    format!(
+        "its advisory came from an earlier incarnation of the trigger stream (emitted {}, before \
+         the stream was created at {}), so its sequence is that stream's, whose messages went \
+         with it",
+        at(emitted),
+        at(chrono::DateTime::from_timestamp_nanos(stream_epoch)),
+    )
 }
 
 /// Errors that prevent the watch from starting or progressing.
@@ -433,14 +432,15 @@ impl AdvisoryWatch {
         // The incarnation of the trigger stream the advisory was emitted
         // for, decided before anything is read from the stream: a sequence
         // from before the stream was last created is not this stream's.
-        let this_incarnation = advisory.of_incarnation(self.bus.trigger_stream_epoch());
+        let earlier = advisory.emitted_before(self.bus.trigger_stream_epoch());
+        let this_incarnation = earlier.is_none();
         let Named {
             agent_id,
             subject: trigger_subject,
             payload: trigger_payload,
             trigger_id,
             unattributed,
-        } = self.named_trigger(&advisory, this_incarnation).await?;
+        } = self.named_trigger(&advisory, earlier).await?;
 
         // Best-effort dedup vs the inline fast path. Its ACK suppresses
         // the advisory, so overlap requires an emit-then-crash-before-
@@ -553,10 +553,11 @@ impl AdvisoryWatch {
             ),
             None => event,
         };
-        let event = match unattributed {
-            Some(why) => {
-                event.annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::Value::String(why))
-            }
+        let event = match &unattributed {
+            Some(why) => event.annotate(
+                DEAD_LETTER_UNATTRIBUTED_KEY,
+                serde_json::Value::String(why.clone()),
+            ),
             None => event,
         };
         let event = match &unchecked {
@@ -590,11 +591,15 @@ impl AdvisoryWatch {
             }
             return Ok(AdvisoryOutcome::Unchecked);
         }
+        // A sequence of an earlier incarnation says so on this line too, so
+        // a log read at error alone does not take it for this stream's; the
+        // field is absent from every other line.
         error!(
             consumer = CONSUMER_NAME,
             agent_id = %event.envelope.agent_id,
             stream_seq = advisory.stream_seq,
             deliveries = advisory.deliveries,
+            unattributed = unattributed.as_deref(),
             "trigger exhausted with nothing of its run on record, or none consulted; emitted a \
              dead-letter event from its MAX_DELIVERIES advisory"
         );
@@ -604,7 +609,8 @@ impl AdvisoryWatch {
     /// The trigger `advisory` names, as its dead letter records it: the
     /// message at the advisory's sequence, read off the trigger stream as
     /// it is now, when the advisory was emitted for this incarnation of the
-    /// stream (`this_incarnation`).
+    /// stream. `earlier` is when it was emitted if that was before this
+    /// incarnation was created ([`MaxDeliverAdvisory::emitted_before`]).
     ///
     /// An advisory from an earlier incarnation is not read at all (issue
     /// 1054). Its sequence is a position on the stream before this one,
@@ -618,9 +624,9 @@ impl AdvisoryWatch {
     async fn named_trigger(
         &self,
         advisory: &MaxDeliverAdvisory,
-        this_incarnation: bool,
+        earlier: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Named, AdvisoryWatchError> {
-        if !this_incarnation {
+        if let Some(emitted) = earlier {
             info!(consumer = CONSUMER_NAME, stream_seq = advisory.stream_seq,
                 timestamp = ?advisory.timestamp,
                 "an advisory from an earlier incarnation of the trigger stream: its sequence \
@@ -628,7 +634,10 @@ impl AdvisoryWatch {
                  message nor the claim this stream has at that sequence, and dead-letters it \
                  naming no trigger");
             return Ok(Named {
-                unattributed: Some(advisory.unattributed_reason(self.bus.trigger_stream_epoch())),
+                unattributed: Some(unattributed_reason(
+                    emitted,
+                    self.bus.trigger_stream_epoch(),
+                )),
                 ..Named::nothing()
             });
         }
@@ -946,8 +955,9 @@ mod tests {
 
     /// The incarnation an advisory belongs to is read off its timestamp:
     /// one emitted before the stream's creation is an earlier
-    /// incarnation's, one at or after it this one's, and one with no
-    /// readable timestamp is taken as this one's.
+    /// incarnation's, and gives when it was emitted; one at or after it is
+    /// this one's, and so is one with no readable timestamp, or one too far
+    /// from 1970 to count in nanoseconds.
     #[test]
     fn an_advisory_belongs_to_the_incarnation_its_timestamp_falls_in() {
         let at = |timestamp: Option<&str>| MaxDeliverAdvisory {
@@ -957,15 +967,30 @@ mod tests {
             deliveries: 5,
             timestamp: timestamp.map(str::to_string),
         };
-        let created = chrono::DateTime::parse_from_rfc3339("2026-07-14T16:00:00Z")
-            .unwrap()
-            .timestamp_nanos_opt()
-            .unwrap();
-        assert!(at(Some("2026-07-14T16:18:43Z")).of_incarnation(created));
-        assert!(at(Some("2026-07-14T16:00:00Z")).of_incarnation(created));
-        assert!(!at(Some("2026-07-14T15:59:59Z")).of_incarnation(created));
-        assert!(at(None).of_incarnation(created));
-        assert!(at(Some("not a time")).of_incarnation(created));
+        let time = |at: &str| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let created = time("2026-07-14T16:00:00Z").timestamp_nanos_opt().unwrap();
+        assert_eq!(
+            at(Some("2026-07-14T16:18:43Z")).emitted_before(created),
+            None
+        );
+        assert_eq!(
+            at(Some("2026-07-14T16:00:00Z")).emitted_before(created),
+            None
+        );
+        assert_eq!(
+            at(Some("2026-07-14T15:59:59Z")).emitted_before(created),
+            Some(time("2026-07-14T15:59:59Z"))
+        );
+        assert_eq!(at(None).emitted_before(created), None);
+        assert_eq!(at(Some("not a time")).emitted_before(created), None);
+        assert_eq!(
+            at(Some("0001-01-01T00:00:00Z")).emitted_before(created),
+            None
+        );
     }
 
     /// The reason an earlier incarnation's dead letter names no trigger
@@ -973,19 +998,14 @@ mod tests {
     /// recreated, and says the sequence is not this stream's.
     #[test]
     fn an_earlier_incarnations_dead_letter_says_when_the_stream_was_created() {
-        let advisory = MaxDeliverAdvisory {
-            stream: TRIGGER_STREAM_NAME.to_string(),
-            consumer: "fq-dispatcher".to_string(),
-            stream_seq: 7,
-            deliveries: 5,
-            timestamp: Some("2026-11-16T10:00:00.250Z".to_string()),
+        let time = |at: &str| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
         };
-        let created = chrono::DateTime::parse_from_rfc3339("2026-11-17T08:00:00Z")
-            .unwrap()
-            .timestamp_nanos_opt()
-            .unwrap();
+        let created = time("2026-11-17T08:00:00Z").timestamp_nanos_opt().unwrap();
         assert_eq!(
-            advisory.unattributed_reason(created),
+            unattributed_reason(time("2026-11-16T10:00:00.250Z"), created),
             "its advisory came from an earlier incarnation of the trigger stream (emitted \
              2026-11-16T10:00:00.250Z, before the stream was created at 2026-11-17T08:00:00Z), \
              so its sequence is that stream's, whose messages went with it"
