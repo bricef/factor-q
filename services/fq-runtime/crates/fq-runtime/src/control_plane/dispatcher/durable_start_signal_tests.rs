@@ -59,7 +59,10 @@
 //! answered once, and that no copy came while it settled: by reading the
 //! pull stream, where a copy would arrive, or, on a last delivery, which
 //! no copy follows, by watching for the broker's max-deliveries advisory
-//! instead.
+//! instead. A last delivery whose dead letter was not published is NAKed
+//! with no delay rather than acked, and then the advisory has to come
+//! (issue 1062); [`unpublished_dead_letter`] follows that trigger to the
+//! dead-letter watch.
 //!
 //! **Bounded (#1048).** Copies are driven beside the first copy, as the
 //! consume loop's tasks are, never awaited inside its turn: a copy waiting
@@ -109,6 +112,8 @@ use crate::trigger::{Trigger, agent_id_from_subject};
 use crate::worker::{
     BoundaryStop, DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
 };
+
+mod unpublished_dead_letter;
 
 /// An ack window shorter than the pauses between a refused mark's
 /// attempts ([`MARK_RETRY_PAUSES`], 1.5 seconds in all), for a consumer
@@ -1644,30 +1649,37 @@ async fn assert_no_copy_arrives(messages: &mut pull::Stream, wait: Duration) {
     }
 }
 
-/// How the stand-in for the events stream answers a dead letter's publish
-/// in [`a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack`].
+/// How the events stream answers a dead letter's publish in
+/// [`a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer`].
 #[derive(Clone, Copy)]
 enum DeadLetterPublish {
-    /// Never: the publish fails when its acknowledgement times out.
+    /// The events stream itself takes it and acknowledges it at once.
+    Lands,
+    /// A stand-in never answers: the publish fails when its
+    /// acknowledgement times out.
     TimesOut,
-    /// With an acknowledgement, this long after the publish: it succeeds,
-    /// slowly.
+    /// A stand-in acknowledges it this long after the publish: it
+    /// succeeds, slowly.
     SucceedsAfter(Duration),
 }
 
 /// The dead letter on a trigger's last delivery, its publish answered as
-/// `publish` says, and the delivery kept alive until its ack (issue 1057).
+/// `publish` says, and the delivery kept alive until its answer (issue
+/// 1057): an ack once the dead letter is published, and a NAK with no delay
+/// when it is not (issue 1062).
 ///
 /// On the last delivery a transient failure before the durable start is
 /// dead-lettered by the dispatcher, which publishes the dead letter, then
-/// releases the claim and acks. The events stream is deleted and a
-/// subscriber of the test's own takes its subjects, so the publish waits on
-/// that subscriber. A last delivery is never redelivered, but a window
-/// that lapses before its ack makes the broker give up on the trigger and
-/// send its max-deliveries advisory, which the dead-letter watch reads, for
-/// a trigger the dispatcher is dead-lettering itself. With the delivery
-/// kept alive through the publish, no advisory is sent and the ack lands.
-async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+/// releases the claim and answers. For a stand-in, the events stream is
+/// deleted and a subscriber of the test's own takes its subjects, so the
+/// publish waits on that subscriber. A last delivery is never redelivered,
+/// but a window that lapses before its answer makes the broker give up on
+/// the trigger and send its max-deliveries advisory, which the dead-letter
+/// watch reads. With the delivery kept alive through the publish, a
+/// published dead letter is acked and no advisory is sent; one that could
+/// not be published is NAKed with no delay, and the broker sends its
+/// advisory at once, for the watch to write the dead letter.
+async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer(
     publish: DeadLetterPublish,
 ) {
     let mut pulled = Pulled::setting_up(
@@ -1681,42 +1693,38 @@ async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
     let watcher = async_nats::connect(pulled.url.as_str())
         .await
         .expect("connect a watcher");
-    let mut advisories = watcher
-        .subscribe(format!(
-            "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.>"
-        ))
-        .await
-        .expect("watch the max-deliveries advisories");
-    pulled
-        .bus
-        .jetstream()
-        .delete_stream(crate::bus::STREAM_NAME)
-        .await
-        .expect("delete the events stream");
     let publishes = Arc::new(AtomicUsize::new(0));
     let mut stand_ins = Vec::new();
-    for subject in crate::bus::EVENT_STREAM_SUBJECTS {
-        let mut subscription = watcher
-            .subscribe(subject.to_string())
+    if !matches!(publish, DeadLetterPublish::Lands) {
+        pulled
+            .bus
+            .jetstream()
+            .delete_stream(crate::bus::STREAM_NAME)
             .await
-            .expect("take the events stream's subjects");
-        let (publishes, watcher) = (Arc::clone(&publishes), watcher.clone());
-        stand_ins.push(tokio::spawn(async move {
-            while let Some(published) = subscription.next().await {
-                publishes.fetch_add(1, Ordering::SeqCst);
-                let (DeadLetterPublish::SucceedsAfter(after), Some(reply)) =
-                    (publish, published.reply)
-                else {
-                    continue;
-                };
-                tokio::time::sleep(after).await;
-                let ack = r#"{"stream":"fq-events","seq":1}"#;
-                watcher
-                    .publish(reply, ack.into())
-                    .await
-                    .expect("acknowledge the publish");
-            }
-        }));
+            .expect("delete the events stream");
+        for subject in crate::bus::EVENT_STREAM_SUBJECTS {
+            let mut subscription = watcher
+                .subscribe(subject.to_string())
+                .await
+                .expect("take the events stream's subjects");
+            let (publishes, watcher) = (Arc::clone(&publishes), watcher.clone());
+            stand_ins.push(tokio::spawn(async move {
+                while let Some(published) = subscription.next().await {
+                    publishes.fetch_add(1, Ordering::SeqCst);
+                    let (DeadLetterPublish::SucceedsAfter(after), Some(reply)) =
+                        (publish, published.reply)
+                    else {
+                        continue;
+                    };
+                    tokio::time::sleep(after).await;
+                    let ack = r#"{"stream":"fq-events","seq":1}"#;
+                    watcher
+                        .publish(reply, ack.into())
+                        .await
+                        .expect("acknowledge the publish");
+                }
+            }));
+        }
     }
     watcher.flush().await.expect("the watches are in place");
     let mut answers = pulled.watch_answers().await;
@@ -1726,6 +1734,7 @@ async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
     let returned = pulled.first_returned_at();
     let sent = answers.sent().await;
     let took = match publish {
+        DeadLetterPublish::Lands => Duration::ZERO,
         DeadLetterPublish::TimesOut => Duration::from_secs(4),
         DeadLetterPublish::SucceedsAfter(after) => after,
     };
@@ -1742,46 +1751,136 @@ async fn a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
              succeeded from one that timed out: {sent:?}"
         );
     }
-    assert_eq!(
-        publishes.load(Ordering::SeqCst),
-        1,
-        "the dead letter was published once"
-    );
+    let published = match publish {
+        DeadLetterPublish::Lands => dead_letters_of(&pulled).await,
+        DeadLetterPublish::TimesOut | DeadLetterPublish::SucceedsAfter(_) => {
+            publishes.load(Ordering::SeqCst)
+        }
+    };
+    assert_eq!(published, 1, "the dead letter was published once");
     let silence = sent.longest_silence_from(returned);
     assert!(
         silence < SHORT_ACK_WINDOW,
         "the last delivery went {silence:?} without an answer while its dead letter was \
          published, as long as its ack window: {sent:?}"
     );
-    assert!(
-        sent.acks == 1 && sent.other.is_empty() && sent.last.as_deref() == Some("ack"),
-        "the last delivery was acked once and nothing followed: {sent:?}"
-    );
-    if let Ok(Some(advisory)) = tokio::time::timeout(SHORT_ACK_WINDOW * 2, advisories.next()).await
-    {
-        panic!(
-            "the broker gave up on the last delivery before its ack: {}",
-            String::from_utf8_lossy(&advisory.payload)
+    let advisory = captured_advisory_within(&pulled, SHORT_ACK_WINDOW * 2).await;
+    if let DeadLetterPublish::TimesOut = publish {
+        assert!(
+            sent.acks == 0 && sent.other == ["-NAK"] && sent.last.as_deref() == Some("-NAK"),
+            "the last delivery, its dead letter not published, was NAKed once with no delay, \
+             not acked, and nothing followed: {sent:?}"
         );
+        // How soon it comes is pinned on the dispatcher's own consumer, whose
+        // last window is long enough to tell (`unpublished_dead_letter`).
+        assert!(
+            advisory.is_some(),
+            "the broker raised no max-deliveries advisory after the NAK, so the dead-letter \
+             watch never hears of the trigger: {sent:?}"
+        );
+    } else {
+        assert!(
+            sent.acks == 1 && sent.other.is_empty() && sent.last.as_deref() == Some("ack"),
+            "the last delivery was acked once and nothing followed: {sent:?}"
+        );
+        if let Some(advisory) = advisory {
+            panic!(
+                "the broker gave up on the last delivery before its ack: {}",
+                String::from_utf8_lossy(&advisory.payload)
+            );
+        }
     }
     for stand_in in stand_ins {
         stand_in.abort();
     }
 }
 
+/// A max-deliveries advisory, as the advisory stream captured it.
+struct CapturedAdvisory {
+    /// What the dead-letter watch is handed.
+    payload: Vec<u8>,
+    /// When the broker emitted it, by its own stamp.
+    emitted: chrono::DateTime<chrono::Utc>,
+}
+
+/// The max-deliveries advisory the broker raised for `pulled`'s trigger on
+/// `pulled`'s consumer, if the advisory stream captures one within `wait`.
+///
+/// Read off the advisory stream, which is what the dead-letter watch reads,
+/// rather than off a subscription of the test's own. A subscription flushed
+/// just before the NAK missed the advisory in about one run in fifteen of
+/// the broker probe (`unpublished_dead_letter`), while the stream held it,
+/// stamped just after the NAK: a flush does not mean the broker has the
+/// subscription yet (issue 1045).
+async fn captured_advisory_within(pulled: &Pulled, wait: Duration) -> Option<CapturedAdvisory> {
+    let consumer = &pulled.consumer.cached_info().name;
+    let subject =
+        format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{consumer}");
+    let advisories = pulled
+        .bus
+        .jetstream()
+        .get_stream(crate::bus::ADVISORY_STREAM_NAME)
+        .await
+        .expect("the advisory stream");
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Ok(raw) = advisories.get_last_raw_message_by_subject(&subject).await {
+            let fields: serde_json::Value =
+                serde_json::from_slice(&raw.payload).expect("the advisory parses");
+            let emitted = fields["timestamp"]
+                .as_str()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .expect("the broker stamps its advisory")
+                .with_timezone(&chrono::Utc);
+            return Some(CapturedAdvisory {
+                payload: raw.payload.to_vec(),
+                emitted,
+            });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// How many dead letters, and other `failed` events, the events stream
+/// holds for the agent `pulled` triggers.
+async fn dead_letters_of(pulled: &Pulled) -> usize {
+    let agent = agent_id_from_subject(&pulled.msg.subject).expect("a trigger subject");
+    let subject = crate::events::subjects::agent_failed(agent);
+    let stream = pulled
+        .bus
+        .jetstream()
+        .get_stream(crate::bus::STREAM_NAME)
+        .await
+        .expect("the events stream");
+    let mut counts = stream
+        .info_with_subjects(&subject)
+        .await
+        .expect("count the events stream's subjects");
+    let mut held = 0;
+    while let Some(entry) = counts.next().await {
+        let (_, count) = entry.expect("a subject's count");
+        held += count;
+    }
+    held
+}
+
 /// **A dead letter whose publish times out on the trigger's last delivery
-/// keeps the delivery alive until its ack (issue 1057).** The publish
+/// keeps the delivery alive until it is NAKed, and the broker hands the
+/// trigger to the dead-letter watch (issues 1057 and 1062).** The publish
 /// fails after async-nats' five seconds for its acknowledgement, and the
-/// delivery is then acked, as it was before issue 1057. That leaves no
-/// dead letter anywhere, since the ack also stops the broker's advisory
-/// that the dead-letter watch would act on: a fault, issue 1062. The test
-/// checks for the ack only because that is what happens today; what it is
-/// for is the renewal through the wait, and that the broker does not give
-/// up on the delivery.
+/// delivery is then NAKed with no delay rather than acked: the dead letter
+/// was not published, so the broker has to report the trigger exhausted
+/// for the watch to write one, and it does so at once. Acked, as it was
+/// before issue 1062, the trigger would have been consumed with no dead
+/// letter from either emitter. What the watch then writes is pinned in
+/// `unpublished_dead_letter`.
 #[tokio::test]
-async fn a_dead_letter_whose_publish_times_out_keeps_the_last_delivery_alive_until_its_ack() {
+async fn a_dead_letter_whose_publish_times_out_keeps_the_last_delivery_alive_until_its_nak() {
     within_the_test_deadline(
-        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer(
             DeadLetterPublish::TimesOut,
         ),
     )
@@ -1792,12 +1891,28 @@ async fn a_dead_letter_whose_publish_times_out_keeps_the_last_delivery_alive_unt
 /// the delivery alive until its ack (issue 1057).** The stand-in for the
 /// events stream acknowledges the publish after two and a half seconds,
 /// longer than two ack windows, so the publish succeeds, slowly, and the
-/// delivery is renewed through the wait for its acknowledgement.
+/// delivery is renewed through the wait for its acknowledgement. Its ack
+/// stops the broker's advisory, so the watch never writes a second dead
+/// letter.
 #[tokio::test]
 async fn a_dead_letter_published_slowly_keeps_the_last_delivery_alive_until_its_ack() {
     within_the_test_deadline(
-        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_ack(
+        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer(
             DeadLetterPublish::SucceedsAfter(Duration::from_millis(2500)),
+        ),
+    )
+    .await;
+}
+
+/// **A dead letter the events stream takes at once is acked once on the
+/// trigger's last delivery, and the broker raises no advisory (issue
+/// 1062).** The everyday path, unchanged: one dead letter, from the
+/// dispatcher, and nothing for the watch.
+#[tokio::test]
+async fn a_dead_letter_published_at_once_acks_the_last_delivery_once_and_raises_no_advisory() {
+    within_the_test_deadline(
+        a_dead_letter_on_the_last_delivery_keeps_it_alive_until_its_answer(
+            DeadLetterPublish::Lands,
         ),
     )
     .await;
