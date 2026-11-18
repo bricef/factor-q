@@ -334,7 +334,7 @@ pub(crate) async fn query_events(
                      negative --limit was unbounded while this query read the projection \
                      file directly, and it now runs in the daemon, which will not \
                      materialise an unbounded answer. For more than a page, narrow with \
-                     --agent/--type/--since, or use `fq events tail`, which is cursored \
+                     --agent/--event-type/--since, or use `fq events tail`, which is cursored \
                      and selects the same events for the same filter.",
                     cap = fq_ops::surface::EVENT_LIST_MAX_LIMIT
                 )

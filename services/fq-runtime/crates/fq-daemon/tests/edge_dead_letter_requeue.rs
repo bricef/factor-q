@@ -1332,8 +1332,9 @@ async fn when_the_claims_cannot_be_read_a_requeue_needs_the_flag() {
         .await;
     assert_cannot_tell(&err, "the trigger's claim could not be read", event_id, 71);
     assert!(
-        err.to_string()
-            .contains(&format!("fq events query --agent {AGENT} --type triggered")),
+        err.to_string().contains(&format!(
+            "fq events query --agent {AGENT} --event-type triggered"
+        )),
         "with no run named, the refusal says how to find it; got {err}"
     );
     let requeued = world

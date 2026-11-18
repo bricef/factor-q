@@ -1702,7 +1702,7 @@ arrives. It lets a requeue through only when the daemon cannot tell, and
 never past a start on record. A copy still handling the claim can start
 the run after you look. With no invocation named, no claim naming one
 could be read and the dead letter's mark names none: list the
-agent's runs with `fq events query --agent <agent> --type triggered`,
+agent's runs with `fq events query --agent <agent> --event-type triggered`,
 read each with `fq events get <event-id>` to find the one whose trigger
 payload is this dead letter's, and check that run with
 `fq invocation show <id>`. `fq doctor`'s `Current executions` only

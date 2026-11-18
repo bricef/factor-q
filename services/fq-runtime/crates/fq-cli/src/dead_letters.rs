@@ -199,8 +199,8 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
                  `fq dead-letters requeue` checks the run's records first and refuses one that \
                  started; if it cannot tell, it refuses unless given --checked-not-started, which \
                  is for once you have found the run among {agent}'s `triggered` events \
-                 (`fq events query --agent {agent} --type triggered`) and `fq invocation show \
-                 <id>` shows it did not start\n",
+                 (`fq events query --agent {agent} --event-type triggered`) and \
+                 `fq invocation show <id>` shows it did not start\n",
                 agent = d.agent_id
             ),
         });
@@ -398,7 +398,7 @@ mod tests {
         assert!(
             unnamed.contains(
                 "found the run among researcher's `triggered` events (`fq events query --agent \
-                 researcher --type triggered`)"
+                 researcher --event-type triggered`)"
             ),
             "got:\n{unnamed}"
         );

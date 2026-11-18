@@ -136,7 +136,7 @@ pub struct WorkerListFilter {
 /// `Assistant.content`, `ToolResult.output` (a tool's whole stdout, or
 /// a file it read), and the opaque `parameters` on both a call and its
 /// result. Nothing truncates any of them on the way to the wire: `fq
-/// invocations show` truncates for *display* only, and `--json` prints
+/// invocation transcript` truncates for *display* only, and `--json` prints
 /// them whole. At 2,000 a page would afford 4,194 bytes per turn, less
 /// than that one system prompt.
 ///

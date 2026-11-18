@@ -453,9 +453,10 @@ fn cannot_tell(
         Some(id) => format!("Check the run with `fq invocation show {id}`: {STARTED_IF}."),
         None => format!(
             "No run is named, since no claim naming one could be read and the dead letter's mark \
-             names none: list the agent's runs with `fq events query --agent {agent} --type \
-             triggered`, find the one whose trigger payload is this dead letter's with `fq \
-             events get <event-id>`, and check it with `fq invocation show <id>`: {STARTED_IF}.",
+             names none: list the agent's runs with `fq events query --agent {agent} \
+             --event-type triggered`, find the one whose trigger payload is this dead letter's \
+             with `fq events get <event-id>`, and check it with `fq invocation show <id>`: \
+             {STARTED_IF}.",
             agent = dead.agent_id
         ),
     };

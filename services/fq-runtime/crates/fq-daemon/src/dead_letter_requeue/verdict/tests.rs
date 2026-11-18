@@ -281,7 +281,7 @@ fn the_cannot_tell_refusal_gives_the_check_and_the_override() {
         unnamed.contains(
             "No run is named, since no claim naming one could be read and the dead letter's \
              mark names none: list the agent's runs with `fq events query --agent researcher \
-             --type triggered`"
+             --event-type triggered`"
         ),
         "{unnamed}"
     );

@@ -151,6 +151,7 @@ pub struct StateConfig {
     ///
     /// The sweep exists because `worker_id` is the daemon's `runtime_id`,
     /// a fresh UUID per run, so `coordination_worker` gains a row on
+    // allow-dead-command: `fq workers prune` was retired; this doc records that it was.
     /// every restart. Reclaiming them was an operator verb (`fq workers
     /// prune`) until it wasn't: the system should not depend on operator
     /// remediations to work normally.
