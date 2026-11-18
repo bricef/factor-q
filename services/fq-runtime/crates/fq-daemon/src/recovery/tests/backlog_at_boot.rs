@@ -11,6 +11,7 @@
 //! runs held for a later start. Nothing is timed but the bound on the fold.
 
 use super::*;
+use crate::recovery::backlog::FoldProbe;
 use crate::resume::ResumeControl;
 use fq_runtime::control_plane::{ArchiveState, OwnerStatus};
 use fq_runtime::events::{
@@ -420,6 +421,86 @@ async fn a_start_after_the_unfolded_tail_aged_out_does_not_wait() {
         "the start waited {took:?} for events that had aged out"
     );
     next.stop().await;
+}
+
+/// **A start with nothing unfolded does not wait.** The last daemon
+/// folded and acknowledged everything before it stopped, so this
+/// process's consumer has nothing to deliver and its watermark stays
+/// where it starts; what is folded is read from the broker. The start
+/// decides at once and resumes the run.
+#[tokio::test]
+async fn a_start_with_nothing_unfolded_does_not_wait() {
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+    publish(&bus, Uuid::now_v7(), its_own_failed()).await;
+    let first = NextBoot::start(&bus, &cp_store, &worker_store, 30).await;
+    // Let it fold what the first start itself published.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    first.stop().await;
+
+    let invocation = a_run_in_flight(&worker_store).await;
+    let started = Instant::now();
+    let next = NextBoot::start(&bus, &cp_store, &worker_store, 4).await;
+    let took = started.elapsed();
+    assert_eq!(next.resumes(), [invocation.to_string()]);
+    assert!(
+        took < Duration::from_secs(2),
+        "the start waited {took:?} with nothing to fold"
+    );
+    next.stop().await;
+}
+
+/// **The durable's acknowledged floor counts as folded.** The watermark
+/// moves only with what this process folds, so how far the last daemon
+/// folded is read from the broker. Here the durable's floor is at the boot
+/// point while later events still wait to be delivered, so the floor
+/// alone says the boot point is reached; one past it is not.
+#[tokio::test]
+async fn the_durables_acknowledged_floor_counts_as_folded() {
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+    publish(&bus, Uuid::now_v7(), its_own_failed()).await;
+    let first = NextBoot::start(&bus, &cp_store, &worker_store, 30).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    first.stop().await;
+    let mut stream = bus
+        .jetstream()
+        .get_stream(fq_runtime::bus::STREAM_NAME)
+        .await
+        .expect("the event stream");
+    let floor = stream
+        .info()
+        .await
+        .expect("stream info")
+        .state
+        .last_sequence;
+    for _ in 0..2 {
+        publish(&bus, Uuid::now_v7(), its_own_failed()).await;
+    }
+
+    let (_mark, watermark) = fq_runtime::watermark::channel();
+    let at_floor = FoldProbe {
+        bus: bus.clone(),
+        durable: fq_runtime::control_plane::coordination_consumer::CONSUMER_NAME.to_string(),
+        watermark,
+        boot_point: floor,
+    };
+    assert!(
+        at_floor.folded_to().await >= floor,
+        "the floor the last daemon left counts as folded"
+    );
+    let past_floor = FoldProbe {
+        boot_point: floor + 1,
+        ..at_floor
+    };
+    assert!(
+        past_floor.folded_to().await < floor + 1,
+        "an event past the floor, still to be delivered, is not folded"
+    );
 }
 
 /// A `fq invocation resume` handle over these stores, its runner asking
