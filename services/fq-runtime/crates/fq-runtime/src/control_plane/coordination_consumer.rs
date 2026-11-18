@@ -81,6 +81,9 @@ use super::store::{
     ArchiveState, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow, WorkerStatus,
 };
 
+mod ack_wait;
+pub use ack_wait::ACK_WAIT;
+
 /// Name of the durable JetStream consumer the coordination
 /// consumer creates. Distinct from the projection consumer's
 /// durable name so they advance independently.
@@ -283,7 +286,7 @@ impl CoordinationConsumer {
             // (Strict refuses deliver-from-new, so test consumers
             // never combine the two.)
             strict_order: self.watermark.is_some(),
-            ack_wait: None,
+            ack_wait: Some(ACK_WAIT),
         };
         let this = &self;
         run_durable_consumer_with_tick(

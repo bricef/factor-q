@@ -1226,6 +1226,16 @@ since a full disk is the common cause and reaches the projection as
 does not exist, which means the task that creates it never started, and
 the daemon log at startup says why.
 
+**After a restart, a delivery the stopped daemon left unacknowledged
+comes back only when its ack window lapses.** A daemon often stops with
+one outstanding: it died handling it, or was stopped while it was on its
+way. The projector and the coordination consumer take one delivery at a
+time, so nothing behind that one is folded until then, and a gated read
+waits with them (`fq invocation drop` reads its drop back that way). The
+coordination consumer's window is five seconds
+([#1070](https://github.com/bricef/factor-q/issues/1070)); the others
+take `[bus] ack_wait_ms`, 30 seconds by default.
+
 `fq status` reports the same consumers under their streams, with the
 message counts and each consumer's backlog beside them. That backlog is
 the broker's `num_pending` — the matching messages JetStream still has

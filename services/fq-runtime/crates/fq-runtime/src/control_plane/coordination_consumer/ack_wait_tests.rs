@@ -1,5 +1,5 @@
 //! A delivery a stopped daemon took and never acknowledged comes back to
-//! the next start's consumer within five seconds (issue 1070).
+//! the next start's consumer within [`ACK_WAIT`] (issue 1070).
 //!
 //! The consumer is strict-order: one delivery outstanding at a time. A
 //! delivery the stopped daemon held unacknowledged therefore holds every
@@ -12,9 +12,6 @@ use crate::bus::STREAM_NAME;
 use crate::events::HostNoticePayload;
 use crate::test_support::nats::test_nats;
 use futures::StreamExt;
-
-/// The window the coordination durable takes: five seconds.
-const ACK_WAIT: Duration = Duration::from_secs(5);
 
 /// An event the fold does nothing with but mark.
 fn notice(agent: &AgentId) -> Event {
