@@ -106,8 +106,11 @@ pub enum ConsumerHealth {
         /// behind it has outlasted the whole escalation. On the
         /// dead-letter watch's consumer it can also be a verdict the
         /// watch holds on purpose until it can tell whether an
-        /// exhausted trigger's run started, which ends about an hour
-        /// after the advisory at the latest. The verdict
+        /// exhausted trigger's run started, or until it can read the
+        /// trigger's message to name it, which ends about an hour after
+        /// the advisory at the latest: in a dead letter marked as
+        /// unchecked, or naming no trigger, unless the run started. The
+        /// verdict
         /// is computed daemon-side because the threshold is the
         /// daemon's configuration — a reader that judged for itself
         /// would be quoting a number it does not have.

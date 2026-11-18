@@ -233,7 +233,9 @@ pub enum AdvisoryOutcome {
 }
 
 /// A verdict the watch holds, with what its line names: the trigger's
-/// sequence and subject, why, and the invocation the claim names.
+/// sequence and subject, why, and the invocation the claim names. The
+/// subject is empty when the hold is on a message the watch could not
+/// read, and the invocation is none then: the records were not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
     pub why: String,
@@ -570,9 +572,10 @@ impl AdvisoryWatch {
             }
             return Ok(AdvisoryOutcome::Unchecked);
         }
-        // A sequence of an earlier incarnation says so on this line too, so
-        // a log read at error alone does not take it for this stream's; the
-        // field is absent from every other line.
+        // A dead letter that names no trigger says why on this line too, so
+        // a log read at error alone does not take an earlier stream's
+        // sequence for this one's; the field is absent when the dead letter
+        // names its trigger.
         error!(
             consumer = CONSUMER_NAME,
             agent_id = %event.envelope.agent_id,
@@ -910,6 +913,27 @@ mod tests {
         assert_eq!(
             at(Some("0001-01-01T00:00:00Z")).emitted_before(created),
             None
+        );
+    }
+
+    /// The reason a dead letter written past the limit with the trigger's
+    /// message unreadable gives says what the last read answered, and that
+    /// the message may still be on the stream only when the answer leaves
+    /// that open: not when it was that the trigger stream is missing.
+    #[test]
+    fn an_unreadable_messages_dead_letter_says_what_the_read_answered() {
+        let open = naming::unreadable_at_the_limit("request timed out", false);
+        assert_eq!(
+            open,
+            "the trigger's message could not be read off the trigger stream by the watch's \
+             limit (the last read answered: request timed out), so the trigger is not named, \
+             though its message may still be on the stream"
+        );
+        let missing = naming::unreadable_at_the_limit("stream not found", true);
+        assert_eq!(
+            missing,
+            "the trigger's message could not be read by the watch's limit: the trigger stream \
+             was missing (the last read answered: stream not found), so the trigger is not named"
         );
     }
 

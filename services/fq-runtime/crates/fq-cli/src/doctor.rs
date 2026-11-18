@@ -408,16 +408,19 @@ fn retaken_note(abandoned_claim_retaken: u64) -> String {
 
 /// The step under a stuck dead-letter watch. The watch leaves an advisory
 /// unacked on purpose while it holds its verdict on an exhausted trigger
-/// (#967), so its redeliveries are not only a handler failing; the two
-/// have their own lines in the daemon log, and this names both.
+/// (#967, #1066), so its redeliveries are not only a handler failing; the
+/// two have their own lines in the daemon log, and this names both.
 const ADVISORY_WATCH_STUCK: &str = "  -> the dead-letter watch redelivers an advisory while it \
      holds its verdict on an exhausted trigger (a copy of the trigger is still handling its claim, \
-     or its run's records cannot be read) or while its handler fails; in the daemon log, \
-     `consumer=fq-advisory-watch` with `holding the dead-letter verdict on an exhausted trigger` \
-     names each held trigger's sequence, subject and reason; a hold ends when the verdict can be \
-     taken, or else, about an hour after the advisory, in a dead letter marked `start not checked` \
-     unless a last look finds the run started; `advisory handling failed` is the handler failing: \
-     free whatever it is blocked on (disk, store, broker)\n";
+     its run's records cannot be read, or the trigger's message cannot be read) or while its \
+     handler fails; in the daemon log, `consumer=fq-advisory-watch` with `holding the dead-letter \
+     verdict on an exhausted trigger` names each held trigger's sequence, subject (empty when its \
+     message could not be read) and reason; a hold ends when the verdict can be taken, or else, \
+     about an hour after the advisory and unless a last look finds the run started, in a dead \
+     letter: marked `start not checked` when the records could not be read, and naming no trigger \
+     (`names no trigger` in `fq dead-letters list`) when the message could not be read; \
+     `advisory handling failed` is the handler failing: free whatever it is blocked on (disk, \
+     store, broker)\n";
 
 /// `, exhausted but started since this daemon started: N`, or nothing
 /// when none was ([`started_note`]).
