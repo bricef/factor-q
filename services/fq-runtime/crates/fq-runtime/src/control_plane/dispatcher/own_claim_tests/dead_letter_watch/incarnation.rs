@@ -9,7 +9,8 @@
 //! watch tells the two apart by the advisory's timestamp against the
 //! stream's creation, and these tests drive the real
 //! [`AdvisoryWatch::handle_advisory`] with the broker's own advisory,
-//! stamped before, at or without that moment.
+//! stamped before, at or without that moment, and once across a real
+//! delete and recreate of the stream, unmodified.
 
 use serde_json::json;
 
@@ -18,8 +19,10 @@ use super::{
     stamped_at_the_streams_creation, watch,
 };
 use crate::agent::AgentId;
-use crate::bus::STREAM_NAME;
-use crate::control_plane::advisory_watch::AdvisoryOutcome;
+use crate::bus::{EventBus, STREAM_NAME, TRIGGER_STREAM_NAME};
+use crate::control_plane::TriggerKey;
+use crate::control_plane::advisory_watch::{AdvisoryOutcome, AdvisoryWatch};
+use crate::control_plane::dispatcher::tests::registry_with;
 use crate::dead_letter::{DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY, from_event};
 use crate::events::{Event, subjects};
 use crate::trigger::PublishedTrigger;
@@ -248,4 +251,108 @@ async fn an_advisory_with_no_readable_timestamp_names_the_message_at_its_sequenc
     attributed_to(&arena, &published).await;
     assert_eq!(unreadable, AdvisoryOutcome::AlreadySurfaced);
     assert!(system_dead_letter(&arena).await.is_none());
+}
+
+/// **Across a real delete and recreate of the trigger stream, the old
+/// stream's advisory names no trigger and the new stream's names its own.**
+/// Every other test here rewrites the timestamp of the broker's advisory
+/// for a message this stream holds, from the very epoch the watch compares
+/// it with, so a fault in how that epoch is read would move both sides
+/// together and still pass. Here nothing is rewritten. A trigger runs and
+/// is exhausted on one incarnation of the stream, and the broker's advisory
+/// for it is kept as the broker emitted it. The stream is deleted, and a
+/// second connection, as the daemon's next start makes, creates it again
+/// and reads its epoch; a different trigger is published, at sequence 1
+/// again. Handed the old advisory, a watch on the new connection writes a
+/// dead letter naming no trigger, and leaves the old trigger's claim and the
+/// new trigger alone; handed the new stream's own advisory, it names the
+/// new trigger.
+#[tokio::test]
+async fn across_a_real_recreate_the_old_streams_advisory_names_no_trigger_and_the_new_ones_does() {
+    let (arena, server) = arena().await;
+    publish(&arena).await;
+    let ran = arena.deliver(1, false).await;
+    assert_eq!(ran.acks, 1, "the old trigger ran: {ran:?}");
+    let old_run = arena.worker.starts()[0].0.to_string();
+    let old = exhaust(&arena).await;
+
+    arena
+        .bus
+        .jetstream()
+        .delete_stream(TRIGGER_STREAM_NAME)
+        .await
+        .expect("delete the trigger stream");
+    let restarted = EventBus::connect(server.url())
+        .await
+        .expect("the next start connects and creates the stream again");
+    assert!(
+        restarted.trigger_stream_epoch() > arena.bus.trigger_stream_epoch(),
+        "a new incarnation"
+    );
+    let new = restarted
+        .publish_trigger(
+            &AgentId::new(&arena.agent).unwrap(),
+            &json!({ "input": "new work" }),
+        )
+        .await
+        .expect("publish on the new stream");
+    assert_eq!(new.stream_seq, SEQ, "the new stream numbers from 1 again");
+    let (_agent_dir, registry) = registry_with(&arena.agent);
+    let dispatcher = Arena::dispatcher(
+        &restarted,
+        registry,
+        &arena.worker,
+        &arena.claims,
+        "daemon-1",
+        1,
+    )
+    .await;
+    let watch = AdvisoryWatch::new(restarted.clone(), &dispatcher);
+
+    let outcome = watch.handle_advisory(&old, LOOKED).await.unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Emitted);
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "nothing is dead-lettered under the agent, whose new trigger sits at that sequence"
+    );
+    let event = system_dead_letter(&arena)
+        .await
+        .expect("the old exhaustion is recorded, under the system sentinel");
+    let dead = from_event(&event).expect("a dead letter");
+    assert_eq!(dead.trigger_payload, serde_json::Value::Null);
+    assert_eq!(event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY), None);
+    assert!(dead.unattributed.is_some(), "it says why it names none");
+    assert_eq!(
+        claim(&arena).await,
+        Some((true, Some(old_run))),
+        "the old trigger's claim is untouched"
+    );
+    let new_key = TriggerKey {
+        stream: TRIGGER_STREAM_NAME,
+        stream_epoch: restarted.trigger_stream_epoch(),
+        stream_seq: SEQ,
+    };
+    assert!(
+        arena.claims.trigger_claim(new_key).await.unwrap().is_none(),
+        "the new trigger has no claim"
+    );
+    assert_eq!(arena.worker.starts().len(), 1, "nothing started");
+
+    let outcome = watch
+        .handle_advisory(&exhaust(&arena).await, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Emitted);
+    let event = dead_letter(&arena)
+        .await
+        .expect("the new trigger is dead-lettered under its agent");
+    let dead = from_event(&event).expect("a dead letter");
+    assert_eq!(dead.trigger_payload, json!({ "input": "new work" }));
+    assert_eq!(dead.unattributed, None);
+    assert_eq!(
+        event.annotations.0.get(DEAD_LETTER_TRIGGER_ID_KEY),
+        Some(&json!(new.id.to_string()))
+    );
 }
