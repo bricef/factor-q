@@ -13,7 +13,8 @@
 //!   the broker's word for a message that aged out of the stream, was
 //!   deleted, or never was, and also for one its store failed to load,
 //!   which the client cannot tell apart. The watch takes it as gone and
-//!   writes the dead letter at once, naming none;
+//!   writes the dead letter at once, naming none and saying so, with when
+//!   it read the stream and when the advisory was emitted;
 //! - anything else: the request timed out, the stream is missing (code
 //!   10059), the broker erred. The message may well be on the stream, and a
 //!   later read may name it, so the verdict is held, as one is when the
@@ -24,6 +25,9 @@
 //! The stream handle is made without asking the broker
 //! (`get_stream_no_info`), so the read is one request and its one answer
 //! decides.
+//!
+//! Every dead letter that names no trigger says why, in words and as a kind
+//! ([`Unattributed`]): it is set exactly when nothing is named.
 
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::message::StreamMessage;
@@ -33,7 +37,11 @@ use uuid::Uuid;
 
 use super::{AdvisoryWatch, CONSUMER_NAME, Hold, MaxDeliverAdvisory};
 use crate::agent::AgentId;
-use crate::bus::TRIGGER_STREAM_NAME;
+use crate::bus::{DEFAULT_TRIGGER_MAX_AGE, TRIGGER_STREAM_NAME};
+use crate::dead_letter::{
+    DEAD_LETTER_UNATTRIBUTED_KEY, DEAD_LETTER_UNATTRIBUTED_KIND_KEY, UnattributedKind,
+};
+use crate::events::Event;
 use crate::trigger::{agent_id_from_subject, trigger_id_in};
 
 /// The trigger an advisory names, as its dead letter records it
@@ -46,23 +54,47 @@ pub(super) struct Named {
     pub(super) payload: serde_json::Value,
     /// The id the trigger's publisher gave it, if it gave one.
     pub(super) trigger_id: Option<Uuid>,
-    /// Why no trigger is named, when the advisory came from an earlier
-    /// incarnation of the stream or the trigger's message could not be read
-    /// by the watch's limit
-    /// ([`crate::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY`]).
-    pub(super) unattributed: Option<String>,
+    /// Why no trigger is named, set exactly when none is.
+    pub(super) unattributed: Option<Unattributed>,
 }
 
 impl Named {
-    /// No trigger: no agent, subject, payload or id.
-    fn nothing() -> Self {
+    /// No trigger: no agent, subject, payload or id, and why.
+    fn unnamed(kind: UnattributedKind, reason: String) -> Self {
         Self {
             agent_id: None,
             subject: String::new(),
             payload: serde_json::Value::Null,
             trigger_id: None,
-            unattributed: None,
+            unattributed: Some(Unattributed { kind, reason }),
         }
+    }
+}
+
+/// Why a dead letter names no trigger: the kind, and the reason in words.
+pub(super) struct Unattributed {
+    kind: UnattributedKind,
+    reason: String,
+}
+
+impl Unattributed {
+    /// The reason, in words.
+    pub(super) fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// `event`, a dead letter that names no trigger, annotated with why
+    /// ([`DEAD_LETTER_UNATTRIBUTED_KEY`], [`DEAD_LETTER_UNATTRIBUTED_KIND_KEY`]).
+    pub(super) fn annotate(&self, event: Event) -> Event {
+        event
+            .annotate(
+                DEAD_LETTER_UNATTRIBUTED_KEY,
+                serde_json::Value::String(self.reason.clone()),
+            )
+            .annotate(
+                DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
+                serde_json::to_value(self.kind).unwrap_or_default(),
+            )
     }
 }
 
@@ -101,13 +133,10 @@ impl AdvisoryWatch {
                  names a message of the stream before this one, so the watch reads neither the \
                  message nor the claim this stream has at that sequence, and dead-letters it \
                  naming no trigger");
-            return Ok(Named {
-                unattributed: Some(unattributed_reason(
-                    emitted,
-                    self.bus.trigger_stream_epoch(),
-                )),
-                ..Named::nothing()
-            });
+            return Ok(Named::unnamed(
+                UnattributedKind::EarlierIncarnation,
+                unattributed_reason(emitted, self.bus.trigger_stream_epoch()),
+            ));
         }
         // The original trigger: subject → agent, payload → annotation.
         // Triggers age out after 24h — an older advisory still
@@ -127,7 +156,10 @@ impl AdvisoryWatch {
                 trigger_id: trigger_id_in(Some(&raw.headers)),
                 unattributed: None,
             }),
-            TriggerRead::Gone => Ok(Named::nothing()),
+            TriggerRead::Gone => Ok(Named::unnamed(
+                UnattributedKind::MessageGone,
+                gone_reason(chrono::Utc::now(), advisory.emitted_at()),
+            )),
             TriggerRead::Unreadable { answer, .. } if !looked_long_enough => Err(Hold {
                 why: held_while_unreadable(&answer),
                 stream_seq: advisory.stream_seq,
@@ -137,10 +169,10 @@ impl AdvisoryWatch {
             TriggerRead::Unreadable {
                 answer,
                 stream_missing,
-            } => Ok(Named {
-                unattributed: Some(unreadable_at_the_limit(&answer, stream_missing)),
-                ..Named::nothing()
-            }),
+            } => Ok(Named::unnamed(
+                UnattributedKind::MessageUnreadable,
+                unreadable_at_the_limit(&answer, stream_missing),
+            )),
         }
     }
 }
@@ -230,4 +262,28 @@ pub(super) fn unreadable_at_the_limit(answer: &str, stream_missing: bool) -> Str
              may still be on the stream"
         )
     }
+}
+
+/// Why a dead letter names no trigger when the broker said the stream held
+/// no message at the trigger's sequence as the watch read it, at `read_at`,
+/// for an advisory emitted at `emitted` (if the watch can read its
+/// timestamp).
+fn gone_reason(
+    read_at: chrono::DateTime<chrono::Utc>,
+    emitted: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let at = |time: chrono::DateTime<chrono::Utc>| {
+        time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    };
+    let advisory = match emitted {
+        Some(emitted) => format!("for an advisory emitted at {}", at(emitted)),
+        None => "for an advisory that carries no timestamp the watch can read".to_string(),
+    };
+    format!(
+        "the trigger's message was no longer on the trigger stream when the watch read it, at \
+         {}, {advisory}: the stream keeps a message {}h after its publish, so it had aged out, \
+         unless it was deleted sooner",
+        at(read_at),
+        DEFAULT_TRIGGER_MAX_AGE.as_secs() / 3600,
+    )
 }

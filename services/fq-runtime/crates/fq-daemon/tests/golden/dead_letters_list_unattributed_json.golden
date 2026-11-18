@@ -8,6 +8,7 @@
     "source": "advisory",
     "trigger_payload": null,
     "error_message": "trigger exhausted after 5 deliveries (limit 5) [advisory]",
-    "unattributed": "its advisory came from an earlier incarnation of the trigger stream (emitted 2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), so its sequence is that stream's, whose messages went with it"
+    "unattributed": "its advisory came from an earlier incarnation of the trigger stream (emitted 2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), so its sequence is that stream's, whose messages went with it",
+    "unattributed_kind": "earlier_incarnation"
   }
 ]

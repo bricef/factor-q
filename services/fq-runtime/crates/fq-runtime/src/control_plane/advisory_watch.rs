@@ -43,7 +43,7 @@
 //! incarnation, or at the message this stream holds at its sequence, which
 //! is another trigger (issue 1054): the dead letter names no trigger, as
 //! for one whose message aged out of the stream, and carries why
-//! ([`DEAD_LETTER_UNATTRIBUTED_KEY`]). The incarnation is
+//! ([`crate::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY`]). The incarnation is
 //! decided first, from the advisory's timestamp against the creation of
 //! the stream this daemon connected to, and one with no timestamp the
 //! watch can read is taken as this incarnation's.
@@ -78,7 +78,7 @@ use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck, TriggerDispat
 use crate::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
     DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_SUBJECT_KEY, DEAD_LETTER_TRIGGER_ID_KEY,
-    DEAD_LETTER_UNATTRIBUTED_KEY, StartUnchecked,
+    StartUnchecked,
 };
 use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals, subjects,
@@ -535,12 +535,10 @@ impl AdvisoryWatch {
             None => event,
         };
         let event = match &unattributed {
-            Some(why) => event.annotate(
-                DEAD_LETTER_UNATTRIBUTED_KEY,
-                serde_json::Value::String(why.clone()),
-            ),
+            Some(why) => why.annotate(event),
             None => event,
         };
+        let why = unattributed.as_ref().map(naming::Unattributed::reason);
         let event = match &unchecked {
             Some(unchecked) => event.annotate(
                 DEAD_LETTER_START_UNCHECKED_KEY,
@@ -555,7 +553,7 @@ impl AdvisoryWatch {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id,
-                    unattributed = unattributed.as_deref(),
+                    unattributed = why,
                     limit_secs = self.held_verdict_limit.as_secs(),
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its verdict could not be taken within the watch's limit and its \
@@ -565,7 +563,7 @@ impl AdvisoryWatch {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
                     reason = %unchecked.reason, %invocation_id, looks = delivered,
-                    unattributed = unattributed.as_deref(),
+                    unattributed = why,
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its advisory carries no timestamp the watch can read, so its age \
                      cannot be told and it was held only for the watch's first looks, and the \
@@ -583,7 +581,7 @@ impl AdvisoryWatch {
             agent_id = %event.envelope.agent_id,
             stream_seq = advisory.stream_seq,
             deliveries = advisory.deliveries,
-            unattributed = unattributed.as_deref(),
+            unattributed = why,
             "trigger exhausted with nothing of its run on record, or none consulted; emitted a \
              dead-letter event from its MAX_DELIVERIES advisory"
         );

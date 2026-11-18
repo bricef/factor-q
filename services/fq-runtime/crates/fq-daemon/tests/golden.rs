@@ -2873,6 +2873,10 @@ fn unattributed_dead_letter_events() -> Vec<Event> {
                  2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), \
                  so its sequence is that stream's, whose messages went with it"
             ),
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
+            serde_json::json!("earlier_incarnation"),
         ),
     ]
 }
@@ -2892,6 +2896,64 @@ fn golden_dead_letters_list_unattributed_json() {
     check_golden_on(
         EdgeFixture::start_with_events(unattributed_dead_letter_events()),
         "dead_letters_list_unattributed_json",
+        &["dead-letters", "list", "--json"],
+        &[],
+    );
+}
+
+/// A dead letter the advisory watch wrote because the broker said the
+/// trigger stream no longer held the trigger's message (#1066), shaped as
+/// the watch writes it: under the system sentinel, with an empty subject,
+/// no payload and no trigger id, and `unattributed` saying why, with when
+/// the watch read the stream and when the advisory was emitted, and its
+/// kind. It used to carry no reason, so it listed as a bare `system` row.
+/// A fixture of its own, so the listings above are untouched.
+fn aged_out_dead_letter_events() -> Vec<Event> {
+    vec![
+        dead_letter_event(
+            AgentId::SYSTEM_STR,
+            4,
+            None,
+            "advisory",
+            serde_json::Value::Null,
+            26,
+            BASE_MS,
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_SUBJECT_KEY,
+            serde_json::json!(""),
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_UNATTRIBUTED_KEY,
+            serde_json::json!(
+                "the trigger's message was no longer on the trigger stream when the watch read \
+                 it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: \
+                 the stream keeps a message 24h after its publish, so it had aged out, unless it \
+                 was deleted sooner"
+            ),
+        )
+        .annotate(
+            fq_runtime::dead_letter::DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
+            serde_json::json!("message_gone"),
+        ),
+    ]
+}
+
+#[test]
+fn golden_dead_letters_list_aged_out_human() {
+    check_golden_on(
+        EdgeFixture::start_with_events(aged_out_dead_letter_events()),
+        "dead_letters_list_aged_out_human",
+        &["dead-letters", "list"],
+        &[],
+    );
+}
+
+#[test]
+fn golden_dead_letters_list_aged_out_json() {
+    check_golden_on(
+        EdgeFixture::start_with_events(aged_out_dead_letter_events()),
+        "dead_letters_list_aged_out_json",
         &["dead-letters", "list", "--json"],
         &[],
     );

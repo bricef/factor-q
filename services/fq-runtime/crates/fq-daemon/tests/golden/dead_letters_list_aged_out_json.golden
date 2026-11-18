@@ -1,0 +1,14 @@
+[
+  {
+    "event_id": "00000000-0000-7000-8000-000000001026",
+    "timestamp": "2026-01-02T03:04:05Z",
+    "agent_id": "system",
+    "trigger_subject": "",
+    "trigger_stream_seq": 4,
+    "source": "advisory",
+    "trigger_payload": null,
+    "error_message": "trigger exhausted after 5 deliveries (limit 5) [advisory]",
+    "unattributed": "the trigger's message was no longer on the trigger stream when the watch read it, at 2026-01-02T03:04:05Z, for an advisory emitted at 2026-01-02T03:04:01Z: the stream keeps a message 24h after its publish, so it had aged out, unless it was deleted sooner",
+    "unattributed_kind": "message_gone"
+  }
+]

@@ -26,7 +26,7 @@
 
 use crate::events::{Event, EventPayload, FailureKind};
 
-pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState, StartUnchecked};
+pub use fq_ops::dead_letter::{DeadLetter, DeadLetterState, StartUnchecked, UnattributedKind};
 
 /// Annotation keys shared by the two dead-letter emitters (#49/#169):
 /// the dispatcher's inline path and the advisory watch. `trigger_*`
@@ -90,10 +90,19 @@ pub const DEAD_LETTER_START_UNCHECKED_KEY: &str = "start_unchecked";
 /// lifts it into [`DeadLetter::unattributed`], so a listing can say why a
 /// dead letter names nothing and that its sequence is not this stream's.
 ///
-/// Also set on one the watch wrote naming no trigger because the trigger's
-/// message could not be read, for a reason other than its absence, by its
-/// limit (issue 1066): the reason then gives what the last read answered.
+/// Also set on every other dead letter the watch writes naming no trigger
+/// (issue 1066): one for a trigger whose message the broker said it no
+/// longer holds, the reason giving when the watch read the stream and when
+/// the advisory was emitted, and one whose message could not be read, for a
+/// reason other than its absence, by the watch's limit, the reason giving
+/// what the last read answered. So it is absent from a dead letter that
+/// names its trigger.
 pub const DEAD_LETTER_UNATTRIBUTED_KEY: &str = "unattributed";
+
+/// Set with [`DEAD_LETTER_UNATTRIBUTED_KEY`]: the kind of its reason, an
+/// [`UnattributedKind`] as its JSON string, lifted into
+/// [`DeadLetter::unattributed_kind`] so a reader can match on it.
+pub const DEAD_LETTER_UNATTRIBUTED_KIND_KEY: &str = "unattributed_kind";
 
 /// Recognise a dead letter in one recorded event, or decline.
 ///
@@ -142,6 +151,10 @@ pub fn from_event(event: &Event) -> Option<DeadLetter> {
         // Present in any form, it still says the dead letter names nothing.
         unattributed: annotation(DEAD_LETTER_UNATTRIBUTED_KEY)
             .map(|why| why.as_str().map_or_else(|| why.to_string(), str::to_string)),
+        // A kind this build does not know is dropped; the reason still says
+        // why.
+        unattributed_kind: annotation(DEAD_LETTER_UNATTRIBUTED_KIND_KEY)
+            .and_then(|kind| serde_json::from_value(kind.clone()).ok()),
     })
 }
 
@@ -229,6 +242,32 @@ mod tests {
             from_event(&garbled).expect("a dead letter").unattributed,
             Some(r#"{"n":1}"#.to_string())
         );
+    }
+
+    /// The kind of the reason is lifted beside it, as the shape's enum; a
+    /// kind this build does not know is dropped, and the reason still says
+    /// why.
+    #[test]
+    fn an_unattributed_dead_letters_kind_is_lifted() {
+        let event = failed(FailureKind::TriggerExhausted)
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::json!("gone"))
+            .annotate(
+                DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
+                serde_json::json!("message_gone"),
+            );
+        assert_eq!(
+            from_event(&event).expect("a dead letter").unattributed_kind,
+            Some(UnattributedKind::MessageGone)
+        );
+        let unknown = failed(FailureKind::TriggerExhausted)
+            .annotate(DEAD_LETTER_UNATTRIBUTED_KEY, serde_json::json!("why"))
+            .annotate(
+                DEAD_LETTER_UNATTRIBUTED_KIND_KEY,
+                serde_json::json!("later"),
+            );
+        let dead = from_event(&unknown).expect("a dead letter");
+        assert_eq!(dead.unattributed_kind, None);
+        assert_eq!(dead.unattributed, Some("why".to_string()));
     }
 
     /// One whose annotation cannot be read still says its start was not

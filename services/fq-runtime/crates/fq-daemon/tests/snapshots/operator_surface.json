@@ -1398,11 +1398,22 @@
                 "type": "string"
               },
               "unattributed": {
-                "description": "Why this dead letter names no trigger, when the dead-letter watch\nwrote it for one of two reasons. The advisory came from an earlier\nincarnation of the trigger stream, one the broker emitted before the\nstream was last created: the reason gives when the advisory was\nemitted and when the stream was created, `trigger_stream_seq` here\nis a position on that earlier stream, whose messages went with it,\nand the message the stream holds at the same sequence now is another\ntrigger. Or the watch could not read the trigger's message off the\nstream, for a reason other than its absence, before its limit ran\nout (an hour after the advisory, and three looks): the reason gives\nwhat the last read answered, and, unless that was that the trigger\nstream is missing, says the message may still be on the stream at\n`trigger_stream_seq`. Either way the dead letter is\nrecorded under the system sentinel with no subject, payload or\ntrigger id, and `dead_letter.requeue` refuses it. Absent on every\nother dead letter, including one written under the system sentinel\nbecause its trigger's message was no longer on the stream.",
+                "description": "Why this dead letter names no trigger, in words; `unattributed_kind`\ngives the same as a kind to match on. The dead-letter watch sets it\non every dead letter it writes without a trigger, which it records\nunder the system sentinel with no subject, payload or trigger id,\nand which `dead_letter.requeue` refuses. There are three reasons.\nThe broker answered that the trigger stream holds no message at the\ntrigger's sequence: the reason gives when the watch read the stream,\nwhen the advisory was emitted and how long the stream keeps a\nmessage, since the message aged out unless it was deleted sooner\n(the broker answers the same for a message it cannot load). The\nadvisory came from an earlier incarnation of the trigger stream, one\nthe broker emitted before the stream was last created: the reason\ngives when the advisory was emitted and when the stream was created,\n`trigger_stream_seq` here is a position on that earlier stream,\nwhose messages went with it, and the message the stream holds at\nthe same sequence now is another trigger. Or the watch could not\nread the trigger's message, for a reason other than its absence,\nbefore its limit ran out (an hour after the advisory, and three\nlooks): the reason gives what the last read answered and, unless\nthat was that the trigger stream is missing, says the message may\nstill be on the stream at `trigger_stream_seq`. Absent on a dead\nletter that names its trigger, and on one an older build wrote\nwithout a trigger before it recorded why.",
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "unattributed_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UnattributedKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. Absent when\n`unattributed` is, and on a dead letter an older build wrote before\nit recorded the kind."
               }
             },
             "required": [
@@ -1435,6 +1446,26 @@
               "reason"
             ],
             "type": "object"
+          },
+          "UnattributedKind": {
+            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).",
+            "oneOf": [
+              {
+                "const": "message_gone",
+                "description": "The broker answered that the trigger stream holds no message at the\ntrigger's sequence: it aged out, was deleted, or could not be\nloaded.",
+                "type": "string"
+              },
+              {
+                "const": "earlier_incarnation",
+                "description": "The advisory came from an earlier incarnation of the trigger stream,\nso its sequence is not a position on this one.",
+                "type": "string"
+              },
+              {
+                "const": "message_unreadable",
+                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1521,11 +1552,22 @@
                 "type": "string"
               },
               "unattributed": {
-                "description": "Why this dead letter names no trigger, when the dead-letter watch\nwrote it for one of two reasons. The advisory came from an earlier\nincarnation of the trigger stream, one the broker emitted before the\nstream was last created: the reason gives when the advisory was\nemitted and when the stream was created, `trigger_stream_seq` here\nis a position on that earlier stream, whose messages went with it,\nand the message the stream holds at the same sequence now is another\ntrigger. Or the watch could not read the trigger's message off the\nstream, for a reason other than its absence, before its limit ran\nout (an hour after the advisory, and three looks): the reason gives\nwhat the last read answered, and, unless that was that the trigger\nstream is missing, says the message may still be on the stream at\n`trigger_stream_seq`. Either way the dead letter is\nrecorded under the system sentinel with no subject, payload or\ntrigger id, and `dead_letter.requeue` refuses it. Absent on every\nother dead letter, including one written under the system sentinel\nbecause its trigger's message was no longer on the stream.",
+                "description": "Why this dead letter names no trigger, in words; `unattributed_kind`\ngives the same as a kind to match on. The dead-letter watch sets it\non every dead letter it writes without a trigger, which it records\nunder the system sentinel with no subject, payload or trigger id,\nand which `dead_letter.requeue` refuses. There are three reasons.\nThe broker answered that the trigger stream holds no message at the\ntrigger's sequence: the reason gives when the watch read the stream,\nwhen the advisory was emitted and how long the stream keeps a\nmessage, since the message aged out unless it was deleted sooner\n(the broker answers the same for a message it cannot load). The\nadvisory came from an earlier incarnation of the trigger stream, one\nthe broker emitted before the stream was last created: the reason\ngives when the advisory was emitted and when the stream was created,\n`trigger_stream_seq` here is a position on that earlier stream,\nwhose messages went with it, and the message the stream holds at\nthe same sequence now is another trigger. Or the watch could not\nread the trigger's message, for a reason other than its absence,\nbefore its limit ran out (an hour after the advisory, and three\nlooks): the reason gives what the last read answered and, unless\nthat was that the trigger stream is missing, says the message may\nstill be on the stream at `trigger_stream_seq`. Absent on a dead\nletter that names its trigger, and on one an older build wrote\nwithout a trigger before it recorded why.",
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "unattributed_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UnattributedKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The kind of `unattributed`'s reason, set with it: `message_gone`,\n`earlier_incarnation` or `message_unreadable`. Absent when\n`unattributed` is, and on a dead letter an older build wrote before\nit recorded the kind."
               }
             },
             "required": [
@@ -1558,6 +1600,26 @@
               "reason"
             ],
             "type": "object"
+          },
+          "UnattributedKind": {
+            "description": "Why a dead letter names no trigger, as a kind a reader can match on\nwithout parsing the reason ([`DeadLetter::unattributed_kind`]).",
+            "oneOf": [
+              {
+                "const": "message_gone",
+                "description": "The broker answered that the trigger stream holds no message at the\ntrigger's sequence: it aged out, was deleted, or could not be\nloaded.",
+                "type": "string"
+              },
+              {
+                "const": "earlier_incarnation",
+                "description": "The advisory came from an earlier incarnation of the trigger stream,\nso its sequence is not a position on this one.",
+                "type": "string"
+              },
+              {
+                "const": "message_unreadable",
+                "description": "The trigger's message could not be read, for a reason other than\nits absence, before the watch's limit ran out; it may still be on\nthe stream.",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

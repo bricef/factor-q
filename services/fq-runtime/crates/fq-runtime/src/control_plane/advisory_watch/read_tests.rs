@@ -234,6 +234,10 @@ async fn a_trigger_that_stays_unreadable_is_dead_lettered_at_the_limit_saying_wh
             && !why.contains("may still be on the stream"),
         "{why}"
     );
+    assert_eq!(
+        dead.unattributed_kind,
+        Some(crate::dead_letter::UnattributedKind::MessageUnreadable)
+    );
 }
 
 /// **A trigger whose message is gone from the stream is dead-lettered as
@@ -285,5 +289,9 @@ async fn a_trigger_whose_message_is_gone_is_dead_lettered_naming_nothing_at_once
         ) && why.contains(&format!("for an advisory emitted at {emitted}"))
             && why.contains("24h after its publish"),
         "{why}"
+    );
+    assert_eq!(
+        dead.unattributed_kind,
+        Some(crate::dead_letter::UnattributedKind::MessageGone)
     );
 }
