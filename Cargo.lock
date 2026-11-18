@@ -1455,6 +1455,7 @@ dependencies = [
  "serde",
  "serde_ignored",
  "serde_json",
+ "sqlx",
  "tarpc",
  "tempfile",
  "tokio",

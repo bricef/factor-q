@@ -2662,10 +2662,16 @@ fn agent_list_without_a_daemon_reports_why() {
 const DEAD_LETTER_TRIGGER_OLDER: u32 = 31;
 const DEAD_LETTER_TRIGGER_NEWER: u32 = 32;
 const DEAD_LETTER_TRIGGER_UNCHECKED: u32 = 33;
+const DEAD_LETTER_TRIGGER_STARTED: u32 = 34;
 
 /// The invocation the unchecked dead letter's claim named: the run an
 /// operator is told to look at before requeueing it.
 const INV_HELD: &str = "6b000000-0000-7000-8000-000000000006";
+
+/// The run of the trigger whose dead letter `dead_letter.requeue` refuses
+/// because its start is on record: its claim, on the fixture broker's own
+/// trigger stream, is marked durably started and names it.
+const INV_STARTED: &str = "6c000000-0000-7000-8000-00000000000c";
 
 /// A dead-letter event exactly as both emitters shape it (the
 /// operator-module broker tests pin the emitters to this contract).
@@ -3026,6 +3032,200 @@ fn requeueing_twice_is_refused_and_names_the_first_trigger() {
         stderr.contains("in flight or landed"),
         "and say why it refused; got:\n{stderr}"
     );
+}
+
+// ------------------------------------------------------------------
+// The requeue refusals (#1059): requeue takes the verdict itself.
+//
+// Before anything is reserved or published, the daemon asks the records
+// the dead-letter watch asks. These goldens pin what an operator reads
+// when it refuses, from fixtures of their own, so the requeue goldens
+// above stay as they were: the fixture's two dead letters are dated in
+// January, before the trigger stream the fixture's broker created, so
+// neither has a claim of this stream to consult, and neither is marked,
+// so both are requeued exactly as before.
+//
+// A refusal is an error, and an error goes to stderr whatever the output
+// mode (`fq_main`), so the `--json` golden pins the same text and the
+// harness asserts stdout is empty in both.
+// ------------------------------------------------------------------
+
+/// The unchecked dead letter of the listing's fixture, written now rather
+/// than in January: so it is the current trigger stream's, and what makes
+/// it "cannot tell" is the case an operator meets, a dead letter marked
+/// `start_unchecked` whose claim is no longer there to consult. The
+/// fixture's broker has no claim at its sequence.
+fn unchecked_dead_letter_events_now() -> Vec<Event> {
+    unchecked_dead_letter_events()
+        .into_iter()
+        .map(|mut event| {
+            event.envelope.timestamp = chrono::Utc::now();
+            event
+        })
+        .collect()
+}
+
+/// A dead letter whose trigger's run has a start on record: written now,
+/// on the fixture broker's own trigger stream, at a sequence whose claim
+/// is marked durably started and names [`INV_STARTED`].
+fn started_dead_letter_fixture() -> EdgeFixture {
+    let fixture = EdgeFixture::start_with_events(vec![dead_letter_event(
+        AGENT_RESEARCHER,
+        14,
+        Some(fixed_uuid(DEAD_LETTER_TRIGGER_STARTED)),
+        "advisory",
+        serde_json::json!({"n": 4}),
+        26,
+        chrono::Utc::now().timestamp_millis(),
+    )]);
+    tokio::runtime::Runtime::new()
+        .expect("claim runtime")
+        .block_on(async {
+            let stream_epoch = fq_runtime::EventBus::connect(fixture.broker.url())
+                .await
+                .expect("connect the fixture broker")
+                .trigger_stream_epoch();
+            let cp = ControlPlaneStore::open(
+                &fq_runtime::db::RuntimeDbPaths::under(fixture.dir.path()).control_plane,
+            )
+            .await
+            .expect("open control plane");
+            let key = TriggerKey {
+                stream: TRIGGER_STREAM_NAME,
+                stream_epoch,
+                stream_seq: 14,
+            };
+            cp.claim_trigger(
+                key,
+                "worker-alpha",
+                INV_STARTED,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .expect("claim");
+            cp.mark_trigger_started(key, INV_STARTED)
+                .await
+                .expect("mark started");
+        });
+    fixture
+}
+
+/// A requeue the daemon refuses: exit 1, nothing on stdout, and the
+/// refusal on stderr compared with the golden. Returns it.
+fn check_golden_requeue_refused(fixture: &EdgeFixture, name: &str, args: &[&str]) -> String {
+    let (exit, stdout, stderr) = fixture.run_fq(args);
+    assert_eq!(
+        exit,
+        Some(1),
+        "fq {args:?} must be refused; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "a refusal writes nothing to stdout, `--json` or not"
+    );
+    compare_golden(name, &stderr);
+    stderr
+}
+
+/// The default selection meets an unchecked dead letter whose claim is
+/// gone: refused, saying which dead letter it took and why it cannot
+/// tell, naming the run to check and the override.
+#[test]
+fn golden_dead_letters_requeue_unchecked_refused_human() {
+    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    check_golden_requeue_refused(
+        &fixture,
+        "dead_letters_requeue_unchecked_refused_human",
+        &["dead-letters", "requeue", AGENT_RESEARCHER],
+    );
+}
+
+#[test]
+fn golden_dead_letters_requeue_unchecked_refused_json() {
+    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    check_golden_requeue_refused(
+        &fixture,
+        "dead_letters_requeue_unchecked_refused_json",
+        &["dead-letters", "requeue", AGENT_RESEARCHER, "--json"],
+    );
+}
+
+/// The override, given once the run is checked, lets the same dead
+/// letter through: the requeue the golden above refused.
+#[test]
+fn the_override_lets_an_unchecked_dead_letter_through() {
+    let fixture = EdgeFixture::start_with_events(unchecked_dead_letter_events_now());
+    let (exit, stdout, stderr) = fixture.run_fq(&[
+        "dead-letters",
+        "requeue",
+        AGENT_RESEARCHER,
+        "--checked-not-started",
+        "--json",
+    ]);
+    assert_eq!(exit, Some(0), "stderr:\n{stderr}");
+    let requeued: serde_json::Value = serde_json::from_str(&stdout).expect("json output");
+    assert_eq!(
+        requeued["requeued_from"].as_str(),
+        Some(
+            fixed_uuid(DEAD_LETTER_TRIGGER_UNCHECKED)
+                .to_string()
+                .as_str()
+        ),
+        "got:\n{stdout}"
+    );
+}
+
+/// A dead letter whose trigger's run has a start on record, selected by
+/// its sequence: refused, naming the run.
+#[test]
+fn golden_dead_letters_requeue_started_refused_human() {
+    check_golden_requeue_refused(
+        &started_dead_letter_fixture(),
+        "dead_letters_requeue_started_refused_human",
+        &[
+            "dead-letters",
+            "requeue",
+            AGENT_RESEARCHER,
+            "--trigger-seq",
+            "14",
+        ],
+    );
+}
+
+#[test]
+fn golden_dead_letters_requeue_started_refused_json() {
+    check_golden_requeue_refused(
+        &started_dead_letter_fixture(),
+        "dead_letters_requeue_started_refused_json",
+        &[
+            "dead-letters",
+            "requeue",
+            AGENT_RESEARCHER,
+            "--trigger-seq",
+            "14",
+            "--json",
+        ],
+    );
+}
+
+/// **The override does not get past a start on record**: the same
+/// refusal, word for word, with `--checked-not-started` as without.
+#[test]
+fn the_override_does_not_pass_a_start_on_record() {
+    let fixture = started_dead_letter_fixture();
+    let args = [
+        "dead-letters",
+        "requeue",
+        AGENT_RESEARCHER,
+        "--trigger-seq",
+        "14",
+    ];
+    let (exit, _, without) = fixture.run_fq(&args);
+    assert_eq!(exit, Some(1), "stderr:\n{without}");
+    let (exit, stdout, with) = fixture.run_fq(&[&args[..], &["--checked-not-started"]].concat());
+    assert_eq!(exit, Some(1), "stdout:\n{stdout}\nstderr:\n{with}");
+    assert_eq!(with, without);
+    assert!(with.contains(INV_STARTED), "got:\n{with}");
 }
 
 /// `--limit` is the atom's, not the renderer's: asking for one row

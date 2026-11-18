@@ -308,6 +308,30 @@ fn fq_invocation_transcript_missing_db_exits_nonzero_without_panic() {
     );
 }
 
+/// `fq dead-letters requeue --help` names the override and says what it
+/// does not do: it lets a requeue through when the daemon cannot tell
+/// whether the trigger's run started, and never past a start on record.
+#[test]
+fn fq_dead_letters_requeue_help_names_the_override() {
+    let (exit, stdout, stderr) = run_fq(
+        &["dead-letters", "requeue", "--help"],
+        Duration::from_secs(5),
+    );
+    assert_eq!(exit, Some(0), "stderr: {stderr}");
+    for needle in [
+        "--checked-not-started",
+        "did not start",
+        "cannot tell",
+        "start on record",
+        "fq invocation show",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "expected `{needle}` in `fq dead-letters requeue --help`; got: {stdout}"
+        );
+    }
+}
+
 #[test]
 fn fq_doctor_help_lists_flags() {
     let (exit, stdout, stderr) = run_fq(&["doctor", "--help"], Duration::from_secs(5));
