@@ -4,5 +4,6 @@
       trigger exhausted after 5 deliveries (limit 5) [advisory]
       payload: null
       names no trigger: its advisory came from an earlier incarnation of the trigger stream (emitted 2026-01-02T02:58:00Z, before the stream was created at 2026-01-02T03:00:00Z), so its sequence is that stream's, whose messages went with it; `fq dead-letters requeue` refuses it
+      start not checked: its sequence is an earlier stream's, so the watch consulted no claim; its run may have started
 
--> `fq dead-letters requeue <agent> [--trigger-seq N]` to re-run one
+-> none of these names its trigger, so `fq dead-letters requeue` refuses each
