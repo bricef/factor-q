@@ -629,7 +629,7 @@ impl AdvisoryWatch {
                     "dead-lettered an exhausted trigger without checking whether its run \
                      started: its verdict could not be taken within the watch's limit and its \
                      last look found no start, so the dead letter is marked as unchecked and may \
-                     be false; look at the invocation before requeueing it");
+                     be false; look at the invocation before running its work again");
             } else {
                 error!(consumer = CONSUMER_NAME, agent_id = %event.envelope.agent_id,
                     stream_seq = advisory.stream_seq, subject = %trigger_subject,
@@ -639,7 +639,7 @@ impl AdvisoryWatch {
                      started: its advisory carries no timestamp the watch can read, so its age \
                      cannot be told and it was held only for the watch's first looks, and the \
                      last look found no start; the dead letter is marked as unchecked and may be \
-                     false; look at the invocation before requeueing it");
+                     false; look at the invocation before running its work again");
             }
             return Ok(AdvisoryOutcome::Unchecked);
         }
