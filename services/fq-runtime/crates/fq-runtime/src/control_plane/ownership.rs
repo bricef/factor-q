@@ -160,6 +160,11 @@ impl RowState {
         }
     }
 
+    /// The state as log lines name it: `status/archive_state`.
+    pub fn name(self) -> String {
+        format!("{}/{}", self.status.as_str(), self.archive.as_str())
+    }
+
     /// Whether a row can hold the pair: a run that has not ended has no
     /// archive due, and a run that has ended has one.
     pub fn is_valid(self) -> bool {

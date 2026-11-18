@@ -305,23 +305,15 @@ pub(crate) async fn classify_in_flight(
 
     // Restore the coordination rows before spawning resumes. A row can be
     // absent after a daemon crash, but the list/dashboard projection keys on
-    // it; without this upsert a recovered invocation runs invisibly.
+    // it; without this restore a recovered invocation runs invisibly.
     let mut recoverable = Vec::new();
     for invocation in classified {
         if matches!(
             invocation.category,
             fq_runtime::worker::RecoveryCategory::SafeResume
                 | fq_runtime::worker::RecoveryCategory::SafeReplay
-        ) {
-            cp_store
-                .upsert_invocation_ownership(
-                    &invocation.state.invocation_id,
-                    worker_id.as_str(),
-                    invocation.state.started_at,
-                    fq_runtime::control_plane::OwnerStatus::InFlight,
-                )
-                .await
-                .context("failed to restore recovered invocation ownership")?;
+        ) && restore_ownership(cp_store, &invocation, worker_id).await?
+        {
             recoverable.push(invocation);
         }
     }
@@ -330,6 +322,59 @@ pub(crate) async fn classify_in_flight(
         in_flight_ids,
         claims,
     })
+}
+
+/// Restore the ownership row of a run recovery will resume, and say
+/// whether to resume it.
+///
+/// The restore is a move of the row like any other
+/// (`control_plane::ownership`): it re-owns the run for this daemon from
+/// its start. It is refused on a row that records the run finished, whose
+/// run is then not resumed; `reconcile_terminal_owners` has marked the WAL
+/// row of every such run terminal already, so a refusal here means the
+/// row ended between the two reads. A row this build cannot read is left
+/// as it is, as the coordination consumer leaves it, and the run is
+/// resumed: the WAL, not the row, says whether a run can be resumed.
+async fn restore_ownership(
+    cp_store: &ControlPlaneStore,
+    invocation: &ClassifiedInvocation,
+    worker_id: &WorkerId,
+) -> anyhow::Result<bool> {
+    use fq_runtime::control_plane::ownership::{
+        Applied, OwnerFacts, OwnershipError, OwnershipEvent, apply,
+    };
+    let invocation_id = &invocation.state.invocation_id;
+    let restored = apply(
+        cp_store,
+        invocation_id,
+        OwnershipEvent::Restored,
+        OwnerFacts {
+            worker_id: worker_id.as_str(),
+            at_ms: invocation.state.started_at,
+        },
+    )
+    .await;
+    match restored {
+        Ok(Applied::Refused { recorded }) => {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                recorded = %recorded.name(),
+                "recovered invocation is recorded finished; not resuming it"
+            );
+            Ok(false)
+        }
+        Ok(_) => Ok(true),
+        Err(OwnershipError::Unreadable { detail, .. }) => {
+            tracing::error!(
+                invocation_id = %invocation_id,
+                detail = %detail,
+                "recovered invocation's ownership row cannot be read; resuming it and leaving \
+                 the row as it is"
+            );
+            Ok(true)
+        }
+        Err(err) => Err(err).context("failed to restore recovered invocation ownership"),
+    }
 }
 
 /// Queue one auto-resume per safe-resume / safe-replay invocation for a

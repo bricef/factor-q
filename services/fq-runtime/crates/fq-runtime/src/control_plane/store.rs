@@ -581,14 +581,11 @@ impl ControlPlaneStore {
         Ok(res.rows_affected())
     }
 
-    /// Upsert the ownership row, whatever it holds. Startup recovery uses
-    /// it to restore a run it will resume to `in_flight` (the trigger
-    /// dispatch path writes no row, so there may be none), and the archive
-    /// hand-off and an operator's drop to record a run's ending. A report
-    /// of ambiguity goes through `mark_invocation_ambiguous` instead, which
-    /// never moves a finished row. The archive's state written is the one
-    /// a row with this status had before the column existed
-    /// ([`ArchiveState::recorded_before_v3`]).
+    /// Write the ownership row whatever it holds: a seeding helper for
+    /// tests and fixtures. The runtime moves rows only through
+    /// `control_plane::ownership::apply`, by compare-and-set. The
+    /// archive's state written is the one a row with this status had
+    /// before the column existed ([`ArchiveState::recorded_before_v3`]).
     pub async fn upsert_invocation_ownership(
         &self,
         invocation_id: &str,
@@ -1046,7 +1043,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 }
 
 mod ownership;
-pub use ownership::{AmbiguousMark, ArchiveState};
+pub use ownership::ArchiveState;
 
 mod trigger_claim;
 pub use trigger_claim::{
