@@ -50,15 +50,28 @@
 //!
 //! - **Ignored**: the event never touches the row. `triggered` is
 //!   published before the run's first WAL write, also by a run refused
-//!   before it starts. A `failed` in `setup` is published only for a run
-//!   that never made its first WAL write: the runner stamps that phase
-//!   from the WAL row itself, in one place
-//!   (`worker/reducer/runner/publish_failure.rs`), and its tests refuse
-//!   every publish of a run in turn to keep it so. A row is what startup
+//!   before it starts. A `failed` in `setup` is published only while the
+//!   run's WAL holds no row: the runner stamps that phase from the WAL
+//!   row itself (`worker/reducer/runner/publish_failure.rs`). That is
+//!   before the run's first WAL write, and a row is what startup
 //!   recovery, the dispatcher's own-claim arm and the dead-letter watch
 //!   read as "the run started" (`RunRecords`), so a row written for such
 //!   a run would mark its trigger's claim started, and drop every later
-//!   copy of the trigger.
+//!   copy of the trigger. Or it is after an operator's live drop whose
+//!   archive was handed off, when the drop is already the ending on
+//!   record. A reducer whose first step errors is one such run: its
+//!   `failed` is in `setup`, and the runner's archive step after it logs
+//!   `archive publish skipped: invocation_state row missing` at warn, as
+//!   it did before this table. The rule holds for events from builds
+//!   that read the phase from the WAL; a consumer that replays the stream
+//!   from its start meets earlier builds' `failed` events in another
+//!   phase for runs that never started, and writes each such run a
+//!   `failed` row, its archive pending, which no archive ever follows.
+//!   `operator_resumed` is ignored too: the resume it records hands the
+//!   run back to its worker, whose next ending moves the row, and it
+//!   carries no worker id to move the row to `in_flight` under, so a run
+//!   an operator resumed reads `ambiguous` until it ends, as the
+//!   operating guide says.
 //! - **Refused**: the row records the run finished, and the event would
 //!   put it back in progress. A report of ambiguity, or recovery's
 //!   restore, can arrive after the run's ending; the ending stands.

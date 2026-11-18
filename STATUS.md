@@ -560,15 +560,45 @@ start, and `fq doctor` and `fq status` list the holds with their reason
 and remedy. `invocation.archived` now carries the run's state as base64
 text, four bytes on the wire for three of state where it was about four
 for one, so a run holding up to about 786,000 bytes of state (two tool
-results at the default cap) archives on a stock 1 MiB broker. An ended
-run whose archive is held still reads `in_flight` in the ownership
-table ([#1024](https://github.com/bricef/factor-q/issues/1024)). An
-`invocation.ambiguous` that reaches the control plane after a run is
-recorded `completed` or `failed`, an operator's drop included, no
-longer puts its ownership row back to `ambiguous`: the move is a
-compare-and-set that refuses to leave a finished status, and the
-refusal is logged (the first change of
-[#1024](https://github.com/bricef/factor-q/issues/1024)). And an
+results at the default cap) archives on a stock 1 MiB broker. The
+control plane's ownership row follows a run's outcome, not the
+hand-off of its archive
+([#1024](https://github.com/bricef/factor-q/issues/1024)): a
+`completed`, or a `failed` outside `setup`, moves the row to that
+ending when it is folded, and a new `archive_state` column beside the
+status records whether the control plane holds the run's archive
+(`pending` until it does), so a run whose archive is late, refused or
+held reads as finished. The column is stored and not yet shown by any
+surface. Every move of the
+row is decided by one transition function and written as a
+compare-and-set on the state it was decided from: a late
+`invocation.ambiguous` never puts a finished run back to triage, an
+operator's drop still wins, a second ending is refused and logged at
+error, and a `failed` in `setup` (published only while the run's WAL
+holds no row) writes no row, so it records no start. A row this build
+cannot read is left as it is, and no event or start waits for it. A
+run that published its `failed` and died before marking its WAL row
+terminal is no longer resumed at the next start, provided the
+coordination consumer folded that `failed` before the daemon died. If
+it did not, the next start resumes the run, and the consumer then folds
+the old `failed`, so the row reads `failed` while the run executes and
+the run's own later ending is refused as a second one; recovery folding
+the coordination backlog before it classifies is item 3 of
+[#1070](https://github.com/bricef/factor-q/issues/1070). A run still
+running from a trigger has no row yet, so it is not in
+`fq invocation list`; `fq doctor`'s current executions count it
+([#721](https://github.com/bricef/factor-q/issues/721)). Still open:
+a run whose stored terminal event this build will not republish, or
+whose row's ids cannot go on an event, never tells the control plane
+that it ended, so its row stays as it was
+([#1071](https://github.com/bricef/factor-q/issues/1071)); a row that
+read `in_flight` before this change for a run that had already ended
+keeps reading so until the run's archive arrives, or for good if the
+archive is held, since a build before this one consumed that ending
+without moving the row and it is not folded again; and the row
+and the run's archive record can disagree, after an operator's drop or
+when an archive names the other ending
+([#1070](https://github.com/bricef/factor-q/issues/1070)). And an
 event the broker refuses for its size now ends its run
 ([#828](https://github.com/bricef/factor-q/issues/828)): one terminal
 `failed` of kind `payload_too_large` names the refused event, its size

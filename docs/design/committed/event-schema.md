@@ -615,6 +615,18 @@ dispatched) — the only completion path; a turn ending with no tool
 calls is answered with a corrective host notice and another model
 turn, never an implicit `success`.
 
+**The run's ownership row follows it.** When the control plane's
+coordination consumer folds a `completed`, it moves the run's
+`coordination_invocation_owner` row to `completed`, writing the row if
+the run has none, with the row's `archive_state` `pending` until
+`invocation.archived` arrives. A run whose archive is late, refused or
+held therefore reads as finished
+([#1024](https://github.com/bricef/factor-q/issues/1024)). A row that
+already records another ending keeps it: the second ending is logged at
+error, or at warn when the recorded ending is an operator's drop that is
+already archived. The whole lifecycle of the row is one transition
+table, in `control_plane/ownership.rs`.
+
 ### `failed`
 
 Published when an invocation terminates with an error.
@@ -641,6 +653,8 @@ The runtime reads the WAL row as it publishes, in the one function every `failed
 
 The rule holds for events published by this build and later. An earlier build's `failed` can be in another phase for a run that had no WAL row (the changelog entry below lists which), so a reader of older events, or one replaying the stream from its start, can meet one.
 
+The control plane's coordination consumer moves the run's ownership row to `failed`, with its archive pending, when it folds a `failed` outside `setup`, as it does for a `completed`, and writes no row for one in `setup`: a row is what startup recovery, the dispatcher and the dead-letter watch read as a start. A consumer that replays the stream from its start, a recreated durable say, meets the `failed` events of earlier builds too, and some of those are in another phase for a run that never started; it writes a `failed` row, its archive pending, for each such run, which no archive ever follows and which reads as a start on record.
+
 **`payload_too_large`** ([#828](https://github.com/bricef/factor-q/issues/828)): an event of the run was larger than the broker's `max_payload`, so the bus refused it and the run ended there. The event is never truncated, since the record would then say something other than what the model saw. The run ends with one `failed` of this kind, carrying the detail below; its `phase` is that of the refused event (`reducer` for the run's own terminal event), or `setup` when the run had not yet made its first WAL write (`triggered`, or a host notice queued before the first step). Where the refusal lands decides the rest:
 
 - **`triggered`**, before anything durable exists: the `failed` is the whole record, with no `triggered` before it, so it names the trigger itself in the annotations `trigger_id` and `trigger_subject`, the keys a dead letter uses (it is not one: those are read as a dead letter only on a `trigger_exhausted` failure). The dispatcher consumes the trigger rather than redelivering it, since every attempt would build the same event. The github-watcher binds a run to its issue through `triggered`, so it never sees this failure.
@@ -649,7 +663,7 @@ The rule holds for events published by this build and later. An earlier build's 
 - **`completed`**, or a `failed` the reducer decided: measured before the row goes terminal, and replaced by this `failed`, which is stored and published in its place.
 - **`invocation.archived`**, after the outcome is out: not a failure of the invocation, and no second terminal event follows.
 
-The archive is where this does not end cleanly. `invocation.archived` carries the run's state as base64, four bytes for every three (see [`invocation.archived`](#invocationarchived)). A run that ends at an `llm.request` holds that request's messages in its state, so its archive is over the limit too, unless what the request carries besides its messages, its tool definitions mostly, is more than a quarter of the limit. A run that ends at a `tool.result` or at its own terminal event does not hold the refused event in its state, so its archive is refused only if the conversation before it was already that large, and one that ends at `triggered` has no row to archive. The archive sweeper holds a row whose archive is refused: it publishes nothing more for it, keeps it whole, says so once per daemon run, offers it again at the next start, and goes on to the rows behind it, and `fq doctor` and `fq status` list the hold with its reason and remedy under `archive_sweep` (see [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row)). Until the archive is acknowledged, the control plane's ownership row for the run reads `in_flight`, which for a held row is until an operator acts ([#1024](https://github.com/bricef/factor-q/issues/1024), open); the held row in `fq doctor` is how an operator finds the run.
+The archive is where this does not end cleanly. `invocation.archived` carries the run's state as base64, four bytes for every three (see [`invocation.archived`](#invocationarchived)). A run that ends at an `llm.request` holds that request's messages in its state, so its archive is over the limit too, unless what the request carries besides its messages, its tool definitions mostly, is more than a quarter of the limit. A run that ends at a `tool.result` or at its own terminal event does not hold the refused event in its state, so its archive is refused only if the conversation before it was already that large, and one that ends at `triggered` has no row to archive. The archive sweeper holds a row whose archive is refused: it publishes nothing more for it, keeps it whole, says so once per daemon run, offers it again at the next start, and goes on to the rows behind it, and `fq doctor` and `fq status` list the hold with its reason and remedy under `archive_sweep` (see [When the archive sweeper holds a terminal row](../../guide/operating-the-daemon.md#when-the-archive-sweeper-holds-a-terminal-row)). The control plane's ownership row reads the run's `failed` from the moment it is folded, with its archive pending for as long as the sweeper holds the row ([#1024](https://github.com/bricef/factor-q/issues/1024)).
 
 It is not `runtime_error` for the reasons `max_iterations` and `trigger_exhausted` are not: a configured limit doing its job is not a defect, and a reader that retries by kind has to tell it apart, because the same work is likely to build the same event. The github-watcher treats it as final.
 
@@ -711,6 +725,7 @@ Published by the worker after an invocation reaches terminal state, carrying the
 
   In the other direction nothing is lost: a reader in this build that re-serialises an event it read — `fq events --json`, the edge's `event.get` — writes the text form, whichever form the stream holds.
 - **Idempotent on the receiver.** The control-plane's `insert_archive` is `ON CONFLICT(invocation_id) DO NOTHING`; a redelivered `invocation.archived` is safe.
+- **The ownership row records the archive.** The coordination consumer sets the run's `coordination_invocation_owner.archive_state` to `archived` and its `worker_id` to the payload's. A row that has not recorded an ending yet takes the one `final_phase` names; a row that has keeps it, so an operator's drop that came first stands. An archive naming another ending is logged at error, or at warn when the recorded ending is a drop already archived; on a row whose archive was pending, the row then keeps its ending while the archive record holds the other, so the two disagree with no operator involved ([#1024](https://github.com/bricef/factor-q/issues/1024), [#1070](https://github.com/bricef/factor-q/issues/1070)).
 
 ### `invocation.archive_acked`
 
@@ -731,7 +746,7 @@ Published by the control-plane on the worker-scoped subject after a successful (
 
 ### `invocation.operator_recovered`
 
-Published by `fq invocation drop` (and any future operator-issued recovery action) so audit can distinguish operator-triggered terminal transitions from worker-triggered ones. The coordination consumer's handler writes an `invocation_archive` row (with an empty `state_blob` in v1 — the control-plane doesn't have the worker's state for an ambiguous invocation) and updates `coordination_invocation_owner.status` to match `final_phase`. No ack is emitted.
+Published by `fq invocation drop` (and any future operator-issued recovery action) so audit can distinguish operator-triggered terminal transitions from worker-triggered ones. The coordination consumer's handler writes an `invocation_archive` row (with an empty `state_blob` in v1 — the control-plane doesn't have the worker's state for an ambiguous invocation) and moves `coordination_invocation_owner` to `final_phase` with its archive `archived`, from whatever the row held, a finished run included, keeping the worker id the row names. No ack is emitted. A worker's `invocation.archived` that arrives later keeps the drop's ending; what that leaves inconsistent between the row and the archive record is [#1070](https://github.com/bricef/factor-q/issues/1070).
 
 ```json
 {

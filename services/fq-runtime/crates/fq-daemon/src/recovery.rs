@@ -602,8 +602,8 @@ impl ResumedRow {
 /// nothing about it is ambiguous. Reporting it would give it a second
 /// ending in the event log, and turn its ownership row to `ambiguous` for
 /// an operator to triage a run that needs nothing. Not reported, its
-/// ownership row reads `failed` once its archive is acknowledged, and
-/// `in_flight` until then: for as long as the archive is refused (issue
+/// ownership row reads `failed` from the moment its `failed` is folded,
+/// with its archive pending for as long as the archive is refused (issue
 /// 1024).
 ///
 /// Only a resume that could not be carried out — the row still in flight,
