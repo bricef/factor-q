@@ -1807,11 +1807,19 @@ struct CapturedAdvisory {
 /// stamped just after the NAK: a flush does not mean the broker has the
 /// subscription yet (issue 1045).
 async fn captured_advisory_within(pulled: &Pulled, wait: Duration) -> Option<CapturedAdvisory> {
-    let consumer = &pulled.consumer.cached_info().name;
+    captured_advisory_on(&pulled.bus, &pulled.consumer.cached_info().name, wait).await
+}
+
+/// [`captured_advisory_within`] for the durable named `consumer` on the
+/// broker `bus` is connected to.
+async fn captured_advisory_on(
+    bus: &EventBus,
+    consumer: &str,
+    wait: Duration,
+) -> Option<CapturedAdvisory> {
     let subject =
         format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{consumer}");
-    let advisories = pulled
-        .bus
+    let advisories = bus
         .jetstream()
         .get_stream(crate::bus::ADVISORY_STREAM_NAME)
         .await
