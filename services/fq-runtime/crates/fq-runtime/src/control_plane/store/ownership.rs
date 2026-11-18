@@ -1,9 +1,70 @@
 //! Moves of an invocation's ownership row that must not land on a row in
-//! the wrong state, written as compare-and-set on the status they expect.
+//! the wrong state, written as compare-and-set on the status they expect,
+//! and the archive's state the row keeps beside its status.
 
 use sqlx::Row;
 
 use super::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus};
+
+/// The rung that adds `archive_state` beside `status` (issue 1024). Every
+/// row a control plane holds when it runs records a run that has not
+/// ended (`not_due`) or one whose archive record was written: before the
+/// column, only the archive hand-off and an operator's drop wrote a
+/// finished status, and each wrote the archive record first.
+///
+/// Its number is where `MIGRATIONS` lists it, so a change that adds a
+/// rung before it renumbers it by that one line.
+pub(super) const ARCHIVE_STATE_V3_SQL: &str = r#"
+ALTER TABLE coordination_invocation_owner
+    ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'not_due'
+    CHECK (archive_state IN ('not_due', 'pending', 'archived'));
+UPDATE coordination_invocation_owner SET archive_state = 'archived'
+    WHERE status IN ('completed', 'failed');
+"#;
+
+/// Whether the control plane holds a run's archive record: the state an
+/// ownership row keeps beside its status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArchiveState {
+    /// The run has not ended, so no archive is due.
+    NotDue,
+    /// The run has ended, and its archive record is not written yet: the
+    /// worker's `invocation.archived` is on its way, refused, held by the
+    /// archive sweeper, or its worker is gone.
+    Pending,
+    /// The archive record was written, from the worker's archive or by an
+    /// operator's drop. A record retention later sweeps leaves the row
+    /// `archived`.
+    Archived,
+}
+
+impl ArchiveState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArchiveState::NotDue => "not_due",
+            ArchiveState::Pending => "pending",
+            ArchiveState::Archived => "archived",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "not_due" => Some(ArchiveState::NotDue),
+            "pending" => Some(ArchiveState::Pending),
+            "archived" => Some(ArchiveState::Archived),
+            _ => None,
+        }
+    }
+
+    /// The archive's state of a row with `status` written before the
+    /// column existed: what the schema's third rung gives such a row.
+    pub fn recorded_before_v3(status: OwnerStatus) -> Self {
+        match status {
+            OwnerStatus::InFlight | OwnerStatus::Ambiguous => ArchiveState::NotDue,
+            OwnerStatus::Completed | OwnerStatus::Failed => ArchiveState::Archived,
+        }
+    }
+}
 
 /// What [`ControlPlaneStore::mark_invocation_ambiguous`] did to the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

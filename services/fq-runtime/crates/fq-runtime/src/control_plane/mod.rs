@@ -77,8 +77,8 @@ pub use coordination_consumer::{CoordinationConsumer, CoordinationConsumerError}
 pub use heartbeat_consumer::{HeartbeatConsumer, HeartbeatConsumerError};
 pub use maintenance::{MaintenanceConsumer, MaintenanceConsumerError, MaintenanceTask};
 pub use store::{
-    CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow,
-    OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, TriggerClaim, TriggerKey, WorkerRow,
-    WorkerStatus,
+    ArchiveState, CONTROL_PLANE_SCHEMA_VERSION, ControlPlaneStore, ControlPlaneStoreError,
+    InvocationArchiveRow, OwnerRow, OwnerStatus, PendingWaitRow, ScheduleEntryRow, TriggerClaim,
+    TriggerKey, WorkerRow, WorkerStatus,
 };
 pub use summary_consumer::{SummaryConsumer, SummaryConsumerError};
