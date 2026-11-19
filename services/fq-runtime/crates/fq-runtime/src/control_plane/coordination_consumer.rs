@@ -681,6 +681,8 @@ fn folded_now(worker_id: &str) -> OwnerFacts<'_> {
 
 #[cfg(test)]
 mod ambiguous_tests;
+#[cfg(test)]
+mod drop_record_tests;
 
 #[cfg(test)]
 mod outcome_tests;
