@@ -614,13 +614,16 @@ cannot read is left as it is, and no event, start or stuck sweep waits
 for it; the list and detail reads, `fq doctor` and the retention sweep
 still fail on it, and only a hand edit clears it
 ([#1082](https://github.com/bricef/factor-q/issues/1082)). A
-run that published its `failed` and died before marking its WAL row
-terminal is no longer resumed at the next start, provided the
-coordination consumer folded that `failed` before the daemon died. If
-it did not, the next start resumes the run, and the consumer then folds
-the old `failed`, so the row reads `failed` while the run executes and
-the run's own later ending is refused as a second one; recovery folding
-the coordination backlog before it classifies is item 3 of
+run that fails mid-step now marks its WAL row finished, with its
+`failed` stored, before it publishes it, so it cannot publish its
+`failed` and die before its mark; a publish lost after the mark is the
+archive sweeper's to repeat, and the mark has one winner against an
+operator's drop ([#1070](https://github.com/bricef/factor-q/issues/1070)). A run whose `failed` an older build
+published before dying unmarked is no longer resumed at the next start,
+provided the coordination consumer folded that `failed` before the
+daemon died. If it did not, the next start resumes the run, and the
+consumer then folds the old `failed`; recovery folding the coordination
+backlog before it classifies is item 3 of
 [#1070](https://github.com/bricef/factor-q/issues/1070). A run still
 running from a trigger has no row yet, so it is not in
 `fq invocation list`; `fq doctor`'s current executions count it

@@ -458,13 +458,12 @@ once the drop has reached the worker's record of the run, the run
 publishes no ending of its own: no `completed`, even if that last model
 call gave a final answer, and no `failed` if that call or tool fails
 ([#1070](https://github.com/bricef/factor-q/issues/1070)). The drop is
-the outcome. The one exception is a failure in the instant the drop
-reaches the worker, after the run has read its record to publish that
-failure and before it marks the record itself: a window about as long
-as one message to the broker and back. The run then publishes its own
-`failed`, with its own error, and its own archive, after the drop. The
-drop's ending and archive record stand, as above, and both say
-`failed`.
+the outcome. Whichever marks the worker's record finished first wins:
+the run writes its own ending into the record before it publishes it,
+and only while the record is unfinished, so a failure in the instant
+the drop reaches the worker either ends the run itself, its `failed`
+going out with its own error and the drop finding the record already
+finished, or loses to the drop and publishes nothing of its own.
 
 Startup recovery also reports an invocation `ambiguous` when it resumed
 one on its own and the resume could not be carried out, leaving the
@@ -501,14 +500,17 @@ it ([#1024](https://github.com/bricef/factor-q/issues/1024)). Before
 [#1005](https://github.com/bricef/factor-q/issues/1005) such a run was
 reported ambiguous as well, and left for an operator to triage.
 
-A run that published its `failed` and died before marking its WAL row
-terminal is not resumed at the next start. A run that fails part-way
-through a step publishes `failed` before it marks its WAL row, so the
-daemon can die in between. Once the coordination consumer has folded
-that `failed`, the ownership row records the ending, and the next
-start's recovery, which reads the ownership rows before it classifies
-anything, marks the WAL row terminal and hands it to the archive
-sweeper: the first ending stands. Before
+A run that fails part-way through a step marks its WAL row finished,
+with its `failed` stored in it, before it publishes the `failed`
+([#1070](https://github.com/bricef/factor-q/issues/1070)). A daemon that dies between the two leaves the row
+finished with its ending owed: the next start does not resume the run,
+and the archive sweeper publishes the stored `failed` on its first pass.
+Builds before that published first and marked after, so a run could
+publish its `failed` and die before its mark. Once the coordination
+consumer has folded such a `failed`, the ownership row records the
+ending, and the next start's recovery, which reads the ownership rows
+before it classifies anything, marks the WAL row terminal and hands it
+to the archive sweeper: the first ending stands. Before
 [#1024](https://github.com/bricef/factor-q/issues/1024) such a run was
 always resumed, and could end a second time.
 
@@ -588,12 +590,19 @@ invocation on its own.
 
 A finished invocation's row stays in `worker.db` until the control plane
 acknowledges its `invocation.archived`. Since worker schema v12 the row
-also keeps the event the invocation ended in — `completed`, or for some
-failures (such as reaching the iteration limit) `failed` — until that
-event is known to have reached the bus. If the publish was lost, the
-archive sweeper republishes it first
+also keeps the event the invocation ended in — `completed`, or the
+`failed` of a run that had started — until that event is known to have
+reached the bus. If the publish was lost, the archive sweeper
+republishes it first
 ([#823](https://github.com/bricef/factor-q/issues/823),
-[#946](https://github.com/bricef/factor-q/issues/946)).
+[#946](https://github.com/bricef/factor-q/issues/946),
+[#1070](https://github.com/bricef/factor-q/issues/1070)). Until it has, the control plane has not heard that the
+run ended: its ownership row reads as it did before the ending, `in_flight`
+for a run startup recovery restored and absent for a run started from a
+trigger, while the worker's row is finished, so nothing resumes the run.
+The sweeper's first pass, within `archive_retry_interval_ms` (10 s by
+default) once the broker takes events again, or at the next start,
+publishes it.
 
 A row the sweeper cannot publish, it **holds**, for one of the three
 reasons below. It publishes nothing more for a held row, leaves the row

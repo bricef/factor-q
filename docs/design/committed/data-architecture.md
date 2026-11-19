@@ -511,13 +511,13 @@ covered in §9.3) uses the same SQLite-first write order. On
 reaching terminal:
 
 1. **Persist `terminal_at` to worker SQLite** (sync). Already
-   stamped by the reducer runner's per-step terminal upsert; the
-   `emit_failed` path calls a small `ensure_terminal` helper to
-   cover mid-step failure sites that bypass the loop's upsert.
-   When the loop's upsert is the terminal write — a `completed`,
-   or a `failed` the reducer itself decides — the same write also
-   stores that event itself, envelope and `event_id` included, in
-   `terminal_outcome` (worker schema v12,
+   stamped by the reducer runner's per-step terminal upsert, or,
+   for a mid-step failure, by the write `end_mid_step` makes
+   before it publishes ([#1070](https://github.com/bricef/factor-q/issues/1070)). The terminal write — a
+   `completed`, a `failed` the reducer itself decides, or a
+   mid-step `failed` — also stores that event itself, envelope
+   and `event_id` included, in `terminal_outcome` (worker schema
+   v12,
    [#823](https://github.com/bricef/factor-q/issues/823),
    [#946](https://github.com/bricef/factor-q/issues/946)). It is
    the only event that carries the outcome (task status, result
@@ -582,9 +582,12 @@ Crash semantics:
   operator corrects it. `fq doctor` and `fq status` list every
   held row, whatever the cause, with the reason and the remedy
   ([#981](https://github.com/bricef/factor-q/issues/981)).
-- The mid-step failure sites publish `failed` *before*
-  `ensure_terminal` marks the row, and store no copy, so a lost
-  `failed` there leaves the row in flight, for recovery to resume.
+- The mid-step failure sites mark the row terminal with the
+  `failed` stored, *then* publish it, like the loop's terminal
+  write: a lost `failed` there is the sweeper's to republish, and
+  the row is not left in flight. The mark lands only on a row
+  still in flight, as an operator's drop marks it, so one of the
+  two wins.
 - Between (3) and (4): the event went out but the row is still
   NULL. The next sweeper tick treats it the same way and
   republishes; the control-plane's `insert_archive` is

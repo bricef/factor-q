@@ -16,11 +16,15 @@
 //! With the live halt armed, the runner already stops at the next step
 //! boundary, before the reducer decides anything and before any row write,
 //! so the two live-drop tests, and the tool test, pass without the rule
-//! and guard it; so does the test that pins the rule's one exception. The
-//! rule is for a runner holding no halt for the run (a deferred run whose
-//! resume starts while the drop is being folded, or a drop another daemon
-//! handled), and for a step that fails after a live drop's mark, which
-//! reaches the runner with no boundary between.
+//! and guard it. The rule is for a runner holding no halt for the run (a
+//! deferred run whose resume starts while the drop is being folded, or a
+//! drop another daemon handled), and for a step that fails after a live
+//! drop's mark, which reaches the runner with no boundary between.
+//!
+//! A run that fails mid-step writes its `failed` into its row before it
+//! publishes it, by a write that lands only on a row still in flight, as
+//! the drop's mark does: one of the two wins. The tests at the end pin
+//! both orders, and the `failed` a lost publish leaves for the sweeper.
 
 use super::*;
 use crate::bus::{BusError, EventSink};
