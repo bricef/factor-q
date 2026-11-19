@@ -806,7 +806,7 @@ async fn invoke(
     let handler = surface
         .handler(&op.to_string())
         .expect("the op is registered on the operator surface");
-    handler(input).await
+    handler(input, fq_edge::CallContext::none()).await
 }
 
 /// The next daemon's start over what a daemon that stopped with

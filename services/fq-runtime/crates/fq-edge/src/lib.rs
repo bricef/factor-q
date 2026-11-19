@@ -16,6 +16,7 @@
 //! identity provisioning, the server, and the pinned client.
 
 pub mod auth;
+pub mod call;
 pub mod client;
 pub mod registry;
 pub mod server;
@@ -28,6 +29,7 @@ pub use auth::IdentityOrigin;
 pub use auth::attenuate;
 pub use auth::{ADMIN_TOKEN_FILE, FINGERPRINT_FILE};
 pub use auth::{fingerprint_hex, parse_fingerprint_hex};
+pub use call::CallContext;
 pub use client::EdgeClient;
 pub use client::probe_fingerprint;
 pub use registry::{EdgeRegistry, ReadGate};

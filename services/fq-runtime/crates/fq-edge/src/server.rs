@@ -36,6 +36,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_util::codec::LengthDelimitedCodec;
 
 use crate::auth::{EdgeIdentity, VerifiedToken, verify_token};
+use crate::call::CallContext;
 use crate::registry::EdgeRegistry;
 use crate::service::Edge;
 use crate::wire::{InvokeRequest, InvokeResponse, NextBatchRequest, StreamBatch, WireError};
@@ -106,6 +107,8 @@ impl Default for EdgeLimits {
 struct EdgeServer {
     registry: Arc<EdgeRegistry>,
     token: Arc<VerifiedToken>,
+    /// Who this connection's calls come from, handed to each handler.
+    call: CallContext,
 }
 
 impl EdgeServer {
@@ -206,7 +209,7 @@ impl Edge for EdgeServer {
             .ok_or_else(|| WireError::NotRegistered {
                 op: request.op.to_string(),
             })?;
-        let output = handler(request.input).await?;
+        let output = handler(request.input, self.call.clone()).await?;
         Ok(InvokeResponse { output })
     }
 
@@ -428,6 +431,7 @@ async fn serve_connection(
         tarpc::serde_transport::new(framed, tarpc::tokio_serde::formats::Json::default());
     let server = EdgeServer {
         registry: ctx.registry.clone(),
+        call: CallContext::of(&token),
         token: Arc::new(token),
     };
     BaseChannel::with_defaults(transport)
