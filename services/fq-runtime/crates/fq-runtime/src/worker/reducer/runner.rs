@@ -1183,42 +1183,38 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                 *cursor,
             )?;
             let phase_label = terminal.as_ref().map_or(phase_label, Terminal::phase);
-            // The first write creates the row; a later one that does not
-            // land stops the run (issue 1070; `runner/own_row.rs`).
-            self.write_own_row(
-                &InvocationStateRow {
-                    invocation_id: invocation_id.to_string(),
-                    agent_id: agent_id.as_str().to_string(),
-                    schema_version: 1,
-                    phase: phase_label.to_string(),
-                    state_blob: output.state.clone(),
-                    step_index,
-                    started_at: started_at_ms,
-                    updated_at: now_ms,
-                    terminal_at,
-                    // The invocation's `${workspace}` binding, persisted
-                    // so recovery re-associates a resumed invocation with
-                    // its workspace (plan §3).
-                    workspace_ref: workspace.map(|p| p.to_string_lossy().into_owned()),
-                    archive_status: None,
-                    archive_published_at: None,
-                    trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
-                    trigger_subject: trigger.subject.clone(),
-                    trigger_payload: Some(trigger.payload.to_string()),
-                    terminal_outcome: terminal.as_ref().map(Terminal::outcome),
-                    terminal_published_at: None,
-                },
-                !durable_start.has_started(),
-                invocation_id,
-            )
-            .await?;
+            let row = InvocationStateRow {
+                invocation_id: invocation_id.to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                schema_version: 1,
+                phase: phase_label.to_string(),
+                state_blob: output.state.clone(),
+                step_index,
+                started_at: started_at_ms,
+                updated_at: now_ms,
+                terminal_at,
+                // The invocation's `${workspace}` binding, persisted
+                // so recovery re-associates a resumed invocation with
+                // its workspace (plan §3).
+                workspace_ref: workspace.map(|p| p.to_string_lossy().into_owned()),
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: Some(trigger_source_label(&trigger.source).to_string()),
+                trigger_subject: trigger.subject.clone(),
+                trigger_payload: Some(trigger.payload.to_string()),
+                terminal_outcome: terminal.as_ref().map(Terminal::outcome),
+                terminal_published_at: None,
+            };
+            // The first write creates the row and signals the durable start,
+            // or under a halt is not made; a later one that does not land
+            // stops the run (issue 1070; `runner/own_row.rs`).
+            if let Some(stopped) = self
+                .write_own_row(&row, &mut durable_start, invocation_id)
+                .await?
+            {
+                return Ok(stopped);
+            }
             state = output.state;
-
-            // First durable (WAL) write for this invocation has landed:
-            // the run is now recoverable from the WAL, so the trigger
-            // dispatcher may ack (issue #41). Idempotent — only the
-            // first step fires; every later call is a no-op.
-            durable_start.fire();
 
             match output.next_action {
                 NextAction::Complete { .. } | NextAction::Failed(_) => {

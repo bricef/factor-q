@@ -30,7 +30,8 @@
 //!
 //! With an operator's live drop the runner seldom gets that far: the halt
 //! stops it at the next step boundary, before the reducer decides and
-//! before any write (`boundary.rs`). These points hold the rule where no
+//! before any write (`boundary.rs`), or, armed during the first step, at
+//! the first write, which is then not made. These points hold the rule where no
 //! halt is armed for the run (a deferred run whose resume starts while
 //! the drop is being folded, a drop another daemon handled), and for a
 //! step that fails after a live drop's mark, which reaches the runner with
@@ -64,12 +65,26 @@ use uuid::Uuid;
 
 use super::{ReducerRunner, map_store_err};
 use crate::agent::AgentId;
-use crate::worker::ExecutorError;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::store::InvocationStateRow;
+use crate::worker::{BoundaryStop, DurableStart, ExecutorError, InvocationOutcome};
 
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
-    /// Write the step's row. The run's first write (`first`) creates it.
+    /// Write the step's row.
+    ///
+    /// The run's first write, before `durable_start` has fired, creates
+    /// the row and then fires it: the run is recoverable from the WAL, so
+    /// the trigger dispatcher may ack (issue #41). It is not made under an
+    /// operator's halt armed before it. The halt is checked at the top of
+    /// every step, but the reducer runs between that check and this write,
+    /// and a halt armed then used to be seen only at the next boundary,
+    /// after this write and the step's model call: the drop's mark,
+    /// folded while there was no row, never reached the row, which stayed
+    /// in flight until the next start (issue 1070). So the halt is taken
+    /// here as at a boundary, and the run returns what a halt at its first
+    /// boundary returns, `Unstarted` (`Some`). A halt armed once the write
+    /// is under way is the next boundary's, as before.
+    ///
     /// Every later write lands only on the row still in flight; one that
     /// does not means someone else finished the row, and the run stops
     /// with [`ExecutorError::FinishedElsewhere`] rather than write over it
@@ -77,17 +92,29 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     pub(super) async fn write_own_row(
         &self,
         row: &InvocationStateRow,
-        first: bool,
+        durable_start: &mut DurableStart,
         invocation_id: Uuid,
-    ) -> Result<(), ExecutorError> {
-        if first {
+    ) -> Result<Option<InvocationOutcome>, ExecutorError> {
+        if !durable_start.has_started() {
+            if self.live.take_halt(invocation_id) {
+                info!(
+                    agent_id = %row.agent_id,
+                    %invocation_id,
+                    step_index = row.step_index,
+                    "operator halt — stopping invocation before its first WAL write"
+                );
+                return Ok(Some(
+                    durable_start.stopped_at_boundary(invocation_id, BoundaryStop::Halt),
+                ));
+            }
             self.config
                 .store
                 .upsert_invocation_state(row)
                 .await
                 .map_err(map_store_err)?;
             self.live.note_row_written(invocation_id);
-            return Ok(());
+            durable_start.fire();
+            return Ok(None);
         }
         let landed = self
             .config
@@ -96,7 +123,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await
             .map_err(map_store_err)?;
         if landed {
-            return Ok(());
+            return Ok(None);
         }
         Err(self.finished_elsewhere(invocation_id, "its row write did not land"))
     }
