@@ -581,7 +581,14 @@ for a `max_concurrent_invocations` permit like every other run, as a
 deferred resume already did, so a restart no longer runs its recovered
 invocations on top of the cap, and they start ahead of any new trigger
 (the review's finding C5,
-[#994](https://github.com/bricef/factor-q/issues/994)). An operator's
+[#994](https://github.com/bricef/factor-q/issues/994)). A plain
+`fq invocation drop` takes such a waiting run before it starts, and an
+invocation deferred for a rate limit too, asleep, waiting for its
+permit, or in the instant it is put down: it is not resumed and asks the
+model nothing more, and one
+still asleep gives its agent's slot back at the drop rather than at the
+end of its wait ([#1070](https://github.com/bricef/factor-q/issues/1070)).
+An operator's
 `fq invocation resume` is the one run not held at its agent's
 `max_concurrent`: it counts against that limit, so the agent can be
 over it until one of its invocations ends, and the command says so
