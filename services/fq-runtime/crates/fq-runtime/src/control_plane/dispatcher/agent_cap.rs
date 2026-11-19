@@ -99,6 +99,7 @@ use super::claim::Claimed;
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
+use crate::control_plane::store::ConsumedWhy;
 
 /// What the registry has to say about a held trigger's agent.
 enum Declared {
@@ -226,7 +227,14 @@ impl TriggerDispatcher {
                     "drain or shutdown while the trigger waited; requeued it \
                      for the next binary as its first delivery"
                 );
-                self.ack(msg, claim, Some(id), "requeued from a hold").await;
+                self.consume(
+                    msg,
+                    claim,
+                    Some(id),
+                    ConsumedWhy::RequeuedFromHold,
+                    "requeued from a hold",
+                )
+                .await;
             }
             Err(err) => warn!(
                 agent_id = %agent,
@@ -277,8 +285,14 @@ impl TriggerDispatcher {
             "agent was removed while its trigger was held; dropping the trigger \
              rather than running a definition that is no longer loaded"
         );
-        self.ack(msg, claim, trigger_id, "agent removed during a cap hold")
-            .await;
+        self.consume(
+            msg,
+            claim,
+            trigger_id,
+            ConsumedWhy::AgentRemoved,
+            "agent removed during a cap hold",
+        )
+        .await;
         None
     }
 }

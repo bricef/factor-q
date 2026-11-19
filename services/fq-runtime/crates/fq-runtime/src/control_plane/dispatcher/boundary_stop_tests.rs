@@ -474,8 +474,10 @@ async fn a_drain_during_setup_leaves_the_trigger_for_the_next_binary_which_runs_
 /// back would start the work the operator just dropped, or, with the
 /// claim left held by this live process, have every redelivery refused
 /// until the trigger is dead-lettered. So the trigger is acked and its
-/// unfinished claim given back, as for any invocation that returned
-/// before its durable start for good. Only the halt is armed here; the
+/// claim recorded consumed as halted in setup (issue 1055), as any
+/// invocation that returned before its durable start for good records
+/// its own reason: a copy a lost ack brings back is dropped, not run.
+/// Only the halt is armed here; the
 /// drop's own event is the operator surface's business and plays no part
 /// in what `handle` does.
 #[tokio::test]
@@ -525,8 +527,11 @@ async fn an_operator_halt_during_setup_consumes_the_trigger() {
     );
     assert_eq!(
         state.claim(&bus, seq).await,
-        TriggerClaim::Won,
-        "the unfinished claim was given back with the ack"
+        TriggerClaim::Consumed {
+            invocation_id: Some(halted.to_string()),
+            why: crate::control_plane::store::ConsumedWhy::HaltedInSetup,
+        },
+        "the claim is kept, consumed as halted in setup, with the ack"
     );
 }
 

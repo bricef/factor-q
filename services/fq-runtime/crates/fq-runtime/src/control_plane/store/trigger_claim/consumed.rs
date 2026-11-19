@@ -133,14 +133,36 @@ impl ControlPlaneStore {
     /// copy of the trigger that comes back, because the answer to its
     /// delivery was lost, meets it and is acked and dropped rather than
     /// handled again (issue 1055).
+    ///
+    /// **An operator's drop is recorded beside the reason, never in its
+    /// place.** A run consumed before its first WAL write has an ownership
+    /// row only when an operator's drop wrote one, the drop having landed
+    /// before the run's own answer (it failed for good, returned, or was
+    /// halted). Beside a claim that does not record the drop, that row
+    /// reads to the dead-letter watch and
+    /// requeue as a start. So the statement reads the row and, when there
+    /// is one, records the drop on the claim (`operator_dropped_at`, at the
+    /// time the row records for the drop's request, the drop event's own),
+    /// keeping the reason it was given; a drop that lands after the consume
+    /// is recorded by the drop's handler
+    /// ([`Self::record_trigger_claim_drop`]). Whichever lands second, the
+    /// claim ends with its own reason and the drop beside it.
     pub async fn consume_trigger_claim(
         &self,
         key: TriggerKey<'_>,
         invocation_id: &str,
         why: &ConsumedWhy,
     ) -> Result<bool, ControlPlaneStoreError> {
+        // The drop's time is its event's own, which the row records as its
+        // request's, as the drop's handler records it: one drop, one time.
+        // A row with no request on it, which no drop writes, falls back to
+        // the store's clock, in epoch ms.
         Ok(sqlx::query(
-            "UPDATE trigger_claim SET state = 'consumed', consumed_why = ? \
+            "UPDATE trigger_claim SET state = 'consumed', consumed_why = ?, \
+             operator_dropped_at = (SELECT COALESCE(o.termination_requested_at, \
+             CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) \
+             FROM coordination_invocation_owner o \
+             WHERE o.invocation_id = trigger_claim.invocation_id) \
              WHERE stream = ? AND stream_epoch = ? AND stream_seq = ? AND state = 'claimed' \
              AND invocation_id = ?",
         )
@@ -153,6 +175,30 @@ impl ControlPlaneStore {
         .await?
         .rows_affected()
             == 1)
+    }
+
+    /// Record, at `at_ms`, that an operator's drop of `invocation_id`'s run
+    /// wrote that run's ownership row, on the claim that run consumed,
+    /// keeping its reason whatever it is (see
+    /// [`Self::consume_trigger_claim`]). Returns how many claims it changed.
+    /// A drop recorded already keeps its first time. A claim still
+    /// `claimed`, or marked started, is left: the first is consumed by its
+    /// own answer, which reads the drop's row and records the drop itself,
+    /// and the second records a run that started.
+    pub async fn record_trigger_claim_drop(
+        &self,
+        invocation_id: &str,
+        at_ms: i64,
+    ) -> Result<u64, ControlPlaneStoreError> {
+        Ok(sqlx::query(
+            "UPDATE trigger_claim SET operator_dropped_at = ? \
+             WHERE invocation_id = ? AND state = 'consumed' AND operator_dropped_at IS NULL",
+        )
+        .bind(at_ms)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Record that the run a `consumed` claim names has durably started, if

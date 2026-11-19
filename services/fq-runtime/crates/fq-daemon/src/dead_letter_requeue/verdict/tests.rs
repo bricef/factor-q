@@ -477,11 +477,11 @@ fn a_trigger_consumed_for_another_reason_is_refused_and_the_override_takes_it() 
          --agent researcher --event-type triggered`, find any whose trigger payload is this dead \
          letter's with `fq events get <event-id>`, and check each with `fq invocation show \
          <id>`: it started if that shows a `Live execution:` block or a trigger line saying \
-         `durably started`. An `archived:` line or a `status:` other than `(no coordination \
-         row)` is a start only under a trigger line that does not say `dropped by an \
-         operator`: a run an operator dropped before its first WAL write shows both without \
-         having started, and its trigger line says it was consumed without a run and dropped \
-         by an operator. Once you have checked that its work did not run, ask again with \
+         `durably started`. A `status:` other than `(no coordination row)` is a start only \
+         under a trigger line that does not say `dropped by an operator`: a run an operator \
+         dropped before its first WAL write has one, ended by the drop, without having \
+         started, and its trigger line says it was consumed without a run and dropped by an \
+         operator. Once you have checked that its work did not run, ask again with \
          `checked_not_started` set: `fq dead-letters requeue researcher --trigger-seq 12 \
          --checked-not-started`. A start on record is refused whatever you pass."
     );

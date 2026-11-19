@@ -145,11 +145,10 @@ fn format_archive_state(detail: &fq_ops::views::InvocationDetailView) -> Option<
 /// the trigger stream started the run, and where its claim stands.
 ///
 /// Said when there is none, too, and worded for what an absent claim
-/// shows. A delivery that ends before its run's first durable write gives
-/// its claim back, though the run can already have published events under
-/// the claim's id (an agent refused for an unavailable MCP server
-/// does), an adoption writes the adopter's id over the old one, and the
-/// daemon's retention sweep deletes a claim once it is older than
+/// shows. A delivery retried before its run's first durable write gives its
+/// claim back, though the run can already have published events under the
+/// claim's id (one dealt with keeps it, consumed), an adoption writes the
+/// adopter's id over the old one, and the daemon's retention sweep deletes a claim once it is older than
 /// `[state] trigger_claim_retention_days`. So no claim is not proof the
 /// run came from somewhere other than the stream.
 /// Pure; covered by unit tests.

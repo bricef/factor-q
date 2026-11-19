@@ -1,9 +1,10 @@
 //! What the trigger dispatcher logs when it drops a copy of a trigger,
-//! cannot record or acknowledge a run's durable start, cannot publish a
-//! trigger's dead letter, or resumes a deferred run that has already ended,
-//! read off the log of a dispatcher running its own consume loop; and what
-//! the dead-letter watch's check, and the watch itself on a claim consumed
-//! as dead-lettered or past its limit, log about an exhausted trigger's
+//! cannot record or acknowledge a run's durable start, cannot record a
+//! trigger it dealt with as consumed, cannot publish a trigger's dead
+//! letter, or resumes a deferred run that has already ended, read off the
+//! log of a dispatcher running its own consume loop; and what the
+//! dead-letter watch's check, and the watch itself on a claim consumed as
+//! dead-lettered or past its limit, log about an exhausted trigger's
 //! consumed claim.
 //!
 //! **Why a binary of its own (#1031).** Whether a callsite is of interest
@@ -93,6 +94,8 @@ const LAST_DELIVERY: &str = "this was its last delivery, so no copy follows";
 const STARTED_DROP: &str = "dropping duplicate trigger delivery after durable start";
 /// What the line for a delivery whose adoption found the row changed says.
 const ADOPTION_LOST: &str = "the claim it met changed before this daemon could adopt it";
+/// The start of the line for a claim of this daemon's own taken again.
+const RETAKEN: &str = "taking again a trigger claim this daemon holds";
 /// The start of the line for a mark that landed after refusals.
 const MARK_HEALED: &str = "marked trigger durably started after the claim store refused";
 /// The start of the line for a mark the claim store refused every time.
@@ -104,6 +107,11 @@ const RELEASE_FAILED: &str = "failed to release unfinished trigger claim";
 /// The start of the line for a release that found no claim of its own to
 /// give back.
 const RELEASED_NOTHING: &str = "released no trigger claim";
+/// The start of the line for a consume the claim store refused.
+const CONSUME_FAILED: &str = "failed to record a trigger claim consumed";
+/// The start of the line for a consume that found no claim of its own to
+/// record consumed.
+const CONSUMED_NOTHING: &str = "recorded no trigger claim consumed";
 /// The start of the line for a mark that found its claim gone and wrote
 /// one recording the start.
 const CLAIM_WRITTEN: &str =
@@ -276,6 +284,14 @@ enum Script {
     /// run with a transient error before its first WAL write: the claim's
     /// release before the NAK finds no claim of its own to give back.
     FailsBeforeStartWithTheClaimTakenAway,
+    /// Makes the claim store refuse every update of a claim row, then fails
+    /// for good before its first WAL write: the claim's consume before the
+    /// ack is refused.
+    FailsForGoodWithConsumesRefused,
+    /// Names [`ANOTHER_RUN`] on the claim, still `claimed`, then fails for
+    /// good before its first WAL write: the claim's consume before the ack
+    /// finds no claim of its own to record consumed.
+    FailsForGoodWithTheClaimTakenAway,
 }
 
 /// How [`Script::ChangedClaim`] changes the claim before the mark.
@@ -379,6 +395,19 @@ impl Worker for Stub {
                 drop(durable_start);
                 self.ended.notify_one();
                 return Err(ExecutorError::WorkerStore(TRANSIENT_FAILURE.to_string()));
+            }
+            Script::FailsForGoodWithConsumesRefused | Script::FailsForGoodWithTheClaimTakenAway => {
+                if matches!(self.script, Script::FailsForGoodWithConsumesRefused) {
+                    refuse_claim_marks(&self.claim_db, Refusals::Every).await;
+                } else {
+                    change_the_claim(&self.claim_db, ClaimChange::ClaimedByAnother).await;
+                }
+                drop(durable_start);
+                self.ended.notify_one();
+                return Err(ExecutorError::InvocationFailed {
+                    kind: fq_runtime::events::FailureKind::RuntimeError,
+                    message: "simulated failure for good before the first WAL write".to_string(),
+                });
             }
             Script::FailsBeforeStartWithReleasesRefused
             | Script::FailsBeforeStartWithTheClaimTakenAway => {
@@ -1006,6 +1035,65 @@ async fn a_lost_adoption_is_one_warn_line_naming_the_delivery_and_the_claim_it_m
     );
 }
 
+/// **A claim of this daemon's own that no copy is handling and whose run
+/// has nothing on record is taken again with one `warn` line naming the
+/// abandoned invocation** (issues 967 and 1055). The guide tells an
+/// operator to match that invocation to the error line of the failure
+/// before the re-take, so its `abandoned_invocation_id` is what the line is
+/// for. The claim is left `claimed` under this daemon's own claimant, as a
+/// copy whose task died, or whose release or consume failed before an
+/// answer that was then lost, leaves it; the WAL holds nothing for that
+/// run and it has no ownership row. The copy takes the claim again under a
+/// new invocation id and runs the trigger.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_taken_again_is_one_warn_line_naming_the_abandoned_invocation() {
+    let mut daemon = Daemon::new("retaken", Script::Nothing).await;
+    let log = daemon.log;
+    let published = daemon.publish().await;
+    let abandoned = Uuid::now_v7().to_string();
+    assert_eq!(
+        daemon
+            .claims
+            .claim_trigger(daemon.key(published.stream_seq), "binary-1", &abandoned, 0)
+            .await
+            .unwrap(),
+        TriggerClaim::Won,
+        "a copy of this daemon's left the claim"
+    );
+    daemon
+        .worker
+        .wal_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(None));
+    daemon.start("binary-1").await;
+    log.wait_for("for the re-take", |line| {
+        about(line, RETAKEN, &daemon.subject)
+    })
+    .await;
+    daemon.stop().await;
+
+    let lines = log.lines(|line| about(line, RETAKEN, &daemon.subject));
+    assert_eq!(lines.len(), 1, "one line for the re-take: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::WARN, "{line:#?}");
+    assert_eq!(
+        line.field("abandoned_invocation_id"),
+        Some(abandoned.as_str()),
+        "the line names the invocation the claim was abandoned under: {line:#?}"
+    );
+    assert!(
+        line.field("invocation_id")
+            .is_some_and(|retaken| retaken != abandoned),
+        "and the new one it is taken again under: {line:#?}"
+    );
+    assert_eq!(
+        line.field("stream_seq"),
+        Some(published.stream_seq.to_string().as_str()),
+        "{line:#?}"
+    );
+}
+
 /// **A copy of a run whose start is on its claim is one `warn` line, which
 /// names the delivery and the run that started**, and is not reported as
 /// a held copy.
@@ -1555,6 +1643,85 @@ async fn a_release_that_gives_nothing_back_is_one_warn_line_naming_the_invocatio
         "{line:#?}"
     );
     assert!(line.field("claimant").is_some(), "{line:#?}");
+}
+
+/// **A consume the claim store refuses is one `error` line naming the
+/// invocation, and the delivery is still acked** (issue 1055). A run fails
+/// for good before its first WAL write, so its claim is recorded consumed
+/// before the ack; the store refuses the write. The claim stays `claimed`,
+/// so a lost ack on top would let a copy handle the trigger again, which
+/// the line says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_consume_is_one_error_line_naming_the_invocation() {
+    let mut daemon = Daemon::new("consume-refused", Script::FailsForGoodWithConsumesRefused).await;
+    let (_, invocation_id) = daemon.run_one().await;
+    let invocation_id = invocation_id.to_string();
+    let named = |line: &Line| {
+        line.message.contains(CONSUME_FAILED)
+            && line.field("invocation_id") == Some(invocation_id.as_str())
+    };
+    daemon.log.wait_for("for the refused consume", named).await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "the refusal is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert!(line.field("stream_seq").is_some(), "{line:#?}");
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("failed_for_good"),
+        "{line:#?}"
+    );
+    assert!(
+        line.field("error")
+            .is_some_and(|error| error.contains("injected")),
+        "{line:#?}"
+    );
+}
+
+/// **A consume that finds no claim of its own is one `warn` line naming
+/// the invocation and the claim as it stands now** (issue 1055). The claim
+/// names another invocation by the time the run fails for good before its
+/// first WAL write, so the consume before the ack matches nothing; the
+/// delivery is acked all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_consume_that_finds_no_claim_of_its_own_is_one_warn_line_naming_the_invocation() {
+    let mut daemon = Daemon::new(
+        "consume-finds-nothing",
+        Script::FailsForGoodWithTheClaimTakenAway,
+    )
+    .await;
+    let (_, invocation_id) = daemon.run_one().await;
+    let invocation_id = invocation_id.to_string();
+    let named = |line: &Line| {
+        line.message.contains(CONSUMED_NOTHING)
+            && line.field("invocation_id") == Some(invocation_id.as_str())
+    };
+    daemon
+        .log
+        .wait_for("for the consume that found nothing", named)
+        .await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::WARN, "{line:#?}");
+    assert_eq!(
+        line.field("subject"),
+        Some(daemon.subject.as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("failed_for_good"),
+        "{line:#?}"
+    );
+    assert_eq!(line.field("claim_state"), Some("claimed"), "{line:#?}");
+    assert_eq!(
+        line.field("claim_invocation_id"),
+        Some(ANOTHER_RUN),
+        "{line:#?}"
+    );
 }
 
 /// **A healthy start logs no release that gave nothing back** (issue

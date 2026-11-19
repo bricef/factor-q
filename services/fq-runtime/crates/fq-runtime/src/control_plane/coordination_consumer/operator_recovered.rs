@@ -23,10 +23,17 @@ impl CoordinationConsumer {
     ///    outcome, whoever ended it. Either way the request (the drop's
     ///    own time, who asked and why) is recorded beside the outcome,
     ///    the first one only. The row keeps the worker id it names.
-    /// 2. Mark the worker's WAL row finished, when this process hosts
+    /// 2. Record the drop beside the reason of a claim the run consumed
+    ///    (issue 1055): beside a claim that does not record it, the row
+    ///    reads to the watch and requeue as a start. Before step 1 and
+    ///    after, the second time also when the row is left as it is; a
+    ///    claim consumed later records it itself, reading the row. Left
+    ///    open (issue 1113): one consumed between the first record and the
+    ///    row stands beside it without the drop until the second.
+    /// 3. Mark the worker's WAL row finished, when this process hosts
     ///    it, so the run stops and the archive sweeper hands the row off
     ///    with the run's real state.
-    /// 3. **No ack**, and **no archive record**: unlike
+    /// 4. **No ack**, and **no archive record**: unlike
     ///    `invocation.archived`, no worker is waiting to clean up, and the
     ///    archive record comes only from the worker's archive, so an
     ///    empty one cannot shadow the run's real state.
@@ -49,6 +56,13 @@ impl CoordinationConsumer {
             "applying an operator's termination request"
         );
 
+        // Step 2, first: before the row exists to be read as a start. The
+        // drop is dated at its event's own time, as the row's request is.
+        let dropped_at = event.envelope.timestamp.timestamp_millis();
+        self.store
+            .record_trigger_claim_drop(&invocation_id, dropped_at)
+            .await?;
+
         // v1 always emits "failed", and a drop's ending is a failure
         // whatever its phase says. The drop brings its request.
         let request = request_of(event);
@@ -68,6 +82,11 @@ impl CoordinationConsumer {
         {
             return moved.map(|_| ());
         }
+        // Step 2, again: for a claim consumed while the row was written,
+        // or while the store refused its move.
+        self.store
+            .record_trigger_claim_drop(&invocation_id, dropped_at)
+            .await?;
 
         if let Some(worker_store) = &self.worker_store {
             worker_store

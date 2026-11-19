@@ -8,8 +8,9 @@
 //!
 //! 1. **A copy of the trigger is still handling the claim**: waiting in a
 //!    hold or for a worker permit, setting up, marking its start, or
-//!    settling its delivery (giving its claim back, and on a last delivery
-//!    publishing its dead letter, before its NAK or ack). That
+//!    settling its delivery (recording its claim consumed or giving it
+//!    back, and on a last delivery publishing its dead letter, before its
+//!    ack or NAK). That
 //!    copy owns the delivery, and an ack or a NAK from this one would
 //!    settle it underneath, so this copy is dropped unanswered, logged and
 //!    counted (`held_duplicate_dropped`). The holds, the setup, the mark
@@ -25,7 +26,7 @@
 //!    too. The run's mark was refused past its retries and the ack sent in
 //!    its place was lost; or its task died in the very poll that made its
 //!    first WAL write; or an operator dropped it before its first WAL write
-//!    and then both the claim's release and the ack after the drop failed
+//!    and then both the claim's consume and the ack after the drop failed
 //!    to land (a drop is on the ownership table whether or not the run
 //!    started, and is its outcome). The copy is acked and the
 //!    claim marked `durably_started`, as the next start's recovery would
@@ -34,13 +35,14 @@
 //! 3. **No copy is handling it, and nothing is on record**: the copy that
 //!    took it ended before its run's first WAL write and left the delivery
 //!    unsettled, because its task died, or because the claim's release
-//!    before its NAK failed, or was given up on and had not landed
-//!    (`claim::settlement`). A release given up on is not called back, and
-//!    may land after the re-take; it then removes nothing, since a release
-//!    removes the claim only while it still names the invocation giving it
-//!    back (issue 1061). The copy takes the claim again under its own
-//!    invocation id, by a compare-and-set on the abandoned one, to run the
-//!    trigger once. Logged at `warn`, once, and counted
+//!    before its NAK failed, or was given up on and had not landed, or the
+//!    claim's consume before its ack did, and the ack was lost as well
+//!    (`claim::settlement`). A write given up on is not called back, and
+//!    may land after the re-take; it then changes nothing, since a release
+//!    or a consume changes the claim only while it still names the
+//!    invocation answering (issue 1061). The copy takes the claim again
+//!    under its own invocation id, by a compare-and-set on the abandoned
+//!    one, to run the trigger once. Logged at `warn`, once, and counted
 //!    (`abandoned_claim_retaken`), which counts claims taken again, not
 //!    runs: the copy runs the trigger unless a drain stops it, as below, or
 //!    `handle` refuses the trigger after its claim as it would any
@@ -48,12 +50,13 @@
 //!    the next binary is this case too, if a copy reaches this process
 //!    before it exits; that copy then stops at `handle`'s own drain check,
 //!    after the re-take, and leaves the claim to the next binary again.
-//!    So is one double fault: a run that failed for good before its first
-//!    WAL write, whose claim's release before its ack failed, or was given
-//!    up on, and whose ack was lost. Nothing of it is on record, so the
-//!    trigger runs once more, where before every copy was dropped until a
-//!    false
-//!    `trigger_exhausted`.
+//!    So is one double fault: a trigger an answer dealt with without a run
+//!    (a refusal, a requeue from a hold, a run that failed for good before
+//!    its first WAL write), whose claim's consume before its ack failed, or
+//!    was given up on, and whose ack was lost. Nothing of it is on record,
+//!    so the copy handles the trigger once more, where before every copy
+//!    was dropped until a false `trigger_exhausted` (left open, issue 1113:
+//!    only holding the ack on the store would close it).
 //!
 //! **Being handled.** Every copy notes the invocation id it will run under
 //! in [`Handling`] before it writes that id on a claim (a fresh claim, an
@@ -228,8 +231,9 @@ impl TriggerDispatcher {
                      whose run has no start on record, and running the trigger under a new \
                      invocation id: the copy that took it ended before its run's first WAL write \
                      and left the delivery unsettled (its task died; the claim's release before its \
-                     NAK failed or was given up on, or before its ack, which was lost; or a drain or \
-                     a shutdown left it for the next binary)");
+                     NAK failed or was given up on; recording it consumed before its ack failed or \
+                     was given up on, and the ack was lost; or a drain or a shutdown left it for the \
+                     next binary)");
                 self.bus
                     .consumer_ledger()
                     .note_abandoned_claim_retaken(CONSUMER_NAME);

@@ -104,7 +104,7 @@ use crate::bus::{
     EventBus, NATS_DEFAULT_MAX_ACK_PENDING, TRIGGER_MAX_DELIVER, TRIGGER_RETRY_BACKOFF,
     TRIGGER_STREAM_NAME,
 };
-use crate::control_plane::store::ClaimState;
+use crate::control_plane::store::{ClaimState, ConsumedWhy};
 use crate::control_plane::{ControlPlaneStore, OwnerStatus, TriggerClaim};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
@@ -181,6 +181,10 @@ enum Resolve {
     /// first WAL write has landed, and the mark meets a claim that no
     /// longer names the run.
     FireOnAChangedClaim(ClaimChange),
+    /// Change the claim row as the [`ClaimChange`] says, then drop the
+    /// signal unfired: the run returns before its first WAL write, and the
+    /// answer that settles it meets a claim that no longer names the run.
+    DropOnAChangedClaim(ClaimChange),
 }
 
 /// How [`Resolve::FireOnAChangedClaim`] changes the claim before the mark.
@@ -347,6 +351,10 @@ impl Worker for ResolvesThenReturns {
             Resolve::FireOnAChangedClaim(change) => {
                 change_the_claim(&self.claim_db, change).await;
                 durable_start.fire();
+            }
+            Resolve::DropOnAChangedClaim(change) => {
+                change_the_claim(&self.claim_db, change).await;
+                drop(durable_start);
             }
         }
         match self.turn {
@@ -539,9 +547,10 @@ const RELEASE_HELD_FOR: Duration = Duration::from_secs(3);
 /// for the lock fails.
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Watch for the first run's claim release to land, for a held-up
-/// release ([`Pulled::setting_up_with_a_held_release`]): from the first
-/// run's return, read the claim row until it is gone, and note when.
+/// Watch for the first run's claim write to land, for a held-up write
+/// ([`Pulled::setting_up_with_a_held_release`]): from the first run's
+/// return, read the claim until it is no longer `claimed` (gone after a
+/// release, consumed after a consume), and note when.
 async fn watch_the_release(
     claims: &ControlPlaneStore,
     key: crate::control_plane::TriggerKey<'static>,
@@ -648,9 +657,11 @@ impl Pulled {
     /// **The real interleaving.** As the first run returns, a connection of
     /// the test's own takes the claim store's write lock for
     /// [`RELEASE_HELD_FOR`] ([`lock_claim_store`]). The dispatcher's own
-    /// release of the claim (`release_unstarted_claim`, a `DELETE`) waits
-    /// behind it and then lands, and the NAK or ack goes out only after the
-    /// release. Before issue 1057 nothing renewed the delivery while it
+    /// write to the claim waits behind it and then lands, and the NAK or ack
+    /// goes out only after it: its release before a NAK
+    /// (`release_unstarted_claim`, a `DELETE`), or, after a clean return,
+    /// its consume before an ack (`consume_unstarted_claim`, an `UPDATE`,
+    /// issue 1055). Before issue 1057 nothing renewed the delivery while it
     /// waited, so once the ack window lapsed the broker redelivered.
     ///
     /// **The gate, which the daemon does not have.** A copy's claim insert
@@ -658,12 +669,12 @@ impl Pulled {
     /// `DELETE` for it: when the insert won, the copy met the first copy's
     /// claim and was dropped as held, and when the `DELETE` won, it took
     /// the freed claim. So [`Self::handle_beside_copies`] holds a copy that
-    /// arrived after the first run returned until the claim row is gone
-    /// ([`wait_for_the_release`]), and only then hands it to `handle`. The
-    /// daemon hands every copy to `handle` at once; the gate picks one of
-    /// the two outcomes the daemon can reach, the one issue 1057 is about,
-    /// and changes nothing the dispatcher does. A copy that arrives before
-    /// the first run returns is not held.
+    /// arrived after the first run returned until the claim is no longer
+    /// `claimed` ([`wait_for_the_release`]), and only then hands it to
+    /// `handle`. The daemon hands every copy to `handle` at once; the gate
+    /// picks one of the two outcomes the daemon can reach, the one issue
+    /// 1057 is about, and changes nothing the dispatcher does. A copy that
+    /// arrives before the first run returns is not held.
     ///
     /// **Since issue 1057** the delivery is kept alive until its answer, so
     /// no copy arrives while the release is held up and the gate holds
@@ -1313,7 +1324,7 @@ async fn nothing_is_sent_after_the_ack_while_the_run_goes_on() {
 /// the first run's return and prints a timeline with the runs started, so
 /// a failure here says which window it came from. The forced form of the
 /// same order is
-/// [`a_held_up_release_keeps_the_delivery_alive_until_its_answer`].
+/// [`a_held_up_write_keeps_the_delivery_alive_until_its_answer`].
 #[tokio::test]
 async fn a_failure_during_a_long_setup_settles_the_delivery_once() {
     within_the_test_deadline(async {
@@ -1414,14 +1425,17 @@ async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery
     .await;
 }
 
-/// **A run's claim release held up past the ack window keeps its
-/// delivery alive until the delivery is answered, so no copy comes and the
-/// trigger runs once (issue 1057).** Played after a run that fails before
-/// its durable start (NAKed) and after one that returns without starting
-/// (consumed, acked).
+/// **A run's claim write held up past the ack window keeps its delivery
+/// alive until the delivery is answered, so no copy comes and the trigger
+/// runs once (issue 1057).** Played after a run that fails before its
+/// durable start (released, NAKed) and after one that returns without
+/// starting (consumed, acked). That the answer waits for the write is
+/// what pins the consume's order (issue 1055): the write first, then the
+/// ack.
 ///
 /// The run sets up for longer than the ack window, kept alive, and returns
-/// before its first WAL write. Its claim's release is then held up for
+/// before its first WAL write. Its claim's write, a release before the NAK
+/// or a consume before the ack, is then held up for
 /// [`RELEASE_HELD_FOR`], three windows
 /// ([`Pulled::setting_up_with_a_held_release`] says which part of this is
 /// real and what the helper's gate adds). Before issue 1057 nothing renewed
@@ -1431,13 +1445,13 @@ async fn a_drain_during_a_long_setup_stops_the_keepalive_and_leaves_the_delivery
 /// run's return until its answer is published.
 ///
 /// Pinned: one run, asserted first, so that against the old dispatcher it
-/// is this assertion that fails and names the issue; that the release
+/// is this assertion that fails and names the issue; that the write
 /// really was held past the window (else the test shows nothing); that no
 /// copy arrived after the run returned; that in-progress acks reached the
 /// broker during the settlement, never a whole window apart; that the
 /// first copy was answered once and nothing followed; and that the claim
-/// ends released.
-async fn a_held_up_release_keeps_the_delivery_alive_until_its_answer(returns: Returns) {
+/// ends released after the NAK, and consumed after the ack.
+async fn a_held_up_write_keeps_the_delivery_alive_until_its_answer(returns: Returns) {
     let naks = matches!(returns, Returns::TransientError);
     let mut pulled = Pulled::setting_up_with_a_held_release(
         Setup::Takes(LONG_SETUP),
@@ -1461,10 +1475,10 @@ async fn a_held_up_release_keeps_the_delivery_alive_until_its_answer(returns: Re
     let returned = pulled.first_returned_at();
     let landed = pulled
         .release_landed_at()
-        .unwrap_or_else(|| panic!("the held-up release never landed. {timeline}"));
+        .unwrap_or_else(|| panic!("the held-up write never landed. {timeline}"));
     assert!(
         landed - returned > SHORT_ACK_WINDOW,
-        "the release was not held up past the ack window, so this test shows nothing. {timeline}"
+        "the write was not held up past the ack window, so this test shows nothing. {timeline}"
     );
     assert!(
         copies.iter().all(|arrived| *arrived < returned),
@@ -1478,8 +1492,8 @@ async fn a_held_up_release_keeps_the_delivery_alive_until_its_answer(returns: Re
     let sent = answers.sent().await;
     assert!(
         sent.settled_at() - returned > SHORT_ACK_WINDOW,
-        "the first copy was answered before its release, held up for longer than the ack \
-         window, could have landed: the answer did not wait for the release. {timeline}: \
+        "the first copy was answered before its claim's write, held up for longer than the \
+         ack window, could have landed: the answer did not wait for the write. {timeline}: \
          {sent:?}"
     );
     let silence = sent.longest_silence_from(returned);
@@ -1498,24 +1512,30 @@ async fn a_held_up_release_keeps_the_delivery_alive_until_its_answer(returns: Re
         "the first copy was answered once, with a {}, and nothing followed: {sent:?}",
         if naks { "NAK" } else { "ack" }
     );
-    assert_eq!(
-        pulled.probe_claim().await,
-        TriggerClaim::Won,
-        "the claim ends released"
-    );
+    // A NAK gives the claim back; an ack after a return without a start
+    // keeps it, recorded consumed (issue 1055). Either write is the one
+    // held up here.
+    match pulled.probe_claim().await {
+        TriggerClaim::Won => assert!(naks, "the claim ends released only after a NAK"),
+        TriggerClaim::Consumed {
+            why: ConsumedWhy::ReturnedUnstarted,
+            ..
+        } => assert!(!naks, "the claim ends consumed only after an ack"),
+        other => panic!("the claim ends released or consumed: {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn a_held_up_release_after_a_failure_keeps_the_delivery_alive_until_its_nak() {
-    within_the_test_deadline(a_held_up_release_keeps_the_delivery_alive_until_its_answer(
+    within_the_test_deadline(a_held_up_write_keeps_the_delivery_alive_until_its_answer(
         Returns::TransientError,
     ))
     .await;
 }
 
 #[tokio::test]
-async fn a_held_up_release_after_a_clean_return_keeps_the_delivery_alive_until_its_ack() {
-    within_the_test_deadline(a_held_up_release_keeps_the_delivery_alive_until_its_answer(
+async fn a_held_up_consume_after_a_clean_return_keeps_the_delivery_alive_until_its_ack() {
+    within_the_test_deadline(a_held_up_write_keeps_the_delivery_alive_until_its_answer(
         Returns::Completed,
     ))
     .await;
@@ -1573,6 +1593,89 @@ async fn a_release_the_store_refuses_still_naks_the_delivery_and_stops_the_keepa
     .await;
 }
 
+/// **A consume the claim store refuses still acks the delivery, and the
+/// keepalive stops with the ack (issue 1055).** The release's twin above,
+/// for a run that returns cleanly before its first WAL write: its claim is
+/// recorded consumed before the ack, and the store's write lock, held from
+/// the run's return for longer than its busy timeout, makes that write
+/// fail. The delivery is kept in progress the whole time, the ack goes out
+/// after the failure, once, with nothing after it, and the claim is left as
+/// the failed write left it, `claimed` by the dispatcher. No copy comes.
+#[tokio::test]
+async fn a_consume_the_store_refuses_still_acks_the_delivery_and_stops_the_keepalive() {
+    within_the_test_deadline(async {
+        let mut pulled = Pulled::setting_up_with_the_release_held_for(
+            Setup::Instant,
+            Resolve::Drop,
+            Turn::Later,
+            Returns::Completed,
+            STORE_BUSY_TIMEOUT + Duration::from_secs(1),
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        pulled.handle_within(STORE_BUSY_TIMEOUT * 2).await;
+
+        let returned = pulled.first_returned_at();
+        let sent = answers.sent().await;
+        assert!(
+            sent.settled_at() - returned >= STORE_BUSY_TIMEOUT,
+            "the consume did not wait out the store's busy timeout before failing: {sent:?}"
+        );
+        let silence = sent.longest_silence_from(returned);
+        assert!(
+            silence < SHORT_ACK_WINDOW,
+            "the delivery went {silence:?} without an answer while its consume waited and \
+             failed, as long as its ack window: {sent:?}"
+        );
+        assert!(
+            sent.acks == 1 && sent.other.is_empty() && sent.last.as_deref() == Some("ack"),
+            "the delivery was acked once all the same, and nothing followed the ack: {sent:?}"
+        );
+        assert_no_copy_arrives(&mut pulled.messages, SHORT_ACK_WINDOW * 2).await;
+        assert_held_by_the_dispatcher(
+            pulled.probe_claim().await,
+            "the consume failed, so the claim is left `claimed` by the dispatcher",
+        );
+    })
+    .await;
+}
+
+/// **A consume that matches nothing still acks the delivery (issue
+/// 1055).** The run returns cleanly before its first WAL write, and by
+/// then the claim names another run, still `claimed`: the consume before
+/// the ack matches nothing, is logged, and the delivery is acked all the
+/// same, once, with the other run's claim left as it is.
+#[tokio::test]
+async fn a_consume_that_matches_nothing_still_acks_the_delivery() {
+    within_the_test_deadline(async {
+        let pulled = Pulled::setting_up(
+            Setup::Instant,
+            Resolve::DropOnAChangedClaim(ClaimChange::ClaimedByAnother),
+            Turn::Later,
+            Returns::Completed,
+        )
+        .await;
+        let mut answers = pulled.watch_answers().await;
+
+        pulled.handle_within(Duration::from_secs(10)).await;
+
+        let sent = answers.sent().await;
+        assert!(
+            sent.acks == 1 && sent.other.is_empty(),
+            "the delivery was acked once all the same: {sent:?}"
+        );
+        assert!(
+            matches!(
+                pulled.probe_claim().await,
+                TriggerClaim::Held { invocation_id: Some(ref run), .. } if run == ANOTHER_RUN
+            ),
+            "the other run's claim is left as it is"
+        );
+    })
+    .await;
+}
+
 /// **A release that outlasts the settlement's own bound is given up on: the
 /// delivery is answered anyway and the keepalive stops, and the release,
 /// not cancelled, lands later (issue 1057).** The claim store's write lock
@@ -1585,7 +1688,7 @@ async fn a_release_the_store_refuses_still_naks_the_delivery_and_stops_the_keepa
 /// The test's bound, 1.5 seconds, sits under the store's 5-second busy
 /// timeout, so the release is still waiting for the lock when it is given
 /// up on: a state the production bound excludes, since it stays above the
-/// store's own waits (`settlement::RELEASE_BOUND` says why that matters).
+/// store's own waits (`settlement::WRITE_BOUND` says why that matters).
 /// What is pinned here holds wherever the release is stuck: settling stops
 /// waiting at its bound, answers the delivery, stops renewing it, and does
 /// not call the release back.
@@ -2025,7 +2128,8 @@ async fn a_dropped_signal_then_a_transient_error_naks_the_trigger() {
 
 /// The signal is dropped unfired and the invocation then completes:
 /// `handle` must not poll the spent receiver again, and the settlement
-/// after its loop acks the trigger and releases its claim.
+/// after its loop records the claim consumed as returned without a start
+/// and acks the trigger (issue 1055).
 #[tokio::test]
 async fn a_dropped_signal_then_a_clean_return_acks_the_trigger() {
     let mut pulled = Pulled::new(Resolve::Drop, Turn::Later, Returns::Completed).await;
@@ -2034,10 +2138,15 @@ async fn a_dropped_signal_then_a_clean_return_acks_the_trigger() {
 
     assert!(pulled.ran_to_end(), "the invocation ran to its end");
     pulled.wait_until_acked().await;
-    assert_eq!(
-        pulled.probe_claim().await,
-        TriggerClaim::Won,
-        "the ack released the claim, so a fresh claim on the delivery wins"
+    assert!(
+        matches!(
+            pulled.probe_claim().await,
+            TriggerClaim::Consumed {
+                why: ConsumedWhy::ReturnedUnstarted,
+                ..
+            }
+        ),
+        "the ack kept the claim, consumed, so a copy of the delivery meets it"
     );
 }
 

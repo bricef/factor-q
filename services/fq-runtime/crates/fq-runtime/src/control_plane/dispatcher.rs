@@ -71,6 +71,7 @@ use tracing::{debug, error, info, warn};
 use crate::agent::{AgentId, AgentRegistry};
 use crate::bus::{BusError, EventBus, TRIGGER_MAX_DELIVER};
 use crate::control_plane::agent_cap::AgentConcurrency;
+use crate::control_plane::store::ConsumedWhy;
 use crate::hot_swap::HotSwap;
 use crate::llm::{LlmClient, ModelThrottle};
 use crate::trigger::agent_id_from_subject;
@@ -469,10 +470,11 @@ impl TriggerDispatcher {
                 subject = %msg.subject,
                 "trigger with unexpected subject format, dropping"
             );
-            self.ack(
+            self.consume(
                 msg,
                 claim,
                 crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                ConsumedWhy::RefusedSubject,
                 "bad subject",
             )
             .await;
@@ -486,10 +488,11 @@ impl TriggerDispatcher {
                     error = %err,
                     "trigger for invalid agent id, dropping"
                 );
-                self.ack(
+                self.consume(
                     msg,
                     claim,
                     crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    ConsumedWhy::InvalidAgentId,
                     "invalid agent id",
                 )
                 .await;
@@ -545,7 +548,14 @@ impl TriggerDispatcher {
                     agent_id = %agent_id,
                     "trigger for unknown agent, dropping"
                 );
-                self.ack(msg, &claim, header_id, "unknown agent").await;
+                self.consume(
+                    msg,
+                    &claim,
+                    header_id,
+                    ConsumedWhy::UnknownAgent,
+                    "unknown agent",
+                )
+                .await;
                 return;
             }
         };
@@ -3119,8 +3129,12 @@ You are a test agent."#
         }
     }
 
+    /// A requeue from a hold publishes the replacement and records the old
+    /// delivery's claim consumed (issue 1055): a copy of the old sequence
+    /// that comes back meets it and is dropped, rather than winning a fresh
+    /// claim and running the work a second time beside its replacement.
     #[tokio::test]
-    async fn requeue_held_releases_old_stream_sequence_claim() {
+    async fn requeue_held_consumes_old_stream_sequence_claim() {
         let server = crate::test_support::nats::test_nats();
         let bus = EventBus::connect(server.url()).await.unwrap();
         let agent_id_str = unique_agent_id("claim-requeue");
@@ -3180,8 +3194,11 @@ You are a test agent."#
                 .claim_trigger(test_key(&bus, seq), "worker-a", "probe", 1)
                 .await
                 .unwrap(),
-            crate::control_plane::TriggerClaim::Won,
-            "requeue ACK releases the old sequence claim"
+            crate::control_plane::TriggerClaim::Consumed {
+                invocation_id: Some(held.invocation_id.to_string()),
+                why: crate::control_plane::store::ConsumedWhy::RequeuedFromHold,
+            },
+            "requeue ACK consumes the old sequence claim"
         );
     }
 
