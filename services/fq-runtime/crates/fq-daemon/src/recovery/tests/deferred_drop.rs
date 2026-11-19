@@ -684,8 +684,13 @@ async fn a_drop_in_the_instant_a_run_is_put_down_holds_it_too() {
         "nothing drives or lists the run, so a plain drop takes it: {dropped:?}"
     );
     let put_down_at = Instant::now();
-    run.deferrals
-        .defer(invocation_id, capped_agent(), resume_after, slot);
+    run.deferrals.defer(
+        run.admission.workers(),
+        invocation_id,
+        capped_agent(),
+        resume_after,
+        slot,
+    );
     let delay_over = put_down_at + resume_after;
     let given_back = run.slot_given_back(put_down_at, PATIENCE).await;
     tokio::time::sleep_until((delay_over + SETTLE).into()).await;

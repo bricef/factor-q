@@ -112,9 +112,9 @@ struct DropCommandInput {
 /// Every refusal here precedes the arm, so a refused drop stops nothing.
 ///
 /// `queued` is the caller's hold on a run waiting for a worker permit
-/// (#994), if this is one. Held, it cannot start; one whose permit came
-/// just before the hold is starting, and is refused like the live run it
-/// is about to be.
+/// (#994), or deferred for a rate limit, if this is one. Held, it cannot
+/// start; one whose permit came just before the hold is starting, and is
+/// refused like the live run it is about to be.
 fn arm_drop_halt(
     runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
     queued: Option<&fq_runtime::control_plane::dispatcher::QueuedHold>,
@@ -259,8 +259,9 @@ pub fn operator_registry(
          daemon is actively driving unless `live` is set, which halts it at \
          its next step boundary (in-flight tools finish) before the drop. A \
          resume that startup recovery or `invocation.resume` queued for a \
-         worker permit is not being driven: the drop takes it, and by the \
-         time the receipt returns it can no longer start in this daemon.",
+         worker permit is not being driven, nor is an invocation deferred \
+         for a rate limit: the drop takes either, and by the time the \
+         receipt returns it can no longer start in this daemon.",
     );
     registry
         .command::<DropCommandInput, _, _>(decl, move |input: DropCommandInput| {
@@ -270,10 +271,10 @@ pub fn operator_registry(
             let runner = deps.runner.clone();
             let workers = deps.resume.admission.workers().clone();
             async move {
-                // A run queued for a worker permit is not driven, so the
-                // runner cannot halt it and its WAL row turns terminal only
-                // when the drop is folded: held from here to the receipt,
-                // it cannot start meanwhile, and marked dropped, never.
+                // A run queued for a worker permit or deferred for a rate
+                // limit is not driven: held from here to the receipt, it
+                // cannot start; marked dropped, never; and remembered, for
+                // one in the instant of being put down, which nothing holds.
                 let queued = workers.hold_for_drop(&input.invocation_id).await;
                 // Liveness first: a refused drop must leave no trace, so
                 // nothing is published until the halt is armed (or the
@@ -311,6 +312,7 @@ pub fn operator_registry(
                 if let Some(queued) = queued {
                     queued.dropped();
                 }
+                workers.note_dropped(&input.invocation_id);
                 Ok(fq_ops::Receipt {
                     // The drop event, named by the identity `event.get`
                     // takes — the same `event_id` its listing carries,

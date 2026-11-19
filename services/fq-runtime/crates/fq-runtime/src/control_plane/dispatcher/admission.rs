@@ -129,13 +129,23 @@ impl TriggerDispatcher {
     /// alive — its trigger was acked at the first WAL write — so it can
     /// neither jump the triggers already waiting nor be jumped by them. A
     /// drain or shutdown during the wait is logged by the wait itself, by
-    /// invocation id, and leaves the WAL row for the next start.
+    /// invocation id, and leaves the WAL row for the next start. The wait
+    /// and the start are the deferral's own, under the listing it has held
+    /// since it was put down, so an operator's drop during the wait means
+    /// it never starts (issue 1070).
     pub(super) async fn resume_when_permitted(self: Arc<Self>, resume: DueResume) {
-        let waiter = Waiter::Deferred(resume.invocation_id);
-        let Some(_permit) = self.workers.wait(None, waiter).await else {
+        let DueResume {
+            invocation_id,
+            agent_id,
+            deferred_for,
+            slot,
+            deferral,
+        } = resume;
+        let Some(permit) = deferral.permit().await else {
             return;
         };
-        self.resume_deferred(resume).await;
+        self.resume_deferred(invocation_id, agent_id, deferred_for, slot, permit)
+            .await;
     }
 
     /// The trigger's body as JSON, or `None` for one that will never

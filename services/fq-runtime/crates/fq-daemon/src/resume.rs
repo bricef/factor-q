@@ -325,6 +325,7 @@ async fn redrive(
     let runner = control.runner.clone();
     let llm = control.llm.clone();
     let deferrals = control.deferrals.clone();
+    let workers = workers.clone();
     tokio::spawn(async move {
         let agent_slot = agent_slot;
         // `None`, logged by the admission, is a drain or shutdown before
@@ -344,7 +345,7 @@ async fn redrive(
             Ok(fq_runtime::InvocationOutcome::Deferred {
                 invocation_id,
                 resume_after,
-            }) => deferrals.defer(invocation_id, agent_id, resume_after, agent_slot),
+            }) => deferrals.defer(&workers, invocation_id, agent_id, resume_after, agent_slot),
             Ok(_) => {}
             // Ended by some other route while it waited, as recovery's
             // resumes can be: nothing failed, so nothing is an error.

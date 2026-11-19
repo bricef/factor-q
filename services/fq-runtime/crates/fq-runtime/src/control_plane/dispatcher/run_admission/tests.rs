@@ -374,6 +374,127 @@ async fn a_dropped_resume_leaves_the_queue_within_a_tick() {
     drop(running);
 }
 
+/// **A drop and a deferred run's resume cannot interleave either** (issue
+/// 1070). A run deferred for a rate limit is listed from the moment it is
+/// put down. A drop holding it as its delay runs out does not wake it, as
+/// a drop still in progress is not one yet, so the resume is due and its
+/// permit comes; it does not start while the drop holds it, and once the
+/// drop has gone through it never starts.
+#[tokio::test]
+async fn a_deferral_held_by_a_drop_as_its_delay_runs_out_never_starts() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    let deferral = workers
+        .list_deferred(id)
+        .expect("listed when it is put down");
+
+    let hold = workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("a deferred run is there to hold");
+    assert!(!hold.is_starting());
+    assert!(
+        deferral.sleep(Duration::from_millis(50)).await,
+        "the drop has not gone through: the delay runs out"
+    );
+    let resume = tokio::spawn(deferral.permit());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !resume.is_finished(),
+        "its permit is free, but the drop holds it: it must not start yet"
+    );
+    hold.dropped();
+    let permit = tokio::time::timeout(Duration::from_secs(2), resume)
+        .await
+        .expect("the resume's wait ends once the drop has gone through")
+        .expect("the wait's task joins");
+    assert!(permit.is_none(), "a dropped run never starts");
+    assert_eq!(workers.in_flight(), 0, "and its permit went straight back");
+    assert!(
+        workers.hold_for_drop(&id.to_string()).await.is_none(),
+        "nor is it listed any more"
+    );
+}
+
+/// **The other order: the resume starts first.** Its permit came and it
+/// started before a drop could hold it. The drop's hold says so, and the
+/// run is the runner's to stop: a plain drop of it is refused, and `--live`
+/// halts it. A drop cannot un-start it, and while it runs it cannot be put
+/// down a second time beside itself.
+#[tokio::test]
+async fn a_deferral_whose_resume_started_first_is_left_to_the_runner() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    let deferral = workers.list_deferred(id).expect("listed");
+    assert!(deferral.sleep(Duration::from_millis(10)).await);
+    let running = deferral
+        .permit()
+        .await
+        .expect("nothing holds it: it starts");
+
+    let hold = workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("listed while it runs");
+    assert!(
+        hold.is_starting(),
+        "a started run is left to the runner's drop path"
+    );
+    hold.dropped();
+    assert!(
+        workers
+            .hold_for_drop(&id.to_string())
+            .await
+            .expect("still listed")
+            .is_starting(),
+        "a drop cannot un-start it"
+    );
+    assert!(
+        matches!(
+            workers.list_deferred(id),
+            Err(super::NotListed::AlreadyListed)
+        ),
+        "nor can it be put down again while it runs"
+    );
+    drop(running);
+    assert!(
+        workers.list_deferred(id).is_ok(),
+        "once its run has ended, it can be put down again"
+    );
+}
+
+/// **A drop wakes a sleeping deferral at once**, however long its delay:
+/// the sleep ends saying the resume is not due, and the resume never
+/// starts.
+#[tokio::test]
+async fn a_dropped_deferral_wakes_from_its_sleep_at_once() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    let deferral = workers.list_deferred(id).expect("listed");
+    let sleeping = tokio::spawn(async move {
+        let due = deferral.sleep(Duration::from_secs(3_600)).await;
+        (due, deferral)
+    });
+
+    workers
+        .hold_for_drop(&id.to_string())
+        .await
+        .expect("held")
+        .dropped();
+    let (due, deferral) = tokio::time::timeout(Duration::from_secs(2), sleeping)
+        .await
+        .expect("the drop wakes the sleep")
+        .expect("the sleep's task joins");
+    assert!(!due, "a dropped deferral is not due");
+    assert!(
+        deferral.permit().await.is_none(),
+        "and its resume never starts"
+    );
+}
+
 /// A run that puts itself down on its first start, under the id the
 /// dispatcher named, for an hour; a resume of it is counted.
 struct DefersOnStart {
@@ -477,4 +598,67 @@ async fn a_triggers_deferral_is_listed_in_the_permits_the_daemon_shares() {
         "and is never resumed"
     );
     stop(dispatcher.shutdown, dispatcher.run).await;
+}
+
+/// **A drop that held nothing is remembered** (issue 1070): a drop that
+/// went through in the instant before its run was put down for a rate
+/// limit found nothing listed. The deferral that follows is refused, so
+/// the run is never put down; a run of another invocation is not touched.
+#[tokio::test]
+async fn a_deferral_of_a_run_a_drop_went_through_for_is_refused() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    workers.note_dropped(&id.to_string());
+    assert!(
+        matches!(workers.list_deferred(id), Err(super::NotListed::Dropped)),
+        "the dropped run is not put down"
+    );
+    assert!(
+        workers.list_deferred(Uuid::now_v7()).is_ok(),
+        "another run is"
+    );
+    workers.note_dropped("not an id");
+}
+
+/// **A drop noted while its run is listed drops it**, as a held drop
+/// does: a sleeping deferral is woken to end, and its resume never starts.
+#[tokio::test]
+async fn a_drop_noted_while_its_run_sleeps_wakes_it_and_it_never_starts() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    let deferral = workers.list_deferred(id).expect("listed");
+    let sleeping = tokio::spawn(async move {
+        let due = deferral.sleep(Duration::from_secs(3_600)).await;
+        (due, deferral)
+    });
+    workers.note_dropped(&id.to_string());
+    let (due, deferral) = tokio::time::timeout(Duration::from_secs(2), sleeping)
+        .await
+        .expect("the noted drop wakes the sleep")
+        .expect("the sleep's task joins");
+    assert!(!due, "a dropped deferral is not due");
+    assert!(deferral.permit().await.is_none(), "and never starts");
+}
+
+/// **A drop is remembered for an hour, and then forgotten**: the memory
+/// holds at most the last hour's drops. Past it, a deferral of the
+/// invocation is listed again.
+#[tokio::test(start_paused = true)]
+async fn a_drop_is_remembered_for_an_hour_then_forgotten() {
+    let admission = RunAdmission::new(CappedWorker::new(), 1);
+    let workers = Arc::clone(admission.workers());
+    let id = Uuid::now_v7();
+    workers.note_dropped(&id.to_string());
+    tokio::time::advance(super::DROPS_REMEMBERED_FOR - Duration::from_secs(1)).await;
+    assert!(
+        matches!(workers.list_deferred(id), Err(super::NotListed::Dropped)),
+        "still remembered just inside the hour"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        workers.list_deferred(id).is_ok(),
+        "forgotten once the hour is out"
+    );
 }

@@ -52,9 +52,32 @@
 //! ([`Place::permit`]). After the drop's receipt the run cannot start in
 //! this process; if the drop fails, the run is as it was.
 //!
-//! A deferred invocation whose delay has run waits on the same permits,
-//! through `resume_when_permitted`, without being listed: a drop does not
-//! reach it here.
+//! # A drop reaches a deferred run too
+//!
+//! A run deferred for a rate limit (#278) is listed the same way, from the
+//! moment it is put down ([`WorkerPermits::list_deferred`]) until its
+//! resume ends: while it sleeps out its delay, while its resume waits for
+//! a permit in `resume_when_permitted`, and while that resume runs. One
+//! listing across all three, so the delay running out is not a moment a
+//! drop can miss. A drop that goes through wakes the sleeping run at once
+//! ([`Deferral::sleep`]), which then ends there, giving its agent's slot
+//! back at the drop rather than at the end of the delay; a resume already
+//! due leaves the permit queue within a tick, as a queued resume does; and
+//! one whose permit came first is starting, which the drop refuses like a
+//! live run.
+//!
+//! One instant is not covered by a listing: the runner stops driving a
+//! run when it returns `Deferred`, and the run is listed only when that
+//! outcome reaches the deferral queue. A drop in between, a plain one or
+//! a live one whose halt the run never reached a step boundary to see,
+//! finds nothing to hold. So the permits remember every drop that went
+//! through ([`WorkerPermits::note_dropped`]), and a deferral of an
+//! invocation they remember is refused ([`WorkerPermits::list_deferred`]),
+//! under the same lock: the run is never put down, its agent's slot goes
+//! back at once, and nothing resumes it. A drop is remembered for
+//! [`DROPS_REMEMBERED_FOR`], and forgotten the next time a drop is noted or
+//! a deferral listed after that, so the memory holds at most the drops of
+//! the last hour.
 //!
 //! # The agent half
 //!
@@ -72,8 +95,11 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
+use std::time::Duration;
 
-use tokio::sync::{Mutex as TurnLock, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
+
+use tokio::sync::{Mutex as TurnLock, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -123,12 +149,54 @@ pub struct WorkerPermits {
     shut_down: AtomicBool,
     /// Asked whether a drain is under way.
     worker: Arc<dyn Worker>,
-    /// The resumes queued here and not yet started, by invocation id:
-    /// what a drop reaches before they start. See the module doc.
-    queued: Mutex<HashMap<Uuid, Arc<TurnLock<Turn>>>>,
+    /// What a drop reaches here: the runs listed for it, and the drops
+    /// that went through. See the module doc.
+    queued: Mutex<Listings>,
 }
 
-/// How far a queued resume has got, as a drop sees it.
+/// How long the permits remember a drop that went through: the longest a
+/// deferral that follows it can be refused. The instant it covers is the
+/// time between a drop and the run it named returning `Deferred`, which a
+/// live drop of a run inside its model call stretches to the rest of that
+/// call: each attempt can last up to its request timeout (600 s by
+/// default) and the retry layer makes up to four, waiting at most two
+/// minutes between them (`[worker.llm_retry]`). An hour need not outlast
+/// all of that: once the drop's fold has marked the run's row finished,
+/// the runner itself refuses to put the run down (`mark_deferred` writes
+/// only a row still in flight), so the memory covers only the fold's lag,
+/// which is milliseconds.
+pub const DROPS_REMEMBERED_FOR: Duration = Duration::from_secs(3_600);
+
+/// What a drop reaches in [`WorkerPermits`], under one lock.
+#[derive(Default)]
+struct Listings {
+    /// The runs listed for a drop to reach, by invocation id: the resumes
+    /// queued here and the runs deferred for a rate limit, each until its
+    /// run ends.
+    runs: HashMap<Uuid, Listing>,
+    /// The invocations a drop went through for, and when.
+    dropped: HashMap<Uuid, Instant>,
+}
+
+impl Listings {
+    /// Forget every drop older than [`DROPS_REMEMBERED_FOR`].
+    fn forget_old_drops(&mut self, now: Instant) {
+        self.dropped
+            .retain(|_, at| now.duration_since(*at) < DROPS_REMEMBERED_FOR);
+    }
+}
+
+/// Why a run was not listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotListed {
+    /// Another run of the invocation is listed here, queued or running.
+    AlreadyListed,
+    /// A drop of the invocation went through, in the instant before the
+    /// run was put down: it is not.
+    Dropped,
+}
+
+/// How far a listed run has got, as a drop sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Turn {
     Waiting,
@@ -136,6 +204,14 @@ enum Turn {
     Dropped,
     /// Its permit came and it is starting: live in all but name.
     Starting,
+}
+
+/// One run's listing: the lock a drop and the run's start both take, and
+/// the wake a drop that goes through gives a run asleep on its deferral.
+#[derive(Clone)]
+struct Listing {
+    turn: Arc<TurnLock<Turn>>,
+    dropped: Arc<Notify>,
 }
 
 impl WorkerPermits {
@@ -147,32 +223,72 @@ impl WorkerPermits {
             max_concurrent,
             shut_down: AtomicBool::new(false),
             worker,
-            queued: Mutex::new(HashMap::new()),
+            queued: Mutex::new(Listings::default()),
         })
     }
 
-    fn queued(&self) -> MutexGuard<'_, HashMap<Uuid, Arc<TurnLock<Turn>>>> {
+    fn queued(&self) -> MutexGuard<'_, Listings> {
         self.queued
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Hold the queued resume of `invocation_id`, if there is one, for a
-    /// drop: until the hold is released the run cannot start, and
-    /// [`QueuedHold::dropped`] makes sure it never does. `None` when no run
-    /// of that id is queued here, which includes an id that does not parse.
+    /// Hold the listed run of `invocation_id`, a queued resume or a
+    /// deferred run, if there is one, for a drop: until the hold is
+    /// released the run cannot start, and [`QueuedHold::dropped`] makes
+    /// sure it never does. `None` when no run of that id is listed here,
+    /// which includes an id that does not parse.
     pub async fn hold_for_drop(&self, invocation_id: &str) -> Option<QueuedHold> {
         let id = Uuid::parse_str(invocation_id).ok()?;
-        let turn = self.queued().get(&id).cloned()?;
-        Some(QueuedHold(turn.lock_owned().await))
+        let listing = self.queued().runs.get(&id).cloned()?;
+        Some(QueuedHold {
+            turn: listing.turn.lock_owned().await,
+            dropped: listing.dropped,
+        })
     }
 
-    /// Whether a drop has gone through for the queued resume of `id`. A
-    /// drop still in progress holds the lock, and is not one yet.
+    /// List `invocation_id`, which a rate limit has just deferred, for a
+    /// drop to reach from now until its resume ends. Refused when the
+    /// invocation is already listed here, queued or running, since a
+    /// deferral of it is then a second run of one invocation; and when a
+    /// drop of it went through, in the instant before the run was put down
+    /// ([`Self::note_dropped`]). Either way the run is not put down.
+    pub fn list_deferred(self: &Arc<Self>, invocation_id: Uuid) -> Result<Deferral, NotListed> {
+        // A deferred waiter is a resume, which `enter` always lists.
+        QueuedEntry::enter(self, Waiter::Deferred(invocation_id))?
+            .map(Deferral)
+            .ok_or(NotListed::AlreadyListed)
+    }
+
+    /// Remember that a drop of `invocation_id` went through: its receipt
+    /// is on its way to the operator. A deferral of it is refused from now
+    /// on, for [`DROPS_REMEMBERED_FOR`], and a run of it listed here and
+    /// still waiting is dropped, as [`QueuedHold::dropped`] drops one, a
+    /// sleeping deferral woken to end. Nothing when the id does not parse.
+    pub fn note_dropped(&self, invocation_id: &str) {
+        let Ok(id) = Uuid::parse_str(invocation_id) else {
+            return;
+        };
+        let now = Instant::now();
+        let mut listings = self.queued();
+        listings.forget_old_drops(now);
+        listings.dropped.insert(id, now);
+        if let Some(listing) = listings.runs.get(&id)
+            && let Ok(mut turn) = listing.turn.try_lock()
+            && *turn == Turn::Waiting
+        {
+            *turn = Turn::Dropped;
+            listing.dropped.notify_one();
+        }
+    }
+
+    /// Whether a drop has gone through for the listed run of `id`. A drop
+    /// still in progress holds the lock, and is not one yet.
     fn is_dropped(&self, id: Uuid) -> bool {
         self.queued()
+            .runs
             .get(&id)
-            .is_some_and(|turn| turn.try_lock().is_ok_and(|t| *t == Turn::Dropped))
+            .is_some_and(|listing| listing.turn.try_lock().is_ok_and(|t| *t == Turn::Dropped))
     }
 
     /// How many invocations may run at once.
@@ -358,16 +474,59 @@ impl Place {
             Wait::Later(wait) => wait.await?,
             Wait::Never | Wait::AlreadyListed => return None,
         };
-        if let Some(entry) = &entry
-            && !entry.start().await
-        {
-            entry.waiter.log_dropped();
-            return None;
+        start_on(permit, entry).await
+    }
+}
+
+/// Start a run on `permit`, under the lock a drop holds if it is listed:
+/// `None`, the permit going straight back, when a drop has gone through
+/// for it.
+async fn start_on(permit: OwnedSemaphorePermit, entry: Option<QueuedEntry>) -> Option<RunPermit> {
+    if let Some(entry) = &entry
+        && !entry.start().await
+    {
+        entry.waiter.log_dropped();
+        return None;
+    }
+    Some(RunPermit {
+        _permit: permit,
+        _entry: entry,
+    })
+}
+
+/// A run deferred for a rate limit, listed for a drop to reach
+/// ([`WorkerPermits::list_deferred`]): carried by the deferral queue while
+/// the run sleeps and by its resume while that waits for a permit, then
+/// held by the [`RunPermit`] the resume runs under, until the run ends.
+pub struct Deferral(QueuedEntry);
+
+impl Deferral {
+    /// Sleep out `delay`, unless a drop of the run goes through first.
+    /// `true` is the delay run out: the resume is due. `false` is the drop,
+    /// which wakes the run at once, so that what the sleeper holds, its
+    /// agent's slot among it, is given back at the drop rather than at the
+    /// end of the delay.
+    pub(crate) async fn sleep(&self, delay: Duration) -> bool {
+        tokio::select! {
+            biased;
+            () = self.0.listing.dropped.notified() => false,
+            () = tokio::time::sleep(delay) => true,
         }
-        Some(RunPermit {
-            _permit: permit,
-            _entry: entry,
-        })
+    }
+
+    /// The permit, once the resume's turn comes, from the permits the run
+    /// was listed in. `None` if a drain or a shutdown comes first, or a
+    /// drop, as for a queued resume ([`Place::permit`]).
+    pub(super) async fn permit(self) -> Option<RunPermit> {
+        let Deferral(entry) = self;
+        let permit = entry.permits.wait(None, entry.waiter).await?;
+        start_on(permit, Some(entry)).await
+    }
+}
+
+impl fmt::Debug for Deferral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Deferral").field(&self.0.id).finish()
     }
 }
 
@@ -388,62 +547,77 @@ pub struct RunPermit {
     _entry: Option<QueuedEntry>,
 }
 
-/// A drop's hold on a queued resume ([`WorkerPermits::hold_for_drop`]).
-/// Released without [`Self::dropped`] — the drop failed — the run is as it
-/// was.
-pub struct QueuedHold(OwnedMutexGuard<Turn>);
+/// A drop's hold on a listed run, a queued resume or a deferred run
+/// ([`WorkerPermits::hold_for_drop`]). Released without [`Self::dropped`]
+/// — the drop failed — the run is as it was.
+pub struct QueuedHold {
+    turn: OwnedMutexGuard<Turn>,
+    dropped: Arc<Notify>,
+}
 
 impl QueuedHold {
     /// Whether the run's permit came and it is starting: as live as a
     /// running one, which a drop takes through the runner, not here.
     pub fn is_starting(&self) -> bool {
-        *self.0 == Turn::Starting
+        *self.turn == Turn::Starting
     }
 
-    /// The drop went through: the run never starts in this process.
+    /// The drop went through: the run never starts in this process, and a
+    /// deferred run asleep on its delay is woken to end now.
     pub fn dropped(mut self) {
-        if *self.0 == Turn::Waiting {
-            *self.0 = Turn::Dropped;
+        if *self.turn == Turn::Waiting {
+            *self.turn = Turn::Dropped;
+            self.dropped.notify_one();
         }
     }
 }
 
-/// A resume's listing in [`WorkerPermits`]'s queued set, removed when it
-/// is dropped — once its run has ended, or it never started.
+/// A run's listing in [`WorkerPermits`]'s queued set, removed when it is
+/// dropped — once its run has ended, or it never started.
 struct QueuedEntry {
     permits: Arc<WorkerPermits>,
     waiter: Waiter,
     id: Uuid,
-    turn: Arc<TurnLock<Turn>>,
+    listing: Listing,
 }
 
 impl QueuedEntry {
     /// List a resume; a trigger has nothing for a drop to reach here. `Err`
     /// is an invocation already listed: two runs of one invocation would
     /// share one listing, and a drop would hold only one of them.
-    fn enter(permits: &Arc<WorkerPermits>, waiter: Waiter) -> Result<Option<Self>, ()> {
+    fn enter(permits: &Arc<WorkerPermits>, waiter: Waiter) -> Result<Option<Self>, NotListed> {
         let Some((id, _)) = waiter.resume() else {
             return Ok(None);
         };
-        let turn = Arc::new(TurnLock::new(Turn::Waiting));
-        match permits.queued().entry(id) {
-            std::collections::hash_map::Entry::Occupied(_) => return Err(()),
-            std::collections::hash_map::Entry::Vacant(listing) => {
-                listing.insert(Arc::clone(&turn));
+        let listing = Listing {
+            turn: Arc::new(TurnLock::new(Turn::Waiting)),
+            dropped: Arc::new(Notify::new()),
+        };
+        let mut listings = permits.queued();
+        if let Waiter::Deferred(_) = waiter {
+            listings.forget_old_drops(Instant::now());
+            if listings.dropped.contains_key(&id) {
+                return Err(NotListed::Dropped);
+            }
+        }
+        match listings.runs.entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => return Err(NotListed::AlreadyListed),
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(listing.clone());
             }
         }
         Ok(Some(Self {
             permits: Arc::clone(permits),
             waiter,
             id,
-            turn,
+            listing,
         }))
     }
 
     /// Start, unless a drop has gone through: under the lock a drop holds
     /// while it publishes, so the two cannot interleave.
     async fn start(&self) -> bool {
-        let mut turn = self.turn.lock().await;
+        let mut turn = self.listing.turn.lock().await;
         if *turn == Turn::Dropped {
             return false;
         }
@@ -456,10 +630,11 @@ impl Drop for QueuedEntry {
     fn drop(&mut self) {
         let mut queued = self.permits.queued();
         if queued
+            .runs
             .get(&self.id)
-            .is_some_and(|turn| Arc::ptr_eq(turn, &self.turn))
+            .is_some_and(|listing| Arc::ptr_eq(&listing.turn, &self.listing.turn))
         {
-            queued.remove(&self.id);
+            queued.runs.remove(&self.id);
         }
     }
 }
@@ -469,7 +644,8 @@ impl Drop for QueuedEntry {
 pub enum Waiter {
     /// A pulled trigger, by the id its publisher stamped, if any.
     Trigger(Option<Uuid>),
-    /// A deferred invocation whose delay has run (#278).
+    /// A run deferred for a rate limit (#278): listed from the deferral,
+    /// and waiting for a permit once its delay has run.
     Deferred(Uuid),
     /// An invocation startup recovery found in flight.
     Recovered(Uuid),

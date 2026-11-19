@@ -57,7 +57,10 @@ mod run_admission;
 
 pub use claim::TriggerClaims;
 pub use exhaustion::{ClaimMark, Exhausted, ExhaustionCheck};
-pub use run_admission::{Place, QueuedHold, RunAdmission, RunPermit, Waiter, WorkerPermits};
+pub use run_admission::{
+    DROPS_REMEMBERED_FOR, Deferral, NotListed, Place, QueuedHold, RunAdmission, RunPermit, Waiter,
+    WorkerPermits,
+};
 use std::sync::Arc;
 
 use futures::StreamExt;
