@@ -689,6 +689,8 @@ mod ambiguous_tests;
 mod archive_none_tests;
 #[cfg(test)]
 mod drop_record_tests;
+#[cfg(test)]
+mod termination_record_tests;
 
 #[cfg(test)]
 mod outcome_tests;
@@ -946,10 +948,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handler_operator_recovered_writes_archive_and_updates_owner() {
+    async fn handler_operator_recovered_writes_no_archive_and_ends_the_owner() {
         // Operator-issued drop: no live worker involvement.
-        // Handler writes the archive row, flips the owner row
-        // to Failed, and does not publish an ack.
+        // Handler writes no archive row (the worker's archive brings
+        // the run's state), ends the owner row Failed by the drop,
+        // marks the WAL row finished, and does not publish an ack.
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
 
@@ -1045,23 +1048,22 @@ mod tests {
             .await
             .expect("handler succeeds");
 
-        // Archive row exists.
-        let archive = store
-            .get_archive(&inv_str)
-            .await
-            .unwrap()
-            .expect("archive row");
-        assert_eq!(archive.agent_id, agent_id.as_str());
-        assert_eq!(archive.final_phase, "failed");
-        assert!(archive.final_state_blob.is_empty());
+        // No archive row: the drop writes none.
+        assert!(store.get_archive(&inv_str).await.unwrap().is_none());
 
-        // Owner row flipped to Failed, worker_id preserved.
+        // Owner row ended Failed by the drop, its archive pending,
+        // worker_id preserved.
         let owner = store
             .get_invocation_owner(&inv_str)
             .await
             .unwrap()
             .expect("owner row");
         assert_eq!(owner.status, OwnerStatus::Failed);
+        assert_eq!(owner.archive_state, ArchiveState::Pending);
+        assert_eq!(
+            owner.ended_by,
+            Some(crate::control_plane::store::EndedBy::Drop)
+        );
         assert_eq!(owner.worker_id, worker_id.as_str());
 
         let worker_state = worker_store
@@ -1141,20 +1143,20 @@ mod tests {
             .handle_invocation_operator_recovered(&event, &payload)
             .await
             .expect("first apply");
-        let first = store.get_archive(&inv_str).await.unwrap().unwrap();
+        let first = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
 
         consumer
             .handle_invocation_operator_recovered(&event, &payload)
             .await
-            .expect("redelivery is a no-op for the archive insert");
-        let second = store.get_archive(&inv_str).await.unwrap().unwrap();
+            .expect("redelivery is a duplicate");
+        let second = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
         assert_eq!(
-            first.archived_at, second.archived_at,
-            "redelivery preserves the first archived_at"
+            first, second,
+            "redelivery leaves the row as the first wrote it"
         );
-
-        let owner = store.get_invocation_owner(&inv_str).await.unwrap().unwrap();
-        assert_eq!(owner.status, OwnerStatus::Failed);
+        assert_eq!(first.status, OwnerStatus::Failed);
+        assert!(first.termination.is_some(), "the request is on record");
+        assert!(store.get_archive(&inv_str).await.unwrap().is_none());
     }
 
     #[tokio::test]

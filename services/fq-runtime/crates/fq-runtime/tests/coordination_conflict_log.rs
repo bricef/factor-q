@@ -1,9 +1,9 @@
 //! The level the coordination consumer logs a conflicting ending at
 //! (issue 1070): an ending that contradicts the one a run's ownership row
-//! records is refused and logged, at warn on a row an operator's drop
-//! leaves, `failed` with its archive written or none to come, where the
-//! drop most likely came first, and at error anywhere else, where the run
-//! published two endings.
+//! records is refused and logged, at error when the run published two
+//! endings, and at warn only where the row cannot say, a `failed` row
+//! archived with no ender on record, as a drop from before the termination
+//! record left it.
 //!
 //! **A binary of its own,** as `coordination_refused_write_log.rs` is: a
 //! captured subscriber has to be the process-global one, since tracing
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use fq_runtime::control_plane::{ControlPlaneStore, CoordinationConsumer};
 use fq_runtime::events::{
-    CompletedPayload, DropArchive, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
+    CompletedPayload, Event, EventPayload, FailedPayload, FailureKind, FailurePhase,
     InvocationArchivedPayload, InvocationOperatorRecoveredPayload, InvocationTotals,
 };
 use fq_runtime::worker::WorkerId;
@@ -27,12 +27,13 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use uuid::Uuid;
 
-/// The start of the warn line for a conflict on a row a drop left.
-const A_DROPS_ROW: &str =
-    "an ending reached a run recorded failed with its archive written or none";
+/// The start of the warn line for a conflict on a row that records no
+/// ender.
+const NO_ENDER: &str = "an ending reached a run recorded failed and archived with no ender";
 /// The start of the error line for two endings of one run.
 const TWO_ENDINGS: &str = "two endings published for one run";
-/// The start of every conflict line, whatever its level.
+/// The start of every conflict line, whatever its level, before and after
+/// this change.
 const ANY_CONFLICT: [&str; 2] = ["an ending reached a run recorded failed", TWO_ENDINGS];
 
 /// One event logged at `info` or above: its level, message and fields.
@@ -137,45 +138,58 @@ fn failed() -> EventPayload {
     })
 }
 
-fn archived_completed() -> EventPayload {
+fn archived_failed() -> EventPayload {
     EventPayload::InvocationArchived(InvocationArchivedPayload {
         worker_id: WorkerId::new("conflict-worker".to_string()).unwrap(),
-        final_phase: "completed".to_string(),
+        final_phase: "failed".to_string(),
         final_state_blob: b"{\"state\":1}".to_vec(),
         started_at_ms: 1_000,
         terminal_at_ms: 2_000,
     })
 }
 
-fn dropped_with_none_to_come() -> EventPayload {
+fn dropped() -> EventPayload {
     EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
         action: "drop".to_string(),
         final_phase: "failed".to_string(),
         reason: None,
         requested_by: Some("on-call".to_string()),
-        archive: Some(DropArchive::WillNotCome),
+        archive: None,
     })
 }
 
-/// **A conflicting ending is a warn on a row a drop left, and an error
-/// anywhere else.** Two runs:
+/// **A conflicting ending is an error where the row says who ended the
+/// run, and a warn only where it cannot.** Five runs, each then reached by
+/// an ending its row contradicts:
 ///
-/// - one a drop saying no archive will come left `failed` with none to
-///   come, then reached by an archive saying `completed`: warn, since the
-///   drop most likely came first;
-/// - one that completed, then reached by a `failed`: error, the run
-///   published two endings.
+/// - one a drop from before the termination record left `failed`,
+///   archived, with no ender, then a `completed`: warn, since the drop may
+///   have come first;
+/// - one that failed by itself and was archived, then a `completed`:
+///   error, the run published two endings (a warn before the record, which
+///   could not tell this row from a drop's);
+/// - one a drop ended, archived `failed`, then a `completed`: error, since
+///   the drop's ending is final and a run whose drop's mark won publishes
+///   no ending of its own;
+/// - two more rows from before the record, with no ender, that no drop
+///   left, since a drop archived what it ended: one `failed` with its
+///   archive pending, then a `completed`, and one `completed` and
+///   archived, then a `failed`. Each is an error. The warn is for a row
+///   `failed` and archived together, not for a `failed` row nor for an
+///   archived one alone.
 #[tokio::test]
-async fn a_conflicting_ending_is_a_warn_on_a_row_a_drop_left_and_an_error_elsewhere() {
+async fn a_conflicting_ending_is_an_error_unless_the_row_names_no_ender() {
     let log = Log::installed();
     let server = fq_test_support::NatsServer::start();
     let bus = EventBus::connect(server.url()).await.expect("connect NATS");
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        ControlPlaneStore::open(&dir.path().join("control-plane.db"))
-            .await
-            .unwrap(),
-    );
+    let path = dir.path().join("control-plane.db");
+    let store = Arc::new(ControlPlaneStore::open(&path).await.unwrap());
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
 
     let agent = AgentId::new(format!("conflict-{}", Uuid::now_v7().simple())).unwrap();
     let consumer_name = format!("conflict-log-{}", Uuid::now_v7().simple());
@@ -202,8 +216,39 @@ async fn a_conflicting_ending_is_a_warn_on_a_row_a_drop_left_and_an_error_elsewh
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let none_to_come = Uuid::now_v7();
-    let two_endings = Uuid::now_v7();
+    // A drop from before the termination record: `failed`, archived, and
+    // no ender, written as that build left it.
+    let old_drop = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+             (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES (?, 'old-worker', 1000, 'failed', 'archived')",
+    )
+    .bind(old_drop.to_string())
+    .execute(&raw)
+    .await
+    .unwrap();
+    // Two more from before the record, with no ender, that no drop left.
+    let failed_pending = Uuid::now_v7();
+    let completed_archived = Uuid::now_v7();
+    for (run, status, archive) in [
+        (failed_pending, "failed", "pending"),
+        (completed_archived, "completed", "archived"),
+    ] {
+        sqlx::query(
+            "INSERT INTO coordination_invocation_owner \
+                 (invocation_id, worker_id, assigned_at, status, archive_state) \
+             VALUES (?, 'old-worker', 1000, ?, ?)",
+        )
+        .bind(run.to_string())
+        .bind(status)
+        .bind(archive)
+        .execute(&raw)
+        .await
+        .unwrap();
+    }
+    let own_failure = Uuid::now_v7();
+    let drop_final = Uuid::now_v7();
     let publish = |invocation_id: Uuid, payload: EventPayload| {
         let bus = bus.clone();
         let agent = agent.clone();
@@ -213,12 +258,23 @@ async fn a_conflicting_ending_is_a_warn_on_a_row_a_drop_left_and_an_error_elsewh
                 .expect("publish");
         }
     };
-    publish(none_to_come, dropped_with_none_to_come()).await;
-    publish(none_to_come, archived_completed()).await;
-    publish(two_endings, completed()).await;
-    publish(two_endings, failed()).await;
+    publish(old_drop, completed()).await;
+    publish(own_failure, failed()).await;
+    publish(own_failure, archived_failed()).await;
+    publish(own_failure, completed()).await;
+    publish(drop_final, dropped()).await;
+    publish(drop_final, archived_failed()).await;
+    publish(drop_final, completed()).await;
+    publish(failed_pending, completed()).await;
+    publish(completed_archived, failed()).await;
 
-    let runs = [none_to_come, two_endings];
+    let runs = [
+        old_drop,
+        own_failure,
+        drop_final,
+        failed_pending,
+        completed_archived,
+    ];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while runs.iter().any(|run| log.conflicts(*run).is_empty()) {
         assert!(
@@ -235,7 +291,7 @@ async fn a_conflicting_ending_is_a_warn_on_a_row_a_drop_left_and_an_error_elsewh
         log.conflicts(run)
             .iter()
             .map(|line| {
-                let start = [A_DROPS_ROW, TWO_ENDINGS]
+                let start = [NO_ENDER, TWO_ENDINGS]
                     .into_iter()
                     .find(|start| line.message.starts_with(start))
                     .unwrap_or(line.message.as_str())
@@ -248,22 +304,46 @@ async fn a_conflicting_ending_is_a_warn_on_a_row_a_drop_left_and_an_error_elsewh
             })
             .collect::<Vec<_>>()
     };
+    let completed = Some("completed".to_string());
     assert_eq!(
-        logged(none_to_come),
+        logged(old_drop),
         [(
             tracing::Level::WARN,
-            A_DROPS_ROW.to_string(),
-            Some("completed".to_string())
+            NO_ENDER.to_string(),
+            completed.clone()
         )],
-        "a row a drop left with no archive to come, reached by an archive saying completed"
+        "a row a drop from before the record left, with no ender on record"
     );
     assert_eq!(
-        logged(two_endings),
+        logged(own_failure),
+        [(
+            tracing::Level::ERROR,
+            TWO_ENDINGS.to_string(),
+            completed.clone()
+        )],
+        "a run's own failure, archived, then its completed: two endings"
+    );
+    assert_eq!(
+        logged(drop_final),
+        [(
+            tracing::Level::ERROR,
+            TWO_ENDINGS.to_string(),
+            completed.clone()
+        )],
+        "a drop's ending made final by its archive, then a completed"
+    );
+    assert_eq!(
+        logged(failed_pending),
+        [(tracing::Level::ERROR, TWO_ENDINGS.to_string(), completed)],
+        "a failed row with no ender whose archive is pending, then a completed"
+    );
+    assert_eq!(
+        logged(completed_archived),
         [(
             tracing::Level::ERROR,
             TWO_ENDINGS.to_string(),
             Some("failed".to_string())
         )],
-        "a completed run, then its failed: two endings"
+        "a completed, archived row with no ender, then a failed"
     );
 }

@@ -5,10 +5,11 @@
 //! record. Folded on a run that has not ended, such a drop leaves the
 //! ownership row `failed` with its archive `none`, and writes no archive
 //! record: none will come, and an empty one would claim the run's state
-//! was archived. A finished row, and a drop that does not say `none`, are
-//! folded as before. And `none` is not final: an archive that arrives is
-//! recorded like any other, and the run's own ending replaces the drop's,
-//! its archive pending.
+//! was archived. A finished row keeps its ending, and a drop that does not
+//! say `none` leaves the archive pending; no drop writes an archive record
+//! (`termination_record_tests.rs`). And `none` is not final: an archive
+//! that arrives is recorded like any other, and the run's own ending, or
+//! an archive saying `completed`, replaces the drop's.
 //!
 //! Rows are read with SQL, as the store holds them, and the drop's payload
 //! carries the field as the daemon writes it.
@@ -181,19 +182,29 @@ async fn a_drop_saying_none_of_a_run_not_ended_leaves_failed_none_and_no_record(
     }
 }
 
-/// **A drop of a finished run, or one not saying `none`, is folded as
-/// before:** `failed`, its archive written, with the drop's empty record.
+/// **A drop of a finished run, or one not saying `none`, writes no archive
+/// record:** a finished run keeps its ending and its archive state, and a
+/// run that had not ended reads `failed` with its archive pending, for the
+/// worker's archive to come.
 #[tokio::test]
-async fn a_drop_of_a_finished_run_or_not_saying_none_is_folded_as_before() {
+async fn a_drop_of_a_finished_run_or_not_saying_none_writes_no_record() {
     let cases = [
-        (Some(OwnerStatus::Completed), Some(DropArchive::WillNotCome)),
-        (Some(OwnerStatus::Failed), Some(DropArchive::WillNotCome)),
-        (None, Some(DropArchive::Pending)),
-        (None, None),
-        (None, Some(DropArchive::Unknown)),
-        (Some(OwnerStatus::InFlight), None),
+        (
+            Some(OwnerStatus::Completed),
+            Some(DropArchive::WillNotCome),
+            pair("completed", "archived"),
+        ),
+        (
+            Some(OwnerStatus::Failed),
+            Some(DropArchive::WillNotCome),
+            pair("failed", "archived"),
+        ),
+        (None, Some(DropArchive::Pending), pair("failed", "pending")),
+        (None, None, pair("failed", "pending")),
+        (None, Some(DropArchive::Unknown), pair("failed", "pending")),
+        (Some(OwnerStatus::InFlight), None, pair("failed", "pending")),
     ];
-    for (seed, archive) in cases {
+    for (seed, archive, expected) in cases {
         let fixture = Fixture::new().await;
         if let Some(status) = seed {
             fixture.seeded(status).await;
@@ -201,11 +212,8 @@ async fn a_drop_of_a_finished_run_or_not_saying_none_is_folded_as_before() {
         fixture.dropped(archive).await;
         assert_eq!(
             (fixture.row().await, fixture.record().await),
-            (
-                pair("failed", "archived"),
-                Some(("failed".to_string(), Vec::new()))
-            ),
-            "from {seed:?}, archive {archive:?}: folded as before"
+            (expected, None),
+            "from {seed:?}, archive {archive:?}"
         );
     }
 }
@@ -224,9 +232,9 @@ async fn a_second_drop_saying_none_changes_nothing() {
 }
 
 /// **`none` is not final: an archive that arrives is recorded like any
-/// other.** Saying `failed`, the row becomes `failed`, archived; saying
-/// `completed`, it keeps the drop's ending, as a `failed` row awaiting its
-/// archive does, and the archive is recorded.
+/// other.** Saying `failed`, the row becomes `failed`, archived, the drop's
+/// ending made final; saying `completed`, the run reached its own ending,
+/// which replaces the drop's provisional one. The archive is recorded.
 #[tokio::test]
 async fn an_archive_after_a_drop_saying_none_is_recorded_like_any_other() {
     for final_phase in ["failed", "completed"] {
@@ -236,7 +244,7 @@ async fn an_archive_after_a_drop_saying_none_is_recorded_like_any_other() {
         assert_eq!(
             (fixture.row().await, fixture.record().await),
             (
-                pair("failed", "archived"),
+                pair(final_phase, "archived"),
                 Some((final_phase.to_string(), b"{\"state\":1}".to_vec()))
             ),
             "an archive saying {final_phase} reached a row the drop left with no archive coming"
@@ -267,13 +275,11 @@ async fn the_runs_own_ending_after_a_drop_saying_none_replaces_it() {
     );
 }
 
-/// **A drop saying `none` of a row this build cannot read still writes its
-/// record**, as any drop of such a row does: the move first meets the row
-/// it cannot read, which is left as it is, and the drop's record is then
-/// written, with the drop's time as the run's start. The event is refused
-/// as permanent.
+/// **A drop saying `none` of a row this build cannot read leaves it as it
+/// is, and writes no record**, as no drop writes one (issue 1070). The
+/// event is refused as permanent.
 #[tokio::test]
-async fn a_drop_saying_none_of_a_row_this_build_cannot_read_still_writes_its_record() {
+async fn a_drop_saying_none_of_a_row_this_build_cannot_read_writes_no_record() {
     let fixture = Fixture::new().await;
     fixture.seeded(OwnerStatus::InFlight).await;
     sqlx::query("UPDATE coordination_invocation_owner SET status = 'weird'")
@@ -300,20 +306,16 @@ async fn a_drop_saying_none_of_a_row_this_build_cannot_read_still_writes_its_rec
     );
     assert_eq!(
         (fixture.row().await, fixture.record().await),
-        (
-            pair("weird", "not_due"),
-            Some(("failed".to_string(), Vec::new()))
-        ),
-        "the row is left as it is, and the drop's record is written"
+        (pair("weird", "not_due"), None),
+        "the row is left as it is, and no record is written"
     );
 }
 
-/// **A drop saying `none` whose move the store refuses still writes its
-/// record**, as for a row this build cannot read: the row is left as it
-/// is, in flight, and the drop's record is what then says the run ended.
-/// The event is refused as permanent.
+/// **A drop saying `none` whose move the store refuses leaves the row as
+/// it is, and writes no record**, as no drop writes one (issue 1070). The
+/// event is refused as permanent.
 #[tokio::test]
-async fn a_drop_saying_none_whose_move_is_refused_still_writes_its_record() {
+async fn a_drop_saying_none_whose_move_is_refused_writes_no_record() {
     let fixture = Fixture::new().await;
     fixture.seeded(OwnerStatus::InFlight).await;
     sqlx::query(
@@ -343,10 +345,7 @@ async fn a_drop_saying_none_whose_move_is_refused_still_writes_its_record() {
     );
     assert_eq!(
         (fixture.row().await, fixture.record().await),
-        (
-            pair("in_flight", "not_due"),
-            Some(("failed".to_string(), Vec::new()))
-        ),
-        "the row is left as it is, and the drop's record is written"
+        (pair("in_flight", "not_due"), None),
+        "the row is left as it is, and no record is written"
     );
 }

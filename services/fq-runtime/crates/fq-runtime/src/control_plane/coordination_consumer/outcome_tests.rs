@@ -250,23 +250,25 @@ async fn an_archive_contradicting_the_recorded_ending_keeps_it() {
     assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
 }
 
-/// An ending published after an operator's drop does not undo the drop.
+/// The run's own ending, folded after an operator's drop whose archive has
+/// not landed, replaces the drop's provisional ending (issue 1070).
 #[tokio::test]
-async fn an_ending_after_a_drop_leaves_the_run_dropped() {
+async fn an_ending_after_a_drop_replaces_its_provisional_ending() {
     let fixture = Fixture::new().await;
     fixture.dropped().await;
     fixture.completed().await;
-    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
 }
 
-/// An operator's drop wins over a finished run, as it always has.
+/// An operator's drop of a finished run records the request and keeps the
+/// run's ending (issue 1070): it never rewrites what happened.
 #[tokio::test]
-async fn a_drop_turns_a_completed_run_failed() {
+async fn a_drop_of_a_completed_run_keeps_it_completed() {
     let fixture = Fixture::new().await;
     fixture.completed().await;
     fixture.archived("completed").await;
     fixture.dropped().await;
-    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
 }
 
 /// A move keeps the worker the row names: the ambiguous move of a row
@@ -411,9 +413,10 @@ async fn an_archive_for_a_row_this_build_cannot_read_is_still_acked_to_the_worke
 }
 
 /// An operator's drop of a run whose row this build cannot read still
-/// stops the run: the archive record is written, with the drop's time as
-/// the run's start, and the worker's WAL row is marked terminal. The event
-/// is then refused as permanent, so the strict-order consumer goes on.
+/// stops the run: the worker's WAL row is marked terminal, for the archive
+/// sweeper to hand off with the run's state, and no archive record is
+/// written, as no drop writes one (issue 1070). The event is then refused
+/// as permanent, so the strict-order consumer goes on.
 #[tokio::test]
 async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
     let fixture = Fixture::new().await;
@@ -465,13 +468,10 @@ async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
         matches!(outcome, Err(HandlerError::Permanent(_))),
         "acked, not retried: a transient error here would hold every later event"
     );
-    let archive = fixture
-        .store
-        .get_archive(&inv)
-        .await
-        .unwrap()
-        .expect("the archive record is written");
-    assert_eq!(archive.final_phase, "failed");
+    assert!(
+        fixture.store.get_archive(&inv).await.unwrap().is_none(),
+        "the drop writes no archive record"
+    );
     let wal = worker_store
         .get_invocation_state(&inv)
         .await
@@ -671,8 +671,9 @@ async fn an_archive_whose_row_insert_is_refused_is_recorded_and_not_acked() {
 
 /// **A drop whose row move the store refuses still stops the run**, as
 /// for a row this build cannot read: the worker's WAL row is marked
-/// terminal, the drop's archive record is written, and the row is left as
-/// it is. Then the event is refused as permanent.
+/// terminal, and the row is left as it is; no archive record is written,
+/// as no drop writes one (issue 1070). Then the event is refused as
+/// permanent.
 #[tokio::test]
 async fn a_drop_whose_row_move_is_refused_still_stops_the_run() {
     let fixture = Fixture::new().await;
@@ -710,8 +711,8 @@ async fn a_drop_whose_row_move_is_refused_still_stops_the_run() {
         "acked, not retried: {outcome:?}"
     );
     assert!(
-        fixture.store.get_archive(&inv).await.unwrap().is_some(),
-        "the drop's archive record is written"
+        fixture.store.get_archive(&inv).await.unwrap().is_none(),
+        "the drop writes no archive record"
     );
     assert_eq!(
         fixture.raw_status().await,
@@ -897,14 +898,19 @@ async fn a_refused_event_still_advances_the_watermark() {
     let _ = stop.send(());
     let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
     waited.expect("a read gated at the refused drop's sequence answers");
+    assert_eq!(
+        fixture.raw_status().await,
+        "weird",
+        "the drop was folded, and left the row as it is"
+    );
     assert!(
         fixture
             .store
             .get_archive(&fixture.invocation_id.to_string())
             .await
             .unwrap()
-            .is_some(),
-        "the drop took effect"
+            .is_none(),
+        "the drop writes no archive record"
     );
 }
 
@@ -1005,13 +1011,14 @@ async fn the_archive_after_a_held_ending_keeps_it() {
     );
 }
 
-/// An operator's drop that came first stands.
+/// An operator's drop that came first ends the run provisionally, and
+/// the held ending, the run's own, replaces it (issue 1070).
 #[tokio::test]
-async fn a_held_ending_after_a_drop_leaves_the_run_dropped() {
+async fn a_held_ending_after_a_drop_replaces_its_provisional_ending() {
     let fixture = Fixture::new().await;
     fixture.dropped().await;
     fixture.held(HeldOutcome::Completed).await;
-    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
 }
 
 /// The worker reads a held run's outcome from its row's phase by the rule

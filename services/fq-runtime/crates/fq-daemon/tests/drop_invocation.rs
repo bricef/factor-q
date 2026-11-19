@@ -98,7 +98,7 @@ async fn drop_invocation_emits_operator_recovered_for_agent() {
 }
 
 #[tokio::test]
-async fn drop_invocation_removes_agentless_owner() {
+async fn drop_invocation_keeps_an_agentless_owner_row_for_the_fold() {
     let server = fq_test_support::NatsServer::start();
     let url = server.url().to_string();
     use tempfile::tempdir;
@@ -131,12 +131,15 @@ async fn drop_invocation_removes_agentless_owner() {
     .await
     .expect("agent-less owner should drop");
     assert_eq!(result.agent_id, "operator");
+    // No delete outside the transition table (issue 1070): the row is
+    // there for the drop's fold to move.
     assert!(
         control_store
             .get_invocation_owner(&fake_inv)
             .await
             .unwrap()
-            .is_none()
+            .is_some(),
+        "the drop deleted the agent-less row; the fold moves the row that is there"
     );
 }
 
