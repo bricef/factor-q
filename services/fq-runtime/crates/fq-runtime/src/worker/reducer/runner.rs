@@ -1167,7 +1167,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             // row terminal, everything else leaves it open.
             // One clock read for both fields: the terminal update *is* the
             // last update, so `terminal_at` and `updated_at` must be the same
-            // instant (as the failed path via `ensure_terminal` already does).
+            // instant (as the mid-step mark in `end_mid_step` does too).
             // Two separate reads let `updated_at` (read second) land a
             // millisecond later under load — `updated_at > terminal_at`, a real
             // ordering violation that surfaced as a flaky test.
@@ -1944,51 +1944,6 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             None,
         );
         self.fail_mid_step(cursor, agent_id, failed).await
-    }
-
-    /// Set `terminal_at` (and update `phase`) on the worker's
-    /// `invocation_state` row if it is not already terminal.
-    /// A no-op when the row is already terminal — keeps the
-    /// original `terminal_at` so the archive timestamp matches
-    /// the first observation of terminal.
-    ///
-    /// Reads the row first to preserve every other column, and
-    /// writes it back with `update_invocation_state`, which lands
-    /// only on a row still in flight: a row a drop finished, or
-    /// that its hand-off deleted, between the read and the write
-    /// is left as it is, never re-created (issue 1070). The row-
-    /// shaped write stays the single SQL surface.
-    async fn ensure_terminal(
-        &self,
-        phase_label: &str,
-        invocation_id: Uuid,
-        terminal_at_ms: i64,
-    ) -> Result<(), ExecutorError> {
-        let invocation_id_str = invocation_id.to_string();
-        let existing = self
-            .config
-            .store
-            .get_invocation_state(&invocation_id_str)
-            .await
-            .map_err(map_store_err)?;
-        let Some(mut row) = existing else {
-            // No state row at all — the run-loop hasn't done
-            // its first upsert yet. Nothing to archive. Skip
-            // silently; recovery has nothing to recover.
-            return Ok(());
-        };
-        if row.terminal_at.is_some() {
-            return Ok(());
-        }
-        row.phase = phase_label.to_string();
-        row.terminal_at = Some(terminal_at_ms);
-        row.updated_at = terminal_at_ms;
-        self.config
-            .store
-            .update_invocation_state(&row)
-            .await
-            .map_err(map_store_err)?;
-        Ok(())
     }
 
     /// Publish `InvocationArchived` for an already-terminal

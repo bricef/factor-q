@@ -10,7 +10,7 @@
 //! drop stopped the run, and what the step in flight then returns is not
 //! the run's outcome.
 //!
-//! **Where the runner notices.** At three points, each of which returns
+//! **Where the runner notices.** At these points, each of which returns
 //! [`ExecutorError::FinishedElsewhere`], which no caller retries:
 //!
 //! - A write of the row after the run's first one ([`Self::write_own_row`])
@@ -19,11 +19,14 @@
 //!   hand-off deleted (a row recovery would then resume), and the finishing
 //!   write, which would otherwise have done nothing and let the run publish
 //!   `completed` anyway.
-//! - `publish_failed` (`publish_failure.rs`), which reads the row before a
-//!   mid-step `failed`: a terminal row, or a missing one after this drive
-//!   wrote it, means someone else finished the run, and no `failed` goes
-//!   out. The run marks its own row only after publishing its `failed`, so
-//!   a terminal row there is never its own.
+//! - The mark that ends a run on a mid-step `failed` (`end_mid_step`,
+//!   `terminal.rs`), written with the `failed` stored in it and before it
+//!   is published: a mark that does not land, or a row already terminal
+//!   or gone when the run comes to it, means someone else finished the
+//!   run, and no `failed` goes out.
+//! - `publish_failed` (`publish_failure.rs`), for a `failed` of a run with
+//!   no row to mark: a row missing after this drive wrote it was handed
+//!   off, and a terminal one is not the run's own.
 //!
 //! With an operator's live drop the runner seldom gets that far: the halt
 //! stops it at the next step boundary, before the reducer decides and
@@ -40,23 +43,12 @@
 //! `invocation.archived` from the run, whose archive is the sweeper's to
 //! hand off from the row the drop finished.
 //!
-//! **The one exception.** A mid-step `failed` is published before the run
-//! marks its row (`end_mid_step`, `terminal.rs`), so a drop's mark that
-//! lands after `publish_failed` has read the row and before the run's own
-//! mark (`ensure_terminal`) lets the run's own `failed` through, and then
-//! its own `invocation.archived`, which `publish_archived_and_mark_pending`
-//! publishes for the row it finds finished. The stream then carries the
-//! run's own `failed`, with its own error, after the drop; the ownership
-//! row and the archive record keep the drop's ending, which the drop's
-//! fold wrote before its mark. The window is one row read, one publish the
-//! broker acknowledges (as long as a round trip to the broker takes), and
-//! one more row read. Both the drop and the run say `failed`, so the
-//! record does not contradict itself. It is not closed here: closing it means
-//! making the run's mark come first, conditional, with the `failed` stored
-//! in it, and deciding from whether it landed, as a `failed` the reducer
-//! decides already is. That reverses the mid-step order (publish, then
-//! mark) and is a change of its own, needed before a run's own ending may
-//! replace a drop's on the ownership row.
+//! **One winner.** Every ending of a run with a row is written into the
+//! row before it is published, by a write that lands only on a row still in
+//! flight, and a drop's fold marks the same row the same way. So the two
+//! never both win: when the drop's mark lands first, the run's write
+//! misses and nothing of the run's goes out; when the run's lands first,
+//! the drop's misses, and the run's ending is the outcome.
 //!
 //! **Telling "never started" from "started, then handed off".** A run with
 //! no row may be one that never made its first write, whose `failed` is

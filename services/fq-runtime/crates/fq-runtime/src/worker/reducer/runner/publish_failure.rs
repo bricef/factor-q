@@ -25,10 +25,11 @@
 //!   resume or mid-run, after the first WAL write. Either way the error is
 //!   not transient, so the dispatcher consumes the trigger.
 //! - **Mid-run**, live or after a resume's replay (every event from the
-//!   first `llm.request` on, which follows the first WAL write): the
-//!   `failed` is published, then the row is marked terminal and the
-//!   archive handed off, the order every mid-step failure takes, so the
-//!   workspace is reclaimed and recovery has nothing to resume.
+//!   first `llm.request` on, which follows the first WAL write): the row
+//!   is marked terminal with the `failed` stored in it, then the `failed`
+//!   is published and the archive handed off, the order every mid-step
+//!   failure takes (`end_mid_step`), so the workspace is reclaimed and
+//!   recovery has nothing to resume.
 //! - **After the run has ended**: the row is terminal, so the refused
 //!   event came after the outcome (`invocation.archived` behind
 //!   `completed` or `failed`). That is not a failure of the invocation,
@@ -65,10 +66,11 @@
 //! budget found exceeded on resume and for a provider failure whose
 //! terminal was lost to a crash, both through `emit_failed`, before the
 //! loop runs. Routing them here would grow `resume` past its size budget.
-//! The first `failed` is a short fixed message; the second carries the
-//! provider's error text, and if that alone were over the broker's limit
-//! the refusal would leave the row in flight for every start to resume
-//! into again, as before #828.
+//! They need not: `emit_failed` ends the run in `end_mid_step`
+//! (`terminal.rs`), which measures every `failed` before storing it, so
+//! one over the broker's limit, a provider's long error text say, is
+//! replaced by this `payload_too_large` `failed`, and the run ends with its
+//! row finished like any other.
 //!
 //! The `failed` always fits. It shares nothing with the event refused:
 //! no history, no output, no state. It is a fixed set of short fields —
@@ -296,11 +298,12 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// dispatcher redelivers, and after it the row stays in flight for
     /// recovery.
     ///
-    /// An error before the `failed` is out and the row marked terminal is
-    /// returned as it is: the run has not ended, and recovery finds the
-    /// row in flight. From that point the run has ended, and it returns
-    /// its own failure whatever happens to the `invocation.archived` that
-    /// follows. That one is often refused too, since it carries the
+    /// An error before the row is marked terminal is returned as it is:
+    /// the run has not ended, and recovery finds the row in flight. From
+    /// the mark the run has ended. A `failed` whose publish is lost after
+    /// it returns that error, and the archive sweeper republishes the
+    /// stored `failed`; once it is out, the run returns its own failure
+    /// whatever happens to the `invocation.archived` that follows. That one is often refused too, since it carries the
     /// conversation the refused event was built from; the error is logged
     /// and the row is left terminal and unarchived (see the module doc).
     pub(super) async fn end_on_refused_publish(
@@ -397,8 +400,10 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// by someone else, an operator's drop: nothing is published, and the
     /// run stops with `ExecutorError::FinishedElsewhere` (issue 1070;
     /// `own_row.rs`). Every `failed` the runner publishes comes through
-    /// here except the terminal event a step stores in its row
-    /// (`terminal.rs`), whose run has a row by then.
+    /// here except the ones stored in the run's row before they go out:
+    /// a step's terminal event and a mid-step `failed` of a run with a row
+    /// (`terminal.rs`). What reaches here is a run with no row, or none
+    /// of its own any more.
     ///
     /// The row is read before the publish, and nothing else creates it
     /// meanwhile: only this run's own loop writes a first row, and it is
@@ -418,8 +423,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .get_invocation_state(&invocation_id.to_string())
             .await
             .map_err(map_store_err)?;
-        // Someone else finished the run (`own_row.rs`): the run marks its
-        // own row only after publishing its `failed`, so a terminal row is
+        // Someone else finished the run (`own_row.rs`): a run marks its own
+        // row only in `end_mid_step` and the loop's terminal write, which
+        // publish what they stored themselves, so a terminal row here is
         // not its own, and a missing one after this drive wrote it was
         // handed off. No `failed` goes out.
         let has_row = match row {
