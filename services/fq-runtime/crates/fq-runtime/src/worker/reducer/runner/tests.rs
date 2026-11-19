@@ -39,6 +39,9 @@ mod unstarted_failures;
 // A drop that lands while a step is in flight (issue 1070).
 mod dropped_mid_step;
 
+// A halt armed before a run's first WAL write (issue 1070).
+mod halted_before_first_write;
+
 /// Issue #9 precedence, checked at the boundary the runner uses to
 /// fill `AgentConfig.max_iterations`: per-agent override (if the
 /// definition sets one) wins; otherwise the daemon config default
