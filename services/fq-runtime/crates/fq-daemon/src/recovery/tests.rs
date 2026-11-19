@@ -713,27 +713,33 @@ impl LlmClient for HeldModel {
                 .expect("release semaphore open")
                 .forget();
         }
-        Ok(ChatResponse {
-            parts: fq_runtime::events::assistant_parts(
-                None,
-                vec![fq_runtime::events::MessageToolCall {
-                    tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
-                    tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
-                    parameters: serde_json::json!({"status": "success", "summary": "done"}),
-                }],
-            ),
-            stop_reason: fq_runtime::events::StopReason::ToolUse,
-            usage: fq_runtime::events::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                cache_write_5m_tokens: None,
-                cache_write_1h_tokens: None,
-                reasoning_tokens: None,
-            },
-            reported_cost_usd: None,
-        })
+        Ok(the_invocation_is_done())
+    }
+}
+
+/// A model turn that declares the invocation done: `report_outcome`, a
+/// success.
+fn the_invocation_is_done() -> ChatResponse {
+    ChatResponse {
+        parts: fq_runtime::events::assistant_parts(
+            None,
+            vec![fq_runtime::events::MessageToolCall {
+                tool_call_id: fq_runtime::events::ToolCallId::new("report-outcome").unwrap(),
+                tool_name: fq_runtime::tools::REPORT_OUTCOME_CANONICAL_NAME.to_string(),
+                parameters: serde_json::json!({"status": "success", "summary": "done"}),
+            }],
+        ),
+        stop_reason: fq_runtime::events::StopReason::ToolUse,
+        usage: fq_runtime::events::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_5m_tokens: None,
+            cache_write_1h_tokens: None,
+            reasoning_tokens: None,
+        },
+        reported_cost_usd: None,
     }
 }
 
@@ -1086,6 +1092,22 @@ fn runner_over(
     store: Arc<WorkerStore>,
     worker_id: WorkerId,
 ) -> Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> {
+    throttled_runner_over(
+        sink,
+        store,
+        worker_id,
+        Arc::new(fq_runtime::llm::ModelThrottle::inert()),
+    )
+}
+
+/// [`runner_over`], deferring a rate-limited run for as long as `throttle`
+/// says.
+fn throttled_runner_over(
+    sink: Arc<dyn fq_runtime::bus::EventSink>,
+    store: Arc<WorkerStore>,
+    worker_id: WorkerId,
+    throttle: Arc<fq_runtime::llm::ModelThrottle>,
+) -> Arc<fq_runtime::ReducerRunner<fq_runtime::Harness>> {
     let mut pricing = std::collections::HashMap::new();
     pricing.insert(
         "claude-haiku".to_string(),
@@ -1109,6 +1131,7 @@ fn runner_over(
                 .pricing(Arc::new(fq_runtime::PricingTable::from_map(pricing)))
                 .store(store)
                 .worker_id(worker_id)
+                .throttle(throttle)
                 .build(),
         ),
         fq_runtime::Harness::new(),
@@ -1725,6 +1748,10 @@ mod ended_before_restart;
 // The restore of an ownership row before a resume, and a row this build
 // cannot read, at the next start (issue 1024).
 mod restore_ownership;
+
+// An operator's drop of a recovered run that a rate limit then deferred
+// (issue 1070).
+mod deferred_drop;
 
 /// The control-plane and worker stores a daemon keeps under `dir`.
 ///
