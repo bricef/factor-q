@@ -53,10 +53,17 @@ pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0
 
 /// The migration ladder, one rung per version. Future migrations: add a
 /// `(version, SQL)` rung.
+///
+/// A merged rung's number is frozen: a store records the number it has
+/// reached, so a rung renumbered after it merged would run again, or never,
+/// on a store that recorded it. An unmerged rung takes the next free number
+/// when it is rebased onto a ladder that has grown, and no build from
+/// before a merge is ever run on a live store.
 const MIGRATIONS: &[Migration] = &[
     (1, CONTROL_PLANE_TABLES_V1_SQL),
     (2, TRIGGER_CLAIM_TABLE_V2_SQL),
     (3, ownership::ARCHIVE_STATE_SQL),
+    (4, ownership::TERMINATION_RECORD_SQL),
 ];
 
 const CONTROL_PLANE_TABLES_V1_SQL: &str = r#"
@@ -199,15 +206,6 @@ pub struct WorkerRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnerRow {
-    pub invocation_id: String,
-    pub worker_id: String,
-    pub assigned_at: i64,
-    pub status: OwnerStatus,
-    pub archive_state: ArchiveState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWaitRow {
     pub invocation_id: String,
     pub kind: String,
@@ -286,7 +284,9 @@ impl ControlPlaneStore {
         let pool = schema::connect_store_pool(options, 4).await?;
 
         let store = Self { pool };
+        let corrected = ownership::pairs_the_record_rung_corrects(&store.pool).await?;
         store.bootstrap_schema().await?;
+        ownership::report_corrected(&corrected);
         Ok(store)
     }
 
@@ -607,17 +607,12 @@ impl ControlPlaneStore {
         &self,
         invocation_id: &str,
     ) -> Result<Option<OwnerRow>, ControlPlaneStoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT invocation_id, worker_id, assigned_at, status, archive_state
-            FROM coordination_invocation_owner WHERE invocation_id = ?
-            "#,
-        )
-        .bind(invocation_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(ownership::select_owner("WHERE invocation_id = ?"))
+            .bind(invocation_id)
+            .fetch_optional(&self.pool)
+            .await?;
         match row {
-            Some(r) => Ok(Some(row_to_owner(r)?)),
+            Some(r) => Ok(Some(ownership::row_to_owner(r)?)),
             None => Ok(None),
         }
     }
@@ -626,34 +621,26 @@ impl ControlPlaneStore {
         &self,
         worker_id: &str,
     ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT invocation_id, worker_id, assigned_at, status, archive_state
-            FROM coordination_invocation_owner WHERE worker_id = ?
-            ORDER BY assigned_at
-            "#,
-        )
+        let rows = sqlx::query(ownership::select_owner(
+            "WHERE worker_id = ? ORDER BY assigned_at",
+        ))
         .bind(worker_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(row_to_owner).collect()
+        rows.into_iter().map(ownership::row_to_owner).collect()
     }
 
     pub async fn list_invocations_with_status(
         &self,
         status: OwnerStatus,
     ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT invocation_id, worker_id, assigned_at, status, archive_state
-            FROM coordination_invocation_owner WHERE status = ?
-            ORDER BY assigned_at
-            "#,
-        )
+        let rows = sqlx::query(ownership::select_owner(
+            "WHERE status = ? ORDER BY assigned_at",
+        ))
         .bind(status.as_str())
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(row_to_owner).collect()
+        rows.into_iter().map(ownership::row_to_owner).collect()
     }
 
     // -----------------------------------------------------------
@@ -887,35 +874,22 @@ impl ControlPlaneStore {
     ) -> Result<Vec<OwnerRow>, ControlPlaneStoreError> {
         let rows = match status {
             Some(s) => {
-                sqlx::query(
-                    r#"
-                    SELECT invocation_id, worker_id, assigned_at, status, archive_state
-                    FROM coordination_invocation_owner
-                    WHERE status = ?
-                    ORDER BY assigned_at DESC
-                    LIMIT ?
-                    "#,
-                )
+                sqlx::query(ownership::select_owner(
+                    "WHERE status = ? ORDER BY assigned_at DESC LIMIT ?",
+                ))
                 .bind(s.as_str())
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await?
             }
             None => {
-                sqlx::query(
-                    r#"
-                    SELECT invocation_id, worker_id, assigned_at, status, archive_state
-                    FROM coordination_invocation_owner
-                    ORDER BY assigned_at DESC
-                    LIMIT ?
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?
+                sqlx::query(ownership::select_owner("ORDER BY assigned_at DESC LIMIT ?"))
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
             }
         };
-        rows.into_iter().map(row_to_owner).collect()
+        rows.into_iter().map(ownership::row_to_owner).collect()
     }
 }
 
@@ -930,24 +904,6 @@ fn row_to_worker(row: sqlx::sqlite::SqliteRow) -> Result<WorkerRow, ControlPlane
         registered_at: row.get("registered_at"),
         last_heartbeat: row.get("last_heartbeat"),
         status,
-    })
-}
-
-fn row_to_owner(row: sqlx::sqlite::SqliteRow) -> Result<OwnerRow, ControlPlaneStoreError> {
-    let status_str: String = row.get("status");
-    let status = OwnerStatus::parse(&status_str).ok_or_else(|| {
-        ControlPlaneStoreError::Malformed(format!("unknown owner status `{status_str}`"))
-    })?;
-    let archive_str: String = row.get("archive_state");
-    let archive_state = ArchiveState::parse(&archive_str).ok_or_else(|| {
-        ControlPlaneStoreError::Malformed(format!("unknown archive state `{archive_str}`"))
-    })?;
-    Ok(OwnerRow {
-        invocation_id: row.get("invocation_id"),
-        worker_id: row.get("worker_id"),
-        assigned_at: row.get("assigned_at"),
-        status,
-        archive_state,
     })
 }
 
@@ -1031,7 +987,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 }
 
 mod ownership;
-pub use ownership::ArchiveState;
+pub use ownership::{ArchiveState, EndedBy, OwnerRow, TerminationRequest};
 
 mod trigger_claim;
 pub use trigger_claim::{
