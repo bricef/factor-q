@@ -21,7 +21,9 @@ use crate::worker::{BoundaryStop, DurableStart, InvocationOutcome};
 impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// Whether the invocation stops at this step boundary, and what it
     /// returns if it does. Asked at the top of every step, the first one
-    /// included, before the reducer runs.
+    /// included, before the reducer runs. A halt armed after the first
+    /// step's check and before its first WAL write is taken by that write
+    /// instead, which is then not made (`write_own_row`, issue 1070).
     ///
     /// Two things stop it, and neither emits a terminal event. An
     /// operator halt (`invocation.drop --live`) is invocation-scoped: the
