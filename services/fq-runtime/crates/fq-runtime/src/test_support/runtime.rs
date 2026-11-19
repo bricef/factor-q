@@ -536,8 +536,9 @@ mod tests {
         // the harness: seed an ambiguous owner row + a
         // projection event for the agent lookup; call
         // operator::drop_invocation; assert the coordination
-        // consumer flips the owner to Failed, writes the
-        // archive row, and the audit chain shows the
+        // consumer ends the owner Failed by the drop with the
+        // request and its reason beside it, writes no archive
+        // row (issue 1070), and the audit chain shows the
         // operator_recovered event with our reason.
 
         use crate::control_plane::operator;
@@ -610,13 +611,26 @@ mod tests {
             .await
             .expect("owner flipped to Failed");
 
-        // Archive row exists with our final_phase.
-        rt.wait_for_archive(invocation_id, Duration::from_secs(2))
+        // Ended by the drop, the request beside it, and no archive row:
+        // the worker's archive brings the run's state.
+        let owner = rt
+            .cp_store()
+            .get_invocation_owner(&inv_str)
             .await
-            .expect("archive row");
-        let archive = rt.cp_store().get_archive(&inv_str).await.unwrap().unwrap();
-        assert_eq!(archive.final_phase, "failed");
-        assert_eq!(archive.agent_id, rt.agent_id().as_str());
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            owner.ended_by,
+            Some(crate::control_plane::store::EndedBy::Drop)
+        );
+        assert_eq!(
+            owner
+                .termination
+                .and_then(|request| request.reason)
+                .as_deref(),
+            Some("e2e drop scenario")
+        );
+        assert!(rt.cp_store().get_archive(&inv_str).await.unwrap().is_none());
 
         // Audit chain has exactly one operator_recovered with
         // the reason carried through.
@@ -853,13 +867,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_then_late_archived_keeps_owner_failed_end_to_end() {
-        // Race scenario, end-to-end via the harness:
-        // operator drops first (owner → Failed); a still-
+    async fn drop_then_late_archived_completed_keeps_the_runs_state_end_to_end() {
+        // Race scenario, end-to-end via the harness (issue
+        // 1070): operator drops first (owner → Failed by the
+        // drop, provisionally, and no archive row); a still-
         // alive worker emits invocation.archived with
-        // final_phase=completed later; the no-downgrade
-        // guard keeps owner = Failed and the first archive
-        // insert wins (ON CONFLICT DO NOTHING).
+        // final_phase=completed later. The run reached its own
+        // ending: the owner reads Completed, ended by the run,
+        // and the archive row holds the worker's real state.
 
         use crate::control_plane::operator;
         use crate::events::{EventPayload, InvocationAmbiguousPayload, InvocationArchivedPayload};
@@ -909,13 +924,10 @@ mod tests {
         rt.wait_for_owner_status(invocation_id, OwnerStatus::Failed, Duration::from_secs(5))
             .await
             .expect("owner Failed after operator drop");
-        let archive_before = rt
-            .cp_store()
-            .get_archive(&inv_str)
-            .await
-            .unwrap()
-            .expect("archive row from operator drop");
-        assert_eq!(archive_before.final_phase, "failed");
+        assert!(
+            rt.cp_store().get_archive(&inv_str).await.unwrap().is_none(),
+            "the operator's drop writes no archive row"
+        );
 
         // Now a "late" worker publishes an archived event
         // with completed — racing the operator's drop. Use a
@@ -942,7 +954,7 @@ mod tests {
         // archived event.
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // No-downgrade: owner stays Failed.
+        // The run's own ending replaces the drop's provisional one.
         let owner = rt
             .cp_store()
             .get_invocation_owner(&inv_str)
@@ -950,19 +962,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            owner.status,
-            OwnerStatus::Failed,
-            "operator's Failed must stick despite the late `completed` archived event"
+            (owner.status, owner.ended_by),
+            (
+                OwnerStatus::Completed,
+                Some(crate::control_plane::store::EndedBy::Run)
+            ),
+            "the late `completed` archive is the run's own ending"
         );
 
-        // Archive row preserved as failed (first-writer-wins
-        // via ON CONFLICT DO NOTHING).
+        // The archive row is the worker's, with the run's real state.
         let archive_after = rt.cp_store().get_archive(&inv_str).await.unwrap().unwrap();
-        assert_eq!(archive_after.final_phase, "failed");
-        assert_eq!(archive_after.archived_at, archive_before.archived_at);
-        assert!(
-            archive_after.final_state_blob.is_empty(),
-            "operator drop wrote an empty blob; the late completed must not have overwritten it"
+        assert_eq!(archive_after.final_phase, "completed");
+        assert_eq!(
+            archive_after.final_state_blob,
+            b"would-have-been-real-state".to_vec(),
+            "no empty record of the drop's shadows the run's state"
         );
 
         rt.shutdown().await;

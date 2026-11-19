@@ -39,6 +39,10 @@ mod unstarted_failures;
 // A drop that lands while a step is in flight (issue 1070).
 mod dropped_mid_step;
 
+// A drop and a run's own ending in each order, through the consumer, the
+// archive sweeper and its acknowledgement (issue 1070).
+mod dropped_end_to_end;
+
 // A halt armed before a run's first WAL write (issue 1070).
 mod halted_before_first_write;
 

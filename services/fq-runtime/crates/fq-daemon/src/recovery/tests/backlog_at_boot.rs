@@ -183,8 +183,8 @@ async fn wal_row(worker_store: &WorkerStore, invocation: Uuid) -> InvocationStat
 
 /// **Item 3: a drop the stopped daemon published and never folded.** The
 /// next start folds it before recovery reads anything: the drop marks the
-/// run's WAL row terminal and ends its ownership row, so recovery finds
-/// nothing in flight, resumes nothing and holds nothing.
+/// run's WAL row terminal and ends its ownership row, provisionally, so
+/// recovery finds nothing in flight, resumes nothing and holds nothing.
 #[tokio::test]
 async fn a_drop_on_the_stream_is_folded_before_recovery_decides() {
     let server = fq_test_support::test_nats();
@@ -209,8 +209,8 @@ async fn a_drop_on_the_stream_is_folded_before_recovery_decides() {
     );
     assert_eq!(
         owner(&cp_store, invocation).await,
-        Some((OwnerStatus::Failed, ArchiveState::Archived)),
-        "the drop ended the ownership row"
+        Some((OwnerStatus::Failed, ArchiveState::Pending)),
+        "the drop ended the ownership row, provisionally, its archive pending"
     );
     next.stop().await;
 }
