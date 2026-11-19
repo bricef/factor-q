@@ -113,7 +113,71 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
             }
         }
     }
-    assert_eq!(cases, 7 * 12);
+    assert_eq!(cases, 7 * 13);
+}
+
+/// **A durable start writes the row its run lacks, and leaves every other
+/// alone.** With no row, it writes `in_flight` under the worker and time
+/// it names. A row in flight already answers as a duplicate and keeps its
+/// own worker and time. An `ambiguous` or ended row answers as refused,
+/// with the row as it found it, and stays exactly as it was: status,
+/// archive, worker and time.
+#[tokio::test]
+async fn a_durable_start_writes_a_missing_row_and_refuses_the_rest() {
+    let (store, _dir) = store().await;
+    let start = OwnerFacts {
+        worker_id: EVENT,
+        at_ms: 200,
+    };
+
+    let applied = apply(&store, "inv-new", OwnershipEvent::DurablyStarted, start)
+        .await
+        .unwrap();
+    assert_eq!(
+        applied,
+        Applied::Moved {
+            from: None,
+            to: RowState::IN_FLIGHT
+        }
+    );
+    let row = store
+        .get_invocation_owner("inv-new")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (row.state(), row.worker_id.as_str(), row.assigned_at),
+        (RowState::IN_FLIGHT, EVENT, 200)
+    );
+
+    for (n, state) in states().into_iter().flatten().enumerate() {
+        let id = format!("inv-{n}");
+        assert!(
+            store
+                .compare_and_set_ownership(&id, None, state, Some(BEFORE), Some(100))
+                .await
+                .unwrap()
+        );
+        let before = store.get_invocation_owner(&id).await.unwrap();
+        let applied = apply(&store, &id, OwnershipEvent::DurablyStarted, start)
+            .await
+            .unwrap();
+        let want = if state == RowState::IN_FLIGHT {
+            Applied::Duplicate { at: state }
+        } else {
+            Applied::Refused { recorded: state }
+        };
+        assert_eq!(applied, want, "{}", state.name());
+        let after = store.get_invocation_owner(&id).await.unwrap();
+        assert_eq!(after, before, "{}: the row is left as it was", state.name());
+        let after = after.unwrap();
+        assert_eq!(
+            (after.worker_id.as_str(), after.assigned_at),
+            (BEFORE, 100),
+            "{}: who and when the row names",
+            state.name()
+        );
+    }
 }
 
 /// The ambiguous move of a row recovery restored keeps the worker it

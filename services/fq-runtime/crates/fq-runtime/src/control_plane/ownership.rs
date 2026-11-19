@@ -21,9 +21,12 @@
 //! There is also no row at all, which is where a triggered run still
 //! running stands: its row is written when it ends, or when something
 //! else happens to it first (recovery restores it, it is reported
-//! ambiguous, an operator drops it). Whether a run should have a row from
-//! its durable start is issue 721's question; it would be one more writer
-//! of the `no row → in_flight` edge below. No event removes a row. The
+//! ambiguous, an operator drops it). The table below has a run's durable
+//! start, its first WAL write, as a second writer of the
+//! `no row → in_flight` edge beside recovery's restore (issue 721).
+//! Nothing writes it yet: the dispatcher is to apply it at the run's
+//! first WAL write, after it marks the trigger's claim started, so that
+//! a running run has a row from that moment. No event removes a row. The
 //! one delete is outside the table: an operator's drop of a row no
 //! projection event names an agent for, which deletes the row before the
 //! drop's own fold writes it again ([`APPLY_ATTEMPTS`] says how a move
@@ -39,6 +42,7 @@
 //! |---|---|---|---|---|---|---|---|
 //! | `triggered`, `archive_acked`, `operator_resumed` | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
 //! | `failed` in `setup` | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
+//! | the run durably starts | in_flight | duplicate | refused | refused | refused | refused | refused |
 //! | recovery restores the run | in_flight | in_flight | in_flight | refused | refused | refused | refused |
 //! | `ambiguous` | ambiguous | ambiguous | duplicate | refused | refused | refused | refused |
 //! | `completed` | completed·pending | completed·pending | completed·pending | duplicate | duplicate | conflict | conflict |
@@ -74,7 +78,23 @@
 //!   operating guide says.
 //! - **Refused**: the row records the run finished, and the event would
 //!   put it back in progress. A report of ambiguity, or recovery's
-//!   restore, can arrive after the run's ending; the ending stands.
+//!   restore, can arrive after the run's ending; the ending stands. A
+//!   durable start is refused by an `ambiguous` row too: see the next
+//!   item.
+//! - **The durable start** creates the row, `in_flight`, for a run that
+//!   has made its first WAL write, and only where there is no row. It
+//!   comes after that write, so the WAL already records the start that the
+//!   row then repeats, and a run refused before it never gets one. Its
+//!   run's id is new at each delivery, so a row already there was written
+//!   for that run by someone else first. An `in_flight` row is the same
+//!   start, written already (a retry of a write that landed): a duplicate,
+//!   which keeps the worker and time it names. An `ambiguous` row awaits
+//!   an operator's triage, and an ended row records an ending, an
+//!   operator's drop among them: either refuses it and keeps what it
+//!   says, since a start must neither take a run from triage nor put a
+//!   finished run back in progress. [`apply`] answers
+//!   [`Applied::Refused`] with the row it found, logs nothing itself, and
+//!   writes nothing; whoever applies the start logs the refusal.
 //! - **Conflict**: an ending that contradicts the one recorded. The
 //!   recorded ending stands, whichever came first on the stream: a run's
 //!   own ending that reaches a row an operator's drop has already ended
@@ -94,8 +114,11 @@
 //!   the archive record is issue 1070's.
 //!
 //! Who a row names: a row an event creates takes the event's worker id
-//! (the worker's own on `invocation.archived` and on recovery's restore,
-//! the agent id standing in for it on every other event) and time. A move
+//! (the worker's own on `invocation.archived`, on recovery's restore and
+//! on a durable start, the agent id standing in for it on every other
+//! event) and time (the run's own start, the `started_at` its WAL row
+//! records, for recovery's restore and a durable start; the time the
+//! event is applied for every other). A move
 //! keeps the row's worker id and time, with two exceptions:
 //! `invocation.archived` brings the worker's real id ([`Owner::TakeWorker`]),
 //! and recovery's restore re-owns the run for this daemon from the run's
@@ -234,12 +257,18 @@ impl OwnerRow {
     }
 }
 
-/// What reaches the row: an event the coordination consumer folds, or
-/// startup recovery's restore of a run it will resume.
+/// What reaches the row: an event the coordination consumer folds,
+/// startup recovery's restore of a run it will resume, or a run's durable
+/// start, which nothing applies yet (issue 721's next change makes the
+/// dispatcher apply it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipEvent {
     /// `triggered`, published before the run's first WAL write.
     Triggered,
+    /// The run made its first WAL write: it durably started, and the
+    /// daemon that saw the write owns it from the run's start (issue 721).
+    /// Nothing applies it yet.
+    DurablyStarted,
     /// Startup recovery restores a run its WAL holds in flight, to resume
     /// it.
     Restored,
@@ -288,6 +317,7 @@ impl OwnershipEvent {
             | OwnershipEvent::Archived(ending)
             | OwnershipEvent::OperatorEnded(ending) => Some(ending),
             OwnershipEvent::Triggered
+            | OwnershipEvent::DurablyStarted
             | OwnershipEvent::Restored
             | OwnershipEvent::Ambiguous
             | OwnershipEvent::SetupFailed
@@ -297,8 +327,9 @@ impl OwnershipEvent {
     }
 
     /// Every event, for the tests that drive each from every state.
-    pub const ALL: [OwnershipEvent; 12] = [
+    pub const ALL: [OwnershipEvent; 13] = [
         OwnershipEvent::Triggered,
+        OwnershipEvent::DurablyStarted,
         OwnershipEvent::Restored,
         OwnershipEvent::Ambiguous,
         OwnershipEvent::Ended(Ending::Completed),
@@ -335,7 +366,7 @@ pub enum Decision {
     /// The row already says what the event says.
     Duplicate,
     /// The row records the run finished, and the event would put it back
-    /// in progress.
+    /// in progress; or, for a durable start, the row awaits triage.
     Refused,
     /// The event reports an ending the row contradicts. The row keeps its
     /// status; `then`, when present, is the move the event still makes
@@ -354,7 +385,7 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
             E::Triggered | E::SetupFailed | E::ArchiveAcked | E::OperatorResumed => {
                 Decision::Ignore
             }
-            E::Restored => Decision::Move {
+            E::DurablyStarted | E::Restored => Decision::Move {
                 to: RowState::IN_FLIGHT,
                 owner: Owner::TakeBoth,
             },
@@ -376,6 +407,8 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
         (E::Triggered | E::SetupFailed | E::ArchiveAcked | E::OperatorResumed, _) => {
             Decision::Ignore
         }
+        (E::DurablyStarted, None) if row.status == OwnerStatus::InFlight => Decision::Duplicate,
+        (E::DurablyStarted, _) => Decision::Refused,
         (E::Restored, None) => Decision::Move {
             to: RowState::IN_FLIGHT,
             owner: Owner::TakeBoth,
@@ -452,11 +485,12 @@ pub const APPLY_ATTEMPTS: usize = 3;
 #[derive(Debug, Clone, Copy)]
 pub struct OwnerFacts<'a> {
     /// The worker the event names: the worker's own id on
-    /// `invocation.archived` and on recovery's restore, the agent id
-    /// standing in for it on every other event.
+    /// `invocation.archived`, on recovery's restore and on a durable
+    /// start, the agent id standing in for it on every other event.
     pub worker_id: &'a str,
-    /// When: the run's start for recovery's restore, the time the event
-    /// is applied otherwise.
+    /// When: the run's start, the `started_at` its WAL row records, for
+    /// recovery's restore and a durable start; the time the event is
+    /// applied otherwise.
     pub at_ms: i64,
 }
 
@@ -473,7 +507,8 @@ pub enum Applied {
     },
     /// The row already said what the event says, and was left as it was.
     Duplicate { at: RowState },
-    /// The row records the run finished, and was left as it was.
+    /// The row records the run finished, or, for a durable start, awaits
+    /// triage, and was left as it was.
     Refused { recorded: RowState },
     /// The event reported an ending the row contradicts. The row keeps its
     /// status; `moved_to` is where it went when an archive's arrival still
