@@ -158,9 +158,7 @@ pub enum ConsumerHealth {
         /// a worker permit), though a trigger in one is a common first
         /// copy. The daemon logs each one at warn with its subject, its
         /// sequence, its attempt, the claim's age and why. Counted in memory since the daemon started, like
-        /// `duplicate_dropped`. A report from a daemon that does not send
-        /// it reads as zero.
-        #[serde(default)]
+        /// `duplicate_dropped`.
         held_duplicate_dropped: u64,
         /// Claims the daemon held itself, with no start recorded on them,
         /// that a delivery took again: no copy of the trigger was handling
@@ -179,9 +177,7 @@ pub enum ConsumerHealth {
         /// the daemon logs; the daemon logs each at warn with its subject,
         /// its sequence, its attempt, the claim's age and the abandoned
         /// invocation id. Counted in memory since the daemon started, like
-        /// `duplicate_dropped`. A report from a daemon that does not send
-        /// it reads as zero.
-        #[serde(default)]
+        /// `duplicate_dropped`.
         abandoned_claim_retaken: u64,
         /// Triggers whose deliveries ran out but which the dead-letter
         /// watch did not dead-letter, because their run had a start on
@@ -198,9 +194,7 @@ pub enum ConsumerHealth {
         /// what became of its claim. Counted on the watch's own consumer,
         /// in memory since the daemon started, once per verdict: an
         /// advisory whose ack was lost comes back, is decided again and is
-        /// counted again, so this can count one trigger twice. A report
-        /// from a daemon that does not send it reads as zero.
-        #[serde(default)]
+        /// counted again, so this can count one trigger twice.
         started_not_dead_lettered: u64,
     },
     /// The consumer stopped itself on an event whose schema version

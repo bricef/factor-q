@@ -125,45 +125,48 @@ fn a_large_backlog_is_a_verdict_and_not_a_fault() {
     assert!(!behind.is_fault());
 }
 
-/// A report from a daemon that does not send `held_duplicate_dropped`
-/// (#968), `abandoned_claim_retaken` or `started_not_dead_lettered` (#967)
-/// still reads, with each count at zero: the fields are additive, and a
-/// client newer than the daemon it asks must render that daemon's report
-/// rather than fail on it.
+/// **Every count of an active consumer is required.** A report that lacks
+/// one is refused, naming it, rather than read as zero: no reading of an
+/// older daemon's report is kept, so a count the report does not carry is
+/// never shown as nothing having happened.
 #[test]
-fn an_active_consumer_without_the_held_duplicate_count_reads_it_as_zero() {
-    let older = serde_json::json!({
-        "active": {
-            "name": "fq-dispatcher",
-            "delivered": 7,
-            "ack_pending": 0,
-            "num_pending": 0,
-            "num_redelivered": 0,
-            "redeliveries": 0,
-            "stuck": false,
-            "malformed_acked": 0,
-            "duplicate_dropped": 3
-        }
-    });
-    let read: ConsumerHealth =
-        serde_json::from_value(older).expect("a report without the field reads");
-    assert_eq!(
-        read,
-        ConsumerHealth::Active {
-            name: "fq-dispatcher".to_string(),
-            delivered: 7,
-            ack_pending: 0,
-            num_pending: 0,
-            num_redelivered: 0,
-            redeliveries: 0,
-            stuck: false,
-            malformed_acked: 0,
-            duplicate_dropped: 3,
-            held_duplicate_dropped: 0,
-            abandoned_claim_retaken: 0,
-            started_not_dead_lettered: 0,
-        }
-    );
+fn an_active_consumer_without_every_count_is_refused() {
+    for count in [
+        "malformed_acked",
+        "duplicate_dropped",
+        "held_duplicate_dropped",
+        "abandoned_claim_retaken",
+        "started_not_dead_lettered",
+    ] {
+        let mut report = serde_json::json!({
+            "active": {
+                "name": "fq-dispatcher",
+                "delivered": 7,
+                "ack_pending": 0,
+                "num_pending": 0,
+                "num_redelivered": 0,
+                "redeliveries": 0,
+                "stuck": false,
+                "malformed_acked": 0,
+                "duplicate_dropped": 3,
+                "held_duplicate_dropped": 0,
+                "abandoned_claim_retaken": 0,
+                "started_not_dead_lettered": 0
+            }
+        });
+        report["active"]
+            .as_object_mut()
+            .expect("an object")
+            .remove(count);
+        let refused = serde_json::from_value::<ConsumerHealth>(report)
+            .expect_err("a report without the count is refused");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("missing field `{count}`")),
+            "{count}: {refused}"
+        );
+    }
 }
 
 /// A held row's reason on the wire: externally tagged like every other
