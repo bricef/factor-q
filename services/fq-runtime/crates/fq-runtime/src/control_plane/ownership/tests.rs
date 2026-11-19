@@ -125,7 +125,7 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             To("failed·archived"),
             Duplicate,
         ],
-        E::OperatorEnded(Ending::Failed) => [
+        E::TerminationRequested(Ending::Failed) => [
             To("failed·archived"),
             To("failed·archived"),
             To("failed·archived"),
@@ -134,7 +134,7 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             To("failed·archived"),
             Duplicate,
         ],
-        E::OperatorEnded(Ending::Completed) => [
+        E::TerminationRequested(Ending::Completed) => [
             To("completed·archived"),
             To("completed·archived"),
             To("completed·archived"),
@@ -252,8 +252,8 @@ proptest! {
             if let Some(ending) = row.and_then(RowState::ending) {
                 let after_ending = next.and_then(RowState::ending);
                 prop_assert!(after_ending.is_some(), "a finished run never goes back in progress");
-                if !matches!(event, OwnershipEvent::OperatorEnded(_)) {
-                    prop_assert_eq!(after_ending, Some(ending), "only an operator changes an ending");
+                if !matches!(event, OwnershipEvent::TerminationRequested(_)) {
+                    prop_assert_eq!(after_ending, Some(ending), "only a termination request changes an ending");
                 }
             }
             if row.map(|state| state.archive) == Some(ArchiveState::Archived) {
@@ -263,7 +263,7 @@ proptest! {
                     "an archive written stays written"
                 );
             }
-            if let OwnershipEvent::OperatorEnded(ending) = event {
+            if let OwnershipEvent::TerminationRequested(ending) = event {
                 prop_assert_eq!(next, Some(RowState::ended(ending, ArchiveState::Archived)));
             }
             row = next;

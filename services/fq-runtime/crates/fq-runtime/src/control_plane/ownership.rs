@@ -45,8 +45,8 @@
 //! | `failed`, not in `setup` | failed·pending | failed·pending | failed·pending | conflict | conflict | duplicate | duplicate |
 //! | `archived`, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | conflict: failed·archived | conflict |
 //! | `archived`, phase `failed` | failed·archived | failed·archived | failed·archived | conflict: completed·archived | conflict | failed·archived | duplicate |
-//! | operator's drop, phase `failed` | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | duplicate |
-//! | operator's recovery, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | completed·archived | completed·archived |
+//! | termination request (a drop), phase `failed` | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | duplicate |
+//! | termination request, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | completed·archived | completed·archived |
 //!
 //! - **Ignored**: the event never touches the row. `triggered` is
 //!   published before the run's first WAL write, also by a run refused
@@ -89,9 +89,10 @@
 //!   other: the two disagree with no operator involved (issue 1070).
 //! - **Duplicate**: the row already says what the event says, as
 //!   at-least-once delivery makes ordinary.
-//! - **An operator's drop wins** from every state, as it always has, and
-//!   can turn a finished run to `failed`. What that leaves inconsistent in
-//!   the archive record is issue 1070's.
+//! - **A termination request wins**: an operator's drop ends the run from
+//!   every state, as it always has, and can turn a finished run to
+//!   `failed`. What that leaves inconsistent in the archive record is
+//!   issue 1070's.
 //!
 //! Who a row names: a row an event creates takes the event's worker id
 //! (the worker's own on `invocation.archived` and on recovery's restore,
@@ -253,9 +254,11 @@ pub enum OwnershipEvent {
     Archived(Ending),
     /// `invocation.archive_acked`, the control plane's own answer to it.
     ArchiveAcked,
-    /// `invocation.operator_recovered`: an operator's drop, or another
-    /// operator-issued ending.
-    OperatorEnded(Ending),
+    /// `invocation.operator_recovered`: an operator asked for the run to
+    /// be terminated, a drop, with the ending its `final_phase` names.
+    /// The request ends the run from every state; issue 1070 records it
+    /// beside the run's outcome instead.
+    TerminationRequested(Ending),
     /// `invocation.operator_resumed`.
     OperatorResumed,
 }
@@ -286,7 +289,7 @@ impl OwnershipEvent {
         match self {
             OwnershipEvent::Ended(ending)
             | OwnershipEvent::Archived(ending)
-            | OwnershipEvent::OperatorEnded(ending) => Some(ending),
+            | OwnershipEvent::TerminationRequested(ending) => Some(ending),
             OwnershipEvent::Triggered
             | OwnershipEvent::Restored
             | OwnershipEvent::Ambiguous
@@ -307,8 +310,8 @@ impl OwnershipEvent {
         OwnershipEvent::Archived(Ending::Completed),
         OwnershipEvent::Archived(Ending::Failed),
         OwnershipEvent::ArchiveAcked,
-        OwnershipEvent::OperatorEnded(Ending::Completed),
-        OwnershipEvent::OperatorEnded(Ending::Failed),
+        OwnershipEvent::TerminationRequested(Ending::Completed),
+        OwnershipEvent::TerminationRequested(Ending::Failed),
         OwnershipEvent::OperatorResumed,
     ];
 }
@@ -366,7 +369,7 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
                 to: RowState::ended(ending, ArchiveState::Pending),
                 owner: Owner::Keep,
             },
-            E::Archived(ending) | E::OperatorEnded(ending) => Decision::Move {
+            E::Archived(ending) | E::TerminationRequested(ending) => Decision::Move {
                 to: RowState::ended(ending, ArchiveState::Archived),
                 owner: Owner::Keep,
             },
@@ -413,7 +416,7 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
                 },
             }
         }
-        (E::OperatorEnded(ending), _) => {
+        (E::TerminationRequested(ending), _) => {
             let to = RowState::ended(ending, ArchiveState::Archived);
             if row == to {
                 Decision::Duplicate
