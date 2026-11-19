@@ -183,6 +183,43 @@ impl EventSink for MarksOnFailed {
     }
 }
 
+/// The drop's fold landing its mark at the last instant before the run's
+/// own: a trigger on the WAL table, fired by the run's write of its row
+/// finished with its stored `failed`, marks the row as the fold does and
+/// abandons the run's write, which then finds the row finished.
+async fn the_drop_lands_just_before_the_runs_mark(dir: &std::path::Path) {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(dir.join("events.db")))
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER the_drop_lands_first \
+         BEFORE UPDATE OF terminal_outcome ON invocation_state \
+         WHEN OLD.terminal_at IS NULL AND NEW.terminal_at IS NOT NULL \
+              AND NEW.phase = 'failed' \
+         BEGIN \
+           UPDATE invocation_state SET phase = 'failed', updated_at = 7000, terminal_at = 7000 \
+             WHERE invocation_id = OLD.invocation_id; \
+           SELECT RAISE(IGNORE); \
+         END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+}
+
+/// Two copies of one event, compared in full: id, time, parent, payload
+/// and annotations, as a reader of either would see them.
+fn assert_same_event(left: &Event, right: &Event, what: &str) {
+    assert_eq!(
+        serde_json::to_value(left).unwrap(),
+        serde_json::to_value(right).unwrap(),
+        "{what}"
+    );
+}
+
 /// What one dropped run left behind.
 struct Dropped {
     outcome: Result<InvocationOutcome, ExecutorError>,
@@ -568,15 +605,62 @@ async fn a_tool_running_when_a_live_drop_lands_finishes_and_is_recorded() {
     assert_eq!(run.published("failed"), 0);
 }
 
-/// Guard, and the one exception to the rule. A mid-step failure publishes
-/// its `failed` before it marks the row, so a drop's mark that lands after
-/// the runner has read the row and before the run's own mark lets the
-/// run's own `failed` through, and then its own `invocation.archived`,
-/// the row being finished when the run looks for it: the stream carries
-/// the run's own `failed`, with its own error. The window is one row read,
-/// one publish the broker acknowledges, and one more row read.
+/// **Red before the mark came first.** A drop's mark that lands after the
+/// run has decided its mid-step `failed`, and before the run's own mark:
+/// the drop marked the row first, so the run publishes no `failed` of its
+/// own and no `invocation.archived` over the drop's, and stops with
+/// `FinishedElsewhere`. The failing call was billed, and its usage and
+/// cost still go out on its `llm.failure`.
+///
+/// Staged at both places that instant has been: when the run hands its
+/// `failed` to the bus (`MarksOnFailed`), where a run that published
+/// before it marked had already read its row, and at the run's own mark
+/// (`the_drop_lands_just_before_the_runs_mark`).
 #[tokio::test]
-async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_failed_out() {
+async fn a_drop_marking_just_before_the_runs_own_mark_leaves_no_failed_of_its_own() {
+    let world = a_world(None, SinkKind::MarksOnFailed).await;
+    the_drop_lands_just_before_the_runs_mark(world.dir.path()).await;
+    let llm = world.model(None, billed_but_empty());
+    let outcome = world.run(&llm).await;
+    let run = world.left(outcome, 0, &llm).await;
+    run.assert_stopped_without_an_ending();
+    let row = run.row.as_ref().expect("the row stays for the sweeper");
+    assert_eq!(
+        (
+            row.phase.as_str(),
+            row.terminal_at,
+            row.terminal_outcome.is_none()
+        ),
+        ("failed", Some(7_000), true),
+        "the drop's mark, and nothing of the run's stored over it"
+    );
+    let failure = run
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::LlmFailure(failure) => Some((failure, event.envelope.cost.as_ref())),
+            _ => None,
+        })
+        .expect("the failing call's llm.failure");
+    assert_eq!(
+        failure.0.usage.map(|usage| usage.input_tokens),
+        Some(1_000),
+        "the call's usage"
+    );
+    assert!(
+        failure.1.is_some_and(|cost| cost.total_cost > 0.0),
+        "the call's cost: {:?}",
+        failure.1
+    );
+}
+
+/// **Red before the mark came first.** The mirror: the run's own mark
+/// lands first, and the drop's mark after it, when the run hands its
+/// `failed` to the bus. The run ended by itself: its own `failed` goes
+/// out and is the ending, the one its row stores, and its own
+/// `invocation.archived` follows. The drop's mark lands on nothing.
+#[tokio::test]
+async fn a_drop_marking_after_the_runs_own_mark_leaves_the_runs_failed_the_ending() {
     let run = a_dropped_run(
         None,
         During::ModelCall,
@@ -584,30 +668,150 @@ async fn a_drop_landing_between_the_read_and_the_publish_lets_the_runs_own_faile
         SinkKind::MarksOnFailed,
     )
     .await;
-    assert_eq!(run.published("failed"), 1, "the run's own failed");
+    let failed: Vec<&Event> = run
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, EventPayload::Failed(_)))
+        .collect();
+    assert_eq!(failed.len(), 1, "the run's own failed");
+    let EventPayload::Failed(payload) = &failed[0].payload else {
+        unreachable!()
+    };
+    assert!(
+        matches!(payload.error_kind, crate::events::FailureKind::LlmError),
+        "with the run's own error: {:?}",
+        payload.error_kind
+    );
     assert_eq!(
         run.published("invocation_archived"),
         1,
-        "and the run's own archive: the row is finished when it looks"
+        "and the run's own archive"
     );
-    let failed = run
-        .events
-        .iter()
-        .find_map(|event| match &event.payload {
-            EventPayload::Failed(failed) => Some(failed),
-            _ => None,
-        })
-        .unwrap();
-    assert!(
-        matches!(failed.error_kind, crate::events::FailureKind::LlmError),
-        "the run's own error: {:?}",
-        failed.error_kind
+    let row = run.row.as_ref().expect("the row awaits its archive's ack");
+    assert_ne!(
+        row.terminal_at,
+        Some(7_000),
+        "the row carries the run's own mark, not the drop's"
     );
-    let row = run.row.as_ref().expect("the row stays for the sweeper");
+    let stored = Event::from_wire(
+        row.terminal_outcome
+            .as_deref()
+            .expect("the row stores its ending")
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_same_event(
+        &stored,
+        failed[0],
+        "the row stores the failed that went out",
+    );
+    assert!(row.terminal_published_at.is_some(), "and knows it went out");
     assert_eq!(
-        (row.phase.as_str(), row.terminal_at),
-        ("failed", Some(7_000)),
-        "the drop's mark landed first, and the run's own did not land over it"
+        Some(row.updated_at),
+        row.terminal_at,
+        "the mark is the row's last write, and moves its time to the mark's"
+    );
+}
+
+/// **Red before the mark came first.** A publish lost after the mark: the
+/// broker refuses the run's `failed` for a moment. The row is already
+/// finished, with the `failed` stored in it and not stamped published, so
+/// the next start does not resume the run (issue 1070, item 5: a run that
+/// published its `failed` and died before its mark was resumed), and the
+/// archive sweeper republishes the stored `failed`, the very event the
+/// broker refused, then the archive; a second pass repeats the archive
+/// only.
+#[tokio::test]
+async fn a_failed_lost_after_the_mark_is_republished_by_the_sweeper() {
+    let world = a_world(None, SinkKind::Recording).await;
+    // The run publishes `triggered`, `llm.request`, `llm.dispatched` and
+    // `llm.failure`, then its `failed`: the fifth publish is refused.
+    world.recording.fail_publish_at(4);
+    let llm = world.model(None, billed_but_empty());
+    let outcome = world.run(&llm).await;
+    assert!(
+        matches!(outcome, Err(ExecutorError::Bus(_))),
+        "the publish failed: {outcome:?}"
+    );
+    let refused = world.recording.refused();
+    let [refused] = &refused[..] else {
+        panic!("one refused publish: {refused:?}");
+    };
+    assert!(
+        matches!(refused.payload, EventPayload::Failed(_)),
+        "the refused publish is the failed: {refused:?}"
+    );
+    world.recording.clear_fault();
+    let id = world.invocation_id.to_string();
+    let row = world
+        .store
+        .get_invocation_state(&id)
+        .await
+        .unwrap()
+        .expect("the row is kept");
+    assert!(
+        row.terminal_at.is_some(),
+        "the row is marked before the publish"
+    );
+    assert!(
+        row.terminal_published_at.is_none(),
+        "and its ending is owed"
+    );
+    let stored =
+        Event::from_wire(row.terminal_outcome.as_deref().expect("stored").as_bytes()).unwrap();
+    assert_same_event(
+        &stored,
+        refused,
+        "the row stores the failed that was refused",
+    );
+    assert!(
+        world
+            .store
+            .find_in_flight_invocations()
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing for the next start to resume"
+    );
+
+    let before = world.recording.events().len();
+    let sweeper = crate::worker::archive_retry::ArchiveRetrySweeper::new_with_sink(
+        world.recording.clone() as Arc<dyn EventSink>,
+        test_worker_id(),
+        world.store.clone(),
+    );
+    sweeper
+        .sweep_once(&mut std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let after: Vec<Event> = world.recording.events().split_off(before);
+    let kinds: Vec<&str> = after
+        .iter()
+        .map(|event| event.payload.event_type())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["failed", "invocation_archived"],
+        "the sweeper's republish"
+    );
+    assert_same_event(&after[0], refused, "the refused failed itself, in full");
+
+    let again = world.recording.events().len();
+    sweeper
+        .sweep_once(&mut std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = world
+        .recording
+        .events()
+        .split_off(again)
+        .iter()
+        .map(|event| event.payload.event_type())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["invocation_archived"],
+        "a second pass repeats the archive only"
     );
 }
 
