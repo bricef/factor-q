@@ -559,8 +559,8 @@ enum ResumedRow {
     /// did not reach a terminal event.
     InFlight,
     /// Terminal: the invocation has ended. Usually the run reached its
-    /// terminal event, stored with the terminal write or published before
-    /// it, and the error came after (its archive refused, say). It can
+    /// terminal event, stored with the terminal write, and the error came
+    /// after (its archive refused, say). It can
     /// also be an operator's drop, which marks the row terminal while the
     /// run is going. Either way the error does not undo the ending.
     Terminal,

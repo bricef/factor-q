@@ -23,17 +23,20 @@
 //! a `payload_too_large` `failed` in its place (#828).
 //!
 //! Every caller of `emit_failed` (an LLM error, a budget stop, a run of
-//! tool timeouts, a reducer step that errors, the host step budget) is
-//! the other order: it fails mid-step, before any terminal write, and
-//! publishes `failed` before it marks the row, so a lost one leaves the
-//! row in flight for recovery, and nothing is stored.
+//! tool timeouts, a reducer step that errors, the host step budget) fails
+//! mid-step, before any terminal write, and ends the same way
+//! (`end_mid_step`): its `failed` is stored in the write that marks the
+//! row terminal, and published after it. That write lands only on a row
+//! still in flight, so against an operator's drop, which marks the same
+//! row, one of the two wins (issue 1070), and a publish lost after it is
+//! the archive sweeper's to repeat, as a lost `completed` is.
 
 use std::time::Instant;
 
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::publish_failure::Refused;
+use super::publish_failure::{Refused, phase_for};
 use super::{ReducerRunner, harness_error_to_failure_kind, map_store_err};
 use crate::agent::AgentId;
 use crate::events::{
@@ -134,6 +137,19 @@ impl FailedEvent {
     pub(super) fn annotate(mut self, key: &str, value: serde_json::Value) -> Self {
         self.annotations.push((key.to_string(), value));
         self
+    }
+
+    /// The event to publish or store, keeping this.
+    fn clone_event(&self) -> Event {
+        let event = Event::new(
+            self.agent_id.clone(),
+            self.invocation_id,
+            EventPayload::Failed(self.payload.clone()),
+        );
+        self.annotations
+            .iter()
+            .cloned()
+            .fold(event, |event, (key, value)| event.annotate(key, value))
     }
 
     /// The event to publish or store.
@@ -322,30 +338,93 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             .await
     }
 
-    /// Publish a mid-step `failed`, then mark the row terminal: the point
-    /// at which the run has ended.
+    /// End a run on a mid-step `failed`: mark its row finished with the
+    /// `failed` stored in the same write, then publish it, as a `completed`
+    /// is ended (`finish`). The point at which the run has ended is the
+    /// mark, not the publish (issue 1070).
     ///
-    /// Every caller arrives before any terminal write (a `failed` the
-    /// reducer decides is stored with the loop's terminal upsert instead,
-    /// #946), so this is the point at which `invocation_state` is marked
-    /// terminal, after the publish: a lost `failed` leaves the row in
-    /// flight for recovery. The `failed` goes out through
-    /// `publish_failed`, so a run that never wrote its row (a reducer whose
-    /// first step errors) fails in `Setup`, whatever phase the caller built
-    /// it with, and a run whose row an operator's drop already finished, or
-    /// finished and handed off, publishes nothing and stops with
-    /// `ExecutorError::FinishedElsewhere` before the row is touched (issue
-    /// 1070; `own_row.rs`). The mark is still a no-op on a row that turned
-    /// terminal between that check and here.
+    /// The mark lands only on a row still in flight, so against an
+    /// operator's drop, whose fold marks the same row, there is one
+    /// winner. A mark that misses means the drop marked first: the run
+    /// publishes no `failed`, and stops with
+    /// `ExecutorError::FinishedElsewhere` (`own_row.rs`). A mark that lands
+    /// means the run ended by itself, and its `failed` is the ending. A
+    /// publish lost after the mark leaves the row finished with its ending
+    /// owed, which the archive sweeper republishes, the same event, as it
+    /// does a lost `completed`; nothing is left in flight to resume.
+    ///
+    /// A run with no row has nothing to mark, and goes to `publish_failed`:
+    /// one that never wrote its row (a reducer whose first step errors)
+    /// publishes its `failed` in `Setup`, as every unstarted run does, and
+    /// one whose row a drop finished and handed off publishes nothing. A
+    /// row already terminal is the mark's miss.
+    ///
+    /// The stored event is measured before it is stored, as a step's
+    /// terminal event is: one the sink would refuse for its size (a
+    /// provider's error text can be long) is replaced by the
+    /// `payload_too_large` `failed` (#828).
     pub(super) async fn end_mid_step(
         &self,
         cursor: &mut Option<Uuid>,
-        failed: FailedEvent,
+        mut failed: FailedEvent,
     ) -> Result<(), ExecutorError> {
         let invocation_id = failed.invocation_id;
-        self.publish_failed(cursor, failed).await?;
-        let terminal_at_ms = self.config.clock.unix_now_ms();
-        self.ensure_terminal("failed", invocation_id, terminal_at_ms)
+        let id = invocation_id.to_string();
+        let row = self
+            .config
+            .store
+            .get_invocation_state(&id)
             .await
+            .map_err(map_store_err)?;
+        // No row to mark: one never written, whose `failed` goes out in
+        // `Setup`, or one handed off after a drop, which publishes nothing;
+        // `publish_failed` tells them apart.
+        let Some(mut row) = row else {
+            return self.publish_failed(cursor, failed).await;
+        };
+        if matches!(failed.payload.phase, FailurePhase::Setup) {
+            warn!(
+                invocation_id = %invocation_id,
+                "a `failed` built in phase setup for a run with a WAL row; \
+                 storing it in phase reducer, since setup would say the run \
+                 never started"
+            );
+        }
+        failed.payload.phase = phase_for(true, failed.payload.phase);
+        let mut event = failed.clone_event();
+        event.envelope.parent_event_id = *cursor;
+        let mut encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
+        if let Some(refused) = Refused::measure(&*self.config.sink, &event, encoded.len()) {
+            event = refused
+                .failed_event(
+                    &failed.agent_id,
+                    invocation_id,
+                    failed.payload.partial_totals,
+                )
+                .into_event();
+            event.envelope.parent_event_id = *cursor;
+            encoded = terminal_outcome::encode(&event).map_err(map_store_err)?;
+        }
+        let terminal_at_ms = self.config.clock.unix_now_ms();
+        row.phase = "failed".to_string();
+        row.terminal_at = Some(terminal_at_ms);
+        row.updated_at = terminal_at_ms;
+        row.terminal_outcome = Some(encoded);
+        let marked = self
+            .config
+            .store
+            .update_invocation_state(&row)
+            .await
+            .map_err(map_store_err)?;
+        if !marked {
+            return Err(self.finished_elsewhere(invocation_id, "its row is terminal"));
+        }
+        self.publish_chained(cursor, event).await?;
+        self.config
+            .store
+            .mark_terminal_published(&id, self.config.clock.unix_now_ms())
+            .await
+            .map_err(map_store_err)?;
+        Ok(())
     }
 }

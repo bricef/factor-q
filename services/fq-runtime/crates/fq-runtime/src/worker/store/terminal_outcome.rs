@@ -1,9 +1,9 @@
 //! The terminal outcome persisted on `invocation_state` in v12 (#823).
 //!
-//! The run loop marks a row terminal *before* it publishes the event the
-//! run ends in — `completed`, or a `failed` the reducer itself decides
-//! (#946) — the SQL-first, then-NATS order of `data-architecture.md`
-//! §5.5. That event is the only one that carries the outcome: task
+//! A run marks its row terminal *before* it publishes the event it ends
+//! in — `completed`, a `failed` the reducer itself decides (#946), or a
+//! `failed` mid-step (issue 1070) — the SQL-first, then-NATS order of
+//! `data-architecture.md` §5.5. That event is the only one that carries the outcome: task
 //! status, result summary, cost and totals, or the failure's kind,
 //! message, phase and partial totals. Before v12 a publish lost after that
 //! write left a terminal row the archive sweeper could only answer with a
@@ -70,10 +70,10 @@ pub(crate) fn encode(event: &Event) -> Result<String, WorkerStoreError> {
 impl InvocationStateRow {
     /// The terminal event this row still owes the bus: its stored outcome,
     /// unless `terminal_published_at` says it already went out. `None` for
-    /// a row that stored none — an operator drop, a mid-step `failed`
-    /// (published before the row was marked), a reducer-decided `failed`
-    /// written by a build before #946, or a row written before v12 —
-    /// whose sweep is `invocation.archived` alone.
+    /// a row that stored none — an operator drop, a mid-step `failed` or a
+    /// reducer-decided one written by a build that published it before
+    /// marking the row, or a row written before v12 — whose sweep is
+    /// `invocation.archived` alone.
     /// `Err` when the stored event must not be published (see the module
     /// doc).
     pub(crate) fn unpublished_terminal_event(&self) -> Result<Option<Event>, HoldReason> {

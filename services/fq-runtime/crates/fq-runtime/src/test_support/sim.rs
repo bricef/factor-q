@@ -1770,7 +1770,7 @@ mod resume_equivalence {
     /// the run (row A errored, phase `deferred`); the resume crosses a
     /// step boundary (phase `awaiting_model`) and the model then fails
     /// for another reason (row B errored); the daemon crashes before
-    /// the `failed` terminal lands. The next resume must reproduce row
+    /// the run marks its row finished. The next resume must reproduce row
     /// B's failure — not read row A through the overwritten phase and
     /// reproduce the deferral as the failure.
     #[tokio::test]
@@ -1790,18 +1790,23 @@ mod resume_equivalence {
             "{outcome:?}"
         );
 
-        // Row B: a transport failure on the resumed turn, with the
-        // `failed` publish faulted so the terminal is never written —
-        // the resumed chain publishes request, dispatched, failure, and
-        // then the terminal, which is the fourth.
+        // Row B: a transport failure on the resumed turn, and the daemon
+        // gone before the run marks its row finished. The mark comes
+        // before the `failed` is published (issue 1070), so the last
+        // publish before it is the call's own `llm.failure`, the third of
+        // the resumed chain after its request and dispatched: faulting
+        // that one is the crash, with row B written and no terminal. It
+        // is the fault issue 1108 names: a billed call's cost would not
+        // reach the stream, and the reproduced `failed` carries no totals.
+        // This call is not billed, and the test asserts nothing on spend.
         let published = world.sink.events().len();
         let resume_llm = FixtureClient::new();
         resume_llm.push_error(crate::llm::LlmError::RequestFailed(
             "sim: provider gave up".to_string(),
         ));
-        let err = resume_crashing_at(&world, &resume_llm, published + 3)
+        let err = resume_crashing_at(&world, &resume_llm, published + 2)
             .await
-            .expect_err("the faulted terminal publish surfaces as the crash");
+            .expect_err("the faulted publish before the mark surfaces as the crash");
         assert!(matches!(err, ExecutorError::Bus(_)), "{err:?}");
         assert!(
             failed_messages(&world.sink.events()).is_empty(),

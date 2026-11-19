@@ -13,8 +13,8 @@
 //! Before `archived`, it republishes the row's stored terminal
 //! event (`terminal_outcome`, v12) while that is not stamped
 //! published — the healer for a `completed` (#823), or a `failed`
-//! the reducer decided (#946), whose publish was lost after the
-//! row went terminal. It is the stored event itself,
+//! the reducer decided (#946) or that ended the run mid-step
+//! (issue 1070), whose publish was lost after the row went terminal. It is the stored event itself,
 //! with the original's `event_id`, and delivery is at-least-once:
 //! if a copy did land (a lost ack, or the run loop racing this
 //! sweep), JetStream's `Nats-Msg-Id` dedup drops the republish only

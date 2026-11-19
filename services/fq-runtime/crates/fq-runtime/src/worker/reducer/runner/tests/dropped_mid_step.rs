@@ -183,6 +183,44 @@ impl EventSink for MarksOnFailed {
     }
 }
 
+/// A broker that refuses a run's own `llm_error` `failed` for its size, as
+/// it would one carrying a long provider error, and takes everything
+/// else: the refusal is the publish's, and the same answer the runner gets
+/// when it measures an event before storing it.
+struct RefusesTheLlmErrorFailed {
+    inner: Arc<RecordingSink>,
+}
+
+impl RefusesTheLlmErrorFailed {
+    fn refuses(event: &Event) -> bool {
+        matches!(
+            &event.payload,
+            EventPayload::Failed(failed)
+                if matches!(failed.error_kind, crate::events::FailureKind::LlmError)
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl EventSink for RefusesTheLlmErrorFailed {
+    async fn publish(&self, event: &Event) -> Result<u64, BusError> {
+        let body_len = serde_json::to_vec(event).unwrap().len();
+        self.check_size(event, body_len)?;
+        self.inner.publish(event).await
+    }
+
+    fn check_size(&self, event: &Event, body_len: usize) -> Result<(), BusError> {
+        if Self::refuses(event) {
+            return Err(BusError::PayloadTooLarge {
+                event_type: crate::events::EventKind::Failed,
+                size: body_len,
+                limit: body_len - 1,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The drop's fold landing its mark at the last instant before the run's
 /// own: a trigger on the WAL table, fired by the run's write of its row
 /// finished with its stored `failed`, marks the row as the fold does and
@@ -321,6 +359,9 @@ async fn a_world(in_tool: Option<Drop>, sink: SinkKind) -> World {
             store: store.clone(),
             inner: recording.clone(),
         }),
+        SinkKind::RefusesTheLlmErrorFailed => Arc::new(RefusesTheLlmErrorFailed {
+            inner: recording.clone(),
+        }),
     };
     let runner = Arc::new(ReducerRunner::new(
         Arc::new(ReducerContext::builder().tools(Arc::new(tools)).build()),
@@ -439,6 +480,7 @@ enum During {
 enum SinkKind {
     Recording,
     MarksOnFailed,
+    RefusesTheLlmErrorFailed,
 }
 
 fn final_answer() -> First {
@@ -942,4 +984,393 @@ async fn a_resumed_run_whose_row_a_drop_handed_off_publishes_no_failed() {
         !noted_after,
         "the note is forgotten when the resumed drive ends"
     );
+}
+
+/// A mid-step `failed` the broker would refuse for its size is measured
+/// before it is stored, as a step's terminal event is, and the run ends on
+/// the refusal's `payload_too_large` `failed` instead: the row never
+/// stores an ending that no publish or sweep could deliver. The one
+/// stored is the one published, in full, and it carries the run's totals,
+/// the billed call's cost among them: no spend figure is lost.
+#[tokio::test]
+async fn a_mid_step_failed_the_broker_would_refuse_is_stored_as_the_refusal() {
+    let run = a_dropped_run(
+        None,
+        During::ModelCall,
+        billed_but_empty(),
+        SinkKind::RefusesTheLlmErrorFailed,
+    )
+    .await;
+    let failed: Vec<&Event> = run
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, EventPayload::Failed(_)))
+        .collect();
+    assert_eq!(failed.len(), 1, "one failed: {:?}", run.events);
+    let EventPayload::Failed(payload) = &failed[0].payload else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            payload.error_kind,
+            crate::events::FailureKind::PayloadTooLarge
+        ),
+        "the refusal's: {:?}",
+        payload.error_kind
+    );
+    let billed = run
+        .events
+        .iter()
+        .find(|event| matches!(event.payload, EventPayload::LlmFailure(_)))
+        .and_then(|event| event.envelope.cost.as_ref())
+        .expect("the billed call's cost")
+        .total_cost;
+    assert!(billed > 0.0);
+    assert_eq!(
+        (
+            payload.partial_totals.total_cost,
+            payload.partial_totals.total_llm_calls
+        ),
+        (billed, 0),
+        "the run's totals: the billed call's cost, and no call that produced an outcome"
+    );
+    let row = run.row.as_ref().expect("the row awaits its archive's ack");
+    let stored = Event::from_wire(
+        row.terminal_outcome
+            .as_deref()
+            .expect("the row stores its ending")
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_same_event(&stored, failed[0], "stored as published, in full");
+}
+
+/// A caller that builds a mid-step `failed` in `setup` for a run with a
+/// WAL row has made a mistake the row corrects: the `failed` is stored,
+/// and published, in `reducer`, since `setup` would tell every reader the
+/// run never started (issue 1024).
+#[tokio::test]
+async fn a_mid_step_failed_built_in_setup_for_a_started_run_is_stored_in_reducer() {
+    let world = a_world(None, SinkKind::Recording).await;
+    let id = world.invocation_id.to_string();
+    world
+        .store
+        .upsert_invocation_state(&crate::worker::store::InvocationStateRow {
+            invocation_id: id.clone(),
+            agent_id: world.agent.id().as_str().to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".to_string(),
+            state_blob: b"{}".to_vec(),
+            step_index: 0,
+            started_at: 1_000,
+            updated_at: 1_000,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
+        })
+        .await
+        .unwrap();
+    let failed = super::super::terminal::failed_event(
+        world.agent.id(),
+        world.invocation_id,
+        crate::events::FailureKind::LlmError,
+        "the provider refused the key".to_string(),
+        crate::events::FailurePhase::Setup,
+        InvocationTotals::default(),
+        None,
+    );
+    world
+        .runner
+        .end_mid_step(&mut None, failed)
+        .await
+        .expect("the run ends");
+    let published: Vec<Event> = world.recording.events();
+    let [event] = &published[..] else {
+        panic!("one failed: {published:?}");
+    };
+    let EventPayload::Failed(payload) = &event.payload else {
+        panic!("a failed: {event:?}");
+    };
+    assert!(
+        matches!(payload.phase, crate::events::FailurePhase::Reducer),
+        "{:?}",
+        payload.phase
+    );
+    let row = world
+        .store
+        .get_invocation_state(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = Event::from_wire(row.terminal_outcome.as_deref().unwrap().as_bytes()).unwrap();
+    assert_same_event(&stored, event, "stored as published, in full");
+}
+
+/// A sink that loses the run's first `llm.failure` to a bus error, as a
+/// broker away for a moment does, and refuses an `llm_error` `failed` for
+/// its size, on publish and on measure.
+struct LosesTheLlmFailureThenRefusesForSize {
+    lost: AtomicUsize,
+    inner: Arc<RecordingSink>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for LosesTheLlmFailureThenRefusesForSize {
+    async fn publish(&self, event: &Event) -> Result<u64, BusError> {
+        if matches!(event.payload, EventPayload::LlmFailure(_))
+            && self.lost.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Err(BusError::Publish("the broker is away".to_string()));
+        }
+        let body_len = serde_json::to_vec(event).unwrap().len();
+        self.check_size(event, body_len)?;
+        self.inner.publish(event).await
+    }
+
+    fn check_size(&self, event: &Event, body_len: usize) -> Result<(), BusError> {
+        if RefusesTheLlmErrorFailed::refuses(event) {
+            return Err(BusError::PayloadTooLarge {
+                event_type: crate::events::EventKind::Failed,
+                size: body_len,
+                limit: body_len - 1,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A provider failure reproduced on resume whose `failed` is over the
+/// broker's limit ends the run on the refusal's `payload_too_large`
+/// `failed`, with the row finished and nothing left in flight. Before the
+/// mark came first, that resume path published its `failed` unmeasured,
+/// and a refusal left the row in flight for every start to resume into
+/// again. The fault that sends the run to that path, a lost
+/// `llm.failure`, also loses the call's cost from the stream: issue 1108,
+/// not this change's.
+#[tokio::test]
+async fn an_oversized_failure_reproduced_on_resume_ends_on_the_refusal() {
+    let dir = tempdir().unwrap();
+    let store = Arc::new(
+        WorkerStore::open(&dir.path().join("events.db"))
+            .await
+            .unwrap(),
+    );
+    let recording = Arc::new(RecordingSink::new());
+    let sink = Arc::new(LosesTheLlmFailureThenRefusesForSize {
+        lost: AtomicUsize::new(0),
+        inner: recording.clone(),
+    });
+    let runner = Arc::new(ReducerRunner::new(
+        Arc::new(
+            ReducerContext::builder()
+                .tools(Arc::new(ToolRegistry::with_builtins()))
+                .build(),
+        ),
+        Arc::new(
+            RunnerConfig::builder()
+                .event_sink(sink.clone() as Arc<dyn EventSink>)
+                .pricing(test_pricing())
+                .store(store.clone())
+                .worker_id(test_worker_id())
+                .build(),
+        ),
+        Harness::new(),
+    ));
+    let agent = Agent::builder()
+        .id(unique_agent_id("reproduced-oversized"))
+        .model("claude-haiku")
+        .system_prompt("be brief")
+        .budget(1.0)
+        .build()
+        .unwrap();
+    let invocation_id = Uuid::now_v7();
+    let model = || DroppedDuringCall {
+        dropper: Dropper {
+            runner: Arc::new(OnceLock::new()),
+            store: store.clone(),
+            invocation_id,
+            drop: None,
+        },
+        first: billed_but_empty(),
+        calls: AtomicUsize::new(0),
+    };
+    let (durable_start, _started) = DurableStart::channel(invocation_id);
+    let outcome = runner
+        .run_signalling(
+            &agent,
+            &model(),
+            Trigger::named(
+                Uuid::now_v7(),
+                TriggerSource::Manual,
+                None,
+                json!({"input": "go"}),
+            ),
+            Some(1),
+            durable_start,
+        )
+        .await;
+    assert!(matches!(outcome, Err(ExecutorError::Bus(_))), "{outcome:?}");
+    assert_eq!(
+        store.find_in_flight_invocations().await.unwrap().len(),
+        1,
+        "the lost llm.failure leaves the row in flight, unmarked"
+    );
+
+    let resumed = runner.resume(&agent, &model(), invocation_id).await;
+    assert!(
+        resumed.is_err(),
+        "the reproduced failure ends the run: {resumed:?}"
+    );
+    let failed: Vec<Event> = recording
+        .events()
+        .into_iter()
+        .filter(|event| matches!(event.payload, EventPayload::Failed(_)))
+        .collect();
+    let [failed] = &failed[..] else {
+        panic!("one failed: {failed:?}");
+    };
+    let EventPayload::Failed(payload) = &failed.payload else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            payload.error_kind,
+            crate::events::FailureKind::PayloadTooLarge
+        ),
+        "the refusal's: {:?}",
+        payload.error_kind
+    );
+    let row = store
+        .get_invocation_state(&invocation_id.to_string())
+        .await
+        .unwrap()
+        .expect("the row awaits its archive's ack");
+    assert!(row.terminal_at.is_some(), "the row is finished");
+    let stored = Event::from_wire(row.terminal_outcome.as_deref().unwrap().as_bytes()).unwrap();
+    assert_same_event(&stored, failed, "stored as published, in full");
+    assert!(
+        store.find_in_flight_invocations().await.unwrap().is_empty(),
+        "nothing for the next start to resume"
+    );
+}
+
+/// A model whose only call fails while an operator's drop really races
+/// the run: a spawned task runs the drop's own mark, on its own pooled
+/// connection, `delay` after the call returns.
+struct RacedByADrop {
+    store: Arc<WorkerStore>,
+    invocation_id: Uuid,
+    delay: std::time::Duration,
+    handle: std::sync::Mutex<Option<tokio::task::JoinHandle<u64>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::LlmClient for RacedByADrop {
+    async fn chat(
+        &self,
+        _request: crate::llm::ChatRequest,
+    ) -> Result<ChatResponse, crate::llm::LlmError> {
+        let store = self.store.clone();
+        let id = self.invocation_id.to_string();
+        let delay = self.delay;
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            store
+                .mark_invocation_operator_terminal(&id, "failed", 7_000)
+                .await
+                .expect("the WAL writes")
+        });
+        *self.handle.lock().unwrap() = Some(handle);
+        Err(refused_key())
+    }
+}
+
+/// A real race between the drop's mark and the run's own, at delays
+/// spread over a few milliseconds after the failing call returns: whichever
+/// statement SQLite runs first, exactly one lands, and the stream agrees
+/// with the row. Either winner passes, so the test does not depend on
+/// timing to pass; the spread is so that both win across the runs. Bounded:
+/// a fixed number of runs, each one model call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drop_racing_the_runs_own_mark_has_one_winner() {
+    const RUNS: u64 = 48;
+    const STEP_US: u64 = 100;
+    for run in 0..RUNS {
+        let world = a_world(None, SinkKind::Recording).await;
+        let llm = RacedByADrop {
+            store: world.store.clone(),
+            invocation_id: world.invocation_id,
+            delay: std::time::Duration::from_micros(run * STEP_US),
+            handle: std::sync::Mutex::new(None),
+        };
+        let (durable_start, _started) = DurableStart::channel(world.invocation_id);
+        let outcome = world
+            .runner
+            .run_signalling(
+                &world.agent,
+                &llm,
+                Trigger::named(
+                    Uuid::now_v7(),
+                    TriggerSource::Manual,
+                    None,
+                    json!({"input": "go"}),
+                ),
+                Some(1),
+                durable_start,
+            )
+            .await;
+        let handle = llm
+            .handle
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the call was made");
+        let drop_marked = handle.await.expect("the drop's task") == 1;
+        let events = world.recording.events();
+        let count = |kind: &str| {
+            events
+                .iter()
+                .filter(|event| event.payload.event_type() == kind)
+                .count()
+        };
+        let row = world
+            .store
+            .get_invocation_state(&world.invocation_id.to_string())
+            .await
+            .unwrap()
+            .expect("the row is kept");
+        assert_eq!(count("llm_failure"), 1, "run {run}: the call's record");
+        if drop_marked {
+            assert!(
+                matches!(outcome, Err(ExecutorError::FinishedElsewhere { .. })),
+                "run {run}: the drop won, outcome {outcome:?}"
+            );
+            assert_eq!(count("failed"), 0, "run {run}: the drop won, no failed");
+            assert_eq!(count("invocation_archived"), 0, "run {run}: no archive");
+            assert_eq!(row.terminal_at, Some(7_000), "run {run}: the drop's mark");
+            assert!(row.terminal_outcome.is_none(), "run {run}: nothing stored");
+        } else {
+            assert!(
+                matches!(outcome, Err(ExecutorError::Llm(_))),
+                "run {run}: the run won, outcome {outcome:?}"
+            );
+            assert_eq!(count("failed"), 1, "run {run}: the run won, its failed");
+            assert_eq!(count("invocation_archived"), 1, "run {run}: its archive");
+            assert_ne!(row.terminal_at, Some(7_000), "run {run}: the run's mark");
+            let failed = events
+                .iter()
+                .find(|event| matches!(event.payload, EventPayload::Failed(_)))
+                .unwrap();
+            let stored =
+                Event::from_wire(row.terminal_outcome.as_deref().unwrap().as_bytes()).unwrap();
+            assert_same_event(&stored, failed, "the stored failed is the published one");
+            assert!(row.terminal_published_at.is_some(), "run {run}: stamped");
+        }
+    }
 }
