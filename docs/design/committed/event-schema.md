@@ -806,7 +806,9 @@ A live drop arms a halt that stops the run at its next step boundary, before it 
 {
   "action": "drop",
   "final_phase": "failed",
-  "reason": "stuck on flaky network call"
+  "reason": "stuck on flaky network call",
+  "requested_by": "admin",
+  "archive": "pending"
 }
 ```
 
@@ -815,6 +817,9 @@ A live drop arms a halt that stops the run at its next step boundary, before it 
 - **`action` is `"drop"` in v1.** The field exists so future actions (`resume`, `requeue`) can be distinguished without minting a new variant.
 - **`final_phase` is `"failed"` in v1.** A future `resume` would set `"completed"`.
 - **`reason` is operator-supplied free-form.** Audit-only; consumers must not parse it. Omitted on the wire when absent.
+- **`requested_by` is who asked for the drop:** the principal of the edge token the request came in on (`admin` for the daemon's own token, and for any token attenuated from it). It is a name, never the token, which is a credential. Absent means not recorded: a drop made in-process with no edge caller, or published by a build before the field. Omitted on the wire when absent.
+- **`archive` says whether an archive of the run may follow the drop:** `pending` when it may, `none` when it will not, as the dropping daemon knew when it published. It is `none` only when the run has no row on that daemon's worker, none will be written there, and no archive is on record. For a run the daemon is driving, the halt's report decides whether a row is to come, and a halt that finds the run's first write under way is always `pending`. A value a later build adds reads as `unknown`. Absent on a drop published by a build before the field, which a reader takes as `pending`. Omitted on the wire when absent.
+- **The coordination consumer reads neither field yet.** It moves the run's ownership row and writes the archive record exactly as for a drop without them ([#1070](https://github.com/bricef/factor-q/issues/1070)).
 - **Resume semantics are deferred.** The control-plane doesn't currently hold the worker's `state_blob` for ambiguous invocations; honest resume would require either enriching `invocation.ambiguous` with the blob or adding an operator-RPC to the worker. See the step-9 plan (`docs/plans/closed/2026-05-22-operator-cli.md`).
 - **No ack.** Unlike `invocation.archived`, no worker is waiting to clean up. The `invocation.archived` handler has a no-downgrade guard so a late `archived` event from a still-alive worker doesn't override the operator's `Failed`.
 
@@ -1155,6 +1160,7 @@ Decided by [ADR-0034](../../adrs/accepted/0034-reasoning-as-a-content-part.md); 
 | *(2026-11-18, [#1070](https://github.com/bricef/factor-q/issues/1070))* A run whose WAL row an operator's drop finished publishes no ending of its own | A run holding no halt for the drop could publish `completed` and `invocation.archived` after the drop had finished its row, or re-create a row the archive hand-off had deleted, which the next start resumed; and a step failing after a live drop published the run's own `failed`. Now no `completed`, `failed` or `invocation.archived` of the run's own follows the drop's mark, except a mid-step `failed` and the `invocation.archived` after it when the mark lands between the run's read of its row for that `failed` and its own mark. The step's `llm.response`, `llm.failure` and `tool.result` still go out. No field changes, so `schema_version` stays at 3. |
 | *(2026-11-18, [#1071](https://github.com/bricef/factor-q/issues/1071))* A new event type, `invocation.ending_held`, on `fq.agent.{agent_id}.invocation.ending_held`, with `{ outcome, ended_at_ms, started_at_ms, worker_id, reason, totals? }` | A run whose stored `completed` or `failed` the archive sweeper held, refused by this build or by the broker for its size, never told the control plane that it ended, so its ownership row read `in_flight` or was absent. The sweeper now publishes this in its place, and the coordination consumer folds it as that ending. Additive, like `invocation.stuck`; `schema_version` stays at 3. Its `event_id` is derived from the run's ids and end, so every copy carries the same id; copies differ in their `timestamp` and, across daemon runs, in `worker_id`. |
 | *(2026-11-19, [#1070](https://github.com/bricef/factor-q/issues/1070))* A started run's mid-step `failed` is stored in the write that marks its row finished, and published only if that write landed | A drop's mark that landed after the run had read its row for a mid-step `failed`, and before the run's own mark, let the run's own `failed` and `invocation.archived` out after the drop; that exception to the row above is gone. And a `failed` whose publish was lost left the row in flight, for the next start to resume the run; the archive sweeper now republishes it, the same event, as it does a lost `completed`. No field changes, so `schema_version` stays at 3. |
+| *(2026-11-19, [#1070](https://github.com/bricef/factor-q/issues/1070))* `invocation.operator_recovered` gains optional `requested_by` and `archive` (`pending` or `none`) | Who asked for a drop, and whether its run's archive can still come, are known only to the daemon that publishes it, so it records them on the event, for the fold that will record the termination request and settle a drop whose archive never comes. Both are optional and omitted when not recorded, so `schema_version` stays at 3, by the rule in [When the version moves](#when-the-version-moves): every event already on the stream still reads. A reader that does not know an `archive` value reads it as `unknown`, and a reader built before this ignores both. Nothing reads them yet. |
 
 ## Changelog: v1 → v2
 
