@@ -563,11 +563,37 @@ the time `drop` returns the run can no longer start in this daemon, and
 a drop that fails leaves it waiting as before. A drop that errors or is
 cut off (a timeout, a cancelled client) may still have published its
 event, and then the run, left waiting, can start before the event is
-folded. A deferred invocation waiting out a provider's rate limit has no
-such guarantee yet: a drop can still lose to its permit. In the instant
-a queued run's permit arrives it is starting rather than waiting, and
-`drop` refuses it like a live run (`starting to run; retry with
---live`).
+folded.
+
+An invocation deferred for a provider's rate limit is not being driven
+either, and a plain `drop` takes it the same way, whether it is still
+sleeping out its wait or the wait is over and it is waiting for a
+permit: it is not resumed in this daemon, makes no further model call
+and publishes no ending of its own, so the drop's event is its ending,
+after its `invocation.deferred` on the stream. One still sleeping is
+woken when the drop goes through and frees its agent's slot just after
+`drop` returns (within a few tens of milliseconds), not when the wait
+would have ended: `fq doctor` stops counting it under "Agents at cap",
+and a trigger held behind it starts. One waiting for a permit leaves the
+queue within a quarter of a second.
+Before [#1070](https://github.com/bricef/factor-q/issues/1070) the drop
+did not reach a deferred invocation: it kept its slot until its wait
+ended, and its resume then ran until it found the drop folded, at once
+if the fold had landed and otherwise after one more model call.
+
+In the instant a queued or deferred run's permit arrives it is starting
+rather than waiting, and `drop` refuses it like a live run (`starting to
+run; retry with --live`). A drop that lands in the instant a run is
+being put down, as its model's rate limit comes back, holds it too: the
+daemon remembers the drop for an hour, and the run is not put down. Its
+slot is freed at once and nothing resumes it. One case is left open: two
+drops of the same run at once in that instant, where the second holds
+the run just as the first is remembered and then fails. The run then
+stays put down and is resumed when its wait runs out. A run dropped with
+`--live` while its model call was in flight, and then put down by that
+call's rate limit, announces its `invocation.deferred` after the drop on
+the stream, since no step boundary came between for it to see the halt;
+nothing of its own follows that announcement.
 
 An accepted `resume` re-drives the invocation under the worker cap like
 any other run: if `max_concurrent_invocations` runs are already in
@@ -777,7 +803,10 @@ in
   dispatcher resumes it after the wait — at least what the provider
   asked for and at least the model's escalating default. A daemon that
   stops first resumes it at startup like any in-flight row. The github
-  watcher's retry count never moves.
+  watcher's retry count never moves. A plain `fq invocation drop` ends a
+  deferred invocation instead: it is not resumed, and its slot is freed
+  at once (see
+  [Triaging unresolved invocations](#triaging-unresolved-invocations)).
 
 `fq status` and `fq doctor` list the throttled models — the pause's end,
 the permits against the ceiling, the 429s in the current window — and
@@ -806,7 +835,8 @@ throttled models, and neither is a doctor issue.
 cap.** A deferred invocation is sleeping, not finished: its WAL row is
 still in flight, `fq doctor` still counts it, and it keeps the slot it
 was admitted under until it ends for real — its resume runs on that
-slot rather than taking a new one. So a persistently throttled model
+slot rather than taking a new one. An operator's drop is such an end:
+the slot goes back when the drop goes through. So a persistently throttled model
 cannot turn a capped agent's queue into a burst: whatever the pause
 does to the timing, a deferral and its resume never take that agent past
 `max_concurrent`. (An operator's `fq invocation resume` can: see
