@@ -143,7 +143,7 @@ impl LlmClient for ParkedLlm {
 /// coordination owner rows. That is the adversarial ordering, held open
 /// for the whole test.
 struct Surface {
-    registry: fq_edge::EdgeRegistry,
+    registry: Arc<fq_edge::EdgeRegistry>,
     bus: fq_runtime::EventBus,
     projection: Arc<fq_runtime::control_plane::projection::store::ProjectionStore>,
     control_plane: Arc<fq_runtime::control_plane::store::ControlPlaneStore>,
@@ -155,6 +155,14 @@ struct Surface {
 
 impl Surface {
     async fn start() -> Self {
+        Self::start_with(None).await
+    }
+
+    /// The surface, its runner binding each run's workspace with
+    /// `workspace` when one is given.
+    async fn start_with(
+        workspace: Option<Arc<dyn fq_runtime::worker::workspace::WorkspaceProvider>>,
+    ) -> Self {
         let nats = fq_test_support::NatsServer::start();
         let scratch = tempfile::tempdir().expect("scratch dir");
         let paths = fq_runtime::db::RuntimeDbPaths::under(scratch.path());
@@ -211,6 +219,7 @@ impl Surface {
                         ))
                         .expect("worker id"),
                     )
+                    .workspace(workspace)
                     .build(),
             ),
             fq_runtime::Harness::new(),
@@ -298,7 +307,7 @@ impl Surface {
         .expect("assemble the operator registry");
 
         Self {
-            registry,
+            registry: Arc::new(registry),
             bus,
             projection,
             control_plane,
@@ -307,6 +316,46 @@ impl Surface {
             _scratch: scratch,
             _nats: nats,
         }
+    }
+
+    /// Serve the registry on the real edge, on a loopback port: TLS, the
+    /// token preamble, then tarpc, as `fqd` serves it. Returns the address
+    /// and the identity tokens are minted under.
+    async fn serve_over_the_edge(&self) -> (std::net::SocketAddr, fq_edge::EdgeIdentity) {
+        let identity = fq_edge::EdgeIdentity::provision().expect("provision an edge identity");
+        let (addr, serving) = fq_edge::bind("127.0.0.1:0", &identity, self.registry.clone())
+            .await
+            .expect("bind the edge");
+        tokio::spawn(serving);
+        (addr, identity)
+    }
+
+    /// The drop event a receipt names, as the broker holds it: the
+    /// payload's JSON, and the message's bytes, payload and headers, as
+    /// text.
+    async fn drop_event(&self, receipt: &serde_json::Value) -> (serde_json::Value, String) {
+        let receipt: fq_ops::Receipt =
+            serde_json::from_value(receipt.clone()).expect("a drop answers with a receipt");
+        let seq = receipt
+            .watermark(fq_ops::Domain::Event)
+            .expect("the receipt names the drop event's sequence");
+        let message = self
+            .bus
+            .jetstream()
+            .get_stream(fq_runtime::bus::STREAM_NAME)
+            .await
+            .expect("the event stream")
+            .get_raw_message(seq)
+            .await
+            .expect("the drop event is on the stream");
+        let event: serde_json::Value =
+            serde_json::from_slice(&message.payload).expect("the event is JSON");
+        let raw = format!(
+            "{}\n{:?}",
+            String::from_utf8_lossy(&message.payload),
+            message.headers
+        );
+        (event["payload"]["payload"].clone(), raw)
     }
 
     /// Issue `invocation.drop` through the registry exactly as the edge
@@ -628,7 +677,14 @@ async fn a_live_drop_during_the_first_write_marks_the_row_once_it_lands() {
     )
     .await
     .expect("the receipt does not wait for the run's first write");
-    assert!(verdict.is_ok(), "a live drop is accepted: {verdict:?}");
+    let receipt = verdict.expect("a live drop is accepted");
+    let (payload, _) = surface.drop_event(&receipt).await;
+    assert_eq!(
+        payload["archive"],
+        serde_json::json!("pending"),
+        "the run's first write is under way, so its row is coming and its archive with it: \
+         {payload}"
+    );
     assert!(
         surface.runner.first_write_under_way(invocation_id) && !run.is_finished(),
         "the request is over while the run's first write is still held"
@@ -761,4 +817,320 @@ async fn a_live_drop_whose_publish_fails_during_the_first_write_marks_nothing() 
         ("awaiting_model".to_string(), None),
         "a drop that is not on the record leaves the row in flight"
     );
+}
+
+// ---------------------------------------------------------------------
+// What the drop's event records (issue 1070): who asked, and whether an
+// archive of the run can still come.
+// ---------------------------------------------------------------------
+
+/// **A drop through the edge records who asked, and never the token.**
+/// The drop goes over the real edge, TLS and the token preamble, with a
+/// token minted for the principal `on-call` and granted only the drop's
+/// authority. Its event names that principal as `requested_by`, a name
+/// signed into the token, and nothing on the broker carries the token
+/// itself, a bearer credential. The run was live, its row written, so an
+/// archive is pending.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_through_the_edge_records_who_asked_and_never_the_token() {
+    let surface = Surface::start().await;
+    let (invocation_id, run, llm) = surface.park_one_invocation().await;
+    let (addr, identity) = surface.serve_over_the_edge().await;
+    let token = identity
+        .mint_token("on-call", &[("write", "invocation")])
+        .expect("mint a token");
+    let client = fq_edge::EdgeClient::connect(&addr.to_string(), identity.fingerprint(), &token)
+        .await
+        .expect("connect to the edge");
+    let receipt = client
+        .rpc
+        .invoke(
+            tarpc::context::current(),
+            fq_edge::InvokeRequest {
+                op: fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Drop)),
+                version: 1,
+                input: serde_json::json!({
+                    "invocation_id": invocation_id.to_string(),
+                    "reason": "requested over the edge",
+                    "live": true,
+                }),
+                min_seq: None,
+            },
+        )
+        .await
+        .expect("rpc")
+        .expect("the drop is accepted")
+        .output;
+    assert!(halted(&outcome_of(&llm, run).await));
+
+    let (payload, raw) = surface.drop_event(&receipt).await;
+    assert_eq!(
+        payload["requested_by"],
+        serde_json::json!("on-call"),
+        "the drop's event names the principal its request came in on: {payload}"
+    );
+    assert_eq!(
+        payload["archive"],
+        serde_json::json!("pending"),
+        "{payload}"
+    );
+    assert!(
+        !raw.contains(&token),
+        "the token, a bearer credential, is on the broker: {raw}"
+    );
+}
+
+/// **A drop with no caller records none.** The handler called in-process,
+/// as these tests call it, has no edge request around it, so the drop's
+/// event says nothing of who asked: not recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_with_no_caller_records_no_requester() {
+    let surface = Surface::start().await;
+    let (invocation_id, run, llm) = surface.park_one_invocation().await;
+    let receipt = surface
+        .drop_invocation(&invocation_id.to_string(), true)
+        .await
+        .expect("the drop is accepted");
+    assert!(halted(&outcome_of(&llm, run).await));
+    let (payload, _) = surface.drop_event(&receipt).await;
+    assert!(
+        payload.get("requested_by").is_none(),
+        "no caller, so nothing is recorded of who asked: {payload}"
+    );
+}
+
+/// A run this daemon is not driving, known to the projection under
+/// `agent`: what a drop of it resolves from.
+async fn known_to_the_projection(surface: &Surface, invocation_id: Uuid) {
+    let event = fq_runtime::events::Event::new(
+        surface.agent.id().clone(),
+        invocation_id,
+        // Any event of the run's names its agent for the drop; this one is
+        // the simplest to write.
+        fq_runtime::events::EventPayload::InvocationOperatorResumed(
+            fq_runtime::events::InvocationOperatorResumedPayload {
+                completed_call_ids: Vec::new(),
+                reason: None,
+            },
+        ),
+    );
+    surface
+        .projection
+        .insert_event(&event, Some(1))
+        .await
+        .expect("the projection records the run");
+}
+
+/// The `archive` a plain drop of `invocation_id` records.
+async fn archive_of_a_drop(surface: &Surface, invocation_id: Uuid) -> serde_json::Value {
+    let receipt = surface
+        .drop_invocation(&invocation_id.to_string(), false)
+        .await
+        .expect("the drop is accepted");
+    let (payload, _) = surface.drop_event(&receipt).await;
+    payload["archive"].clone()
+}
+
+/// **No row and no archive: none will come.** A run this daemon is not
+/// driving, with no row on its worker and no archive on record, gets no
+/// archive after its drop: nothing that starts a run here begins one
+/// without a row, and the run has none. Its event says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_of_a_run_with_no_row_and_no_archive_says_none_will_come() {
+    let surface = Surface::start().await;
+    let invocation_id = Uuid::now_v7();
+    known_to_the_projection(&surface, invocation_id).await;
+    assert_eq!(
+        archive_of_a_drop(&surface, invocation_id).await,
+        serde_json::json!("none"),
+        "no row on the worker, none to come, no archive on record: the drop's event must say \
+         no archive will come"
+    );
+}
+
+/// **A row on the worker: an archive is pending.** The run's row is on
+/// this daemon's worker, so the archive sweeper hands it off once it is
+/// finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_of_a_run_whose_row_is_on_the_worker_says_an_archive_is_pending() {
+    let surface = Surface::start().await;
+    let invocation_id = Uuid::now_v7();
+    known_to_the_projection(&surface, invocation_id).await;
+    let worker = fq_runtime::worker::store::WorkerStore::open(
+        &fq_runtime::db::RuntimeDbPaths::under(surface._scratch.path()).worker,
+    )
+    .await
+    .expect("open the worker store");
+    worker
+        .upsert_invocation_state(&fq_runtime::worker::store::InvocationStateRow {
+            invocation_id: invocation_id.to_string(),
+            agent_id: surface.agent.id().as_str().to_string(),
+            schema_version: 1,
+            phase: "awaiting_model".to_string(),
+            state_blob: b"{}".to_vec(),
+            step_index: 0,
+            started_at: 1,
+            updated_at: 1,
+            terminal_at: None,
+            workspace_ref: None,
+            archive_status: None,
+            archive_published_at: None,
+            trigger_source: None,
+            trigger_subject: None,
+            trigger_payload: None,
+            terminal_outcome: None,
+            terminal_published_at: None,
+        })
+        .await
+        .expect("the run's row");
+    assert_eq!(
+        archive_of_a_drop(&surface, invocation_id).await,
+        serde_json::json!("pending"),
+        "the run's row is on the worker: the drop's event must say an archive is pending"
+    );
+}
+
+/// **An archive on record: pending.** The run's row has been handed off
+/// already, so its archive is on record, and `none` would deny it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_of_a_run_whose_archive_is_on_record_says_pending() {
+    let surface = Surface::start().await;
+    let invocation_id = Uuid::now_v7();
+    known_to_the_projection(&surface, invocation_id).await;
+    surface
+        .control_plane
+        .insert_archive(&fq_runtime::control_plane::store::InvocationArchiveRow {
+            invocation_id: invocation_id.to_string(),
+            agent_id: surface.agent.id().as_str().to_string(),
+            final_phase: "completed".to_string(),
+            final_state_blob: b"{}".to_vec(),
+            started_at: 1,
+            terminal_at: 2,
+            archived_at: 3,
+        })
+        .await
+        .expect("the run's archive");
+    assert_eq!(
+        archive_of_a_drop(&surface, invocation_id).await,
+        serde_json::json!("pending"),
+        "the run's archive is on record: the drop's event must say an archive is pending"
+    );
+}
+
+/// A workspace provider whose provisioning waits until the test lets it
+/// through: a run live in the runner, before its first write.
+#[derive(Debug)]
+struct ParkedProvision {
+    inner: fq_runtime::worker::workspace::PerInvocationWorkspace,
+    _root: tempfile::TempDir,
+    provisioning: AtomicUsize,
+    gate: Semaphore,
+}
+
+#[async_trait::async_trait]
+impl fq_runtime::worker::workspace::WorkspaceProvider for ParkedProvision {
+    async fn provision(
+        &self,
+        invocation_id: Uuid,
+    ) -> Result<std::path::PathBuf, fq_runtime::worker::workspace::WorkspaceError> {
+        self.provisioning.fetch_add(1, Ordering::SeqCst);
+        self.gate.acquire().await.expect("gate open").forget();
+        self.inner.provision(invocation_id).await
+    }
+
+    async fn reclaim(
+        &self,
+        invocation_id: Uuid,
+        path: &std::path::Path,
+    ) -> Result<(), fq_runtime::worker::workspace::WorkspaceError> {
+        self.inner.reclaim(invocation_id, path).await
+    }
+}
+
+/// **A live drop of a run before its first write says no archive will
+/// come, through the real handler.** The run is live in the runner, its
+/// workspace being provisioned, before its first write. The live drop's
+/// halt finds no row and none to come, and the handler passes that to its
+/// decision: the event says `none`. Let through, the run takes the halt at
+/// its first step boundary, before its first write, and stops unstarted,
+/// so no row ever comes. A handler that
+/// read every halt as one on a written row would say `pending`, for good,
+/// of a run that never wrote one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_drop_of_a_run_before_its_first_write_says_no_archive_will_come() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = Arc::new(ParkedProvision {
+        inner: fq_runtime::worker::workspace::PerInvocationWorkspace::new(
+            root.path().to_path_buf(),
+        ),
+        _root: root,
+        provisioning: AtomicUsize::new(0),
+        gate: Semaphore::new(0),
+    });
+    let surface = Surface::start_with(Some(
+        workspace.clone() as Arc<dyn fq_runtime::worker::workspace::WorkspaceProvider>
+    ))
+    .await;
+    let invocation_id = Uuid::now_v7();
+    let llm = ParkedLlm::new();
+    let run = {
+        let runner = surface.runner.clone();
+        let agent = surface.agent.clone();
+        let llm = llm.clone();
+        tokio::spawn(async move {
+            let (durable_start, _fired) = fq_runtime::worker::DurableStart::channel(invocation_id);
+            runner
+                .run_signalling(
+                    &agent,
+                    llm.as_ref(),
+                    fq_runtime::Trigger::mint(
+                        TriggerSource::Manual,
+                        None,
+                        serde_json::json!({"input": "go"}),
+                    ),
+                    None,
+                    durable_start,
+                )
+                .await
+        })
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while workspace.provisioning.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run reaches its workspace"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        surface.runner.is_active(&invocation_id),
+        "the run is live, before its first write"
+    );
+
+    let receipt = surface
+        .drop_invocation(&invocation_id.to_string(), true)
+        .await
+        .expect("a live drop is accepted");
+    let (payload, _) = surface.drop_event(&receipt).await;
+    workspace.gate.add_permits(1);
+    let outcome = tokio::time::timeout(PATIENCE, run)
+        .await
+        .expect("the run stops")
+        .expect("the run's task joins");
+    assert_eq!(
+        payload["archive"],
+        serde_json::json!("none"),
+        "the halt found no row and none to come: {payload}"
+    );
+    assert!(
+        matches!(
+            outcome,
+            Ok(InvocationOutcome::Unstarted {
+                stopped_by: fq_runtime::worker::BoundaryStop::Halt,
+                ..
+            })
+        ),
+        "the run took the halt at its first step boundary, before its first write: {outcome:?}"
+    );
+    assert_eq!(llm.calls.load(Ordering::SeqCst), 0, "no model call");
 }
