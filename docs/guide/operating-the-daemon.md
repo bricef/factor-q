@@ -456,11 +456,23 @@ fq invocation drop <invocation-id>
 `drop`, unless you pass `--live`, which halts it at its next step
 boundary first. A run halted before its first write to the worker's log
 stops before that write, whether the halt lands while it is being set up
-or during its first step: it writes no row and makes no model call.
-Before [#1070](https://github.com/bricef/factor-q/issues/1070) a halt
-that landed during the first step was seen only at the next boundary,
-after the row and the step's model call, and the row then stayed in
-flight until the next start. `fq doctor` composes the same signals into
+or during its first step: it writes no row and makes no model call. One
+halted while that write is under way lets the row land, stops before any
+model call, and marks its row finished itself, since the drop's own
+ending could have been recorded before the row existed. `drop`'s receipt
+does not wait for that: for the few milliseconds the write takes, the
+row can still read in flight after the receipt. If that write fails, the
+run stops with no row, and its trigger is not run again; so does a run
+that fails that write before the halt, if the halt lands while the run
+is still being torn down (its MCP servers stopped, its workspace
+reclaimed). Only a halt that lands in the last instant of that teardown,
+after the run's last look for one, misses it: the drop is recorded, and
+the trigger is retried under a new id, as for any run whose first write
+fails. Before
+[#1070](https://github.com/bricef/factor-q/issues/1070) a halt that
+landed during the first step or its write was seen only at the next
+boundary, after the row and the step's model call, and the row then
+stayed in flight until the next start. `fq doctor` composes the same signals into
 one report if you would rather start from a summary.
 
 A drop ends the run as `failed` from whatever its ownership row says, a
