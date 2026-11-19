@@ -458,8 +458,14 @@ fq invocation drop <invocation-id>
 
 `resume` refuses an invocation this daemon is actively driving; so does
 `drop`, unless you pass `--live`, which halts it at its next step
-boundary first. `fq doctor` composes the same signals into one report if
-you would rather start from a summary.
+boundary first. A run halted before its first write to the worker's log
+stops before that write, whether the halt lands while it is being set up
+or during its first step: it writes no row and makes no model call.
+Before [#1070](https://github.com/bricef/factor-q/issues/1070) a halt
+that landed during the first step was seen only at the next boundary,
+after the row and the step's model call, and the row then stayed in
+flight until the next start. `fq doctor` composes the same signals into
+one report if you would rather start from a summary.
 
 A drop ends the run as `failed` from whatever its ownership row says, a
 finished run included, and writes the run's archive record itself, with
