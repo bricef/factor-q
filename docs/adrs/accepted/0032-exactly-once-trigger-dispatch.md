@@ -11,7 +11,10 @@ claim which landed on 2026-09-16
 ([#809](https://github.com/bricef/factor-q/issues/809), PR
 [#817](https://github.com/bricef/factor-q/pull/817)) is the project's
 exactly-once dispatch design, and that the inbox is not built while one
-daemon is the deployment.
+daemon is the deployment. Refined by
+[ADR-0038](0038-a-trigger-dealt-with-and-not-run-keeps-its-claim-consumed.md):
+a trigger dealt with and not run keeps its claim, consumed, which adds a
+third state to §2 and replaces §4 for those answers.
 
 This record was rewritten around what is on `main` in the change that
 moved it to `accepted/`. It had never been accepted in its earlier form,
