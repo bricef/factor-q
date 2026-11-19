@@ -713,3 +713,99 @@ async fn a_halt_armed_while_the_drive_ends_after_a_failed_first_write_stops_it_a
     assert_eq!(model.calls.load(Ordering::SeqCst), 0, "no model call");
     assert!(fired.await.is_err(), "no durable start is signalled");
 }
+
+/// **The run marks its row once the drop says it is published, and not
+/// before.** A halt armed while the run's first write is under way carries
+/// the run's word. The row lands, the run takes the halt and waits for the
+/// word, its row in flight: given, the run marks the row as the drop's fold
+/// does and stops; dropped unsaid, as a drop whose publish failed drops it,
+/// the run stops and leaves the row in flight, since a drop that is not on
+/// the record must not finish it.
+#[tokio::test]
+async fn the_run_marks_its_row_once_the_drop_says_it_is_published_and_not_before() {
+    for published in [true, false] {
+        let dir = tempdir().unwrap();
+        let (store, mut held, _other) =
+            a_store_with_its_write_lock_held(&dir.path().join("worker.db")).await;
+        let sink = Arc::new(RecordingSink::new());
+        let invocation_id = Uuid::now_v7();
+        let (runner, model) = mid_write_runner(&store, &sink, invocation_id);
+        let (durable_start, mut fired) = DurableStart::channel(invocation_id);
+        let agent = simple_responder_agent(&unique_agent_id("waits-for-the-word"));
+        let run = runner.run_signalling(
+            &agent,
+            &model,
+            Trigger::mint(TriggerSource::Subject, None, json!({"input": "go"})),
+            Some(1),
+            durable_start,
+        );
+        tokio::pin!(run);
+        park_inside_its_first_write(&runner, run.as_mut()).await;
+        let word = runner
+            .arm_halt(invocation_id)
+            .expect("the run is live, so the halt arms")
+            .word
+            .expect("a halt that found the write under way carries the run's word");
+        sqlx::query("COMMIT").execute(&mut *held).await.unwrap();
+        drop(held);
+
+        // The row lands, and the run, which has taken the halt, waits.
+        let row = |store: Arc<WorkerStore>| async move {
+            store
+                .get_invocation_state(&invocation_id.to_string())
+                .await
+                .unwrap()
+                .map(|row| (row.phase, row.terminal_at.is_some()))
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut waited = 0;
+        while waited < 20 {
+            assert!(
+                futures::poll!(run.as_mut()).is_pending(),
+                "the run ended before the drop said whether it was published"
+            );
+            if row(store.clone()).await.is_some() {
+                waited += 1;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the row never landed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            row(store.clone()).await,
+            Some(("awaiting_model".to_string(), false)),
+            "while the word is not given, the row is in flight"
+        );
+        assert!(
+            fired.try_recv().is_ok(),
+            "the durable start fires as the row lands, before the wait for the word: the \
+             delivery is acknowledged while the run waits, not held unacknowledged through it"
+        );
+
+        if published {
+            word.published("failed");
+        } else {
+            drop(word);
+        }
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("the word, given or dropped, ends the wait");
+        assert!(
+            matches!(outcome, Ok(InvocationOutcome::Suspended { .. })),
+            "{outcome:?}"
+        );
+        assert_eq!(model.calls.load(Ordering::SeqCst), 0, "no model call");
+        let expected = if published {
+            ("failed".to_string(), true)
+        } else {
+            ("awaiting_model".to_string(), false)
+        };
+        assert_eq!(
+            row(store.clone()).await,
+            Some(expected),
+            "published: {published}; the row is marked exactly when the drop is on the record"
+        );
+    }
+}

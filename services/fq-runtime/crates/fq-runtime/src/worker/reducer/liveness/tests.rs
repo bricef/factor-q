@@ -196,3 +196,183 @@ async fn the_drops_word_reaches_the_run_once_its_write_ends() {
     drop(word);
     assert_eq!(hear(heard).await, None, "a drop not published says nothing");
 }
+
+/// Wait, on a test thread, until `ready` holds.
+fn wait_until(ready: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready() {
+        assert!(std::time::Instant::now() < deadline, "never ready");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Long enough for a thread let go to reach the next lock it waits on.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// **An arm that meets the end of a first write that landed reports the
+/// row** (issue 1070). The end is not under the `active` lock the arm
+/// holds: it notes the row, then the write leaves the set of writes under
+/// way. Staged with the registry's own locks, as the review staged it: the
+/// test holds that set, so the arm, its halt inserted, waits on it; the
+/// run's end then notes the row and takes the write out, and lets go. The
+/// arm, reading the set first, finds the write gone and the row noted. In
+/// the other order it read no row before the end, then no write after it,
+/// and reported a row that had landed as never written.
+#[test]
+fn an_arm_that_meets_the_end_of_a_landed_first_write_reports_the_row() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+    assert!(live.begin_first_write(id));
+
+    let mut writes = live.first_writes.lock().unwrap();
+    std::thread::scope(|s| {
+        let arm = s.spawn(|| live.arm_halt(id).map(|halt| halt.row));
+        wait_until(|| live.halt_requested.lock().unwrap().contains(&id));
+        std::thread::sleep(SETTLE);
+        // The run's end, as `end_first_write` makes it.
+        live.note_row_written(id);
+        writes.remove(&id);
+        drop(writes);
+        assert_eq!(
+            arm.join().unwrap(),
+            Some(RowAtHalt::Written),
+            "the row landed before the arm read where it stood"
+        );
+    });
+}
+
+/// **A first write leaves the writes under way only once its row is
+/// noted** (issue 1070), the order the arm's reads rely on. Staged: the
+/// test holds the noted rows, so the run's end waits at its note; an arm
+/// then answers without that lock, and finds the write still under way.
+/// Had the write left first, the arm would find neither a write nor a note
+/// and wait on the note held here.
+#[test]
+fn a_first_write_is_noted_before_it_leaves_the_writes_under_way() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+    assert!(live.begin_first_write(id));
+
+    let noted = live.wrote_row.lock().unwrap();
+    let (answered, report) = std::thread::scope(|s| {
+        let end = s.spawn(|| live.end_first_write(id, true).is_some());
+        std::thread::sleep(SETTLE);
+        let arm = s.spawn(|| live.arm_halt(id).map(|halt| halt.row));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !arm.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let answered = arm.is_finished();
+        drop(noted);
+        let report = arm.join().unwrap();
+        assert!(end.join().unwrap(), "the arm's word is there to hear");
+        (answered, report)
+    });
+    assert!(
+        answered,
+        "the arm waited on the note: the write had left the writes under way before its row \
+         was noted"
+    );
+    assert_eq!(report, Some(RowAtHalt::FirstWriteUnderWay));
+}
+
+/// **No halt is armed between the first write's look for one and its
+/// beginning** (issue 1070): both are made in one hold of the `active`
+/// lock the arm takes. Staged: the test holds the writes under way, so the
+/// beginning, having looked for a halt and found none, waits to record
+/// itself; an arm started then waits on `active`, and arms nothing until
+/// the write has begun, which it then reports.
+#[test]
+fn no_halt_is_armed_between_the_first_writes_look_and_its_beginning() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+
+    let writes = live.first_writes.lock().unwrap();
+    let (armed_meanwhile, begun, report) = std::thread::scope(|s| {
+        let begin = s.spawn(|| live.begin_first_write(id));
+        std::thread::sleep(SETTLE);
+        let arm = s.spawn(|| live.arm_halt(id).map(|halt| halt.row));
+        std::thread::sleep(SETTLE);
+        let armed_meanwhile = live.halt_requested.lock().unwrap().contains(&id);
+        drop(writes);
+        (armed_meanwhile, begin.join().unwrap(), arm.join().unwrap())
+    });
+    assert!(
+        !armed_meanwhile,
+        "a halt was armed after the first write looked for one and before it began: the write \
+         goes ahead with the halt armed, and the arm may report no row to come"
+    );
+    assert!(begun, "no halt was armed when the write looked");
+    assert_eq!(report, Some(RowAtHalt::FirstWriteUnderWay));
+}
+
+/// **A halt never finds a resumed drive live without its row** (issue
+/// 1070): the row is noted in the same hold of the `active` lock that
+/// registers the drive. Staged: the test holds the noted rows, so the
+/// registration waits at its note; an arm started then waits on `active`
+/// and arms nothing until the drive is registered with its row.
+#[test]
+fn a_halt_never_finds_a_resumed_drive_live_without_its_row() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+
+    let noted = live.wrote_row.lock().unwrap();
+    let (armed_meanwhile, report) = std::thread::scope(|s| {
+        let entered = s.spawn(|| {
+            let drive = live.enter_from_row(id, agent("builder"), &rounds, &timeouts);
+            std::mem::forget(drive);
+        });
+        std::thread::sleep(SETTLE);
+        let arm = s.spawn(|| live.arm_halt(id).map(|halt| halt.row));
+        std::thread::sleep(SETTLE);
+        let armed_meanwhile = live.halt_requested.lock().unwrap().contains(&id);
+        drop(noted);
+        entered.join().unwrap();
+        (armed_meanwhile, arm.join().unwrap())
+    });
+    assert!(
+        !armed_meanwhile,
+        "a halt was armed on a resumed drive registered before its row was noted"
+    );
+    assert_eq!(report, Some(RowAtHalt::Written));
+}
+
+/// **A first write under way is forgotten with its drive** (issue 1070).
+/// A drive that ends during its first write, as a panic or a cancelled
+/// task ends it, leaves no entry behind: a fresh drive of the same id
+/// would otherwise read as having its first write under way, and a halt
+/// armed on it would wait for a word no write will hear.
+#[test]
+fn a_first_write_under_way_is_forgotten_with_its_drive() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    {
+        let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+        assert!(live.begin_first_write(id));
+        assert!(live.first_write_under_way(id));
+    }
+    assert!(
+        !live.first_write_under_way(id),
+        "the first write's entry outlived its drive"
+    );
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+    assert_eq!(
+        live.arm_halt(id)
+            .map(|halt| (halt.row, halt.word.is_some())),
+        Some((RowAtHalt::NeverWritten, false)),
+        "a fresh drive of the same id has no write under way"
+    );
+}
