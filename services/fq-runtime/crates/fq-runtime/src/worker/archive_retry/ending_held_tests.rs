@@ -175,9 +175,12 @@ impl World {
             self.cp_store.as_ref(),
             &invocation_id.to_string(),
             OwnershipEvent::Restored,
+            // A restore ends nothing and records no request.
             OwnerFacts {
                 worker_id: "the-last-daemon",
                 at_ms: 1_000,
+                ended_at_ms: 1_000,
+                request: None,
             },
         )
         .await

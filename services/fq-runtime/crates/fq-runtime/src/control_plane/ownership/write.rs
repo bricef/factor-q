@@ -4,7 +4,9 @@
 //! ahead of the table growing the termination record (issue 1070).
 
 use super::{Decision, Owner, OwnershipEvent, RowState, transition};
-use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, OwnerRow};
+use crate::control_plane::store::{
+    ControlPlaneStore, ControlPlaneStoreError, MoveFacts, OwnerRow, TerminationRequest,
+};
 
 /// How many times [`apply`] decides and writes before it gives up on a row
 /// that keeps changing under it.
@@ -17,16 +19,11 @@ use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, Own
 /// included, or one it had not reached when recovery's wait for it ran
 /// out (the held runs are restored again once it has). The compare-and-set
 /// orders the two: whichever writes second decides again from the row the
-/// first left. The one other writer is an
-/// operator's drop of a row no projection event names an agent for:
-/// `operator::drop_invocation` deletes that row itself, to tell it from an
-/// id that never existed, before it publishes the drop, whose fold writes
-/// the row again as `failed`, its archive written or none to come. A move
-/// decided over the row just
-/// before the delete loses its compare-and-set and is decided again from
-/// no row. Past that, a lost compare-and-set means another process writes
-/// the same store, and three attempts tell a passing race from a row that
-/// will not settle. When they are spent,
+/// first left. (An operator's drop of a row no projection event named an
+/// agent for used to delete the row outside the table; it reads it now,
+/// issue 1070.) Past that, a lost compare-and-set means another process
+/// writes the same store, and three attempts tell a passing race from a
+/// row that will not settle. When they are spent,
 /// [`apply`] answers [`OwnershipError::Contended`] and has written
 /// nothing. The coordination consumer takes that as a transient error: the
 /// event is redelivered after the bus's backoff and decided again from the
@@ -34,18 +31,50 @@ use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, Own
 pub const APPLY_ATTEMPTS: usize = 3;
 
 /// What an event says about the row's owner, for a row it creates or a
-/// move that takes them ([`Owner`]).
+/// move that takes them ([`Owner`]), and what it brings to the
+/// termination record.
 #[derive(Debug, Clone, Copy)]
 pub struct OwnerFacts<'a> {
     /// The worker the event names: the worker's own id on
     /// `invocation.archived`, on recovery's restore and on a durable
-    /// start, the agent id standing in for it on every other event.
+    /// start, the holding worker's on a held ending
+    /// (`invocation.ending_held`), the agent id standing in for it on
+    /// every other event.
     pub worker_id: &'a str,
     /// When: the run's start, the `started_at` its WAL row records, for
     /// recovery's restore and a durable start, and for a held ending
     /// (`invocation.ending_held` carries it); the time the event is
     /// applied otherwise.
     pub at_ms: i64,
+    /// The ending's own time, which a move that records a new ender writes
+    /// beside it: the event's own time for a run's ending and for a drop,
+    /// and the time the run ended for an archive (`terminal_at_ms`) and for
+    /// a held ending (`ended_at_ms`), never a hand-off's or the fold's. A
+    /// move that records no new ender does not read it.
+    pub ended_at_ms: i64,
+    /// The termination request a drop's event carries, which a move that
+    /// first records a request writes.
+    pub request: Option<&'a TerminationRequest>,
+}
+
+impl<'a> OwnerFacts<'a> {
+    /// What the move from `from` to `to` writes beside the state: the
+    /// owner facts `owner` takes, the ending's time where `to` records an
+    /// ender `from` did not, and the request where `to` first records one.
+    fn written(&self, from: Option<RowState>, to: RowState, owner: Owner) -> MoveFacts<'a> {
+        let (worker_id, assigned_at) = match owner {
+            Owner::Keep => (None, None),
+            Owner::TakeWorker => (Some(self.worker_id), None),
+            Owner::TakeBoth => (Some(self.worker_id), Some(self.at_ms)),
+        };
+        let (ender, requested) = from.map_or((None, false), |from| (from.ended_by, from.requested));
+        MoveFacts {
+            worker_id,
+            assigned_at,
+            ended_at: (to.ended_by.is_some() && to.ended_by != ender).then_some(self.ended_at_ms),
+            request: self.request.filter(|_| to.requested && !requested),
+        }
+    }
 }
 
 /// What [`apply`] did. Each answer but `Ignored` names the state it was
@@ -110,8 +139,7 @@ pub trait OwnershipStore: Sync {
         invocation_id: &str,
         expected: Option<RowState>,
         to: RowState,
-        worker_id: Option<&str>,
-        assigned_at: Option<i64>,
+        facts: MoveFacts<'_>,
     ) -> Result<bool, ControlPlaneStoreError>;
 }
 
@@ -129,18 +157,9 @@ impl OwnershipStore for ControlPlaneStore {
         invocation_id: &str,
         expected: Option<RowState>,
         to: RowState,
-        worker_id: Option<&str>,
-        assigned_at: Option<i64>,
+        facts: MoveFacts<'_>,
     ) -> Result<bool, ControlPlaneStoreError> {
-        ControlPlaneStore::compare_and_set_ownership(
-            self,
-            invocation_id,
-            expected,
-            to,
-            worker_id,
-            assigned_at,
-        )
-        .await
+        ControlPlaneStore::compare_and_set_ownership(self, invocation_id, expected, to, facts).await
     }
 }
 
@@ -177,8 +196,7 @@ pub async fn apply(
                     invocation_id,
                     None,
                     to,
-                    Some(facts.worker_id),
-                    Some(facts.at_ms),
+                    facts.written(None, to, Owner::TakeBoth),
                 )
                 .await
                 .map_err(OwnershipError::Store)?;
@@ -202,13 +220,13 @@ pub async fn apply(
                 then: Some((to, owner)),
             } => (to, owner),
         };
-        let (worker_id, assigned_at) = match owner {
-            Owner::Keep => (None, None),
-            Owner::TakeWorker => (Some(facts.worker_id), None),
-            Owner::TakeBoth => (Some(facts.worker_id), Some(facts.at_ms)),
-        };
         if store
-            .compare_and_set_ownership(invocation_id, Some(row), to, worker_id, assigned_at)
+            .compare_and_set_ownership(
+                invocation_id,
+                Some(row),
+                to,
+                facts.written(Some(row), to, owner),
+            )
             .await
             .map_err(OwnershipError::Store)?
         {

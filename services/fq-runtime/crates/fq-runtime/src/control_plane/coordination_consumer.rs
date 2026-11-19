@@ -23,8 +23,9 @@
 //!   back on the worker-scoped
 //!   `fq.worker.{worker_id}.invocation.archive_acked` subject.
 //! - `fq.agent.*.invocation.operator_recovered` — an operator's
-//!   drop: the archive row, the ownership row, and the worker's
-//!   WAL row when this process hosts it.
+//!   drop: the ownership row, which records the request beside the
+//!   run's outcome, and the worker's WAL row when this process hosts
+//!   it. It writes no archive record (issue 1070).
 //!
 //! The consumer also runs a periodic stale-worker sweep:
 //! workers whose `last_heartbeat` is older than the
@@ -81,7 +82,10 @@ use super::durable_consumer::{
 use super::ownership::{
     self, Applied, Ending, OwnerFacts, OwnershipError, OwnershipEvent, RowState,
 };
-use super::store::{ArchiveState, ControlPlaneStore, ControlPlaneStoreError, InvocationArchiveRow};
+use super::store::{
+    ArchiveState, ControlPlaneStore, ControlPlaneStoreError, EndedBy, InvocationArchiveRow,
+    OwnerStatus, TerminationRequest,
+};
 
 mod ack_wait;
 mod handler_error;
@@ -379,15 +383,16 @@ impl CoordinationConsumer {
                     .await
             }
             // The ending of a run whose own the worker holds (issue 1071),
-            // folded as that ending; a row it writes names that worker and
-            // is dated at the run's start, not at this fold.
+            // folded as that ending, the run its ender at the time it ended
+            // ([`ended_at_ms`]); a row it writes names that worker and is
+            // dated at the run's start, not at this fold.
             EventPayload::InvocationEndingHeld(held) => self
                 .move_row(
                     &event,
                     OwnershipEvent::Ended(held.outcome.into()),
                     OwnerFacts {
-                        worker_id: held.worker_id.as_str(),
                         at_ms: held.started_at_ms,
+                        ..folded_now(&event, held.worker_id.as_str())
                     },
                     None,
                 )
@@ -407,17 +412,23 @@ impl CoordinationConsumer {
 
     /// Apply `what` to `event`'s run's ownership row, `facts` standing for
     /// the worker and the time on a row the move creates or one that takes
-    /// them, and say what happened: debug for a move or a duplicate, warn for a
+    /// them, and for what the event brings to the termination record, and
+    /// say what happened: debug for a move or a duplicate, warn for a
     /// refusal (the row records the run finished, and the event would put
     /// it back in progress) and for an ending that reaches a row recorded
-    /// `failed` with its archive written or none to come, the states an
-    /// operator's drop leaves (most likely the drop came first, which is
-    /// no fault), error
-    /// for any other conflicting ending (the run published two). `reported` on a conflict is the ending the event
-    /// names, `invocation.archived`'s `final_phase` included. `report` is
-    /// a late `invocation.ambiguous`'s own fields, which tell startup
+    /// `failed`, archived, with no ender on record, as a drop from before
+    /// the termination record left it (the drop may have come first, which
+    /// is no fault), and error for any other conflicting ending: the run
+    /// published two, or one after its drop's ending was made final.
+    /// `reported` on a conflict is the ending the event names,
+    /// `invocation.archived`'s `final_phase` included. `report` is a late
+    /// `invocation.ambiguous`'s own fields, which tell startup
     /// categorisation (`stuck_entity` a dispatch kind) from a resume that
     /// could not be carried out (`recovery`, with the error in `note`).
+    ///
+    /// The termination record's facts come from the event: the ending's own
+    /// time ([`ended_at_ms`], which [`folded_now`] reads) and a drop's
+    /// request ([`request_of`]).
     async fn move_row(
         &self,
         event: &Event,
@@ -459,8 +470,10 @@ impl CoordinationConsumer {
             ),
             Applied::Conflict { recorded, moved_to } => {
                 let reported = what.ending().map(|ending| ending.status().as_str());
-                if recorded == RowState::ended(Ending::Failed, ArchiveState::Archived)
-                    || recorded == RowState::ended(Ending::Failed, ArchiveState::WillNotCome)
+                let ended_by = recorded.ended_by.map(EndedBy::as_str);
+                if recorded.status == OwnerStatus::Failed
+                    && recorded.archive == ArchiveState::Archived
+                    && recorded.ended_by.is_none()
                 {
                     warn!(
                         invocation_id,
@@ -468,9 +481,9 @@ impl CoordinationConsumer {
                         event_type,
                         recorded = recorded.name(),
                         reported,
-                        "an ending reached a run recorded failed with its archive written or none \
-                         to come, as an operator's drop leaves it; the ownership row keeps the \
-                         ending it recorded"
+                        "an ending reached a run recorded failed and archived with no ender on \
+                         record, as a drop from before the termination record leaves it; the \
+                         ownership row keeps the ending it recorded"
                     );
                 } else {
                     error!(
@@ -478,6 +491,7 @@ impl CoordinationConsumer {
                         agent_id,
                         event_type,
                         recorded = recorded.name(),
+                        ended_by,
                         reported,
                         moved_to = moved_to.map(RowState::name),
                         "two endings published for one run; the ownership row keeps the ending \
@@ -501,7 +515,7 @@ impl CoordinationConsumer {
         self.move_row(
             event,
             what,
-            folded_now(event.envelope.agent_id.as_str()),
+            folded_now(event, event.envelope.agent_id.as_str()),
             None,
         )
         .await?;
@@ -531,7 +545,7 @@ impl CoordinationConsumer {
         self.move_row(
             event,
             OwnershipEvent::Ambiguous,
-            folded_now(event.envelope.agent_id.as_str()),
+            folded_now(event, event.envelope.agent_id.as_str()),
             Some(payload),
         )
         .await?;
@@ -545,11 +559,12 @@ impl CoordinationConsumer {
     ///    no-op).
     /// 2. Record the archive on the ownership row, which also takes
     ///    the worker's id. A row that has not ended takes the ending
-    ///    `final_phase` names; a row that has keeps its ending, and an
-    ///    archive naming another is a second ending, logged at error.
-    ///    An operator's drop before the archive arrived therefore
-    ///    stands (what that leaves in the archive record is issue
-    ///    1070's).
+    ///    `final_phase` names, the run its ender. A row that has keeps
+    ///    its ending, except an operator's drop's while it is
+    ///    provisional: an archive saying `completed` replaces it with
+    ///    the run's own, and one saying `failed` makes it final. An
+    ///    archive naming an ending other than the one kept is a second
+    ///    ending, logged at error.
     /// 3. Publish `invocation.archive_acked` on
     ///    `fq.worker.{worker_id}.invocation.archive_acked` so
     ///    the originating worker can delete its local row.
@@ -596,7 +611,7 @@ impl CoordinationConsumer {
             .move_row(
                 event,
                 OwnershipEvent::Archived(Ending::of_archived_phase(&payload.final_phase)),
-                folded_now(payload.worker_id.as_str()),
+                folded_now(event, payload.worker_id.as_str()),
                 None,
             )
             .await;
@@ -674,12 +689,44 @@ impl From<DurableConsumerError> for CoordinationConsumerError {
     }
 }
 
-/// The owner facts of an event folded now: `worker_id`, and the time of
-/// the fold.
-fn folded_now(worker_id: &str) -> OwnerFacts<'_> {
+/// The owner facts of `event` folded now, for a row named `worker_id`:
+/// the time of the fold, for a row the move creates or one that takes it,
+/// and the ending's own time by [`ended_at_ms`]. It brings no request; a
+/// drop adds its own ([`request_of`]).
+fn folded_now<'a>(event: &Event, worker_id: &'a str) -> OwnerFacts<'a> {
     OwnerFacts {
         worker_id,
         at_ms: Utc::now().timestamp_millis(),
+        ended_at_ms: ended_at_ms(event),
+        request: None,
+    }
+}
+
+/// The ending's own time an event brings to the termination record: the
+/// time the run ended for an archive (`terminal_at_ms`), since its event is
+/// the hand-off's, possibly much later, and for a held ending
+/// (`ended_at_ms`, the worker row's `terminal_at`), whose event can be much
+/// later too; the event's own time otherwise, as a run's ending and a drop
+/// are the ending, and a republished stored event keeps its time. Never
+/// the fold's.
+fn ended_at_ms(event: &Event) -> i64 {
+    match &event.payload {
+        EventPayload::InvocationArchived(payload) => payload.terminal_at_ms,
+        EventPayload::InvocationEndingHeld(held) => held.ended_at_ms,
+        _ => event.envelope.timestamp.timestamp_millis(),
+    }
+}
+
+/// The termination request a drop's event carries: its own time, who
+/// asked and why. Other events carry none.
+fn request_of(event: &Event) -> Option<TerminationRequest> {
+    match &event.payload {
+        EventPayload::InvocationOperatorRecovered(payload) => Some(TerminationRequest {
+            requested_at: event.envelope.timestamp.timestamp_millis(),
+            requested_by: payload.requested_by.clone(),
+            reason: payload.reason.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -1160,11 +1207,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handler_archived_does_not_downgrade_failed_owner() {
-        // Race scenario: operator drops first, sets owner =
-        // Failed; then the worker emits invocation.archived
-        // with final_phase = "completed". The owner row must
-        // remain Failed.
+    async fn handler_archived_does_not_rewrite_a_runs_own_failure() {
+        // A row recorded Failed with no ender on record, as a
+        // build before the termination record wrote a run's own
+        // failure, is taken as the run's: an invocation.archived
+        // with final_phase = "completed" is a second ending, and
+        // the row must remain Failed. (A drop's provisional
+        // Failed is another matter: such an archive replaces it,
+        // `termination_record_tests`.)
         let server = crate::test_support::nats::test_nats();
         let url = server.url().to_string();
 
@@ -1185,14 +1235,13 @@ mod tests {
         let invocation_id = Uuid::now_v7();
         let inv_str = invocation_id.to_string();
 
-        // Operator already set this to Failed.
+        // The run's own failure, with no ender on record.
         store
             .upsert_invocation_ownership(&inv_str, worker_id.as_str(), 1_000, OwnerStatus::Failed)
             .await
             .unwrap();
 
-        // Worker now reports archived with completed (a stale
-        // success that the operator decided to ignore).
+        // The worker now reports archived with completed.
         let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
         let event = Event::new(
             agent_id.clone(),
@@ -1218,7 +1267,7 @@ mod tests {
         assert_eq!(
             owner.status,
             OwnerStatus::Failed,
-            "operator's Failed must stick; worker's later completed must not downgrade it"
+            "a run's own Failed stays; an archive naming completed does not rewrite it"
         );
     }
 

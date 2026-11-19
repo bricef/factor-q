@@ -11,24 +11,89 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus};
+use crate::control_plane::store::{
+    ControlPlaneStore, ControlPlaneStoreError, EndedBy, MoveFacts, OwnerStatus, TerminationRequest,
+};
 
 const BEFORE: &str = "worker-before";
 const EVENT: &str = "worker-of-the-event";
 
-/// Every state a row can be in, `None` for no row.
-fn states() -> Vec<Option<RowState>> {
-    let mut states = vec![None, Some(RowState::IN_FLIGHT), Some(RowState::AMBIGUOUS)];
-    for ending in [Ending::Completed, Ending::Failed] {
-        for archive in [ArchiveState::Pending, ArchiveState::Archived] {
-            states.push(Some(RowState::ended(ending, archive)));
+const STATUSES: [OwnerStatus; 4] = [
+    OwnerStatus::InFlight,
+    OwnerStatus::Ambiguous,
+    OwnerStatus::Completed,
+    OwnerStatus::Failed,
+];
+const ARCHIVES: [ArchiveState; 4] = [
+    ArchiveState::NotDue,
+    ArchiveState::Pending,
+    ArchiveState::Archived,
+    ArchiveState::WillNotCome,
+];
+const ENDERS: [Option<EndedBy>; 3] = [None, Some(EndedBy::Run), Some(EndedBy::Drop)];
+
+/// Every state, whether a row can hold it or not: each status, archive
+/// state and ender, with and without a request.
+fn every_state() -> Vec<RowState> {
+    let mut states = Vec::new();
+    for status in STATUSES {
+        for archive in ARCHIVES {
+            for ended_by in ENDERS {
+                for requested in [false, true] {
+                    states.push(RowState {
+                        status,
+                        archive,
+                        ended_by,
+                        requested,
+                    });
+                }
+            }
         }
     }
-    states.push(Some(RowState::ended(
-        Ending::Failed,
-        ArchiveState::WillNotCome,
-    )));
     states
+}
+
+/// Every state a row can be in, `None` for no row.
+fn states() -> Vec<Option<RowState>> {
+    std::iter::once(None)
+        .chain(
+            every_state()
+                .into_iter()
+                .filter(|state| state.is_valid())
+                .map(Some),
+        )
+        .collect()
+}
+
+/// The request a seeded row records, and the time its ender is recorded
+/// at.
+fn seeded_request() -> TerminationRequest {
+    TerminationRequest {
+        requested_at: 50,
+        requested_by: Some("first".to_string()),
+        reason: Some("the first request".to_string()),
+    }
+}
+const SEEDED_ENDED_AT: i64 = 40;
+
+/// The request the event brings, and its ending's time.
+fn the_events_request() -> TerminationRequest {
+    TerminationRequest {
+        requested_at: 300,
+        requested_by: Some("second".to_string()),
+        reason: None,
+    }
+}
+const THE_EVENTS_ENDED_AT: i64 = 300;
+
+/// What a row seeded in `state` records beside it.
+fn seeded<'a>(state: RowState, request: &'a TerminationRequest) -> MoveFacts<'a> {
+    MoveFacts {
+        worker_id: Some(BEFORE),
+        assigned_at: Some(100),
+        ended_at: state.ended_by.map(|_| SEEDED_ENDED_AT),
+        request: state.requested.then_some(request),
+    }
 }
 
 async fn store() -> (ControlPlaneStore, tempfile::TempDir) {
@@ -47,15 +112,17 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
         for what in OwnershipEvent::ALL {
             cases += 1;
             let id = format!("inv-{cases}");
+            let first = seeded_request();
             if let Some(state) = state {
                 assert!(
                     store
-                        .compare_and_set_ownership(&id, None, state, Some(BEFORE), Some(100))
+                        .compare_and_set_ownership(&id, None, state, seeded(state, &first))
                         .await
                         .unwrap()
                 );
             }
             let before = store.get_invocation_owner(&id).await.unwrap();
+            let second = the_events_request();
             let applied = apply(
                 &store,
                 &id,
@@ -63,6 +130,8 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
                 OwnerFacts {
                     worker_id: EVENT,
                     at_ms: 200,
+                    ended_at_ms: THE_EVENTS_ENDED_AT,
+                    request: Some(&second),
                 },
             )
             .await
@@ -113,11 +182,29 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
                         (worker, at),
                         "{context}: who the row names"
                     );
+                    // The record: a new ender takes the event's ending time,
+                    // and the first request is the one kept.
+                    let ender = state.and_then(|state| state.ended_by);
+                    let ended_at = if to.ended_by != ender {
+                        Some(THE_EVENTS_ENDED_AT)
+                    } else {
+                        before.as_ref().and_then(|row| row.ended_at)
+                    };
+                    let termination = match before.as_ref().and_then(|row| row.termination.clone())
+                    {
+                        Some(kept) => Some(kept),
+                        None => to.requested.then(the_events_request),
+                    };
+                    assert_eq!(
+                        (row.ended_at, row.termination),
+                        (ended_at, termination),
+                        "{context}: the termination record"
+                    );
                 }
             }
         }
     }
-    assert_eq!(cases, 8 * 15);
+    assert_eq!(cases, 29 * 13);
 }
 
 /// **A durable start writes the row its run lacks, and leaves every other
@@ -125,13 +212,16 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
 /// it names. A row in flight already answers as a duplicate and keeps its
 /// own worker and time. An `ambiguous` or ended row answers as refused,
 /// with the row as it found it, and stays exactly as it was: status,
-/// archive, worker and time.
+/// archive, worker and time, and its termination record.
 #[tokio::test]
 async fn a_durable_start_writes_a_missing_row_and_refuses_the_rest() {
     let (store, _dir) = store().await;
+    // A start brings no ending and no request; the time is not read.
     let start = OwnerFacts {
         worker_id: EVENT,
         at_ms: 200,
+        ended_at_ms: THE_EVENTS_ENDED_AT,
+        request: None,
     };
 
     let applied = apply(&store, "inv-new", OwnershipEvent::DurablyStarted, start)
@@ -150,15 +240,22 @@ async fn a_durable_start_writes_a_missing_row_and_refuses_the_rest() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        (row.state(), row.worker_id.as_str(), row.assigned_at),
-        (RowState::IN_FLIGHT, EVENT, 200)
+        (
+            row.state(),
+            row.worker_id.as_str(),
+            row.assigned_at,
+            row.ended_at,
+            row.termination
+        ),
+        (RowState::IN_FLIGHT, EVENT, 200, None, None)
     );
 
     for (n, state) in states().into_iter().flatten().enumerate() {
         let id = format!("inv-{n}");
+        let first = seeded_request();
         assert!(
             store
-                .compare_and_set_ownership(&id, None, state, Some(BEFORE), Some(100))
+                .compare_and_set_ownership(&id, None, state, seeded(state, &first))
                 .await
                 .unwrap()
         );
@@ -200,6 +297,8 @@ async fn ambiguous_keeps_a_restored_rows_worker_and_time() {
         OwnerFacts {
             worker_id: "agent",
             at_ms: 60,
+            ended_at_ms: 60,
+            request: None,
         },
     )
     .await
@@ -245,6 +344,8 @@ async fn a_row_this_build_cannot_read_is_unreadable_and_left_alone() {
         OwnerFacts {
             worker_id: "agent",
             at_ms: 2,
+            ended_at_ms: 2,
+            request: None,
         },
     )
     .await
@@ -294,9 +395,9 @@ impl OwnershipStore for Racing {
             assigned_at: 100,
             status: state.status,
             archive_state: state.archive,
-            ended_by: None,
-            ended_at: None,
-            termination: None,
+            ended_by: state.ended_by,
+            ended_at: state.ended_by.map(|_| SEEDED_ENDED_AT),
+            termination: state.requested.then(seeded_request),
         }))
     }
 
@@ -305,8 +406,7 @@ impl OwnershipStore for Racing {
         _invocation_id: &str,
         expected: Option<RowState>,
         to: RowState,
-        _worker_id: Option<&str>,
-        _assigned_at: Option<i64>,
+        _facts: MoveFacts<'_>,
     ) -> Result<bool, ControlPlaneStoreError> {
         let write = self.writes.fetch_add(1, Ordering::SeqCst);
         if write < self.lose {
@@ -320,6 +420,8 @@ impl OwnershipStore for Racing {
 const FACTS: OwnerFacts<'static> = OwnerFacts {
     worker_id: EVENT,
     at_ms: 200,
+    ended_at_ms: 200,
+    request: None,
 };
 
 /// A write that lost its race is decided again from the row as it then
@@ -380,13 +482,15 @@ async fn a_lost_insert_is_decided_again_on_the_row_that_won() {
     );
 }
 
-/// **The pairs a row can hold are the ones the store admits** (issue
-/// 1070). `RowState::is_valid` says which status and archive state go
-/// together, and the store's checks say the same of every row written;
-/// the table moves only to valid pairs, so the two agreeing is what keeps
-/// the consumer from attempting a write the store refuses. Every pair is
-/// written straight into the table: the store takes exactly the valid
-/// ones, `failed·none` among them, and refuses the rest.
+/// **The states a row can hold are the ones the store admits** (issue
+/// 1070). `RowState::is_valid` says which status, archive state, ender and
+/// request go together, and the store's checks say the same of every row
+/// written; the table moves only to valid states, so the two agreeing is
+/// what keeps the consumer from attempting a write the store refuses.
+/// Every state is written straight into the table, its ender with the
+/// ending's time and its request with the request's: the store takes
+/// exactly the valid ones, `failed·none` and a drop's `failed` among them,
+/// and refuses the rest.
 #[tokio::test]
 async fn the_pairs_a_row_can_hold_are_the_ones_the_store_admits() {
     let dir = tempfile::tempdir().unwrap();
@@ -397,37 +501,30 @@ async fn the_pairs_a_row_can_hold_are_the_ones_the_store_admits() {
         .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
         .await
         .unwrap();
-    let statuses = [
-        OwnerStatus::InFlight,
-        OwnerStatus::Ambiguous,
-        OwnerStatus::Completed,
-        OwnerStatus::Failed,
-    ];
-    let archives = [
-        ArchiveState::NotDue,
-        ArchiveState::Pending,
-        ArchiveState::Archived,
-        ArchiveState::WillNotCome,
-    ];
-    for status in statuses {
-        for archive in archives {
-            let pair = RowState { status, archive };
-            let written = sqlx::query(
-                "INSERT INTO coordination_invocation_owner \
-                 (invocation_id, worker_id, assigned_at, status, archive_state) \
-                 VALUES (?, 'w', 1, ?, ?)",
-            )
-            .bind(pair.name())
-            .bind(status.as_str())
-            .bind(archive.as_str())
-            .execute(&raw)
-            .await;
-            assert_eq!(
-                written.is_ok(),
-                pair.is_valid(),
-                "{}: the store and the table disagree: {written:?}",
-                pair.name()
-            );
-        }
+    let mut admitted = 0;
+    for (n, state) in every_state().into_iter().enumerate() {
+        let written = sqlx::query(
+            "INSERT INTO coordination_invocation_owner \
+             (invocation_id, worker_id, assigned_at, status, archive_state, ended_by, ended_at, \
+              termination_requested_at, termination_requested_by, termination_reason) \
+             VALUES (?, 'w', 1, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(format!("inv-{n}"))
+        .bind(state.status.as_str())
+        .bind(state.archive.as_str())
+        .bind(state.ended_by.map(EndedBy::as_str))
+        .bind(state.ended_by.map(|_| 2_i64))
+        .bind(state.requested.then_some(3_i64))
+        .bind(state.requested.then_some("on-call"))
+        .bind(state.requested.then_some("runaway"))
+        .execute(&raw)
+        .await;
+        assert_eq!(
+            written.is_ok(),
+            state.is_valid(),
+            "{state:?}: the store and the table disagree: {written:?}"
+        );
+        admitted += usize::from(written.is_ok());
     }
+    assert_eq!(admitted, 28, "the states a row can hold");
 }

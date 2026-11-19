@@ -333,8 +333,8 @@ const OPERATOR_RECOVERED_EVENT_TYPE: &str = "invocation_operator_recovered";
 /// event's identity, which this line has always printed, now come from
 /// a gated read rather than from a locally minted event. Composing the
 /// two also makes the closing "follow with `fq invocation show`"
-/// honest: the horizon releases the read only once the archive row and
-/// the owner flip are visible too.
+/// honest: the horizon releases the read only once the drop's fold, the
+/// ownership row's move and the request, is visible too.
 ///
 /// Liveness lives entirely daemon-side now (see `arm_drop_halt`): the
 /// runner is asked and the halt armed inside the one handler that

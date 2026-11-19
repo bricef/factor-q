@@ -41,13 +41,13 @@ UPDATE coordination_invocation_owner SET archive_state = 'archived'
 ///   ended, since a drop of a run in progress ends it; the caller and the
 ///   reason come only with the time.
 ///
-/// Nothing writes them yet: the coordination consumer's fold of a run's
-/// ending and of a drop does, once it records the request beside the
-/// outcome. A row from before this rung keeps all five empty, which reads
-/// "not recorded"; nothing is migrated into them. The archive state's
-/// values admit `none`, the archive a dropped run that never wrote a
-/// worker row will never have, so the table is rebuilt once for the whole
-/// record; this build writes and reads no `none` yet.
+/// The coordination consumer's fold of a run's ending and of a drop
+/// writes them, through the compare-and-set every move takes
+/// ([`ControlPlaneStore::compare_and_set_ownership`]). A row from before
+/// this rung keeps all five empty, which reads "not recorded"; nothing is
+/// migrated into them. The archive state's values admit `none`, the
+/// archive a dropped run that never wrote a worker row will never have, so
+/// the table is rebuilt once for the whole record.
 ///
 /// SQLite adds no table constraint to a table that exists, so the rung
 /// rebuilds the table, copies every row, and puts the index back. The
@@ -327,9 +327,9 @@ pub enum ArchiveState {
     /// worker's `invocation.archived` is on its way, refused, held by the
     /// archive sweeper, or its worker is gone.
     Pending,
-    /// The archive record was written, from the worker's archive or by an
-    /// operator's drop. A record retention later sweeps leaves the row
-    /// `archived`.
+    /// The archive record was written, from the worker's archive (an
+    /// operator's drop wrote one too, with no state, before issue 1070). A
+    /// record retention later sweeps leaves the row `archived`.
     Archived,
     /// No archive record will come: an operator's drop said so, of a run
     /// with no row on its worker and none to come there, and wrote none
@@ -384,11 +384,30 @@ impl From<ArchiveState> for fq_ops::views::InvocationArchiveState {
     }
 }
 
+/// What a move writes beside the row's state: the owner facts it takes,
+/// and the termination record it adds. Each `None` keeps what the row
+/// has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MoveFacts<'a> {
+    /// The worker id that replaces the row's; a row the move inserts needs
+    /// it.
+    pub worker_id: Option<&'a str>,
+    /// The time that replaces the row's; a row the move inserts needs it.
+    pub assigned_at: Option<i64>,
+    /// The ending's own time, written with an ender the row did not
+    /// record.
+    pub ended_at: Option<i64>,
+    /// The termination request, written only on a row that records none:
+    /// the first is kept.
+    pub request: Option<&'a TerminationRequest>,
+}
+
 impl ControlPlaneStore {
     /// Move `invocation_id`'s ownership row to `to`, only from `expected`:
     /// insert it when `expected` is no row, and update it when the row
-    /// still holds exactly `expected`. `worker_id` and `assigned_at`
-    /// replace the row's when given, and a row this inserts needs both.
+    /// still holds exactly `expected`, its ender and whether it records a
+    /// request included. `facts` says what else the move writes; a row
+    /// this inserts needs its worker and time.
     ///
     /// One statement either way, so the condition and the write cannot be
     /// separated. True when the row moved; false when it was not in
@@ -399,16 +418,16 @@ impl ControlPlaneStore {
         invocation_id: &str,
         expected: Option<RowState>,
         to: RowState,
-        worker_id: Option<&str>,
-        assigned_at: Option<i64>,
+        facts: MoveFacts<'_>,
     ) -> Result<bool, ControlPlaneStoreError> {
-        // `apply` moves only between pairs a row may hold; a write of any
-        // other is a caller's mistake, which the store's checks refuse
-        // since the termination record's rung.
+        // `apply` moves only between states a row may hold; a write of any
+        // other is a caller's mistake, which the store's checks refuse.
         debug_assert!(to.is_valid(), "an ownership row cannot hold {}", to.name());
+        let request = facts.request;
         let written = match expected {
             None => {
-                let (Some(worker_id), Some(assigned_at)) = (worker_id, assigned_at) else {
+                let (Some(worker_id), Some(assigned_at)) = (facts.worker_id, facts.assigned_at)
+                else {
                     return Err(ControlPlaneStoreError::Malformed(format!(
                         "the ownership row of {invocation_id} cannot be inserted without its \
                          worker and time"
@@ -416,8 +435,10 @@ impl ControlPlaneStore {
                 };
                 sqlx::query(
                     "INSERT INTO coordination_invocation_owner \
-                         (invocation_id, worker_id, assigned_at, status, archive_state) \
-                     VALUES (?, ?, ?, ?, ?) \
+                         (invocation_id, worker_id, assigned_at, status, archive_state, \
+                          ended_by, ended_at, termination_requested_at, \
+                          termination_requested_by, termination_reason) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(invocation_id) DO NOTHING",
                 )
                 .bind(invocation_id)
@@ -425,29 +446,70 @@ impl ControlPlaneStore {
                 .bind(assigned_at)
                 .bind(to.status.as_str())
                 .bind(to.archive.as_str())
+                .bind(to.ended_by.map(EndedBy::as_str))
+                .bind(facts.ended_at)
+                .bind(request.map(|request| request.requested_at))
+                .bind(request.and_then(|request| request.requested_by.as_deref()))
+                .bind(request.and_then(|request| request.reason.as_deref()))
                 .execute(&self.pool)
                 .await?
             }
             Some(expected) => {
+                // SQLite evaluates every assignment against the row as it
+                // was, so the request's caller and reason are written only
+                // where no request was on record, with its time.
                 sqlx::query(
                     "UPDATE coordination_invocation_owner \
                      SET status = ?, archive_state = ?, \
                          worker_id = COALESCE(?, worker_id), \
-                         assigned_at = COALESCE(?, assigned_at) \
-                     WHERE invocation_id = ? AND status = ? AND archive_state = ?",
+                         assigned_at = COALESCE(?, assigned_at), \
+                         ended_by = ?, \
+                         ended_at = COALESCE(?, ended_at), \
+                         termination_requested_by = CASE WHEN termination_requested_at IS NULL \
+                             THEN ? ELSE termination_requested_by END, \
+                         termination_reason = CASE WHEN termination_requested_at IS NULL \
+                             THEN ? ELSE termination_reason END, \
+                         termination_requested_at = COALESCE(termination_requested_at, ?) \
+                     WHERE invocation_id = ? AND status = ? AND archive_state = ? \
+                       AND ended_by IS ? \
+                       AND (termination_requested_at IS NOT NULL) = ?",
                 )
                 .bind(to.status.as_str())
                 .bind(to.archive.as_str())
-                .bind(worker_id)
-                .bind(assigned_at)
+                .bind(facts.worker_id)
+                .bind(facts.assigned_at)
+                .bind(to.ended_by.map(EndedBy::as_str))
+                .bind(facts.ended_at)
+                .bind(request.and_then(|request| request.requested_by.as_deref()))
+                .bind(request.and_then(|request| request.reason.as_deref()))
+                .bind(request.map(|request| request.requested_at))
                 .bind(invocation_id)
                 .bind(expected.status.as_str())
                 .bind(expected.archive.as_str())
+                .bind(expected.ended_by.map(EndedBy::as_str))
+                .bind(expected.requested)
                 .execute(&self.pool)
                 .await?
             }
         };
         Ok(written.rows_affected() == 1)
+    }
+
+    /// Whether `invocation_id` has an ownership row, readable or not: how an
+    /// operator's drop of a run no projection event names an agent for
+    /// tells it from an id that never existed (issue 1070), without moving
+    /// or removing the row.
+    pub async fn has_invocation_owner(
+        &self,
+        invocation_id: &str,
+    ) -> Result<bool, ControlPlaneStoreError> {
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM coordination_invocation_owner WHERE invocation_id = ?",
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.is_some())
     }
 
     /// Write `status`, any text, over `invocation_id`'s ownership row, as a

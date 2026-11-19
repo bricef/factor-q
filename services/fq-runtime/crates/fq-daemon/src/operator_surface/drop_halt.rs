@@ -69,10 +69,9 @@ pub(super) fn arm_drop_halt(
         )));
     }
     // The arm can lose to the invocation finishing between the
-    // liveness check and here. Report that rather than publishing
-    // a terminal event: the operator-recovered handler
-    // deliberately overrides any prior status, so a run that
-    // completed on its own would be archived as `failed`.
+    // liveness check and here, and that is refused, though the
+    // drop's fold would now keep the ending the run reached and
+    // record the request beside it.
     let Some(halt) = runner.arm_halt(id) else {
         return Err(refuse(format!(
             "invocation {id} finished before the halt could be armed; \

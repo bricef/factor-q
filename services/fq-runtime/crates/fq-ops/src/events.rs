@@ -593,11 +593,13 @@ pub enum EventPayload {
     /// recovery actions. Distinct from [`Self::InvocationArchived`]
     /// so audit can filter operator-triggered terminal
     /// transitions from worker-triggered ones. The
-    /// coordination consumer writes an `invocation_archive`
-    /// row and moves `coordination_invocation_owner` to
-    /// `final_phase` with its archive recorded, from whatever the
-    /// row held; no ack is emitted (no worker is waiting to clean
-    /// up).
+    /// coordination consumer records the termination request
+    /// beside the run's outcome on `coordination_invocation_owner`:
+    /// a run that has not ended ends `failed`, by the drop, until
+    /// its archive lands, and one that has keeps its ending. It
+    /// marks the run's worker row finished when this process hosts
+    /// it, and writes no `invocation_archive` row: the worker's
+    /// archive brings the run's state. No ack is emitted.
     InvocationOperatorRecovered(InvocationOperatorRecoveredPayload),
 
     /// Operator-triggered interrupted-result injection for an ambiguous invocation.

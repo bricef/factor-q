@@ -49,7 +49,7 @@
               },
               {
                 "const": "archived",
-                "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
+                "description": "The archive record was written, from the worker's archive. (An\noperator's drop wrote an empty one too, before the drop recorded a\ntermination request instead.)",
                 "type": "string"
               },
               {
@@ -365,7 +365,7 @@
               },
               {
                 "const": "archived",
-                "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
+                "description": "The archive record was written, from the worker's archive. (An\noperator's drop wrote an empty one too, before the drop recorded a\ntermination request instead.)",
                 "type": "string"
               },
               {
@@ -1082,7 +1082,7 @@
               },
               {
                 "const": "archived",
-                "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
+                "description": "The archive record was written, from the worker's archive. (An\noperator's drop wrote an empty one too, before the drop recorded a\ntermination request instead.)",
                 "type": "string"
               },
               {
@@ -4930,7 +4930,7 @@
         "type": "object"
       },
       "stability": "experimental",
-      "summary": "Drop an invocation: archive it as failed and release its owner.",
+      "summary": "Drop an invocation: end it as failed if it has not ended, and record the request.",
       "verb": "drop",
       "version": 1
     }
