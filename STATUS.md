@@ -295,9 +295,13 @@ the row keeps whichever invocation id was written last", since a mark
 now matches only the claim naming its run, and that
 `release_trigger_claim` "deletes by key and `state = 'claimed'`", since
 a release now deletes only the claim naming the invocation giving it
-back; and section 2's account of the row, in "schema version 2" with a
-`state` that is "`claimed` or `durably_started`", since a later rung
-rebuilt the table with a third state, `consumed`.
+back; and section 2's account of the row, in "schema version 2", since a
+later rung rebuilt the table. The third claim state, `consumed`, and the
+answers that write it, which replace section 4's "Every other ack gives
+the claim back" for every answer that deals with a trigger without a
+run, are recorded in
+[ADR-0038](docs/adrs/accepted/0038-a-trigger-dealt-with-and-not-run-keeps-its-claim-consumed.md),
+which refines ADR-0032.
 The
 retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
@@ -574,40 +578,62 @@ stream deleted between two of the dispatcher's pulls leaves the daemon
 running and consuming nothing, and its watch then reads an advisory
 emitted before the recreate at its sequence in the new stream
 ([#1065](https://github.com/bricef/factor-q/issues/1065)). A claim written before claims named
-their run is dead-lettered without a look at the records, as before. And a trigger consumed without its run starting (it failed for
-good before its first WAL write, was refused at admission, was requeued
-from a hold, or was halted in setup, among others) has its claim
-released before its delivery is acked, so a lost ack brings the
-delivery back to be handled again: with the claim released it takes a
-fresh one, and with the release failed, or given up on and not landed,
-as well it meets a claim with nothing on record and takes it again. A
-trigger that failed for good then fails again, one requeued from a hold
-can run twice, and on the last delivery the watch finds no claim and
-writes a `trigger_exhausted` for a trigger already dealt with
-([#1055](https://github.com/bricef/factor-q/issues/1055)). The claim
-now has the state that will close this, `consumed`, with how in
-`consumed_why`, and every reader honours it: a copy that meets one is
-acked and dropped and the watch writes no dead letter for it, each
-counted on `fq status`, `fq doctor` and the dashboard apart from the
-runs that started, requeue
-proceeds for one consumed as dead-lettered, refuses one requeued from a
-hold whatever it is told, and takes one consumed for any other reason
-only on the operator's word, adoption, re-take, recovery
-and `fq doctor` leave it, a start found over one is recorded over it,
-the sweep takes it with the started claims, and `fq invocation show`
-names it, with an operator's drop when the claim records one. The watch
-and requeue do not take it on trust: a start on
-record for the run it names is a start (for a claim that records an
-operator's drop of the run, beside its reason, only a start in the WAL,
-since the drop writes the run's ownership row), and the claim is marked
-so; one whose records cannot be read is never dead-lettered, and
-requeue cannot tell. No answer
-writes it yet, so
-the gap stands until the consuming answers do. A slow
-release no longer leads there, since the delivery is kept alive until
-its answer is published
-([#1057](https://github.com/bricef/factor-q/issues/1057)); only a lost
-answer does. A trigger that fails transiently before its first WAL
+their run is dead-lettered without a look at the records, as before. A
+trigger consumed without its run starting (it failed for good before its
+first WAL write, was refused at admission, was requeued from a hold, or
+was halted in setup, among others) no longer has its claim released
+before its delivery is acked, which let a lost ack bring the delivery
+back to be handled again: a trigger that failed for good failed again,
+one requeued from a hold could run twice, and on the last delivery the
+watch found no claim and wrote a `trigger_exhausted` for a trigger
+already dealt with
+([#1055](https://github.com/bricef/factor-q/issues/1055)). Every answer
+that consumes a trigger without a run now records its claim `consumed`,
+with how in `consumed_why`, and then acks, so a lost ack, or a stop
+between the write and the ack, leaves a consumed claim, and the copy the
+broker brings back is acked and dropped; on a last delivery the watch
+writes no second dead letter. Every reader honours the state: a copy
+that meets one is acked and dropped and the watch writes no dead letter
+for it, each counted on `fq status`, `fq doctor` and the dashboard apart
+from the runs that started (save one consumed as dead-lettered, which the
+watch answers as a dead letter already written and counts in neither),
+requeue proceeds for one consumed as
+dead-lettered, refuses one requeued from a hold whatever it is told, and
+takes one consumed for any other reason only on the operator's word,
+adoption, re-take, recovery and `fq doctor` leave it, a start found over
+one is recorded over it, the sweep takes it with the started claims,
+and `fq invocation show` names it, with an operator's drop when the
+claim records one. The watch and requeue do not take it on trust: a
+start on record for the run it names is a start (for a claim that
+records an operator's drop of the run, only a start in the WAL, since
+the drop writes the run's ownership row), and the claim is marked so;
+one whose records cannot be read is never dead-lettered, and requeue
+cannot tell. An operator's drop of a run that never made its first WAL
+write is recorded on its consumed claim beside the reason, never in its
+place, by whichever of the consume and the drop lands second, so a
+trigger the dispatcher dead-lettered and whose run was then dropped
+keeps `dead_lettered` and its dead letter is still requeued. The
+decision is recorded in
+[ADR-0038](docs/adrs/accepted/0038-a-trigger-dealt-with-and-not-run-keeps-its-claim-consumed.md),
+which refines ADR-0032. Four things stay open, tracked in
+[#1113](https://github.com/bricef/factor-q/issues/1113): a consume the
+claim store refuses, with a lost ack on top, still lets a copy take the
+claim again and handle the trigger a second time, which only holding the
+ack on the store would close; a stop between a hold's replacement
+publish and the consume leaves the original to be adopted and run beside
+its replacement; a dead letter the watch wrote before this change for a
+trigger that would now count as consumed stays requeueable; and the
+drop's handler records the drop before it writes the run's ownership row
+and again after, which leaves one instant two statements wide: a
+consume that lands between the first record and the row records
+nothing, and until the second record a reader takes the row for a start
+and marks the claim started for good, which errs on the cautious side
+and which writing the row and the claim's record in one transaction
+would close. A slow
+release or consume does not lead to a second handling either, since the
+delivery is kept alive until its answer is published
+([#1057](https://github.com/bricef/factor-q/issues/1057)). A trigger
+that fails transiently before its first WAL
 write on its last delivery, and whose dead letter the dispatcher cannot
 publish, is no longer acked: the dispatcher gives its claim back and
 NAKs the delivery with no delay, the broker reports the trigger

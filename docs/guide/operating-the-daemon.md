@@ -1708,9 +1708,9 @@ something else.)
      handling the claim any more and its run had no start on record,
      because the copy that took it ended before its first WAL write
      without settling the delivery (its task died; giving the claim back
-     failed or was given up on before a NAK, or before an ack that was
-     then lost; or a drain left it); the copy then runs the trigger unless
-     a drain or the
+     failed or was given up on before a NAK; recording it consumed failed
+     or was given up on before an ack that was then lost; or a drain left
+     it); the copy then runs the trigger unless a drain or the
      trigger's own checks stop it first; the daemon log has a warn line
      for each naming the abandoned invocation id, and the failure before
      it
@@ -1745,8 +1745,9 @@ something else.)
   so a slow start is not redelivered either unless they stop landing. Or
   it may be marking its start, which the same in-progress acks cover. Or
   it may be settling the delivery, from its run's return or its refusal
-  until its NAK or ack is published: giving its claim back and, on a
-  fifth and last delivery, publishing its dead letter first. The same
+  until its NAK or ack is published: giving its claim back, or recording
+  it consumed, and, on a fifth and last delivery, publishing its dead
+  letter first. The same
   in-progress acks cover that too
   ([#1057](https://github.com/bricef/factor-q/issues/1057)). Either way
   the trigger runs at most once, and that copy settles the delivery
@@ -1770,9 +1771,11 @@ something else.)
   agent no longer loaded, a payload that does not parse). It is not a
   duplicate, and not an issue. A claim a drain left behind is taken
   again the same way, if a copy reaches the daemon before it exits. One
-  double fault lands here too: a run that failed for good before its
-  first durable write, whose claim could not be given back, or was
-  given up on, and whose ack was lost, is run once more.
+  double fault lands here too: a trigger an answer dealt with without a
+  run (a run that failed for good before its first durable write, a
+  refusal, a requeue from a hold), whose claim could not be recorded
+  consumed, or whose write was given up on, and whose ack was lost, is
+  handled once more.
 - **Consumed copies dropped.** The claim records the trigger consumed
   without a run: an earlier delivery dealt with it and no run started
   (it was refused, failed for good or was halted before its first
@@ -1794,8 +1797,7 @@ something else.)
   redelivered trigger that was consumed without a run`, naming the
   invocation that consumed the trigger and how; its attempt
   (`delivered`) is 1 for a replay to a recreated consumer, and more for
-  a redelivery. No answer consumes a trigger yet, so this count stays at
-  zero until one does.
+  a redelivery.
 
 The warn lines are `dropping duplicate trigger delivery after durable
 start`, `acking a redelivered trigger whose claim this daemon holds`,
@@ -1806,18 +1808,20 @@ subject, which names the agent, the claim's age (`claim_age_ms`) and the
 invocation id the claim names: `claim_invocation_id`, or, on a re-take,
 `abandoned_invocation_id` beside the new `invocation_id`. The failure
 before a re-take is logged at error: `failed to release unfinished
-trigger claim`, with the error, `stream_seq` and `invocation_id`, or,
-when settling stopped waiting for the release after 40 seconds and
-answered the delivery without it, `gave up waiting for the claim store
-to release a trigger's claim`, with `stream_seq`, `invocation_id`, the
-subject, `trigger_id`, what the delivery was being answered for
-(`context`) and how long it waited (`waited_ms`); a task that died, or a
-drain, leaves no such line. Either line's `invocation_id` is the
-re-take's `abandoned_invocation_id`. A release given up on can still
-land after the re-take, and then removes nothing: a release removes only
-the claim of the invocation giving it back
+trigger claim` before a NAK, or `failed to record a trigger claim
+consumed` before an ack that was then lost, each with the error,
+`stream_seq` and `invocation_id`; or, when settling stopped waiting for
+either write after 40 seconds and answered the delivery without it,
+`gave up waiting for the claim store to release a trigger's claim, or
+record it consumed`, with `stream_seq`, `invocation_id`, the subject,
+`trigger_id`, what the delivery was being answered for (`context`) and
+how long it waited (`waited_ms`); a task that died, or a drain, leaves
+no such line. Each line's `invocation_id` is the re-take's
+`abandoned_invocation_id`. A write given up on can still land after the
+re-take, and then changes nothing: a release or a consume changes only
+the claim of the invocation answering
 ([#1061](https://github.com/bricef/factor-q/issues/1061)); nothing
-watches a release given up on, so its landing is not logged. A release
+watches a write given up on, so its landing is not logged. A release
 settling waits out to its end that finds no claim of its own to give
 back is logged at warn, `released no trigger claim`, with `stream_seq`,
 `invocation_id`, the subject, `trigger_id` and `context`, as the NAK or
@@ -1862,9 +1866,10 @@ changes such a row in that moment, so the line is not expected.
 watch.** On a trigger's fifth and last delivery, a run that fails
 transiently before its first durable write is dead-lettered by the
 dispatcher itself: it publishes the `trigger_exhausted` dead letter,
-gives the claim back and acks the delivery, and the ack keeps the broker
-from reporting the trigger exhausted. When that publish fails, because
-the events stream is unavailable or does not acknowledge it within five
+records the claim consumed as `dead_lettered` and acks the delivery, and
+the ack keeps the broker from reporting the trigger exhausted. When that
+publish fails, because the events stream is unavailable or does not
+acknowledge it within five
 seconds, the dispatcher does not ack. It gives the claim back and NAKs
 the delivery with no delay, and the broker, having no delivery left to
 make, reports the trigger exhausted as soon as the dispatcher's consumer
@@ -1925,8 +1930,14 @@ logging `a dead letter naming this trigger is already on the log` at
 info; a read it cannot make decides again, as below. It writes a second
 one, under the same sequence, when the dispatcher's publish reached the
 stream only after the watch had looked, or when its check could not be
-made by its limit. The same holds, as before, for a dead letter the
-dispatcher published whose delivery's ack never reached the broker.
+made by its limit. The same holds for a dead letter the dispatcher
+published when the daemon stopped before it recorded the trigger's claim
+consumed. Once the claim is consumed as `dead_lettered`, a lost ack, or
+a stop between the write and the ack, leads to no second dead letter:
+the watch reads the claim first and answers it as a dead letter already
+written, logging `not dead-lettering a trigger whose deliveries ran out:
+its claim records that the dispatcher published its dead letter` at
+info.
 `fq dead-letters list` shows both, and `fq doctor` counts both; what a
 requeue then does is below
 ([#1091](https://github.com/bricef/factor-q/issues/1091)).
@@ -1986,8 +1997,7 @@ delivery as it consumed the claim, so the watch, which reads the claim
 before anything else, answers it as a dead letter already written and
 counts it in neither count, checked or, past its limit, not. Its line, at
 info, is `not dead-lettering a trigger whose deliveries ran out: its claim
-records that the dispatcher published its dead letter`. No answer
-consumes a trigger yet, so this count stays at zero until one does.
+records that the dispatcher published its dead letter`.
 
 Three cases are neither, and the watch holds its verdict on them,
 NAKing the advisory to decide again when it comes back: the claim store
@@ -2489,11 +2499,29 @@ decimal string: a recreated stream numbers its messages from 1 again, so
 a sequence names a message only together with it. A finished, archived
 run still shows its trigger.
 
-A claim has a third state, for a trigger dealt with and never run,
-which this build reads and does not yet write: the answers that will
-write it come later
-([#1055](https://github.com/bricef/factor-q/issues/1055)). Its line
-says how the trigger was consumed:
+A claim has a third state, for a trigger dealt with and never run
+([#1055](https://github.com/bricef/factor-q/issues/1055)). Every answer
+that deals with a trigger without starting its run records the claim
+`consumed`, with why, and only then acks the delivery: a refusal (a
+subject the dispatcher cannot address, an agent id that is not a valid
+one, an agent that is not loaded, a payload that does not parse), a
+requeue from a hold, an agent removed during a cap hold, a run that
+fails for good, is halted by an operator or returns before its first
+durable write, and a dead letter published on a trigger's last
+delivery. A transient failure still gives the claim back and NAKs, and
+so does a dead letter the dispatcher could not publish, which the watch
+then writes. If the ack is lost, or the daemon stops between the write
+and the ack, the claim is consumed and the message unacked: the copy the
+broker brings back meets the claim and is dropped, so the trigger is
+not handled a second time, and on a last delivery the watch writes no
+second dead letter. A consume that matches nothing is logged at warn
+(`recorded no trigger claim consumed`) and one the claim store refuses
+at error (`failed to record a trigger claim consumed`); the delivery is
+acked either way, and after a refused one a lost ack on top still lets
+a copy handle the trigger again
+([#1113](https://github.com/bricef/factor-q/issues/1113)). An
+operator's drop of the run is recorded beside the reason, never in its
+place (below). Its line says how the trigger was consumed:
 
 ```text
   trigger:  fq-triggers seq 1 (consumed without a run: failed_for_good; claimed 2026-01-02T03:04:04Z by 019a4c0e-…)
@@ -2526,22 +2554,31 @@ disagree, and one of them may be about another trigger. Before you pass
 run: find the agent's runs whose trigger payload is the dead letter's
 among its `triggered` events, as the refusal says, and look at each with
 `fq invocation show`. A run started if it shows a `Live execution:`
-block or a trigger line saying `durably started`. An `archived:` line or
-a `status:` is not enough on its own: a run an operator dropped before
-its first durable write has both without having started, and its
-trigger line then says so (below). Startup recovery leaves a consumed
+block or a trigger line saying `durably started`. A `status:` is not
+enough on its own: a run an operator dropped before its first durable
+write has one without having started, and its trigger line then says so
+(below). Startup recovery leaves a consumed
 claim, and `fq doctor` does not list it among the stranded claims.
 
 **An operator's drop is recorded beside the reason.** Dropping a run
 that never made its first durable write (`fq invocation drop <id>`)
-writes the run's ownership row and its archive record, which for any
-other run would show a start. So a consumed claim can record the drop,
-and keeps its reason when it does; like the state itself, this build
-reads it, and the answers that write it come later. Its line then
-reads, for example, `consumed without a run: failed_for_good; dropped
-by an operator, recorded 2026-01-02T03:04:06Z`. A trigger the
-dispatcher dead-lettered and whose run was then dropped keeps
-`dead_lettered`, and its dead letter is still requeued.
+writes the run's ownership row, which for any other run would show a
+start. So the claim records the drop and keeps
+its reason, whichever lands second: the consume records it when the
+run already has the drop's ownership row, as when a run in setup fails
+for good, returns or is halted just as it is dropped, and the drop
+records it on a claim already consumed. Its line then reads, for
+example, `consumed without a run: failed_for_good; dropped by an
+operator, recorded 2026-01-02T03:04:06Z`. An operator halts a run in
+setup only by dropping it, so a claim consumed as `halted_in_setup`
+gets the drop beside it once the drop's event is folded. Until then,
+and for good if that event was never published (the halt is armed
+before the publish,
+[#1114](https://github.com/bricef/factor-q/issues/1114)), it reads
+`halted_in_setup` with no drop; no ownership row exists then either, so
+nothing reads it as a start. A trigger the dispatcher dead-lettered and
+whose run was then dropped keeps `dead_lettered`, and its dead letter
+is still requeued.
 
 The watch and the requeue do not take a consumed claim on trust. They
 look for the run it names in the worker's WAL and on the ownership
@@ -2579,10 +2616,9 @@ decodes the answer and writes it out again, prints it as `"unknown"`, a
 value no daemon sends and the published schema does not list.
 
 A run no claim names reads `none recorded`, and that says less than it
-seems. A delivery that ends before its run's first durable write gives
-its claim back, yet the run may already have published events under the
-claim's id: an agent refused because a shared MCP server is down
-publishes `triggered` and `failed` and keeps no claim. An adoption also
+seems. A delivery that ends before its run's first durable write and is
+retried gives its claim back, yet the run may already have published
+events under the claim's id, its `triggered` at least. An adoption also
 writes the adopter's id over the one an exited process reserved, and the
 retention sweep deletes a claim once it is older than its window. So the
 line reads "not started from the trigger stream, its claim was released
