@@ -169,10 +169,27 @@ fn requeue_declaration() -> fq_ops::Command {
          `start_unchecked` mark names a run, those two records for that run, \
          by its own id. A start on record in any of them is refused with a \
          `Conflict` naming the invocation, whatever `checked_not_started` says; \
-         a start found in the records on a claim still reading `claimed` is \
-         marked on the claim, as startup recovery marks it, and the refusal \
-         says so. Nothing on record proceeds, whether or not the dead letter \
-         carries `start_unchecked`. When it cannot tell, it is refused with \
+         a start found in the records on a claim still reading `claimed`, or \
+         reading `consumed` for that run, is marked on the claim, and the \
+         refusal says so. Nothing on record proceeds, whether or not the dead \
+         letter carries `start_unchecked`, except under a claim that reads \
+         `consumed`, which says the trigger was dealt with and no run started, \
+         and why. Such a claim may also record that an operator dropped the \
+         run it names before its first durable write: the drop writes the \
+         run's ownership row, so on that claim only the worker's WAL is read \
+         for a start, and the reason decides as on any other. Consumed as \
+         `dead_lettered`, the dead letter is the \
+         dispatcher's own, written as it consumed the claim, and it proceeds. \
+         Consumed as `requeued_from_hold`, the trigger's replacement was \
+         already published under the same trigger id, so it is refused with a \
+         `Conflict` whatever `checked_not_started` says; the work can still be \
+         published as new work with `trigger.publish`. Consumed for any other \
+         reason, no dead letter is written for that answer, so this dead \
+         letter and the claim disagree and one of them may be about another \
+         trigger: it is refused with `InvalidInput` unless \
+         `checked_not_started` is true, which the operator sets once they have \
+         checked that the dead letter's own work did not run. When it cannot \
+         tell, it is refused with \
          `InvalidInput` unless `checked_not_started` is true: the records \
          cannot be read, a copy of the trigger is still handling its claim, \
          the claim changed while it was read, or the dead letter carries \

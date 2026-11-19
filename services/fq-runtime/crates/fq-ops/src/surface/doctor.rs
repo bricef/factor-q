@@ -140,8 +140,8 @@ pub struct DoctorReport {
     #[serde(default)]
     pub agents_at_cap: Vec<crate::health::AgentAtCap>,
     /// Trigger claims that have not settled and will not settle on their
-    /// own: claimed deliveries that were neither released nor recorded as
-    /// started. The claim is the only record linking a delivery to its
+    /// own: claimed deliveries that were neither released, nor recorded
+    /// consumed, nor recorded as started. The claim is the only record linking a delivery to its
     /// run, so a delivery that never started one shows up nowhere else.
     #[serde(default)]
     pub trigger_claims: DoctorTriggerClaims,

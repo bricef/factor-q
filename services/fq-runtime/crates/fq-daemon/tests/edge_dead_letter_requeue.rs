@@ -1910,17 +1910,13 @@ async fn a_dead_letter_whose_trigger_was_consumed_and_then_dropped_is_requeued()
         )
         .await
         .expect("the drop's ownership row");
-    let raw = sqlx::SqlitePool::connect(&format!(
-        "sqlite://{}",
-        world.stores().control_plane.display()
-    ))
-    .await
-    .expect("open the claim store");
-    sqlx::query("UPDATE trigger_claim SET operator_dropped_at = 1 WHERE invocation_id = ?")
-        .bind(&invocation)
-        .execute(&raw)
-        .await
-        .expect("record the drop on the claim");
+    assert_eq!(
+        store
+            .record_trigger_claim_drop(&invocation, chrono::Utc::now().timestamp_millis())
+            .await
+            .expect("record the drop on the claim"),
+        1
+    );
 
     let requeued = world
         .requeued(json!({ "agent_id": AGENT, "trigger_seq": 47 }))

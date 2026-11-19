@@ -45,8 +45,8 @@ pub struct ConsumerRecord {
     /// copy was handling the claim any more and its run had no start on
     /// record, because the copy that took it ended before its first WAL
     /// write and left the delivery unsettled (its task died, or the release
-    /// before its NAK failed or was given up on, or before its ack, which
-    /// was lost), or a drain
+    /// before its NAK failed or was given up on, or the consume before its
+    /// ack, which was lost), or a drain
     /// left it. Each was taken under a new invocation id to run the
     /// trigger, which the copy then does unless a drain stops it first or
     /// the trigger is refused after its claim; so this counts claims, not

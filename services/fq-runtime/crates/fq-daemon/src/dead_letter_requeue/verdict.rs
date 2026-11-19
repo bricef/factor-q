@@ -61,9 +61,9 @@
 //! ([`Exhausted::NoClaim`]), or there is none to consult:
 //!
 //! - **An unmarked dead letter proceeds.** Its writer found nothing of the
-//!   run on record: the dispatcher wrote it on the last delivery and gave
-//!   the claim back before acking it, or the watch found no claim, or a
-//!   claim with no start and no copy handling it. No delivery follows the
+//!   run on record: the watch found no claim, or a claim with no start and
+//!   no copy handling it (the dispatcher's own dead letter keeps its
+//!   claim, consumed, as below). No delivery follows the
 //!   last one, so a run starts after it only by a copy its writer did not
 //!   see, such as a replay of the stream, and that run's claim is marked
 //!   started: requeue refuses it while the claim is kept. A dead letter is
@@ -86,10 +86,15 @@
 //!   absent for either reason looks the same.
 //!
 //! The dispatcher's own dead letter, written on the fifth failed delivery,
-//! is the first kind: its claim is released as the delivery is answered,
-//! so requeue finds no claim and proceeds, as it always did, before or
-//! after any sweep. In the moment between the dead letter's publish and
-//! that release, a copy is still handling the claim, and requeue says so.
+//! keeps its claim: as the delivery is answered the claim is recorded
+//! consumed as dead-lettered (issue 1055), so requeue finds it consumed
+//! and proceeds. An operator's drop of that run afterwards changes
+//! neither: the claim keeps its reason and records the drop beside it,
+//! whose ownership row is then not read as a start. Once the retention
+//! sweep has deleted that claim, the dead
+//! letter is an unmarked one with no claim, and proceeds as the first kind
+//! does. In the moment between the dead letter's publish and the consume,
+//! a copy is still handling the claim, and requeue says so.
 //!
 //! **The look.** [`ExhaustionCheck::last_look`], not the bare verdict: the
 //! watch takes it when it is about to act on a verdict it could not take,
@@ -537,12 +542,13 @@ pub(super) const STARTED_IF: &str = "it started if that shows a `Live execution:
 /// What in `fq invocation show`'s output says a run started, for the runs
 /// of a trigger whose claim says it was consumed (issue 1055). An operator
 /// may have dropped such a run before its first WAL write, and the drop
-/// writes the `archived:` record and the coordination status that
-/// [`STARTED_IF`] counts as a start; the trigger line tells the two apart.
+/// writes the coordination status that [`STARTED_IF`] counts as a start
+/// (the run's ownership row, ended by the drop, with its request), though
+/// no archive record; the trigger line tells the two apart.
 const STARTED_IF_DROPPED_SHOWN: &str = "it started if that shows a `Live execution:` block or a \
-     trigger line saying `durably started`. An `archived:` line or a `status:` other than `(no \
-     coordination row)` is a start only under a trigger line that does not say `dropped by an \
-     operator`: a run an operator dropped before its first WAL write shows both without having \
+     trigger line saying `durably started`. A `status:` other than `(no coordination row)` is a \
+     start only under a trigger line that does not say `dropped by an operator`: a run an \
+     operator dropped before its first WAL write has one, ended by the drop, without having \
      started, and its trigger line says it was consumed without a run and dropped by an operator";
 
 /// The refusal for a trigger whose run has a start on record. A

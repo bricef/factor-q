@@ -1136,6 +1136,375 @@ mod tests {
         );
     }
 
+    /// **An operator's drop of a run whose trigger was consumed records the
+    /// drop on the claim, keeping its reason, whatever the reason (issue
+    /// 1055).** The run never made its first WAL write, and its claim says
+    /// how its trigger was dealt with; the drop writes the run's ownership
+    /// row, which beside a claim that does not record the drop would read
+    /// to the dead-letter watch and requeue as a start. So the handler
+    /// records the drop beside the reason, and never changes the reason: a
+    /// trigger the dispatcher dead-lettered keeps `dead_lettered`, and its
+    /// dead letter can still be requeued.
+    #[tokio::test]
+    async fn handler_operator_recovered_records_the_drop_on_a_consumed_claim_keeping_its_reason() {
+        use crate::control_plane::store::{ClaimState, ConsumedWhy, TriggerKey};
+        use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            ControlPlaneStore::open(&dir.path().join("control-plane.db"))
+                .await
+                .unwrap(),
+        );
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone());
+        let agent_id =
+            AgentId::new(format!("op-drop-consumed-{}", Uuid::now_v7().simple())).unwrap();
+        let reasons = [
+            ConsumedWhy::RefusedSubject,
+            ConsumedWhy::InvalidAgentId,
+            ConsumedWhy::UnknownAgent,
+            ConsumedWhy::InvalidPayload,
+            ConsumedWhy::RequeuedFromHold,
+            ConsumedWhy::AgentRemoved,
+            ConsumedWhy::FailedForGood,
+            ConsumedWhy::HaltedInSetup,
+            ConsumedWhy::ReturnedUnstarted,
+            ConsumedWhy::DeadLettered,
+            ConsumedWhy::Other("a_reason_from_a_newer_build".to_string()),
+        ];
+        for (i, why) in reasons.into_iter().enumerate() {
+            let invocation_id = Uuid::now_v7();
+            let inv_str = invocation_id.to_string();
+            let key = TriggerKey {
+                stream: crate::bus::TRIGGER_STREAM_NAME,
+                stream_epoch: 1,
+                stream_seq: i as u64 + 1,
+            };
+            store
+                .claim_trigger(key, "daemon-0", &inv_str, 0)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .consume_trigger_claim(key, &inv_str, &why)
+                    .await
+                    .unwrap()
+            );
+
+            let payload = InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+                requested_by: None,
+                archive: None,
+            };
+            let event = Event::new(
+                agent_id.clone(),
+                invocation_id,
+                EventPayload::InvocationOperatorRecovered(payload.clone()),
+            );
+            consumer
+                .handle_invocation_operator_recovered(&event, &payload)
+                .await
+                .expect("handler succeeds");
+
+            let row = store.trigger_claim(key).await.unwrap().expect("the claim");
+            assert_eq!(
+                (
+                    row.state,
+                    row.invocation_id,
+                    row.operator_dropped_at.is_some()
+                ),
+                (
+                    ClaimState::Consumed { why: why.clone() },
+                    Some(inv_str.clone()),
+                    true
+                ),
+                "{why}: the reason is kept, and the drop recorded beside it"
+            );
+            assert!(
+                store
+                    .get_invocation_owner(&inv_str)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{why}: the drop wrote the run's ownership row"
+            );
+        }
+    }
+
+    /// A store, its file, a consumer over it, and a claim for a new run of
+    /// a new agent, `claimed` at sequence 7, for the two tests below.
+    async fn a_drop_on_a_claimed_run() -> (
+        crate::test_support::nats::NatsServer,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<ControlPlaneStore>,
+        CoordinationConsumer,
+        Event,
+        crate::events::InvocationOperatorRecoveredPayload,
+        crate::control_plane::store::TriggerKey<'static>,
+    ) {
+        use crate::control_plane::store::TriggerKey;
+        use crate::events::{EventPayload, InvocationOperatorRecoveredPayload};
+        use uuid::Uuid;
+        let server = crate::test_support::nats::test_nats();
+        let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control-plane.db");
+        let store = Arc::new(ControlPlaneStore::open(&path).await.unwrap());
+        let consumer = CoordinationConsumer::new(bus, store.clone());
+        let agent_id = AgentId::new(format!("op-drop-order-{}", Uuid::now_v7().simple())).unwrap();
+        let invocation_id = Uuid::now_v7();
+        let key = TriggerKey {
+            stream: crate::bus::TRIGGER_STREAM_NAME,
+            stream_epoch: 1,
+            stream_seq: 7,
+        };
+        store
+            .claim_trigger(key, "daemon-0", &invocation_id.to_string(), 0)
+            .await
+            .unwrap();
+        let payload = InvocationOperatorRecoveredPayload {
+            action: "drop".to_string(),
+            final_phase: "failed".to_string(),
+            reason: None,
+            requested_by: None,
+            archive: None,
+        };
+        let event = Event::new(
+            agent_id,
+            invocation_id,
+            EventPayload::InvocationOperatorRecovered(payload.clone()),
+        );
+        (server, dir, path, store, consumer, event, payload, key)
+    }
+
+    /// Run `statements` on the store's file from a connection of the
+    /// test's own.
+    async fn on_the_store(path: &std::path::Path, statements: &[&'static str]) {
+        use sqlx::{ConnectOptions, Connection};
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .connect()
+            .await
+            .expect("open the store's file");
+        for &statement in statements {
+            sqlx::query(statement)
+                .execute(&mut conn)
+                .await
+                .expect("run the statement");
+        }
+        conn.close().await.expect("close the store's file");
+    }
+
+    /// **The drop is on a consumed claim before its ownership row exists to
+    /// be read (issue 1055).** Beside a consumed claim that does not record
+    /// the drop, the drop's row reads to the dead-letter watch and requeue
+    /// as a start, so the handler records the drop before it writes the
+    /// row, not only after. The test watches the moment the row is written,
+    /// from inside the statement that writes it: the claim, consumed before
+    /// the drop, already records the drop then.
+    #[tokio::test]
+    async fn handler_operator_recovered_records_the_drop_before_its_ownership_row_is_written() {
+        use crate::control_plane::store::ConsumedWhy;
+        let (_server, _dir, path, store, consumer, event, payload, key) =
+            a_drop_on_a_claimed_run().await;
+        let run = event.envelope.invocation_id.to_string();
+        assert!(
+            store
+                .consume_trigger_claim(key, &run, &ConsumedWhy::FailedForGood)
+                .await
+                .unwrap()
+        );
+        on_the_store(
+            &path,
+            &[
+                "CREATE TABLE seen_when_the_row_was_written (dropped_at INTEGER)",
+                "CREATE TRIGGER watch_the_row AFTER INSERT ON coordination_invocation_owner \
+                 BEGIN INSERT INTO seen_when_the_row_was_written \
+                 SELECT operator_dropped_at FROM trigger_claim \
+                 WHERE invocation_id = NEW.invocation_id; END",
+            ],
+        )
+        .await;
+
+        consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await
+            .expect("handler succeeds");
+
+        let mut conn = {
+            use sqlx::ConnectOptions;
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .connect()
+                .await
+                .unwrap()
+        };
+        let seen: Vec<Option<i64>> =
+            sqlx::query_scalar("SELECT dropped_at FROM seen_when_the_row_was_written")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+        assert_eq!(seen.len(), 1, "the row was written once: {seen:?}");
+        assert!(
+            seen[0].is_some(),
+            "the claim recorded the drop before the drop's row could be read"
+        );
+    }
+
+    /// **A claim consumed while the drop's ownership row is written still
+    /// records the drop (issue 1055).** The run's own answer lands after
+    /// the handler's first record of the drop, which found the claim still
+    /// `claimed`, and before its consume could read the row: here it lands
+    /// in the very statement that writes the row. The handler records the
+    /// drop again once the row is written, so the claim ends consumed with
+    /// its reason and the drop beside it.
+    #[tokio::test]
+    async fn handler_operator_recovered_records_the_drop_on_a_claim_consumed_while_its_row_is_written()
+     {
+        use crate::control_plane::store::{ClaimState, ConsumedWhy};
+        let (_server, _dir, path, store, consumer, event, payload, key) =
+            a_drop_on_a_claimed_run().await;
+        on_the_store(
+            &path,
+            &["CREATE TRIGGER consume_as_the_row_is_written \
+               AFTER INSERT ON coordination_invocation_owner \
+               BEGIN UPDATE trigger_claim SET state = 'consumed', \
+               consumed_why = 'failed_for_good' \
+               WHERE invocation_id = NEW.invocation_id AND state = 'claimed'; END"],
+        )
+        .await;
+
+        consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await
+            .expect("handler succeeds");
+
+        let row = store.trigger_claim(key).await.unwrap().expect("the claim");
+        assert_eq!(
+            (row.state, row.operator_dropped_at.is_some()),
+            (
+                ClaimState::Consumed {
+                    why: ConsumedWhy::FailedForGood
+                },
+                true
+            ),
+            "consumed with its reason, and the drop beside it"
+        );
+    }
+
+    /// **A claim consumed while the store refuses the drop's ownership row
+    /// still records the drop (issue 1055).** The store refuses the row's
+    /// write by its own rules, and the run's own answer consumes its claim
+    /// in that same statement, after the handler's first record of the
+    /// drop found the claim still `claimed`. A row left as it is does not
+    /// stop the rest of the drop, and the second record is part of it: the
+    /// claim ends consumed with its reason and the drop beside it, though
+    /// the event is refused for the row.
+    #[tokio::test]
+    async fn handler_operator_recovered_records_the_drop_on_a_claim_consumed_as_its_row_is_refused()
+    {
+        use crate::control_plane::store::{ClaimState, ConsumedWhy};
+        let (_server, _dir, path, store, consumer, event, payload, key) =
+            a_drop_on_a_claimed_run().await;
+        // `FAIL` keeps what the statement did before it, the consume here,
+        // where `ABORT` would undo it.
+        on_the_store(
+            &path,
+            &["CREATE TRIGGER consume_and_refuse_the_row \
+               BEFORE INSERT ON coordination_invocation_owner \
+               BEGIN UPDATE trigger_claim SET state = 'consumed', \
+               consumed_why = 'failed_for_good' \
+               WHERE invocation_id = NEW.invocation_id AND state = 'claimed'; \
+               SELECT RAISE(FAIL, 'the test refuses the drop''s row'); END"],
+        )
+        .await;
+
+        let folded = consumer
+            .handle_invocation_operator_recovered(&event, &payload)
+            .await;
+
+        assert!(
+            folded.is_err(),
+            "the row's refusal is the event's: {folded:?}"
+        );
+        let run = event.envelope.invocation_id.to_string();
+        assert!(
+            store.get_invocation_owner(&run).await.unwrap().is_none(),
+            "the store wrote no row"
+        );
+        let row = store.trigger_claim(key).await.unwrap().expect("the claim");
+        assert_eq!(
+            (row.state, row.operator_dropped_at.is_some()),
+            (
+                ClaimState::Consumed {
+                    why: ConsumedWhy::FailedForGood
+                },
+                true
+            ),
+            "consumed with its reason, the drop recorded beside it"
+        );
+    }
+
+    /// **One drop has one time: the drop event's own (issue 1055).** The
+    /// claim records the drop at the time the ownership row records the
+    /// drop's request, the event's own, whichever lands second: the drop on
+    /// a claim already consumed, or the consume on a claim whose run the
+    /// drop already wrote a row for. Neither takes the clock of the process
+    /// that folds it, so `fq invocation show` prints one time for one drop.
+    #[tokio::test]
+    async fn one_drop_is_dated_at_its_events_own_time_on_the_claim_and_the_row() {
+        use crate::control_plane::store::ConsumedWhy;
+        use chrono::TimeZone;
+        // 2026-01-02T03:04:05Z, long before any clock the test reads.
+        const DROPPED_AT: i64 = 1_767_323_045_000;
+        for consumed_first in [true, false] {
+            let (_server, _dir, _path, store, consumer, mut event, payload, key) =
+                a_drop_on_a_claimed_run().await;
+            event.envelope.timestamp = Utc.timestamp_millis_opt(DROPPED_AT).unwrap();
+            let run = event.envelope.invocation_id.to_string();
+            let consume = || async {
+                assert!(
+                    store
+                        .consume_trigger_claim(key, &run, &ConsumedWhy::FailedForGood)
+                        .await
+                        .unwrap()
+                );
+            };
+            if consumed_first {
+                consume().await;
+            }
+            consumer
+                .handle_invocation_operator_recovered(&event, &payload)
+                .await
+                .expect("handler succeeds");
+            if !consumed_first {
+                consume().await;
+            }
+
+            let claim = store.trigger_claim(key).await.unwrap().expect("the claim");
+            let row = store
+                .get_invocation_owner(&run)
+                .await
+                .unwrap()
+                .expect("the drop's row");
+            assert_eq!(
+                (
+                    claim.operator_dropped_at,
+                    row.termination.map(|request| request.requested_at)
+                ),
+                (Some(DROPPED_AT), Some(DROPPED_AT)),
+                "consumed first: {consumed_first}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn handler_operator_recovered_idempotent_on_redelivery() {
         let server = crate::test_support::nats::test_nats();

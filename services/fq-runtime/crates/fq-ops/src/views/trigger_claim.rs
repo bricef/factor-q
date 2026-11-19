@@ -59,12 +59,14 @@ pub struct TriggerDeliveryView {
     /// as it is. Absent in any other state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_why: Option<String>,
-    /// When the claim recorded that an operator's drop of the invocation it
-    /// names wrote that invocation's coordination status, epoch ms, when
-    /// `state` is `consumed`. The claim says no run started, so that status,
-    /// and the archive record the drop writes with it, record the drop,
-    /// not a start. `consumed_why` still says how the trigger was dealt
-    /// with. Absent when no drop was recorded, and in any other state.
+    /// The time of an operator's drop of the invocation the claim names,
+    /// epoch ms, when `state` is `consumed` and the drop wrote that
+    /// invocation's coordination status: the drop's own time, which the
+    /// request recorded on that status carries. The claim says no run
+    /// started, so that status, ended by the drop, records the drop, not a
+    /// start; a drop writes no archive record. `consumed_why` still says how
+    /// the trigger was dealt with. Absent when no drop was recorded, and in
+    /// any other state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_dropped_at_ms: Option<i64>,
     /// The worker id of the daemon process that holds the claim, or held

@@ -589,10 +589,11 @@ pub struct InvocationDetailView {
     /// seems: the run was not started from the trigger stream, its claim
     /// was released or taken over before the run's first durable write,
     /// or the claim has been swept. A delivery that ends before that write
-    /// (a refusal, a transient failure) gives its claim back, and an
-    /// adoption writes the adopter's own id over the one the claim named,
-    /// yet a run refused that way can already have published events under
-    /// the id.
+    /// to be retried, after a transient failure, gives its claim back, and
+    /// an adoption writes the adopter's own id over the one the claim
+    /// named, yet a run that ended that way can already have published
+    /// events under the id. A delivery dealt with before that write, a
+    /// refusal among them, keeps its claim, consumed, naming the run.
     #[serde(default)]
     pub trigger: Option<TriggerDeliveryView>,
     /// Why the worker's archive sweeper is holding this invocation's

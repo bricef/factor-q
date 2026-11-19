@@ -7,7 +7,11 @@
 //! and when it next starts if the daemon went down, however long that was,
 //! up to the advisory stream's day. And the dispatcher can have written the
 //! trigger's dead letter itself before the trigger came to the watch, when
-//! its publish landed and only its acknowledgement was lost. The checks
+//! its publish landed and only its acknowledgement was lost, or when the
+//! daemon stopped between its publish and the claim's consume. One it
+//! published and then recorded on the claim, consuming it as dead-lettered,
+//! never reaches these checks: the watch reads the claim first and answers
+//! it as a dead letter already written (issue 1055). The checks
 //! below keep one exhaustion to one dead letter, whichever form came first;
 //! a dead letter that names the trigger may still follow one that names
 //! none, since it is the one that can be requeued. Where a check cannot be

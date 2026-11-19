@@ -6,7 +6,7 @@ use std::time::Duration;
 use tracing::{debug, error, warn};
 
 use crate::bus::TRIGGER_STREAM_NAME;
-use crate::control_plane::store::RunRecords;
+use crate::control_plane::store::{ConsumedWhy, RunRecords};
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerClaim, TriggerKey};
 use crate::worker::DurableStartReport;
 
@@ -298,8 +298,9 @@ impl TriggerDispatcher {
     /// **A mark refused on every attempt** is answered with an ack that
     /// does not release the claim ([`Self::ack_keeping_claim`]), and the
     /// run continues, so the delivery is not redelivered. The claim is not
-    /// released first, as [`Self::ack`] would: a copy that came back would
-    /// then win a fresh claim and start the work again.
+    /// released first, as a NAK's would be, nor recorded consumed: a copy
+    /// that came back would then win a fresh claim and start the work
+    /// again, or meet a claim saying no run started.
     ///
     /// What stays behind is a `claimed` row for a run that started, and
     /// only until this daemon next starts: [`TriggerClaims::recover`]
@@ -568,27 +569,32 @@ impl TriggerDispatcher {
 }
 
 impl TriggerDispatcher {
-    /// Release the delivery's claim and ack it, keeping the delivery in
-    /// progress until the ack is published ([`settlement`], #1057).
-    pub(super) async fn ack(
+    /// Record the delivery's claim consumed without a run, as `why`, and ack
+    /// it, keeping the delivery in progress until the ack is published
+    /// ([`settlement`], #1057). The write comes first (issue 1055): a crash
+    /// or a lost ack after it leaves a consumed claim and an unacked
+    /// message, and the copy the broker brings back is dropped, not handled
+    /// a second time.
+    pub(super) async fn consume(
         &self,
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: Option<uuid::Uuid>,
+        why: ConsumedWhy,
         context: &str,
     ) {
-        let answer = Answer::Ack { context };
+        let answer = Answer::Consume { why, context };
         self.settle(msg, claim, trigger_id, std::future::ready(answer))
             .await;
     }
 
-    /// Ack the delivery, leaving its claim row as it is. [`Self::ack`]
-    /// releases the claim first and then calls this, from settling; called
-    /// directly, it is for a run that started: whose start was marked
-    /// (`mark_durable_started`), or could not be, or was marked by a copy
-    /// that met its own claim (`own_claim`), or whose start was recorded on
-    /// a claim the mark did not find (`unmarked_start`), and for a run with
-    /// no claim store to mark it on.
+    /// Ack the delivery, leaving its claim row as it is. [`Self::consume`]
+    /// records the claim consumed first and then calls this, from settling;
+    /// called directly, it is for a run that started: whose start was
+    /// marked (`mark_durable_started`), or could not be, or was marked by a
+    /// copy that met its own claim (`own_claim`), or whose start was
+    /// recorded on a claim the mark did not find (`unmarked_start`), and for
+    /// a run with no claim store to mark it on.
     pub(super) async fn ack_keeping_claim(
         &self,
         msg: &async_nats::jetstream::Message,

@@ -106,8 +106,9 @@ pub(crate) fn register_doctor_report(
          call: every durable it expects, named, with a stuck verdict for any that is \
          redelivering rather than progressing. A summariser durable is expected only \
          where `[summary]` configures one. \
-         The trigger-claim block lists claimed deliveries that were neither released nor \
-         recorded as started and will not settle without help. Two findings are issues: a \
+         The trigger-claim block lists claimed deliveries that were neither released, nor \
+         recorded consumed, nor recorded as started and will not settle without help. Two \
+         findings are issues: a \
          run whose claim still says it has not started while its message can still be \
          redelivered, and a delivery an exited process left that never started a run and \
          will not be redelivered, because its message is gone or did not come back within \

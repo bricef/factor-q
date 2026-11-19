@@ -166,7 +166,8 @@ pub enum ConsumerHealth {
         /// worker's WAL or the control plane's, because the copy that took
         /// it ended before its run's first WAL write and left the delivery
         /// unsettled (its task died, or releasing the claim before a NAK
-        /// failed, or before an ack that was lost as well), or because a
+        /// failed, or recording it consumed before an ack failed and the
+        /// ack was lost as well), or because a
         /// drain left it for the next binary. Each was taken under a new
         /// invocation id to run the trigger once. The copy that took it
         /// runs the trigger unless a drain or a shutdown under way stops it
@@ -648,8 +649,8 @@ impl ArchiveSweep {
 }
 
 /// A trigger claim that has not settled and will not settle on its own,
-/// as `control.doctor` reports it: a claimed delivery that has neither
-/// been released nor recorded as started.
+/// as `control.doctor` reports it: a claimed delivery that has been
+/// neither released, nor recorded consumed, nor recorded as started.
 ///
 /// A claim this daemon holds for an invocation that has not started is
 /// never one of these, however old. A trigger can wait behind a paused

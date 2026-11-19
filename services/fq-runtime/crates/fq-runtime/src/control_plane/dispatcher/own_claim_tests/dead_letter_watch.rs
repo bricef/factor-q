@@ -1304,30 +1304,41 @@ async fn a_consumed_trigger_is_not_dead_lettered() {
     );
 }
 
-/// **A consumed claim that says the trigger was dead-lettered is answered
-/// as a dead letter already written, and counted in neither count (issue
-/// 1055).** The usual consumed trigger to reach the watch: its last
-/// delivery failed, the dispatcher published its dead letter and consumed
-/// its claim as dead-lettered, and the ack was lost. The watch asks the
-/// records first, and the claim says the trigger was dead-lettered: one is
-/// already written, so none is due, and the watch withheld none, so it is
-/// counted neither as kept out because its run started nor as kept out as
-/// consumed. The change that writes the state relies on this answer.
+/// **A trigger dead-lettered on its last delivery is consumed as
+/// dead-lettered, and a crash between that write and the ack leaves no
+/// second dead letter (issue 1055).** Its last delivery fails transiently;
+/// the dispatcher publishes its dead letter, records the claim consumed,
+/// and acks. The ack is lost here, as a daemon stopping between the write
+/// and the ack would lose it, so the broker's deliveries run out and it
+/// raises its advisory. The watch reads the claim first, and the claim
+/// says the trigger was dead-lettered: it is answered as a dead letter
+/// already written, with no second one, and counted in neither count,
+/// since the watch withheld none. A copy that comes anyway, by a replay of
+/// the stream, meets the consumed claim and is dropped.
 #[tokio::test]
-async fn a_claim_consumed_as_dead_lettered_is_answered_as_already_surfaced_and_not_counted() {
+async fn a_dead_lettered_trigger_is_consumed_and_its_lost_ack_writes_no_second_dead_letter() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
     let (arena, _server) = arena().await;
     publish(&arena).await;
     fail(&arena, 4).await;
     arena.worker.queue(Run::FailsTransiently);
-    let last = arena.deliver(5, false).await;
-    assert_eq!((last.acks, last.naks), (1, 0), "{last:?}");
-    assert!(
-        dead_letter(&arena).await.is_some(),
-        "the dispatcher's own dead letter"
+    let last = arena.deliver(5, true).await;
+    assert_eq!((last.acks, last.naks), (0, 0), "the ack is lost: {last:?}");
+    let own = dead_letter(&arena)
+        .await
+        .expect("the dispatcher's own dead letter");
+    let run = arena.worker.starts()[4].0.to_string();
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            Some(run)
+        )),
+        "consumed by the last delivery's run, as dead-lettered"
     );
-    // What the change that writes the state will leave: consumed as
-    // dead-lettered.
-    consume(&arena, "inv-consumed").await;
     let advisory = exhaust(&arena).await;
 
     let outcome = watch(&arena)
@@ -1337,10 +1348,20 @@ async fn a_claim_consumed_as_dead_lettered_is_answered_as_already_surfaced_and_n
 
     assert_eq!(outcome, AdvisoryOutcome::AlreadySurfaced);
     assert_eq!(
+        dead_letter(&arena)
+            .await
+            .map(|event| event.envelope.event_id),
+        Some(own.envelope.event_id),
+        "no second dead letter"
+    );
+    assert_eq!(
         (kept(&arena), kept_as_consumed(&arena)),
         (0, 0),
         "answered as already written, so counted in neither"
     );
+    let replayed = arena.deliver(1, false).await;
+    assert_eq!((replayed.acks, replayed.naks), (1, 0), "{replayed:?}");
+    assert_eq!(arena.worker.starts().len(), 5, "nothing runs again");
 }
 
 /// **Past the watch's limit, a claim consumed as dead-lettered whose run
@@ -1380,6 +1401,137 @@ async fn past_the_limit_an_unverified_claim_consumed_as_dead_lettered_is_already
             why: ConsumedWhy::DeadLettered
         }),
         "the claim is left as it was"
+    );
+}
+
+/// **The claim the dispatcher consumed is read first, and its lost ack
+/// writes no second dead letter (issue 1055).** As above, the last
+/// delivery's ack is lost after the dispatcher published its dead letter
+/// and consumed the claim as dead-lettered. The watch reads the claim
+/// first, and the claim says the trigger was dead-lettered: a dead letter
+/// is already written, so it writes none and counts the trigger in neither
+/// count, since it withheld none. It does not look for that dead letter on
+/// the log, which these tests' deliveries could not match anyway: they
+/// carry a trigger id other than the one `publish` minted. Another failure
+/// of the agent, recorded after the dispatcher's dead letter, is what
+/// shows that nothing was written after it.
+#[tokio::test]
+async fn the_claim_the_dispatcher_consumed_is_read_first_and_its_lost_ack_writes_no_second_dead_letter()
+ {
+    use crate::events::{FailedPayload, FailurePhase, InvocationTotals};
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    fail(&arena, 4).await;
+    arena.worker.queue(Run::FailsTransiently);
+    let last = arena.deliver(5, true).await;
+    assert_eq!((last.acks, last.naks), (0, 0), "the ack is lost: {last:?}");
+    assert!(
+        dead_letter(&arena).await.is_some(),
+        "the dispatcher's own dead letter"
+    );
+    let other = Event::new(
+        AgentId::new(&arena.agent).unwrap(),
+        uuid::Uuid::now_v7(),
+        EventPayload::Failed(FailedPayload {
+            error_kind: FailureKind::RuntimeError,
+            error_message: "another failure of the agent, in between".to_string(),
+            phase: FailurePhase::Setup,
+            partial_totals: InvocationTotals::default(),
+            detail: None,
+        }),
+    );
+    arena.bus.publish(&other).await.unwrap();
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        AdvisoryOutcome::AlreadySurfaced,
+        "read off the claim"
+    );
+    assert_eq!(
+        dead_letter(&arena)
+            .await
+            .map(|event| event.envelope.event_id),
+        Some(other.envelope.event_id),
+        "no second dead letter: the latest failure is still the other one"
+    );
+    assert_eq!(
+        (kept(&arena), kept_as_consumed(&arena)),
+        (0, 0),
+        "answered as already written, so counted in neither"
+    );
+}
+
+/// **A trigger the dispatcher dead-lettered, whose run an operator then
+/// drops, keeps its reason (issue 1055).** The dispatcher publishes the
+/// trigger's dead letter on its last delivery, consumes the claim as
+/// dead-lettered and acks; then the drop of that delivery's run goes
+/// through the real handler, which writes the run's ownership row and
+/// records the drop on the claim. The claim still says dead-lettered, with
+/// the drop beside it, and the last look reads it as consumed, not as a
+/// start: the dead letter is still the trigger's own, and can be requeued.
+#[tokio::test]
+async fn a_dead_lettered_trigger_whose_run_is_then_dropped_keeps_its_reason() {
+    use crate::control_plane::CoordinationConsumer;
+    use crate::control_plane::dispatcher::ConsumedClaim;
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    use crate::events::InvocationOperatorRecoveredPayload;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    fail(&arena, 4).await;
+    arena.worker.queue(Run::FailsTransiently);
+    let last = arena.deliver(5, false).await;
+    assert_eq!((last.acks, last.naks), (1, 0), "{last:?}");
+    let run = arena.worker.starts()[4].0;
+
+    let consumer = CoordinationConsumer::new(arena.bus.clone(), arena.claims.clone());
+    let payload = InvocationOperatorRecoveredPayload {
+        action: "drop".to_string(),
+        final_phase: "failed".to_string(),
+        reason: None,
+        requested_by: None,
+        archive: None,
+    };
+    let event = Event::new(
+        AgentId::new(&arena.agent).unwrap(),
+        run,
+        EventPayload::InvocationOperatorRecovered(payload.clone()),
+    );
+    consumer
+        .handle_invocation_operator_recovered(&event, &payload)
+        .await
+        .expect("the drop's handler");
+
+    let row = arena
+        .claims
+        .trigger_claim(consumed_key(&arena))
+        .await
+        .unwrap()
+        .expect("the claim");
+    assert_eq!(
+        (row.state, row.operator_dropped_at.is_some()),
+        (
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            true
+        ),
+        "the reason is kept, and the drop recorded beside it"
+    );
+    let check = arena.dispatcher.exhaustion_check().expect("a claim store");
+    assert_eq!(
+        check.last_look(SEQ).await,
+        Exhausted::Consumed(ConsumedClaim::Checked {
+            invocation_id: Some(run.to_string()),
+            why: ConsumedWhy::DeadLettered,
+            operator_dropped: true,
+        }),
+        "consumed, not a start"
     );
 }
 

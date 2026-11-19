@@ -1930,6 +1930,132 @@ async fn a_claim_is_consumed_only_while_its_invocation_holds_it() {
     assert_eq!(store.trigger_claim(key(4)).await.unwrap(), None);
 }
 
+/// Every reason a claim can be consumed for, a spelling of a newer build
+/// included.
+fn every_reason() -> [ConsumedWhy; 11] {
+    [
+        ConsumedWhy::RefusedSubject,
+        ConsumedWhy::InvalidAgentId,
+        ConsumedWhy::UnknownAgent,
+        ConsumedWhy::InvalidPayload,
+        ConsumedWhy::RequeuedFromHold,
+        ConsumedWhy::AgentRemoved,
+        ConsumedWhy::FailedForGood,
+        ConsumedWhy::HaltedInSetup,
+        ConsumedWhy::ReturnedUnstarted,
+        ConsumedWhy::DeadLettered,
+        ConsumedWhy::Other("a_reason_from_a_newer_build".to_string()),
+    ]
+}
+
+/// **A consume beside a drop's ownership row keeps its reason and records
+/// the drop, whatever the reason (issue 1055).** A run that never made its
+/// first WAL write has an ownership row only when an operator's drop wrote
+/// one, so the consume, reading the row in the same statement, records the
+/// drop beside the reason it was given, never in its place. A run with no
+/// ownership row records no drop.
+#[tokio::test]
+async fn a_consume_beside_a_drops_ownership_row_keeps_its_reason_and_records_the_drop() {
+    let (store, _dir) = open_fresh().await;
+    let mut seq = 0;
+    for why in every_reason() {
+        for dropped in [true, false] {
+            seq += 1;
+            let run = format!("inv-{seq}");
+            store
+                .claim_trigger(key(seq), "worker-a", &run, 100)
+                .await
+                .unwrap();
+            if dropped {
+                store
+                    .upsert_invocation_ownership(&run, "worker-a", 100, OwnerStatus::Failed)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                store
+                    .consume_trigger_claim(key(seq), &run, &why)
+                    .await
+                    .unwrap()
+            );
+            let row = store.trigger_claim(key(seq)).await.unwrap().unwrap();
+            assert_eq!(
+                (row.state, row.operator_dropped_at.is_some()),
+                (ClaimState::Consumed { why: why.clone() }, dropped),
+                "{why}, its run dropped: {dropped}"
+            );
+        }
+    }
+}
+
+/// **The drop's handler records the drop on a consumed claim, keeping its
+/// reason, whatever the reason (issue 1055),** and on nothing else: a
+/// `claimed` claim is consumed by its own answer, which reads the drop's
+/// row, and a started one records a run that started. A drop recorded
+/// already keeps the time it was first recorded at.
+#[tokio::test]
+async fn the_drop_is_recorded_on_a_consumed_claim_keeping_its_reason() {
+    let (store, _dir) = open_fresh().await;
+    for (i, why) in every_reason().into_iter().enumerate() {
+        let seq = i as u64 + 1;
+        let run = format!("inv-{seq}");
+        consumed(&store, seq, &run, why.clone()).await;
+        assert_eq!(
+            store.record_trigger_claim_drop(&run, 500).await.unwrap(),
+            1,
+            "{why}"
+        );
+        assert_eq!(
+            store.record_trigger_claim_drop(&run, 900).await.unwrap(),
+            0,
+            "{why}: recorded once"
+        );
+        let row = store.trigger_claim(key(seq)).await.unwrap().unwrap();
+        assert_eq!(
+            (row.state, row.operator_dropped_at),
+            (ClaimState::Consumed { why: why.clone() }, Some(500)),
+            "{why}: the reason is kept, and the drop recorded beside it"
+        );
+    }
+
+    store
+        .claim_trigger(key(50), "worker-a", "inv-claimed", 100)
+        .await
+        .unwrap();
+    store
+        .claim_trigger(key(51), "worker-a", "inv-started", 100)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .mark_trigger_started(key(51), "inv-started")
+            .await
+            .unwrap()
+    );
+    for run in ["inv-claimed", "inv-started", "inv-absent"] {
+        assert_eq!(
+            store.record_trigger_claim_drop(run, 500).await.unwrap(),
+            0,
+            "{run} is left"
+        );
+    }
+    assert_eq!(
+        store
+            .trigger_claim(key(50))
+            .await
+            .unwrap()
+            .map(|row| (row.state, row.operator_dropped_at)),
+        Some((ClaimState::Claimed, None))
+    );
+    assert_eq!(
+        store
+            .trigger_claim(key(51))
+            .await
+            .unwrap()
+            .map(|row| (row.state, row.operator_dropped_at)),
+        Some((ClaimState::DurablyStarted, None))
+    );
+}
 /// **A consumed claim is the trigger's record that it was dealt with, and
 /// nothing that works on `claimed` rows touches it (issue 1055).** A copy
 /// that claims the delivery is answered `Consumed`; adoption, re-take,

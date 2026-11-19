@@ -72,6 +72,7 @@ use super::claim::Claimed;
 use super::run_admission::Waiter;
 use super::{TriggerDispatcher, trigger_name};
 use crate::agent::AgentId;
+use crate::control_plane::store::ConsumedWhy;
 use crate::worker::DueResume;
 
 /// How often a held delivery is kept alive — and, because the check
@@ -176,10 +177,11 @@ impl TriggerDispatcher {
                     error = %err,
                     "trigger payload is not valid JSON, dropping"
                 );
-                self.ack(
+                self.consume(
                     msg,
                     claim,
                     crate::trigger::trigger_id_in(msg.headers.as_ref()),
+                    ConsumedWhy::InvalidPayload,
                     "invalid payload",
                 )
                 .await;
@@ -302,8 +304,9 @@ impl TriggerDispatcher {
 
 /// Reset the delivery's ack window without counting as a delivery: the
 /// holds, the wait for a worker permit, a run's setup up to its durable
-/// start, the mark that records that start, and the settlement that gives
-/// a claim back and answers the delivery (`claim::settlement`) all send
+/// start, the mark that records that start, and the settlement that records
+/// a claim consumed or gives it back and answers the delivery
+/// (`claim::settlement`) all send
 /// one every [`HOLD_KEEPALIVE`]. A failure changes nothing for the caller: the
 /// worst case is the window expiring and JetStream redelivering, which is
 /// where the delivery would be without the keepalive at all.

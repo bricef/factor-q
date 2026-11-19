@@ -25,11 +25,13 @@
 //!
 //! 4. **Liveness.** A trigger with nothing on record that the broker can
 //!    still deliver, or that a restart lets a replay reach, is started by
-//!    that copy.
+//!    that copy, unless it was consumed without a run (issue 1055): the
+//!    dispatcher dead-lettered it itself, and no run is due.
 //! 5. **Every claim settles.** After a restart, a replay of the trigger
 //!    starts nothing, is acked, and finds the claim marked started, naming
-//!    the run on record: no step left a claim that a later delivery or
-//!    restart cannot settle.
+//!    the run on record, or, for a trigger consumed without a run, still
+//!    consumed, with nothing on record: no step left a claim that a later
+//!    delivery or restart cannot settle.
 //!
 //! # The dead-letter watch's verdict
 //!
@@ -42,9 +44,12 @@
 //!
 //! 6. **Dead-lettered exactly when nothing is on record.** A trigger whose
 //!    run has a start on record is not dead-lettered: requeuing that dead
-//!    letter would run the work twice. One with nothing on record is.
-//!    Nothing is handling a copy at that moment in these sequential lives,
-//!    and the records can be read, so the verdict is never held.
+//!    letter would run the work twice. One with nothing on record is,
+//!    unless the dispatcher dead-lettered it itself on its last delivery
+//!    and consumed its claim (issue 1055): that trigger is read as
+//!    consumed, and no second dead letter is due. Nothing is handling a
+//!    copy at that moment in these sequential lives, and the records can be
+//!    read, so the verdict is never held.
 //!
 //! Only what the watch then does with the verdict, writing the dead letter
 //! or not, is left out here; `dead_letter_watch` drives the real watch with
@@ -67,10 +72,10 @@
 //! | replay | after a restart, a durable recreated on the stream delivers it, acked or not | the same |
 //! | a run dies before its start | the task panics before the first WAL write | `handle`, on a task of its own as the consume loop runs it |
 //! | a run dies after its start | the task panics in the poll that made the first WAL write | the same |
-//! | a run fails transiently | the signal is dropped and the run errs before its first WAL write | `settle_before_durable_start`, `nak` |
-//! | the store refuses updates | marks, re-takes and adoptions fail until healed or a restart | `mark_durable_started`'s retries and fallback |
-//! | the store refuses releases | the release before an ack or a NAK fails | `ack`, `nak` |
-//! | answers are lost | the next copy answers on a closed connection | the ack after a refused mark, a NAK, an ack |
+//! | a run fails transiently | the signal is dropped and the run errs before its first WAL write; on the last delivery its dead letter is published and the claim consumed | `settle_before_durable_start`, `nak`, `consume` |
+//! | the store refuses updates | marks, re-takes, adoptions and consumes fail until healed or a restart | `mark_durable_started`'s retries and fallback, `consume_unstarted_claim` |
+//! | the store refuses releases | the release before a NAK fails | `nak` |
+//! | answers are lost | the next copy answers on a closed connection | the ack after a refused mark, a NAK, the ack after a consume |
 //! | restart | a new claimant id, claims recovered over the WAL; a run in flight is resumed and finishes | `TriggerClaims::recover`, then a new dispatcher |
 //! | deliveries run out | the durable's last delivery is handled and no ack has reached the broker | `ExhaustionCheck::verdict`, as the dead-letter watch takes it |
 //!
@@ -90,7 +95,8 @@ use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 use super::{Answered, Arena, Run, SEQ, heal, refuse_deletes, refuse_updates};
 use crate::bus::TRIGGER_MAX_DELIVER;
-use crate::control_plane::dispatcher::{Exhausted, ExhaustionCheck};
+use crate::control_plane::dispatcher::{ConsumedClaim, Exhausted, ExhaustionCheck};
+use crate::control_plane::store::ConsumedWhy;
 use crate::test_support::nats::test_nats;
 use crate::worker::WalRun;
 
@@ -231,10 +237,22 @@ async fn deliver(
                      be read: {}",
                     why
                 ),
-                // Nothing in this arena consumes a trigger yet.
-                Exhausted::Consumed(_) => prop_assert!(
-                    false,
-                    "the watch found a trigger consumed, though nothing here consumes one: {:?}",
+                // The one consuming answer these lives reach (issue 1055):
+                // the last delivery's run failed transiently, its dead
+                // letter was published, the claim consumed as dead-lettered,
+                // and the ack lost. Nothing started, and the watch writes no
+                // second dead letter.
+                Exhausted::Consumed(consumed) => prop_assert!(
+                    !started_after
+                        && matches!(
+                            consumed,
+                            ConsumedClaim::Checked {
+                                why: ConsumedWhy::DeadLettered,
+                                ..
+                            }
+                        ),
+                    "the watch found a trigger consumed other than by its own dead letter, or \
+                     one whose run has a start on record: {:?}",
                     verdict
                 ),
             }
@@ -306,9 +324,13 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<Option<Exhausted>, Te
     heal(&arena.claim_db).await;
     broker.lose_next = false;
 
+    // A trigger consumed without a run was dealt with (issue 1055): no run
+    // is due, and the settling replay below finds the claim as it was.
+    let consumed = arena.claim(SEQ).await.and_then(|row| row.consumed);
+
     // Liveness: nothing on record, and a copy the broker can still deliver
     // or a restart lets a replay bring, starts the trigger.
-    if arena.wal().await.is_empty() {
+    if consumed.is_none() && arena.wal().await.is_empty() {
         if !broker.acked && broker.delivered < MAX_DELIVER {
             broker.delivered += 1;
             let delivered = broker.delivered;
@@ -343,22 +365,36 @@ async fn play(arena: &mut Arena, steps: &[Step]) -> Result<Option<Exhausted>, Te
         "a replay after a restart started the trigger again"
     );
     let wal = arena.wal().await;
-    prop_assert_eq!(
-        wal.len(),
-        1,
-        "one run of the trigger is on record: {:?}",
-        wal
-    );
-    prop_assert_eq!(wal[0].1, WalRun::Finished);
     let claim = arena.claim(SEQ).await;
-    prop_assert_eq!(
-        claim
-            .as_ref()
-            .map(|row| (row.started, row.invocation_id.clone())),
-        Some((true, Some(wal[0].0.clone()))),
-        "the claim must end marked started, naming the run on record: {:?}",
-        claim
-    );
+    if let Some(why) = consumed {
+        prop_assert!(
+            wal.is_empty(),
+            "a trigger consumed without a run has a run on record: {:?}",
+            wal
+        );
+        prop_assert_eq!(
+            claim.as_ref().and_then(|row| row.consumed.clone()),
+            Some(why),
+            "the claim of a trigger consumed without a run stays consumed: {:?}",
+            claim
+        );
+    } else {
+        prop_assert_eq!(
+            wal.len(),
+            1,
+            "one run of the trigger is on record: {:?}",
+            wal
+        );
+        prop_assert_eq!(wal[0].1, WalRun::Finished);
+        prop_assert_eq!(
+            claim
+                .as_ref()
+                .map(|row| (row.started, row.invocation_id.clone())),
+            Some((true, Some(wal[0].0.clone()))),
+            "the claim must end marked started, naming the run on record: {:?}",
+            claim
+        );
+    }
     prop_assert_eq!(replay.acks, 1, "the replay is acked: {:?}", replay);
     check(arena, "the settling replay").await?;
     Ok(broker.exhausted)
@@ -443,4 +479,35 @@ async fn a_fault_on_the_last_delivery_does_not_dead_letter_a_started_trigger() {
              watch keeps it out of the dead letters: {exhausted:?}"
         );
     }
+}
+
+/// **A trigger the dispatcher dead-lettered, whose ack was lost, is read
+/// as consumed (issue 1055).** Five deliveries fail transiently; on the
+/// fifth the dispatcher publishes the trigger's dead letter, records the
+/// claim consumed as dead-lettered and acks, and the ack is lost. The
+/// deliveries have run out with no ack at the broker: the watch's verdict
+/// finds the claim consumed, nothing started, and no second dead letter is
+/// due. Random lives almost never reach this, so it is played on every
+/// run, through every invariant the property checks.
+#[tokio::test]
+async fn a_dead_letter_whose_ack_was_lost_leaves_the_trigger_consumed() {
+    let steps = [
+        &[Step::Deliver(Run::FailsTransiently); 4][..],
+        &[Step::LoseAnswers, Step::Deliver(Run::FailsTransiently)],
+    ]
+    .concat();
+    let (mut arena, _server) = super::arena().await;
+    let exhausted = play(&mut arena, &steps)
+        .await
+        .unwrap_or_else(|err| panic!("{steps:?}: {err}"));
+    assert!(
+        matches!(
+            exhausted,
+            Some(Exhausted::Consumed(ConsumedClaim::Checked {
+                why: ConsumedWhy::DeadLettered,
+                ..
+            }))
+        ),
+        "{steps:?}: {exhausted:?}"
+    );
 }

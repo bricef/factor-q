@@ -61,6 +61,7 @@ use crate::worker::{
     InvocationStateRow, WalRun, Worker, WorkerStore,
 };
 
+mod consuming;
 mod dead_letter_watch;
 mod proptests;
 
@@ -90,6 +91,26 @@ enum Run {
     /// Waits at [`Scripted::setup_gate`], then panics before its first WAL
     /// write.
     WaitsInSetupThenDiesBeforeStart,
+    /// Drops its signal unfired and fails for good, before its first WAL
+    /// write: a permanent failure, which `handle` does not retry.
+    FailsForGood,
+    /// Waits at [`Scripted::setup_gate`], then fails for good before its
+    /// first WAL write.
+    WaitsInSetupThenFailsForGood,
+    /// Drops its signal unfired and returns stopped by an operator's halt,
+    /// before its first WAL write: the first half of a drop in setup.
+    HaltedInSetup,
+    /// Drops its signal unfired and returns cleanly, with no WAL write.
+    ReturnsUnstarted,
+    /// Waits at [`Scripted::setup_gate`], then fails transiently before its
+    /// first WAL write.
+    WaitsInSetupThenFailsTransiently,
+    /// Waits at [`Scripted::setup_gate`], then returns stopped by an
+    /// operator's halt, before its first WAL write.
+    WaitsInSetupThenHalts,
+    /// Waits at [`Scripted::setup_gate`], then returns cleanly, with no WAL
+    /// write.
+    WaitsInSetupThenReturnsUnstarted,
 }
 
 /// The stub worker: each `run_invocation` takes the next [`Run`] from its
@@ -125,6 +146,9 @@ struct Scripted {
     hands_off_on_read: Mutex<Option<Arc<ControlPlaneStore>>>,
     /// While set, `wal_run` errs: the worker cannot say what its WAL holds.
     fail_wal_reads: AtomicBool,
+    /// While set, the worker reports itself draining: every wait the
+    /// dispatcher makes lets go on it.
+    draining: AtomicBool,
 }
 
 impl Scripted {
@@ -143,6 +167,7 @@ impl Scripted {
             wal_reads_held: AtomicUsize::new(0),
             hands_off_on_read: Mutex::new(None),
             fail_wal_reads: AtomicBool::new(false),
+            draining: AtomicBool::new(false),
         })
     }
 
@@ -266,7 +291,10 @@ impl Worker for Scripted {
             Run::DiesBeforeStart => {
                 panic!("injected: the invocation task dies before its first WAL write")
             }
-            Run::FailsTransiently => {
+            Run::FailsTransiently | Run::WaitsInSetupThenFailsTransiently => {
+                if run == Run::WaitsInSetupThenFailsTransiently {
+                    self.wait(&self.setup_gate).await;
+                }
                 drop(durable_start);
                 return Err(ExecutorError::WorkerStore(
                     "injected: a transient failure before the first WAL write".to_string(),
@@ -278,6 +306,38 @@ impl Worker for Scripted {
             Run::WaitsInSetupThenDiesBeforeStart => {
                 self.wait(&self.setup_gate).await;
                 panic!("injected: the invocation task dies in setup, before its first WAL write")
+            }
+            Run::FailsForGood | Run::WaitsInSetupThenFailsForGood => {
+                if run == Run::WaitsInSetupThenFailsForGood {
+                    self.wait(&self.setup_gate).await;
+                }
+                drop(durable_start);
+                return Err(ExecutorError::InvocationFailed {
+                    kind: crate::events::FailureKind::RuntimeError,
+                    message: "injected: a failure for good before the first WAL write".to_string(),
+                });
+            }
+            Run::HaltedInSetup | Run::WaitsInSetupThenHalts => {
+                if run == Run::WaitsInSetupThenHalts {
+                    self.wait(&self.setup_gate).await;
+                }
+                drop(durable_start);
+                return Ok(InvocationOutcome::Unstarted {
+                    invocation_id,
+                    stopped_by: crate::worker::BoundaryStop::Halt,
+                });
+            }
+            Run::ReturnsUnstarted | Run::WaitsInSetupThenReturnsUnstarted => {
+                if run == Run::WaitsInSetupThenReturnsUnstarted {
+                    self.wait(&self.setup_gate).await;
+                }
+                drop(durable_start);
+                return Ok(InvocationOutcome::Completed {
+                    invocation_id,
+                    response: canned_response(),
+                    cost: 0.0,
+                    duration_ms: 0,
+                });
             }
             Run::Completes | Run::DiesAfterStart | Run::WaitsAfterStart => {}
         }
@@ -339,7 +399,11 @@ impl Worker for Scripted {
     async fn request_drain(&self, _req: DrainRequest) {}
 
     fn drain_status(&self) -> DrainState {
-        DrainState::Running
+        if self.draining.load(Ordering::SeqCst) {
+            DrainState::Draining
+        } else {
+            DrainState::Running
+        }
     }
 }
 
@@ -350,6 +414,8 @@ struct ClaimRow {
     claimant: String,
     started: bool,
     invocation_id: Option<String>,
+    /// Why the trigger was consumed without a run, for a consumed claim.
+    consumed: Option<String>,
 }
 
 /// One copy of a trigger being handled: the task `handle` runs on, and the
@@ -393,6 +459,9 @@ struct Arena {
     claim_db: PathBuf,
     worker: Arc<Scripted>,
     dispatcher: Arc<TriggerDispatcher>,
+    /// The dispatcher's agent registry, which a test swaps as a reload
+    /// would.
+    registry: super::SharedRegistry,
     claimant: String,
     restarts: u32,
     trigger_id: Uuid,
@@ -436,8 +505,15 @@ impl Arena {
         }
         let (agent_dir, registry) = registry_with(&agent);
         let claimant = "daemon-0".to_string();
-        let dispatcher =
-            Self::dispatcher(&bus, registry, &worker, &claims, &claimant, max_concurrent).await;
+        let dispatcher = Self::dispatcher(
+            &bus,
+            registry.clone(),
+            &worker,
+            &claims,
+            &claimant,
+            max_concurrent,
+        )
+        .await;
         Self {
             bus,
             agent,
@@ -452,6 +528,7 @@ impl Arena {
             claim_db,
             worker,
             dispatcher,
+            registry,
             claimant,
             restarts: 0,
             trigger_id: Uuid::now_v7(),
@@ -510,19 +587,35 @@ impl Arena {
         self._dirs.push(agent_dir);
         self.dispatcher = Self::dispatcher(
             &self.bus,
-            registry,
+            registry.clone(),
             &self.worker,
             &self.claims,
             &self.claimant,
             1,
         )
         .await;
+        self.registry = registry;
     }
 
     /// The message the broker would send for delivery `delivered` of the
     /// trigger at `seq`, and the id of this copy. With `lost`, it answers on
     /// a closed connection, so none of its answers reaches the broker.
     fn delivery(&self, seq: u64, delivered: u32, lost: bool) -> (Message, u64) {
+        let subject = crate::events::subjects::trigger(&self.agent);
+        let payload = serde_json::to_vec(&json!({ "input": "hi" })).unwrap();
+        self.shaped_delivery(seq, delivered, lost, &subject, payload)
+    }
+
+    /// [`Self::delivery`], on `subject` and carrying `payload`: a trigger
+    /// the dispatcher refuses for what it is.
+    fn shaped_delivery(
+        &self,
+        seq: u64,
+        delivered: u32,
+        lost: bool,
+        subject: &str,
+        payload: Vec<u8>,
+    ) -> (Message, u64) {
         let copy = self.copies.fetch_add(1, Ordering::SeqCst);
         let reply = format!(
             "$JS.ACK.{TRIGGER_STREAM_NAME}.{}.{delivered}.{seq}.{copy}.{}.0",
@@ -536,7 +629,6 @@ impl Arena {
             Uuid::now_v7()
         };
         headers.insert(TRIGGER_ID_HEADER, trigger_id.to_string());
-        let payload = serde_json::to_vec(&json!({ "input": "hi" })).unwrap();
         let client = if lost {
             self.closed_client.clone()
         } else {
@@ -544,7 +636,7 @@ impl Arena {
         };
         let msg = Message {
             message: async_nats::Message {
-                subject: crate::events::subjects::trigger(&self.agent).into(),
+                subject: subject.to_string().into(),
                 reply: Some(reply.into()),
                 length: payload.len(),
                 payload: payload.into(),
@@ -571,6 +663,20 @@ impl Arena {
     async fn deliver(&self, delivered: u32, lost: bool) -> Answered {
         let handling = self.spawn_delivery(SEQ, delivered, lost);
         self.finish(handling).await
+    }
+
+    /// [`Self::deliver`], of a delivery on `subject` carrying `payload`.
+    async fn deliver_shaped(
+        &self,
+        delivered: u32,
+        lost: bool,
+        subject: &str,
+        payload: Vec<u8>,
+    ) -> Answered {
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let (msg, copy) = self.shaped_delivery(SEQ, delivered, lost, subject, payload);
+        let task = tokio::spawn(async move { dispatcher.handle(&msg).await });
+        self.finish(Handling { task, copy }).await
     }
 
     /// Wait for a delivery's task and say what it answered.
@@ -671,24 +777,26 @@ impl Arena {
             .connect()
             .await
             .expect("open the claim store's file");
-        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT claimant, state, invocation_id FROM trigger_claim WHERE stream_seq = ?",
+        let row: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT claimant, state, invocation_id, consumed_why FROM trigger_claim \
+             WHERE stream_seq = ?",
         )
         .bind(seq as i64)
         .fetch_optional(&mut conn)
         .await
         .expect("read the claim");
         conn.close().await.expect("close the claim store's file");
-        row.map(|(claimant, state, invocation_id)| ClaimRow {
+        row.map(|(claimant, state, invocation_id, consumed_why)| ClaimRow {
             claimant,
             // Each state by name, so a state these tests do not know fails
             // here rather than reading as `claimed`.
             started: match state.as_str() {
                 "durably_started" => true,
-                "claimed" => false,
+                "claimed" | "consumed" => false,
                 other => panic!("a claim state these tests do not read: {other}"),
             },
             invocation_id,
+            consumed: consumed_why,
         })
     }
 
@@ -810,6 +918,7 @@ async fn a_panic_before_the_durable_start_is_taken_again_and_runs_once() {
             claimant: arena.claimant.clone(),
             started: true,
             invocation_id: Some(retaken.to_string()),
+            consumed: None,
         }),
         "the claim names the re-taken run, marked started"
     );
@@ -902,6 +1011,7 @@ async fn a_mark_refused_whose_ack_was_lost_is_acked_and_marked_and_not_run_again
             claimant: arena.claimant.clone(),
             started: true,
             invocation_id: Some(first_run.to_string()),
+            consumed: None,
         }),
         "the claim is marked, naming the run that started"
     );
