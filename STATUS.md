@@ -723,9 +723,10 @@ read `in_flight` before this change for a run that had already ended
 keeps reading so until the run's archive arrives, or for good if the
 archive is held, since a build before this one consumed that ending
 without moving the row and it is not folded again; and the row
-and the run's archive record can disagree, after an operator's drop or
-when an archive names the other ending
-([#1070](https://github.com/bricef/factor-q/issues/1070)). And an
+and the run's archive record can disagree when an archive names the
+other ending; an operator's drop no longer writes an archive record,
+and records its request beside the run's outcome instead of rewriting
+it ([#1070](https://github.com/bricef/factor-q/issues/1070)). And an
 event the broker refuses for its size now ends its run
 ([#828](https://github.com/bricef/factor-q/issues/828)): one terminal
 `failed` of kind `payload_too_large` names the refused event, its size

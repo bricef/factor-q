@@ -279,12 +279,15 @@ $ fq invocation drop inv_abc12 --reason "stuck on flaky network"
 
 `fq invocation drop` publishes
 `invocation.operator_recovered` (see event-schema.md). The
-coordination consumer's handler writes an `invocation_archive`
-row, unless the drop says no archive of the run will come, and
-updates the owner status to `Failed`. A late
-`invocation.archived` from a still-alive worker is detected by
-a no-downgrade guard and does not override the operator's
-decision.
+coordination consumer's handler records the termination request
+beside the run's outcome
+([#1070](https://github.com/bricef/factor-q/issues/1070)): a run that had not ended
+ends `Failed`, by the drop, until its archive lands, and one that
+had ended keeps its ending. It writes no `invocation_archive`
+row; the worker's archive brings the run's state. A late
+`invocation.archived` saying `completed` from a still-alive
+worker is the run's own ending, and replaces the drop's while
+its archive has not landed.
 
 `fq invocation resume <id> [--reason <text>]` recovers an ambiguous
 invocation through the daemon that owns its worker store. It completes each
@@ -1103,8 +1106,19 @@ CREATE TABLE coordination_invocation_owner (
 -- that arrives is recorded, and the run's own ending makes it
 -- 'pending'. Every move is one transition table
 -- (control_plane/ownership.rs), written as a compare-and-set.
--- The termination record beside them (issue 1070) is empty on a row
--- written before it, which reads "not recorded". Checks across the
+-- The termination record beside them (issue 1070): the fold of a
+-- run's ending, or of an archive that ends it, records the run as its
+-- ender, and an operator's drop of a run not ended records the drop,
+-- each at the event's own time (an archive's terminal_at_ms, not its
+-- hand-off's). A drop records its request beside the outcome whatever
+-- the row holds, the first one only, and rewrites no ending: a run that
+-- had ended keeps it. A drop's ending is provisional until its archive
+-- lands: the run's own ending, or an archive saying 'completed',
+-- replaces it. A drop writes no invocation_archive row; that comes only
+-- from the worker's archive, with the run's state. The compare-and-set
+-- compares the ender and whether a request is on record as well as the
+-- pair. The record is empty on a row written before it, which reads
+-- "not recorded", and such a row is taken as the run's. Checks across the
 -- columns hold which status and archive state go together, and the
 -- record's own rules: an ender with its time, neither on a run in
 -- progress, a drop's ending only on a failed run, a request's caller and
