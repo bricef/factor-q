@@ -13,10 +13,17 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::call::CallContext;
 use crate::wire::WireError;
 
+/// A bound handler: the request's input, and what the edge knows of the
+/// call ([`CallContext`]), to its output. Every registration makes one;
+/// only [`EdgeRegistry::command_with_call`]'s handlers read the context.
 type Handler = Arc<
-    dyn Fn(serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value, WireError>>
+    dyn Fn(
+            serde_json::Value,
+            CallContext,
+        ) -> BoxFuture<'static, Result<serde_json::Value, WireError>>
         + Send
         + Sync,
 >;
@@ -67,6 +74,8 @@ impl EdgeRegistry {
         self.read_gate.clone()
     }
 
+    /// Bind a handler that does not read the call's context: it is
+    /// given the input alone.
     fn bind<I, O, F, Fut>(&mut self, op: &OpId, handler: F)
     where
         I: DeserializeOwned + Send + 'static,
@@ -74,13 +83,24 @@ impl EdgeRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<O, WireError>> + Send + 'static,
     {
+        self.bind_with_call::<I, O, _, _>(op, move |input, _call| handler(input));
+    }
+
+    /// Bind a handler that is given the call's context with its input.
+    fn bind_with_call<I, O, F, Fut>(&mut self, op: &OpId, handler: F)
+    where
+        I: DeserializeOwned + Send + 'static,
+        O: Serialize,
+        F: Fn(I, CallContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O, WireError>> + Send + 'static,
+    {
         let name = op.to_string();
         let dispatch_name = name.clone();
-        let handler: Handler = Arc::new(move |input: serde_json::Value| {
+        let handler: Handler = Arc::new(move |input: serde_json::Value, call: CallContext| {
             let parsed: Result<I, _> = serde_json::from_value(input);
             match parsed {
                 Ok(input) => {
-                    let fut = handler(input);
+                    let fut = handler(input, call);
                     Box::pin(async move {
                         let output = fut.await?;
                         serde_json::to_value(output).map_err(|e| WireError::Internal {
@@ -114,6 +134,26 @@ impl EdgeRegistry {
         let op = decl.op();
         self.registry.register(decl)?;
         self.bind::<I, Receipt, _, _>(&op, handler);
+        Ok(())
+    }
+
+    /// Register a command whose handler is given the call's context
+    /// ([`CallContext`]): who made it. A handler that needs its caller is
+    /// registered here, and cannot be without taking the context; every
+    /// other command registers with [`Self::command`].
+    pub fn command_with_call<I, F, Fut>(
+        &mut self,
+        decl: Command,
+        handler: F,
+    ) -> Result<(), RegistryError>
+    where
+        I: DeserializeOwned + Send + 'static,
+        F: Fn(I, CallContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Receipt, WireError>> + Send + 'static,
+    {
+        let op = decl.op();
+        self.registry.register(decl)?;
+        self.bind_with_call::<I, Receipt, _, _>(&op, handler);
         Ok(())
     }
 

@@ -317,11 +317,14 @@ impl Surface {
             .registry
             .handler(&op.to_string())
             .expect("invocation.drop is registered on the operator surface");
-        handler(serde_json::json!({
-            "invocation_id": id,
-            "reason": "adversarial ordering",
-            "live": live,
-        }))
+        handler(
+            serde_json::json!({
+                "invocation_id": id,
+                "reason": "adversarial ordering",
+                "live": live,
+            }),
+            fq_edge::CallContext::none(),
+        )
         .await
     }
 
