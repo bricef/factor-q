@@ -816,3 +816,199 @@ async fn the_rebuilt_table_is_the_table_it_replaced_with_the_record_added() {
         "an upgraded store's schema is a fresh one's"
     );
 }
+
+/// **Every reader of the row carries the record.** A row with a record
+/// reads back with it, through the lookup and each listing, and a row
+/// without one reads not recorded: no ender, no time, no request.
+#[tokio::test]
+async fn every_reader_of_the_row_carries_the_record() {
+    let dir = tempdir().unwrap();
+    let store = ControlPlaneStore::open(&dir.path().join("control-plane.db"))
+        .await
+        .unwrap();
+    insert_raw(
+        &store,
+        "dropped",
+        "failed",
+        "pending",
+        "ended_by = 'drop', ended_at = 20, termination_requested_at = 20, \
+         termination_requested_by = 'operator', termination_reason = 'stuck'",
+    )
+    .await
+    .unwrap();
+    insert_raw(
+        &store,
+        "requested-after",
+        "completed",
+        "archived",
+        "ended_by = 'run', ended_at = 10, termination_requested_at = 30",
+    )
+    .await
+    .unwrap();
+    insert_raw(&store, "not-recorded", "failed", "archived", "")
+        .await
+        .unwrap();
+
+    let expected = |id: &str| -> (Option<EndedBy>, Option<i64>, Option<TerminationRequest>) {
+        match id {
+            "dropped" => (
+                Some(EndedBy::Drop),
+                Some(20),
+                Some(TerminationRequest {
+                    requested_at: 20,
+                    requested_by: Some("operator".to_string()),
+                    reason: Some("stuck".to_string()),
+                }),
+            ),
+            "requested-after" => (
+                Some(EndedBy::Run),
+                Some(10),
+                Some(TerminationRequest {
+                    requested_at: 30,
+                    requested_by: None,
+                    reason: None,
+                }),
+            ),
+            _ => (None, None, None),
+        }
+    };
+    let record = |row: &OwnerRow| (row.ended_by, row.ended_at, row.termination.clone());
+
+    for id in ["dropped", "requested-after", "not-recorded"] {
+        let row = store.get_invocation_owner(id).await.unwrap().unwrap();
+        assert_eq!(record(&row), expected(id), "{id}, looked up");
+    }
+    let listings = [
+        store.list_invocations(None, 10).await.unwrap(),
+        store
+            .list_invocations(Some(OwnerStatus::Failed), 10)
+            .await
+            .unwrap(),
+        store.list_invocations_for_worker("w").await.unwrap(),
+        store
+            .list_invocations_with_status(OwnerStatus::Completed)
+            .await
+            .unwrap(),
+    ];
+    for rows in listings {
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert_eq!(
+                record(&row),
+                expected(&row.invocation_id),
+                "{}, listed",
+                row.invocation_id
+            );
+        }
+    }
+}
+
+#[test]
+fn an_ender_round_trips() {
+    for ender in [EndedBy::Run, EndedBy::Drop] {
+        assert_eq!(EndedBy::parse(ender.as_str()), Some(ender));
+    }
+    assert_eq!(EndedBy::parse("operator"), None);
+}
+
+/// **The rows the rung corrects are read before it runs, and none after.**
+/// The store's open reads them before the ladder, and logs each once the
+/// rung has landed, naming the invocation, its status and the archive
+/// state before and after; the same query is the pre-flight check of a
+/// copy of a live file. A store from before the archive-state column, a
+/// fresh store and one past the rung have none.
+#[tokio::test]
+async fn the_rows_the_rung_corrects_are_read_before_it_and_none_after() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    a_store_before_the_record(&path).await;
+    a_hand_edited_row(&path, "failed", "not_due").await;
+    let pool = raw_pool(&path).await;
+    assert_eq!(
+        pairs_the_record_rung_corrects(&pool).await.unwrap(),
+        [PairCorrected {
+            invocation_id: "run-hand-edited-pair".to_string(),
+            status: "failed".to_string(),
+            before: "not_due".to_string(),
+            after: "archived".to_string(),
+        }]
+    );
+    pool.close().await;
+    let store = ControlPlaneStore::open(&path).await.expect("migrates");
+    assert!(
+        pairs_the_record_rung_corrects(&store.pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let fresh = ControlPlaneStore::open(&dir.path().join("fresh.db"))
+        .await
+        .unwrap();
+    assert!(
+        pairs_the_record_rung_corrects(&fresh.pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let before_the_column = raw_pool(&dir.path().join("v2.db")).await;
+    let archive_rung = MIGRATIONS
+        .iter()
+        .position(|(_, sql)| *sql == ARCHIVE_STATE_SQL)
+        .unwrap();
+    schema::bootstrap_versioned(
+        &before_the_column,
+        SCHEMA_CLASS,
+        MIGRATIONS[archive_rung - 1].0,
+        &MIGRATIONS[..archive_rung],
+    )
+    .await
+    .unwrap();
+    assert!(
+        pairs_the_record_rung_corrects(&before_the_column)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// **A row the rung carries is read without panicking, whatever its
+/// storage.** An id stored as a blob, which no writer stores, on a row
+/// whose archive state does not go with its status: the read before the
+/// ladder reports it as text, and the store opens with the row corrected.
+#[tokio::test]
+async fn a_row_whose_id_is_a_blob_is_read_and_carried_through() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    a_store_before_the_record(&path).await;
+    let pool = raw_pool(&path).await;
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES (X'626C6F62', 'w', 1, 'failed', 'not_due')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pairs_the_record_rung_corrects(&pool).await.unwrap(),
+        [PairCorrected {
+            invocation_id: "blob".to_string(),
+            status: "failed".to_string(),
+            before: "not_due".to_string(),
+            after: "archived".to_string(),
+        }]
+    );
+    pool.close().await;
+
+    let store = ControlPlaneStore::open(&path)
+        .await
+        .expect("a blob id does not stop the open");
+    let archive: String = sqlx::query_scalar(
+        "SELECT archive_state FROM coordination_invocation_owner WHERE typeof(invocation_id) = 'blob'",
+    )
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(archive, "archived");
+}

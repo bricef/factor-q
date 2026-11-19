@@ -290,6 +290,9 @@ impl OwnershipStore for Racing {
             assigned_at: 100,
             status: state.status,
             archive_state: state.archive,
+            ended_by: None,
+            ended_at: None,
+            termination: None,
         }))
     }
 
