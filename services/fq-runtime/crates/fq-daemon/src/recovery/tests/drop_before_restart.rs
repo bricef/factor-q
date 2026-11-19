@@ -44,6 +44,8 @@ async fn a_drop_published_before_the_daemon_died_is_not_undone_by_the_next_start
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: Some("abandoned mid tool call".to_string()),
+                requested_by: None,
+                archive: None,
             }),
         ))
         .await

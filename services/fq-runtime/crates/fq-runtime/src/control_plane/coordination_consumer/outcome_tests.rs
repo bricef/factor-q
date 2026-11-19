@@ -129,6 +129,8 @@ impl Fixture {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             },
         ))
         .await;
@@ -454,6 +456,8 @@ async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             }),
         ))
         .await;
@@ -685,6 +689,8 @@ async fn a_drop_whose_row_move_is_refused_still_stops_the_run() {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             }),
         ))
         .await;
@@ -744,6 +750,8 @@ async fn a_write_the_store_refuses_for_good_is_acknowledged() {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             }),
         ))
         .await;
@@ -810,6 +818,8 @@ fn an_unreadable_row_and_a_refused_write_are_the_permanent_errors() {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
             reason: None,
+            requested_by: None,
+            archive: None,
         }),
     );
     let permanent = |err| matches!(as_handler_error(&event, err), HandlerError::Permanent(_));
@@ -877,6 +887,8 @@ async fn a_refused_event_still_advances_the_watermark() {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             }),
         ))
         .await

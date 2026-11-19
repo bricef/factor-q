@@ -73,7 +73,7 @@ async fn drop_invocation_emits_operator_recovered_for_agent() {
         &proj_store,
         &control_store,
         &invocation_id.to_string(),
-        Some("test reason"),
+        &fq_runtime::control_plane::operator::DropRecord::with_reason(Some("test reason")),
         None,
     )
     .await
@@ -125,7 +125,7 @@ async fn drop_invocation_removes_agentless_owner() {
         &proj_store,
         &control_store,
         &fake_inv,
-        None,
+        &fq_runtime::control_plane::operator::DropRecord::default(),
         None,
     )
     .await
@@ -163,7 +163,7 @@ async fn drop_invocation_errors_when_nothing_known() {
         &proj_store,
         &control_store,
         &fake_inv,
-        None,
+        &fq_runtime::control_plane::operator::DropRecord::default(),
         None,
     )
     .await

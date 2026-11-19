@@ -1026,6 +1026,8 @@ mod tests {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: Some("flaky network".to_string()),
+                requested_by: None,
+                archive: None,
             }),
         );
         let payload = match &event.payload {
@@ -1120,6 +1122,8 @@ mod tests {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             }),
         );
         let payload = match &event.payload {

@@ -397,6 +397,8 @@ fn exemplars() -> Vec<Event> {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: Some("operator: stale".to_string()),
+                requested_by: None,
+                archive: None,
             }),
         ),
         chained(
@@ -599,6 +601,23 @@ fn variants() -> Vec<(&'static str, Event)> {
                         size_bytes: 1_153_433,
                         limit_bytes: 1_048_576,
                     }),
+                }),
+            ),
+        ),
+        (
+            // A drop that records who asked for it and that no archive of
+            // the run will come (issue 1070). The exemplar above records
+            // neither, as a drop made with no edge caller, or by a build
+            // before the fields, does; this pins both fields' spellings.
+            "recorded",
+            chained(
+                31,
+                EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                    action: "drop".to_string(),
+                    final_phase: "failed".to_string(),
+                    reason: Some("operator: stale".to_string()),
+                    requested_by: Some("admin".to_string()),
+                    archive: Some(fq_runtime::events::DropArchive::WillNotCome),
                 }),
             ),
         ),

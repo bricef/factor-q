@@ -408,6 +408,8 @@ fn invocation_operator_recovered_subject_is_agent_scoped() {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
             reason: Some("stuck on flaky network call".to_string()),
+            requested_by: None,
+            archive: None,
         }),
     );
     assert_eq!(
@@ -440,6 +442,8 @@ fn invocation_operator_recovered_payload_omits_reason_when_none() {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
             reason: None,
+            requested_by: None,
+            archive: None,
         }),
     );
     let body = serde_json::to_value(&event.payload).unwrap();
@@ -447,6 +451,57 @@ fn invocation_operator_recovered_payload_omits_reason_when_none() {
         body.get("reason").is_none(),
         "reason should be omitted when None, got {body}"
     );
+}
+
+/// A drop's `requested_by` and `archive` (issue 1070): written when
+/// known and omitted when not; read back as written; an `archive` value a
+/// later build adds reads as `unknown`, with the rest of the drop; and a
+/// drop from before the fields reads with neither.
+#[test]
+fn a_drops_requester_and_archive_are_written_read_and_degrade() {
+    let payload = InvocationOperatorRecoveredPayload {
+        action: "drop".to_string(),
+        final_phase: "failed".to_string(),
+        reason: None,
+        requested_by: Some("on-call".to_string()),
+        archive: Some(DropArchive::WillNotCome),
+    };
+    let body = serde_json::to_value(&payload).unwrap();
+    assert_eq!(body["requested_by"], "on-call");
+    assert_eq!(body["archive"], "none");
+    let back: InvocationOperatorRecoveredPayload = serde_json::from_value(body).unwrap();
+    assert_eq!(back.requested_by.as_deref(), Some("on-call"));
+    assert_eq!(back.archive, Some(DropArchive::WillNotCome));
+    assert_eq!(
+        serde_json::to_value(DropArchive::Pending).unwrap(),
+        "pending"
+    );
+
+    let unrecorded = serde_json::to_value(InvocationOperatorRecoveredPayload {
+        requested_by: None,
+        archive: None,
+        ..payload
+    })
+    .unwrap();
+    assert!(
+        unrecorded.get("requested_by").is_none() && unrecorded.get("archive").is_none(),
+        "not recorded is omitted, not null: {unrecorded}"
+    );
+
+    let later: InvocationOperatorRecoveredPayload = serde_json::from_value(serde_json::json!({
+        "action": "drop",
+        "final_phase": "failed",
+        "requested_by": "on-call",
+        "archive": "a value a later build adds",
+    }))
+    .unwrap();
+    assert_eq!(later.archive, Some(DropArchive::Unknown));
+    assert_eq!(later.requested_by.as_deref(), Some("on-call"));
+
+    let earlier: InvocationOperatorRecoveredPayload =
+        serde_json::from_value(serde_json::json!({"action": "drop", "final_phase": "failed"}))
+            .unwrap();
+    assert_eq!((earlier.requested_by, earlier.archive), (None, None));
 }
 
 #[test]

@@ -262,6 +262,42 @@ pub struct InvocationOperatorRecoveredPayload {
     /// `--reason`). Audit-only; consumers must not parse it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Who asked for the drop: the principal of the edge token its
+    /// request came in on (`admin` for the daemon's own token), a name
+    /// and never the token. Absent: not recorded, as for a drop made with
+    /// no edge caller, or published by a build before this field (issue
+    /// 1070).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    /// Whether an archive of the run may follow the drop, as the daemon
+    /// that published it knew (issue 1070). Absent: not recorded, as for
+    /// a drop published by a build before this field, which a reader
+    /// takes as [`DropArchive::Pending`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<DropArchive>,
+}
+
+/// Whether an archive of a dropped run may follow its drop
+/// ([`InvocationOperatorRecoveredPayload::archive`], issue 1070).
+///
+/// A value this build does not know decodes as `unknown` rather than
+/// failing the whole event: a later build may add one, and the rest of the
+/// drop still reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DropArchive {
+    /// An archive may follow: the run has a row on the dropping daemon's
+    /// worker, one is being written, or its archive is already on record.
+    Pending,
+    /// None will: the run has no row on the dropping daemon's worker, none
+    /// will be written there, and no archive is on record. `none` on the
+    /// wire.
+    #[serde(rename = "none")]
+    WillNotCome,
+    /// A value this build does not know, written by a later one. Nothing
+    /// writes it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Audit payload for `fq invocation resume`.

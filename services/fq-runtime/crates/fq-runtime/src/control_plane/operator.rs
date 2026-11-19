@@ -13,7 +13,9 @@ use crate::bus::{BusError, EventBus, STREAM_NAME};
 use crate::control_plane::projection::ProjectionStore;
 use crate::control_plane::projection::store::StoreError;
 use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError};
-use crate::events::{Event, EventPayload, InvocationOperatorRecoveredPayload, subjects};
+use crate::events::{
+    DropArchive, Event, EventPayload, InvocationOperatorRecoveredPayload, subjects,
+};
 
 /// Outcome of a successful [`drop_invocation`].
 #[derive(Debug, Clone)]
@@ -25,6 +27,29 @@ pub struct DropResult {
     /// The drop event's sequence on the event stream — the receipt
     /// coordinate a gated read waits on for read-your-writes (D4).
     pub event_seq: u64,
+}
+
+/// What a drop's event records beside the drop itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropRecord {
+    /// The operator's reason: free-form, for audit.
+    pub reason: Option<String>,
+    /// Who asked for the drop: the principal of the edge token its request
+    /// came in on, never the token. `None`: not recorded (issue 1070).
+    pub requested_by: Option<String>,
+    /// Whether an archive of the run may follow the drop. `None`: not
+    /// recorded, which a reader takes as pending (issue 1070).
+    pub archive: Option<DropArchive>,
+}
+
+impl DropRecord {
+    /// A record of the operator's `reason` alone.
+    pub fn with_reason(reason: Option<&str>) -> Self {
+        Self {
+            reason: reason.map(str::to_string),
+            ..Self::default()
+        }
+    }
 }
 
 /// Failure modes for [`drop_invocation`].
@@ -49,10 +74,10 @@ pub enum DropError {
 }
 
 /// Operator-issued drop. Resolves the agent the invocation belongs to,
-/// builds an `invocation.operator_recovered` event with `action="drop"`
-/// and `final_phase="failed"`, and publishes it. The control-plane's
-/// coordination consumer is responsible for writing the archive row and
-/// flipping the owner status.
+/// builds an `invocation.operator_recovered` event with `action="drop"`,
+/// `final_phase="failed"` and what `record` says, and publishes it. The
+/// control-plane's coordination consumer is responsible for writing the
+/// archive row and flipping the owner status.
 ///
 /// `driving_agent` is the agent a **live** runner on this daemon is
 /// driving the invocation for, straight from that runner (#107). It
@@ -71,7 +96,7 @@ pub async fn drop_invocation(
     proj_store: &ProjectionStore,
     control_store: &ControlPlaneStore,
     invocation_id: &str,
-    reason: Option<&str>,
+    record: &DropRecord,
     driving_agent: Option<&AgentId>,
 ) -> Result<DropResult, DropError> {
     // Resolution, freshest source first. A live runner's answer needs no
@@ -115,7 +140,9 @@ pub async fn drop_invocation(
         EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
-            reason: reason.map(|s| s.to_string()),
+            reason: record.reason.clone(),
+            requested_by: record.requested_by.clone(),
+            archive: record.archive,
         }),
     );
     let event_id = event.envelope.event_id.to_string();
@@ -125,7 +152,7 @@ pub async fn drop_invocation(
         invocation_id: invocation_id.to_string(),
         agent_id: agent_id_str,
         event_id,
-        reason: reason.map(|s| s.to_string()),
+        reason: record.reason.clone(),
         event_seq,
     })
 }

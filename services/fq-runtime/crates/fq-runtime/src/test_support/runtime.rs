@@ -596,7 +596,7 @@ mod tests {
             rt.proj_store(),
             rt.cp_store(),
             &inv_str,
-            Some("e2e drop scenario"),
+            &operator::DropRecord::with_reason(Some("e2e drop scenario")),
             None,
         )
         .await
@@ -899,7 +899,7 @@ mod tests {
             rt.proj_store(),
             rt.cp_store(),
             &inv_str,
-            Some("race scenario: operator wins"),
+            &operator::DropRecord::with_reason(Some("race scenario: operator wins")),
             None,
         )
         .await
