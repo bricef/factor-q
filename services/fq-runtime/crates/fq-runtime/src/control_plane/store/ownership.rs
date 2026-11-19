@@ -177,3 +177,6 @@ impl ControlPlaneStore {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod record_tests;
