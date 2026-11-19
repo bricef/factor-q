@@ -33,6 +33,7 @@ pub(crate) mod timeouts;
 pub mod types;
 
 pub use harness::Harness;
+pub use liveness::{ArmedHalt, DropWord, RowAtHalt};
 pub use runner::{
     MAX_SUPPORTED_ITERATIONS, ReducerContext, ReducerContextBuilder, ReducerRunner, RunnerConfig,
     RunnerConfigBuilder, SamplingChannel,

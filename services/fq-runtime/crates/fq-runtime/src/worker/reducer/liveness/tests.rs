@@ -95,3 +95,104 @@ fn a_written_row_is_noted_for_the_drive_and_forgotten_with_it() {
     let _drive = live.enter(id, agent("researcher"), &rounds, &timeouts);
     assert!(!live.wrote_row(id), "a fresh drive starts with no note");
 }
+
+/// **A halt says where the run's own row stands** (issue 1070): no row
+/// and none to come before the first write begins; the write under way
+/// from its beginning to its end; the row there once it has landed. A
+/// write that failed leaves no row, and none to come from this drive.
+#[test]
+fn a_halt_says_whether_the_runs_row_is_to_come() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    let row = |live: &LiveRegistry| live.arm_halt(id).map(|halt| halt.row);
+    assert_eq!(row(&live), None, "not driving: nothing armed");
+
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+    assert_eq!(row(&live), Some(RowAtHalt::NeverWritten));
+    assert!(
+        !live.begin_first_write(id),
+        "the first write takes a halt armed before it, and is not made"
+    );
+    assert!(!live.take_halt(id), "the halt was taken");
+
+    assert!(live.begin_first_write(id), "with no halt armed, it begins");
+    assert_eq!(row(&live), Some(RowAtHalt::FirstWriteUnderWay));
+    assert!(live.take_halt(id));
+    live.end_first_write(id, false);
+    assert_eq!(
+        row(&live),
+        Some(RowAtHalt::NeverWritten),
+        "a write that failed left no row"
+    );
+    assert!(live.take_halt(id));
+
+    assert!(live.begin_first_write(id));
+    live.end_first_write(id, true);
+    assert_eq!(row(&live), Some(RowAtHalt::Written));
+}
+
+/// **A resumed drive is live with its row, or not at all** (issue 1070):
+/// it is entered from its row, and the arm never finds it live with none.
+#[test]
+fn a_resumed_drive_is_entered_with_its_row() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    {
+        let _drive = live.enter_from_row(id, agent("builder"), &rounds, &timeouts);
+        assert_eq!(
+            live.arm_halt(id).map(|halt| halt.row),
+            Some(RowAtHalt::Written)
+        );
+        assert!(live.take_halt(id));
+    }
+    assert!(!live.wrote_row(id), "forgotten with the drive");
+}
+
+/// **The drop's word reaches the run** (issue 1070). Only a halt that
+/// finds the first write under way carries a word. The run hears it once
+/// its write has ended: the final phase of a drop that was published, and
+/// nothing from one that was not, whose word is dropped; and the hearing
+/// ends with the words, so a run never waits on a drop that is gone.
+#[tokio::test]
+async fn the_drops_word_reaches_the_run_once_its_write_ends() {
+    let live = LiveRegistry::default();
+    let rounds = super::super::rounds::RoundLedger::default();
+    let timeouts = super::super::timeouts::TimeoutLedger::default();
+    let id = Uuid::now_v7();
+    let _drive = live.enter(id, agent("builder"), &rounds, &timeouts);
+    let hear = |mut heard: tokio::sync::mpsc::Receiver<String>| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(1), heard.recv())
+            .await
+            .expect("the hearing ends with the words")
+    };
+
+    assert!(live.arm_halt(id).expect("armed").word.is_none());
+    assert!(live.take_halt(id));
+
+    assert!(live.begin_first_write(id));
+    assert!(
+        live.end_first_write(id, true).is_none(),
+        "no halt during the write: nothing to hear"
+    );
+
+    live.wrote_row.lock().unwrap().clear();
+    assert!(live.begin_first_write(id));
+    let published = live.arm_halt(id).expect("armed").word.expect("a word");
+    let not_published = live.arm_halt(id).expect("armed").word.expect("a word");
+    drop(not_published);
+    published.published("failed");
+    let heard = live.end_first_write(id, true).expect("a drop armed a halt");
+    assert_eq!(hear(heard).await.as_deref(), Some("failed"));
+    assert!(live.take_halt(id));
+
+    live.wrote_row.lock().unwrap().clear();
+    assert!(live.begin_first_write(id));
+    let word = live.arm_halt(id).expect("armed").word.expect("a word");
+    let heard = live.end_first_write(id, true).expect("a drop armed a halt");
+    drop(word);
+    assert_eq!(hear(heard).await, None, "a drop not published says nothing");
+}

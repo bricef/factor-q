@@ -586,7 +586,8 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         manager.shutdown().await;
         self.reclaim_if_terminal(invocation_id, workspace.as_deref(), &outcome)
             .await;
-        outcome
+        // The drive's last look for a halt, its teardown done (issue 1070).
+        self.halted_as_it_ends(invocation_id, outcome)
     }
 
     /// Release the invocation's workspace on a *terminal* outcome only.
@@ -1214,6 +1215,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             {
                 return Ok(stopped);
             }
+            drop(row);
             state = output.state;
 
             match output.next_action {

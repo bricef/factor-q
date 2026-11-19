@@ -44,7 +44,7 @@ pub(super) fn arm_drop_halt(
     runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
     queued: Option<&fq_runtime::control_plane::dispatcher::QueuedHold>,
     input: &DropCommandInput,
-) -> Result<Option<fq_runtime::AgentId>, fq_edge::wire::WireError> {
+) -> Result<Option<Armed>, fq_edge::wire::WireError> {
     let refuse = |message: String| fq_edge::wire::WireError::InvalidInput {
         op: "invocation.drop".into(),
         message,
@@ -73,11 +73,34 @@ pub(super) fn arm_drop_halt(
     // a terminal event: the operator-recovered handler
     // deliberately overrides any prior status, so a run that
     // completed on its own would be archived as `failed`.
-    if !runner.request_halt(id) {
+    let Some(halt) = runner.arm_halt(id) else {
         return Err(refuse(format!(
             "invocation {id} finished before the halt could be armed; \
              nothing dropped — re-check `fq invocation show {id}`"
         )));
+    };
+    Ok(Some(Armed { agent, halt }))
+}
+
+/// A halt armed on a run this daemon is driving: whose it is, where the
+/// run's own row stood, and, for a run whose first write was under way,
+/// the word the run waits for (issue 1070).
+pub(super) struct Armed {
+    pub(super) agent: fq_runtime::AgentId,
+    pub(super) halt: fq_runtime::worker::ArmedHalt,
+}
+
+impl Armed {
+    /// The drop is published. A run whose first write was under way when
+    /// the halt was armed is told so, and marks its own row once the write
+    /// has landed, as the drop's fold does: the fold may have come before
+    /// the row existed. Called with nothing awaited since the publish
+    /// returned, so a request cut off after it cannot lose the word; an
+    /// `Armed` dropped without this call tells the run the drop is not on
+    /// the record, and its row is left as it is.
+    pub(super) fn published(self) {
+        if let Some(word) = self.halt.word {
+            word.published("failed");
+        }
     }
-    Ok(Some(agent))
 }
