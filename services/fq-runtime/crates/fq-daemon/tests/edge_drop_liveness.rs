@@ -658,3 +658,107 @@ async fn a_live_drop_during_the_first_write_marks_the_row_once_it_lands() {
     assert_eq!(row.0, "failed", "the drop's mark is on the row");
     assert!(row.1.is_some());
 }
+
+/// **A live drop whose publish fails makes no mark** (issue 1070). The
+/// run's first write is held, the live drop arms its halt, which finds the
+/// write under way, and its publish fails: the reason given is larger than
+/// the broker accepts, which the bus refuses before sending, so the
+/// failure is immediate and the write's lock is let go well within the
+/// store's busy timeout. The operator is told the drop failed. The handler
+/// gives the run its word only once the publish has returned, so the run
+/// hears nothing: when its row lands it stops before any model call and
+/// leaves the row in flight, as a drop that is not on the record must.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_drop_whose_publish_fails_during_the_first_write_marks_nothing() {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let surface = Arc::new(Surface::start().await);
+    let worker_db = fq_runtime::db::RuntimeDbPaths::under(surface._scratch.path()).worker;
+    let other = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&worker_db))
+        .await
+        .expect("a second connection to the worker store");
+    let mut held = other.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+
+    let llm = ParkedLlm::new();
+    let run = {
+        let runner = surface.runner.clone();
+        let agent = surface.agent.clone();
+        let llm = llm.clone();
+        tokio::spawn(async move {
+            runner
+                .run(
+                    &agent,
+                    llm.as_ref(),
+                    TriggerSource::Manual,
+                    None,
+                    serde_json::json!({"input": "go"}),
+                )
+                .await
+        })
+    };
+    let invocation_id = surface.triggered_invocation().await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !surface.runner.first_write_under_way(invocation_id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run reaches its first write and waits on the lock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let op = fq_ops::OpId::Verb(fq_ops::VerbId::Invocation(fq_ops::Invocation::Drop));
+    let handler = surface
+        .registry
+        .handler(&op.to_string())
+        .expect("invocation.drop is registered on the operator surface");
+    let verdict = tokio::time::timeout(
+        PATIENCE,
+        handler(
+            serde_json::json!({
+                "invocation_id": invocation_id.to_string(),
+                "reason": "x".repeat(2 * 1024 * 1024),
+                "live": true,
+            }),
+            fq_edge::CallContext::none(),
+        ),
+    )
+    .await
+    .expect("the drop answers once its publish has failed");
+    assert!(
+        verdict.is_err(),
+        "the drop's event is larger than the broker accepts, so the drop fails"
+    );
+    assert!(
+        surface.runner.first_write_under_way(invocation_id),
+        "the drop failed while the run's first write was still held"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *held).await.unwrap();
+    drop(held);
+
+    let outcome = tokio::time::timeout(PATIENCE, run)
+        .await
+        .expect("the run stops")
+        .expect("the run's task joins");
+    assert!(
+        matches!(outcome, Ok(InvocationOutcome::Suspended { .. })),
+        "the halt was armed, so the run stops once its row has landed: {outcome:?}"
+    );
+    assert_eq!(llm.calls.load(Ordering::SeqCst), 0, "no model call");
+    let row: (String, Option<i64>) =
+        sqlx::query_as("SELECT phase, terminal_at FROM invocation_state WHERE invocation_id = ?")
+            .bind(invocation_id.to_string())
+            .fetch_one(&other)
+            .await
+            .expect("the row landed");
+    assert_eq!(
+        row,
+        ("awaiting_model".to_string(), None),
+        "a drop that is not on the record leaves the row in flight"
+    );
+}
