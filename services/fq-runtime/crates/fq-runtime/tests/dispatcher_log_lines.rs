@@ -1,7 +1,7 @@
 //! What the trigger dispatcher logs when it drops a copy of a trigger,
-//! cannot record or acknowledge a run's durable start, or cannot publish a
-//! trigger's dead letter, read off the log of a dispatcher running its own
-//! consume loop.
+//! cannot record or acknowledge a run's durable start, cannot publish a
+//! trigger's dead letter, or resumes a deferred run that has already ended,
+//! read off the log of a dispatcher running its own consume loop.
 //!
 //! **Why a binary of its own (#1031).** Whether a callsite is of interest
 //! to a subscriber is cached once for the whole process, not per thread.
@@ -62,7 +62,7 @@ use fq_runtime::llm::fixture::FixtureClient;
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
 use fq_runtime::worker::{
     DrainRequest, DrainState, DurableStart, DurableStartReport, ExecutorError, InvocationOutcome,
-    Worker, WorkerStore,
+    ResumeError, Worker, WorkerStore,
 };
 use fq_runtime::{DispatcherError, TriggerDispatcher, shared_registry};
 use futures::StreamExt;
@@ -112,6 +112,8 @@ const START_NOT_RECORDED: &str =
     "could not record the durable start of a trigger whose claim does not name its run";
 /// The invocation a changed claim names ([`ClaimChange`]).
 const ANOTHER_RUN: &str = "another-run";
+/// The line for a deferred run whose resume found it already ended.
+const ENDED_BEFORE_RESUME: &str = "deferred invocation ended before its resume; nothing to resume";
 /// The start of the line for a last delivery whose dead letter the
 /// dispatcher could not publish.
 const DEAD_LETTER_UNPUBLISHED: &str =
@@ -122,7 +124,7 @@ const PATIENCE: Duration = Duration::from_secs(20);
 
 // ---- The log ----
 
-/// One event the dispatcher logged at `warn` or above: its level, its
+/// One event the dispatcher logged at `info` or above: its level, its
 /// message and every other field, each as the text a formatter prints.
 #[derive(Debug, Clone)]
 struct Line {
@@ -157,7 +159,7 @@ impl Line {
     }
 }
 
-/// Every line logged at `warn` or above, by every test in this binary.
+/// Every line logged at `info` or above, by every test in this binary.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<Line>>>);
 
@@ -182,7 +184,7 @@ impl Log {
         LOG.get_or_init(|| {
             let log = Log::default();
             tracing::subscriber::set_global_default(
-                tracing_subscriber::registry().with(log.clone().with_filter(LevelFilter::WARN)),
+                tracing_subscriber::registry().with(log.clone().with_filter(LevelFilter::INFO)),
             )
             .expect("install the process's one subscriber");
             log
@@ -247,6 +249,10 @@ enum Script {
     /// delivery is NAKed, and the claim's release before the NAK is
     /// refused.
     FailsBeforeStartWithReleasesRefused,
+    /// Makes its first WAL write and puts the run down for a moment, as a
+    /// rate limit does; its resume then finds the run already ended, as
+    /// an operator's drop folded while it slept leaves it.
+    DeferredThenEndedBeforeItsResume,
 }
 
 /// How [`Script::ChangedClaim`] changes the claim before the mark.
@@ -334,6 +340,15 @@ impl Worker for Stub {
                     "simulated transient store outage before the first WAL write".to_string(),
                 ));
             }
+            Script::DeferredThenEndedBeforeItsResume => {
+                durable_start.fire();
+                tokio::task::yield_now().await;
+                self.ended.notify_one();
+                return Ok(InvocationOutcome::Deferred {
+                    invocation_id,
+                    resume_after: Duration::from_millis(20),
+                });
+            }
         }
         durable_start.fire();
         // One more turn of `handle`'s loop, which marks and acks on the
@@ -343,6 +358,19 @@ impl Worker for Stub {
         // What the run returns past its durable start is not logged at
         // `warn`, so it does not matter to these lines.
         Ok(InvocationOutcome::Suspended { invocation_id })
+    }
+
+    /// A resume finds the run already ended: only
+    /// [`Script::DeferredThenEndedBeforeItsResume`] puts a run down.
+    async fn resume_invocation(
+        &self,
+        _agent: &Agent,
+        _llm: &dyn LlmClient,
+        invocation_id: Uuid,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        Err(ExecutorError::Resume(ResumeError::AlreadyTerminal {
+            invocation_id,
+        }))
     }
 
     async fn request_drain(&self, _req: DrainRequest) {}
@@ -1355,4 +1383,45 @@ async fn a_refused_release_is_one_error_line_naming_the_invocation_whose_claim_i
             .is_some_and(|error| error.contains("injected")),
         "{line:#?}"
     );
+}
+
+/// **A deferred run that ended before its resume is one line at `info`**
+/// (issue 1070). An operator's drop folded while the run slept finishes
+/// its row, so the resume the dispatcher runs when the delay is out finds
+/// it ended. That is the run behaving as the operating guide says, not a
+/// failure: one `info` line names the invocation, and nothing about it is
+/// logged at `warn` or above, as recovery's and the operator's resumes
+/// already log the same case.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_run_that_ended_before_its_resume_is_one_info_line() {
+    let mut daemon = Daemon::new(
+        "ended-before-resume",
+        Script::DeferredThenEndedBeforeItsResume,
+    )
+    .await;
+    daemon.start("binary-1").await;
+    daemon.publish().await;
+    daemon.worker.wait_until_ended().await;
+    let (_, invocation_id) = daemon.worker.named();
+    let id = invocation_id.to_string();
+    let names = |line: &Line| {
+        line.field("invocation_id") == Some(id.as_str())
+            || line
+                .field("error")
+                .is_some_and(|error| error.contains(id.as_str()))
+    };
+    let ended = |line: &Line| names(line) && line.message.contains(ENDED_BEFORE_RESUME);
+    daemon
+        .log
+        .wait_for("saying the deferred run ended before its resume", ended)
+        .await;
+    daemon.stop().await;
+
+    let lines = daemon.log.lines(ended);
+    assert_eq!(lines.len(), 1, "one line: {lines:#?}");
+    assert_eq!(lines[0].level, tracing::Level::INFO, "{:#?}", lines[0]);
+    let alarms = daemon.log.lines(|line| {
+        names(line) && matches!(line.level, tracing::Level::WARN | tracing::Level::ERROR)
+    });
+    assert!(alarms.is_empty(), "nothing at warn or above: {alarms:#?}");
 }
