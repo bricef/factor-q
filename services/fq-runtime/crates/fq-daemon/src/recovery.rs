@@ -380,9 +380,13 @@ async fn restore_ownership(
         cp_store,
         invocation_id,
         OwnershipEvent::Restored,
+        // A restore ends nothing and records no request, so it brings no
+        // ending time and no request.
         OwnerFacts {
             worker_id: worker_id.as_str(),
             at_ms: invocation.state.started_at,
+            ended_at_ms: invocation.state.started_at,
+            request: None,
         },
     )
     .await;

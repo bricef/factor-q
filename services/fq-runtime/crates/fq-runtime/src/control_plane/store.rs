@@ -500,23 +500,6 @@ impl ControlPlaneStore {
         )
     }
 
-    /// Remove an invocation's coordination owner row. Returns whether a
-    /// row existed — callers use this to tell an agent-less recovery row
-    /// (which they clear) from an id that was never registered.
-    pub async fn delete_invocation_owner(
-        &self,
-        invocation_id: &str,
-    ) -> Result<bool, ControlPlaneStoreError> {
-        Ok(
-            sqlx::query("DELETE FROM coordination_invocation_owner WHERE invocation_id = ?")
-                .bind(invocation_id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                > 0,
-        )
-    }
-
     /// Workers whose heartbeat is older than `now_ms - threshold_ms`
     /// AND not already marked shutdown. Uses the pure
     /// [`is_stale`] predicate for the cutoff calculation.
@@ -1007,7 +990,7 @@ impl From<sqlx::Error> for ControlPlaneStoreError {
 }
 
 mod ownership;
-pub use ownership::{ArchiveState, EndedBy, OwnerRow, TerminationRequest};
+pub use ownership::{ArchiveState, EndedBy, MoveFacts, OwnerRow, TerminationRequest};
 
 mod trigger_claim;
 pub use trigger_claim::{

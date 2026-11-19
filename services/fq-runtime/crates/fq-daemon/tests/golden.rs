@@ -33,7 +33,8 @@ use std::time::Duration;
 use fq_runtime::bus::TRIGGER_STREAM_NAME;
 use fq_runtime::control_plane::ownership::RowState;
 use fq_runtime::control_plane::store::{
-    ArchiveState, ControlPlaneStore, InvocationArchiveRow, OwnerStatus, TriggerKey, WorkerStatus,
+    ArchiveState, ControlPlaneStore, InvocationArchiveRow, MoveFacts, OwnerStatus, TriggerKey,
+    WorkerStatus,
 };
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
@@ -607,9 +608,17 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             cp.compare_and_set_ownership(
                 invocation,
                 None,
-                RowState { status, archive },
-                Some(agent),
-                Some(at),
+                RowState {
+                    status,
+                    archive,
+                    ended_by: None,
+                    requested: false,
+                },
+                MoveFacts {
+                    worker_id: Some(agent),
+                    assigned_at: Some(at),
+                    ..MoveFacts::default()
+                },
             )
             .await
             .unwrap()

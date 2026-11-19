@@ -174,7 +174,7 @@ pub fn operator_registry(
             verb: fq_ops::Verb::Write,
             scope: fq_ops::Domain::Invocation,
         },
-        "Drop an invocation: archive it as failed and release its owner.",
+        "Drop an invocation: end it as failed if it has not ended, and record the request.",
         fq_ops::Stability::Experimental,
     )
     .description(

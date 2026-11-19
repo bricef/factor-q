@@ -21,7 +21,8 @@
 //! the production durable, as the #959 tests beside these do.
 
 use super::*;
-use fq_runtime::control_plane::{InvocationArchiveRow, OwnerStatus};
+use fq_runtime::control_plane::ownership::{self, ArchiveExpected, OwnerFacts, OwnershipEvent};
+use fq_runtime::control_plane::{InvocationArchiveRow, OwnerStatus, TerminationRequest};
 
 /// How the dead daemon's run stood when the next daemon started.
 #[derive(Clone, Copy, Debug)]
@@ -447,8 +448,10 @@ async fn a_replay_after_a_restart_drops_finished_runs_and_adopts_the_trigger_tha
 /// accepted from the moment the runner takes the run, and a drop of a run
 /// whose process died resolves it through its `triggered` event, which is
 /// published before that write. The drop leaves what the coordination
-/// consumer writes for it, an archive row and a `failed` ownership row,
-/// and no WAL row. Recovery marks the claim, so the redelivery is dropped
+/// consumer writes for it, a `failed` ownership row ended by the drop
+/// with its archive `none`, as the drop says of a run with no worker row
+/// and no archive, and no WAL row or archive record. Recovery marks the
+/// claim, so the redelivery is dropped
 /// and the work never runs: the drop is the run's outcome, as it is for
 /// the same drop on a live daemon, where the dispatcher consumes the
 /// trigger rather than retry it.
@@ -456,26 +459,26 @@ async fn a_replay_after_a_restart_drops_finished_runs_and_adopts_the_trigger_tha
 async fn a_run_dropped_before_its_first_wal_write_is_not_run_after_a_restart() {
     let mut crash = a_daemon_dies_holding_a_trigger(false).await;
     let dropped = crash.dead_invocation.to_string();
-    // `handle_invocation_operator_recovered`'s writes, in its order. Its
-    // third, marking the WAL row terminal, finds no row.
-    crash
-        .cp_store
-        .insert_archive(&InvocationArchiveRow {
-            invocation_id: dropped.clone(),
-            agent_id: CRASH_AGENT.to_string(),
-            final_phase: "failed".to_string(),
-            final_state_blob: Vec::new(),
-            started_at: 3_000,
-            terminal_at: 3_000,
-            archived_at: 3_000,
-        })
-        .await
-        .unwrap();
-    crash
-        .cp_store
-        .upsert_invocation_ownership(&dropped, CRASH_AGENT, 3_000, OwnerStatus::Failed)
-        .await
-        .unwrap();
+    // `handle_invocation_operator_recovered`'s write, the drop's fold of a
+    // run that has not ended, the drop saying no archive will come. Its
+    // mark of the WAL row finds no row.
+    ownership::apply(
+        crash.cp_store.as_ref(),
+        &dropped,
+        OwnershipEvent::TerminationRequested(ArchiveExpected::No),
+        OwnerFacts {
+            worker_id: CRASH_AGENT,
+            at_ms: 3_000,
+            ended_at_ms: 3_000,
+            request: Some(&TerminationRequest {
+                requested_at: 3_000,
+                requested_by: None,
+                reason: None,
+            }),
+        },
+    )
+    .await
+    .unwrap();
     crash
         .delivery
         .ack_with(AckKind::Nak(None))

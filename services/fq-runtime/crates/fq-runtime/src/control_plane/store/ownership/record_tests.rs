@@ -449,8 +449,9 @@ async fn the_pair_check_refuses_every_pair_a_row_may_not_hold() {
 }
 
 /// **Nothing a writer writes is refused.** Every state the transition
-/// moves a row to, from no row and from every state a row may hold,
-/// written by the one production writer, the compare-and-set; and every
+/// moves a row to, from no row and from every state a row may hold, its
+/// ender and request included, written by the one production writer, the
+/// compare-and-set, with the termination record a move writes; and every
 /// row the seeding helpers write. With the rung in place, none of it
 /// breaks a check.
 #[tokio::test]
@@ -459,14 +460,32 @@ async fn every_row_a_writer_writes_passes_the_checks() {
     let store = ControlPlaneStore::open(&dir.path().join("control-plane.db"))
         .await
         .unwrap();
-    let states: Vec<Option<crate::control_plane::ownership::RowState>> = std::iter::once(None)
-        .chain(VALID_PAIRS.iter().filter_map(|(status, archive)| {
-            Some(Some(crate::control_plane::ownership::RowState {
-                status: OwnerStatus::parse(status)?,
-                archive: ArchiveState::parse(archive)?,
-            }))
-        }))
-        .collect();
+    let mut states: Vec<Option<crate::control_plane::ownership::RowState>> = vec![None];
+    for (status, archive) in VALID_PAIRS {
+        let (Some(status), Some(archive)) =
+            (OwnerStatus::parse(status), ArchiveState::parse(archive))
+        else {
+            continue;
+        };
+        for ended_by in [None, Some(EndedBy::Run), Some(EndedBy::Drop)] {
+            for requested in [false, true] {
+                let state = crate::control_plane::ownership::RowState {
+                    status,
+                    archive,
+                    ended_by,
+                    requested,
+                };
+                if state.is_valid() {
+                    states.push(Some(state));
+                }
+            }
+        }
+    }
+    let request = TerminationRequest {
+        requested_at: 1,
+        requested_by: Some("on-call".to_string()),
+        reason: Some("runaway".to_string()),
+    };
     let mut n = 0;
     for from in &states {
         for event in OwnershipEvent::ALL {
@@ -482,13 +501,35 @@ async fn every_row_a_writer_writes_passes_the_checks() {
             if let Some(from) = from {
                 assert!(
                     store
-                        .compare_and_set_ownership(&id, None, *from, Some("w"), Some(1))
+                        .compare_and_set_ownership(
+                            &id,
+                            None,
+                            *from,
+                            MoveFacts {
+                                worker_id: Some("w"),
+                                assigned_at: Some(1),
+                                ended_at: from.ended_by.map(|_| 1),
+                                request: from.requested.then_some(&request),
+                            },
+                        )
                         .await
                         .expect("the state it moves from is written"),
                 );
             }
+            let (ender, requested) =
+                from.map_or((None, false), |from| (from.ended_by, from.requested));
             let moved = store
-                .compare_and_set_ownership(&id, *from, to, Some("w"), Some(2))
+                .compare_and_set_ownership(
+                    &id,
+                    *from,
+                    to,
+                    MoveFacts {
+                        worker_id: Some("w"),
+                        assigned_at: Some(2),
+                        ended_at: (to.ended_by != ender).then_some(2),
+                        request: (to.requested && !requested).then_some(&request),
+                    },
+                )
                 .await;
             assert!(
                 moved.as_ref().is_ok_and(|landed| *landed),
@@ -1011,4 +1052,119 @@ async fn a_row_whose_id_is_a_blob_is_read_and_carried_through() {
     .await
     .unwrap();
     assert_eq!(archive, "archived");
+}
+
+/// Apply `set`, SQL assignments, to `id`'s ownership row by hand, as the
+/// operating guide's edit does. The number of rows changed.
+async fn hand_edit(store: &ControlPlaneStore, id: &str, set: &str) -> Result<u64, sqlx::Error> {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE coordination_invocation_owner SET {set} WHERE invocation_id = ?"
+    )))
+    .bind(id)
+    .execute(&store.pool)
+    .await
+    .map(|done| done.rows_affected())
+}
+
+/// Whether `id`'s ownership row reads as one this build cannot read.
+async fn unreadable(store: &ControlPlaneStore, id: &str) -> bool {
+    matches!(
+        store.get_invocation_owner(id).await,
+        Err(ControlPlaneStoreError::Malformed(_))
+    )
+}
+
+/// **The hand edit the operating guide gives for a row this build cannot
+/// read clears it, and the checks hold the record to its status.** A row
+/// whose status a newer build wrote, with an ender and a request on
+/// record, reads as malformed. Set to a run in progress with its record
+/// left on it, it is refused and stays as it was; with the record cleared
+/// too, it is admitted and reads. Set to a run that ended, its record may
+/// stay, but a `completed` run's ender may not be the drop.
+#[tokio::test]
+async fn the_guides_hand_edit_of_an_unreadable_row_goes_through_the_checks() {
+    let dir = tempdir().unwrap();
+    let store = ControlPlaneStore::open(&dir.path().join("control-plane.db"))
+        .await
+        .unwrap();
+    let record = "ended_by = 'drop', ended_at = 1500, termination_requested_at = 1400, \
+                  termination_requested_by = 'on-call', termination_reason = 'stuck'";
+    for id in ["to-in-flight", "to-completed", "to-failed"] {
+        insert_raw(&store, id, "weird", "not_due", "")
+            .await
+            .unwrap();
+        hand_edit(&store, id, record)
+            .await
+            .expect("a status this build does not know holds any record");
+        assert!(unreadable(&store, id).await, "{id} reads as malformed");
+    }
+
+    assert!(
+        hand_edit(
+            &store,
+            "to-in-flight",
+            "status = 'in_flight', archive_state = 'not_due'"
+        )
+        .await
+        .is_err(),
+        "a run in progress with a record on it is refused"
+    );
+    assert!(
+        unreadable(&store, "to-in-flight").await,
+        "the refused edit leaves the row as it was"
+    );
+    let cleared = hand_edit(
+        &store,
+        "to-in-flight",
+        "status = 'in_flight', archive_state = 'not_due', ended_by = NULL, ended_at = NULL, \
+         termination_requested_at = NULL, termination_requested_by = NULL, \
+         termination_reason = NULL",
+    )
+    .await;
+    assert_eq!(cleared.ok(), Some(1), "the record cleared with it");
+    assert_eq!(
+        store
+            .get_invocation_owner("to-in-flight")
+            .await
+            .unwrap()
+            .map(|row| (row.status, row.ended_by, row.termination)),
+        Some((OwnerStatus::InFlight, None, None))
+    );
+
+    assert!(
+        hand_edit(
+            &store,
+            "to-completed",
+            "status = 'completed', archive_state = 'archived'"
+        )
+        .await
+        .is_err(),
+        "a completed run's ender is not the drop"
+    );
+    hand_edit(
+        &store,
+        "to-completed",
+        "status = 'completed', archive_state = 'archived', ended_by = 'run'",
+    )
+    .await
+    .expect("a completed run ended by the run, its request kept");
+    hand_edit(
+        &store,
+        "to-failed",
+        "status = 'failed', archive_state = 'archived'",
+    )
+    .await
+    .expect("a failed run keeps the drop's record");
+    for (id, status, ended_by) in [
+        ("to-completed", OwnerStatus::Completed, EndedBy::Run),
+        ("to-failed", OwnerStatus::Failed, EndedBy::Drop),
+    ] {
+        let row = store.get_invocation_owner(id).await.unwrap().unwrap();
+        assert_eq!(
+            (row.status, row.archive_state, row.ended_by, row.ended_at),
+            (status, ArchiveState::Archived, Some(ended_by), Some(1500)),
+            "{id}"
+        );
+        assert!(row.termination.is_some(), "{id} keeps the request");
+    }
 }

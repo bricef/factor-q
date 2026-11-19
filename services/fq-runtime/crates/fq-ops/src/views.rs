@@ -228,8 +228,9 @@ pub enum InvocationArchiveState {
     /// sweeper's memory of its current run, so not known until its first
     /// pass after a start, when the archive reads `pending`.
     Held,
-    /// The archive record was written: from the worker's archive, or by an
-    /// operator's drop.
+    /// The archive record was written, from the worker's archive. (An
+    /// operator's drop wrote an empty one too, before the drop recorded a
+    /// termination request instead.)
     Archived,
     /// No archive will come: an operator's drop ended a run that had no
     /// row on its worker and none to come there, and no record was

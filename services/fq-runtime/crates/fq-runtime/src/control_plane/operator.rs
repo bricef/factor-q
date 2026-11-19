@@ -76,8 +76,9 @@ pub enum DropError {
 /// Operator-issued drop. Resolves the agent the invocation belongs to,
 /// builds an `invocation.operator_recovered` event with `action="drop"`,
 /// `final_phase="failed"` and what `record` says, and publishes it. The
-/// control-plane's coordination consumer is responsible for writing the
-/// archive row and flipping the owner status.
+/// control-plane's coordination consumer folds it: it ends a run that has
+/// not ended, records the request beside the outcome of one that has, and
+/// writes no archive record (issue 1070).
 ///
 /// `driving_agent` is the agent a **live** runner on this daemon is
 /// driving the invocation for, straight from that runner (#107). It
@@ -103,8 +104,8 @@ pub async fn drop_invocation(
     // corroboration and cannot be stale; only when no runner here is
     // driving the invocation does the durable record get a say. Older or
     // synthetic recovery rows may have no projection event and therefore
-    // no agent — those rows are cleared directly below; normal rows
-    // retain the existing event-driven terminal/archive transition.
+    // no agent; their drop is published under the operator's own agent id,
+    // and folded like any other.
     let resolved_agent = match driving_agent {
         Some(agent) => Some(agent.as_str().to_string()),
         None => proj_store.agent_id_for_invocation(invocation_id).await?,
@@ -113,16 +114,14 @@ pub async fn drop_invocation(
         Some(agent_id) => agent_id,
         None => {
             // No projection event names an agent — this is either an
-            // agent-less recovery row or an id that never existed.
-            // `delete_invocation_owner` tells them apart by whether it
-            // actually removed a row: a truly-unknown id must still error
-            // rather than emit a phantom operator-recovered event
-            // (ADR-0026 — the event log is the system of record). This is
-            // the one delete of an ownership row outside the transition
-            // table (`control_plane::ownership`); the drop's fold writes
-            // the row again, `failed` with its archive recorded, or none to
-            // come when the drop says so.
-            if !control_store.delete_invocation_owner(invocation_id).await? {
+            // agent-less recovery row or an id that never existed. Whether
+            // a row is there tells them apart: a truly-unknown id must
+            // still error rather than emit a phantom operator-recovered
+            // event (ADR-0026 — the event log is the system of record).
+            // The row is only read: the drop's fold moves it, as the
+            // transition table says (`control_plane::ownership`, issue
+            // 1070).
+            if !control_store.has_invocation_owner(invocation_id).await? {
                 return Err(DropError::UnknownInvocation(invocation_id.to_string()));
             }
             AgentId::operator().into_inner()
