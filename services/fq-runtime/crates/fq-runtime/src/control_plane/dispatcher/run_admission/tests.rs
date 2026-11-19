@@ -38,7 +38,7 @@ async fn dispatcher_sharing(
     bus: &EventBus,
     agent: &str,
     registry: SharedRegistry,
-    worker: Arc<CappedWorker>,
+    worker: Arc<dyn Worker>,
     admission: &RunAdmission,
 ) -> Sharing {
     let claims = tempfile::tempdir().unwrap();
@@ -372,4 +372,109 @@ async fn a_dropped_resume_leaves_the_queue_within_a_tick() {
         .expect("the wait's task joins");
     assert!(permit.is_none());
     drop(running);
+}
+
+/// A run that puts itself down on its first start, under the id the
+/// dispatcher named, for an hour; a resume of it is counted.
+struct DefersOnStart {
+    named: std::sync::Mutex<Option<Uuid>>,
+    resumed: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Worker for DefersOnStart {
+    async fn run_invocation(
+        &self,
+        _agent: &crate::agent::Agent,
+        _llm: &dyn crate::llm::LlmClient,
+        _trigger: crate::trigger::Trigger,
+        _delivery_attempt: Option<u32>,
+        mut durable_start: crate::worker::DurableStart,
+    ) -> Result<crate::worker::InvocationOutcome, crate::worker::ExecutorError> {
+        let invocation_id = durable_start
+            .invocation_id()
+            .expect("the dispatcher names the run it starts");
+        *self.named.lock().unwrap() = Some(invocation_id);
+        durable_start.fire();
+        Ok(crate::worker::InvocationOutcome::Deferred {
+            invocation_id,
+            resume_after: Duration::from_secs(3_600),
+        })
+    }
+
+    async fn resume_invocation(
+        &self,
+        _agent: &crate::agent::Agent,
+        _llm: &dyn crate::llm::LlmClient,
+        invocation_id: Uuid,
+    ) -> Result<crate::worker::InvocationOutcome, crate::worker::ExecutorError> {
+        self.resumed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(crate::worker::ExecutorError::WorkerStore(format!(
+            "{invocation_id} is not to be resumed here"
+        )))
+    }
+
+    async fn request_drain(&self, _req: DrainRequest) {}
+
+    fn drain_status(&self) -> crate::worker::DrainState {
+        crate::worker::DrainState::Running
+    }
+}
+
+/// **A trigger's deferral is listed in the permits the daemon shares**
+/// (issue 1070): the ones the operator surface's drop holds, so `fq
+/// invocation drop` reaches a run a trigger started and a rate limit put
+/// down. Held and dropped there, it gives its agent's slot back at once,
+/// and it is never resumed.
+#[tokio::test]
+async fn a_triggers_deferral_is_listed_in_the_permits_the_daemon_shares() {
+    let server = crate::test_support::nats::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let agent = unique_agent_id("trigger-deferral");
+    let (_agents, registry) = registry_with(&agent);
+    let worker = Arc::new(DefersOnStart {
+        named: std::sync::Mutex::new(None),
+        resumed: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let admission = RunAdmission::new(worker.clone(), 1);
+    let dispatcher = dispatcher_sharing(&bus, &agent, registry, worker.clone(), &admission).await;
+    publish_triggers(&bus, &agent, 1).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let hold = loop {
+        let named = *worker.named.lock().unwrap();
+        if let Some(id) = named
+            && let Some(hold) = admission.workers().hold_for_drop(&id.to_string()).await
+        {
+            break hold;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the trigger's run is put down, and its deferral listed in the shared permits"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(!hold.is_starting(), "asleep, not starting");
+    let agent_id = crate::agent::AgentId::new(&agent).unwrap();
+    assert_eq!(
+        admission.agents().in_flight(&agent_id),
+        1,
+        "the sleeping run holds its agent's slot"
+    );
+    hold.dropped();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while admission.agents().in_flight(&agent_id) != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the dropped run gives its slot back at once"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        worker.resumed.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "and is never resumed"
+    );
+    stop(dispatcher.shutdown, dispatcher.run).await;
 }
