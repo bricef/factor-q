@@ -123,6 +123,8 @@ fn a_drop() -> EventPayload {
         action: "drop".to_string(),
         final_phase: "failed".to_string(),
         reason: Some("dropped just before the daemon died".to_string()),
+        requested_by: None,
+        archive: None,
     })
 }
 

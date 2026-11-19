@@ -720,6 +720,8 @@ mod tests {
                         action: "drop".into(),
                         final_phase: final_phase.into(),
                         reason: reason.map(str::to_string),
+                        requested_by: None,
+                        archive: None,
                     },
                 ),
             )

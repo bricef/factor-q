@@ -99,6 +99,8 @@ impl Fixture {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
             reason: Some("abandoned by the operator".to_string()),
+            requested_by: None,
+            archive: None,
         };
         let event = self.event(EventPayload::InvocationOperatorRecovered(payload.clone()));
         self.consumer

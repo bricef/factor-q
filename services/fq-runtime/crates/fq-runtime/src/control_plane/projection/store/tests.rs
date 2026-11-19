@@ -165,6 +165,8 @@ async fn agent_id_for_invocation_ignores_operator_only_tombstone() {
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: None,
+                requested_by: None,
+                archive: None,
             },
         ),
     );

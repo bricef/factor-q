@@ -1777,6 +1777,8 @@ async fn a_drop_on_the_stream_is_folded_before_the_next_start_resumes_the_run() 
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: Some("dropped while the daemon was down".to_string()),
+                requested_by: None,
+                archive: None,
             },
         ),
     )
@@ -1901,6 +1903,8 @@ async fn a_run_the_fold_cannot_reach_in_time_is_held_and_named_at_every_start() 
                 action: "drop".to_string(),
                 final_phase: "failed".to_string(),
                 reason: Some("dropped while the daemon was down".to_string()),
+                requested_by: None,
+                archive: None,
             },
         ),
     )

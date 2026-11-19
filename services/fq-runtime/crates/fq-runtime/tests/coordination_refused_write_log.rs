@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use fq_runtime::control_plane::{ControlPlaneStore, CoordinationConsumer};
-use fq_runtime::events::{Event, EventPayload, InvocationOperatorRecoveredPayload};
+use fq_runtime::events::{DropArchive, Event, EventPayload, InvocationOperatorRecoveredPayload};
 use fq_runtime::{AgentId, EventBus};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer as _;
@@ -161,6 +161,8 @@ async fn a_refused_write_is_acknowledged_and_logged_once_at_error() {
             action: "drop".to_string(),
             final_phase: "failed".to_string(),
             reason: None,
+            requested_by: None,
+            archive: Some(DropArchive::WillNotCome),
         }),
     ))
     .await
