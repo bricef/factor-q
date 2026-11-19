@@ -481,6 +481,7 @@ pub(crate) async fn spawn_resume_tasks(
         let bus = bus.clone();
         let wstore = worker_store.clone();
         let deferrals = deferrals.clone();
+        let workers = admission.workers().clone();
         // Taken before the task is spawned, so the count is right the
         // instant `assemble` returns — the dispatcher must not admit a
         // trigger in the window before a resume task is scheduled. It is
@@ -514,7 +515,13 @@ pub(crate) async fn spawn_resume_tasks(
                 Ok(fq_runtime::InvocationOutcome::Deferred {
                     invocation_id,
                     resume_after,
-                }) => deferrals.defer(invocation_id, agent_id, resume_after, agent_slot),
+                }) => deferrals.defer(
+                    &workers,
+                    invocation_id,
+                    agent_id,
+                    resume_after,
+                    agent_slot,
+                ),
                 Ok(outcome) => tracing::info!(
                     invocation_id = %inv_id,
                     ?outcome,

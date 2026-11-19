@@ -3,12 +3,16 @@
 //! for like any trigger, and a resume that is deferred again goes back
 //! on the queue.
 
+use std::time::Duration;
+
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::TriggerDispatcher;
+use super::run_admission::RunPermit;
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
-use crate::worker::{DueResume, ExecutorError, InvocationOutcome};
+use crate::worker::{ExecutorError, InvocationOutcome};
 
 impl TriggerDispatcher {
     /// What becomes of an invocation's outcome once its trigger's fate
@@ -35,7 +39,7 @@ impl TriggerDispatcher {
                 resume_after,
             }) => self
                 .deferrals
-                .defer(invocation_id, agent_id, resume_after, slot),
+                .defer(&self.workers, invocation_id, agent_id, resume_after, slot),
             Ok(_) => {}
             Err(err) => {
                 // A drop's stop is not an error of the run: its own info
@@ -52,22 +56,24 @@ impl TriggerDispatcher {
         }
     }
 
-    /// Resume `due.invocation_id` now. The caller holds the concurrency
-    /// permit; this is the invocation itself, however long it runs.
+    /// Resume `invocation_id` now, on `permit`, the worker permit its
+    /// resume waited for. This is the invocation itself, however long it
+    /// runs; the permit goes back when it returns, before its outcome is
+    /// handled, so a deferral again lists it afresh.
     ///
     /// **No entry into the count happens here (#718).** The invocation
-    /// never left it: `due.slot` is the very claim its trigger was
-    /// admitted under, carried across the sleep by the deferral queue.
-    /// Taking a fresh one here — which is what this did before — made a
-    /// deferral a hole in the cap, because the entry it took was the
-    /// ungated one.
-    pub(super) async fn resume_deferred(&self, due: DueResume) {
-        let DueResume {
-            invocation_id,
-            agent_id,
-            deferred_for,
-            slot,
-        } = due;
+    /// never left it: `slot` is the very claim its trigger was admitted
+    /// under, carried across the sleep by the deferral queue. Taking a
+    /// fresh one here — which is what this did before — made a deferral a
+    /// hole in the cap, because the entry it took was the ungated one.
+    pub(super) async fn resume_deferred(
+        &self,
+        invocation_id: Uuid,
+        agent_id: AgentId,
+        deferred_for: Duration,
+        slot: AgentSlot,
+        permit: RunPermit,
+    ) {
         let registry = self.registry.current();
         let Some(loaded) = registry.get_loaded(&agent_id) else {
             warn!(
@@ -85,17 +91,20 @@ impl TriggerDispatcher {
             deferred_for_ms = deferred_for.as_millis() as u64,
             "resuming a deferred invocation"
         );
-        match self
+        let resumed = self
             .worker
             .resume_invocation(&loaded.agent, self.llm.as_ref(), invocation_id)
-            .await
-        {
+            .await;
+        // The run is over: its worker goes back, and its listing with it,
+        // which a deferral below takes again.
+        drop(permit);
+        match resumed {
             Ok(InvocationOutcome::Deferred {
                 invocation_id,
                 resume_after,
             }) => self
                 .deferrals
-                .defer(invocation_id, agent_id, resume_after, slot),
+                .defer(&self.workers, invocation_id, agent_id, resume_after, slot),
             Ok(outcome) => debug!(
                 invocation_id = %invocation_id,
                 ?outcome,

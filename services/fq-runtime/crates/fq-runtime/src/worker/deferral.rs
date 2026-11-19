@@ -31,7 +31,30 @@
 //! finishing — the WAL row is still `in_flight` and `control.doctor`
 //! still folds it — so the slot stays taken, and `Drop` still covers
 //! every way the resume can end, including a queue nobody drains.
+//!
+//! # A drop ends a deferral (issue 1070)
+//!
+//! Nothing drives a deferred invocation while it sleeps, so `fq invocation
+//! drop` takes it as it takes a resume queued for a worker permit: the
+//! deferral is listed in the worker permits from the moment it is put
+//! down ([`Deferral`], travelling inside [`DueResume`] beside the slot),
+//! and a drop that goes through wakes the sleep. The timer then ends
+//! there: the invocation is not resumed, asks its model nothing more, and
+//! its slot goes back at the drop, not when the delay would have run out.
+//! A drop after the delay has run finds the same listing on the resume
+//! waiting for its permit, which never starts.
+//!
+//! One instant has no listing to reach: the runner stops driving the
+//! invocation when it returns `Deferred`, and it is listed only when its
+//! outcome reaches [`DeferralQueue::defer`]. A drop in between, or a
+//! `--live` one whose halt the run never reached a step boundary to see,
+//! finds nothing to hold. The permits remember the drop instead
+//! (`WorkerPermits::note_dropped`), and the deferral that follows is
+//! refused: the invocation is never put down, its slot goes back at once,
+//! and nothing resumes it. A run dropped live that way has announced its
+//! deferral on the stream by then, after the drop; nothing follows it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -39,6 +62,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
+use crate::control_plane::dispatcher::{Deferral, NotListed, WorkerPermits};
 
 /// One resume the control plane owes an invocation: who, how long it was
 /// put down for, and the agent-cap slot it never let go of.
@@ -57,6 +81,10 @@ pub struct DueResume {
     /// is the daemon stopping — the next start's recovery counts the row
     /// again.
     pub slot: AgentSlot,
+    /// The invocation's listing for a drop, held from the deferral until
+    /// its resume ends: the resume waits for its permit and starts under
+    /// it.
+    pub deferral: Deferral,
 }
 
 /// The handle a deferral is handed to. Cloneable, so the dispatcher, the
@@ -87,7 +115,41 @@ impl DeferralQueue {
     /// still one of that agent's in-flight runs (#718), and dropping it
     /// at the deferral would let the resume come back through an ungated
     /// entry.
-    pub fn defer(&self, invocation_id: Uuid, agent_id: AgentId, after: Duration, slot: AgentSlot) {
+    ///
+    /// `workers` are the permits the resume will wait on, and where the
+    /// invocation is listed for a drop to reach meanwhile. An invocation
+    /// already listed there, queued or running, is not put down a second
+    /// time, and one a drop went through for in the instant before is not
+    /// put down at all: its slot goes back here and nothing is scheduled.
+    pub fn defer(
+        &self,
+        workers: &Arc<WorkerPermits>,
+        invocation_id: Uuid,
+        agent_id: AgentId,
+        after: Duration,
+        slot: AgentSlot,
+    ) {
+        let deferral = match workers.list_deferred(invocation_id) {
+            Ok(deferral) => deferral,
+            // `slot` goes with these returns: nothing is put down.
+            Err(NotListed::Dropped) => {
+                tracing::info!(
+                    invocation_id = %invocation_id,
+                    agent_id = %agent_id,
+                    "an operator dropped the invocation as it was put down; it is not resumed"
+                );
+                return;
+            }
+            Err(NotListed::AlreadyListed) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    agent_id = %agent_id,
+                    "invocation deferred while another run of it is queued or running in this \
+                     daemon; no second resume is scheduled"
+                );
+                return;
+            }
+        };
         let due = self.due.clone();
         tracing::info!(
             invocation_id = %invocation_id,
@@ -96,12 +158,22 @@ impl DeferralQueue {
             "invocation deferred; a resume is scheduled"
         );
         tokio::spawn(async move {
-            tokio::time::sleep(after).await;
+            if !deferral.sleep(after).await {
+                // `slot` and `deferral` go with this return: the drop is
+                // the invocation's end in this process.
+                tracing::info!(
+                    invocation_id = %invocation_id,
+                    agent_id = %agent_id,
+                    "an operator dropped the invocation while it was deferred; it is not resumed"
+                );
+                return;
+            }
             let resume = DueResume {
                 invocation_id,
                 agent_id,
                 deferred_for: after,
                 slot,
+                deferral,
             };
             if due.send(resume).await.is_err() {
                 tracing::debug!(
@@ -117,7 +189,40 @@ impl DeferralQueue {
 mod tests {
     use super::*;
 
+    use crate::agent::Agent;
     use crate::control_plane::agent_cap::AgentConcurrency;
+    use crate::control_plane::dispatcher::Waiter;
+    use crate::llm::LlmClient;
+    use crate::trigger::Trigger;
+    use crate::worker::{
+        DrainRequest, DrainState, DurableStart, ExecutorError, InvocationOutcome, Worker,
+    };
+
+    /// A worker that is never draining: all the permits ask of one.
+    struct NeverDraining;
+
+    #[async_trait::async_trait]
+    impl Worker for NeverDraining {
+        async fn run_invocation(
+            &self,
+            _agent: &Agent,
+            _llm: &dyn LlmClient,
+            _trigger: Trigger,
+            _delivery_attempt: Option<u32>,
+            _durable_start: DurableStart,
+        ) -> Result<InvocationOutcome, ExecutorError> {
+            unreachable!("nothing runs on these permits")
+        }
+        async fn request_drain(&self, _req: DrainRequest) {}
+        fn drain_status(&self) -> DrainState {
+            DrainState::Running
+        }
+    }
+
+    /// The worker permits a deferral is listed in.
+    fn permits() -> Arc<WorkerPermits> {
+        WorkerPermits::new(Arc::new(NeverDraining), 1)
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_deferral_is_delivered_when_its_delay_has_run() {
@@ -126,7 +231,7 @@ mod tests {
         let id = Uuid::now_v7();
         let agent = AgentId::new("deferred-agent").unwrap();
         let slot = counts.try_enter(&agent, None).expect("no cap, no refusal");
-        queue.defer(id, agent.clone(), Duration::from_secs(30), slot);
+        queue.defer(&permits(), id, agent.clone(), Duration::from_secs(30), slot);
         let early = tokio::time::timeout(Duration::from_secs(29), due.recv()).await;
         assert!(early.is_err(), "not before the delay");
         let resume = tokio::time::timeout(Duration::from_secs(2), due.recv())
@@ -148,7 +253,13 @@ mod tests {
         let counts = AgentConcurrency::new();
         let agent = AgentId::new("builder").unwrap();
         let slot = counts.try_enter(&agent, Some(1)).expect("the first fits");
-        queue.defer(Uuid::now_v7(), agent.clone(), Duration::from_secs(30), slot);
+        queue.defer(
+            &permits(),
+            Uuid::now_v7(),
+            agent.clone(),
+            Duration::from_secs(30),
+            slot,
+        );
         assert_eq!(
             counts.in_flight(&agent),
             1,
@@ -177,8 +288,11 @@ mod tests {
         let counts = AgentConcurrency::new();
         let agent = AgentId::new("orphan").unwrap();
         drop(due);
+        let workers = permits();
+        let id = Uuid::now_v7();
         queue.defer(
-            Uuid::now_v7(),
+            &workers,
+            id,
             agent.clone(),
             Duration::from_millis(10),
             counts.try_enter(&agent, Some(1)).expect("the first fits"),
@@ -188,5 +302,110 @@ mod tests {
         // wedge the agent at its cap.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(counts.in_flight(&agent), 0);
+        assert!(
+            workers.hold_for_drop(&id.to_string()).await.is_none(),
+            "nor is the invocation still listed"
+        );
+    }
+
+    /// **A drop ends a sleeping deferral at once (issue 1070).** The
+    /// deferred invocation is listed for a drop to reach; one that goes
+    /// through wakes the sleep, and the invocation's slot goes back then,
+    /// not when the delay would have run out. Nothing is ever due.
+    #[tokio::test(start_paused = true)]
+    async fn a_drop_ends_a_sleeping_deferral_and_gives_its_slot_back_at_once() {
+        let (queue, mut due) = DeferralQueue::new();
+        let counts = AgentConcurrency::new();
+        let agent = AgentId::new("dropped").unwrap();
+        let workers = permits();
+        let id = Uuid::now_v7();
+        let slot = counts.try_enter(&agent, Some(1)).expect("the first fits");
+        queue.defer(&workers, id, agent.clone(), Duration::from_secs(30), slot);
+
+        let hold = workers
+            .hold_for_drop(&id.to_string())
+            .await
+            .expect("a sleeping deferral is listed for a drop to reach");
+        assert!(!hold.is_starting());
+        hold.dropped();
+        // The timer task runs once: no time passes.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            counts.in_flight(&agent),
+            0,
+            "the slot goes back at the drop, not at the end of the delay"
+        );
+        assert!(
+            workers.hold_for_drop(&id.to_string()).await.is_none(),
+            "and the invocation is no longer listed"
+        );
+        let resumed = tokio::time::timeout(Duration::from_secs(31), due.recv()).await;
+        assert!(resumed.is_err(), "a dropped deferral is never due");
+    }
+
+    /// **A drop that fails leaves the deferral as it was**: released
+    /// without `dropped`, the hold does not wake the sleep, and the resume
+    /// is due when the delay has run, on the slot it had.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferral_whose_drop_fails_is_due_as_before() {
+        let (queue, mut due) = DeferralQueue::new();
+        let counts = AgentConcurrency::new();
+        let agent = AgentId::new("kept").unwrap();
+        let workers = permits();
+        let id = Uuid::now_v7();
+        let slot = counts.try_enter(&agent, Some(1)).expect("the first fits");
+        queue.defer(&workers, id, agent.clone(), Duration::from_secs(30), slot);
+
+        drop(workers.hold_for_drop(&id.to_string()).await.expect("held"));
+        tokio::task::yield_now().await;
+        assert_eq!(counts.in_flight(&agent), 1, "the run still sleeps");
+        let resume = tokio::time::timeout(Duration::from_secs(31), due.recv())
+            .await
+            .expect("due once the delay has run")
+            .expect("the queue holds a sender");
+        assert_eq!(resume.invocation_id, id);
+        assert_eq!(counts.in_flight(&agent), 1, "on the slot it had");
+    }
+
+    /// **One invocation is put down once.** A deferral of an invocation
+    /// already listed in the permits, queued or running there, would be a
+    /// second run of it beside the first: nothing is scheduled, and its
+    /// slot goes back at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferral_of_an_invocation_already_listed_is_not_put_down() {
+        let (queue, mut due) = DeferralQueue::new();
+        let counts = AgentConcurrency::new();
+        let agent = AgentId::new("twice").unwrap();
+        let workers = permits();
+        let id = Uuid::now_v7();
+        let listed = workers.queue(Waiter::Recovered(id)).await;
+        assert!(listed.is_admitted());
+
+        let slot = counts.try_enter(&agent, None).expect("no cap, no refusal");
+        queue.defer(&workers, id, agent.clone(), Duration::from_secs(30), slot);
+        assert_eq!(counts.in_flight(&agent), 0, "its slot goes back at once");
+        let resumed = tokio::time::timeout(Duration::from_secs(31), due.recv()).await;
+        assert!(resumed.is_err(), "and nothing is due");
+        drop(listed);
+    }
+
+    /// **A drop in the instant before the deferral is honoured** (issue
+    /// 1070): the permits remember it, and the deferral that follows puts
+    /// nothing down. The slot goes back at once, and nothing is ever due.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferral_of_an_invocation_just_dropped_is_not_put_down() {
+        let (queue, mut due) = DeferralQueue::new();
+        let counts = AgentConcurrency::new();
+        let agent = AgentId::new("dropped-first").unwrap();
+        let workers = permits();
+        let id = Uuid::now_v7();
+        workers.note_dropped(&id.to_string());
+
+        let slot = counts.try_enter(&agent, Some(1)).expect("the first fits");
+        queue.defer(&workers, id, agent.clone(), Duration::from_secs(30), slot);
+        assert_eq!(counts.in_flight(&agent), 0, "its slot goes back at once");
+        assert!(workers.hold_for_drop(&id.to_string()).await.is_none());
+        let resumed = tokio::time::timeout(Duration::from_secs(31), due.recv()).await;
+        assert!(resumed.is_err(), "and nothing is due");
     }
 }
