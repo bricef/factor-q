@@ -578,7 +578,8 @@ impl CoordinationConsumer {
         moved.map(|_| ())
     }
 
-    /// Step 9: operator-issued terminal transition.
+    /// Step 9: an operator's termination request (a drop), applied as a
+    /// terminal transition.
     ///
     /// 1. Write the archive row (idempotent on `invocation_id`).
     ///    State blob is empty in v1 — the CP doesn't have the
@@ -637,7 +638,9 @@ impl CoordinationConsumer {
         let moved = self
             .move_row(
                 event,
-                OwnershipEvent::OperatorEnded(Ending::of_operator_phase(&payload.final_phase)),
+                OwnershipEvent::TerminationRequested(Ending::of_operator_phase(
+                    &payload.final_phase,
+                )),
                 event.envelope.agent_id.as_str(),
                 None,
             )
