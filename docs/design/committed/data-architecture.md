@@ -1081,13 +1081,27 @@ CREATE TABLE coordination_invocation_owner (
     worker_id        TEXT NOT NULL,
     assigned_at      INTEGER NOT NULL,
     status           TEXT NOT NULL,             -- 'in_flight' | 'ambiguous' | 'completed' | 'failed'
-    archive_state    TEXT NOT NULL,             -- 'not_due' | 'pending' | 'archived'
+    archive_state    TEXT NOT NULL,             -- 'not_due' | 'pending' | 'archived' | 'none'
+    ended_by         TEXT,                      -- 'run' | 'drop'
+    ended_at         INTEGER,                   -- the ending event's own time
+    termination_requested_at INTEGER,           -- the first drop's, and its
+    termination_requested_by TEXT,              --   caller and reason
+    termination_reason       TEXT,
     INDEX(worker_id, status)
 );
 -- The row follows the run's outcome: a run's ending moves it, and
 -- archive_state says separately whether the archive has reached the
 -- control plane. Every move is one transition table
 -- (control_plane/ownership.rs), written as a compare-and-set.
+-- The termination record beside them (issue 1070) is empty on a row
+-- written before it, which reads "not recorded". Checks across the
+-- columns hold which status and archive state go together, and the
+-- record's own rules: an ender with its time, neither on a run in
+-- progress, a drop's ending only on a failed run, a request's caller and
+-- reason only with its time. None refuses a row for a status this build
+-- does not know. The rung that adds the record carries a row whose
+-- archive state did not go with its status through with the one its
+-- status implies, and logs it at error.
 
 -- Pending external waits: approvals, time waits, webhook receivers.
 CREATE TABLE pending_wait (

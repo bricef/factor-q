@@ -420,7 +420,18 @@ the worker's row finished, though the command then says that reading the
 run back failed, since `show` fails on the row. The ownership row itself
 keeps reading as it
 did, and only a hand edit of `coordination_invocation_owner` clears it
-([#1082](https://github.com/bricef/factor-q/issues/1082)).
+([#1082](https://github.com/bricef/factor-q/issues/1082)). Such an edit
+sets `status` and `archive_state` together, to a pair a row may hold:
+`in_flight` or `ambiguous` with `not_due`, `completed` with `pending` or
+`archived`, `failed` with `pending` or `archived`. A run that ended and
+whose archive the control plane holds is `failed` (or `completed`) with
+`archived`. A row whose status was edited alone, so that its archive
+state does not go with it, is corrected when the daemon first starts
+with the termination record: the archive state becomes the one its
+status implies (`not_due` for a run in progress, `archived` for one that
+ended), and the daemon logs `an ownership row's archive state did not go
+with its status` at error, with the invocation, the status and the
+archive state before and after.
 
 `ambiguous` is the state that needs a decision: the daemon knows a tool
 dispatch was issued but not whether it took effect, so it will not replay
