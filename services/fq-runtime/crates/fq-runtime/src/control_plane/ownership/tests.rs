@@ -71,6 +71,15 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
     use OwnershipEvent as E;
     match event {
         E::Triggered | E::ArchiveAcked | E::OperatorResumed | E::SetupFailed => [Ignored; 7],
+        E::DurablyStarted => [
+            To("in_flight"),
+            Duplicate,
+            Refused,
+            Refused,
+            Refused,
+            Refused,
+            Refused,
+        ],
         E::Restored => [
             To("in_flight"),
             To("in_flight"),
@@ -180,12 +189,14 @@ fn every_event_from_every_state_does_what_the_table_says() {
             cells += 1;
         }
     }
-    assert_eq!(cells, 7 * 12, "the table covers every cell");
+    assert_eq!(cells, 7 * 13, "the table covers every cell");
 }
 
 /// Who the row names after each move: a move keeps the row's worker
 /// unless it is an archive's arrival (the worker's own id) or recovery's
-/// restore (this daemon, from the run's start).
+/// restore (this daemon, from the run's start). A durable start never
+/// moves a row: it only creates one, which takes the start's worker and
+/// time ([`a_durable_start_creates_a_row_only_where_there_is_none`]).
 #[test]
 fn a_move_keeps_the_rows_worker_but_for_an_archive_and_a_restore() {
     for event in OwnershipEvent::ALL {
@@ -204,6 +215,32 @@ fn a_move_keeps_the_rows_worker_but_for_an_archive_and_a_restore() {
             };
             assert_eq!(owner, want, "{event:?} from {}", short(state));
         }
+    }
+}
+
+/// **A durable start creates a row only where there is none**, owned by
+/// the daemon and from the time the start names; every row already there
+/// is left as it is.
+#[test]
+fn a_durable_start_creates_a_row_only_where_there_is_none() {
+    assert_eq!(
+        transition(None, OwnershipEvent::DurablyStarted),
+        Decision::Move {
+            to: RowState::IN_FLIGHT,
+            owner: Owner::TakeBoth,
+        }
+    );
+    for state in STATES.into_iter().flatten() {
+        let decision = transition(Some(state), OwnershipEvent::DurablyStarted);
+        assert!(
+            matches!(decision, Decision::Duplicate | Decision::Refused),
+            "{} answers {decision:?}",
+            short(state)
+        );
+        assert_eq!(
+            after(Some(state), OwnershipEvent::DurablyStarted),
+            Some(state)
+        );
     }
 }
 
