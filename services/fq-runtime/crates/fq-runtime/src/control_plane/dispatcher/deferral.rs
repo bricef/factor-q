@@ -12,7 +12,7 @@ use super::TriggerDispatcher;
 use super::run_admission::RunPermit;
 use crate::agent::AgentId;
 use crate::control_plane::agent_cap::AgentSlot;
-use crate::worker::{ExecutorError, InvocationOutcome};
+use crate::worker::{ExecutorError, InvocationOutcome, ResumeError};
 
 impl TriggerDispatcher {
     /// What becomes of an invocation's outcome once its trigger's fate
@@ -109,6 +109,17 @@ impl TriggerDispatcher {
                 invocation_id = %invocation_id,
                 ?outcome,
                 "deferred invocation resumed to an outcome"
+            ),
+            // Ended by another route while it slept, an operator's drop
+            // folded into its row as the operating guide describes, and the
+            // archive hand-off may have deleted the row since: nothing
+            // failed, so nothing is an error, as recovery's and the
+            // operator's resumes log it.
+            Err(ExecutorError::Resume(
+                ResumeError::AlreadyTerminal { .. } | ResumeError::NoStateRow { .. },
+            )) => info!(
+                invocation_id = %invocation_id,
+                "deferred invocation ended before its resume; nothing to resume"
             ),
             Err(err) => {
                 if !matches!(err, ExecutorError::FinishedElsewhere { .. }) {
