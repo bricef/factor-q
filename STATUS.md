@@ -179,7 +179,10 @@ criteria verified on the dogfood host 2026-09-04; Phase 1 code complete
 2026-09-06, follow-ups merged by 2026-09-09); the
 [dogfood host migration plan](docs/plans/active/2026-09-05-dogfood-host-migration.md)
 carried Phases 0 and 1 to the live instance on 2026-09-12, and
-Phase 2 (the record is trustworthy) is next, by hand, one PR at a time. The review's standing
+Phase 2 (the record is trustworthy) has been **in progress** since
+then, by hand, one PR at a time: its
+[milestone](https://github.com/bricef/factor-q/milestone/9) holds the
+issues, and most of what follows here is that work. The review's standing
 answer to "can we also…" **parks the storage M3–M5 track, Memory and
 Skills, and the multi-node vertical until Phase 2 is done**. So M3, then M4, then M5
 per the
