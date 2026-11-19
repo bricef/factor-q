@@ -21,8 +21,8 @@ use crate::bus::EventSink;
 use crate::events::EventKind;
 use crate::test_support::sim::RecordingSink;
 use crate::trigger::Trigger;
-use crate::worker::DurableStart;
 use crate::worker::reducer::types::StepOutput;
+use crate::worker::{DurableStart, RowAtHalt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{OnceLock, Weak};
 
@@ -52,15 +52,17 @@ struct HaltedInItsFirstStep {
 }
 
 impl HaltedInItsFirstStep {
-    fn arm(&self) {
+    /// Arm the halt, which must find the run's row as `expected` says.
+    fn arm(&self, expected: RowAtHalt) {
         let runner = self
             .runner
             .get()
             .and_then(Weak::upgrade)
             .expect("the runner is set and alive");
-        assert!(
-            runner.request_halt(self.invocation_id),
-            "the run is live here, so the halt is armed"
+        assert_eq!(
+            runner.arm_halt(self.invocation_id).map(|halt| halt.row),
+            Some(expected),
+            "the run is live here, so the halt is armed, and says where its row stands"
         );
     }
 }
@@ -68,10 +70,11 @@ impl HaltedInItsFirstStep {
 impl Reducer for HaltedInItsFirstStep {
     fn step(&self, input: StepInput) -> Result<StepOutput, HarnessError> {
         let step = self.steps.fetch_add(1, Ordering::SeqCst);
-        if (step == 0 && self.armed == ArmedAt::BeforeTheFirstWrite)
-            || (step == 1 && self.armed == ArmedAt::InTheSecondStep)
-        {
-            self.arm();
+        if step == 0 && self.armed == ArmedAt::BeforeTheFirstWrite {
+            self.arm(RowAtHalt::NeverWritten);
+        }
+        if step == 1 && self.armed == ArmedAt::InTheSecondStep {
+            self.arm(RowAtHalt::Written);
         }
         self.inner.step(input)
     }
@@ -101,7 +104,11 @@ impl crate::llm::LlmClient for Answering {
                 .get()
                 .and_then(Weak::upgrade)
                 .expect("the runner is set and alive");
-            assert!(runner.request_halt(self.invocation_id));
+            assert_eq!(
+                runner.arm_halt(self.invocation_id).map(|halt| halt.row),
+                Some(RowAtHalt::Written),
+                "the first write has landed by the step's model call"
+            );
         }
         Ok(end_turn_response("done."))
     }
@@ -362,13 +369,16 @@ async fn park_inside_its_first_write<F: std::future::Future>(
 }
 
 /// **A halt armed while the first write is under way stops the run before
-/// its first model call.** Another writer holds the store's write lock, so
-/// the run's first write waits inside SQLite, past every check before it.
-/// The operator's live drop arms the halt then, and the drop's mark, the
-/// coordination consumer's fold, wins the lock ahead of the row and finds
-/// nothing to mark. When the lock goes, the row lands and the durable
-/// start fires, which is true: the run wrote its row. The run must then
-/// take the halt and stop, with no model call.
+/// its first model call, and the drop's mark is not lost.** Another writer
+/// holds the store's write lock, so the run's first write waits inside
+/// SQLite, past every check before it. The operator's live drop arms the
+/// halt then, which finds the first write under way, and the drop's mark,
+/// the coordination consumer's fold, wins the lock ahead of the row and
+/// finds nothing to mark. The drop's handler, its publish done, gives the
+/// run its word. When the lock goes, the row lands and the durable start
+/// fires, which is true: the run wrote its row. The run then takes the
+/// halt and, told the drop is published, marks its own row as the fold
+/// would have, and stops, with no model call.
 #[tokio::test]
 async fn a_halt_armed_while_the_first_write_is_under_way_stops_the_run_before_its_model_call() {
     let dir = tempdir().unwrap();
@@ -398,10 +408,18 @@ async fn a_halt_armed_while_the_first_write_is_under_way_stops_the_run_before_it
                 .is_none(),
             "the first write has not landed yet"
         );
-        assert!(
-            runner.request_halt(invocation_id),
-            "the live drop's halt arms"
+        let halt = runner
+            .arm_halt(invocation_id)
+            .expect("the run is live, so the halt arms");
+        assert_eq!(
+            halt.row,
+            RowAtHalt::FirstWriteUnderWay,
+            "the live drop's halt finds the first write under way"
         );
+        // The drop's handler, once its publish returned.
+        halt.word
+            .expect("a halt that found the write under way carries the run's word")
+            .published("failed");
         // The drop's mark, made on the connection that holds the lock: it
         // comes before the row and finds none.
         let marked = sqlx::query(
@@ -443,6 +461,20 @@ async fn a_halt_armed_while_the_first_write_is_under_way_stops_the_run_before_it
         [EventKind::Triggered],
         "nothing is published after `triggered`"
     );
+    let row = store
+        .get_invocation_state(&invocation_id.to_string())
+        .await
+        .unwrap()
+        .expect("the row landed");
+    assert_eq!(
+        (
+            row.phase.as_str(),
+            row.terminal_at.is_some(),
+            row.terminal_outcome
+        ),
+        ("failed", true, None),
+        "the drop's mark is on it, and no ending of the run's own"
+    );
 }
 
 /// **A first write that fails while a halt is armed stops the run as
@@ -483,10 +515,14 @@ async fn a_first_write_that_fails_under_an_armed_halt_stops_the_run_as_halted() 
         );
         tokio::pin!(run);
         park_inside_its_first_write(&runner, run.as_mut()).await;
-        assert!(
-            runner.request_halt(invocation_id),
-            "the live drop's halt arms"
-        );
+        let halt = runner
+            .arm_halt(invocation_id)
+            .expect("the run is live, so the halt arms");
+        assert_eq!(halt.row, RowAtHalt::FirstWriteUnderWay);
+        // The drop is published; the run has nothing to mark.
+        halt.word
+            .expect("a halt that found the write under way carries the run's word")
+            .published("failed");
         sqlx::query("COMMIT").execute(&mut *held).await.unwrap();
         drop(held);
         run.await
@@ -649,9 +685,13 @@ async fn a_halt_armed_while_the_drive_ends_after_a_failed_first_write_stops_it_a
             assert!(polls < 2000, "the drive never reached its reclaim");
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
-        assert!(
-            runner.request_halt(invocation_id),
-            "the run's drive is still live as it ends, so the live drop's halt arms"
+        let halt = runner
+            .arm_halt(invocation_id)
+            .expect("the run's drive is still live as it ends, so the live drop's halt arms");
+        assert_eq!(
+            (halt.row, halt.word.is_some()),
+            (RowAtHalt::NeverWritten, false),
+            "the write failed: no row, and none to come"
         );
         workspace.gate.add_permits(1);
         run.await

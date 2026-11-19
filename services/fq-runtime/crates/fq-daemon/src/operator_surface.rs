@@ -206,7 +206,8 @@ pub fn operator_registry(
                 // resolves from that rather than from a projection this
                 // daemon may be ahead of — an armed halt and a NotFound
                 // can never be the same answer (#107).
-                let driving_agent = arm_drop_halt(&runner, queued.as_ref(), &input)?;
+                let armed = arm_drop_halt(&runner, queued.as_ref(), &input)?;
+                let driving_agent = armed.as_ref().map(|armed| armed.agent.clone());
                 // The edge implementing an op IS the runtime boundary, not a
                 // call point to flip.
                 // allow-runtime-internals: daemon-side command handler.
@@ -232,6 +233,11 @@ pub fn operator_registry(
                         message: other.to_string(),
                     },
                 })?;
+                // Published: a run halted during its first write marks its
+                // row once the write lands (issue 1070).
+                if let Some(armed) = armed {
+                    armed.published();
+                }
                 if let Some(queued) = queued {
                     queued.dropped();
                 }

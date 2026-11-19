@@ -47,8 +47,9 @@ pub use recovery::{
     scan_in_flight,
 };
 pub use reducer::{
-    Harness, MAX_SUPPORTED_ITERATIONS, Reducer, ReducerContext, ReducerContextBuilder,
-    ReducerRunner, RunnerConfig, RunnerConfigBuilder, SamplingChannel,
+    ArmedHalt, DropWord, Harness, MAX_SUPPORTED_ITERATIONS, Reducer, ReducerContext,
+    ReducerContextBuilder, ReducerRunner, RowAtHalt, RunnerConfig, RunnerConfigBuilder,
+    SamplingChannel,
 };
 pub use store::{
     Compatibility, DispatchStatus, InvocationStateRow, LlmDispatchRow, ToolDispatchRow,
@@ -216,9 +217,10 @@ pub enum InvocationOutcome {
     Suspended {
         invocation_id: Uuid,
     },
-    /// The invocation stopped at its first step boundary, **before its
-    /// first WAL write** (#974): a drain or an operator halt arrived while
-    /// it was being set up. Either way the worker wrote no
+    /// The invocation stopped **before its first WAL write** (#974): a
+    /// drain arrived while it was being set up, or an operator halt before
+    /// that write, which takes the halt as a step boundary does (issue
+    /// 1070). Either way the worker wrote no
     /// `invocation_state` row, so recovery has nothing to resume, and
     /// signalled no durable start; its `triggered` event is on the stream.
     ///

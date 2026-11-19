@@ -35,8 +35,9 @@ impl TriggerDispatcher {
     ///   payload) or a clean `Ok` return: nothing to retry, so ACK. The
     ///   `Failed` event already recorded why, and redelivering a poison
     ///   trigger would loop under the consumer's unbounded redelivery. An
-    ///   operator halt during the invocation's setup is in this group: the
-    ///   operator dropped the invocation, and the drop is its outcome.
+    ///   operator halt before the invocation's first WAL write is in this
+    ///   group: the operator dropped the invocation, and the drop is its
+    ///   outcome.
     /// - A **drain** during the invocation's setup (#974): neither. The
     ///   trigger is the only record of the work, so the delivery is left
     ///   un-acked, the way `handle`'s own drain check leaves one. The

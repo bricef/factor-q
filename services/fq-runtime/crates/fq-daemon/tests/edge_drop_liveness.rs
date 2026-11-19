@@ -566,3 +566,95 @@ async fn drop_of_a_genuinely_unknown_invocation_is_still_not_found() {
         None
     );
 }
+
+/// **A live drop during a run's first write marks the row its fold may
+/// miss, after the request is over** (issue 1070). Another writer holds
+/// the worker store's write lock, so the run's first write waits inside
+/// SQLite. The live drop arms the halt then, which finds the write under
+/// way, and publishes; in the daemon the drop's fold could now come before
+/// the row exists and find nothing (no fold runs in this arena). The
+/// receipt does not wait for the write: the handler gives the run word of
+/// the publish and returns, so the request is over while the write is
+/// still held, as one the edge client's deadline cuts off after its
+/// publish would be. When the write lands, the run stops before any model
+/// call and marks its own row as the fold would have.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_drop_during_the_first_write_marks_the_row_once_it_lands() {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let surface = Arc::new(Surface::start().await);
+    let worker_db = fq_runtime::db::RuntimeDbPaths::under(surface._scratch.path()).worker;
+    let other = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&worker_db))
+        .await
+        .expect("a second connection to the worker store");
+    let mut held = other.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+
+    let llm = ParkedLlm::new();
+    let run = {
+        let runner = surface.runner.clone();
+        let agent = surface.agent.clone();
+        let llm = llm.clone();
+        tokio::spawn(async move {
+            runner
+                .run(
+                    &agent,
+                    llm.as_ref(),
+                    TriggerSource::Manual,
+                    None,
+                    serde_json::json!({"input": "go"}),
+                )
+                .await
+        })
+    };
+    let invocation_id = surface.triggered_invocation().await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while !surface.runner.first_write_under_way(invocation_id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run reaches its first write and waits on the lock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let verdict = tokio::time::timeout(
+        PATIENCE,
+        surface.drop_invocation(&invocation_id.to_string(), true),
+    )
+    .await
+    .expect("the receipt does not wait for the run's first write");
+    assert!(verdict.is_ok(), "a live drop is accepted: {verdict:?}");
+    assert!(
+        surface.runner.first_write_under_way(invocation_id) && !run.is_finished(),
+        "the request is over while the run's first write is still held"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *held).await.unwrap();
+    drop(held);
+
+    let outcome = tokio::time::timeout(PATIENCE, run)
+        .await
+        .expect("the run stops")
+        .expect("the run's task joins");
+    assert!(
+        matches!(outcome, Ok(InvocationOutcome::Suspended { .. })),
+        "the row is there, so the run stops as at a boundary after it: {outcome:?}"
+    );
+    assert_eq!(
+        llm.calls.load(Ordering::SeqCst),
+        0,
+        "the run made no model call"
+    );
+    let row: (String, Option<i64>) =
+        sqlx::query_as("SELECT phase, terminal_at FROM invocation_state WHERE invocation_id = ?")
+            .bind(invocation_id.to_string())
+            .fetch_one(&other)
+            .await
+            .expect("the row landed");
+    assert_eq!(row.0, "failed", "the drop's mark is on the row");
+    assert!(row.1.is_some());
+}

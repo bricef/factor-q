@@ -60,11 +60,13 @@
 //! drive's knowledge of its own write, the fact its `DurableStart` holds,
 //! not a second record of the run's start.
 
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{ReducerRunner, map_store_err};
 use crate::agent::AgentId;
+use crate::worker::reducer::liveness::ArmedHalt;
 use crate::worker::reducer::types::Reducer;
 use crate::worker::store::InvocationStateRow;
 use crate::worker::{BoundaryStop, DurableStart, ExecutorError, InvocationOutcome};
@@ -82,8 +84,11 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     /// folded while there was no row, never reached the row, which stayed
     /// in flight until the next start (issue 1070). So the halt is taken
     /// here as at a boundary, and the run returns what a halt at its first
-    /// boundary returns, `Unstarted` (`Some`). A halt armed once the write
-    /// is under way is the next boundary's, as before.
+    /// boundary returns, `Unstarted` (`Some`). The write is begun under the
+    /// lock a halt is armed under, so a halt armed after that sees it under
+    /// way; [`Self::write_first_row`] says what the run does then. Only the
+    /// first write takes a halt: one armed during a later step is the next
+    /// boundary's, and the step in flight finishes.
     ///
     /// Every later write lands only on the row still in flight; one that
     /// does not means someone else finished the row, and the run stops
@@ -96,7 +101,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
         invocation_id: Uuid,
     ) -> Result<Option<InvocationOutcome>, ExecutorError> {
         if !durable_start.has_started() {
-            if self.live.take_halt(invocation_id) {
+            if !self.live.begin_first_write(invocation_id) {
                 info!(
                     agent_id = %row.agent_id,
                     %invocation_id,
@@ -107,14 +112,9 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
                     durable_start.stopped_at_boundary(invocation_id, BoundaryStop::Halt),
                 ));
             }
-            self.config
-                .store
-                .upsert_invocation_state(row)
-                .await
-                .map_err(map_store_err)?;
-            self.live.note_row_written(invocation_id);
-            durable_start.fire();
-            return Ok(None);
+            return self
+                .write_first_row(row, durable_start, invocation_id)
+                .await;
         }
         let landed = self
             .config
@@ -126,6 +126,153 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             return Ok(None);
         }
         Err(self.finished_elsewhere(invocation_id, "its row write did not land"))
+    }
+
+    /// The run's first write, begun with no halt armed. A halt armed while
+    /// it is under way (the arm reports
+    /// [`FirstWriteUnderWay`](crate::worker::RowAtHalt::FirstWriteUnderWay))
+    /// is taken as soon as the write ends:
+    ///
+    /// - **The write lands.** The row is there and the run recoverable, so
+    ///   the durable start fires and the run stops as at a boundary after
+    ///   its first write, `Suspended`, before any model call. First it
+    ///   waits for the word of the drop that armed the halt, and, told the
+    ///   drop is published, marks its row as the drop's fold does
+    ///   ([`Self::mark_once_the_drop_is_published`]).
+    /// - **The write fails.** There is no row, and with a halt armed the
+    ///   run stops as halted before its first write, `Unstarted`, which the
+    ///   dispatcher takes as the drop's outcome and consumes the trigger
+    ///   for. Returning the store error would have the dispatcher retry the
+    ///   trigger, and the work the operator dropped would run again under a
+    ///   new id. A halt armed only once the run has looked for one finds no
+    ///   row and none to come (the arm reports
+    ///   [`NeverWritten`](crate::worker::RowAtHalt::NeverWritten)), and the
+    ///   error goes back as for any run that fails before its first write.
+    async fn write_first_row(
+        &self,
+        row: &InvocationStateRow,
+        durable_start: &mut DurableStart,
+        invocation_id: Uuid,
+    ) -> Result<Option<InvocationOutcome>, ExecutorError> {
+        let written = self.config.store.upsert_invocation_state(row).await;
+        let words = self.live.end_first_write(invocation_id, written.is_ok());
+        if let Err(err) = written {
+            if self.live.take_halt(invocation_id) {
+                info!(
+                    agent_id = %row.agent_id,
+                    %invocation_id,
+                    error = %err,
+                    "operator halt — the invocation's first WAL write failed while a halt was \
+                     armed; stopping it as halted before its first write"
+                );
+                return Ok(Some(
+                    durable_start.stopped_at_boundary(invocation_id, BoundaryStop::Halt),
+                ));
+            }
+            return Err(map_store_err(err));
+        }
+        durable_start.fire();
+        if !self.live.take_halt(invocation_id) {
+            return Ok(None);
+        }
+        info!(
+            agent_id = %row.agent_id,
+            %invocation_id,
+            step_index = row.step_index,
+            "operator halt — stopping invocation after its first WAL write, before any model call"
+        );
+        if let Some(words) = words {
+            self.mark_once_the_drop_is_published(invocation_id, words)
+                .await;
+        }
+        Ok(Some(
+            durable_start.stopped_at_boundary(invocation_id, BoundaryStop::Halt),
+        ))
+    }
+
+    /// The mark of a drop whose halt found the run's first write under way,
+    /// made by the run once the row has landed: wait for the drop's word
+    /// ([`crate::worker::DropWord`]), and, told it is published, mark the
+    /// row finished in the drop's final phase as the coordination
+    /// consumer's fold of the drop does, since that fold may have come
+    /// before the row existed. Only a row still in flight is marked, so
+    /// whichever of the two comes first is the mark. A drop that is not
+    /// published says nothing, and the row is left in flight. The wait ends
+    /// when the request that armed the halt does, and the mark is one write,
+    /// bounded by the store's own timeouts; a mark that fails is logged, and
+    /// the next start's recovery marks the row from the drop's fold.
+    async fn mark_once_the_drop_is_published(
+        &self,
+        invocation_id: Uuid,
+        mut words: mpsc::Receiver<String>,
+    ) {
+        let Some(final_phase) = words.recv().await else {
+            return;
+        };
+        if let Err(err) = self
+            .config
+            .store
+            .mark_invocation_operator_terminal(
+                &invocation_id.to_string(),
+                &final_phase,
+                self.config.clock.unix_now_ms(),
+            )
+            .await
+        {
+            warn!(
+                %invocation_id,
+                error = %err,
+                "could not mark the row of a run dropped during its first write; the next \
+                 start's recovery marks it from the drop's fold"
+            );
+        }
+    }
+
+    /// The drive's last look for a halt, as it ends (issue 1070). A run
+    /// that ends in an error with no row of its own would have its trigger
+    /// retried by the dispatcher, under a new id. Its drive is live until
+    /// it ends, through the grant servers' shutdown and the workspace's
+    /// reclaim after the run itself, so a halt can be armed after the
+    /// run's own look following a failed first write. Taken here, it
+    /// stops the run as halted before its first write, `Unstarted`, which
+    /// consumes the trigger. Left open is the instant between this look
+    /// and the drive's end, nothing awaited in it: a halt armed then finds
+    /// no row and none to come, and the trigger is retried under a new id.
+    pub(super) fn halted_as_it_ends(
+        &self,
+        invocation_id: Uuid,
+        outcome: Result<InvocationOutcome, ExecutorError>,
+    ) -> Result<InvocationOutcome, ExecutorError> {
+        let Err(err) = &outcome else {
+            return outcome;
+        };
+        if self.live.wrote_row(invocation_id) || !self.live.take_halt(invocation_id) {
+            return outcome;
+        }
+        info!(
+            %invocation_id,
+            error = %err,
+            "operator halt — the invocation is ending in an error before its first WAL write, \
+             with a halt armed; stopping it as halted before its first write"
+        );
+        Ok(InvocationOutcome::Unstarted {
+            invocation_id,
+            stopped_by: BoundaryStop::Halt,
+        })
+    }
+
+    /// Arm an operator's halt on `invocation_id`, as
+    /// [`Self::request_halt`] does, and say where the run's own row stood:
+    /// `None` when this runner is not driving it (issue 1070).
+    pub fn arm_halt(&self, invocation_id: Uuid) -> Option<ArmedHalt> {
+        self.live.arm_halt(invocation_id)
+    }
+
+    /// Whether `invocation_id`'s first write is under way: for tests that
+    /// must arm a halt in that instant.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_write_under_way(&self, invocation_id: Uuid) -> bool {
+        self.live.first_write_under_way(invocation_id)
     }
 
     /// Say that someone else finished `invocation_id`'s row, and what the
@@ -141,14 +288,15 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
     }
 
     /// Register a resumed drive: it begins from a row of its own, so a row
-    /// missing later was handed off, not never written.
+    /// missing later was handed off, not never written. The row is noted
+    /// as the drive is registered, under one lock, so a halt armed on the
+    /// resumed run never finds it live with no row.
     pub(super) fn mark_resumed(
         &self,
         invocation_id: Uuid,
         agent_id: AgentId,
     ) -> super::super::liveness::ActiveInvocation<'_> {
-        let active = self.mark_active(invocation_id, agent_id);
-        self.live.note_row_written(invocation_id);
-        active
+        self.live
+            .enter_from_row(invocation_id, agent_id, &self.rounds, &self.timeouts)
     }
 }
