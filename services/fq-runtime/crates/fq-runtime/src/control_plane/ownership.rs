@@ -161,13 +161,36 @@
 use super::store::{
     ArchiveState, ControlPlaneStore, ControlPlaneStoreError, OwnerRow, OwnerStatus,
 };
-use crate::events::FailurePhase;
+use crate::events::{FailurePhase, HeldOutcome};
 
 /// How a run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
     Completed,
     Failed,
+}
+
+/// The ending `invocation.ending_held` reports (issue 1071), the outcome
+/// of a run whose own ending the worker holds.
+impl From<HeldOutcome> for Ending {
+    fn from(outcome: HeldOutcome) -> Self {
+        match outcome {
+            HeldOutcome::Completed => Ending::Completed,
+            HeldOutcome::Failed => Ending::Failed,
+        }
+    }
+}
+
+/// What a worker holding a run's ending reports: the ending its row's
+/// phase names, read by [`Ending::of_archived_phase`], the rule the
+/// run's `invocation.archived` is read by, so the two never disagree.
+impl From<Ending> for HeldOutcome {
+    fn from(ending: Ending) -> Self {
+        match ending {
+            Ending::Completed => HeldOutcome::Completed,
+            Ending::Failed => HeldOutcome::Failed,
+        }
+    }
 }
 
 impl Ending {
@@ -492,7 +515,8 @@ pub struct OwnerFacts<'a> {
     /// start, the agent id standing in for it on every other event.
     pub worker_id: &'a str,
     /// When: the run's start, the `started_at` its WAL row records, for
-    /// recovery's restore and a durable start; the time the event is
+    /// recovery's restore and a durable start, and for a held ending
+    /// (`invocation.ending_held` carries it); the time the event is
     /// applied otherwise.
     pub at_ms: i64,
 }
