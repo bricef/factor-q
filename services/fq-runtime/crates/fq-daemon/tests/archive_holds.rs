@@ -407,6 +407,125 @@ async fn a_held_run_reads_finished_with_its_archive_held() {
     );
 }
 
+/// **A run whose own ending the sweeper holds reads finished, with its
+/// archive held, and its held ending among its events** (issue 1071). The
+/// row stores a `failed` at an envelope version this build does not read,
+/// so the sweeper holds it as `stored_event_refused` and publishes
+/// `invocation.ending_held` in its place; the coordination consumer folds
+/// it as the `failed` it stands for. Before, nothing about the ending
+/// reached the stream, and the run was not listed as finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_ending_is_held_reads_finished_with_its_archive_held() {
+    const HELD: &str = "019a0000-0000-7000-8000-000000001071";
+    let server = fq_test_support::NatsServer::start();
+    let scratch = scratch();
+    let paths = RuntimeDbPaths::under(&scratch.path().join("cache"));
+    let store = WorkerStore::open(&paths.worker)
+        .await
+        .expect("open the worker store");
+    let mut failed = fq_ops::events::Event::new(
+        fq_ops::agent::AgentId::new("researcher").unwrap(),
+        uuid::Uuid::parse_str(HELD).unwrap(),
+        fq_ops::events::EventPayload::Failed(fq_ops::events::FailedPayload {
+            error_kind: fq_ops::events::FailureKind::MaxIterations,
+            error_message: "exceeded max iterations (2)".to_string(),
+            phase: fq_ops::events::FailurePhase::Reducer,
+            partial_totals: Default::default(),
+            detail: None,
+        }),
+    );
+    failed.envelope.schema_version = fq_ops::events::SCHEMA_VERSION - 1;
+    let mut row = terminal_row(HELD, vec![1, 2, 3]);
+    row.phase = "failed".to_string();
+    row.terminal_outcome = Some(serde_json::to_string(&failed).unwrap());
+    store.upsert_invocation_state(&row).await.unwrap();
+
+    let log = scratch.path().join("fqd.log");
+    let log_file = std::fs::File::create(&log).expect("create daemon log");
+    let child = TestChild::builder(env!("CARGO_BIN_EXE_fqd"))
+        .env("FQ_DAEMON_CONFIG", scratch.path().join("fqd.toml"))
+        .env("FQ_NATS_URL", server.url())
+        .env("FQ_CACHE_DIR", scratch.path().join("cache"))
+        .env("FQ_STATE_DIR", scratch.path().join("state"))
+        .env("FQ_AGENTS_DIR", scratch.path().join("agents"))
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn();
+    let mut daemon = Daemon { child, log };
+
+    let log_path = &daemon.log.clone();
+    let addr = daemon
+        .wait_for("the edge to listen", move || async move {
+            let log = std::fs::read_to_string(log_path).ok()?;
+            log.lines()
+                .find_map(|l| l.trim().strip_prefix("- edge is listening on "))
+                .map(|a| a.trim().to_string())
+        })
+        .await;
+    let state = scratch.path().join("state");
+    let client = fq_edge::EdgeClient::connect(
+        &addr,
+        parse_fingerprint(&fq_test_support::edge_fingerprint(&state)),
+        &fq_test_support::admin_token(&state),
+    )
+    .await
+    .expect("connect edge");
+    let client = &client;
+
+    let listed = daemon
+        .wait_for(
+            "the run listed finished, its archive held",
+            move || async move {
+                let items = invoke(
+                    client,
+                    OpId::List(fq_ops::Domain::Invocation),
+                    serde_json::json!({ "include_archived": false, "limit": 50 }),
+                )
+                .await;
+                let item = items
+                    .as_array()?
+                    .iter()
+                    .find(|item| item["invocation_id"] == HELD)?
+                    .clone();
+                (item["status"] == "failed" && item["archive_state"] == "held").then_some(item)
+            },
+        )
+        .await;
+    assert_eq!(listed["status"], "failed", "{listed}");
+
+    let detail = daemon
+        .wait_for(
+            "the held ending among the run's events",
+            move || async move {
+                let detail = invoke(
+                    client,
+                    OpId::Get(fq_ops::Domain::Invocation),
+                    serde_json::json!({ "invocation_id": HELD }),
+                )
+                .await;
+                detail["recent_events"]
+                    .as_array()?
+                    .iter()
+                    .any(|event| event["event_type"] == "invocation_ending_held")
+                    .then_some(detail)
+            },
+        )
+        .await;
+    assert_eq!(detail["owner"]["status"], "failed", "{detail}");
+    assert_eq!(detail["owner"]["archive_state"], "held", "{detail}");
+    let hold = &detail["archive_hold"];
+    assert!(
+        hold["reason"].get("stored_event_refused").is_some(),
+        "the hold names its reason: {detail}"
+    );
+    assert!(
+        hold["remedy"]
+            .as_str()
+            .is_some_and(|remedy| remedy.contains("terminal_outcome")),
+        "and what lifts it: {detail}"
+    );
+}
+
 /// **The worker view reads `held` as the invocation list does.** A row
 /// startup recovery restored sits under the worker's own id, so the run is
 /// among that worker's owned rows; when the run's archive is held, the
