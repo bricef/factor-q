@@ -35,8 +35,11 @@ struct World {
     worker_store: Arc<WorkerStore>,
     cp_store: Arc<ControlPlaneStore>,
     folded: crate::watermark::Watermark,
-    stop: Option<oneshot::Sender<()>>,
+    consumer: Option<Folding>,
 }
+
+/// A running coordination consumer: what stops it, and its task.
+type Folding = (oneshot::Sender<()>, tokio::task::JoinHandle<()>);
 
 impl World {
     async fn new() -> Self {
@@ -53,12 +56,7 @@ impl World {
                 .await
                 .expect("control-plane store"),
         );
-        let (mark, folded) = crate::watermark::channel();
-        let consumer = CoordinationConsumer::new(bus.clone(), cp_store.clone())
-            .with_worker_store(worker_store.clone())
-            .with_watermark(mark);
-        let (stop, stopped) = oneshot::channel();
-        tokio::spawn(async move { consumer.run(stopped).await });
+        let (consumer, folded) = Self::fold(&bus, &worker_store, &cp_store);
         Self {
             _server: server,
             _dir: dir,
@@ -66,8 +64,78 @@ impl World {
             worker_store,
             cp_store,
             folded,
-            stop: Some(stop),
+            consumer: Some(consumer),
         }
+    }
+
+    /// Start the coordination consumer folding the stream into `store`.
+    fn fold(
+        bus: &EventBus,
+        worker_store: &Arc<WorkerStore>,
+        store: &Arc<ControlPlaneStore>,
+    ) -> (Folding, crate::watermark::Watermark) {
+        let (mark, folded) = crate::watermark::channel();
+        let consumer = CoordinationConsumer::new(bus.clone(), store.clone())
+            .with_worker_store(worker_store.clone())
+            .with_watermark(mark);
+        let (stop, stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = consumer.run(stopped).await;
+        });
+        ((stop, task), folded)
+    }
+
+    /// Wait until the consumer has folded everything on the stream.
+    async fn folded_all(&self) {
+        let barrier = self
+            .bus
+            .publish(&Event::new(
+                AgentId::new(AGENT).unwrap(),
+                Uuid::now_v7(),
+                EventPayload::HostNotice(HostNoticePayload {
+                    kind: "barrier".to_string(),
+                    body: String::new(),
+                }),
+            ))
+            .await
+            .expect("publish the barrier");
+        self.folded
+            .wait_for(barrier, Duration::from_secs(10))
+            .await
+            .expect("the consumer folds to the barrier");
+    }
+
+    /// Fold the whole stream again from its start into a fresh control-plane
+    /// store, as a consumer whose durable was deleted and recreated does,
+    /// and return that store. The consumer folds into it from then on.
+    async fn replay(&mut self) -> Arc<ControlPlaneStore> {
+        if let Some((stop, task)) = self.consumer.take() {
+            let _ = stop.send(());
+            task.await.expect("the consumer stops");
+        }
+        self.bus
+            .jetstream()
+            .get_stream(crate::bus::STREAM_NAME)
+            .await
+            .expect("the event stream")
+            .delete_consumer(crate::control_plane::coordination_consumer::CONSUMER_NAME)
+            .await
+            .expect("delete the durable");
+        let fresh = Arc::new(
+            ControlPlaneStore::open(
+                &self
+                    ._dir
+                    .path()
+                    .join(format!("replay-{}.db", Uuid::now_v7())),
+            )
+            .await
+            .expect("a fresh control-plane store"),
+        );
+        let (consumer, folded) = Self::fold(&self.bus, &self.worker_store, &fresh);
+        self.consumer = Some(consumer);
+        self.folded = folded;
+        self.folded_all().await;
+        fresh
     }
 
     /// A finished WAL row in `phase` that stored `stored(its id)` as its
@@ -128,27 +196,31 @@ impl World {
             .sweep_once(&mut HashSet::new())
             .await
             .expect("the sweep");
-        let barrier = self
-            .bus
-            .publish(&Event::new(
-                AgentId::new(AGENT).unwrap(),
-                Uuid::now_v7(),
-                EventPayload::HostNotice(HostNoticePayload {
-                    kind: "barrier".to_string(),
-                    body: String::new(),
-                }),
-            ))
-            .await
-            .expect("publish the barrier");
-        self.folded
-            .wait_for(barrier, Duration::from_secs(10))
-            .await
-            .expect("the consumer folds to the barrier");
+        self.folded_all().await;
         sweeper.holds()
     }
 
     async fn sweep(&self) -> Arc<ArchiveHolds> {
         self.sweep_through(Arc::new(self.bus.clone())).await
+    }
+
+    /// An operator's edit of the worker's row, with `sqlite3` as the guide
+    /// has it: `sql` with the run's id bound.
+    async fn operator_sql(&self, sql: &'static str, invocation_id: Uuid) {
+        let operator = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(self._dir.path().join("worker.db")),
+            )
+            .await
+            .unwrap();
+        sqlx::query(sql)
+            .bind(invocation_id.to_string())
+            .execute(&operator)
+            .await
+            .unwrap();
+        operator.close().await;
     }
 
     async fn owner(&self, invocation_id: Uuid) -> Option<OwnerStatus> {
@@ -170,10 +242,37 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
+        if let Some((stop, _)) = self.consumer.take() {
             let _ = stop.send(());
         }
     }
+}
+
+/// When the ownership row says the run started (`assigned_at`, the
+/// list's started column).
+async fn started_of(store: &ControlPlaneStore, invocation_id: Uuid) -> Option<i64> {
+    store
+        .get_invocation_owner(&invocation_id.to_string())
+        .await
+        .expect("read the ownership row")
+        .map(|row| row.assigned_at)
+}
+
+/// What the ownership row says of a run: its status, its archive state
+/// and the worker it names.
+async fn record_of(
+    store: &ControlPlaneStore,
+    invocation_id: Uuid,
+) -> Option<(
+    OwnerStatus,
+    crate::control_plane::store::ArchiveState,
+    String,
+)> {
+    store
+        .get_invocation_owner(&invocation_id.to_string())
+        .await
+        .expect("read the ownership row")
+        .map(|row| (row.status, row.archive_state, row.worker_id))
 }
 
 fn its_own_failed(invocation_id: Uuid) -> Event {
@@ -322,19 +421,12 @@ async fn a_malformed_row_publishes_nothing_and_stays_reported() {
         .await;
     world.restored(invocation_id).await;
     // The runtime never writes such an id: a hand edit, or another build.
-    let operator = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new().filename(world._dir.path().join("worker.db")),
+    world
+        .operator_sql(
+            "UPDATE invocation_state SET agent_id = 'not a token' WHERE invocation_id = ?",
+            invocation_id,
         )
-        .await
-        .unwrap();
-    sqlx::query("UPDATE invocation_state SET agent_id = 'not a token' WHERE invocation_id = ?")
-        .bind(invocation_id.to_string())
-        .execute(&operator)
-        .await
-        .unwrap();
-    operator.close().await;
+        .await;
 
     let recording = Arc::new(crate::test_support::sim::RecordingSink::new());
     let holds = world
@@ -356,5 +448,113 @@ async fn a_malformed_row_publishes_nothing_and_stays_reported() {
         world.owner(invocation_id).await,
         Some(OwnerStatus::InFlight),
         "the ownership row is left as it was"
+    );
+}
+
+/// **A replay of the stream rebuilds the same row.** A triggered run with
+/// no ownership row, held for size: the held ending writes its row, and a
+/// fresh consumer folding the stream from its start writes the same one,
+/// status, archive state and worker.
+#[tokio::test]
+async fn a_replay_rebuilds_the_row_a_held_ending_wrote() {
+    let mut world = World::new().await;
+    let invocation_id = world
+        .finished_row("completed", |id| {
+            terminal_outcome::encode(&its_own_completed(id)).unwrap()
+        })
+        .await;
+    world
+        .sweep_through(Arc::new(RefusesTheEnding {
+            bus: world.bus.clone(),
+        }))
+        .await;
+    let folded = record_of(&world.cp_store, invocation_id).await;
+    assert_eq!(
+        folded
+            .as_ref()
+            .map(|(status, _, worker)| (*status, worker.as_str())),
+        Some((OwnerStatus::Completed, "held-ending-worker"))
+    );
+    let replayed = world.replay().await;
+    assert_eq!(record_of(&replayed, invocation_id).await, folded);
+    assert_eq!(
+        started_of(&replayed, invocation_id).await,
+        Some(1_000),
+        "dated at the run's start, in the replay as in the fold"
+    );
+    assert_eq!(
+        started_of(&world.cp_store, invocation_id).await,
+        Some(1_000)
+    );
+}
+
+/// **A replay rebuilds the same row through the run's release and
+/// archive.** The refused case on a row recovery had restored: the held
+/// ending, then the operator's release and the archive that follows.
+/// Replayed from the start, the stream gives the row the original fold
+/// left. Before the archive the two differ only in the worker: the restore
+/// that named the last daemon is a write of startup recovery's, not an
+/// event, as for any restored run, and the archive names the worker in
+/// both.
+///
+/// The stream holds one copy of the held ending. A second daemon run's
+/// sweep publishes another under the same id, and the broker drops it as a
+/// duplicate inside its window (`Nats-Msg-Id`), so the replay folds one.
+/// The fold of a second copy that does reach the consumer is
+/// `outcome_tests::the_run_s_own_ending_after_its_held_one_changes_nothing`,
+/// by direct delivery.
+#[tokio::test]
+async fn a_replay_of_one_held_ending_rebuilds_the_row_through_its_archive() {
+    let mut world = World::new().await;
+    let invocation_id = world
+        .finished_row("failed", |id| {
+            let mut stored = its_own_failed(id);
+            stored.envelope.schema_version = crate::events::SCHEMA_VERSION - 1;
+            terminal_outcome::encode(&stored).unwrap()
+        })
+        .await;
+    world.restored(invocation_id).await;
+    world.sweep().await;
+    // The next daemon run publishes it again, under the same id; the
+    // broker drops that copy as a duplicate.
+    world.sweep().await;
+    let held = record_of(&world.cp_store, invocation_id).await;
+    assert_eq!(
+        held.as_ref()
+            .map(|(status, archive, worker)| (*status, *archive, worker.as_str())),
+        Some((
+            OwnerStatus::Failed,
+            crate::control_plane::store::ArchiveState::Pending,
+            "the-last-daemon"
+        ))
+    );
+
+    // The operator keeps a copy and releases the row as the guide says;
+    // the next pass archives it without its outcome.
+    world
+        .operator_sql(
+            "UPDATE invocation_state SET terminal_outcome = NULL WHERE invocation_id = ?",
+            invocation_id,
+        )
+        .await;
+    world.sweep().await;
+    let archived = record_of(&world.cp_store, invocation_id).await;
+    assert_eq!(
+        archived
+            .as_ref()
+            .map(|(status, archive, worker)| (*status, *archive, worker.as_str())),
+        Some((
+            OwnerStatus::Failed,
+            crate::control_plane::store::ArchiveState::Archived,
+            "held-ending-worker"
+        ))
+    );
+
+    let replayed = world.replay().await;
+    assert_eq!(record_of(&replayed, invocation_id).await, archived);
+    assert_eq!(
+        started_of(&replayed, invocation_id).await,
+        started_of(&world.cp_store, invocation_id).await,
+        "the run's start, whether the restore or the held ending wrote it"
     );
 }

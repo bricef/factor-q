@@ -3131,3 +3131,70 @@ async fn a_replay_refreshes_a_row_and_never_unlocates_it() {
     );
     assert_eq!(store.count().await.unwrap(), 1);
 }
+
+/// A held ending's totals are a run-level copy of what the run's model
+/// calls cost (issue 1071), and every call's cost is already on its own
+/// `llm.response` or `llm.failure`. So no cost report counts it: its row
+/// carries no cost and no duration, and every cost query reads the call
+/// alone, however the event's own totals are filled in.
+#[tokio::test]
+async fn no_cost_report_counts_a_held_ending() {
+    let (store, _dir) = open_store().await;
+    let inv = Uuid::now_v7();
+    store
+        .insert_event(&sample_llm_response_with_cost("alpha", inv, 0.10), None)
+        .await
+        .unwrap();
+    let held = Event::new(
+        aid("alpha"),
+        inv,
+        EventPayload::InvocationEndingHeld(crate::events::InvocationEndingHeldPayload {
+            outcome: crate::events::HeldOutcome::Completed,
+            ended_at_ms: 2_000,
+            started_at_ms: 1_000,
+            worker_id: crate::worker::WorkerId::new("worker-1").unwrap(),
+            reason: crate::events::EndingHeldReason::PayloadTooLarge,
+            totals: Some(crate::events::RecordedTotals {
+                total_llm_calls: 1,
+                total_tool_calls: 0,
+                total_cost: 0.10,
+            }),
+        }),
+    );
+    store.insert_event(&held, None).await.unwrap();
+
+    let rows = store
+        .query_events(
+            &EventFilter {
+                event_type: Some("invocation_ending_held"),
+                ..EventFilter::default()
+            },
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the held ending is projected");
+    assert_eq!((rows[0].total_cost, rows[0].duration_ms), (None, None));
+
+    let summary = store.cost_summary(None, None).await.unwrap();
+    assert_eq!(summary.len(), 1);
+    assert!((summary[0].total_cost - 0.10).abs() < 1e-12, "{summary:?}");
+    assert_eq!(summary[0].event_count, 1);
+    let by_invocation = store.cost_by_invocation("alpha", None, 10).await.unwrap();
+    assert_eq!(by_invocation.len(), 1);
+    assert!((by_invocation[0].total_cost - 0.10).abs() < 1e-12);
+    assert_eq!(by_invocation[0].event_count, 1);
+    let one = store
+        .cost_of_invocation(&inv.to_string())
+        .await
+        .unwrap()
+        .expect("the call is on record");
+    assert!((one.total_cost - 0.10).abs() < 1e-12);
+    assert_eq!(one.event_count, 1);
+    let models = store.cost_by_model(None, None).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert!((models[0].total_cost - 0.10).abs() < 1e-12);
+    let buckets = store.cost_by_time_bucket(false, None).await.unwrap();
+    let bucketed: f64 = buckets.iter().map(|b| b.total_cost).sum();
+    assert!((bucketed - 0.10).abs() < 1e-12, "{buckets:?}");
+}
