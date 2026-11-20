@@ -373,6 +373,21 @@ impl CoordinationConsumer {
                 self.handle_ending(&event, OwnershipEvent::of_failed(payload.phase))
                     .await
             }
+            // The ending of a run whose own the worker holds (issue 1071),
+            // folded as that ending; a row it writes names that worker and
+            // is dated at the run's start, not at this fold.
+            EventPayload::InvocationEndingHeld(held) => self
+                .move_row(
+                    &event,
+                    OwnershipEvent::Ended(held.outcome.into()),
+                    OwnerFacts {
+                        worker_id: held.worker_id.as_str(),
+                        at_ms: held.started_at_ms,
+                    },
+                    None,
+                )
+                .await
+                .map(|_| ()),
             EventPayload::InvocationOperatorResumed(_) => Ok(()),
             _ => {
                 // Unknown invocation event variant — ack and
@@ -385,9 +400,9 @@ impl CoordinationConsumer {
         result.map_err(as_handler_error)
     }
 
-    /// Apply `what` to `event`'s run's ownership row, `worker_id` standing
-    /// for the worker on a row the move creates or one that takes it, and
-    /// say what happened: debug for a move or a duplicate, warn for a
+    /// Apply `what` to `event`'s run's ownership row, `facts` standing for
+    /// the worker and the time on a row the move creates or one that takes
+    /// them, and say what happened: debug for a move or a duplicate, warn for a
     /// refusal (the row records the run finished, and the event would put
     /// it back in progress) and for an ending that reaches a row recorded
     /// `failed` with its archive written, the state an operator's drop
@@ -401,20 +416,11 @@ impl CoordinationConsumer {
         &self,
         event: &Event,
         what: OwnershipEvent,
-        worker_id: &str,
+        facts: OwnerFacts<'_>,
         report: Option<&crate::events::InvocationAmbiguousPayload>,
     ) -> Result<Applied, CoordinationConsumerError> {
         let invocation_id = event.envelope.invocation_id.to_string();
-        let applied = ownership::apply(
-            self.store.as_ref(),
-            &invocation_id,
-            what,
-            OwnerFacts {
-                worker_id,
-                at_ms: Utc::now().timestamp_millis(),
-            },
-        )
-        .await?;
+        let applied = ownership::apply(self.store.as_ref(), &invocation_id, what, facts).await?;
         let agent_id = event.envelope.agent_id.as_str();
         let event_type = event.payload.event_type();
         let stuck_entity = report.map(|report| report.stuck_entity.as_str());
@@ -483,8 +489,13 @@ impl CoordinationConsumer {
         event: &Event,
         what: OwnershipEvent,
     ) -> Result<(), CoordinationConsumerError> {
-        self.move_row(event, what, event.envelope.agent_id.as_str(), None)
-            .await?;
+        self.move_row(
+            event,
+            what,
+            folded_now(event.envelope.agent_id.as_str()),
+            None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -511,7 +522,7 @@ impl CoordinationConsumer {
         self.move_row(
             event,
             OwnershipEvent::Ambiguous,
-            event.envelope.agent_id.as_str(),
+            folded_now(event.envelope.agent_id.as_str()),
             Some(payload),
         )
         .await?;
@@ -570,7 +581,7 @@ impl CoordinationConsumer {
             .move_row(
                 event,
                 OwnershipEvent::Archived(Ending::of_archived_phase(&payload.final_phase)),
-                payload.worker_id.as_str(),
+                folded_now(payload.worker_id.as_str()),
                 None,
             )
             .await;
@@ -705,6 +716,15 @@ fn is_unreadable(err: &CoordinationConsumerError) -> bool {
         err,
         CoordinationConsumerError::Ownership(OwnershipError::Unreadable { .. })
     )
+}
+
+/// The owner facts of an event folded now: `worker_id`, and the time of
+/// the fold.
+fn folded_now(worker_id: &str) -> OwnerFacts<'_> {
+    OwnerFacts {
+        worker_id,
+        at_ms: Utc::now().timestamp_millis(),
+    }
 }
 
 #[cfg(test)]

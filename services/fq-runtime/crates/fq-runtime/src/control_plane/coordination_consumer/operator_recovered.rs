@@ -5,7 +5,7 @@
 use chrono::Utc;
 use tracing::{debug, warn};
 
-use super::{CoordinationConsumer, CoordinationConsumerError, is_unreadable};
+use super::{CoordinationConsumer, CoordinationConsumerError, folded_now, is_unreadable};
 use crate::control_plane::ownership::{Ending, OwnershipEvent};
 use crate::control_plane::store::{ControlPlaneStoreError, InvocationArchiveRow};
 use crate::events::Event;
@@ -74,7 +74,7 @@ impl CoordinationConsumer {
                 OwnershipEvent::TerminationRequested(Ending::of_operator_phase(
                     &payload.final_phase,
                 )),
-                event.envelope.agent_id.as_str(),
+                folded_now(event.envelope.agent_id.as_str()),
                 None,
             )
             .await;

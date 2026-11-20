@@ -11,8 +11,9 @@ use crate::agent::AgentId;
 use crate::control_plane::store::OwnerRow;
 use crate::control_plane::store::{ArchiveState, OwnerStatus};
 use crate::events::{
-    CompletedPayload, FailedPayload, FailureKind, FailurePhase, InvocationAmbiguousPayload,
-    InvocationArchivedPayload, InvocationOperatorRecoveredPayload, InvocationTotals,
+    CompletedPayload, EndingHeldReason, FailedPayload, FailureKind, FailurePhase, HeldOutcome,
+    InvocationAmbiguousPayload, InvocationArchivedPayload, InvocationEndingHeldPayload,
+    InvocationOperatorRecoveredPayload, InvocationTotals,
 };
 use crate::test_support::nats::{NatsServer, test_nats};
 use crate::worker::WorkerId;
@@ -133,6 +134,24 @@ impl Fixture {
         .await;
     }
 
+    /// The worker holding the run's own ending says how the run ended
+    /// (issue 1071). It names a worker of its own, so a test can tell
+    /// whose id a row it writes takes.
+    async fn held(&self, outcome: HeldOutcome) {
+        self.deliver(EventPayload::InvocationEndingHeld(
+            InvocationEndingHeldPayload {
+                outcome,
+                ended_at_ms: 2_000,
+                // Not the restore's 1_000, so a test can tell them apart.
+                started_at_ms: 1_500,
+                worker_id: WorkerId::new(HOLDING_WORKER).unwrap(),
+                reason: EndingHeldReason::StoredEventRefused,
+                totals: None,
+            },
+        ))
+        .await;
+    }
+
     async fn row(&self) -> Option<OwnerRow> {
         self.store
             .get_invocation_owner(&self.invocation_id.to_string())
@@ -144,6 +163,9 @@ impl Fixture {
         self.row().await.map(|row| row.status)
     }
 }
+
+/// The worker that holds a run's own ending in the `held` deliveries.
+const HOLDING_WORKER: &str = "the-holding-worker";
 
 /// The issue's own case: a run recovery restored ends in `failed`, and its
 /// archive never arrives (refused, held, or still on its way).
@@ -544,4 +566,159 @@ async fn a_refused_event_still_advances_the_watermark() {
             .is_some(),
         "the drop took effect"
     );
+}
+
+// --- A held ending (issue 1071) ------------------------------------------
+//
+// `invocation.ending_held` stands for the run's own ending, which the
+// worker holds, and folds through the same cells of the transition table.
+
+/// A run with no row, a triggered one: the held ending writes the row with
+/// that ending, its archive pending, owned by the worker holding it.
+#[tokio::test]
+async fn a_held_ending_writes_the_row_of_a_run_that_had_none() {
+    let fixture = Fixture::new().await;
+    fixture.held(HeldOutcome::Completed).await;
+    let row = fixture.row().await.expect("the held ending writes the row");
+    assert_eq!(
+        (row.status, row.archive_state, row.worker_id.as_str()),
+        (
+            OwnerStatus::Completed,
+            ArchiveState::Pending,
+            HOLDING_WORKER
+        )
+    );
+}
+
+/// A run recovery restored to `in_flight` reads the ending, and keeps the
+/// worker it was restored under, as the run's own ending would.
+#[tokio::test]
+async fn a_held_ending_moves_a_restored_run_and_keeps_its_worker() {
+    let fixture = Fixture::new().await;
+    fixture.restored_in_flight().await;
+    fixture.held(HeldOutcome::Failed).await;
+    let row = fixture.row().await.expect("the run is on record");
+    assert_eq!(
+        (row.status, row.archive_state, row.worker_id.as_str()),
+        (
+            OwnerStatus::Failed,
+            ArchiveState::Pending,
+            fixture.worker_id.as_str()
+        )
+    );
+}
+
+/// A run reported ambiguous reads the ending.
+#[tokio::test]
+async fn a_held_ending_moves_an_ambiguous_run() {
+    let fixture = Fixture::new().await;
+    fixture.ambiguous().await;
+    fixture.held(HeldOutcome::Failed).await;
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+}
+
+/// The run's own ending, published later by a build that can republish
+/// it, finds the row already saying it, and so does a second copy of the
+/// held ending, as after a restart: neither changes the row.
+#[tokio::test]
+async fn the_run_s_own_ending_after_its_held_one_changes_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.held(HeldOutcome::Completed).await;
+    let first = fixture.row().await.expect("the held ending writes the row");
+    fixture.held(HeldOutcome::Completed).await;
+    fixture.completed().await;
+    assert_eq!(fixture.row().await, Some(first));
+}
+
+/// A held ending after the run's own, the same one, changes nothing.
+#[tokio::test]
+async fn a_held_ending_after_the_run_s_own_changes_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.restored_in_flight().await;
+    fixture.failed(FailurePhase::ToolCall).await;
+    let first = fixture.row().await.expect("the ending moved the row");
+    fixture.held(HeldOutcome::Failed).await;
+    assert_eq!(fixture.row().await, Some(first));
+}
+
+/// A held ending that contradicts the one on record is a conflict, and the
+/// row keeps the ending it recorded.
+#[tokio::test]
+async fn a_held_ending_contradicting_the_recorded_one_keeps_it() {
+    let fixture = Fixture::new().await;
+    fixture.completed().await;
+    fixture.held(HeldOutcome::Failed).await;
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Completed));
+}
+
+/// The archive that follows once an operator releases the row moves it to
+/// archived with the same ending, owned by the worker the archive names.
+#[tokio::test]
+async fn the_archive_after_a_held_ending_keeps_it() {
+    let fixture = Fixture::new().await;
+    fixture.held(HeldOutcome::Failed).await;
+    fixture.archived("failed").await;
+    let row = fixture.row().await.expect("the run is on record");
+    assert_eq!(
+        (row.status, row.archive_state),
+        (OwnerStatus::Failed, ArchiveState::Archived)
+    );
+}
+
+/// An operator's drop that came first stands.
+#[tokio::test]
+async fn a_held_ending_after_a_drop_leaves_the_run_dropped() {
+    let fixture = Fixture::new().await;
+    fixture.dropped().await;
+    fixture.held(HeldOutcome::Completed).await;
+    assert_eq!(fixture.status().await, Some(OwnerStatus::Failed));
+}
+
+/// The worker reads a held run's outcome from its row's phase by the rule
+/// the run's `invocation.archived` is read by, so the archive that follows
+/// a release never contradicts the held ending, whatever the phase says.
+#[tokio::test]
+async fn a_held_ending_and_the_archive_after_it_agree_for_every_phase() {
+    for phase in [
+        "completed",
+        "failed",
+        "in_flight",
+        "deferred",
+        "something-newer",
+    ] {
+        let fixture = Fixture::new().await;
+        let outcome = HeldOutcome::from(
+            crate::control_plane::ownership::Ending::of_archived_phase(phase),
+        );
+        fixture.held(outcome).await;
+        let held = fixture.status().await;
+        fixture.archived(phase).await;
+        let row = fixture.row().await.expect("the run is on record");
+        assert_eq!(
+            (Some(row.status), row.archive_state),
+            (held, ArchiveState::Archived),
+            "phase {phase:?}: the archive keeps the held ending and records the archive"
+        );
+    }
+}
+
+/// A row the held ending writes is dated at the run's start, which the
+/// event carries, not at the fold, which can come days after the run:
+/// `fq invocation list` shows the row's time as when the run started. A
+/// row that was already there keeps its own time.
+#[tokio::test]
+async fn a_row_a_held_ending_writes_is_dated_at_the_run_s_start() {
+    let fixture = Fixture::new().await;
+    fixture.held(HeldOutcome::Completed).await;
+    let row = fixture.row().await.expect("the held ending writes the row");
+    assert_eq!(
+        row.assigned_at, 1_500,
+        "the run's start, as the held ending reports it"
+    );
+
+    let restored = Fixture::new().await;
+    restored.restored_in_flight().await;
+    let before = restored.row().await.expect("restored").assigned_at;
+    restored.held(HeldOutcome::Failed).await;
+    assert_eq!(restored.row().await.expect("on record").assigned_at, before);
 }
