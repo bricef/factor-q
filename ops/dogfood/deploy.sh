@@ -467,11 +467,16 @@ running_image() {  # $1 = service → the image its running container was create
 # when it cannot be asked (no container, or its fq is not paired yet —
 # the README's one-time step). Asked through the container's own client
 # over the edge, like every other question to the daemon — of `fq
-# doctor`, whose `executions.in_flight` is read from the live execution
-# table and counts a trigger-dispatched run from the instant it is
-# dispatched. NOT `fq invocation list --status in_flight`: that reads the
-# ownership table, which nothing writes on dispatch (#721), so it
+# doctor`, whose `executions.in_flight` is read from the worker's live
+# execution table, which holds a run from its first WAL write until it
+# ends. NOT `fq invocation list --status in_flight`: that reads the
+# ownership table, which before #721 had no row for a running run, so it
 # answered "idle" while agents were mid-tool and the drain killed them.
+# A run now has its row from the same first WAL write, but not one whose
+# row that write could not make, or one an earlier build started, and
+# the doctor's count still holds those. Neither counts a run still in
+# setup: the drain stops it before its first WAL write and its trigger
+# is delivered again (#974).
 # Stuck invocations count too: a deploy waits until an operator drops
 # or resumes them, which FQ_DEFER_WARN_HOURS exists to surface.
 in_flight() {

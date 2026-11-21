@@ -111,7 +111,8 @@ if [ "$build_mb" -gt "$max_mb" ]; then
     else
         # deploy.sh's question, of the same surface: `fq doctor`'s live
         # execution count, never `invocation list --status in_flight`,
-        # which is blind to trigger-dispatched runs (#721).
+        # which misses a run whose ownership row was never written
+        # (deploy.sh says when, #721).
         inflight="$(if out="$(docker compose exec -T fqd fq doctor --json 2>/dev/null)"; then printf '%s' "$out" | jq -rn '(try input catch {}) | .executions.in_flight // "unknown"' 2>/dev/null || echo unknown; else echo unknown; fi)"
         if [ "$inflight" = "0" ]; then
             say "build cache is ${build_mb}M, over ${CACHE_MAX_GB}G and the daemon is idle — emptying build/ (the next build is cold)"

@@ -735,9 +735,12 @@ to resume once the fold has caught up (resuming it without a restart is
 [#1089](https://github.com/bricef/factor-q/issues/1089)), and the
 consumer's tick sweeps wait until recovery has decided. A delivery the stopped daemon left unacknowledged holds the
 fold for the coordination consumer's five-second ack window, well
-inside that bound. A run still
-running from a trigger has no row yet, so it is not in
-`fq invocation list`; `fq doctor`'s current executions count it
+inside that bound. A run
+started from a trigger has its row from its first WAL write, written by
+the dispatcher once it has marked the trigger's claim, so it is in
+`fq invocation list` while it runs, under the daemon's worker id and
+from its own start; a run whose row that write could not make, or one
+an earlier build started, has none until it ends or is restored
 ([#721](https://github.com/bricef/factor-q/issues/721)). A run whose
 stored terminal event the archive sweeper holds, because this build
 will not republish it or the broker refuses it for its size, reads

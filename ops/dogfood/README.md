@@ -535,13 +535,16 @@ unattended:
   "job succeeded/failed" line per run.
 - **It waits its turn.** Before draining it asks the daemon, through
   the container's `fq doctor`, how many invocations are in flight —
-  the live execution count, which sees a trigger-dispatched run from
-  the instant it is dispatched, stuck ones included — and defers to the
-  next run if any, or if the daemon cannot be asked (an unpaired
-  container is never assumed idle). Not `fq invocation list --status
-  in_flight`: that listing is not written on dispatch and answered
-  "idle" while agents were mid-tool
-  ([#721](https://github.com/bricef/factor-q/issues/721)). The backup
+  the live execution count, which sees a run from its first WAL write
+  until it ends, stuck ones included — and defers to the next run if
+  any, or if the daemon cannot be asked (an unpaired container is never
+  assumed idle). A run still in setup is not counted; the drain stops it
+  before its first WAL write and its trigger is delivered again. Not
+  `fq invocation list --status in_flight`: before
+  [#721](https://github.com/bricef/factor-q/issues/721) that listing had
+  no row for a running run and answered "idle" while agents were
+  mid-tool, and it still misses a run whose row was never written. The
+  backup
   and the cache prune ask the same question the same way. This
   automates the first check of "Before any restart", and it is why a
   merge lands on the next quiet hour rather than interrupting the

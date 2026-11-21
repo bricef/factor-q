@@ -320,6 +320,10 @@ because the ack fires seconds in rather than at
 completion, a long-running invocation is not redelivered past the ack
 deadline and re-run. From the first WAL write on, in-flight
 durability is the reducer WAL's job (`recovery::scan_in_flight`).
+At that durable start, once it has marked the trigger's claim, the
+dispatcher also writes the run's ownership row, `in_flight` under its
+worker id from the run's own start, so `fq invocation list` lists a
+running run ([#721](https://github.com/bricef/factor-q/issues/721)).
 
 ### Pricing (`fq-runtime/src/pricing.rs`)
 

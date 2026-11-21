@@ -1106,6 +1106,11 @@ CREATE TABLE coordination_invocation_owner (
 -- that arrives is recorded, and the run's own ending makes it
 -- 'pending'. Every move is one transition table
 -- (control_plane/ownership.rs), written as a compare-and-set.
+-- A run's row is first written at its durable start, its first WAL
+-- write: the trigger dispatcher writes it 'in_flight', under its worker
+-- id, with assigned_at the run's own start, once it has marked the
+-- trigger's claim, as startup recovery's restore does (issue 721). An
+-- event creates a row only for a run whose start wrote none.
 -- The termination record beside them (issue 1070): the fold of a
 -- run's ending, or of an archive that ends it, records the run as its
 -- ender, and an operator's drop of a run not ended records the drop,
