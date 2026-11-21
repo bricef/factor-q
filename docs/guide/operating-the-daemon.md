@@ -2118,19 +2118,39 @@ so check its run yourself first
 
 What still needs a person is the last case. The refusal names the
 invocation to check. In `fq invocation show <id>`, the run started if
-the output has any of these: a `Live execution:` block (the worker's
-WAL holds the run, in flight or finished and not yet archived), an
-`archived:` line, a `status:` other than `(no coordination row)`, or a
-`trigger:` line saying `durably started`. A run still going in this
-daemon has no coordination row, since ownership rows are written only
-when a run ends (a `completed`, or a `failed` outside `setup`), turns
-ambiguous, is archived or is dropped, and by startup recovery: for it the output says `status:   (no coordination row)` and
-then shows the `Live execution:` block, so that status alone does not
-mean the run never started. The run has not started if the command
-answers `no invocation found with id=…`, or shows none of the four,
-only a `trigger:` line saying `claimed, start not recorded`,
-`consumed without a run` or `none recorded`, and its events: its `triggered` event at most, and a
-`failed` one if it was refused in setup. Then requeue it with
+the output has a `Live execution:` block (the worker's WAL holds the
+run, in flight or finished and not yet archived), an `archived:` line
+(the worker handed the run's archive over), or a `trigger:` line saying
+`durably started`. A `status:` other than `(no coordination row)` is a
+start too, but only under a `trigger:` line that does not say
+`dropped by an operator`: a drop of a run before its first WAL write
+writes the run's row, ended by the drop, without its having started,
+and its `trigger:` line then reads
+`consumed without a run: …; dropped by an operator`. A run still going
+has its coordination row from its first WAL write,
+`status:   in_flight`. One started by an earlier build, or
+whose row that write could not make (the daemon logs it at error), says
+`status:   (no coordination row)` until it ends, turns ambiguous, is
+archived, is dropped or is restored by startup recovery, and then shows
+the `Live execution:` block, so that status alone does not mean the run
+never started. Rows an older build wrote are the one exception: before
+the termination record, a drop wrote an empty archive record of its own,
+even for a run that never made its first WAL write, and recorded no drop
+on its claim. Such a run shows `ended by: not recorded`,
+`status:   failed` and an `archived:` line with `phase=failed` whose
+`terminal_at_ms` and `archived_at_ms` are the same, the drop's time,
+under a trigger line that does not say it was dropped, so the rule
+above reads it as started; it did not start if its recent events show
+nothing after its `triggered` (and a `failed` from setup) but the drop's
+`invocation_operator_recovered`, and once those events have aged out of
+the event log, nothing on the surface tells it apart. The run has not
+started if the command answers
+`no invocation found with id=…`, or shows no start by those rules: no
+`Live execution:` block and no `archived:` line, a `trigger:` line
+saying `claimed, start not recorded`, `consumed without a run` or
+`none recorded`, a `status:` only under `dropped by an operator`, and
+its events: its `triggered` event at most, and a `failed` one if it was
+refused in setup. Then requeue it with
 `--trigger-seq <N> --checked-not-started` (`checked_not_started` on
 `dead_letter.requeue`, which needs `trigger_seq`); the refusal prints
 that command. The flag is your word that the run of that one dead letter

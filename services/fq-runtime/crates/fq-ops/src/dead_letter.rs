@@ -77,10 +77,13 @@ pub struct DeadLetter {
     /// can be run again only as new work, which nothing checks, so check
     /// the run first: from its recorded payload with `trigger.publish` for
     /// the last, and published afresh for the others. That check is of the
-    /// invocation named here: the run started if `fq invocation show`
-    /// gives a `Live execution:` block, an `archived:` line, a `status:`
-    /// other than `(no coordination row)` or a trigger line saying
-    /// `durably started`. With no invocation named, `fq doctor` cannot
+    /// invocation named here, with `fq invocation show`: it started if that
+    /// shows a `Live execution:` block, an `archived:` line or a trigger
+    /// line saying `durably started`; a `status:` other than `(no
+    /// coordination row)` is a start only under a trigger line that does
+    /// not say `dropped by an operator`, since a run an operator dropped
+    /// before its first WAL write has one, ended by the drop, without
+    /// having started. With no invocation named, `fq doctor` cannot
     /// show that the run did not start: it lists a trigger claim only
     /// while it is still held and judged stranded, never one whose run
     /// started and marked it, though one it lists at the dead letter's
@@ -182,6 +185,26 @@ pub struct StartUnchecked {
     pub invocation_id: Option<String>,
 }
 
+/// What in `fq invocation show`'s output says a run started, in the one
+/// set of words every surface that sends an operator to check a run gives:
+/// `dead_letter.requeue`'s refusals, `fq dead-letters list`'s line, and
+/// the description of [`DeadLetter::start_unchecked`], which carries it
+/// word for word.
+///
+/// A run that started shows its live execution while the worker's WAL
+/// holds it, its archive record once the worker has handed its archive
+/// over, and a trigger line saying `durably started` once its claim is
+/// marked. Its coordination row, from its durable start, says so too,
+/// except for a run an operator dropped before its first WAL write: the
+/// drop writes the run's row, ended by the drop, with its request, though
+/// no archive record, and its trigger line says so. So the row counts only
+/// under a trigger line that does not.
+pub const STARTED_IF: &str = "it started if that shows a `Live execution:` block, an `archived:` \
+     line or a trigger line saying `durably started`; a `status:` other than `(no coordination \
+     row)` is a start only under a trigger line that does not say `dropped by an operator`, since \
+     a run an operator dropped before its first WAL write has one, ended by the drop, without \
+     having started";
+
 /// Why `fq doctor` not listing a stranded trigger claim for a dead letter
 /// does not show that its run did not start, in the words
 /// `dead_letter.requeue`'s refusal and `fq dead-letters list` both give
@@ -254,6 +277,23 @@ mod tests {
                 "unattributed_kind": kind,
             },
         })
+    }
+
+    /// **The published description of `start_unchecked` gives the words
+    /// for telling a start that the refusals and the listing give**, word
+    /// for word: one text everywhere, so a correction cannot reach one
+    /// surface and miss another.
+    #[test]
+    fn start_uncheckeds_description_carries_the_shared_words_for_a_start() {
+        let schema = serde_json::to_value(schemars::schema_for!(DeadLetter)).unwrap();
+        let description = schema["properties"]["start_unchecked"]["description"]
+            .as_str()
+            .expect("start_unchecked is described");
+        let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(STARTED_IF),
+            "the description does not carry the shared words:\n{flat}"
+        );
     }
 
     /// **A page holding one dead letter of a kind this build does not know

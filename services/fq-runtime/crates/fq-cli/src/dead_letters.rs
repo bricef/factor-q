@@ -180,11 +180,11 @@ fn dead_letter_lines(d: &fq_ops::dead_letter::DeadLetter) -> String {
         out.push_str(&match (&unchecked.invocation_id, &d.unattributed) {
             // It names no trigger, so there is no requeue to check before:
             // only whether the work ran.
+            // The refusal's words for telling a start, from one source.
             (Some(id), Some(_)) => format!(
                 "      -> it cannot be requeued; to tell whether its run started, run `fq \
-                 invocation show {id}`: it started if that shows a `Live execution:` block, an \
-                 `archived:` line, a `status:` other than `(no coordination row)` or a trigger \
-                 line saying `durably started`; a copy can still start it after you look\n"
+                 invocation show {id}`: {}. A copy can still start it after you look\n",
+                fq_ops::dead_letter::STARTED_IF,
             ),
             // The refusal's words, from one source: a claim `fq doctor`
             // does not list shows nothing, and nothing on a nameless
@@ -285,9 +285,12 @@ mod tests {
                 "      start not checked: the worker could not say whether its WAL holds the run; \
                  its run may have started\n      -> it cannot be requeued; to tell whether its run \
                  started, run `fq invocation show 019a0000-0000-7000-8000-000000000001`: it \
-                 started if that shows a `Live execution:` block, an `archived:` line, a \
-                 `status:` other than `(no coordination row)` or a trigger line saying `durably \
-                 started`; a copy can still start it after you look\n"
+                 started if that shows a `Live execution:` block, an `archived:` line or a \
+                 trigger line saying `durably started`; a `status:` other than `(no \
+                 coordination row)` is a start only under a trigger line that does not say \
+                 `dropped by an operator`, since a run an operator dropped before its first WAL \
+                 write has one, ended by the drop, without having started. A copy can still \
+                 start it after you look\n"
             ),
             "got:\n{named}"
         );
