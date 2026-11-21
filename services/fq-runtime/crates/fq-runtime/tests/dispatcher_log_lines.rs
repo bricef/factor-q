@@ -1,5 +1,6 @@
 //! What the trigger dispatcher logs when it drops a copy of a trigger,
-//! cannot record or acknowledge a run's durable start, cannot record a
+//! cannot record or acknowledge a run's durable start, cannot write the
+//! run's ownership row at that start, cannot record a
 //! trigger it dealt with as consumed, cannot publish a trigger's dead
 //! letter, or resumes a deferred run that has already ended, read off the
 //! log of a dispatcher running its own consume loop; and what the
@@ -128,6 +129,15 @@ const CLAIM_STARTED_BY_ANOTHER: &str =
 /// claim the mark did not find.
 const START_NOT_RECORDED: &str =
     "could not record the durable start of a trigger whose claim does not name its run";
+/// The start of the line for a run's ownership row the store would not
+/// write at its durable start.
+const ROW_NOT_WRITTEN: &str = "could not write the run's ownership row at its durable start";
+/// The start of the line for a run's ownership row that already recorded
+/// the run ended when its durable start came to write it.
+const ROW_ALREADY_ENDED: &str = "the run's ownership row already records it ended";
+/// The agent id an operator's drop of a run with no row names in the
+/// worker column ([`Script::DroppedRow`]).
+const DROPPED_BY_AGENT: &str = "the-dropped-runs-agent";
 /// The invocation a changed claim names ([`ClaimChange`]).
 const ANOTHER_RUN: &str = "another-run";
 /// The line for a deferred run whose resume found it already ended.
@@ -292,6 +302,16 @@ enum Script {
     /// good before its first WAL write: the claim's consume before the ack
     /// finds no claim of its own to record consumed.
     FailsForGoodWithTheClaimTakenAway,
+    /// Makes the store refuse every new ownership row: the mark lands and
+    /// the run's row is not written.
+    RefusedRows,
+    /// Folds an operator's drop of the run onto its ownership row, as the
+    /// coordination consumer would between the run's first WAL write and
+    /// the dispatcher's write of the row.
+    DroppedRow,
+    /// Writes the run an ownership row with a status this build cannot
+    /// read, as a newer daemon sharing the store could.
+    UnreadableRow,
 }
 
 /// How [`Script::ChangedClaim`] changes the claim before the mark.
@@ -391,6 +411,9 @@ impl Worker for Stub {
                 close(&self.connection).await;
             }
             Script::ChangedClaim(change) => change_the_claim(&self.claim_db, change).await,
+            Script::RefusedRows => refuse_ownership_rows(&self.claim_db).await,
+            Script::DroppedRow => drop_the_run(&self.claim_db, invocation_id).await,
+            Script::UnreadableRow => write_an_unreadable_row(&self.claim_db, invocation_id).await,
             Script::FailsTransiently => {
                 drop(durable_start);
                 self.ended.notify_one();
@@ -542,6 +565,66 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
             .expect("install the refusal");
     }
     conn.close().await.expect("close the claim store's file");
+}
+
+/// Make every insert of an ownership row fail from now on.
+async fn refuse_ownership_rows(claim_db: &Path) {
+    let mut conn = claim_db_connection(claim_db).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_ownership_rows BEFORE INSERT ON coordination_invocation_owner \
+         BEGIN SELECT RAISE(ABORT, 'injected: the store refuses the ownership row'); END",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("install the refusal");
+    conn.close().await.expect("close the claim store's file");
+}
+
+/// Write `invocation_id` an ownership row whose status this build does
+/// not know: the store's checks admit it, and every read of it fails.
+async fn write_an_unreadable_row(claim_db: &Path, invocation_id: Uuid) {
+    let mut conn = claim_db_connection(claim_db).await;
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES (?, 'a-newer-daemon', 1, 'a_status_from_a_newer_daemon', 'not_due')",
+    )
+    .bind(invocation_id.to_string())
+    .execute(&mut conn)
+    .await
+    .expect("write the row");
+    conn.close().await.expect("close the claim store's file");
+}
+
+/// Fold an operator's drop of `invocation_id` onto its ownership row, as
+/// the coordination consumer folds one for a run with no row: the agent's
+/// id stands in the worker column.
+async fn drop_the_run(claim_db: &Path, invocation_id: Uuid) {
+    use fq_runtime::control_plane::ownership::{
+        ArchiveExpected, OwnerFacts, OwnershipEvent, apply,
+    };
+    use fq_runtime::control_plane::store::TerminationRequest;
+    let store = ControlPlaneStore::open(claim_db)
+        .await
+        .expect("open the claim store's file");
+    let request = TerminationRequest {
+        requested_at: 2,
+        requested_by: Some("an-operator".to_string()),
+        reason: None,
+    };
+    apply(
+        &store,
+        &invocation_id.to_string(),
+        OwnershipEvent::TerminationRequested(ArchiveExpected::Yes),
+        OwnerFacts {
+            worker_id: DROPPED_BY_AGENT,
+            at_ms: 2,
+            ended_at_ms: 2,
+            request: Some(&request),
+        },
+    )
+    .await
+    .expect("fold the drop");
 }
 
 /// Make every delete of a claim row fail from now on: the release is the
@@ -1744,6 +1827,82 @@ async fn a_healthy_start_logs_no_release_that_gave_nothing_back() {
     assert!(
         lines.is_empty(),
         "a healthy start released nothing and said so: {lines:#?}"
+    );
+}
+
+/// **A run's ownership row the store refuses at its durable start is one
+/// `error` line naming the run, the trigger and the sequence** (issue
+/// 721), at the level of a mark the store refuses: the run goes on, and
+/// the line is what says why `fq invocation list` leaves it out until its
+/// ending writes the row. The mark landed, so nothing says it gave up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_the_store_refuses_is_one_error_line_naming_the_run() {
+    let mut daemon = Daemon::new("row-refused", Script::RefusedRows).await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, ROW_NOT_WRITTEN, named);
+    assert!(line.field("error").is_some(), "{line:#?}");
+}
+
+/// **A run's ownership row an operator's drop already ended is one `warn`
+/// line naming the run and the state the row records** (issue 721). The
+/// drop was folded before the dispatcher wrote the row, so the start is
+/// not written over it, and the row keeps the agent's id the drop wrote in
+/// its worker column; the line is what says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_an_operators_drop_already_ended_is_one_warn_line_naming_the_run() {
+    let mut daemon = Daemon::new("row-already-dropped", Script::DroppedRow).await;
+    let (trigger_id, invocation_id) = daemon.run_one().await;
+
+    let lines = daemon
+        .log
+        .lines(|line| about(line, ROW_ALREADY_ENDED, &daemon.subject));
+    assert_eq!(lines.len(), 1, "the case is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::WARN, "{line:#?}");
+    assert_eq!(
+        line.field("invocation_id"),
+        Some(invocation_id.to_string().as_str())
+    );
+    assert_eq!(
+        line.field("trigger_id"),
+        Some(trigger_id.to_string().as_str())
+    );
+    assert!(
+        line.field("recorded")
+            .is_some_and(|recorded| recorded.starts_with("failed/")),
+        "the line names the drop's ending: {line:#?}"
+    );
+}
+
+/// **A run's ownership row this build cannot read, met at its durable
+/// start, is one `error` line naming the run** (issue 721): the row is
+/// left as it is and the run goes on, and the line says why the run's
+/// row does not read `in_flight`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_this_build_cannot_read_is_one_error_line_naming_the_run() {
+    let mut daemon = Daemon::new("row-unreadable", Script::UnreadableRow).await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, ROW_NOT_WRITTEN, named);
+    assert!(line.field("detail").is_some(), "{line:#?}");
+}
+
+/// **A healthy start logs nothing about its run's ownership row** at
+/// `info` or above (issue 721): the row is written, and only a row that
+/// was not is worth an operator's attention.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_healthy_start_logs_nothing_about_its_runs_ownership_row() {
+    let mut daemon = Daemon::new("healthy-row-is-quiet", Script::Nothing).await;
+    daemon.run_one().await;
+
+    let lines = daemon.log.lines(|line: &Line| {
+        (line.message.contains(ROW_NOT_WRITTEN) || line.message.contains(ROW_ALREADY_ENDED))
+            && line.field("subject") == Some(daemon.subject.as_str())
+    });
+    assert!(
+        lines.is_empty(),
+        "a healthy start's row is not logged: {lines:#?}"
     );
 }
 

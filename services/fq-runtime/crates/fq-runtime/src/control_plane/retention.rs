@@ -970,6 +970,60 @@ mod tests {
         );
     }
 
+    /// **A stale worker whose run's row its durable start wrote is kept
+    /// until recovery re-owns the run (issue 721).** The row names the
+    /// worker that saw the run's first WAL write; while it is `in_flight`
+    /// it pins that worker's registration, and once the next start's
+    /// recovery restores the run under its own worker, nothing pins it.
+    #[tokio::test]
+    async fn a_stale_worker_is_kept_until_recovery_re_owns_the_run_it_started() {
+        use crate::control_plane::ownership::{OwnerFacts, OwnershipEvent, apply};
+        let (store, _dir) = fresh_store().await;
+        let heartbeat = seed_worker(&store, "dead-after-a-start", 30, WorkerStatus::Stale).await;
+        let facts = |worker_id| OwnerFacts {
+            worker_id,
+            at_ms: heartbeat,
+            ended_at_ms: heartbeat,
+            request: None,
+        };
+        apply(
+            store.as_ref(),
+            "inv-started",
+            OwnershipEvent::DurablyStarted,
+            facts("dead-after-a-start"),
+        )
+        .await
+        .unwrap();
+        let sweeper = RetentionSweeper::new(store.clone(), &workers_only(7));
+
+        sweeper.sweep_now().await.unwrap();
+        assert!(
+            store
+                .get_worker("dead-after-a-start")
+                .await
+                .unwrap()
+                .is_some(),
+            "the run its start wrote a row for still names it"
+        );
+
+        apply(
+            store.as_ref(),
+            "inv-started",
+            OwnershipEvent::Restored,
+            facts("the-next-daemon"),
+        )
+        .await
+        .unwrap();
+        sweeper.sweep_now().await.unwrap();
+        assert!(
+            store
+                .get_worker("dead-after-a-start")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// The complement: once the same invocation reaches a terminal
     /// status, nothing is pinning the row and the next tick takes it.
     #[tokio::test]

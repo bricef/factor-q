@@ -202,6 +202,77 @@ async fn a_completed_run_whose_archive_has_not_arrived_reads_completed() {
     );
 }
 
+/// **A run whose row was written at its durable start keeps that row's
+/// worker and start through its ending (issue 721).** The dispatcher wrote
+/// the row `in_flight` under its own worker id from the run's start; the
+/// run's `completed`, folded as on a replay of the stream over the live
+/// store, moves it to `completed` and leaves both, so the agent's id never
+/// stands in the worker column.
+#[tokio::test]
+async fn an_ending_keeps_the_worker_and_start_a_durable_start_wrote() {
+    use crate::control_plane::ownership::{OwnerFacts, OwnershipEvent, apply};
+    let fixture = Fixture::new().await;
+    apply(
+        fixture.store.as_ref(),
+        &fixture.invocation_id.to_string(),
+        OwnershipEvent::DurablyStarted,
+        OwnerFacts {
+            worker_id: fixture.worker_id.as_str(),
+            at_ms: 1_000,
+            ended_at_ms: 1_000,
+            request: None,
+        },
+    )
+    .await
+    .expect("the durable start writes the row");
+
+    fixture.completed().await;
+
+    let row = fixture.row().await.expect("the run is on record");
+    assert_eq!(
+        (row.status, row.archive_state),
+        (OwnerStatus::Completed, ArchiveState::Pending)
+    );
+    assert_eq!(
+        (row.worker_id.as_str(), row.assigned_at),
+        (fixture.worker_id.as_str(), 1_000),
+        "the ending keeps the worker and the start the durable start wrote"
+    );
+}
+
+/// **A replay into an empty store writes no row for a run until its
+/// ending (issue 721).** The durable start is written directly, not
+/// published, so nothing on the stream writes it: the run's `triggered`
+/// writes no row, and its ending writes one with the agent's id standing
+/// in for the worker. A rebuilt store cannot restore a running run's row.
+#[tokio::test]
+async fn a_replay_into_an_empty_store_writes_no_row_until_the_runs_ending() {
+    use crate::events::{ConfigSnapshot, TriggerSource, TriggeredPayload};
+    let fixture = Fixture::new().await;
+    fixture
+        .deliver(EventPayload::Triggered(TriggeredPayload {
+            trigger_id: Some(Uuid::now_v7()),
+            trigger_source: TriggerSource::Manual,
+            trigger_subject: None,
+            trigger_payload: serde_json::json!({}),
+            config_snapshot: ConfigSnapshot::default(),
+        }))
+        .await;
+    assert_eq!(
+        fixture.row().await,
+        None,
+        "nothing on the stream writes the start"
+    );
+
+    fixture.completed().await;
+
+    let row = fixture.row().await.expect("the ending writes the row");
+    assert_eq!(
+        (row.status, row.worker_id.as_str()),
+        (OwnerStatus::Completed, fixture.agent_id.as_str())
+    );
+}
+
 /// The archive arriving later moves the row on, and keeps the ending.
 #[tokio::test]
 async fn a_run_whose_archive_arrives_later_keeps_its_ending() {
