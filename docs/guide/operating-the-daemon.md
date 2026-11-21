@@ -388,7 +388,10 @@ not its archive has reached the control plane yet, and the list's
 `archive` column says which: `pending` until it has, `held` while the
 worker's archive sweeper is holding it back (see
 [When the archive sweeper holds a terminal row](#when-the-archive-sweeper-holds-a-terminal-row)),
-`yes` once it has, and `-` for a run that has not ended. `fq invocation
+`yes` once it has, `none` for a run you dropped that had no row on
+its worker, so that no archive will ever come, and `-` for a run that
+has not ended. A run dropped with `none` is settled: `fq doctor` and the
+stuck sweep count it ended, as any `failed` run. `fq invocation
 show` says the same, with the hold's reason and remedy, and the JSON of
 both, and of `fq workers show`'s owned rows, carries it as
 `archive_state`. The column replaced `arch`, which said something else:
@@ -430,7 +433,7 @@ did, and only a hand edit of `coordination_invocation_owner` clears it
 ([#1082](https://github.com/bricef/factor-q/issues/1082)). Such an edit
 sets `status` and `archive_state` together, to a pair a row may hold:
 `in_flight` or `ambiguous` with `not_due`, `completed` with `pending` or
-`archived`, `failed` with `pending` or `archived`. A run that ended and
+`archived`, `failed` with `pending`, `archived` or `none`. A run that ended and
 whose archive the control plane holds is `failed` (or `completed`) with
 `archived`. A row whose status was edited alone, so that its archive
 state does not go with it, is corrected when the daemon first starts
@@ -481,7 +484,9 @@ one report if you would rather start from a summary.
 
 A drop ends the run as `failed` from whatever its ownership row says, a
 finished run included, and writes the run's archive record itself, with
-no state. A worker's archive that arrives after the drop keeps the
+no state, unless its event says no archive of the run will come: then a
+run that had not ended reads `failed` with its archive `none`, and no
+record is written. A worker's archive that arrives after the drop keeps the
 drop's ending. What that leaves inconsistent, a dropped completed run
 whose archive record still says `completed`, and a run whose real final
 state is lost when the drop lands before the worker's archive, is
@@ -560,10 +565,11 @@ A second ending that reaches the control plane is refused and logged at
 error, `two endings published for one run; the ownership row keeps the
 ending it recorded`, with the ending `recorded`, the one `reported`, and
 the event type. When the row records `failed` with its archive already
-written, which is what a drop leaves, as when you drop a run as it
-finishes, the same refusal is logged at warn instead: `an ending reached
-a run recorded failed with its archive written, as an operator's drop
-leaves it`. A worker's own failure leaves the same state once its archive
+written, or with none to come, which is what a drop leaves, as when you
+drop a run as it finishes, the same refusal is logged at warn instead:
+`an ending reached a run recorded failed with its archive written or
+none to come, as an operator's drop leaves it`. A worker's own failure
+leaves the same state once its archive
 arrives, so a second ending after that is logged at warn too, although
 no drop was involved.
 
@@ -1515,7 +1521,8 @@ depends on which write was refused:
 - **The archive record's own insert.** Nothing more is done. An
   `invocation.archived` is not acknowledged, so the worker sends it again
   at every sweep, each time with the two lines; a drop neither moves the
-  run's row nor stops the run.
+  run's row nor stops the run, except that one saying no archive will
+  come, of a run that had ended, has moved the row already.
 
 The consumer makes no write it means the store to refuse, so these lines
 are a fault to report, not a state to wait out, and restarting changes
