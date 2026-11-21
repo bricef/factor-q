@@ -54,6 +54,7 @@ fn claim(seq: u64, claimant: &str, invocation_id: &str, claimed_at: i64) -> Trig
         state: crate::control_plane::store::ClaimState::Claimed,
         invocation_id: Some(invocation_id.into()),
         claimed_at,
+        operator_dropped_at: None,
     }
 }
 
@@ -500,6 +501,8 @@ async fn the_invocation_view_names_the_delivery_that_started_it() {
             stream_epoch: EPOCH.to_string(),
             stream_seq: 41,
             state: TriggerClaimState::DurablyStarted,
+            consumed_why: None,
+            operator_dropped_at_ms: None,
             claimant: THIS_DAEMON.into(),
             claimed_at_ms: NOW_MS - 5_000,
         })
@@ -912,5 +915,171 @@ async fn a_restarts_recovery_marks_a_claim_whose_ownership_row_has_an_unknown_st
             invocation_id: "inv-from-a-later-build".into()
         },
         "the run is on record, so its claim is marked"
+    );
+}
+
+impl Seed {
+    /// A claim this daemon or an exited one wrote and then consumed, as the
+    /// dispatcher's consuming answers will.
+    async fn consumed(
+        &self,
+        seq: u64,
+        claimant: &str,
+        invocation_id: &str,
+        at: i64,
+        why: crate::control_plane::store::ConsumedWhy,
+    ) {
+        self.claimed(seq, claimant, invocation_id, at).await;
+        assert!(
+            self.cp
+                .consume_trigger_claim(Self::key(seq), invocation_id, &why)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// An operator's drop of `invocation_id`'s run recorded on its consumed
+    /// claim at `at`, as the drop's handler records it.
+    async fn dropped(&self, invocation_id: &str, at: i64) {
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(&self.paths.control_plane),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE trigger_claim SET operator_dropped_at = ? \
+             WHERE invocation_id = ? AND state = 'consumed'",
+        )
+        .bind(at)
+        .bind(invocation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+}
+
+/// **The invocation view names an operator's drop recorded on a consumed
+/// claim, beside its reason (issue 1055),** so `fq invocation show` can say
+/// the run's coordination status and archive come from the drop, not from
+/// a run that started.
+#[tokio::test]
+async fn the_invocation_view_names_a_drop_recorded_on_a_consumed_claim() {
+    use crate::control_plane::store::ConsumedWhy;
+    let seed = Seed::new().await;
+    seed.consumed(
+        8,
+        THIS_DAEMON,
+        "inv-dropped",
+        NOW_MS - 5_000,
+        ConsumedWhy::FailedForGood,
+    )
+    .await;
+    seed.dropped("inv-dropped", NOW_MS - 1_000).await;
+    let views = seed.views().await;
+
+    let view = views
+        .invocation_trigger("inv-dropped")
+        .await
+        .unwrap()
+        .expect("the claim");
+    assert_eq!(
+        (
+            view.state,
+            view.consumed_why.as_deref(),
+            view.operator_dropped_at_ms
+        ),
+        (
+            TriggerClaimState::Consumed,
+            Some("failed_for_good"),
+            Some(NOW_MS - 1_000)
+        )
+    );
+}
+
+/// **A consumed claim is settled, not stranded (issue 1055).** `fq doctor`
+/// lists claims that will not settle without help; one consumed without a
+/// run has settled and is not listed. Each consumed row here would be
+/// listed were it still `claimed`, as the `claimed` row beside them shows:
+/// one left by an exited process with nothing on record, one with a
+/// terminal WAL row, and one of this daemon's with a run in flight.
+#[tokio::test]
+async fn a_consumed_claim_is_not_listed_as_stranded() {
+    use crate::control_plane::store::ConsumedWhy;
+    let seed = Seed::new().await;
+    seed.consumed(
+        1,
+        EXITED,
+        "inv-never",
+        NOW_MS - 8 * HOUR_MS,
+        ConsumedWhy::FailedForGood,
+    )
+    .await;
+    seed.consumed(
+        2,
+        EXITED,
+        "inv-terminal",
+        NOW_MS - 6 * HOUR_MS,
+        ConsumedWhy::HaltedInSetup,
+    )
+    .await;
+    seed.wal("inv-terminal", NOW_MS - 6 * HOUR_MS, Some("failed"))
+        .await;
+    seed.consumed(
+        3,
+        THIS_DAEMON,
+        "inv-running",
+        NOW_MS - 5 * HOUR_MS,
+        ConsumedWhy::RequeuedFromHold,
+    )
+    .await;
+    seed.wal("inv-running", NOW_MS - HOUR_MS, None).await;
+    seed.claimed(4, EXITED, "inv-control", NOW_MS - 8 * HOUR_MS)
+        .await;
+    let views = seed.views().await;
+
+    let stranded = views
+        .stranded_trigger_claims(&judgement(window_ms()))
+        .await
+        .unwrap();
+    let listed: Vec<(u64, StrandedClaimFinding)> = stranded
+        .iter()
+        .map(|s| (s.delivery.stream_seq, s.finding))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![(4, StrandedClaimFinding::NeverStarted)],
+        "only the `claimed` row is listed"
+    );
+}
+
+/// **The invocation view names a consumed claim and how it was consumed
+/// (issue 1055),** under the stable spelling the claim stores.
+#[tokio::test]
+async fn the_invocation_view_names_a_consumed_claim_and_how() {
+    use crate::control_plane::store::ConsumedWhy;
+    let seed = Seed::new().await;
+    seed.consumed(
+        7,
+        THIS_DAEMON,
+        "inv-consumed",
+        NOW_MS - 5_000,
+        ConsumedWhy::DeadLettered,
+    )
+    .await;
+    let views = seed.views().await;
+
+    assert_eq!(
+        views.invocation_trigger("inv-consumed").await.unwrap(),
+        Some(TriggerDeliveryView {
+            stream: STREAM.into(),
+            stream_epoch: EPOCH.to_string(),
+            stream_seq: 7,
+            state: TriggerClaimState::Consumed,
+            consumed_why: Some("dead_lettered".to_string()),
+            operator_dropped_at_ms: None,
+            claimant: THIS_DAEMON.into(),
+            claimed_at_ms: NOW_MS - 5_000,
+        })
     );
 }

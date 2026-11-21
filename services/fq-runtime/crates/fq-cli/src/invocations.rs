@@ -100,16 +100,39 @@ fn format_trigger_delivery(trigger: Option<&fq_ops::views::TriggerDeliveryView>)
             .to_string();
     };
     let state = match t.state {
-        fq_ops::views::TriggerClaimState::DurablyStarted => "durably started",
-        fq_ops::views::TriggerClaimState::Claimed => "claimed, start not recorded",
+        fq_ops::views::TriggerClaimState::DurablyStarted => "durably started".to_string(),
+        fq_ops::views::TriggerClaimState::Claimed => "claimed, start not recorded".to_string(),
+        fq_ops::views::TriggerClaimState::Consumed => {
+            let why = t.consumed_why.as_deref().unwrap_or("no reason given");
+            match t.operator_dropped_at_ms {
+                // Beside the reason, never in its place: the run's status
+                // and archive come from the drop, not from a start.
+                Some(at) => format!(
+                    "consumed without a run: {why}; dropped by an operator, recorded {}",
+                    utc(at)
+                ),
+                None => format!("consumed without a run: {why}"),
+            }
+        }
+        fq_ops::views::TriggerClaimState::Unknown => {
+            "in a state this build does not know".to_string()
+        }
     };
-    let when = chrono::DateTime::from_timestamp_millis(t.claimed_at_ms)
-        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|| format!("{}ms", t.claimed_at_ms));
     format!(
-        "{} seq {} ({state}; claimed {when} by {})",
-        t.stream, t.stream_seq, t.claimant
+        "{} seq {} ({state}; claimed {} by {})",
+        t.stream,
+        t.stream_seq,
+        utc(t.claimed_at_ms),
+        t.claimant
     )
+}
+
+/// An epoch-ms time as the claim line shows it, or the raw number when it
+/// is not a time chrono can show.
+fn utc(at_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{at_ms}ms"))
 }
 
 pub(crate) async fn invocation_list(

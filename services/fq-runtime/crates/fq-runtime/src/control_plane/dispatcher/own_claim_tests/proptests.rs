@@ -231,6 +231,12 @@ async fn deliver(
                      be read: {}",
                     why
                 ),
+                // Nothing in this arena consumes a trigger yet.
+                Exhausted::Consumed(_) => prop_assert!(
+                    false,
+                    "the watch found a trigger consumed, though nothing here consumes one: {:?}",
+                    verdict
+                ),
             }
             broker.exhausted = Some(verdict);
         }

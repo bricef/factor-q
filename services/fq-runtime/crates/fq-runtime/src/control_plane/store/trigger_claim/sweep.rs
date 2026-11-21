@@ -1,5 +1,5 @@
-//! The claim table's retention sweeps: started rows, and rows an exited
-//! process left `claimed`, both past the window.
+//! The claim table's retention sweeps: settled rows, started or consumed,
+//! and rows an exited process left `claimed`, all past the window.
 
 use super::super::{ControlPlaneStore, ControlPlaneStoreError};
 
@@ -7,12 +7,14 @@ use super::super::{ControlPlaneStore, ControlPlaneStoreError};
 const SWEEP_BATCH_ROWS: i64 = 10_000;
 
 impl ControlPlaneStore {
-    /// Delete every `durably_started` row claimed before `cutoff_ms`,
-    /// whatever its stream incarnation. Returns how many went.
+    /// Delete every settled row, `durably_started` or `consumed`, claimed
+    /// before `cutoff_ms`, whatever its stream incarnation. Returns how many
+    /// went.
     ///
-    /// A started row is the dedupe record: it stops a redelivered or
-    /// replayed copy of its trigger from starting a second run, and has to
-    /// live as long as the message can come back. A claim is never older
+    /// A settled row is the dedupe record: a started one stops a redelivered
+    /// or replayed copy of its trigger from starting a second run, and a
+    /// consumed one stops it from being handled a second time, so each has
+    /// to live as long as the message can come back. A claim is never older
     /// than its message — `claimed_at` is the dispatcher's clock when it
     /// handled a delivery of a message already on the stream, and an
     /// adoption only moves it later — and the stream drops a message older
@@ -27,15 +29,15 @@ impl ControlPlaneStore {
     /// dispatcher's claims for its whole length. `claimed_at` has no
     /// index, so each batch scans until it has found its rows; old rows
     /// sit at the front of the table, so the scan finds them early.
-    pub async fn sweep_started_trigger_claims(
+    pub async fn sweep_settled_trigger_claims(
         &self,
         cutoff_ms: i64,
     ) -> Result<u64, ControlPlaneStoreError> {
-        self.sweep_started_trigger_claims_batched(cutoff_ms, SWEEP_BATCH_ROWS)
+        self.sweep_settled_trigger_claims_batched(cutoff_ms, SWEEP_BATCH_ROWS)
             .await
     }
 
-    pub(in crate::control_plane::store) async fn sweep_started_trigger_claims_batched(
+    pub(in crate::control_plane::store) async fn sweep_settled_trigger_claims_batched(
         &self,
         cutoff_ms: i64,
         batch: i64,
@@ -45,7 +47,7 @@ impl ControlPlaneStore {
             let deleted = sqlx::query(
                 "DELETE FROM trigger_claim WHERE rowid IN \
                  (SELECT rowid FROM trigger_claim \
-                  WHERE state = 'durably_started' AND claimed_at < ? LIMIT ?)",
+                  WHERE state IN ('durably_started', 'consumed') AND claimed_at < ? LIMIT ?)",
             )
             .bind(cutoff_ms)
             .bind(batch)
@@ -70,7 +72,7 @@ impl ControlPlaneStore {
     /// it is. A row under any other id was left by a process that has
     /// exited (one daemon dispatches at a time, under a new id per start).
     /// Older than the cutoff, its message has left the stream for the
-    /// reason [`Self::sweep_started_trigger_claims`] gives, so no
+    /// reason [`Self::sweep_settled_trigger_claims`] gives, so no
     /// redelivery can adopt it and nothing can follow from it.
     ///
     /// Batched for the same reason.

@@ -51,8 +51,10 @@
 //! never deleted, so the table grew by one row per trigger for the
 //! life of the instance. The window deletes:
 //!
-//! - a `durably_started` row claimed before the cutoff, whatever
-//!   its stream incarnation;
+//! - a settled row, `durably_started` or `consumed`, claimed before
+//!   the cutoff, whatever its stream incarnation: each is the record
+//!   that refuses a copy of its trigger, which can come back only
+//!   while its message is on the stream;
 //! - a `claimed` row claimed before the cutoff and held by any
 //!   claimant but this daemon's dispatcher: a claim a process that
 //!   has exited left behind.
@@ -68,7 +70,7 @@
 //! message, and the trigger stream drops a message older than its
 //! maximum age, so a row older than that names a message that is
 //! gone and that nothing can deliver again
-//! ([`crate::control_plane::store::ControlPlaneStore::sweep_started_trigger_claims`]
+//! ([`crate::control_plane::store::ControlPlaneStore::sweep_settled_trigger_claims`]
 //! has the argument). The config refuses a window shorter than that
 //! age plus a day ([`crate::config::trigger_claim_retention_floor_days`]),
 //! and the sweep skips one that reaches it some other way — a
@@ -299,13 +301,13 @@ impl RetentionSweeper {
                 .await?
         };
         let worker_deleted = self.sweep_stale_workers(now_ms).await?;
-        let (started_claims_deleted, abandoned_claims_deleted) =
+        let (settled_claims_deleted, abandoned_claims_deleted) =
             self.sweep_trigger_claims(now_ms).await?;
         let deleted = archive_deleted
             + event_deleted
             + signal_deleted
             + worker_deleted
-            + started_claims_deleted
+            + settled_claims_deleted
             + abandoned_claims_deleted;
         if deleted > 0 {
             info!(
@@ -319,10 +321,11 @@ impl RetentionSweeper {
                 // read against either.
                 operator_signal_deleted_rows = signal_deleted,
                 stale_worker_deleted_rows = worker_deleted,
-                // Apart for the same reason: a started claim is the
-                // dedupe record of a run, an abandoned one a delivery
-                // an exited process never settled.
-                started_trigger_claim_deleted_rows = started_claims_deleted,
+                // Apart for the same reason: a settled claim, started or
+                // consumed, is the record that refuses a copy of its
+                // trigger, an abandoned one a delivery an exited process
+                // never settled.
+                settled_trigger_claim_deleted_rows = settled_claims_deleted,
                 abandoned_trigger_claim_deleted_rows = abandoned_claims_deleted,
                 retention_days = self.retention_days,
                 stale_worker_retention_days = self.stale_worker_retention_days,
@@ -446,7 +449,7 @@ impl RetentionSweeper {
                 trigger_claim_retention_days = days,
                 floor_days,
                 "trigger-claim retention of {days} days is below its floor of {floor_days} \
-                 days; skipping the claim window rather than delete started claims whose \
+                 days; skipping the claim window rather than delete settled claims whose \
                  trigger messages the stream may still deliver"
             );
             return Ok((0, 0));
@@ -454,7 +457,7 @@ impl RetentionSweeper {
         let Some(cutoff_ms) = trigger_claim_cutoff_ms(now_ms, days) else {
             return Ok((0, 0));
         };
-        let started = self.store.sweep_started_trigger_claims(cutoff_ms).await?;
+        let settled = self.store.sweep_settled_trigger_claims(cutoff_ms).await?;
         let abandoned = match &self.claimant {
             Some(claimant) => {
                 self.store
@@ -463,7 +466,7 @@ impl RetentionSweeper {
             }
             None => 0,
         };
-        Ok((started, abandoned))
+        Ok((settled, abandoned))
     }
 
     /// Run a single sweep without ticking. Exposed for tests

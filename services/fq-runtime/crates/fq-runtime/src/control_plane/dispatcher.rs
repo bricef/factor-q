@@ -56,7 +56,7 @@ mod own_claim;
 mod run_admission;
 
 pub use claim::TriggerClaims;
-pub use exhaustion::{ClaimMark, Exhausted, ExhaustionCheck};
+pub use exhaustion::{ClaimMark, ConsumedClaim, Exhausted, ExhaustionCheck};
 pub use run_admission::{
     DROPS_REMEMBERED_FOR, Deferral, NotListed, Place, QueuedHold, RunAdmission, RunPermit, Waiter,
     WorkerPermits,

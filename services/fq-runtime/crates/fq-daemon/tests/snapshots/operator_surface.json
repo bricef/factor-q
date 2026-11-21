@@ -667,6 +667,11 @@
                 "const": "durably_started",
                 "description": "The invocation made its first durable write and the claim records\nit. A redelivery of the same message meets this state and starts\nnothing.",
                 "type": "string"
+              },
+              {
+                "const": "consumed",
+                "description": "The trigger was dealt with and no invocation started: it was\nrefused, failed for good before its first durable write, was\nrequeued from a hold, or ran out of deliveries and was\ndead-lettered, as `consumed_why` says. A redelivery of the same\nmessage meets this state and is acknowledged and dropped.",
+                "type": "string"
               }
             ]
           },
@@ -681,6 +686,21 @@
                 "description": "When the claim was taken, epoch ms. A claim one process adopted\nfrom another that had exited carries the time of the adoption.",
                 "format": "int64",
                 "type": "integer"
+              },
+              "consumed_why": {
+                "description": "How the trigger was consumed, when `state` is `consumed`: one of a\nsmall set of stable spellings, such as `failed_for_good` or\n`dead_lettered`. A reader that meets one it does not know shows it\nas it is. Absent in any other state.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operator_dropped_at_ms": {
+                "description": "When the claim recorded that an operator's drop of the invocation it\nnames wrote that invocation's coordination status, epoch ms, when\n`state` is `consumed`. The claim says no run started, so that status,\nand the archive record the drop writes with it, record the drop,\nnot a start. `consumed_why` still says how the trigger was dealt\nwith. Absent when no drop was recorded, and in any other state.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "state": {
                 "$ref": "#/$defs/TriggerClaimState"
@@ -3761,6 +3781,11 @@
                 "const": "durably_started",
                 "description": "The invocation made its first durable write and the claim records\nit. A redelivery of the same message meets this state and starts\nnothing.",
                 "type": "string"
+              },
+              {
+                "const": "consumed",
+                "description": "The trigger was dealt with and no invocation started: it was\nrefused, failed for good before its first durable write, was\nrequeued from a hold, or ran out of deliveries and was\ndead-lettered, as `consumed_why` says. A redelivery of the same\nmessage meets this state and is acknowledged and dropped.",
+                "type": "string"
               }
             ]
           },
@@ -3775,6 +3800,21 @@
                 "description": "When the claim was taken, epoch ms. A claim one process adopted\nfrom another that had exited carries the time of the adoption.",
                 "format": "int64",
                 "type": "integer"
+              },
+              "consumed_why": {
+                "description": "How the trigger was consumed, when `state` is `consumed`: one of a\nsmall set of stable spellings, such as `failed_for_good` or\n`dead_lettered`. A reader that meets one it does not know shows it\nas it is. Absent in any other state.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operator_dropped_at_ms": {
+                "description": "When the claim recorded that an operator's drop of the invocation it\nnames wrote that invocation's coordination status, epoch ms, when\n`state` is `consumed`. The claim says no run started, so that status,\nand the archive record the drop writes with it, record the drop,\nnot a start. `consumed_why` still says how the trigger was dealt\nwith. Absent when no drop was recorded, and in any other state.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "state": {
                 "$ref": "#/$defs/TriggerClaimState"

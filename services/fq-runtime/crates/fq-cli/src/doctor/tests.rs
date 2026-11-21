@@ -1149,6 +1149,8 @@ fn stranded(
             stream_epoch: stream_epoch.to_string(),
             stream_seq: seq,
             state: fq_ops::views::TriggerClaimState::Claimed,
+            consumed_why: None,
+            operator_dropped_at_ms: None,
             claimant: claimant.to_string(),
             claimed_at_ms: 1_767_323_045_000 + seq as i64 * 60_000,
         },

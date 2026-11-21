@@ -114,6 +114,8 @@ fn format_trigger_delivery_names_the_delivery_or_its_absence() {
         stream_epoch: "1767323045000000000".to_string(),
         stream_seq: 42,
         state: fq_ops::views::TriggerClaimState::DurablyStarted,
+        consumed_why: None,
+        operator_dropped_at_ms: None,
         claimant: "worker-alpha".to_string(),
         claimed_at_ms: 1_767_323_045_000,
     };
@@ -223,5 +225,55 @@ fn show_names_a_pending_or_held_archive() {
     assert!(
         held.ends_with("-> raise the broker's max_payload"),
         "{held}"
+    );
+}
+
+/// **The claim line names a consumed claim and how, and reads what a newer
+/// daemon sends without failing (issue 1055).** A state this build does
+/// not know decodes to `Unknown` rather than failing the whole answer, and
+/// a reason it does not know is shown as it is.
+#[test]
+fn format_trigger_delivery_names_a_consumed_claim_and_reads_newer_values() {
+    let decode = |state: &str, why: Option<&str>| -> fq_ops::views::TriggerDeliveryView {
+        let mut wire = serde_json::json!({
+            "stream": "fq-triggers",
+            "stream_epoch": "1767323045000000000",
+            "stream_seq": 42,
+            "state": state,
+            "claimant": "worker-alpha",
+            "claimed_at_ms": 1_767_323_045_000_i64,
+        });
+        if let Some(why) = why {
+            wire["consumed_why"] = serde_json::json!(why);
+        }
+        serde_json::from_value(wire).expect("the claim decodes")
+    };
+    assert_eq!(
+        format_trigger_delivery(Some(&decode("consumed", Some("failed_for_good")))),
+        "fq-triggers seq 42 (consumed without a run: failed_for_good; claimed \
+         2026-01-02T03:04:05Z by worker-alpha)"
+    );
+    assert_eq!(
+        format_trigger_delivery(Some(&decode(
+            "consumed",
+            Some("a_reason_from_a_newer_daemon")
+        ))),
+        "fq-triggers seq 42 (consumed without a run: a_reason_from_a_newer_daemon; claimed \
+         2026-01-02T03:04:05Z by worker-alpha)"
+    );
+    let mut dropped = decode("consumed", Some("failed_for_good"));
+    dropped.operator_dropped_at_ms = Some(1_767_323_046_000);
+    assert_eq!(
+        format_trigger_delivery(Some(&dropped)),
+        "fq-triggers seq 42 (consumed without a run: failed_for_good; dropped by an operator, \
+         recorded 2026-01-02T03:04:06Z; claimed 2026-01-02T03:04:05Z by worker-alpha)",
+        "an operator's drop recorded on the claim is named beside its reason"
+    );
+    let newer = decode("a_state_from_a_newer_daemon", None);
+    assert_eq!(newer.state, fq_ops::views::TriggerClaimState::Unknown);
+    assert_eq!(
+        format_trigger_delivery(Some(&newer)),
+        "fq-triggers seq 42 (in a state this build does not know; claimed \
+         2026-01-02T03:04:05Z by worker-alpha)"
     );
 }

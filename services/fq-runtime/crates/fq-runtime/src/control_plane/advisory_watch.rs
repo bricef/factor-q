@@ -99,9 +99,11 @@ use crate::events::{
     Event, EventPayload, FailedPayload, FailureKind, FailurePhase, InvocationTotals,
 };
 
+mod consumed;
 mod naming;
 mod surfaced;
 
+use consumed::on_a_consumed_claim;
 use naming::Named;
 use surfaced::{Check, NamedTrigger, with_advisory_id, with_duplicate_check};
 
@@ -258,6 +260,13 @@ pub enum AdvisoryOutcome {
     /// The trigger's run has a start on record: no dead letter, and the
     /// claim is marked if it was this watch's to mark (issue 967).
     RunStarted,
+    /// The trigger was consumed without its run starting: dealt with, so
+    /// no dead letter (issue 1055).
+    Consumed,
+    /// The trigger's claim says it was consumed, and past the watch's
+    /// limit the records that could contradict it still could not be read:
+    /// no dead letter, since none is due either way (issue 1055).
+    ConsumedUnchecked,
     /// The verdict is held, for the reason given: the advisory is NAKed
     /// and decided again when it comes back.
     Held(Hold),
@@ -513,6 +522,11 @@ impl AdvisoryWatch {
                          this daemon next starts and its recovery resumes it, and shows meanwhile \
                          among `fq doctor`'s stuck executions");
                     return Ok(AdvisoryOutcome::RunStarted);
+                }
+                Exhausted::Consumed(consumed) => {
+                    let subject = self.subject_at(advisory.stream_seq).await;
+                    let long = looked_long_enough;
+                    return Ok(on_a_consumed_claim(&advisory, subject, consumed, long));
                 }
                 Exhausted::Undecided { why, invocation_id } => {
                     if !looked_long_enough {
