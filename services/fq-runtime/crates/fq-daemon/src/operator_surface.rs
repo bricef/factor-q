@@ -28,10 +28,11 @@ use fq_runtime::views::Views;
 pub(crate) use fq_ops::surface::{WorkerListFilter, WorkerViewKey};
 
 mod drop_archive;
+mod drop_command;
 mod drop_halt;
 mod facts;
 
-use drop_halt::{DropCommandInput, arm_drop_halt};
+use drop_halt::DropCommandInput;
 
 pub use facts::DaemonFacts;
 
@@ -100,8 +101,6 @@ pub fn operator_registry(
     min_seq_bound: std::time::Duration,
     deps: OperatorDeps,
 ) -> anyhow::Result<fq_edge::EdgeRegistry> {
-    use fq_edge::wire::WireError;
-
     // Cloned up front: the registrations below each move their own
     // handles into 'static closures.
     let event_bus = deps.bus.clone();
@@ -190,96 +189,21 @@ pub fn operator_registry(
          limit: the drop takes either, and by the time the receipt returns \
          it can no longer start in this daemon.",
     );
+    let drop_deps = Arc::new(drop_command::DropDeps {
+        bus: deps.bus.clone(),
+        projection: deps.projection.clone(),
+        control_plane: deps.control_plane.clone(),
+        workers: deps.resume.admission.workers().clone(),
+        worker_store: deps.resume.worker_store.clone(),
+    });
     registry
         .command_with_call::<DropCommandInput, _, _>(
             decl,
             move |input: DropCommandInput, call: fq_edge::CallContext| {
-                let bus = deps.bus.clone();
-                let projection = deps.projection.clone();
-                let control_plane = deps.control_plane.clone();
+                let drop_deps = drop_deps.clone();
                 let runner = deps.runner.clone();
-                let workers = deps.resume.admission.workers().clone();
-                let worker_store = deps.resume.worker_store.clone();
                 async move {
-                    // Who asked: the principal of the token the call came in
-                    // on, as the edge hands it; none for a call made in-process,
-                    // which records nothing (issue 1070).
-                    let requested_by = call.principal().map(str::to_string);
-                    // A run queued for a worker permit or deferred for a rate
-                    // limit is not driven: held from here to the receipt, it
-                    // cannot start; marked dropped, never; and remembered, for
-                    // one in the instant of being put down, which nothing holds.
-                    let queued = workers.hold_for_drop(&input.invocation_id).await;
-                    // Liveness first: a refused drop must leave no trace, so
-                    // nothing is published until the halt is armed (or the
-                    // invocation is known idle). The arm hands back who the
-                    // halted invocation belongs to, and the write below
-                    // resolves from that rather than from a projection this
-                    // daemon may be ahead of — an armed halt and a NotFound
-                    // can never be the same answer (#107).
-                    let armed = arm_drop_halt(runner.as_ref(), queued.as_ref(), &input)?;
-                    let driving_agent = armed.as_ref().map(|armed| armed.agent.clone());
-                    let archive = drop_archive::after_the_drop(
-                        &worker_store,
-                        &control_plane,
-                        armed.as_ref().map(|armed| armed.halt.row),
-                        &input.invocation_id,
-                    )
-                    .await;
-                    let record = fq_runtime::control_plane::operator::DropRecord {
-                        reason: input.reason.clone(),
-                        requested_by,
-                        archive: Some(archive),
-                    };
-                    // The edge implementing an op IS the runtime boundary, not a
-                    // call point to flip.
-                    // allow-runtime-internals: daemon-side command handler.
-                    let result = fq_runtime::control_plane::operator::drop_invocation(
-                        &bus,
-                        &projection,
-                        &control_plane,
-                        &input.invocation_id,
-                        &record,
-                        driving_agent.as_ref(),
-                    )
-                    .await
-                    .map_err(|e| match e {
-                        // allow-runtime-internals: daemon-side error mapping, same handler.
-                        fq_runtime::control_plane::operator::DropError::UnknownInvocation(id) => {
-                            WireError::NotFound {
-                                op: "invocation.drop".into(),
-                                message: format!("no invocation `{id}`"),
-                            }
-                        }
-                        other => WireError::InvalidInput {
-                            op: "invocation.drop".into(),
-                            message: other.to_string(),
-                        },
-                    })?;
-                    // Published: a run halted during its first write marks its
-                    // row once the write lands (issue 1070).
-                    if let Some(armed) = armed {
-                        armed.published();
-                    }
-                    if let Some(queued) = queued {
-                        queued.dropped();
-                    }
-                    workers.note_dropped(&input.invocation_id);
-                    Ok(fq_ops::Receipt {
-                        // The drop event, named by the identity `event.get`
-                        // takes — the same `event_id` its listing carries,
-                        // so the receipt walks to the whole event.
-                        atoms: vec![fq_ops::AtomRef {
-                            domain: fq_ops::Domain::Event,
-                            key: serde_json::json!({ "event_id": result.event_id }),
-                        }],
-                        // The position is still here, where being a log
-                        // coordinate is the point: it is what a gated read
-                        // passes as `min_seq` for read-your-writes.
-                        watermarks: [(fq_ops::Domain::Event, result.event_seq)]
-                            .into_iter()
-                            .collect(),
-                    })
+                    drop_command::drop_command(&drop_deps, runner.as_ref(), input, &call).await
                 }
             },
         )
