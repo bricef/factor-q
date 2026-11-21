@@ -41,8 +41,8 @@ impl DriveHalts for fq_runtime::ReducerRunner<fq_runtime::Harness> {
 /// happen here — in the same handler that then writes the terminal
 /// event, leaving no window between deciding and acting.
 ///
-/// Returns **the agent the halted invocation belongs to**, when this
-/// daemon was driving it. That is not a convenience: the runner is the
+/// Returns **the agent the invocation belongs to**, when this daemon was
+/// driving it, and the halt, when one could be armed. That is not a convenience: the runner is the
 /// same authority that just justified stopping real work, and it is
 /// ahead of every durable record (the projection is folded
 /// asynchronously; nothing on the dispatch path writes an owner row).
@@ -54,6 +54,15 @@ impl DriveHalts for fq_runtime::ReducerRunner<fq_runtime::Harness> {
 /// bare drop of live work), not on the invocation's existence. The
 /// operator reads the message verbatim, so each one names its remedy.
 /// Every refusal here precedes the arm, so a refused drop stops nothing.
+///
+/// A run whose drive ends between the two answers, driven at the first
+/// and gone by the arm, is not refused (issue 1070): the drop goes ahead
+/// with no halt, as for any run this daemon is not driving. If the run
+/// ended, the drop's fold records the request beside that ending; if its
+/// drive stopped for another reason, the fold ends it as it ends any run
+/// that has not ended. Refusing it would lose the request. The agent is
+/// the runner's first answer, so the drop's resolution still cannot come
+/// back unknown.
 ///
 /// `queued` is the caller's hold on a run waiting for a worker permit
 /// (#994), or deferred for a rate limit, if this is one. Held, it cannot
@@ -88,24 +97,20 @@ pub(super) fn arm_drop_halt(
         )));
     }
     // The arm can lose to the invocation finishing between the
-    // liveness check and here, and that is refused, though the
-    // drop's fold would now keep the ending the run reached and
-    // record the request beside it.
-    let Some(halt) = runner.arm_halt(id) else {
-        return Err(refuse(format!(
-            "invocation {id} finished before the halt could be armed; \
-             nothing dropped — re-check `fq invocation show {id}`"
-        )));
-    };
+    // liveness check and here: no halt, and the drop goes ahead on a run
+    // that has ended, whose fold keeps that ending and records the
+    // request beside it.
+    let halt = runner.arm_halt(id);
     Ok(Some(Armed { agent, halt }))
 }
 
-/// A halt armed on a run this daemon is driving: whose it is, where the
-/// run's own row stood, and, for a run whose first write was under way,
-/// the word the run waits for (issue 1070).
+/// A run this daemon was driving: whose it is, and the halt armed on it,
+/// with where the run's own row stood and, for a run whose first write was
+/// under way, the word the run waits for (issue 1070). No halt when the
+/// run ended before one could be armed.
 pub(super) struct Armed {
     pub(super) agent: fq_runtime::AgentId,
-    pub(super) halt: fq_runtime::worker::ArmedHalt,
+    pub(super) halt: Option<fq_runtime::worker::ArmedHalt>,
 }
 
 impl Armed {
@@ -117,7 +122,7 @@ impl Armed {
     /// `Armed` dropped without this call tells the run the drop is not on
     /// the record, and its row is left as it is.
     pub(super) fn published(self) {
-        if let Some(word) = self.halt.word {
+        if let Some(word) = self.halt.and_then(|halt| halt.word) {
             word.published("failed");
         }
     }

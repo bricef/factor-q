@@ -109,6 +109,18 @@ pub(crate) async fn workers_list(
     Ok(())
 }
 
+/// One line of `fq workers show`'s owned invocations: the run, its
+/// status, and who ended an ended run, as `fq invocation list` says it;
+/// nothing of an ender where the row does not say (issue 1070). Pure;
+/// covered by unit tests.
+fn format_owned_row_human(o: &fq_ops::views::InvocationSummaryView) -> String {
+    let inv: String = o.invocation_id.chars().take(11).collect();
+    match crate::invocations::ended_by_label(o) {
+        "-" => format!("  {inv}  {}", o.status),
+        by => format!("  {inv}  {}  ended by {by}", o.status),
+    }
+}
+
 pub(crate) async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> anyhow::Result<()> {
     let stale_threshold_ms = DEFAULT_STALE_THRESHOLD_MS;
     // The flip (plan Phase 4, verb 22): the fold — roster row plus
@@ -147,8 +159,7 @@ pub(crate) async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> a
         if !detail.owned.is_empty() {
             println!("\nInvocations owned:");
             for o in detail.owned.iter().take(20) {
-                let inv: String = o.invocation_id.chars().take(11).collect();
-                println!("  {inv}  {}", o.status);
+                println!("{}", format_owned_row_human(o));
             }
         }
     }
@@ -157,6 +168,39 @@ pub(crate) async fn workers_show(global: &GlobalArgs, id: &str, json: bool) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An owned run says who ended it once it has ended, and nothing of an
+    /// ender where the row does not say.
+    #[test]
+    fn an_owned_run_says_who_ended_it() {
+        use fq_ops::views::InvocationEnder as E;
+        let owned = |status: &str, ended_by: Option<E>| fq_ops::views::InvocationSummaryView {
+            invocation_id: "0123456789abcdef".into(),
+            agent_id: None,
+            worker_id: "w".into(),
+            status: status.into(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            archive_state: fq_ops::views::InvocationArchiveState::Pending,
+            ended_by,
+            ended_at_ms: ended_by.map(|_| 1),
+            termination: None,
+            summary: None,
+        };
+        assert_eq!(
+            format_owned_row_human(&owned("failed", Some(E::Drop))),
+            "  0123456789a  failed  ended by drop"
+        );
+        assert_eq!(
+            format_owned_row_human(&owned("completed", Some(E::Run))),
+            "  0123456789a  completed  ended by run"
+        );
+        assert_eq!(
+            format_owned_row_human(&owned("in_flight", None)),
+            "  0123456789a  in_flight"
+        );
+    }
 
     #[test]
     fn format_heartbeat_age_human_under_threshold_shows_seconds() {

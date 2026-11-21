@@ -50,6 +50,7 @@ pub mod model;
 pub mod opid;
 pub mod registry;
 pub mod surface;
+pub mod text;
 pub mod transcript;
 pub mod trigger;
 pub mod turn;

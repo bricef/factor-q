@@ -13,6 +13,9 @@ fn row(id: &str, status: &str, archive_state: InvocationArchiveState) -> Invocat
         started_at_ms: 0,
         archived: false,
         archive_state,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: None,
     }
 }

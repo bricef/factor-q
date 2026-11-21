@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use fq_ops::views::{ActiveInvocationView, InvocationArchiveState, InvocationSummaryView};
+use fq_ops::views::{
+    ActiveInvocationView, InvocationArchiveState, InvocationEnder, InvocationSummaryView,
+};
 
 use super::{age, agent_link, display_cap, esc, inv_link, liveness_badge, short, status_span};
 
@@ -196,11 +198,11 @@ pub fn invocations(
         return b;
     }
     b.push_str(
-        "<table><tr><th>invocation</th><th>status</th><th>summary</th><th>started</th><th>agent</th><th>worker</th><th>archive</th></tr>",
+        "<table><tr><th>invocation</th><th>status</th><th>summary</th><th>started</th><th>agent</th><th>worker</th><th>archive</th><th>ended by</th></tr>",
     );
     for i in items {
         b.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             inv_link(&i.invocation_id),
             status_span(&i.status),
             summary_cell(
@@ -216,11 +218,93 @@ pub fn invocations(
                 None => r#"<span class="muted">?</span>"#.to_string(),
             },
             short(&i.worker_id),
-            archive_cell(i.archive_state)
+            archive_cell(i.archive_state),
+            ended_by_cell(i)
         ));
     }
     b.push_str("</table>");
     b
+}
+
+/// The `ended by` column: who ended the run, `run` or `drop`, with how the
+/// ending reads beside an operator's termination request, when one is on
+/// record, as the cell's title. A dash, muted, while the run has not
+/// ended, and where the row does not say who ended it.
+fn ended_by_cell(item: &InvocationSummaryView) -> String {
+    let Some(ender) = item.ended_by else {
+        return r#"<span class="muted">—</span>"#.to_string();
+    };
+    let label = match ender {
+        InvocationEnder::Run => "run",
+        InvocationEnder::Drop => "drop",
+    };
+    match item.termination_reading() {
+        Some(reading) => format!(r#"<span title="{}">{label}</span>"#, esc(reading.phrase())),
+        None => label.to_string(),
+    }
+}
+
+/// A time as the detail page writes it: `2026-01-02T03:04:05Z`.
+fn utc(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{ms}ms"))
+}
+
+/// The detail page's rows for the run's ownership row, as `fq invocation
+/// show` reads it: its status and worker; who ended it and when, `not
+/// recorded` for a run that ended before its row recorded an ender; and
+/// the termination request beside its ending, the first one on record,
+/// with the reading, who asked and why. Everything the row's writers or an
+/// operator supplied is escaped, and who asked and why are shown as
+/// `fq invocation show` shows them, one bounded line with their hidden
+/// characters written as escapes ([`fq_ops::text::one_line`]).
+pub(super) fn owner_rows(owner: &InvocationSummaryView) -> String {
+    let mut rows = format!(
+        "<tr><th>status</th><td>{}</td></tr><tr><th>worker</th><td>{}</td></tr>",
+        status_span(&owner.status),
+        esc(&owner.worker_id)
+    );
+    let ended = match (owner.ended_by, owner.ended_at_ms) {
+        (Some(ender), at) => Some(format!(
+            "{}{}",
+            match ender {
+                InvocationEnder::Run => "run",
+                InvocationEnder::Drop => "drop",
+            },
+            at.map(|at| format!(" at {}", utc(at))).unwrap_or_default()
+        )),
+        (None, _) if matches!(owner.status.as_str(), "completed" | "failed") => {
+            Some(r#"<span class="muted">not recorded</span>"#.to_string())
+        }
+        (None, _) => None,
+    };
+    if let Some(ended) = ended {
+        rows.push_str(&format!("<tr><th>ended by</th><td>{ended}</td></tr>"));
+    }
+    if let Some(request) = &owner.termination {
+        let mut said = format!("requested {}", utc(request.requested_at_ms));
+        if let Some(by) = &request.requested_by {
+            said.push_str(&format!(
+                " by {}",
+                esc(&fq_ops::text::one_line(by, fq_ops::text::REQUESTER_CHARS))
+            ));
+        }
+        if let Some(reason) = &request.reason {
+            said.push_str(&format!(
+                ": {}",
+                esc(&fq_ops::text::one_line(reason, fq_ops::text::REASON_CHARS))
+            ));
+        }
+        let termination = match owner.termination_reading() {
+            Some(reading) => format!("{} ({said})", esc(reading.phrase())),
+            None => said,
+        };
+        rows.push_str(&format!(
+            "<tr><th>termination</th><td>{termination}</td></tr>"
+        ));
+    }
+    rows
 }
 
 /// The archive column: whether the control plane holds the run's archive.

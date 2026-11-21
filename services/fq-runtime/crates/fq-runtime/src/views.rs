@@ -482,6 +482,10 @@ impl Views {
                     started_at_ms: arc.started_at,
                     archived: true,
                     archive_state: InvocationArchiveState::Archived,
+                    // An archive record says nothing of who ended the run.
+                    ended_by: None,
+                    ended_at_ms: None,
+                    termination: None,
                     summary: None,
                 });
             }

@@ -35,6 +35,9 @@ impl From<OwnerRow> for InvocationSummaryView {
             started_at_ms: r.assigned_at,
             archived: false,
             archive_state: r.archive_state.into(),
+            ended_by: r.ended_by.map(Into::into),
+            ended_at_ms: r.ended_at,
+            termination: r.termination.map(Into::into),
             summary: None,
         }
     }

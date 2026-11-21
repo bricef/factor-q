@@ -50,7 +50,9 @@ pub(super) async fn drop_command(
     let archive = drop_archive::after_the_drop(
         &deps.worker_store,
         &deps.control_plane,
-        armed.as_ref().map(|armed| armed.halt.row),
+        armed
+            .as_ref()
+            .and_then(|armed| armed.halt.as_ref().map(|halt| halt.row)),
         &input.invocation_id,
     )
     .await;
@@ -109,3 +111,6 @@ pub(super) async fn drop_command(
             .collect(),
     })
 }
+
+#[cfg(test)]
+mod tests;

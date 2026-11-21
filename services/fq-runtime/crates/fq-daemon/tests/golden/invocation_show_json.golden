@@ -10,6 +10,13 @@
     "started_at_ms": 1767323050000,
     "archived": false,
     "archive_state": "pending",
+    "ended_by": "run",
+    "ended_at_ms": 1767323050000,
+    "termination": {
+      "requested_at_ms": 1767323048000,
+      "requested_by": "on-call",
+      "reason": "golden fixture request"
+    },
     "summary": null
   },
   "archive": null,

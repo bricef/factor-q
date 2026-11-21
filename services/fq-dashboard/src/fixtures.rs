@@ -79,6 +79,9 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             started_at_ms: NOW_MS - 600_000,
             archived: false,
             archive_state: fq_ops::views::InvocationArchiveState::NotDue,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: Some("Fixing #83: SECURITY.md drafted, running just ci".to_string()),
         },
         InvocationSummaryView {
@@ -90,6 +93,9 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             started_at_ms: NOW_MS - 7_200_000,
             archived: false,
             archive_state: fq_ops::views::InvocationArchiveState::Archived,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: Some("Done: docs drift fixed, PR #141 opened".to_string()),
         },
         InvocationSummaryView {
@@ -103,6 +109,9 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             started_at_ms: NOW_MS - 90_000_000,
             archived: true,
             archive_state: fq_ops::views::InvocationArchiveState::Archived,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: None,
         },
         InvocationSummaryView {
@@ -114,6 +123,9 @@ fn invocation_rows() -> Vec<InvocationSummaryView> {
             started_at_ms: NOW_MS - 172_800_000,
             archived: false,
             archive_state: fq_ops::views::InvocationArchiveState::Pending,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: Some("Failed: budget exceeded before a PR could be opened".to_string()),
         },
     ]
