@@ -587,7 +587,9 @@ writes a `trigger_exhausted` for a trigger already dealt with
 ([#1055](https://github.com/bricef/factor-q/issues/1055)). The claim
 now has the state that will close this, `consumed`, with how in
 `consumed_why`, and every reader honours it: a copy that meets one is
-acked and dropped, the watch writes no dead letter for it, requeue
+acked and dropped and the watch writes no dead letter for it, each
+counted on `fq status`, `fq doctor` and the dashboard apart from the
+runs that started, requeue
 proceeds for one consumed as dead-lettered, refuses one requeued from a
 hold whatever it is told, and takes one consumed for any other reason
 only on the operator's word, adoption, re-take, recovery
