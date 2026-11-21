@@ -504,9 +504,10 @@ impl CoordinationConsumer {
     }
 
     /// A run's ending, `completed` or `failed`: the row follows it, with
-    /// its archive pending until `invocation.archived` arrives. A triggered
-    /// run has no row yet, and the event's agent id stands in for the
-    /// worker's until the archive names it.
+    /// its archive pending until `invocation.archived` arrives. A run has
+    /// its row from its durable start, and the ending keeps the worker it
+    /// names; one whose start wrote none gets its row here, and the event's
+    /// agent id stands in for the worker's until the archive names it.
     async fn handle_ending(
         &self,
         event: &Event,
@@ -539,9 +540,10 @@ impl CoordinationConsumer {
         event: &Event,
         payload: &crate::events::InvocationAmbiguousPayload,
     ) -> Result<(), CoordinationConsumerError> {
-        // The trigger-dispatch path writes no ownership row, so a run in
-        // flight usually has none: the event's `agent_id` stands in for
-        // the worker id of the row this writes.
+        // A run in flight has its row from its durable start, which this
+        // move keeps the worker of; a run whose start wrote none (its write
+        // failed, or a build before it started the run) gets one here, and
+        // the event's `agent_id` stands in for the worker id it writes.
         self.move_row(
             event,
             OwnershipEvent::Ambiguous,

@@ -681,15 +681,23 @@ impl TriggerDispatcher {
                     signal_resolved = true;
                     // A resolved receiver panics if polled again (#987),
                     // so this branch runs once. `Ok` = fired (first WAL
-                    // write landed): mark the claim and ack. The run waits
-                    // for that and then carries on whether or not the mark
-                    // landed (`mark_durable_started`, #967). `Err` =
-                    // dropped unfired (the invocation is ending before its
-                    // first WAL write): settled after the loop.
-                    if signal.is_ok() {
+                    // write landed), carrying the run's start: mark the
+                    // claim and ack, then write the run's ownership row.
+                    // The run waits for that and then carries on whether
+                    // or not either landed (`mark_durable_started`, #967,
+                    // issue 721). `Err` = dropped unfired (the invocation
+                    // is ending before its first WAL write): settled after
+                    // the loop.
+                    if let Ok(started_at_ms) = signal {
                         durable_start_observed = true;
-                        self.mark_durable_started(msg, &claim, trigger_id, &mut handled)
-                            .await;
+                        self.mark_durable_started(
+                            msg,
+                            &claim,
+                            trigger_id,
+                            started_at_ms,
+                            &mut handled,
+                        )
+                        .await;
                     }
                 }
                 outcome = &mut invocation => break outcome,
@@ -715,9 +723,9 @@ impl TriggerDispatcher {
         // loop then ends on the result without seeing the signal (#966).
         // Asked once more, a fired signal is a durable start like any other,
         // marked and acked the same way.
-        if !signal_resolved && durably_started.try_recv().is_ok() {
+        if !signal_resolved && let Ok(started_at_ms) = durably_started.try_recv() {
             durable_start_observed = true;
-            self.mark_durable_started(msg, &claim, trigger_id, &mut handled)
+            self.mark_durable_started(msg, &claim, trigger_id, started_at_ms, &mut handled)
                 .await;
         }
 

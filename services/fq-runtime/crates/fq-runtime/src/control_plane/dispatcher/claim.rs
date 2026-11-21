@@ -15,6 +15,7 @@ use super::own_claim::{Handled, OwnClaim};
 use super::{CONSUMER_NAME, TriggerDispatcher, trigger_name};
 
 mod settlement;
+mod started_row;
 mod unmarked_start;
 pub(super) use settlement::Answer;
 
@@ -95,6 +96,13 @@ pub(super) const MARK_RETRY_PAUSES: [Duration; 3] = [
 /// pooled connection taken, the acquire timeout and then the busy timeout
 /// (about thirty-seven). `handle` does not poll the invocation for that
 /// long; one blocking attempt cost the same before there were retries.
+///
+/// That is the mark's wait, no longer the whole of the run's. The run's
+/// ownership row is written after the mark and the ack (`started_row`):
+/// two statements, a read and an insert, each of which can wait out the
+/// busy timeout, or the acquire timeout first, on a store that blocks. The
+/// delivery is answered by then, so they hold up the run and not its
+/// trigger.
 pub(super) const MARK_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The trigger-claim table, handed to a dispatcher as its arbiter. The
@@ -310,9 +318,19 @@ impl TriggerDispatcher {
     /// start it again. Until then `fq doctor` lists the row as started and
     /// never marked, once a minute has passed.
     ///
+    /// **Then the run's ownership row** is written, `in_flight`, under this
+    /// daemon's worker id and from the run's own start, `started_at_ms`,
+    /// whatever the mark did (`started_row`, issue 721): two writes, the
+    /// mark first, and the run waits for both. The row comes after the ack
+    /// so that a store blocking its two statements cannot hold the delivery
+    /// unanswered inside its ack window, which `started_row` says more of. A
+    /// row that does not land is logged and leaves the run on every record
+    /// that decides a start.
+    ///
     /// **Once it returns, the copy stops counting as handling its claim**
-    /// ([`Handled::release`]): the delivery has been answered and the run's
-    /// first WAL write is on record, though the run goes on.
+    /// ([`Handled::release`]): the delivery has been answered, the run's
+    /// first WAL write is on record, and its row has been written or given
+    /// up on, though the run goes on.
     ///
     /// **An ack that is lost as well** is settled by the copy it brings
     /// back. An ack is published without waiting for the broker, so only
@@ -332,6 +350,7 @@ impl TriggerDispatcher {
         msg: &async_nats::jetstream::Message,
         claim: &Claimed,
         trigger_id: uuid::Uuid,
+        started_at_ms: i64,
         handled: &mut Handled,
     ) {
         let Some((store, worker_id)) = self.claim_store.as_ref() else {
@@ -390,6 +409,8 @@ impl TriggerDispatcher {
                     .await;
             }
         }
+        self.write_started_row(msg, store, worker_id, claim, trigger_id, started_at_ms)
+            .await;
         handled.release();
     }
 

@@ -33,14 +33,7 @@ use std::path::Path;
 /// tracking issue is the useful thing to do — not a provenance note
 /// about why a behaviour exists, which is what a doc comment or a
 /// commit message is for.
-const SANCTIONED: &[(&str, &str)] = &[(
-    "#50",
-    "`DoctorExecutions` reads the worker-local `invocation_state` table \
-     because the control plane's `in_flight` is not populated by trigger \
-     dispatch yet. A consumer comparing doctor's numbers against the \
-     control plane needs to know why they differ, and where that is \
-     tracked.",
-)];
+const SANCTIONED: &[(&str, &str)] = &[];
 
 /// Every `#NN`–`#NNNN` in `text`, with the byte offset it starts at.
 ///

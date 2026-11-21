@@ -152,7 +152,8 @@ async fn ambiguous_after_an_operator_drop_leaves_the_run_dropped() {
     ambiguous_leaves_the_row_as_it_was(&fixture, OwnerStatus::Failed).await;
 }
 
-/// A triggered run in flight has no row yet: the event writes one.
+/// A run in flight whose durable start wrote no row (the write failed, or
+/// an earlier build started it): the event writes one.
 #[tokio::test]
 async fn ambiguous_for_a_run_in_flight_with_no_row_marks_it() {
     let fixture = Fixture::new().await;

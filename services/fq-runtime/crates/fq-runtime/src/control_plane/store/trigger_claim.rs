@@ -244,11 +244,13 @@ impl UnsettledTriggerClaim {
 ///
 /// A run has a start on record when either record holds it. The WAL holds
 /// it from its first WAL write until the control plane acknowledges its
-/// archive; the run's ending writes the ownership row, and the archive
-/// hand-off writes it before the acknowledgement if the ending did not,
-/// and nothing sweeps that row, so a run that has left the WAL is on the
-/// ownership table. A `failed` in `setup`, published only while the run's
-/// WAL holds no row, writes no row, so it records no start.
+/// archive. The dispatcher writes the ownership row just after that first
+/// write, at the run's durable start (issue 721); the run's ending writes
+/// it if that write did not land, and the archive hand-off before the
+/// acknowledgement if neither did, and nothing sweeps that row, so a run
+/// that has left the WAL is on the ownership table. A `failed` in `setup`,
+/// published only while the run's WAL holds no row, writes no row, so it
+/// records no start.
 /// An operator's drop writes an ownership row too, even
 /// for a run that never made its first WAL write, which counts it as
 /// started on purpose: a dropped run must not be run again. A consumed

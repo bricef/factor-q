@@ -17,9 +17,10 @@
 //!    and the settlement (`claim::settlement`, issue 1057) keep the first
 //!    copy's delivery alive, so a copy comes only when
 //!    those in-progress acks stopped landing for a whole ack window. A copy
-//!    stops handling its claim once its mark has landed or given up and its
-//!    delivery is answered, though its run goes on: from then on its run is
-//!    on record, and a copy that comes back is case 2.
+//!    stops handling its claim once its mark has landed or given up, its
+//!    delivery is answered, and its run's ownership row has been written or
+//!    given up on, though its run goes on: from then on its run is on
+//!    record, and a copy that comes back is case 2.
 //! 2. **No copy is handling it, and the run has a start on record**, in the
 //!    worker's WAL or on the control plane's ownership table, by the one
 //!    definition ([`RunRecords`]) startup recovery and `fq doctor` read

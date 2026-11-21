@@ -12,8 +12,11 @@ use crate::control_plane::store::{
 /// that keeps changing under it.
 ///
 /// Within one daemon little contends: the coordination consumer is the
-/// row's only writer of moves while it runs, on one task. Startup
-/// recovery's restores run beside it: the consumer starts first, so that
+/// row's only writer of moves while it runs, on one task. The dispatcher
+/// writes a run's first row beside it, at the run's durable start: a drop
+/// folded between the run's first WAL write and that write wins the
+/// insert, and the start, decided again from the drop's row, is refused.
+/// Startup recovery's restores run beside both: the consumer starts first, so that
 /// recovery decides over a folded backlog (issue 1070), and goes on
 /// folding while recovery restores, a later event for the same run
 /// included, or one it had not reached when recovery's wait for it ran

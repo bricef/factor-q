@@ -154,7 +154,7 @@
             "type": "string"
           },
           "started_at_ms": {
-            "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+            "description": "When the invocation began: for an ownership row its `assigned_at`,\nwhich is the run's own start as its WAL records it for a row written\nat the run's durable start, restored by startup recovery or created\nby a held ending, and the time the row was first written for one\nanother event created (the run's ending, a report that it is\nambiguous, or a drop); the archive's true `started_at` for\narchive-only rows. Unlike `assigned_at_ms`, this means the same thing\non both row kinds — the list surface's \"started\" column.",
             "format": "int64",
             "type": "integer"
           },
@@ -574,7 +574,7 @@
                 "type": "string"
               },
               "started_at_ms": {
-                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "description": "When the invocation began: for an ownership row its `assigned_at`,\nwhich is the run's own start as its WAL records it for a row written\nat the run's durable start, restored by startup recovery or created\nby a held ending, and the time the row was first written for one\nanother event created (the run's ending, a report that it is\nambiguous, or a drop); the archive's true `started_at` for\narchive-only rows. Unlike `assigned_at_ms`, this means the same thing\non both row kinds — the list surface's \"started\" column.",
                 "format": "int64",
                 "type": "integer"
               },
@@ -1312,7 +1312,7 @@
                 "type": "string"
               },
               "started_at_ms": {
-                "description": "When the invocation began: `assigned_at` (dispatch time — the\nclosest thing to a start the coordination store records) for\nownership rows, the archive's true `started_at` for archive-only\nrows. Unlike `assigned_at_ms`, this means the same thing on both\nrow kinds — the list surface's \"started\" column.",
+                "description": "When the invocation began: for an ownership row its `assigned_at`,\nwhich is the run's own start as its WAL records it for a row written\nat the run's durable start, restored by startup recovery or created\nby a held ending, and the time the row was first written for one\nanother event created (the run's ending, a report that it is\nambiguous, or a drop); the archive's true `started_at` for\narchive-only rows. Unlike `assigned_at_ms`, this means the same thing\non both row kinds — the list surface's \"started\" column.",
                 "format": "int64",
                 "type": "integer"
               },
@@ -3683,7 +3683,7 @@
             "type": "object"
           },
           "DoctorExecutions": {
-            "description": "In-flight / current-execution view, read from the worker-local\n`invocation_state` table (the reliable live view — the CP owner\ntable's `in_flight` status is not populated by trigger dispatch\nyet; see issue #50).",
+            "description": "In-flight / current-execution view, read from the worker-local\n`invocation_state` table, which holds a run from its first durable\nwrite until it ends. The control plane's ownership rows name a run\nfrom that same write, but not one whose row that write could not make\nor one an earlier build started, so these counts can include runs the\ncontrol plane's `in_flight` does not list.",
             "properties": {
               "in_flight": {
                 "format": "int64",
