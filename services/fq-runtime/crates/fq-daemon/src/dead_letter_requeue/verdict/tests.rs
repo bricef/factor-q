@@ -260,9 +260,11 @@ fn the_cannot_tell_refusal_gives_the_check_and_the_override() {
          claim is there: if the claim has been given back by then, a dead letter marked like \
          this one is still one it cannot tell about, unless the run its mark names is on record. \
          Check the run with `fq invocation show 019a0000-0000-7000-8000-000000000001`: it \
-         started if that shows a `Live execution:` block, an `archived:` line, a `status:` other \
-         than `(no coordination row)` or a trigger line saying `durably started`. A copy of the \
-         trigger can still start the run after you look. Once you have checked that it did not \
+         started if that shows a `Live execution:` block, an `archived:` line or a trigger line \
+         saying `durably started`; a `status:` other than `(no coordination row)` is a start only \
+         under a trigger line that does not say `dropped by an operator`, since a run an operator \
+         dropped before its first WAL write has one, ended by the drop, without having started. \
+         A copy of the trigger can still start the run after you look. Once you have checked that it did not \
          start, ask again with `checked_not_started` set: `fq dead-letters requeue researcher \
          --trigger-seq 12 --checked-not-started`. A start on record is refused whatever you \
          pass."
@@ -476,12 +478,11 @@ fn a_trigger_consumed_for_another_reason_is_refused_and_the_override_takes_it() 
          dead letter's own work did not run: list the agent's runs with `fq events query \
          --agent researcher --event-type triggered`, find any whose trigger payload is this dead \
          letter's with `fq events get <event-id>`, and check each with `fq invocation show \
-         <id>`: it started if that shows a `Live execution:` block or a trigger line saying \
-         `durably started`. A `status:` other than `(no coordination row)` is a start only \
-         under a trigger line that does not say `dropped by an operator`: a run an operator \
-         dropped before its first WAL write has one, ended by the drop, without having \
-         started, and its trigger line says it was consumed without a run and dropped by an \
-         operator. Once you have checked that its work did not run, ask again with \
+         <id>`: it started if that shows a `Live execution:` block, an `archived:` line or a \
+         trigger line saying `durably started`; a `status:` other than `(no coordination row)` \
+         is a start only under a trigger line that does not say `dropped by an operator`, since \
+         a run an operator dropped before its first WAL write has one, ended by the drop, \
+         without having started. Once you have checked that its work did not run, ask again with \
          `checked_not_started` set: `fq dead-letters requeue researcher --trigger-seq 12 \
          --checked-not-started`. A start on record is refused whatever you pass."
     );

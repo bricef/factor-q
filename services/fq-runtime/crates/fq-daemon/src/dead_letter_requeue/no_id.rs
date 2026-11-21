@@ -3,10 +3,10 @@
 //! is, from what it records; whether its run may have started; and what
 //! can be done with its work.
 
-use fq_ops::dead_letter::{AN_UNLISTED_CLAIM_SHOWS_NOTHING, NOTHING_SHOWS_IT_DID_NOT_START};
+use fq_ops::dead_letter::{
+    AN_UNLISTED_CLAIM_SHOWS_NOTHING, NOTHING_SHOWS_IT_DID_NOT_START, STARTED_IF,
+};
 use fq_runtime::dead_letter::{DeadLetter, UnattributedKind};
-
-use super::verdict::STARTED_IF;
 
 /// The kinds of dead letter with no trigger id, told apart by what each
 /// records.

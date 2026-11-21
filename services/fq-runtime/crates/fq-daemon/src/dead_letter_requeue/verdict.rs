@@ -118,6 +118,7 @@
 //! claim was read.
 
 use fq_edge::wire::WireError;
+use fq_ops::dead_letter::STARTED_IF;
 use fq_runtime::TriggerDispatcher;
 use fq_runtime::control_plane::dispatcher::{ClaimMark, ConsumedClaim, Exhausted, ExhaustionCheck};
 use fq_runtime::control_plane::store::ConsumedWhy;
@@ -534,23 +535,6 @@ fn on_your_word(dead: &DeadLetter, checked: &str) -> String {
     }
 }
 
-/// What in `fq invocation show`'s output says a run started.
-pub(super) const STARTED_IF: &str = "it started if that shows a `Live execution:` block, an `archived:` \
-     line, a `status:` other than `(no coordination row)` or a trigger line saying `durably \
-     started`";
-
-/// What in `fq invocation show`'s output says a run started, for the runs
-/// of a trigger whose claim says it was consumed (issue 1055). An operator
-/// may have dropped such a run before its first WAL write, and the drop
-/// writes the coordination status that [`STARTED_IF`] counts as a start
-/// (the run's ownership row, ended by the drop, with its request), though
-/// no archive record; the trigger line tells the two apart.
-const STARTED_IF_DROPPED_SHOWN: &str = "it started if that shows a `Live execution:` block or a \
-     trigger line saying `durably started`. A `status:` other than `(no coordination row)` is a \
-     start only under a trigger line that does not say `dropped by an operator`: a run an \
-     operator dropped before its first WAL write has one, ended by the drop, without having \
-     started, and its trigger line says it was consumed without a run and dropped by an operator";
-
 /// The refusal for a trigger whose run has a start on record. A
 /// `Conflict`, as for a dead letter already requeued: the request was
 /// right, the work ran, and no edit to the request changes that.
@@ -693,7 +677,7 @@ fn disagrees(
              you override, check that this dead letter's own work did not run: list the \
              agent's runs with `fq events query --agent {agent} --event-type triggered`, find any \
              whose trigger payload is this dead letter's with `fq events get <event-id>`, and \
-             check each with `fq invocation show <id>`: {STARTED_IF_DROPPED_SHOWN}. {} A start \
+             check each with `fq invocation show <id>`: {STARTED_IF}. {} A start \
              on record is refused whatever you pass.",
             which(dead, selected),
             on_your_word(dead, "its work did not run"),
