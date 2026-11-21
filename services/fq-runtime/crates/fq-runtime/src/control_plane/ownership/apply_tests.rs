@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::control_plane::store::OwnerStatus;
+use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, OwnerStatus};
 
 const BEFORE: &str = "worker-before";
 const EVENT: &str = "worker-of-the-event";
