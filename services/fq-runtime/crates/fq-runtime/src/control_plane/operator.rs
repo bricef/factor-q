@@ -120,7 +120,8 @@ pub async fn drop_invocation(
             // (ADR-0026 — the event log is the system of record). This is
             // the one delete of an ownership row outside the transition
             // table (`control_plane::ownership`); the drop's fold writes
-            // the row again, `failed` with its archive recorded.
+            // the row again, `failed` with its archive recorded, or none to
+            // come when the drop says so.
             if !control_store.delete_invocation_owner(invocation_id).await? {
                 return Err(DropError::UnknownInvocation(invocation_id.to_string()));
             }

@@ -3,8 +3,14 @@
 //! receipt names the drop event's sequence; the gated read waits at
 //! the read horizon — EVERY consumer feeding the Invocation view's
 //! fold (projection AND coordination) — so when it answers, the
-//! archive row, the failed owner status, and the recent event are all
-//! there. No sleeps, no polling: the horizon is the synchronisation.
+//! failed owner status, with what it says of the archive, and the recent
+//! event are all there. No sleeps, no polling: the horizon is the
+//! synchronisation.
+//!
+//! The run here never wrote a row on the daemon's worker (its
+//! `triggered` is published by hand), so the drop says no archive will
+//! come, and its fold records the row's archive `none` and writes no
+//! archive record (issue 1070).
 
 #![cfg(unix)]
 
@@ -184,7 +190,7 @@ async fn drop_then_gated_get_sees_every_effect() {
         .expect("the receipt names the drop event's sequence");
 
     // The gated read: released only when the whole fold includes the
-    // drop — owner flipped, archive written, event projected.
+    // drop — owner flipped, with no archive to come, event projected.
     let detail = client
         .rpc
         .invoke(
@@ -205,8 +211,12 @@ async fn drop_then_gated_get_sees_every_effect() {
         "the owner flip is visible at the receipt's watermark: {detail}"
     );
     assert_eq!(
-        detail["archive"]["final_phase"], "failed",
-        "the archive row is visible at the receipt's watermark: {detail}"
+        detail["owner"]["archive_state"], "none",
+        "the drop's word on the archive is visible at the receipt's watermark: {detail}"
+    );
+    assert!(
+        detail["archive"].is_null(),
+        "a run that never wrote a row gets no archive record from its drop: {detail}"
     );
     assert!(
         detail["recent_events"]

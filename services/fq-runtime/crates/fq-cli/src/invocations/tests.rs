@@ -161,8 +161,8 @@ fn format_resume_accepted_names_the_worker_cap_and_the_agent_cap_it_is_not_held_
 fn the_archive_column_names_each_state() {
     use fq_ops::views::InvocationArchiveState as S;
     assert_eq!(
-        [S::NotDue, S::Pending, S::Held, S::Archived].map(archive_label),
-        ["-", "pending", "held", "yes"]
+        [S::NotDue, S::Pending, S::Held, S::Archived, S::WillNotCome].map(archive_label),
+        ["-", "pending", "held", "yes", "none"]
     );
 }
 
@@ -206,6 +206,10 @@ fn show_names_a_pending_or_held_archive() {
     assert_eq!(
         format_archive_state(&detail_with(S::Pending, None)).as_deref(),
         Some("pending: the run has ended and its archive has not reached the control plane")
+    );
+    assert_eq!(
+        format_archive_state(&detail_with(S::WillNotCome, None)).as_deref(),
+        Some("none: the run was dropped with no row on its worker, so no archive will come")
     );
     let hold = fq_ops::health::ArchiveHold {
         invocation_id: "inv".to_string(),

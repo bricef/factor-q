@@ -331,6 +331,12 @@ pub enum ArchiveState {
     /// operator's drop. A record retention later sweeps leaves the row
     /// `archived`.
     Archived,
+    /// No archive record will come: an operator's drop said so, of a run
+    /// with no row on its worker and none to come there, and wrote none
+    /// (issue 1070). Only a `failed` row holds it, and not for good: an
+    /// archive that arrives is recorded, and the run's own ending makes it
+    /// `pending`. Stored as `none`.
+    WillNotCome,
 }
 
 impl ArchiveState {
@@ -339,6 +345,7 @@ impl ArchiveState {
             ArchiveState::NotDue => "not_due",
             ArchiveState::Pending => "pending",
             ArchiveState::Archived => "archived",
+            ArchiveState::WillNotCome => "none",
         }
     }
 
@@ -347,6 +354,7 @@ impl ArchiveState {
             "not_due" => Some(ArchiveState::NotDue),
             "pending" => Some(ArchiveState::Pending),
             "archived" => Some(ArchiveState::Archived),
+            "none" => Some(ArchiveState::WillNotCome),
             _ => None,
         }
     }
@@ -371,6 +379,7 @@ impl From<ArchiveState> for fq_ops::views::InvocationArchiveState {
             ArchiveState::NotDue => Self::NotDue,
             ArchiveState::Pending => Self::Pending,
             ArchiveState::Archived => Self::Archived,
+            ArchiveState::WillNotCome => Self::WillNotCome,
         }
     }
 }
@@ -394,8 +403,8 @@ impl ControlPlaneStore {
         assigned_at: Option<i64>,
     ) -> Result<bool, ControlPlaneStoreError> {
         // `apply` moves only between pairs a row may hold; a write of any
-        // other is a caller's mistake (the column's CHECK covers values,
-        // not pairs).
+        // other is a caller's mistake, which the store's checks refuse
+        // since the termination record's rung.
         debug_assert!(to.is_valid(), "an ownership row cannot hold {}", to.name());
         let written = match expected {
             None => {

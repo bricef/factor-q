@@ -53,13 +53,14 @@ fn archive_label(state: fq_ops::views::InvocationArchiveState) -> &'static str {
         fq_ops::views::InvocationArchiveState::Pending => "pending",
         fq_ops::views::InvocationArchiveState::Held => "held",
         fq_ops::views::InvocationArchiveState::Archived => "yes",
+        fq_ops::views::InvocationArchiveState::WillNotCome => "none",
     }
 }
 
 /// The `archive:` line of `fq invocation show`, for a run that has ended
-/// and whose archive has not reached the control plane: pending, or held
-/// by the worker's archive sweeper with the reason and what lifts it.
-/// `None` otherwise. Pure; covered by unit tests.
+/// and whose archive has not reached the control plane: pending, held by
+/// the worker's archive sweeper with the reason and what lifts it, or none
+/// to come after a drop. `None` otherwise. Pure; covered by unit tests.
 fn format_archive_state(detail: &fq_ops::views::InvocationDetailView) -> Option<String> {
     let owner = detail.owner.as_ref()?;
     match (owner.archive_state, &detail.archive_hold) {
@@ -74,6 +75,10 @@ fn format_archive_state(detail: &fq_ops::views::InvocationDetailView) -> Option<
             _,
         ) => Some(
             "pending: the run has ended and its archive has not reached the control plane"
+                .to_string(),
+        ),
+        (fq_ops::views::InvocationArchiveState::WillNotCome, _) => Some(
+            "none: the run was dropped with no row on its worker, so no archive will come"
                 .to_string(),
         ),
         _ => None,
@@ -408,7 +413,7 @@ pub(crate) async fn invocation_drop(
         if let Some(r) = &result.reason {
             println!("Reason: {r}");
         }
-        println!("Follow with `fq invocation show {id}` to confirm the archive row.");
+        println!("Follow with `fq invocation show {id}` to see where the drop left it.");
     }
     Ok(())
 }

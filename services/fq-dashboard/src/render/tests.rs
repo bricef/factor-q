@@ -1810,6 +1810,7 @@ fn the_invocation_list_shows_each_archive_state() {
         mk("inv-pending", "failed", S::Pending),
         mk("inv-held", "completed", S::Held),
         mk("inv-archived", "completed", S::Archived),
+        mk("inv-none", "failed", S::WillNotCome),
     ];
     let html = invocations(
         &items,
@@ -1834,6 +1835,11 @@ fn the_invocation_list_shows_each_archive_state() {
         row("inv-pending").ends_with("<td>pending</td>"),
         "{}",
         row("inv-pending")
+    );
+    assert!(
+        row("inv-none").ends_with(r#"<span class="muted">none</span></td>"#),
+        "{}",
+        row("inv-none")
     );
     assert!(
         row("inv-held").ends_with(r#"<span class="warn">held</span></td>"#),

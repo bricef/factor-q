@@ -266,3 +266,87 @@ async fn the_runs_own_ending_after_a_drop_saying_none_replaces_it() {
         "the run's own failed replaces it too, its archive pending"
     );
 }
+
+/// **A drop saying `none` of a row this build cannot read still writes its
+/// record**, as any drop of such a row does: the move first meets the row
+/// it cannot read, which is left as it is, and the drop's record is then
+/// written, with the drop's time as the run's start. The event is refused
+/// as permanent.
+#[tokio::test]
+async fn a_drop_saying_none_of_a_row_this_build_cannot_read_still_writes_its_record() {
+    let fixture = Fixture::new().await;
+    fixture.seeded(OwnerStatus::InFlight).await;
+    sqlx::query("UPDATE coordination_invocation_owner SET status = 'weird'")
+        .execute(&fixture.raw)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+                requested_by: None,
+                archive: Some(DropArchive::WillNotCome),
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried: {outcome:?}"
+    );
+    assert_eq!(
+        (fixture.row().await, fixture.record().await),
+        (
+            pair("weird", "not_due"),
+            Some(("failed".to_string(), Vec::new()))
+        ),
+        "the row is left as it is, and the drop's record is written"
+    );
+}
+
+/// **A drop saying `none` whose move the store refuses still writes its
+/// record**, as for a row this build cannot read: the row is left as it
+/// is, in flight, and the drop's record is what then says the run ended.
+/// The event is refused as permanent.
+#[tokio::test]
+async fn a_drop_saying_none_whose_move_is_refused_still_writes_its_record() {
+    let fixture = Fixture::new().await;
+    fixture.seeded(OwnerStatus::InFlight).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_the_move BEFORE UPDATE ON coordination_invocation_owner \
+         BEGIN SELECT RAISE(ABORT, 'the test refuses the move'); END",
+    )
+    .execute(&fixture.raw)
+    .await
+    .unwrap();
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+                requested_by: None,
+                archive: Some(DropArchive::WillNotCome),
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried: {outcome:?}"
+    );
+    assert_eq!(
+        (fixture.row().await, fixture.record().await),
+        (
+            pair("in_flight", "not_due"),
+            Some(("failed".to_string(), Vec::new()))
+        ),
+        "the row is left as it is, and the drop's record is written"
+    );
+}

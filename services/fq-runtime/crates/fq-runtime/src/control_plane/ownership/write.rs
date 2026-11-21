@@ -21,7 +21,8 @@ use crate::control_plane::store::{ControlPlaneStore, ControlPlaneStoreError, Own
 /// operator's drop of a row no projection event names an agent for:
 /// `operator::drop_invocation` deletes that row itself, to tell it from an
 /// id that never existed, before it publishes the drop, whose fold writes
-/// the row again as `failed`, archived. A move decided over the row just
+/// the row again as `failed`, its archive written or none to come. A move
+/// decided over the row just
 /// before the delete loses its compare-and-set and is decided again from
 /// no row. Past that, a lost compare-and-set means another process writes
 /// the same store, and three attempts tell a passing race from a row that

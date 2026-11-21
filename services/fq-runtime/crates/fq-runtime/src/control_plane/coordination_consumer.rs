@@ -410,8 +410,9 @@ impl CoordinationConsumer {
     /// them, and say what happened: debug for a move or a duplicate, warn for a
     /// refusal (the row records the run finished, and the event would put
     /// it back in progress) and for an ending that reaches a row recorded
-    /// `failed` with its archive written, the state an operator's drop
-    /// leaves (most likely the drop came first, which is no fault), error
+    /// `failed` with its archive written or none to come, the states an
+    /// operator's drop leaves (most likely the drop came first, which is
+    /// no fault), error
     /// for any other conflicting ending (the run published two). `reported` on a conflict is the ending the event
     /// names, `invocation.archived`'s `final_phase` included. `report` is
     /// a late `invocation.ambiguous`'s own fields, which tell startup
@@ -458,15 +459,18 @@ impl CoordinationConsumer {
             ),
             Applied::Conflict { recorded, moved_to } => {
                 let reported = what.ending().map(|ending| ending.status().as_str());
-                if recorded == RowState::ended(Ending::Failed, ArchiveState::Archived) {
+                if recorded == RowState::ended(Ending::Failed, ArchiveState::Archived)
+                    || recorded == RowState::ended(Ending::Failed, ArchiveState::WillNotCome)
+                {
                     warn!(
                         invocation_id,
                         agent_id,
                         event_type,
                         recorded = recorded.name(),
                         reported,
-                        "an ending reached a run recorded failed with its archive written, as an \
-                         operator's drop leaves it; the ownership row keeps the ending it recorded"
+                        "an ending reached a run recorded failed with its archive written or none \
+                         to come, as an operator's drop leaves it; the ownership row keeps the \
+                         ending it recorded"
                     );
                 } else {
                     error!(
