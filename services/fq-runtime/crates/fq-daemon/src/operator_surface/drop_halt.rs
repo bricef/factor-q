@@ -16,6 +16,25 @@ pub(super) struct DropCommandInput {
     pub(super) live: bool,
 }
 
+/// What the live drop asks of the runner: which agent it is driving a
+/// run for, and to arm a halt on that run. The runner is the one
+/// implementation; a test gives another, to stand in for the instant
+/// between the two answers.
+pub(super) trait DriveHalts {
+    fn active_agent(&self, invocation_id: &uuid::Uuid) -> Option<fq_runtime::AgentId>;
+    fn arm_halt(&self, invocation_id: uuid::Uuid) -> Option<fq_runtime::worker::ArmedHalt>;
+}
+
+impl DriveHalts for fq_runtime::ReducerRunner<fq_runtime::Harness> {
+    fn active_agent(&self, invocation_id: &uuid::Uuid) -> Option<fq_runtime::AgentId> {
+        fq_runtime::ReducerRunner::active_agent(self, invocation_id)
+    }
+
+    fn arm_halt(&self, invocation_id: uuid::Uuid) -> Option<fq_runtime::worker::ArmedHalt> {
+        fq_runtime::ReducerRunner::arm_halt(self, invocation_id)
+    }
+}
+
 /// The live-drop precondition, daemon-side (plan Phase 4, verb 18):
 /// the runner that would be driving this invocation is the only
 /// zero-lag authority on whether it *is*, so the check and the halt
@@ -41,7 +60,7 @@ pub(super) struct DropCommandInput {
 /// start; one whose permit came just before the hold is starting, and is
 /// refused like the live run it is about to be.
 pub(super) fn arm_drop_halt(
-    runner: &fq_runtime::ReducerRunner<fq_runtime::Harness>,
+    runner: &impl DriveHalts,
     queued: Option<&fq_runtime::control_plane::dispatcher::QueuedHold>,
     input: &DropCommandInput,
 ) -> Result<Option<Armed>, fq_edge::wire::WireError> {
