@@ -271,8 +271,9 @@ pins that an awaiting setup longer than the production window is not
 redelivered. ADR-0032's one edit since 2026-11-11 records the finished
 retry ladder (2026-11-14); it is not edited for the keepalive, for the
 settling of a daemon's own claims, for the dead-letter watch's reading
-of the records, for the mark's report of what it marked or for the
-release's scope to its own invocation, so these of its statements are
+of the records, for the mark's report of what it marked, for the
+release's scope to its own invocation or for the claim's consumed
+state, so these of its statements are
 now out of date: section 5's account of the two routes to a redelivery
 before durable start, and of the replay using the second; gap 3 as a
 whole, now closed (below), its "a start that takes longer than the whole
@@ -294,7 +295,9 @@ the row keeps whichever invocation id was written last", since a mark
 now matches only the claim naming its run, and that
 `release_trigger_claim` "deletes by key and `state = 'claimed'`", since
 a release now deletes only the claim naming the invocation giving it
-back.
+back; and section 2's account of the row, in "schema version 2" with a
+`state` that is "`claimed` or `durably_started`", since a later rung
+rebuilt the table with a third state, `consumed`.
 The
 retry ladder is finished
 ([#953](https://github.com/bricef/factor-q/issues/953)): the trigger
@@ -572,7 +575,24 @@ as well it meets a claim with nothing on record and takes it again. A
 trigger that failed for good then fails again, one requeued from a hold
 can run twice, and on the last delivery the watch finds no claim and
 writes a `trigger_exhausted` for a trigger already dealt with
-([#1055](https://github.com/bricef/factor-q/issues/1055)). A slow
+([#1055](https://github.com/bricef/factor-q/issues/1055)). The claim
+now has the state that will close this, `consumed`, with how in
+`consumed_why`, and every reader honours it: a copy that meets one is
+acked and dropped, the watch writes no dead letter for it, requeue
+proceeds for one consumed as dead-lettered, refuses one requeued from a
+hold whatever it is told, and takes one consumed for any other reason
+only on the operator's word, adoption, re-take, recovery
+and `fq doctor` leave it, a start found over one is recorded over it,
+the sweep takes it with the started claims, and `fq invocation show`
+names it, with an operator's drop when the claim records one. The watch
+and requeue do not take it on trust: a start on
+record for the run it names is a start (for a claim that records an
+operator's drop of the run, beside its reason, only a start in the WAL,
+since the drop writes the run's ownership row), and the claim is marked
+so; one whose records cannot be read is never dead-lettered, and
+requeue cannot tell. No answer
+writes it yet, so
+the gap stands until the consuming answers do. A slow
 release no longer leads there, since the delivery is kept alive until
 its answer is published
 ([#1057](https://github.com/bricef/factor-q/issues/1057)); only a lost

@@ -1944,8 +1944,8 @@ ambiguous, is archived or is dropped, and by startup recovery: for it the output
 then shows the `Live execution:` block, so that status alone does not
 mean the run never started. The run has not started if the command
 answers `no invocation found with id=…`, or shows none of the four,
-only a `trigger:` line saying `claimed, start not recorded` or
-`none recorded`, and its events: its `triggered` event at most, and a
+only a `trigger:` line saying `claimed, start not recorded`,
+`consumed without a run` or `none recorded`, and its events: its `triggered` event at most, and a
 `failed` one if it was refused in setup. Then requeue it with
 `--trigger-seq <N> --checked-not-started` (`checked_not_started` on
 `dead_letter.requeue`, which needs `trigger_seq`); the refusal prints
@@ -2306,6 +2306,89 @@ decimal string: a recreated stream numbers its messages from 1 again, so
 a sequence names a message only together with it. A finished, archived
 run still shows its trigger.
 
+A claim has a third state, for a trigger dealt with and never run,
+which this build reads and does not yet write: the answers that will
+write it come later
+([#1055](https://github.com/bricef/factor-q/issues/1055)). Its line
+says how the trigger was consumed:
+
+```text
+  trigger:  fq-triggers seq 1 (consumed without a run: failed_for_good; claimed 2026-01-02T03:04:04Z by 019a4c0e-…)
+```
+
+The reason is one of a small set of stable spellings, `failed_for_good`
+and `dead_lettered` among them, and `--json` carries it as
+`consumed_why`; a spelling a later build adds is shown as it is. A copy
+of the trigger that meets a consumed claim is acked and dropped, logged
+at warn as `dropping a redelivered trigger that was consumed without a
+run`, with no count. The dead-letter watch writes no `trigger_exhausted`
+for it, logged at warn as `not dead-lettering a trigger whose deliveries
+ran out`. `fq dead-letters requeue` requeues the dead letter of a
+trigger consumed as `dead_lettered`, the one reason that writes one,
+since its run never started. It refuses that of a trigger consumed as
+`requeued_from_hold`, whatever you pass: the trigger's replacement was
+published under the same trigger id, so requeueing it would run the
+work twice; to run the work again anyway, publish it as new work with
+`trigger.publish`. For any other reason it refuses too, saying it found
+no start on record for the run the claim names: the daemon writes no
+dead letter for those answers, so the dead letter and the claim
+disagree, and one of them may be about another trigger. Before you pass
+`--checked-not-started`, check that the dead letter's own work did not
+run: find the agent's runs whose trigger payload is the dead letter's
+among its `triggered` events, as the refusal says, and look at each with
+`fq invocation show`. A run started if it shows a `Live execution:`
+block or a trigger line saying `durably started`. An `archived:` line or
+a `status:` is not enough on its own: a run an operator dropped before
+its first durable write has both without having started, and its
+trigger line then says so (below). Startup recovery leaves a consumed
+claim, and `fq doctor` does not list it among the stranded claims.
+
+**An operator's drop is recorded beside the reason.** Dropping a run
+that never made its first durable write (`fq invocation drop <id>`)
+writes the run's ownership row and its archive record, which for any
+other run would show a start. So a consumed claim can record the drop,
+and keeps its reason when it does; like the state itself, this build
+reads it, and the answers that write it come later. Its line then
+reads, for example, `consumed without a run: failed_for_good; dropped
+by an operator, recorded 2026-01-02T03:04:06Z`. A trigger the
+dispatcher dead-lettered and whose run was then dropped keeps
+`dead_lettered`, and its dead letter is still requeued.
+
+The watch and the requeue do not take a consumed claim on trust. They
+look for the run it names in the worker's WAL and on the ownership
+table, as they do for a `claimed` row; for one that records an
+operator's drop, in the WAL only, whatever its reason, since the drop
+writes the run's ownership row itself. A run found there is a start,
+whatever the claim says: the watch writes no dead letter, the requeue
+is refused as for any run that started, the claim is marked started,
+and the daemon logs at error `the claim of an exhausted trigger said it
+was consumed without a run, and its run has a start on record`. Check
+that run with `fq invocation show`. A run found in the WAL is a start
+even when the ownership table cannot be read. When the records cannot
+be read and the WAL shows nothing, the verdict is held; past its limit
+the watch's last look reads the WAL again, and if it still cannot tell,
+the watch writes no dead letter, since none is due either way, and logs
+at error `not dead-lettering a trigger whose deliveries ran out: its
+claim says it was consumed without a run, and the records that could
+say otherwise still cannot be read`, while the requeue keeps answering
+that it cannot tell (or, for a trigger requeued from a hold, refuses
+whatever you pass). A run the dispatcher itself finds starting over a
+consumed claim has its start recorded over it, logged at error as `the
+claim of a trigger whose run started recorded it consumed without a
+run`, since left consumed the trigger's dead letter could be requeued
+and run again. Startup recovery reads only `claimed` claims, so a
+consumed claim whose run did start stays consumed until the watch or a
+requeue meets it; a copy that meets it is dropped either way, and until
+then `fq invocation show` reads `consumed without a run` for a run that
+started.
+
+A `fq` built before this state cannot read the line, and fails the
+whole answer of `fq invocation show`: use a client as new as the daemon.
+From this build on, a state the client does not know reads `in a state
+this build does not know`, and `fq invocation show --json`, which
+decodes the answer and writes it out again, prints it as `"unknown"`, a
+value no daemon sends and the published schema does not list.
+
 A run no claim names reads `none recorded`, and that says less than it
 seems. A delivery that ends before its run's first durable write gives
 its claim back, yet the run may already have published events under the
@@ -2531,6 +2614,7 @@ message is gone is reported the same way whenever the daemon started.
 
 A claim row does two jobs. Marked started, it is the record that stops
 a redelivered or replayed copy of its trigger from starting the run a
+second time; consumed, the record that stops one from being handled a
 second time. And it is the only record of which delivery started which
 run: the `trigger:` line of `fq invocation show`, and the claims
 `fq doctor` reports. The daemon's retention sweep deletes claim rows on
@@ -2542,8 +2626,9 @@ stale-worker windows:
 trigger_claim_retention_days = 90 # the default; -1 keeps every claim row indefinitely
 ```
 
-The sweep deletes a claim marked started once it is older than the
-window, whichever incarnation of the stream it was on, and a claim
+The sweep deletes a claim marked started or consumed once it is older
+than the window, whichever incarnation of the stream it was on, and a
+claim
 still `claimed` by a process that has exited once it is older than the
 window. It never deletes a claim this daemon holds, however old: that
 may be a trigger it is still holding behind a paused model or a full
@@ -2556,8 +2641,8 @@ trigger stream keeps a message for a day after it was published,
 whether or not it has been acked: a trigger held for ten hours and then
 acked stays fourteen hours more. So a durable consumer that is deleted and recreated, or
 whose state is lost in a broker restore, replays the triggers published
-in the last day, and the started claims are what keep those from
-running twice. A claim is never older than its message, so a claim
+in the last day, and the started and consumed claims are what keep
+those from running twice or being handled again. A claim is never older than its message, so a claim
 older than a day names a message the stream has dropped; the floor is
 that day rounded up, plus a day of margin for the two clocks the
 argument reads.
