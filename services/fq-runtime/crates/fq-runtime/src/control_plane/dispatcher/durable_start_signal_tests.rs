@@ -40,6 +40,18 @@
 //! end as: a claim recording a start, which refuses a copy that comes
 //! back, and one ack that releases nothing.
 //!
+//! **The run's ownership row (issue 721).** At the durable start, after
+//! the claim's mark, the dispatcher writes the run's ownership row,
+//! `in_flight`, under its own worker id and from the run's own start, the
+//! time the signal carries ([`STUB_STARTED_AT`]). These tests pin the row
+//! a start writes, that a run refused in setup writes none, that a mark
+//! the store refuses, or one that finds no claim naming the run, still
+//! writes it, that a row the store refuses leaves the mark and the run as
+//! they are, that a row an operator's drop already ended is left as the
+//! drop left it, and that a row already in flight is left as it was
+//! ([`Resolve::FireIntoRefusedRows`], [`Resolve::FireOverADroppedRow`],
+//! [`Resolve::FireOverARowInFlight`]).
+//!
 //! **A long setup (#967).** From the worker permit to the durable start a
 //! run provisions its workspace, starts its per-invocation MCP servers
 //! and publishes `triggered`, and that can take longer than the
@@ -159,6 +171,21 @@ const DRIVE_DEADLINE: Duration = Duration::from_secs(40);
 /// rather than a reason to keep reading.
 const ANSWERS_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The run's start the stub's signal carries, as a real run's carries the
+/// `started_at` of its first WAL row.
+const STUB_STARTED_AT: i64 = 1_763_000_000_123;
+
+/// The agent id an operator's drop of a run with no row names in the
+/// worker column, standing in for a worker it does not know.
+const DROPPED_BY_AGENT: &str = "the-dropped-runs-agent";
+
+/// The worker an `in_flight` row the start meets names
+/// ([`Resolve::FireOverARowInFlight`]).
+const ANOTHER_DAEMON: &str = "another-daemon";
+
+/// The start an `in_flight` row the start meets records.
+const ANOTHER_START: i64 = STUB_STARTED_AT - 5;
+
 /// What the stub invocation does with its durable-start signal.
 enum Resolve {
     /// Drop it unfired. `run_loop_for` does this when `run_loop_inner`
@@ -185,6 +212,17 @@ enum Resolve {
     /// signal unfired: the run returns before its first WAL write, and the
     /// answer that settles it meets a claim that no longer names the run.
     DropOnAChangedClaim(ClaimChange),
+    /// Make the control-plane store refuse every new ownership row, then
+    /// fire it: the claim's mark lands and the run's row does not.
+    FireIntoRefusedRows,
+    /// Fold an operator's drop of the run onto its ownership row, as the
+    /// coordination consumer would between the run's first WAL write and
+    /// the dispatcher's write of the row, then fire it.
+    FireOverADroppedRow,
+    /// Write the run an `in_flight` row under [`ANOTHER_DAEMON`], from
+    /// [`ANOTHER_START`], then fire it: a row the start meets already in
+    /// flight, as a retry of a write that landed would.
+    FireOverARowInFlight,
 }
 
 /// How [`Resolve::FireOnAChangedClaim`] changes the claim before the mark.
@@ -337,24 +375,36 @@ impl Worker for ResolvesThenReturns {
         }
         match self.resolve {
             Resolve::Drop => drop(durable_start),
-            Resolve::Fire => durable_start.fire(0),
+            Resolve::Fire => durable_start.fire(STUB_STARTED_AT),
             Resolve::FireIntoRefusedMarks(refusals) => {
                 refuse_claim_marks(&self.claim_db, refusals).await;
-                durable_start.fire(0);
+                durable_start.fire(STUB_STARTED_AT);
             }
             Resolve::FireIntoLockedStore(held_for) => {
                 let refusals = Refusals::First(ATTEMPTS_IF_REFUSED_AT_ONCE);
                 refuse_claim_marks(&self.claim_db, refusals).await;
                 lock_claim_store(&self.claim_db, held_for).await;
-                durable_start.fire(0);
+                durable_start.fire(STUB_STARTED_AT);
             }
             Resolve::FireOnAChangedClaim(change) => {
                 change_the_claim(&self.claim_db, change).await;
-                durable_start.fire(0);
+                durable_start.fire(STUB_STARTED_AT);
             }
             Resolve::DropOnAChangedClaim(change) => {
                 change_the_claim(&self.claim_db, change).await;
                 drop(durable_start);
+            }
+            Resolve::FireIntoRefusedRows => {
+                refuse_ownership_rows(&self.claim_db).await;
+                durable_start.fire(STUB_STARTED_AT);
+            }
+            Resolve::FireOverADroppedRow => {
+                drop_the_run(&self.claim_db, invocation_id).await;
+                durable_start.fire(STUB_STARTED_AT);
+            }
+            Resolve::FireOverARowInFlight => {
+                put_the_run_in_flight(&self.claim_db, invocation_id).await;
+                durable_start.fire(STUB_STARTED_AT);
             }
         }
         match self.turn {
@@ -452,6 +502,76 @@ async fn refuse_claim_marks(claim_db: &Path, refusals: Refusals) {
             .expect("install the refusal");
     }
     conn.close().await.expect("close the claim store's file");
+}
+
+/// Make every insert of an ownership row fail from now on, through a
+/// connection of its own to the store's file.
+async fn refuse_ownership_rows(claim_db: &Path) {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(claim_db)
+        .connect()
+        .await
+        .expect("open the store's file");
+    sqlx::query(
+        "CREATE TRIGGER refuse_ownership_rows BEFORE INSERT ON coordination_invocation_owner \
+         BEGIN SELECT RAISE(ABORT, 'injected: the store refuses the ownership row'); END",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("install the refusal");
+    conn.close().await.expect("close the store's file");
+}
+
+/// Fold an operator's drop of `invocation_id` onto its ownership row, as
+/// the coordination consumer folds one: the row it writes names the
+/// agent's id in the worker column, standing in for a worker the drop's
+/// event does not know.
+async fn drop_the_run(claim_db: &Path, invocation_id: Uuid) {
+    use crate::control_plane::ownership::{ArchiveExpected, OwnerFacts, OwnershipEvent, apply};
+    use crate::control_plane::store::TerminationRequest;
+    let store = ControlPlaneStore::open(claim_db)
+        .await
+        .expect("open the store's file");
+    let request = TerminationRequest {
+        requested_at: STUB_STARTED_AT + 1,
+        requested_by: Some("an-operator".to_string()),
+        reason: None,
+    };
+    apply(
+        &store,
+        &invocation_id.to_string(),
+        OwnershipEvent::TerminationRequested(ArchiveExpected::Yes),
+        OwnerFacts {
+            worker_id: DROPPED_BY_AGENT,
+            at_ms: STUB_STARTED_AT + 1,
+            ended_at_ms: STUB_STARTED_AT + 1,
+            request: Some(&request),
+        },
+    )
+    .await
+    .expect("fold the drop");
+}
+
+/// Write `invocation_id` an `in_flight` row under [`ANOTHER_DAEMON`],
+/// from [`ANOTHER_START`].
+async fn put_the_run_in_flight(claim_db: &Path, invocation_id: Uuid) {
+    use crate::control_plane::ownership::{OwnerFacts, OwnershipEvent, apply};
+    let store = ControlPlaneStore::open(claim_db)
+        .await
+        .expect("open the store's file");
+    apply(
+        &store,
+        &invocation_id.to_string(),
+        OwnershipEvent::Restored,
+        OwnerFacts {
+            worker_id: ANOTHER_DAEMON,
+            at_ms: ANOTHER_START,
+            ended_at_ms: ANOTHER_START,
+            request: None,
+        },
+    )
+    .await
+    .expect("write the row");
 }
 
 /// Change the one claim row as `change` says, through a connection of its
@@ -2235,6 +2355,223 @@ async fn a_mark_refused_past_its_retries_acks_keeping_the_claim_and_the_run_runs
         "the delivery was kept alive while its mark was retried: {sent:?}"
     );
     assert_no_copy_comes_back(&mut pulled.messages, SHORT_ACK_WINDOW * 3).await;
+}
+
+/// The run's ownership row, as the store holds it now: the run the
+/// stub's signal named.
+async fn owner_row(pulled: &Pulled) -> Option<crate::control_plane::store::OwnerRow> {
+    let (_, invocation_id) = pulled
+        .worker
+        .named
+        .lock()
+        .unwrap()
+        .expect("the dispatcher handed the stub a run");
+    pulled
+        .claims
+        .get_invocation_owner(&invocation_id.to_string())
+        .await
+        .expect("read the ownership row")
+}
+
+/// **A run has its ownership row from its durable start (issue 721).** At
+/// the first WAL write the dispatcher marks the claim and then writes the
+/// run's row: `in_flight`, under the dispatcher's own worker id, from the
+/// run's own start as its signal carries it. Before, nothing wrote a row
+/// until the run ended, so `fq invocation list --status in_flight` never
+/// listed a run started from a trigger.
+#[tokio::test]
+async fn a_durable_start_writes_the_runs_ownership_row_in_flight_from_its_start() {
+    let pulled = Pulled::new(Resolve::Fire, Turn::Later, Returns::Completed).await;
+
+    pulled.handle().await;
+
+    assert_marked_started(pulled.probe_claim().await);
+    let row = owner_row(&pulled)
+        .await
+        .expect("the durable start writes the run's ownership row");
+    assert_eq!(
+        (row.state(), row.worker_id.as_str(), row.assigned_at),
+        (
+            crate::control_plane::ownership::RowState::IN_FLIGHT,
+            "worker-a",
+            STUB_STARTED_AT
+        ),
+        "in flight, under the dispatcher's worker, from the run's own start"
+    );
+}
+
+/// **A run that returns in the poll that fired its signal still gets its
+/// row, from its own start.** The loop's turn ended on the run's result
+/// with the signal unseen, and the start is taken after the loop (#966):
+/// that path carries the start too.
+#[tokio::test]
+async fn a_start_seen_after_the_run_returned_writes_its_row_from_its_start() {
+    let pulled = Pulled::new(Resolve::Fire, Turn::Same, Returns::Completed).await;
+
+    pulled.handle().await;
+
+    assert_marked_started(pulled.probe_claim().await);
+    let row = owner_row(&pulled)
+        .await
+        .expect("the start seen after the loop writes the run's row");
+    assert_eq!(
+        (row.state(), row.assigned_at),
+        (
+            crate::control_plane::ownership::RowState::IN_FLIGHT,
+            STUB_STARTED_AT
+        )
+    );
+}
+
+/// **A run refused in setup has no ownership row, and runs again.**
+/// Nothing is written before the first WAL write: a row would read as a
+/// start, and the trigger, released and NAKed, would never run again.
+#[tokio::test]
+async fn a_run_refused_in_setup_writes_no_ownership_row() {
+    let pulled = Pulled::new(Resolve::Drop, Turn::Later, Returns::TransientError).await;
+
+    pulled.handle().await;
+
+    assert_eq!(owner_row(&pulled).await, None);
+    assert!(
+        matches!(pulled.probe_claim().await, TriggerClaim::Won),
+        "the claim was released, so the next copy of the trigger runs it"
+    );
+}
+
+/// **A mark the store refuses still writes the run's row.** The two writes
+/// are made in turn, the mark first: a mark refused on every attempt
+/// leaves the claim `claimed`, as before, and the row is written after it,
+/// so the run is listed in flight while recovery has the claim to mark.
+#[tokio::test]
+async fn a_mark_refused_past_its_retries_still_writes_the_runs_row() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireIntoRefusedMarks(Refusals::Every),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+
+    pulled.handle().await;
+
+    assert_held_by_the_dispatcher(
+        pulled.probe_claim().await,
+        "the mark never landed, so the claim stays `claimed`",
+    );
+    let row = owner_row(&pulled)
+        .await
+        .expect("the row is written whatever the mark did");
+    assert_eq!(
+        row.state(),
+        crate::control_plane::ownership::RowState::IN_FLIGHT
+    );
+    pulled.wait_until_acked().await;
+}
+
+/// **A mark that finds no claim naming the run still writes the run's
+/// row.** The mark records the start on the claim another way
+/// (`unmarked_start`), and the row is written after it all the same,
+/// whatever the mark met.
+#[tokio::test]
+async fn a_start_whose_claim_is_gone_still_writes_the_runs_row() {
+    let mut pulled = Pulled::with_ack_window(
+        Resolve::FireOnAChangedClaim(ClaimChange::Gone),
+        Turn::Later,
+        Returns::Completed,
+        SHORT_ACK_WINDOW,
+    )
+    .await;
+
+    pulled.handle().await;
+
+    let row = owner_row(&pulled)
+        .await
+        .expect("the row is written whatever the mark met");
+    assert_eq!(
+        (row.state(), row.worker_id.as_str(), row.assigned_at),
+        (
+            crate::control_plane::ownership::RowState::IN_FLIGHT,
+            "worker-a",
+            STUB_STARTED_AT
+        )
+    );
+    pulled.wait_until_acked().await;
+}
+
+/// **A row already in flight is left as it was.** It is a retry's, of a
+/// write that landed: the start is a duplicate, and the row keeps the
+/// worker and the start it names. Recovery's restore re-owns such a row;
+/// a durable start does not.
+#[tokio::test]
+async fn a_row_already_in_flight_is_left_as_it_was() {
+    let pulled = Pulled::new(
+        Resolve::FireOverARowInFlight,
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+
+    pulled.handle().await;
+
+    let row = owner_row(&pulled).await.expect("the row");
+    assert_eq!(
+        (row.status, row.worker_id.as_str(), row.assigned_at),
+        (OwnerStatus::InFlight, ANOTHER_DAEMON, ANOTHER_START),
+        "the start leaves an in-flight row's worker and start"
+    );
+}
+
+/// **A row the store refuses leaves the mark and the run as they are.**
+/// The claim is marked and the delivery acked once, the run goes on to
+/// its end, and the run has no row until its ending writes one: what the
+/// record said of every run before its row was written at the start.
+#[tokio::test]
+async fn a_row_the_store_refuses_leaves_the_mark_and_the_run_as_they_are() {
+    let mut pulled = Pulled::new(
+        Resolve::FireIntoRefusedRows,
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    assert!(pulled.ran_to_end(), "the run goes on without its row");
+    assert_marked_started(pulled.probe_claim().await);
+    assert_eq!(owner_row(&pulled).await, None);
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once: {sent:?}"
+    );
+}
+
+/// **A row an operator's drop already ended refuses the start.** The drop
+/// was folded between the run's first WAL write and the dispatcher's write
+/// of its row, so the row reads `failed`, ended by the drop, and keeps
+/// that: a start must not put an ended run back in progress. The row keeps
+/// the agent's id the drop wrote in its worker column.
+#[tokio::test]
+async fn a_row_an_operators_drop_already_ended_is_left_as_the_drop_left_it() {
+    let pulled = Pulled::new(
+        Resolve::FireOverADroppedRow,
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+
+    pulled.handle().await;
+
+    assert_marked_started(pulled.probe_claim().await);
+    let row = owner_row(&pulled).await.expect("the drop's row");
+    assert_eq!(row.status, OwnerStatus::Failed, "the drop's ending stands");
+    assert_eq!(
+        row.worker_id, DROPPED_BY_AGENT,
+        "the row keeps the worker column the drop wrote"
+    );
 }
 
 /// Wait `wait` on the pull stream for a copy of the delivery, and fail if

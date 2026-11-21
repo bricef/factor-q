@@ -345,7 +345,7 @@ impl Worker for Scripted {
             .upsert_invocation_state(&wal_row(invocation_id, false))
             .await
             .expect("the first WAL write");
-        durable_start.fire(0);
+        durable_start.fire(1);
         if matches!(
             run,
             Run::DiesAfterStart | Run::WaitsInSetupThenDiesAfterStart
@@ -1020,6 +1020,47 @@ async fn a_mark_refused_whose_ack_was_lost_is_acked_and_marked_and_not_run_again
         arena.counts(),
         (1, 0, 0),
         "counted as a copy of a run that started"
+    );
+}
+
+/// **A lost acknowledgement after the start leaves the run's row as the
+/// start wrote it (issue 721).** The run makes its first WAL write; the
+/// dispatcher marks the claim and writes the run's ownership row, and the
+/// ack it sends never reaches the broker. The redelivery meets a claim
+/// marked started: it is acked and dropped, nothing starts again, and the
+/// row still names the first run's worker and start.
+#[tokio::test]
+async fn a_lost_ack_after_the_start_leaves_the_runs_row_as_the_start_wrote_it() {
+    let (arena, _server) = arena().await;
+
+    let first = arena.deliver(1, true).await;
+    assert!(!first.panicked);
+    let first_run = arena.worker.starts()[0].0.to_string();
+    let written = arena
+        .claims
+        .get_invocation_owner(&first_run)
+        .await
+        .unwrap()
+        .expect("the start writes the run's row");
+
+    let again = arena.deliver(2, false).await;
+
+    assert_eq!(arena.worker.starts().len(), 1, "nothing starts again");
+    assert_eq!((again.acks, again.naks), (1, 0), "{again:?}");
+    let row = arena
+        .claims
+        .get_invocation_owner(&first_run)
+        .await
+        .unwrap()
+        .expect("the row is still there");
+    assert_eq!(
+        row, written,
+        "the copy leaves the row as the start wrote it"
+    );
+    assert_eq!(
+        (row.worker_id.as_str(), row.assigned_at),
+        (arena.claimant.as_str(), 1),
+        "under the dispatcher's worker, from the WAL row's own start"
     );
 }
 

@@ -74,6 +74,49 @@ async fn a_restore_refused_on_a_finished_row_does_not_resume_the_run() {
     );
 }
 
+/// **A run whose row its durable start wrote, left running by a daemon
+/// that stopped, is re-owned by the next start and resumed (issue 721).**
+/// The row reads `in_flight` under the stopped daemon's worker. Recovery
+/// restores it under its own worker, from the run's start as the WAL
+/// records it, and resumes the run.
+#[tokio::test]
+async fn a_run_whose_start_wrote_its_row_is_re_owned_and_resumed() {
+    use fq_runtime::control_plane::ownership::{OwnerFacts, OwnershipEvent, apply};
+    let server = fq_test_support::test_nats();
+    let bus = EventBus::connect(server.url()).await.expect("connect NATS");
+    let scratch = tempfile::tempdir().unwrap();
+    let (cp_store, worker_store) = stores_under(scratch.path()).await;
+    let invocation = in_flight_run(&worker_store).await;
+    apply(
+        cp_store.as_ref(),
+        &invocation,
+        OwnershipEvent::DurablyStarted,
+        OwnerFacts {
+            worker_id: "the-stopped-daemon",
+            at_ms: 1_000,
+            ended_at_ms: 1_000,
+            request: None,
+        },
+    )
+    .await
+    .expect("the durable start writes the row");
+
+    let recovered = next_start(&bus, &cp_store, &worker_store).await;
+
+    assert_eq!(recovered.recoverable.len(), 1, "the run is resumed");
+    let row = cp_store
+        .get_invocation_owner(&invocation)
+        .await
+        .unwrap()
+        .expect("the row stays");
+    assert_eq!(row.status, OwnerStatus::InFlight);
+    assert_ne!(
+        row.worker_id, "the-stopped-daemon",
+        "the next start's recovery owns the run now"
+    );
+    assert_eq!(row.assigned_at, 1_000, "from the run's own start");
+}
+
 #[tokio::test]
 async fn a_row_this_build_cannot_read_is_left_as_it_is_and_its_run_resumed() {
     let server = fq_test_support::test_nats();
