@@ -484,6 +484,276 @@ async fn a_drop_of_a_row_this_build_cannot_read_still_stops_the_run() {
     );
 }
 
+impl Fixture {
+    /// A trigger that refuses every move of an ownership row already
+    /// written, as a rule the store holds the write to would.
+    async fn refuse_every_move(&self) {
+        let by_hand = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}",
+            self._dir.path().join("control-plane.db").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_the_move BEFORE UPDATE ON coordination_invocation_owner \
+             BEGIN SELECT RAISE(ABORT, 'the test refuses the move'); END",
+        )
+        .execute(&by_hand)
+        .await
+        .unwrap();
+    }
+
+    /// A worker's WAL holding the run in flight, as the run's worker does.
+    async fn a_worker_running_the_run(&self) -> Arc<crate::worker::store::WorkerStore> {
+        let worker_store = Arc::new(
+            crate::worker::store::WorkerStore::open(&self._dir.path().join("worker.db"))
+                .await
+                .unwrap(),
+        );
+        worker_store
+            .upsert_invocation_state(&crate::worker::store::InvocationStateRow {
+                invocation_id: self.invocation_id.to_string(),
+                agent_id: self.agent_id.as_str().to_string(),
+                schema_version: 1,
+                phase: "awaiting_model".into(),
+                state_blob: vec![],
+                step_index: 3,
+                started_at: 1_000,
+                updated_at: 1_500,
+                terminal_at: None,
+                workspace_ref: None,
+                archive_status: None,
+                archive_published_at: None,
+                trigger_source: None,
+                trigger_subject: None,
+                trigger_payload: None,
+                terminal_outcome: None,
+                terminal_published_at: None,
+            })
+            .await
+            .unwrap();
+        worker_store
+    }
+}
+
+/// **An archive whose row move the store refuses is still recorded and
+/// acknowledged to the worker**, as for a row this build cannot read: the
+/// row is left as it is, and without the acknowledgement the worker would
+/// keep its terminal row and republish the whole archive at every sweep,
+/// for good. Then the event is refused as permanent.
+#[tokio::test]
+async fn an_archive_whose_row_move_is_refused_is_still_acked_to_the_worker() {
+    use futures::StreamExt;
+    let fixture = Fixture::new().await;
+    fixture.restored_in_flight().await;
+    fixture.refuse_every_move().await;
+    let mut acks = fixture
+        .consumer
+        .bus
+        .subscribe(format!(
+            "fq.worker.{}.invocation.archive_acked",
+            fixture.worker_id.as_str()
+        ))
+        .await
+        .expect("subscribe to the worker's acks");
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: fixture.worker_id.clone(),
+                final_phase: "failed".to_string(),
+                final_state_blob: b"{}".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "the archive whose row move was refused was answered {outcome:?}: acked, not retried"
+    );
+    assert!(
+        fixture
+            .store
+            .get_archive(&fixture.invocation_id.to_string())
+            .await
+            .unwrap()
+            .is_some(),
+        "the archive record is written"
+    );
+    tokio::time::timeout(Duration::from_secs(5), acks.next())
+        .await
+        .expect("the worker is acknowledged: without it, it republishes the archive at every sweep")
+        .expect("an ack")
+        .expect("the ack reads");
+    assert_eq!(
+        fixture.raw_status().await,
+        "in_flight",
+        "the row is left as it is"
+    );
+}
+
+/// **An archive whose row insert the store refuses is recorded, and not
+/// acknowledged.** The run has no ownership row, and the store refuses the
+/// one the archive would write. Acknowledged, the worker would delete its
+/// terminal row, and the run would then be on neither record a trigger's
+/// claim is settled from: its trigger could be taken again and run twice.
+/// So the archive record is stored, the worker is not acknowledged (it
+/// keeps its row and republishes, which the record's insert takes as a
+/// duplicate), and the event is refused as permanent.
+#[tokio::test]
+async fn an_archive_whose_row_insert_is_refused_is_recorded_and_not_acked() {
+    use futures::StreamExt;
+    let fixture = Fixture::new().await;
+    let by_hand = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        fixture._dir.path().join("control-plane.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_the_row BEFORE INSERT ON coordination_invocation_owner \
+         BEGIN SELECT RAISE(ABORT, 'the test refuses the row'); END",
+    )
+    .execute(&by_hand)
+    .await
+    .unwrap();
+    let mut acks = fixture
+        .consumer
+        .bus
+        .subscribe(format!(
+            "fq.worker.{}.invocation.archive_acked",
+            fixture.worker_id.as_str()
+        ))
+        .await
+        .expect("subscribe to the worker's acks");
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationArchived(InvocationArchivedPayload {
+                worker_id: fixture.worker_id.clone(),
+                final_phase: "completed".to_string(),
+                final_state_blob: b"{}".to_vec(),
+                started_at_ms: 1_000,
+                terminal_at_ms: 2_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "the archive whose row insert was refused was answered {outcome:?}: acked, not retried"
+    );
+    assert!(
+        fixture
+            .store
+            .get_archive(&fixture.invocation_id.to_string())
+            .await
+            .unwrap()
+            .is_some(),
+        "the archive record is stored"
+    );
+    let ack = tokio::time::timeout(Duration::from_millis(700), acks.next()).await;
+    assert!(
+        ack.is_err(),
+        "the worker was acknowledged for a run with no ownership row: it would delete its \
+         terminal row, and the run would be on no record its trigger's claim reads"
+    );
+    assert_eq!(fixture.row().await, None, "no ownership row is written");
+}
+
+/// **A drop whose row move the store refuses still stops the run**, as
+/// for a row this build cannot read: the worker's WAL row is marked
+/// terminal, the drop's archive record is written, and the row is left as
+/// it is. Then the event is refused as permanent.
+#[tokio::test]
+async fn a_drop_whose_row_move_is_refused_still_stops_the_run() {
+    let fixture = Fixture::new().await;
+    fixture.restored_in_flight().await;
+    fixture.refuse_every_move().await;
+    let worker_store = fixture.a_worker_running_the_run().await;
+    let consumer = CoordinationConsumer::new(fixture.consumer.bus.clone(), fixture.store.clone())
+        .with_worker_store(worker_store.clone());
+    let outcome = consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        ))
+        .await;
+    let inv = fixture.invocation_id.to_string();
+    let wal = worker_store
+        .get_invocation_state(&inv)
+        .await
+        .unwrap()
+        .expect("the WAL row is kept for the sweeper");
+    assert!(
+        wal.terminal_at.is_some(),
+        "the drop whose row move was refused was answered {outcome:?} and did not mark the \
+         worker's WAL row terminal: the run the operator dropped goes on"
+    );
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "acked, not retried: {outcome:?}"
+    );
+    assert!(
+        fixture.store.get_archive(&inv).await.unwrap().is_some(),
+        "the drop's archive record is written"
+    );
+    assert_eq!(
+        fixture.raw_status().await,
+        "in_flight",
+        "the row is left as it is"
+    );
+}
+
+/// **A write the store refuses for good is acknowledged, not retried.** A
+/// refusal the store makes by its own rules is not one a retry can change,
+/// and on a strict-order consumer a retry would hold every later event
+/// behind it for good. A trigger stands in for such a rule here: it
+/// refuses every write of the ownership row.
+#[tokio::test]
+async fn a_write_the_store_refuses_for_good_is_acknowledged() {
+    let fixture = Fixture::new().await;
+    let by_hand = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        fixture._dir.path().join("control-plane.db").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_the_row BEFORE INSERT ON coordination_invocation_owner \
+         BEGIN SELECT RAISE(ABORT, 'the test refuses the row'); END",
+    )
+    .execute(&by_hand)
+    .await
+    .unwrap();
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+                action: "drop".to_string(),
+                final_phase: "failed".to_string(),
+                reason: None,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, Err(HandlerError::Permanent(_))),
+        "a write the store refused by its own rules was answered {outcome:?}: a transient \
+         error is redelivered for ever and holds every later event behind it"
+    );
+}
+
 /// Only a row this build cannot read is refused as permanent. Every other
 /// error of a move, a row that kept changing under it and a store that
 /// failed included, is transient: the event is redelivered and decided
