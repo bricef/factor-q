@@ -97,15 +97,15 @@ use crate::trigger::Trigger;
 #[derive(Debug, Default)]
 pub struct DurableStart {
     invocation_id: Option<Uuid>,
-    tx: Option<oneshot::Sender<()>>,
+    tx: Option<oneshot::Sender<i64>>,
     started: bool,
 }
 
 impl DurableStart {
     /// A signal for an invocation that is to run under `invocation_id`,
-    /// whose fire notifies `rx`. Returns the signal to hand to the
-    /// worker and the receiver the caller awaits.
-    pub fn channel(invocation_id: Uuid) -> (Self, oneshot::Receiver<()>) {
+    /// whose fire notifies `rx` with the run's start. Returns the signal
+    /// to hand to the worker and the receiver the caller awaits.
+    pub fn channel(invocation_id: Uuid) -> (Self, oneshot::Receiver<i64>) {
         let (tx, rx) = oneshot::channel();
         let signal = Self {
             invocation_id: Some(invocation_id),
@@ -142,14 +142,16 @@ impl DurableStart {
         self.started
     }
 
-    /// Signal that the invocation has durably started. Idempotent: the
-    /// first call notifies the waiter; later calls (and a `noop`) notify
-    /// nobody. A dropped receiver (the dispatcher already acked and
-    /// moved on) is ignored.
-    pub fn fire(&mut self) {
+    /// Signal that the invocation has durably started, and when it
+    /// started: `started_at_ms` is the `started_at` its first WAL row
+    /// records, the time startup recovery's restore takes for the run too.
+    /// Idempotent: the first call notifies the waiter; later calls (and a
+    /// `noop`) notify nobody. A dropped receiver (the dispatcher already
+    /// acked and moved on) is ignored.
+    pub fn fire(&mut self, started_at_ms: i64) {
         self.started = true;
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(());
+            let _ = tx.send(started_at_ms);
         }
     }
 
@@ -563,9 +565,9 @@ mod durable_start_tests {
         for signal in [&mut dispatched, &mut direct] {
             assert!(unstarted(signal, BoundaryStop::Drain));
             assert!(unstarted(signal, BoundaryStop::Halt));
-            signal.fire();
+            signal.fire(0);
             assert!(suspended(signal));
-            signal.fire();
+            signal.fire(0);
             assert!(suspended(signal), "firing again changes nothing");
         }
 
@@ -578,7 +580,7 @@ mod durable_start_tests {
     fn firing_notifies_the_waiter() {
         let (mut signal, mut rx) = DurableStart::channel(Uuid::now_v7());
         assert!(rx.try_recv().is_err(), "nothing yet");
-        signal.fire();
+        signal.fire(0);
         assert!(rx.try_recv().is_ok(), "the first fire notifies");
     }
 }

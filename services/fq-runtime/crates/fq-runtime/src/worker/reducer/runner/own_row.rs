@@ -171,7 +171,7 @@ impl<R: Reducer + Send + Sync> ReducerRunner<R> {
             }
             return Err(map_store_err(err));
         }
-        durable_start.fire();
+        durable_start.fire(row.started_at);
         if !self.live.take_halt(invocation_id) {
             return Ok(None);
         }

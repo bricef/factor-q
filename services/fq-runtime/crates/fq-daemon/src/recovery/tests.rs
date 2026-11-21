@@ -299,7 +299,7 @@ impl Worker for RestartedWorker {
     ) -> Result<InvocationOutcome, ExecutorError> {
         let invocation_id = durable_start.invocation_id();
         self.starts.lock().unwrap().push(invocation_id);
-        durable_start.fire();
+        durable_start.fire(0);
         tokio::task::yield_now().await;
         Ok(InvocationOutcome::Completed {
             invocation_id: invocation_id.unwrap_or_else(Uuid::now_v7),

@@ -516,7 +516,7 @@ impl Worker for DefersOnStart {
             .invocation_id()
             .expect("the dispatcher names the run it starts");
         *self.named.lock().unwrap() = Some(invocation_id);
-        durable_start.fire();
+        durable_start.fire(0);
         Ok(crate::worker::InvocationOutcome::Deferred {
             invocation_id,
             resume_after: Duration::from_secs(3_600),

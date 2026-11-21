@@ -345,7 +345,7 @@ impl Worker for Scripted {
             .upsert_invocation_state(&wal_row(invocation_id, false))
             .await
             .expect("the first WAL write");
-        durable_start.fire();
+        durable_start.fire(0);
         if matches!(
             run,
             Run::DiesAfterStart | Run::WaitsInSetupThenDiesAfterStart

@@ -63,7 +63,7 @@ impl Worker for StartsAndFinishes {
         mut durable_start: DurableStart,
     ) -> Result<InvocationOutcome, ExecutorError> {
         self.started.fetch_add(1, Ordering::SeqCst);
-        durable_start.fire();
+        durable_start.fire(0);
         // The real runner awaits the store or the broker between its first
         // WAL write and its return, and `handle` learns of the durable
         // start only by polling for it: yield once so it does, and marks
