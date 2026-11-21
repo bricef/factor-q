@@ -58,6 +58,51 @@
                 "type": "string"
               }
             ]
+          },
+          "InvocationEnder": {
+            "description": "Who ended a run, as its ownership row records it.",
+            "oneOf": [
+              {
+                "const": "run",
+                "description": "The run reached its own ending.",
+                "type": "string"
+              },
+              {
+                "const": "drop",
+                "description": "An operator's drop ended it.",
+                "type": "string"
+              }
+            ]
+          },
+          "TerminationRequestView": {
+            "description": "The first termination an operator requested for a run.",
+            "properties": {
+              "reason": {
+                "default": null,
+                "description": "Why, in the operator's words. Null when the drop gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "requested_at_ms": {
+                "description": "When it was requested: the drop event's own time.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "requested_by": {
+                "default": null,
+                "description": "Who asked: the principal of the token the drop came in on. Null\nwhen the drop did not say.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "requested_at_ms"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -84,6 +129,27 @@
             "format": "int64",
             "type": "integer"
           },
+          "ended_at_ms": {
+            "default": null,
+            "description": "When the run ended, beside `ended_by`: the ending's own time, not\nwhen it was folded or handed off.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended_by": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InvocationEnder"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Who ended the run: `run`, its own ending, or `drop`, an operator's.\nNull while the run has not ended, on a row that ended before the\nownership row recorded its ender (not recorded), and on an\narchive-only row."
+          },
           "invocation_id": {
             "type": "string"
           },
@@ -103,6 +169,18 @@
               "string",
               "null"
             ]
+          },
+          "termination": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TerminationRequestView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The first termination an operator requested for the run; null when\nnone is on record. A request beside an ending the run reached itself did\nnot change that ending."
           },
           "worker_id": {
             "description": "Empty for archive-only rows (the archive keeps no worker).",
@@ -432,6 +510,21 @@
             ],
             "type": "object"
           },
+          "InvocationEnder": {
+            "description": "Who ended a run, as its ownership row records it.",
+            "oneOf": [
+              {
+                "const": "run",
+                "description": "The run reached its own ending.",
+                "type": "string"
+              },
+              {
+                "const": "drop",
+                "description": "An operator's drop ended it.",
+                "type": "string"
+              }
+            ]
+          },
           "InvocationSummaryView": {
             "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
             "properties": {
@@ -456,6 +549,27 @@
                 "format": "int64",
                 "type": "integer"
               },
+              "ended_at_ms": {
+                "default": null,
+                "description": "When the run ended, beside `ended_by`: the ending's own time, not\nwhen it was folded or handed off.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ended_by": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InvocationEnder"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Who ended the run: `run`, its own ending, or `drop`, an operator's.\nNull while the run has not ended, on a row that ended before the\nownership row recorded its ender (not recorded), and on an\narchive-only row."
+              },
               "invocation_id": {
                 "type": "string"
               },
@@ -475,6 +589,18 @@
                   "string",
                   "null"
                 ]
+              },
+              "termination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TerminationRequestView"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The first termination an operator requested for the run; null when\nnone is on record. A request beside an ending the run reached itself did\nnot change that ending."
               },
               "worker_id": {
                 "description": "Empty for archive-only rows (the archive keeps no worker).",
@@ -616,6 +742,36 @@
               "model",
               "status",
               "intent_at_ms"
+            ],
+            "type": "object"
+          },
+          "TerminationRequestView": {
+            "description": "The first termination an operator requested for a run.",
+            "properties": {
+              "reason": {
+                "default": null,
+                "description": "Why, in the operator's words. Null when the drop gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "requested_at_ms": {
+                "description": "When it was requested: the drop event's own time.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "requested_by": {
+                "default": null,
+                "description": "Who asked: the principal of the token the drop came in on. Null\nwhen the drop did not say.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "requested_at_ms"
             ],
             "type": "object"
           },
@@ -1092,6 +1248,21 @@
               }
             ]
           },
+          "InvocationEnder": {
+            "description": "Who ended a run, as its ownership row records it.",
+            "oneOf": [
+              {
+                "const": "run",
+                "description": "The run reached its own ending.",
+                "type": "string"
+              },
+              {
+                "const": "drop",
+                "description": "An operator's drop ended it.",
+                "type": "string"
+              }
+            ]
+          },
           "InvocationSummaryView": {
             "description": "One row in the invocation list: a coordination-ownership row, or (in\nthe merged index) an archive-only row flagged `archived`.",
             "properties": {
@@ -1116,6 +1287,27 @@
                 "format": "int64",
                 "type": "integer"
               },
+              "ended_at_ms": {
+                "default": null,
+                "description": "When the run ended, beside `ended_by`: the ending's own time, not\nwhen it was folded or handed off.",
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ended_by": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InvocationEnder"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Who ended the run: `run`, its own ending, or `drop`, an operator's.\nNull while the run has not ended, on a row that ended before the\nownership row recorded its ender (not recorded), and on an\narchive-only row."
+              },
               "invocation_id": {
                 "type": "string"
               },
@@ -1136,6 +1328,18 @@
                   "null"
                 ]
               },
+              "termination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TerminationRequestView"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The first termination an operator requested for the run; null when\nnone is on record. A request beside an ending the run reached itself did\nnot change that ending."
+              },
               "worker_id": {
                 "description": "Empty for archive-only rows (the archive keeps no worker).",
                 "type": "string"
@@ -1148,6 +1352,36 @@
               "assigned_at_ms",
               "started_at_ms",
               "archived"
+            ],
+            "type": "object"
+          },
+          "TerminationRequestView": {
+            "description": "The first termination an operator requested for a run.",
+            "properties": {
+              "reason": {
+                "default": null,
+                "description": "Why, in the operator's words. Null when the drop gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "requested_at_ms": {
+                "description": "When it was requested: the drop event's own time.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "requested_by": {
+                "default": null,
+                "description": "Who asked: the principal of the token the drop came in on. Null\nwhen the drop did not say.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "requested_at_ms"
             ],
             "type": "object"
           },
@@ -4901,7 +5135,7 @@
         "scope": "invocation",
         "verb": "write"
       },
-      "description": "Returns a receipt naming the drop event's sequence — feed it to a gated read for read-your-writes. Refused on an invocation this daemon is actively driving unless `live` is set, which halts it before the drop: at its next step boundary (in-flight tools finish), or at its first write to the worker's log. A run halted while that write is under way marks its own row finished once the write lands, which can be just after the receipt. A resume that startup recovery or `invocation.resume` queued for a worker permit is not being driven, nor is an invocation deferred for a rate limit: the drop takes either, and by the time the receipt returns it can no longer start in this daemon.",
+      "description": "Returns a receipt naming the drop event and its sequence — feed the sequence to a gated read for read-your-writes. Succeeds whenever the invocation exists, one that has ended included: the request is recorded beside its ending, and the record keeps the first request. What this drop found is read from the drop event's own time against the ending on the owner row read at the receipt: ended by the drop with this request on record, dropped; with an earlier request, already ended by an earlier drop; ended by the run at or before the drop's time, already ended; after it, the run reached its own ending first. A drop's ending stays provisional until the run's archive lands: a run whose own ending came first and is folded after the receipt reads dropped until then, and its own ending after. Refused on an invocation this daemon is actively driving unless `live` is set, which halts it before the drop: at its next step boundary (in-flight tools finish), or at its first write to the worker's log. A run halted while that write is under way marks its own row finished once the write lands, which can be just after the receipt. A resume that startup recovery or `invocation.resume` queued for a worker permit is not being driven, nor is an invocation deferred for a rate limit: the drop takes either, and by the time the receipt returns it can no longer start in this daemon.",
       "domain": "invocation",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

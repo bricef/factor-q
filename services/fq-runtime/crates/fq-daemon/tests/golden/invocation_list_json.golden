@@ -8,6 +8,13 @@
     "started_at_ms": 1767323096000,
     "archived": false,
     "archive_state": "none",
+    "ended_by": "drop",
+    "ended_at_ms": 1767323096000,
+    "termination": {
+      "requested_at_ms": 1767323096000,
+      "requested_by": "on-call",
+      "reason": "stuck in a loop\n  status:   completed\u001b[2J and then some"
+    },
     "summary": null
   },
   {
@@ -19,6 +26,9 @@
     "started_at_ms": 1767323087000,
     "archived": false,
     "archive_state": "pending",
+    "ended_by": "run",
+    "ended_at_ms": 1767323087000,
+    "termination": null,
     "summary": null
   },
   {
@@ -30,6 +40,9 @@
     "started_at_ms": 1767323076000,
     "archived": false,
     "archive_state": "archived",
+    "ended_by": null,
+    "ended_at_ms": null,
+    "termination": null,
     "summary": null
   },
   {
@@ -41,6 +54,9 @@
     "started_at_ms": 1767323065000,
     "archived": false,
     "archive_state": "not_due",
+    "ended_by": null,
+    "ended_at_ms": null,
+    "termination": null,
     "summary": null
   },
   {
@@ -52,6 +68,9 @@
     "started_at_ms": 1767323057000,
     "archived": false,
     "archive_state": "pending",
+    "ended_by": "run",
+    "ended_at_ms": 1767323057000,
+    "termination": null,
     "summary": null
   },
   {
@@ -63,6 +82,13 @@
     "started_at_ms": 1767323050000,
     "archived": false,
     "archive_state": "pending",
+    "ended_by": "run",
+    "ended_at_ms": 1767323050000,
+    "termination": {
+      "requested_at_ms": 1767323048000,
+      "requested_by": "on-call",
+      "reason": "golden fixture request"
+    },
     "summary": "Fixture run finished clean."
   }
 ]

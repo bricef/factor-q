@@ -370,6 +370,27 @@ impl ArchiveState {
     }
 }
 
+/// Who ended a run, as the invocation views show it.
+impl From<EndedBy> for fq_ops::views::InvocationEnder {
+    fn from(ender: EndedBy) -> Self {
+        match ender {
+            EndedBy::Run => Self::Run,
+            EndedBy::Drop => Self::Drop,
+        }
+    }
+}
+
+/// An operator's termination request, as the invocation views show it.
+impl From<TerminationRequest> for fq_ops::views::TerminationRequestView {
+    fn from(request: TerminationRequest) -> Self {
+        Self {
+            requested_at_ms: request.requested_at,
+            requested_by: request.requested_by,
+            reason: request.reason,
+        }
+    }
+}
+
 /// The stored state as the invocation views show it. `held` is not
 /// stored: the daemon reads it from the archive sweeper where it builds a
 /// report.

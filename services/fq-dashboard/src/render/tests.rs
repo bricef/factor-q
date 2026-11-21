@@ -389,6 +389,9 @@ fn summary_column_renders_escaped_with_fallback() {
         started_at_ms: 0,
         archived: false,
         archive_state: fq_ops::views::InvocationArchiveState::NotDue,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: Some("Fixing #7: <script>alert(1)</script>".into()),
     }];
     let descriptions = std::collections::HashMap::from([(
@@ -536,6 +539,9 @@ fn active_table_omitted_when_nothing_in_flight() {
         started_at_ms: 0,
         archived: false,
         archive_state: fq_ops::views::InvocationArchiveState::Archived,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: None,
     }];
     assert_eq!(active(&[], &Default::default(), 1_000), "");
@@ -1070,6 +1076,9 @@ fn invocation_surfaces_link_agent_names() {
             started_at_ms: 0,
             archived: false,
             archive_state: fq_ops::views::InvocationArchiveState::Archived,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: None,
         },
         fq_ops::views::InvocationSummaryView {
@@ -1081,6 +1090,9 @@ fn invocation_surfaces_link_agent_names() {
             started_at_ms: 0,
             archived: false,
             archive_state: fq_ops::views::InvocationArchiveState::Archived,
+            ended_by: None,
+            ended_at_ms: None,
+            termination: None,
             summary: None,
         },
     ];
@@ -1133,6 +1145,9 @@ fn invocation_filters_hide_terminal_rows_and_compose_links() {
         started_at_ms: 0,
         archived: false,
         archive_state: fq_ops::views::InvocationArchiveState::NotDue,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: None,
     };
     let items = vec![
@@ -1365,6 +1380,9 @@ fn invocation_rows_escape_link_and_show_start() {
         started_at_ms: 600_000,
         archived: false,
         archive_state: fq_ops::views::InvocationArchiveState::NotDue,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: None,
     }];
     let html = invocations(
@@ -1803,6 +1821,9 @@ fn the_invocation_list_shows_each_archive_state() {
         started_at_ms: 0,
         archived: false,
         archive_state,
+        ended_by: None,
+        ended_at_ms: None,
+        termination: None,
         summary: None,
     };
     let items = vec![
@@ -1827,28 +1848,227 @@ fn the_invocation_list_shows_each_archive_state() {
         html[start..end].to_string()
     };
     assert!(
-        row("inv-running").ends_with(r#"<span class="muted">—</span></td>"#),
+        row("inv-running").contains(r#"<span class="muted">—</span></td><td>"#),
         "{}",
         row("inv-running")
     );
     assert!(
-        row("inv-pending").ends_with("<td>pending</td>"),
+        row("inv-pending").contains("<td>pending</td><td>"),
         "{}",
         row("inv-pending")
     );
     assert!(
-        row("inv-none").ends_with(r#"<span class="muted">none</span></td>"#),
+        row("inv-none").contains(r#"<span class="muted">none</span></td><td>"#),
         "{}",
         row("inv-none")
     );
     assert!(
-        row("inv-held").ends_with(r#"<span class="warn">held</span></td>"#),
+        row("inv-held").contains(r#"<span class="warn">held</span></td><td>"#),
         "{}",
         row("inv-held")
     );
     assert!(
-        row("inv-archived").ends_with("<td>yes</td>"),
+        row("inv-archived").contains("<td>yes</td><td>"),
         "{}",
         row("inv-archived")
     );
+}
+
+/// The list's `ended by` column, the last: `run` or `drop`, with how the
+/// ending reads beside an operator's request as the cell's title, and a
+/// muted dash where the row does not say who ended the run.
+#[test]
+fn the_invocation_list_shows_who_ended_each_run() {
+    use fq_ops::views::{InvocationEnder as E, TerminationRequestView};
+    let mk = |id: &str, status: &str, ended_by, ended_at_ms, termination| {
+        fq_ops::views::InvocationSummaryView {
+            invocation_id: id.into(),
+            agent_id: Some("a".into()),
+            worker_id: "w".into(),
+            status: status.into(),
+            assigned_at_ms: 0,
+            started_at_ms: 0,
+            archived: false,
+            archive_state: fq_ops::views::InvocationArchiveState::Pending,
+            ended_by,
+            ended_at_ms,
+            termination,
+            summary: None,
+        }
+    };
+    let asked = || {
+        Some(TerminationRequestView {
+            requested_at_ms: 100,
+            requested_by: None,
+            reason: None,
+        })
+    };
+    let items = vec![
+        mk("inv-dropped", "failed", Some(E::Drop), Some(100), asked()),
+        mk("inv-first", "completed", Some(E::Run), Some(200), asked()),
+        mk("inv-plain", "completed", Some(E::Run), Some(50), None),
+        mk("inv-old", "completed", None, None, None),
+    ];
+    let html = invocations(
+        &items,
+        InvocationFilters::default(),
+        &Default::default(),
+        1_000,
+    );
+    assert!(html.contains("<th>ended by</th></tr>"), "got: {html}");
+    let row = |id: &str| {
+        let start = html
+            .find(id)
+            .unwrap_or_else(|| panic!("{id} listed: {html}"));
+        let end = html[start..].find("</tr>").unwrap() + start;
+        html[start..end].to_string()
+    };
+    for (id, cell) in [
+        (
+            "inv-dropped",
+            r#"<td><span title="dropped">drop</span></td>"#,
+        ),
+        (
+            "inv-first",
+            r#"<td><span title="requested while running; it reached its own ending first">run</span></td>"#,
+        ),
+        ("inv-plain", "<td>run</td>"),
+        ("inv-old", r#"<td><span class="muted">—</span></td>"#),
+    ] {
+        assert!(row(id).ends_with(cell), "{id}: {}", row(id));
+    }
+}
+
+/// **The detail page says who ended a run, and the request beside its
+/// ending**, as `fq invocation show` does: the ender and its time, `not
+/// recorded` for a run that ended before its row recorded one, and the
+/// first request with its reading. Who asked and why reach the page
+/// escaped.
+#[test]
+fn the_invocation_detail_shows_who_ended_the_run_and_the_request() {
+    use fq_ops::views::{InvocationEnder as E, TerminationRequestView};
+    // 2026-01-02T03:04:05Z.
+    const T: i64 = 1_767_323_045_000;
+    let detail =
+        |status: &str, ended_by, ended_at_ms, termination| fq_ops::views::InvocationDetailView {
+            invocation_id: "inv-1".into(),
+            agent_id: Some("a".into()),
+            owner: Some(fq_ops::views::InvocationSummaryView {
+                invocation_id: "inv-1".into(),
+                agent_id: Some("a".into()),
+                worker_id: "w".into(),
+                status: status.into(),
+                assigned_at_ms: 0,
+                started_at_ms: 0,
+                archived: false,
+                archive_state: fq_ops::views::InvocationArchiveState::Pending,
+                ended_by,
+                ended_at_ms,
+                termination,
+                summary: None,
+            }),
+            archive: None,
+            live: None,
+            recent_events: vec![],
+            has_transcript: false,
+            summary: None,
+            cost: None,
+            trigger: None,
+            archive_hold: None,
+        };
+    let html = invocation_detail(
+        &detail(
+            "failed",
+            Some(E::Drop),
+            Some(T),
+            Some(TerminationRequestView {
+                requested_at_ms: T,
+                requested_by: Some("<b>on-call</b>".into()),
+                reason: Some("stuck & <script>alert(1)</script>".into()),
+            }),
+        ),
+        1_000,
+    );
+    assert!(
+        html.contains("<tr><th>ended by</th><td>drop at 2026-01-02T03:04:05Z</td></tr>"),
+        "got: {html}"
+    );
+    assert!(
+        html.contains(
+            "<tr><th>termination</th><td>dropped (requested 2026-01-02T03:04:05Z by \
+             &lt;b&gt;on-call&lt;/b&gt;: stuck &amp; &lt;script&gt;alert(1)&lt;/script&gt;)</td></tr>"
+        ),
+        "got: {html}"
+    );
+    assert!(
+        !html.contains("<script>") && !html.contains("<b>on-call"),
+        "raw markup leaked: {html}"
+    );
+
+    let html = invocation_detail(
+        &detail(
+            "completed",
+            Some(E::Run),
+            Some(T + 1_000),
+            Some(TerminationRequestView {
+                requested_at_ms: T,
+                requested_by: None,
+                reason: None,
+            }),
+        ),
+        1_000,
+    );
+    assert!(
+        html.contains(
+            "<tr><th>termination</th><td>requested while running; it reached its own ending \
+             first (requested 2026-01-02T03:04:05Z)</td></tr>"
+        ),
+        "got: {html}"
+    );
+
+    for status in ["completed", "failed"] {
+        let html = invocation_detail(&detail(status, None, None, None), 1_000);
+        assert!(
+            html.contains(
+                r#"<tr><th>ended by</th><td><span class="muted">not recorded</span></td></tr>"#
+            ),
+            "{status}: {html}"
+        );
+        assert!(!html.contains("<th>termination</th>"), "{status}: {html}");
+    }
+
+    // Who asked and why reach the page as `show` prints them: one line,
+    // a bidirectional override or an invisible character written as an
+    // escape, and a long reason cut.
+    let html = invocation_detail(
+        &detail(
+            "failed",
+            Some(E::Drop),
+            Some(T),
+            Some(TerminationRequestView {
+                requested_at_ms: T,
+                requested_by: Some(format!("on\u{202e}call{}", "w".repeat(100))),
+                reason: Some(format!("why\u{200b}\n{}", "y".repeat(300))),
+            }),
+        ),
+        1_000,
+    );
+    assert!(
+        !html.contains('\u{202e}') && !html.contains('\u{200b}') && !html.contains('\n'),
+        "a hidden character reached the page: {html}"
+    );
+    assert!(
+        html.contains(&format!(
+            "by on\\u{{202e}}call{}…: why\\u{{200b}}\\n",
+            "w".repeat(80 - "on\\u{202e}call".chars().count())
+        )),
+        "who asked, cut at 80: {html}"
+    );
+    assert!(
+        !html.contains(&"y".repeat(200)),
+        "the reason is cut: {html}"
+    );
+
+    let html = invocation_detail(&detail("in_flight", None, None, None), 1_000);
+    assert!(!html.contains("<th>ended by</th>"), "got: {html}");
 }

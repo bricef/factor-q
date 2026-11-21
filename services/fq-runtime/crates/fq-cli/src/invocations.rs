@@ -26,6 +26,7 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
     let agent_trim: String = agent.chars().take(22).collect();
     let worker_trim: String = item.worker_id.chars().take(22).collect();
     let archive = archive_label(item.archive_state);
+    let ended_by = ended_by_label(item);
     // The one-line summary (#216) rides last: it is the only
     // variable-width column, truncated char-wise so a long line
     // cannot wrap the table.
@@ -39,9 +40,64 @@ fn format_invocation_list_row_human(item: &fq_ops::views::InvocationSummaryView)
         None => "—".to_string(),
     };
     format!(
-        "{:<11} {:<10} {:<24} {:<24} {:<8} {}",
-        inv_short, item.status, agent_trim, worker_trim, archive, summary
+        "{:<11} {:<10} {:<24} {:<24} {:<8} {:<8} {}",
+        inv_short, item.status, agent_trim, worker_trim, archive, ended_by, summary
     )
+}
+
+/// The list's `ended by` column: who ended the run, `run` or `drop`; `-`
+/// while it has not ended, and where the row does not say (a run that
+/// ended before its row recorded an ender, an archive-only row). Pure;
+/// covered by unit tests.
+pub(crate) fn ended_by_label(item: &fq_ops::views::InvocationSummaryView) -> &'static str {
+    item.ended_by
+        .map_or("-", fq_ops::views::InvocationEnder::as_str)
+}
+
+/// The `ended by:` line of `fq invocation show`: who ended the run and
+/// when, or `not recorded` for a run that ended before its row recorded an
+/// ender. `None` while the run has not ended. Pure; covered by unit tests.
+fn format_ended_by(owner: &fq_ops::views::InvocationSummaryView) -> Option<String> {
+    match (owner.ended_by, owner.ended_at_ms) {
+        (Some(ender), Some(at)) => Some(format!("{} at {}", ender.as_str(), utc(at))),
+        (Some(ender), None) => Some(ender.as_str().to_string()),
+        (None, _) if matches!(owner.status.as_str(), "completed" | "failed") => {
+            Some("not recorded".to_string())
+        }
+        (None, _) => None,
+    }
+}
+
+/// A request as a human line reads it: its time, who asked and why, each
+/// only where the record says, the free text made safe for the terminal.
+fn request_said(request: &fq_ops::views::TerminationRequestView) -> String {
+    let mut said = format!("requested {}", utc(request.requested_at_ms));
+    if let Some(by) = &request.requested_by {
+        said.push_str(&format!(
+            " by {}",
+            fq_ops::text::one_line(by, fq_ops::text::REQUESTER_CHARS)
+        ));
+    }
+    if let Some(reason) = &request.reason {
+        said.push_str(&format!(
+            ": {}",
+            fq_ops::text::one_line(reason, fq_ops::text::REASON_CHARS)
+        ));
+    }
+    said
+}
+
+/// The `termination:` line of `fq invocation show`: how the run's ending
+/// reads beside the operator's request, then the request itself, its time,
+/// who asked and why, each only where the record says. The record keeps
+/// the first request, so this is the first one's. `None` when no request
+/// is on record. Pure; covered by unit tests.
+fn format_termination(owner: &fq_ops::views::InvocationSummaryView) -> Option<String> {
+    let said = request_said(owner.termination.as_ref()?);
+    Some(match owner.termination_reading() {
+        Some(reading) => format!("{} ({said})", reading.phrase()),
+        None => said,
+    })
 }
 
 /// The list's `archive` column: whether the control plane holds the run's
@@ -177,8 +233,8 @@ pub(crate) async fn invocation_list(
         println!("0 invocations {what}— nothing to list.");
     } else {
         println!(
-            "{:<11} {:<10} {:<24} {:<24} {:<8} summary",
-            "invocation", "status", "agent", "worker", "archive"
+            "{:<11} {:<10} {:<24} {:<24} {:<8} {:<8} summary",
+            "invocation", "status", "agent", "worker", "archive", "ended by"
         );
         for item in &items {
             println!("{}", format_invocation_list_row_human(item));
@@ -222,6 +278,12 @@ pub(crate) async fn invocation_show(
         if let Some(o) = &detail.owner {
             println!("  status:   {}", o.status);
             println!("  worker:   {}", o.worker_id);
+            if let Some(ended_by) = format_ended_by(o) {
+                println!("  ended by: {ended_by}");
+            }
+            if let Some(termination) = format_termination(o) {
+                println!("  termination: {termination}");
+            }
         } else {
             println!("  status:   (no coordination row)");
         }
@@ -315,26 +377,136 @@ fn format_resume_accepted(id: &str) -> String {
 #[derive(serde::Serialize, Debug)]
 struct InvocationDropResult {
     invocation_id: String,
-    agent_id: String,
+    /// The run's agent, `operator` for a run whose only events are
+    /// operator-issued. `null` when reading the drop back failed.
+    agent_id: Option<String>,
     event_id: String,
     reason: Option<String>,
+    /// What this drop found, read from its own event's time against the
+    /// run's ending on the owner row at the receipt: `dropped`,
+    /// `ended_by_an_earlier_drop`, `already_ended` or
+    /// `reached_its_own_ending_first`. `null` when the row does not say.
+    case: Option<fq_ops::views::DropCase>,
+    /// Whether the ending the row reads can still be replaced: a drop's
+    /// until the run's archive lands. If the run reached its own ending
+    /// first, that ending stands, and `fq invocation show` reads it.
+    provisional: bool,
+    /// The request on record when it is not this one: an earlier drop's,
+    /// which the record keeps. `null` when this drop's is the one on
+    /// record.
+    earlier_request: Option<fq_ops::views::TerminationRequestView>,
+    /// Why reading the drop back failed, when it did: the drop is
+    /// recorded, and only what it found is not known. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_back_failed: Option<String>,
+    /// Whether no archive of the run is expected (its archive is `none`):
+    /// what the human line says of a provisional ending. Not in JSON,
+    /// whose `provisional` says the same of every row.
+    #[serde(skip)]
+    expects_no_archive: bool,
 }
 
-/// The projection's name for the event a drop publishes — the row the
-/// rendered `event_id` is read back from.
-const OPERATOR_RECOVERED_EVENT_TYPE: &str = "invocation_operator_recovered";
+impl InvocationDropResult {
+    /// A drop read back: its own event's time, `requested_at_ms`, against
+    /// the run's ending on `detail`'s owner row.
+    fn read_back(
+        id: &str,
+        event_id: String,
+        reason: Option<&str>,
+        requested_at_ms: i64,
+        detail: &fq_ops::views::InvocationDetailView,
+    ) -> Self {
+        let owner = detail.owner.as_ref();
+        Self {
+            invocation_id: id.to_string(),
+            // An invocation whose only events are operator-issued has no
+            // agent of its own; the drop was published as `operator`, and
+            // that is what it is reported as.
+            agent_id: Some(
+                detail
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| AgentId::operator().into_inner()),
+            ),
+            event_id,
+            reason: reason.map(str::to_string),
+            case: owner.and_then(|owner| owner.drop_case(requested_at_ms)),
+            provisional: owner
+                .is_some_and(fq_ops::views::InvocationSummaryView::ending_is_provisional),
+            earlier_request: owner
+                .and_then(|owner| owner.earlier_request(requested_at_ms))
+                .cloned(),
+            read_back_failed: None,
+            expects_no_archive: owner.is_some_and(|owner| {
+                owner.archive_state == fq_ops::views::InvocationArchiveState::WillNotCome
+            }),
+        }
+    }
+
+    /// A drop recorded whose reading back failed with `error`.
+    fn unread(id: &str, event_id: String, reason: Option<&str>, error: String) -> Self {
+        Self {
+            invocation_id: id.to_string(),
+            agent_id: None,
+            event_id,
+            reason: reason.map(str::to_string),
+            case: None,
+            provisional: false,
+            earlier_request: None,
+            read_back_failed: Some(error),
+            expects_no_archive: false,
+        }
+    }
+}
+
+/// Read a recorded drop back, gated at its receipt's `event_seq`: its own
+/// event, by the identity the receipt names (a run with more events than
+/// the detail's recent list holds may not list it), for its time; and the
+/// run's detail, for its row.
+async fn read_the_drop_back(
+    client: &fq_edge::EdgeClient,
+    id: &str,
+    event_id: &str,
+    event_seq: u64,
+) -> anyhow::Result<(i64, fq_ops::views::InvocationDetailView)> {
+    let event = client
+        .invoke_gated(
+            fq_ops::OpId::Get(fq_ops::Domain::Event),
+            serde_json::to_value(fq_ops::surface::EventKey {
+                event_id: event_id.to_string(),
+            })?,
+            Some(event_seq),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("the drop event: {e}"))?;
+    let event: fq_ops::events::EventState = serde_json::from_value(event)?;
+    let detail = client
+        .invoke_gated(
+            fq_ops::OpId::Get(fq_ops::Domain::Invocation),
+            serde_json::to_value(InvocationViewKey {
+                invocation_id: id.to_string(),
+            })?,
+            Some(event_seq),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("the invocation: {e}"))?;
+    Ok((
+        event.event.envelope.timestamp.timestamp_millis(),
+        serde_json::from_value(detail)?,
+    ))
+}
 
 /// Drop an invocation over the authenticated edge (plan Phase 4, verb
-/// 18). One client, two questions: the `invocation.drop` command, then
-/// the Invocation view read at the receipt's watermark.
+/// 18). One client, three questions: the `invocation.drop` command, then,
+/// gated at the receipt's watermark, the drop event the receipt names
+/// (its own time) and the Invocation view (the run's row).
 ///
-/// The second question is not a nicety. A receipt references the atoms
-/// a command appended — never state (D3/P4) — so the agent and the
-/// event's identity, which this line has always printed, now come from
-/// a gated read rather than from a locally minted event. Composing the
-/// two also makes the closing "follow with `fq invocation show`"
-/// honest: the horizon releases the read only once the drop's fold, the
-/// ownership row's move and the request, is visible too.
+/// The reads are not a nicety. A receipt references the atoms a command
+/// appended — never state (D3/P4) — so the agent, and what the drop
+/// found, come from gated reads rather than from a locally minted event.
+/// The horizon releases them only once the drop's fold, the ownership
+/// row's move and the request, is visible too. A read that fails is
+/// reported as such: the drop is recorded, and the command succeeds.
 ///
 /// Liveness lives entirely daemon-side now (see `arm_drop_halt`): the
 /// runner is asked and the halt armed inside the one handler that
@@ -363,59 +535,92 @@ pub(crate) async fn invocation_drop(
     let event_seq = receipt
         .watermark(fq_ops::Domain::Event)
         .context("the drop receipt named no event — cannot confirm the drop")?;
-
-    let detail = client
-        .invoke_gated(
-        fq_ops::OpId::Get(fq_ops::Domain::Invocation),
-        serde_json::to_value(InvocationViewKey {
-            invocation_id: id.to_string(),
-        })?,
-        Some(event_seq),
-    )
-    .await?
-    // The write already landed, so this is never "the drop failed" —
-    // say so, and name the sequence the operator can read it back at.
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "dropped invocation {id} at event sequence {event_seq}, but reading it back failed: {e}"
-        )
-    })?;
-    let detail: fq_ops::views::InvocationDetailView = serde_json::from_value(detail)?;
-    let result = InvocationDropResult {
-        invocation_id: id.to_string(),
-        // An invocation whose only events are operator-issued has no
-        // agent of its own; the drop was published as `operator`, and
-        // that is what it is reported as.
-        agent_id: detail
-            .agent_id
-            .unwrap_or_else(|| AgentId::operator().into_inner()),
-        event_id: detail
-            .recent_events
-            .iter()
-            .find(|e| e.event_type == OPERATOR_RECOVERED_EVENT_TYPE)
-            .map(|e| e.event_id.clone())
-            .with_context(|| {
-                format!(
-                    "dropped invocation {id} at event sequence {event_seq}, but the drop \
-                     event is not among its recent events"
-                )
-            })?,
-        reason: reason.map(str::to_string),
+    let event_id = receipt
+        .atoms
+        .iter()
+        .find(|atom| atom.domain == fq_ops::Domain::Event)
+        .and_then(|atom| atom.key.get("event_id"))
+        .and_then(serde_json::Value::as_str)
+        .context("the drop receipt named no event — cannot confirm the drop")?
+        .to_string();
+    // The drop is recorded from here on. What it found comes from reading
+    // it back; a read that fails is reported as that, never as a failed
+    // drop, and the command still succeeds.
+    let result = match read_the_drop_back(&client, id, &event_id, event_seq).await {
+        Ok((requested_at_ms, detail)) => {
+            InvocationDropResult::read_back(id, event_id, reason, requested_at_ms, &detail)
+        }
+        Err(err) => InvocationDropResult::unread(id, event_id, reason, format!("{err:#}")),
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        println!(
-            "Dropped invocation {id} (agent={}, event_id={}).",
-            result.agent_id, result.event_id
-        );
-        if let Some(r) = &result.reason {
-            println!("Reason: {r}");
-        }
-        println!("Follow with `fq invocation show {id}` to see where the drop left it.");
+        print!("{}", format_drop_recorded(&result));
     }
     Ok(())
+}
+
+/// What `fq invocation drop` prints: the drop is recorded, and what this
+/// drop found, read from its own time against the run's ending at the
+/// receipt; that the ending can still be replaced, while it can; the
+/// earlier request the record keeps, when there is one; and the reason
+/// given. Pure; covered by unit tests.
+fn format_drop_recorded(result: &InvocationDropResult) -> String {
+    let id = &result.invocation_id;
+    let mut out = match (&result.read_back_failed, &result.agent_id) {
+        (Some(error), _) => format!(
+            "Drop of invocation {id} recorded (event_id={}), but reading it back failed, so \
+             what it found is not known: {}.\n",
+            result.event_id,
+            fq_ops::text::one_line(error, fq_ops::text::REASON_CHARS)
+        ),
+        (None, agent) => {
+            let found = result
+                .case
+                .map(|case| format!(": {}", case.phrase()))
+                .unwrap_or_default();
+            format!(
+                "Drop of invocation {id} recorded (agent={}, event_id={}){found}.\n",
+                agent.as_deref().unwrap_or("?"),
+                result.event_id
+            )
+        }
+    };
+    if result.provisional {
+        out.push_str(match (result.case, result.expects_no_archive) {
+            // The line above names no ending: say only what can come.
+            (None, _) => {
+                "If the run's own ending arrives, it is recorded in place of what the row holds \
+                 now, and `fq invocation show` reads the final record.\n"
+            }
+            (Some(_), true) => {
+                "No archive of the run is expected; if its own ending arrives after all, that \
+                 ending stands, and `fq invocation show` reads the final record.\n"
+            }
+            (Some(_), false) => {
+                "That ending is provisional until the run's archive lands: if the run reached \
+                 its own ending first, its own ending stands, and `fq invocation show` reads \
+                 the final record.\n"
+            }
+        });
+    }
+    if let Some(earlier) = &result.earlier_request {
+        out.push_str(&format!(
+            "An earlier request is on record ({}); the record keeps the first.\n",
+            request_said(earlier)
+        ));
+    }
+    if let Some(reason) = &result.reason {
+        out.push_str(&format!(
+            "Reason given: {}\n",
+            fq_ops::text::one_line(reason, fq_ops::text::REASON_CHARS)
+        ));
+    }
+    out.push_str(&format!(
+        "Follow with `fq invocation show {id}` to read the record.\n"
+    ));
+    out
 }
 
 /// Render the full payload-bearing transcript for one invocation.

@@ -461,13 +461,15 @@ pub(crate) enum InvocationCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Operator-issued terminal transition for an invocation.
-    /// Publishes `invocation.operator_recovered` so audit can
-    /// distinguish operator-initiated terminations from
-    /// worker-initiated ones. Works on any state EXCEPT one this
-    /// daemon is actively driving — that needs `--live`, which halts
-    /// it at its next step boundary first (#107). To reconcile unknown
-    /// execution and preserve progress instead, use `resume`.
+    /// Record an operator's request to terminate an invocation.
+    /// Publishes `invocation.operator_recovered`, so audit tells an
+    /// operator's termination from a run's own ending. A run that has
+    /// not ended ends as failed, by the drop; one that has ended keeps
+    /// its own ending, with the request recorded beside it, and the
+    /// command says which this drop found. Refused on a run this
+    /// daemon is actively driving unless `--live` is given, which halts
+    /// it at its next step boundary first. To reconcile unknown
+    /// execution and keep its progress instead, use `resume`.
     Drop {
         /// Invocation id to drop.
         id: String,

@@ -3,6 +3,8 @@ Invocation: 1c000000-0000-7000-8000-000000000001
   summary:  Fixture run finished clean.
   status:   completed
   worker:   researcher
+  ended by: run at 2026-01-02T03:04:10Z
+  termination: requested while running; it reached its own ending first (requested 2026-01-02T03:04:08Z by on-call: golden fixture request)
   archive:  pending: the run has ended and its archive has not reached the control plane
   trigger:  fq-triggers seq 1 (durably started; claimed 2026-01-02T03:04:04Z by worker-alpha)
 

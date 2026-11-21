@@ -329,6 +329,16 @@ async fn invocation_index_hides_sentinel_archive_agents() {
             .as_deref(),
         Some("agent-a")
     );
+    // An archive record says nothing of who ended the run, or of a
+    // request: an archive-only row names neither (issue 1070).
+    for row in &index {
+        assert_eq!(
+            (row.ended_by, row.ended_at_ms, &row.termination),
+            (None, None, &None),
+            "{}",
+            row.invocation_id
+        );
+    }
 }
 
 /// #216: the one-line summary joins onto both invocation surfaces

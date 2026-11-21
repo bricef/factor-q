@@ -177,8 +177,19 @@ pub fn operator_registry(
         fq_ops::Stability::Experimental,
     )
     .description(
-        "Returns a receipt naming the drop event's sequence — feed it to a \
-         gated read for read-your-writes. Refused on an invocation this \
+        "Returns a receipt naming the drop event and its sequence — feed the \
+         sequence to a gated read for read-your-writes. Succeeds whenever the \
+         invocation exists, one that has ended included: the request is \
+         recorded beside its ending, and the record keeps the first request. \
+         What this drop found is read from the drop event's own time against \
+         the ending on the owner row read at the receipt: ended by the drop \
+         with this request on record, dropped; with an earlier request, \
+         already ended by an earlier drop; ended by the run at or before the \
+         drop's time, already ended; after it, the run reached its own ending \
+         first. A drop's ending stays provisional until the run's archive \
+         lands: a run whose own ending came first and is folded after the \
+         receipt reads dropped until then, and its own ending after. Refused \
+         on an invocation this \
          daemon is actively driving unless `live` is set, which halts it \
          before the drop: at its next step boundary (in-flight tools \
          finish), or at its first write to the worker's log. A run halted \

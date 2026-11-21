@@ -293,11 +293,7 @@ pub fn invocation_detail(d: &InvocationDetailView, now_ms: i64) -> String {
         ));
     }
     if let Some(o) = &d.owner {
-        b.push_str(&format!(
-            "<tr><th>status</th><td>{}</td></tr><tr><th>worker</th><td>{}</td></tr>",
-            status_span(&o.status),
-            esc(&o.worker_id)
-        ));
+        b.push_str(&invocations::owner_rows(o));
     }
     if let Some(a) = &d.archive {
         b.push_str(&format!(

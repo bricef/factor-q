@@ -202,10 +202,108 @@ pub struct InvocationSummaryView {
     /// an operator's drop said none will come.
     #[serde(default)]
     pub archive_state: InvocationArchiveState,
+    /// Who ended the run: `run`, its own ending, or `drop`, an operator's.
+    /// Null while the run has not ended, on a row that ended before the
+    /// ownership row recorded its ender (not recorded), and on an
+    /// archive-only row.
+    #[serde(default)]
+    pub ended_by: Option<InvocationEnder>,
+    /// When the run ended, beside `ended_by`: the ending's own time, not
+    /// when it was folded or handed off.
+    #[serde(default)]
+    pub ended_at_ms: Option<i64>,
+    /// The first termination an operator requested for the run; null when
+    /// none is on record. A request beside an ending the run reached itself did
+    /// not change that ending.
+    #[serde(default)]
+    pub termination: Option<TerminationRequestView>,
     /// One-line operator summary; see
     /// [`ActiveInvocationView::summary`].
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+impl InvocationSummaryView {
+    /// How the run's ending reads beside an operator's termination
+    /// request: the drop ended it; it had already ended when the
+    /// termination was requested; or the termination was requested while
+    /// it ran and it reached its own ending first. Read from the two
+    /// times, `ended_at_ms` against the request's. `None` when the row
+    /// says neither (a run that has not ended, one that ended with no
+    /// request on record, or one whose ender was not recorded).
+    pub fn termination_reading(&self) -> Option<TerminationReading> {
+        match (self.ended_by?, &self.termination, self.ended_at_ms) {
+            (InvocationEnder::Drop, _, _) => Some(TerminationReading::Dropped),
+            (InvocationEnder::Run, Some(request), Some(ended_at)) => {
+                Some(if ended_at <= request.requested_at_ms {
+                    TerminationReading::AlreadyEnded
+                } else {
+                    TerminationReading::ReachedItsOwnEndingFirst
+                })
+            }
+            (InvocationEnder::Run, _, _) => None,
+        }
+    }
+}
+
+/// Who ended a run, as its ownership row records it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationEnder {
+    /// The run reached its own ending.
+    Run,
+    /// An operator's drop ended it.
+    Drop,
+}
+
+impl InvocationEnder {
+    /// The ender as the surfaces write it: `run` or `drop`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InvocationEnder::Run => "run",
+            InvocationEnder::Drop => "drop",
+        }
+    }
+}
+
+/// The first termination an operator requested for a run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+pub struct TerminationRequestView {
+    /// When it was requested: the drop event's own time.
+    pub requested_at_ms: i64,
+    /// Who asked: the principal of the token the drop came in on. Null
+    /// when the drop did not say.
+    #[serde(default)]
+    pub requested_by: Option<String>,
+    /// Why, in the operator's words. Null when the drop gave none.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// How a run's ending reads beside an operator's termination request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationReading {
+    /// The drop ended the run.
+    Dropped,
+    /// The run had already ended when the termination was requested.
+    AlreadyEnded,
+    /// The termination was requested while the run ran, and it reached its
+    /// own ending first.
+    ReachedItsOwnEndingFirst,
+}
+
+impl TerminationReading {
+    /// The phrase every surface reads it as.
+    pub fn phrase(self) -> &'static str {
+        match self {
+            TerminationReading::Dropped => "dropped",
+            TerminationReading::AlreadyEnded => "already ended when the termination was requested",
+            TerminationReading::ReachedItsOwnEndingFirst => {
+                "requested while running; it reached its own ending first"
+            }
+        }
+    }
 }
 
 /// Whether the control plane holds an invocation's archive record, as the
@@ -243,7 +341,9 @@ pub enum InvocationArchiveState {
 
 // A trigger delivery and the dispatcher's claim on it — its own module,
 // because both the invocation view and `control.doctor` carry it.
+mod drop_case;
 mod trigger_claim;
+pub use drop_case::DropCase;
 pub use trigger_claim::{TriggerClaimState, TriggerDeliveryView};
 
 /// A finalised invocation's archive record.

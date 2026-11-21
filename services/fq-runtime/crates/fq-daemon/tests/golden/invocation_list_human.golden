@@ -1,7 +1,7 @@
-invocation  status     agent                    worker                   archive  summary
-bd000000    failed     fixer                    fixer                    none     —
-ad000000    completed  fixer                    fixer                    pending  —
-4e000000    completed  fixer                    fixer                    yes      —
-3a000000    in_flight  researcher               researcher               -        —
-2f000000    failed     fixer                    fixer                    pending  —
-1c000000    completed  researcher               researcher               pending  Fixture run finished clean.
+invocation  status     agent                    worker                   archive  ended by summary
+bd000000    failed     fixer                    fixer                    none     drop     —
+ad000000    completed  fixer                    fixer                    pending  run      —
+4e000000    completed  fixer                    fixer                    yes      -        —
+3a000000    in_flight  researcher               researcher               -        -        —
+2f000000    failed     fixer                    fixer                    pending  run      —
+1c000000    completed  researcher               researcher               pending  run      Fixture run finished clean.
