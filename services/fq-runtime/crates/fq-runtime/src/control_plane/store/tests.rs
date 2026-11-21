@@ -1519,3 +1519,129 @@ fn a_start_on_record_is_either_record_holding_the_run() {
         );
     }
 }
+
+// ----- Which errors the store refuses for good (issue 1070) -----
+
+/// **A write the store refuses by its own rules is `Refused`; every other
+/// failure is `Backend`.** Against the real store and schema: a CHECK, a
+/// key, a NOT NULL column and a trigger each refuse the same write again
+/// on every try, so each comes back [`ControlPlaneStoreError::Refused`],
+/// which the coordination consumer acknowledges rather than retries. A
+/// locked database, a full one, and a statement that fails for another
+/// reason (here a table that is not there) can pass, so each comes back
+/// [`ControlPlaneStoreError::Backend`], which the consumer retries: taken
+/// for a refusal, a locked file or a full disk would be acknowledged and
+/// the event lost.
+#[tokio::test]
+async fn a_write_the_store_refuses_by_its_own_rules_is_refused_and_no_other_failure_is() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let store = ControlPlaneStore::open(&path).await.unwrap();
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    let refused = |err: Option<&ControlPlaneStoreError>| {
+        matches!(err, Some(ControlPlaneStoreError::Refused(_)))
+    };
+    let backend = |err: Option<&ControlPlaneStoreError>| {
+        matches!(err, Some(ControlPlaneStoreError::Backend(_)))
+    };
+
+    // A CHECK: a status the row's archive state does not go with.
+    store.assign_invocation("checked", "w", 1).await.unwrap();
+    let check = store
+        .overwrite_owner_status_for_test("checked", "completed")
+        .await;
+    assert!(
+        refused(check.as_ref().err()),
+        "a CHECK violation: {check:?}"
+    );
+
+    // A key: the same invocation's row inserted twice.
+    let key = store.assign_invocation("checked", "w", 1).await;
+    assert!(refused(key.as_ref().err()), "a key violation: {key:?}");
+
+    // A NOT NULL column: a row with no worker.
+    let not_null = sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES ('no-worker', NULL, 1, 'in_flight', 'not_due')",
+    )
+    .execute(&raw)
+    .await
+    .map(|_| ())
+    .map_err(ControlPlaneStoreError::from);
+    assert!(
+        refused(not_null.as_ref().err()),
+        "a NOT NULL violation: {not_null:?}"
+    );
+
+    // A trigger's RAISE.
+    sqlx::query(
+        "CREATE TRIGGER refuse_the_worker BEFORE INSERT ON coordination_worker \
+         BEGIN SELECT RAISE(ABORT, 'the test refuses the worker'); END",
+    )
+    .execute(&raw)
+    .await
+    .unwrap();
+    let trigger = store.register_worker("refused", "host", 1).await;
+    assert!(
+        refused(trigger.as_ref().err()),
+        "a trigger's RAISE: {trigger:?}"
+    );
+
+    // A statement that fails for another reason: a table that is not there.
+    sqlx::query("DROP TABLE schedule_entry")
+        .execute(&raw)
+        .await
+        .unwrap();
+    let missing = store.list_due_schedules(i64::MAX).await;
+    assert!(
+        backend(missing.as_ref().err()),
+        "a table that is not there: {missing:?}"
+    );
+
+    // A full database: the file may grow no further than it is, so a write
+    // that needs a new page fails as on a full disk (SQLITE_FULL, 13).
+    let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(&raw)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA max_page_count = {pages}"
+    )))
+    .execute(&raw)
+    .await
+    .unwrap();
+    let full = sqlx::query(
+        "INSERT INTO invocation_archive \
+         (invocation_id, agent_id, final_phase, final_state_blob, started_at, terminal_at, \
+          archived_at) \
+         VALUES ('full', 'a', 'completed', ?, 1, 2, 3)",
+    )
+    .bind(vec![0_u8; 1 << 20])
+    .execute(&raw)
+    .await
+    .map(|_| ())
+    .map_err(ControlPlaneStoreError::from);
+    assert!(
+        matches!(&full, Err(ControlPlaneStoreError::Backend(message)) if message.contains("(code: 13)")),
+        "a full database: {full:?}"
+    );
+
+    // A locked database: another connection holds the write lock past the
+    // store's busy timeout.
+    let mut holder = raw.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let locked = store.assign_invocation("locked", "w", 1).await;
+    sqlx::query("ROLLBACK").execute(&mut *holder).await.unwrap();
+    assert!(
+        backend(locked.as_ref().err()),
+        "a locked database: {locked:?}"
+    );
+}

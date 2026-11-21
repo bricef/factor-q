@@ -49,10 +49,14 @@
 //!   re-delivery is safe.
 //! - **Parse errors** are logged and acked.
 //! - **Store errors** are transient handler errors: NAK'd to
-//!   trigger redelivery. An ownership row this build cannot read
-//!   is the exception: the event is logged and acked, because a
-//!   row that cannot be read cannot be moved, and retrying would
-//!   hold every later event behind it.
+//!   trigger redelivery. Two are the exception, and the event is
+//!   logged and acked, because retrying would hold every later
+//!   event behind it: an ownership row this build cannot read,
+//!   which cannot be moved, and a write the store refuses by its
+//!   own rules, which no retry changes. Where the ownership row is
+//!   the one left as it is, the rest of the event still takes
+//!   effect: an archive is recorded and acknowledged to the
+//!   worker, and a drop still stops the run.
 //!
 //! The consumer is single-process in v1; v2 splits it onto
 //! the dedicated control-plane node.
@@ -395,7 +399,7 @@ impl CoordinationConsumer {
                 Ok(())
             }
         };
-        result.map_err(as_handler_error)
+        result.map_err(|err| as_handler_error(&event, err))
     }
 
     /// Apply `what` to `event`'s run's ownership row, `facts` standing for
@@ -546,10 +550,16 @@ impl CoordinationConsumer {
     /// If step 3 fails the message is NAK'd: insert is
     /// idempotent and the worker's retry sweeper will republish
     /// `invocation.archived` anyway, so duplicates are safe. An ownership
-    /// row this build cannot read is not moved, but the archive record is
-    /// written by then, so the ack still goes out before the event is
-    /// refused as permanent: without it the worker would keep its terminal
-    /// row and republish the whole archive at every sweep, for good.
+    /// row this build cannot read, or one whose move the store refuses, is
+    /// not moved, but the archive record is written by then, so the ack
+    /// still goes out before the event is refused as permanent: without it
+    /// the worker would keep its terminal row and republish the whole
+    /// archive at every sweep, for good. Not when the store refused the
+    /// row's insert, though, and no row is there: acknowledged, the worker
+    /// would delete its terminal row, and the run would be on no record a
+    /// trigger's claim is settled from, so its trigger could run again. The
+    /// worker is not told, keeps its row and republishes, which the
+    /// record's insert takes as a duplicate.
     pub(crate) async fn handle_invocation_archived(
         &self,
         event: &Event,
@@ -583,10 +593,19 @@ impl CoordinationConsumer {
                 None,
             )
             .await;
-        if let Err(err) = &moved
-            && !is_unreadable(err)
-        {
-            return moved.map(|_| ());
+        if let Err(err) = &moved {
+            if !leaves_the_row_as_it_is(err) {
+                return moved.map(|_| ());
+            }
+            if !is_unreadable(err) && !self.an_ownership_row_is_there(&invocation_id).await? {
+                warn!(
+                    invocation_id = %invocation_id,
+                    error = %err,
+                    "the archive is recorded and not acknowledged to the worker: the store refused \
+                     the run's ownership row, and with no row there the worker keeps its own"
+                );
+                return moved.map(|_| ());
+            }
         }
 
         let ack = Event::new(
@@ -597,14 +616,27 @@ impl CoordinationConsumer {
             }),
         );
         self.bus.publish(&ack).await?;
-        if moved.is_err() {
+        if let Err(err) = &moved {
             warn!(
                 invocation_id = %invocation_id,
+                error = %err,
                 "the archive is recorded and acknowledged to the worker; the run's ownership row \
-                 cannot be read and is left as it is"
+                 is left as it is, since it cannot be read or the store refused its move"
             );
         }
         moved.map(|_| ())
+    }
+
+    /// Whether `invocation_id` has an ownership row, readable or not.
+    async fn an_ownership_row_is_there(
+        &self,
+        invocation_id: &str,
+    ) -> Result<bool, CoordinationConsumerError> {
+        match self.store.get_invocation_owner(invocation_id).await {
+            Ok(row) => Ok(row.is_some()),
+            Err(ControlPlaneStoreError::Malformed(_)) => Ok(true),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
@@ -635,18 +667,68 @@ impl From<DurableConsumerError> for CoordinationConsumerError {
     }
 }
 
-/// What the shared loop does with a handler's error. A row this build
-/// cannot read cannot be moved by compare-and-set, and a retry would hold
-/// every later event behind this one on a strict-order consumer: that is
-/// permanent, which the loop logs at warn and acks, leaving the row as it
-/// is. Every other error, a contended row's included, is transient and
+/// What the shared loop does with a handler's error. Two are permanent,
+/// acked and never retried, since a retry would hold every later event
+/// behind this one on a strict-order consumer for good:
+///
+/// - a row this build cannot read, which cannot be moved by
+///   compare-and-set and is left as it is; the loop logs it at warn;
+/// - a write the store refuses by its own rules, a check, a key, a NOT
+///   NULL column or a trigger ([`ControlPlaneStoreError::Refused`]),
+///   which no retry changes. It is logged here, at error, since a write
+///   this consumer meant to make is left unmade (issue 1070), and the
+///   loop logs it at warn too. A refused move of the ownership row leaves
+///   the row as it is, and the handlers then do the rest of the event, as
+///   for a row this build cannot read ([`leaves_the_row_as_it_is`]). No
+///   write the consumer makes is meant to be refused, so this is a guard,
+///   not a path the consumer takes.
+///
+/// Every other error, a contended row's included, is transient and
 /// redelivered.
-fn as_handler_error(err: CoordinationConsumerError) -> HandlerError {
+fn as_handler_error(event: &Event, err: CoordinationConsumerError) -> HandlerError {
     if is_unreadable(&err) {
-        HandlerError::permanent(err)
-    } else {
-        HandlerError::transient(err)
+        return HandlerError::permanent(err);
     }
+    if is_refused(&err) {
+        error!(
+            invocation_id = %event.envelope.invocation_id,
+            agent_id = event.envelope.agent_id.as_str(),
+            event_type = event.payload.event_type(),
+            error = %err,
+            "the control-plane store refused the event's write for good; the event is \
+             acknowledged, and that write is not made"
+        );
+        return HandlerError::permanent(err);
+    }
+    HandlerError::transient(err)
+}
+
+/// Whether `err` is a write the control-plane store refused by its own
+/// rules, which no retry changes.
+fn is_refused(err: &CoordinationConsumerError) -> bool {
+    matches!(
+        err,
+        CoordinationConsumerError::Store(ControlPlaneStoreError::Refused(_))
+            | CoordinationConsumerError::Ownership(OwnershipError::Store(
+                ControlPlaneStoreError::Refused(_)
+            ))
+    )
+}
+
+/// Whether `err` left the run's ownership row as it is, for a reason a
+/// retry does not change: the row cannot be read, or the store refused its
+/// move by its own rules. Either way the handlers do the rest of the event
+/// (an archive recorded and acknowledged, a drop's stop of the run), as
+/// issue 1024 settled for a row this build cannot read, and the event is
+/// then refused as permanent.
+fn leaves_the_row_as_it_is(err: &CoordinationConsumerError) -> bool {
+    is_unreadable(err)
+        || matches!(
+            err,
+            CoordinationConsumerError::Ownership(OwnershipError::Store(
+                ControlPlaneStoreError::Refused(_)
+            ))
+        )
 }
 
 /// Whether `err` is an ownership row this build cannot read, which every

@@ -754,13 +754,71 @@ async fn a_write_the_store_refuses_for_good_is_acknowledged() {
     );
 }
 
-/// Only a row this build cannot read is refused as permanent. Every other
-/// error of a move, a row that kept changing under it and a store that
-/// failed included, is transient: the event is redelivered and decided
-/// again, not dropped.
+/// **A locked store is retried, not acknowledged.** Another connection
+/// holds the store's write lock past its busy timeout, as a long write or
+/// a stuck process would: the run's ending cannot be folded now, but it
+/// can later, so the event is transient and redelivered, not taken as a
+/// refusal and lost.
+#[tokio::test]
+async fn an_ending_the_store_is_too_busy_to_fold_is_retried() {
+    let fixture = Fixture::new().await;
+    let by_hand = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&format!(
+            "sqlite://{}",
+            fixture._dir.path().join("control-plane.db").display()
+        ))
+        .await
+        .unwrap();
+    let mut holder = by_hand.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let outcome = fixture
+        .consumer
+        .handle_event(Event::new(
+            fixture.agent_id.clone(),
+            fixture.invocation_id,
+            EventPayload::Completed(CompletedPayload {
+                task_status: Default::default(),
+                result_summary: None,
+                total_llm_calls: 1,
+                total_tool_calls: 0,
+                total_cost: 0.0,
+                total_duration_ms: 10,
+            }),
+        ))
+        .await;
+    sqlx::query("ROLLBACK").execute(&mut *holder).await.unwrap();
+    assert!(
+        matches!(outcome, Err(HandlerError::Transient(_))),
+        "an ending the store was too busy to fold was answered {outcome:?}: it is retried"
+    );
+}
+
+/// A row this build cannot read, and a write the store refuses by its own
+/// rules, are refused as permanent. Every other error of a move, a row
+/// that kept changing under it and a store that failed included, is
+/// transient: the event is redelivered and decided again, not dropped.
 #[test]
-fn only_an_unreadable_row_is_refused_as_permanent() {
-    let permanent = |err| matches!(as_handler_error(err), HandlerError::Permanent(_));
+fn an_unreadable_row_and_a_refused_write_are_the_permanent_errors() {
+    let event = Event::new(
+        AgentId::new("a").unwrap(),
+        Uuid::now_v7(),
+        EventPayload::InvocationOperatorRecovered(InvocationOperatorRecoveredPayload {
+            action: "drop".to_string(),
+            final_phase: "failed".to_string(),
+            reason: None,
+        }),
+    );
+    let permanent = |err| matches!(as_handler_error(&event, err), HandlerError::Permanent(_));
+    assert!(permanent(CoordinationConsumerError::Ownership(
+        OwnershipError::Store(ControlPlaneStoreError::Refused("CHECK".to_string()))
+    )));
+    assert!(permanent(CoordinationConsumerError::Store(
+        ControlPlaneStoreError::Refused("CHECK".to_string())
+    )));
     assert!(permanent(CoordinationConsumerError::Ownership(
         OwnershipError::Unreadable {
             invocation_id: "inv".to_string(),

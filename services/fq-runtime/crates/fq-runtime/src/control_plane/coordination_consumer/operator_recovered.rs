@@ -5,7 +5,7 @@
 use chrono::Utc;
 use tracing::{debug, warn};
 
-use super::{CoordinationConsumer, CoordinationConsumerError, folded_now, is_unreadable};
+use super::{CoordinationConsumer, CoordinationConsumerError, folded_now, leaves_the_row_as_it_is};
 use crate::control_plane::ownership::{Ending, OwnershipEvent};
 use crate::control_plane::store::{ControlPlaneStoreError, InvocationArchiveRow};
 use crate::events::Event;
@@ -27,11 +27,12 @@ impl CoordinationConsumer {
     ///    archive's arrival keeps the operator's ending (see
     ///    `handle_invocation_archived`).
     ///
-    /// An ownership row this build cannot read does not stop the drop:
-    /// the archive record takes the drop's time as the run's start, the
-    /// row is left as it is, and the worker's WAL row is still marked
-    /// terminal, since the operator meant to stop the run. Then the event
-    /// is refused as permanent, as every event for such a row is.
+    /// An ownership row this build cannot read, or one whose move the
+    /// store refuses by its own rules, does not stop the drop: the archive
+    /// record takes the drop's time as the run's start if the row cannot
+    /// be read, the row is left as it is, and the worker's WAL row is
+    /// still marked terminal, since the operator meant to stop the run.
+    /// Then the event is refused as permanent.
     pub(crate) async fn handle_invocation_operator_recovered(
         &self,
         event: &Event,
@@ -79,7 +80,7 @@ impl CoordinationConsumer {
             )
             .await;
         if let Err(err) = &moved
-            && !is_unreadable(err)
+            && !leaves_the_row_as_it_is(err)
         {
             return moved.map(|_| ());
         }
@@ -89,11 +90,13 @@ impl CoordinationConsumer {
                 .mark_invocation_operator_terminal(&invocation_id, &payload.final_phase, now_ms)
                 .await?;
         }
-        if moved.is_err() {
+        if let Err(err) = &moved {
             warn!(
                 invocation_id = %invocation_id,
+                error = %err,
                 "the drop took effect: its archive record is written and the worker's row marked \
-                 finished; the run's ownership row cannot be read and is left as it is"
+                 finished; the run's ownership row is left as it is, since it cannot be read or \
+                 the store refused its move"
             );
         }
 
