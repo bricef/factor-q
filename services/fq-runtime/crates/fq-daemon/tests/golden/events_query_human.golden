@@ -6,6 +6,10 @@ timestamp            agent                                    event          cos
 <TIME>               system                                   system_startup -            <EVENT_ID>
 <TIME>               researcher                               invocation_ambiguous -            <EVENT_ID>
 <TIME>               system                                   system_recovery -            <EVENT_ID>
+2026-01-02T03:04:56  fixer                                    invocation_operator_recovered -            00000000-0000-7000-8000-000000001045
+2026-01-02T03:04:55  fixer                                    triggered      -            00000000-0000-7000-8000-000000001044
+2026-01-02T03:04:47  fixer                                    completed      $0.000000    00000000-0000-7000-8000-000000001043
+2026-01-02T03:04:45  fixer                                    triggered      -            00000000-0000-7000-8000-000000001042
 2026-01-02T03:04:35  fixer                                    triggered      -            00000000-0000-7000-8000-000000001008
 2026-01-02T03:04:25  researcher                               triggered      -            00000000-0000-7000-8000-000000001007
 2026-01-02T03:04:17  fixer                                    failed         $0.003100    00000000-0000-7000-8000-000000001006
@@ -14,5 +18,6 @@ timestamp            agent                                    event          cos
 2026-01-02T03:04:15  fixer                                    triggered      -            00000000-0000-7000-8000-000000001004
 2026-01-02T03:04:11  summary                                  invocation_summary $0.000900    00000000-0000-7000-8000-000000001010
 2026-01-02T03:04:10  researcher                               completed      $0.012500    00000000-0000-7000-8000-000000001003
+2026-01-02T03:04:08  researcher                               invocation_operator_recovered -            00000000-0000-7000-8000-000000001041
 2026-01-02T03:04:06  researcher                               llm_response   $0.012500    00000000-0000-7000-8000-000000001002
 2026-01-02T03:04:05  researcher                               triggered      -            00000000-0000-7000-8000-000000001001

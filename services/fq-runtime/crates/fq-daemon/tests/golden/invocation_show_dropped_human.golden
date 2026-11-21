@@ -1,0 +1,12 @@
+Invocation: bd000000-0000-7000-8000-00000000000e
+  agent:    fixer
+  status:   failed
+  worker:   fixer
+  ended by: drop at 2026-01-02T03:04:56Z
+  termination: dropped (requested 2026-01-02T03:04:56Z by on-call: stuck in a loop\n  status:   completed\u{1b}[2J and then some)
+  archive:  none: the run was dropped with no row on its worker, so no archive will come
+  trigger:  none recorded: not started from the trigger stream, its claim was released or taken over before the run's first durable write, or the claim is older than its retention window
+
+Recent events:
+  2026-01-02T03:04:56  invocation_operator_recovered
+  2026-01-02T03:04:55  triggered

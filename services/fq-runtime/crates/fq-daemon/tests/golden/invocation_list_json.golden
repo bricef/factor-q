@@ -1,5 +1,27 @@
 [
   {
+    "invocation_id": "bd000000-0000-7000-8000-00000000000e",
+    "agent_id": "fixer",
+    "worker_id": "fixer",
+    "status": "failed",
+    "assigned_at_ms": 1767323096000,
+    "started_at_ms": 1767323096000,
+    "archived": false,
+    "archive_state": "none",
+    "summary": null
+  },
+  {
+    "invocation_id": "ad000000-0000-7000-8000-00000000000d",
+    "agent_id": "fixer",
+    "worker_id": "fixer",
+    "status": "completed",
+    "assigned_at_ms": 1767323087000,
+    "started_at_ms": 1767323087000,
+    "archived": false,
+    "archive_state": "pending",
+    "summary": null
+  },
+  {
     "invocation_id": "4e000000-0000-7000-8000-000000000004",
     "agent_id": "fixer",
     "worker_id": "fixer",

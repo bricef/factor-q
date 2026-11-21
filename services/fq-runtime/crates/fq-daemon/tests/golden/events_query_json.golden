@@ -84,6 +84,54 @@
     "duration_ms": null
   },
   {
+    "event_id": "00000000-0000-7000-8000-000000001045",
+    "timestamp": "2026-01-02T03:04:56+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "bd000000-0000-7000-8000-00000000000e",
+    "event_type": "invocation_operator_recovered",
+    "model": null,
+    "total_cost": null,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001044",
+    "timestamp": "2026-01-02T03:04:55+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "bd000000-0000-7000-8000-00000000000e",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001043",
+    "timestamp": "2026-01-02T03:04:47+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "ad000000-0000-7000-8000-00000000000d",
+    "event_type": "completed",
+    "model": null,
+    "total_cost": 0.0,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": 2000
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001042",
+    "timestamp": "2026-01-02T03:04:45+00:00",
+    "agent_id": "fixer",
+    "invocation_id": "ad000000-0000-7000-8000-00000000000d",
+    "event_type": "triggered",
+    "model": "claude-haiku",
+    "total_cost": null,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
+  },
+  {
     "event_id": "00000000-0000-7000-8000-000000001008",
     "timestamp": "2026-01-02T03:04:35+00:00",
     "agent_id": "fixer",
@@ -178,6 +226,18 @@
     "error_kind": null,
     "error_message": null,
     "duration_ms": 5000
+  },
+  {
+    "event_id": "00000000-0000-7000-8000-000000001041",
+    "timestamp": "2026-01-02T03:04:08+00:00",
+    "agent_id": "researcher",
+    "invocation_id": "1c000000-0000-7000-8000-000000000001",
+    "event_type": "invocation_operator_recovered",
+    "model": null,
+    "total_cost": null,
+    "error_kind": null,
+    "error_message": null,
+    "duration_ms": null
   },
   {
     "event_id": "00000000-0000-7000-8000-000000001002",

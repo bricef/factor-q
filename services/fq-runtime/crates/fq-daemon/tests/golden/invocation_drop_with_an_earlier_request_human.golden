@@ -1,0 +1,4 @@
+Drop of invocation 1c000000-0000-7000-8000-000000000001 recorded (agent=researcher, event_id=<UUID>): already ended when the termination was requested.
+An earlier request is on record (requested 2026-01-02T03:04:08Z by on-call: golden fixture request); the record keeps the first.
+Reason given: golden fixture drop
+Follow with `fq invocation show 1c000000-0000-7000-8000-000000000001` to read the record.
