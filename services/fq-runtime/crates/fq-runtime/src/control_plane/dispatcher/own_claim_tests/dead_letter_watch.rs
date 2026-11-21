@@ -26,6 +26,7 @@ use crate::control_plane::advisory_watch::test_kit::{self, PAST};
 use crate::control_plane::advisory_watch::{
     AdvisoryOutcome, AdvisoryWatch, CONSUMER_NAME as WATCH_CONSUMER, HELD_VERDICT_MIN_LOOKS,
 };
+use crate::control_plane::dispatcher::{ClaimMark, Exhausted};
 use crate::dead_letter::{
     DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_STREAM_SEQ_KEY, DEAD_LETTER_TRIGGER_ID_KEY, StartUnchecked,
     from_event,
@@ -1243,4 +1244,592 @@ async fn a_run_read_in_the_wal_is_a_start_when_the_second_claim_read_fails() {
     assert_eq!(outcome, AdvisoryOutcome::RunStarted);
     assert!(dead_letter(&arena).await.is_none());
     assert_eq!(claim(&arena).await, Some((true, Some(run))));
+}
+
+/// **A trigger consumed without a run is not dead-lettered (issue 1055).**
+/// The trigger was dealt with, its claim consumed, and the answer to its
+/// delivery never reached the broker, so its deliveries ran out on the
+/// broker's side. The watch reads the consumed claim and writes no
+/// `trigger_exhausted`: the trigger already has its record.
+#[tokio::test]
+async fn a_consumed_trigger_is_not_dead_lettered() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::Consumed);
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "a consumed trigger must not be dead-lettered"
+    );
+    assert_eq!(
+        kept(&arena),
+        0,
+        "not counted as a trigger whose run started"
+    );
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            Some("inv-consumed".to_string())
+        )),
+        "the claim is left as it was"
+    );
+}
+
+/// **A consumed claim whose run has a start on record is a start (issue
+/// 1055).** "Consumed" says no run started; the run it names is on the
+/// control plane's record, and that is the truth. The watch writes no
+/// dead letter, counts the trigger as one whose run started, and marks the
+/// claim started for that run.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_has_a_start_on_record_is_a_start() {
+    use crate::control_plane::OwnerStatus;
+    use crate::control_plane::store::ClaimState;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    arena
+        .claims
+        .upsert_invocation_ownership("inv-consumed", &arena.claimant, 100, OwnerStatus::Failed)
+        .await
+        .unwrap();
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "a trigger whose run started must not be dead-lettered"
+    );
+    assert_eq!(kept(&arena), 1, "counted as a trigger whose run started");
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((ClaimState::DurablyStarted, Some("inv-consumed".to_string()))),
+        "the claim is marked started for the run on record"
+    );
+}
+
+/// **A consumed claim whose run cannot be looked up holds the verdict
+/// (issue 1055).** The worker cannot say what its WAL holds, so the watch
+/// cannot tell a trigger dealt with from one whose run started over it: it
+/// holds, as it does for a `claimed` row, and decides when the advisory
+/// comes back. Nothing is written, and the claim is left.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_cannot_be_looked_up_is_held() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    let advisory = exhaust(&arena).await;
+    arena
+        .worker
+        .fail_wal_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, AdvisoryOutcome::Held(_)),
+        "held: {outcome:?}"
+    );
+    assert!(dead_letter(&arena).await.is_none());
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| row.state),
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::DeadLettered
+        }),
+        "the claim is left as it was"
+    );
+}
+
+/// **A consumed claim whose run is in the worker's WAL is a start, on the
+/// watch's first look (issue 1055).** The likeliest way a consumed claim is
+/// wrong: its run made its first WAL write after all, and nothing else
+/// records it yet. The first look finds the run in the WAL, writes no dead
+/// letter, counts the trigger among those whose run started and marks the
+/// claim started for the run.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_is_in_the_wal_is_a_start_on_the_first_look() {
+    use crate::control_plane::store::ClaimState;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let run = uuid::Uuid::now_v7();
+    consume(&arena, &run.to_string()).await;
+    arena
+        .worker
+        .wal
+        .upsert_invocation_state(&super::wal_row(run, false))
+        .await
+        .unwrap();
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(kept(&arena), 1, "counted as a trigger whose run started");
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((ClaimState::DurablyStarted, Some(run.to_string()))),
+        "the claim is marked started for the run in the WAL"
+    );
+}
+
+/// **A claim consumed between the watch's two reads is read as consumed
+/// (issue 1055).** The watch reads the claim `claimed`, with no copy
+/// handling it, then the WAL, which holds nothing; before it reads the
+/// claim again, the claim is consumed, as a copy's answer would consume
+/// it. The second read finds it consumed: no dead letter, and not a
+/// verdict held because the claim changed. Inside the limit, so that only
+/// the decision after the second read can answer. Once the dispatcher
+/// writes the state, this second read is the one that meets it.
+#[tokio::test]
+async fn a_claim_consumed_between_the_watchs_reads_is_read_as_consumed() {
+    use crate::control_plane::store::ConsumedWhy;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let key = consumed_key(&arena);
+    arena
+        .claims
+        .claim_trigger(key, &arena.claimant, "inv-between", 0)
+        .await
+        .unwrap();
+    let advisory = exhaust(&arena).await;
+    let the_watch = std::sync::Arc::new(watch(&arena));
+
+    let asking = held_in_its_wal_read(&arena, &the_watch, &advisory).await;
+    assert!(
+        arena
+            .claims
+            .consume_trigger_claim(key, "inv-between", &ConsumedWhy::DeadLettered)
+            .await
+            .unwrap()
+    );
+    arena.worker.wal_read_gate.add_permits(1);
+    let outcome = asking.await.expect("the watch's task");
+
+    assert_eq!(outcome, AdvisoryOutcome::Consumed);
+    assert!(dead_letter(&arena).await.is_none());
+}
+
+/// **Past the watch's limit, a consumed claim whose run cannot be looked
+/// up is not dead-lettered (issue 1055).** The worker cannot say what its
+/// WAL holds, so the claim's word cannot be checked. Either way no dead
+/// letter is due: a run on record started, and one not on record was
+/// dealt with. Held for an hour, a `claimed` row is dead-lettered marked
+/// unchecked; a consumed one is not, and its claim is left as it is.
+#[tokio::test]
+async fn past_the_limit_a_consumed_trigger_whose_run_cannot_be_looked_up_is_not_dead_lettered() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    arena
+        .worker
+        .fail_wal_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::ConsumedUnchecked);
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "a consumed trigger must not be dead-lettered, checked or not"
+    );
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| row.state),
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::DeadLettered
+        }),
+        "the claim is left as it was"
+    );
+}
+
+/// **Past the watch's limit, a consumed claim whose run's ownership row
+/// cannot be read is not dead-lettered either (issue 1055).** The WAL holds
+/// nothing for the run; the ownership table cannot be read.
+#[tokio::test]
+async fn past_the_limit_a_consumed_trigger_whose_ownership_row_cannot_be_read_is_not_dead_lettered()
+{
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE coordination_invocation_owner RENAME TO owner_out_of_reach"],
+    )
+    .await;
+
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::ConsumedUnchecked);
+    assert!(dead_letter(&arena).await.is_none());
+}
+
+/// **A consumed claim whose run is in the WAL is a start though its
+/// ownership row cannot be read (issue 1055).** A start found is never
+/// held, as for a `claimed` row: the WAL alone is a start on record. The
+/// first look writes no dead letter and marks the claim started for the
+/// run, whatever the ownership table could not say.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_is_in_the_wal_is_a_start_though_its_ownership_row_cannot_be_read()
+ {
+    use crate::control_plane::store::ClaimState;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let run = uuid::Uuid::now_v7();
+    consume(&arena, &run.to_string()).await;
+    arena
+        .worker
+        .wal
+        .upsert_invocation_state(&super::wal_row(run, false))
+        .await
+        .unwrap();
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE coordination_invocation_owner RENAME TO owner_out_of_reach"],
+    )
+    .await;
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((ClaimState::DurablyStarted, Some(run.to_string()))),
+        "the claim is marked started for the run in the WAL"
+    );
+}
+
+/// **A consumed claim whose run's ownership row this build cannot read is
+/// a start (issue 1055).** The row is there, so the run reached the
+/// ownership table, whatever its status says: a start on record, as it is
+/// for a `claimed` row's run, and the claim is marked started for it.
+#[tokio::test]
+async fn a_consumed_trigger_whose_ownership_row_this_build_cannot_read_is_a_start() {
+    use crate::control_plane::OwnerStatus;
+    use crate::control_plane::store::ClaimState;
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    arena
+        .claims
+        .upsert_invocation_ownership("inv-consumed", &arena.claimant, 100, OwnerStatus::Failed)
+        .await
+        .unwrap();
+    assert!(
+        arena
+            .claims
+            .overwrite_owner_status_for_test("inv-consumed", "a_status_from_a_newer_build")
+            .await
+            .unwrap()
+    );
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::RunStarted);
+    assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(kept(&arena), 1, "counted as a trigger whose run started");
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((ClaimState::DurablyStarted, Some("inv-consumed".to_string()))),
+        "the claim is marked started for the run on record"
+    );
+}
+
+/// Start the check's last look at the arena's trigger in a task, and wait
+/// until it is held in its first read of the WAL
+/// ([`super::Scripted::hold_wal_reads`]); the WAL reads after it are not
+/// held.
+async fn held_in_its_last_look(arena: &Arena) -> tokio::task::JoinHandle<Exhausted> {
+    use std::sync::atomic::Ordering;
+    let check = arena.dispatcher.exhaustion_check().expect("a claim store");
+    arena.worker.hold_wal_reads.store(true, Ordering::SeqCst);
+    let asking = tokio::spawn(async move { check.last_look(SEQ).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while arena.worker.wal_reads_held.load(Ordering::SeqCst) == 0 {
+        assert!(
+            !asking.is_finished() && tokio::time::Instant::now() < deadline,
+            "the last look did not reach its read of the WAL"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    arena.worker.hold_wal_reads.store(false, Ordering::SeqCst);
+    asking
+}
+
+/// **The last look at a consumed claim it then cannot read says what is
+/// true of it (issue 1055).** The claim says consumed and the ownership
+/// table is out of reach, so the verdict is held unchecked; meanwhile the
+/// run reaches the WAL and the claim table goes out of reach too. The last
+/// look finds the run in the WAL, a start, and cannot read the claim to
+/// mark it. Startup recovery does not mark a consumed claim, and the mark
+/// says so.
+#[tokio::test]
+async fn the_last_look_at_a_consumed_claim_it_cannot_read_says_recovery_leaves_it() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let run = uuid::Uuid::now_v7();
+    consume(&arena, &run.to_string()).await;
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE coordination_invocation_owner RENAME TO owner_out_of_reach"],
+    )
+    .await;
+
+    let asking = held_in_its_last_look(&arena).await;
+    arena
+        .worker
+        .wal
+        .upsert_invocation_state(&super::wal_row(run, false))
+        .await
+        .unwrap();
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE trigger_claim RENAME TO claim_out_of_reach"],
+    )
+    .await;
+    arena.worker.wal_read_gate.add_permits(1);
+    let verdict = asking.await.expect("the check's task");
+
+    let Exhausted::Started {
+        invocation_id,
+        mark,
+        ..
+    } = &verdict
+    else {
+        panic!("a start: {verdict:?}");
+    };
+    assert_eq!(*invocation_id, run.to_string());
+    let mark = mark.to_string();
+    assert!(
+        mark.starts_with("not marked: the claim could not be read (")
+            && mark.ends_with("); if it still says consumed, startup recovery leaves it so"),
+        "{verdict:?}"
+    );
+}
+
+/// **The last look at a `claimed` claim it then cannot read says what is
+/// true of it (issue 1055).** As above for a claim still `claimed`, whose
+/// run's WAL read the verdict could not settle. The run is in the WAL, a
+/// start; the claim cannot be read to mark it, and this daemon's next
+/// start marks a `claimed` claim whose run is on record, which the mark
+/// says.
+#[tokio::test]
+async fn the_last_look_at_a_claimed_claim_it_cannot_read_says_the_next_start_marks_it() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    let run = uuid::Uuid::now_v7();
+    arena
+        .claims
+        .claim_trigger(consumed_key(&arena), &arena.claimant, &run.to_string(), 0)
+        .await
+        .unwrap();
+
+    let asking = held_in_its_last_look(&arena).await;
+    arena
+        .worker
+        .wal
+        .upsert_invocation_state(&super::wal_row(run, false))
+        .await
+        .unwrap();
+    exec(
+        &arena.claim_db,
+        &["ALTER TABLE trigger_claim RENAME TO claim_out_of_reach"],
+    )
+    .await;
+    arena.worker.wal_read_gate.add_permits(1);
+    let verdict = asking.await.expect("the check's task");
+
+    let Exhausted::Started {
+        invocation_id,
+        mark,
+        ..
+    } = &verdict
+    else {
+        panic!("a start: {verdict:?}");
+    };
+    assert_eq!(*invocation_id, run.to_string());
+    let mark = mark.to_string();
+    assert!(
+        mark.starts_with("not marked: the claim could not be read (")
+            && mark.ends_with("); if it still says claimed, this daemon's next start marks it"),
+        "{verdict:?}"
+    );
+}
+
+/// **A run read in the WAL is a start though the claim was consumed under
+/// another run since (issue 1055).** The claim is `claimed` for a run the
+/// check reads in the WAL; before the check reads the claim again, it is
+/// taken again under another id and consumed as dead-lettered. The run in
+/// the WAL started, so the trigger is not dead-lettered and its dead letter
+/// not requeued, as if the claim had been taken again and left `claimed`;
+/// the consumed claim, which names another run, is left as it is.
+#[tokio::test]
+async fn a_run_read_in_the_wal_is_a_start_though_the_claim_was_consumed_under_another_since() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    let (arena, _server) = arena().await;
+    let first = uuid::Uuid::now_v7().to_string();
+    let verdict = consumed_under_another_during_the_last_look(&arena, &first, true).await;
+
+    assert!(
+        matches!(
+            &verdict,
+            Exhausted::Started { invocation_id, mark: ClaimMark::Changed, .. }
+                if *invocation_id == first
+        ),
+        "a start for the run in the WAL: {verdict:?}"
+    );
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| (row.state, row.invocation_id)),
+        Some((
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            Some("inv-second".to_string())
+        )),
+        "the claim consumed under another run is left as it is"
+    );
+}
+
+/// **With nothing read in the WAL, a claim consumed under another run
+/// between the check's reads is read as consumed (issue 1055).** As above,
+/// with the first run not in the WAL: the trigger was dealt with by the
+/// copy that consumed it, so the verdict is that copy's, and past the
+/// watch's limit no unchecked dead letter is written for it.
+#[tokio::test]
+async fn with_nothing_in_the_wal_a_claim_consumed_under_another_since_is_read_as_consumed() {
+    use crate::control_plane::dispatcher::ConsumedClaim;
+    use crate::control_plane::store::ConsumedWhy;
+    let (arena, _server) = arena().await;
+    let first = uuid::Uuid::now_v7().to_string();
+    let verdict = consumed_under_another_during_the_last_look(&arena, &first, false).await;
+
+    assert_eq!(
+        verdict,
+        Exhausted::Consumed(ConsumedClaim::Checked {
+            invocation_id: Some("inv-second".to_string()),
+            why: ConsumedWhy::DeadLettered,
+            operator_dropped: false,
+        })
+    );
+}
+
+/// The arena's trigger published and claimed for `first`, in the WAL when
+/// `in_the_wal`, and the check's last look at it, during whose first read
+/// of the WAL the claim is taken again under `inv-second` and consumed as
+/// dead-lettered.
+async fn consumed_under_another_during_the_last_look(
+    arena: &Arena,
+    first: &str,
+    in_the_wal: bool,
+) -> Exhausted {
+    use crate::control_plane::store::ConsumedWhy;
+    publish(arena).await;
+    let key = consumed_key(arena);
+    arena
+        .claims
+        .claim_trigger(key, &arena.claimant, first, 0)
+        .await
+        .unwrap();
+    if in_the_wal {
+        arena
+            .worker
+            .wal
+            .upsert_invocation_state(&super::wal_row(first.parse().unwrap(), false))
+            .await
+            .unwrap();
+    }
+    let asking = held_in_its_last_look(arena).await;
+    assert!(
+        arena
+            .claims
+            .retake_trigger_claim(key, &arena.claimant, first, "inv-second", 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        arena
+            .claims
+            .consume_trigger_claim(key, "inv-second", &ConsumedWhy::DeadLettered)
+            .await
+            .unwrap()
+    );
+    arena.worker.wal_read_gate.add_permits(1);
+    asking.await.expect("the check's task")
+}
+
+/// The claim store's key for the arena's trigger.
+fn consumed_key(arena: &Arena) -> crate::control_plane::store::TriggerKey<'static> {
+    crate::control_plane::store::TriggerKey {
+        stream: TRIGGER_STREAM_NAME,
+        stream_epoch: arena.bus.trigger_stream_epoch(),
+        stream_seq: SEQ,
+    }
+}
+
+/// The arena's trigger claimed by this daemon under `invocation_id` and
+/// consumed as dead-lettered, as the dispatcher's consuming answers will.
+async fn consume(arena: &Arena, invocation_id: &str) {
+    use crate::control_plane::store::ConsumedWhy;
+    let key = consumed_key(arena);
+    arena
+        .claims
+        .claim_trigger(key, &arena.claimant, invocation_id, 0)
+        .await
+        .unwrap();
+    assert!(
+        arena
+            .claims
+            .consume_trigger_claim(key, invocation_id, &ConsumedWhy::DeadLettered)
+            .await
+            .unwrap()
+    );
 }

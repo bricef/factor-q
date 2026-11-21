@@ -64,6 +64,7 @@ const MIGRATIONS: &[Migration] = &[
     (2, TRIGGER_CLAIM_TABLE_V2_SQL),
     (3, ownership::ARCHIVE_STATE_SQL),
     (4, ownership::TERMINATION_RECORD_SQL),
+    (5, trigger_claim::TRIGGER_CLAIM_CONSUMED_STATE_SQL),
 ];
 
 const CONTROL_PLANE_TABLES_V1_SQL: &str = r#"
@@ -1010,7 +1011,7 @@ pub use ownership::{ArchiveState, EndedBy, OwnerRow, TerminationRequest};
 
 mod trigger_claim;
 pub use trigger_claim::{
-    ClaimState, RecordedStart, RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey,
+    ClaimState, ConsumedWhy, RecordedStart, RunRecords, TriggerClaim, TriggerClaimRow, TriggerKey,
     UnsettledTriggerClaim,
 };
 

@@ -9,10 +9,12 @@
 //! callsite's interest for the whole process.
 //!
 //! The store it opens is built by hand at the version before the record's
-//! rung, with the ownership table as that version left it; the rung is
-//! the ladder's last, so that version is one before the binary's. A rung
-//! added after it makes this test fail loudly (the open would not rebuild
-//! the table), and the version written here must then move.
+//! rung, with the ownership table and the trigger claim table as that
+//! version left them. One rung follows the record's on the ladder, the
+//! consumed claim state's (issue 1055), which rebuilds the trigger claim
+//! table, so that version is two before the binary's. A rung added after
+//! them makes this test fail loudly (the open would not rebuild the table),
+//! and the version written here must then move.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -104,7 +106,7 @@ impl Log {
 }
 
 /// A control plane at the version before the record's rung, its ownership
-/// table as that version left it, holding `rows`.
+/// and trigger claim tables as that version left them, holding `rows`.
 async fn a_store_before_the_record(path: &std::path::Path, rows: &[(&str, &str, &str)]) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -123,6 +125,11 @@ async fn a_store_before_the_record(path: &std::path::Path, rows: &[(&str, &str, 
          worker_id TEXT NOT NULL, assigned_at INTEGER NOT NULL, status TEXT NOT NULL)",
         "CREATE INDEX idx_owner_worker_status \
          ON coordination_invocation_owner(worker_id, status)",
+        "CREATE TABLE trigger_claim (stream TEXT NOT NULL, stream_epoch INTEGER NOT NULL, \
+         stream_seq INTEGER NOT NULL, claimant TEXT NOT NULL, \
+         state TEXT NOT NULL CHECK (state IN ('claimed', 'durably_started')), \
+         invocation_id TEXT, claimed_at INTEGER NOT NULL, \
+         PRIMARY KEY (stream, stream_epoch, stream_seq))",
         "ALTER TABLE coordination_invocation_owner \
          ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'not_due' \
          CHECK (archive_state IN ('not_due', 'pending', 'archived'))",
@@ -132,7 +139,7 @@ async fn a_store_before_the_record(path: &std::path::Path, rows: &[(&str, &str, 
     sqlx::query(
         "INSERT INTO schema_meta (class, version, updated_at) VALUES ('control_plane', ?, 0)",
     )
-    .bind(CONTROL_PLANE_SCHEMA_VERSION - 1)
+    .bind(CONTROL_PLANE_SCHEMA_VERSION - 2)
     .execute(&pool)
     .await
     .unwrap();

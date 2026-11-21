@@ -1,7 +1,9 @@
 //! What the trigger dispatcher logs when it drops a copy of a trigger,
 //! cannot record or acknowledge a run's durable start, cannot publish a
 //! trigger's dead letter, or resumes a deferred run that has already ended,
-//! read off the log of a dispatcher running its own consume loop.
+//! read off the log of a dispatcher running its own consume loop; and what
+//! the dead-letter watch's check, and the watch itself past its limit, log
+//! about an exhausted trigger's consumed claim.
 //!
 //! **Why a binary of its own (#1031).** Whether a callsite is of interest
 //! to a subscriber is cached once for the whole process, not per thread.
@@ -54,15 +56,17 @@ use fq_runtime::bus::{
     ADVISORY_STREAM_NAME, EventBus, NATS_DEFAULT_MAX_ACK_PENDING, STREAM_NAME, TRIGGER_MAX_DELIVER,
     TRIGGER_STREAM_NAME,
 };
-use fq_runtime::control_plane::dispatcher::{CONSUMER_NAME, TriggerClaims};
-use fq_runtime::control_plane::store::TriggerKey;
-use fq_runtime::control_plane::{ControlPlaneStore, TriggerClaim};
+use fq_runtime::control_plane::dispatcher::{
+    CONSUMER_NAME, ClaimMark, ConsumedClaim, Exhausted, ExhaustionCheck, TriggerClaims,
+};
+use fq_runtime::control_plane::store::{ClaimState, ConsumedWhy, TriggerKey};
+use fq_runtime::control_plane::{AdvisoryWatch, ControlPlaneStore, TriggerClaim};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::llm::fixture::FixtureClient;
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
 use fq_runtime::worker::{
     DrainRequest, DrainState, DurableStart, DurableStartReport, ExecutorError, InvocationOutcome,
-    ResumeError, Worker, WorkerStore,
+    ResumeError, WalRun, Worker, WorkerStore,
 };
 use fq_runtime::{DispatcherError, TriggerDispatcher, shared_registry};
 use futures::StreamExt;
@@ -121,6 +125,15 @@ const ENDED_BEFORE_RESUME: &str = "deferred invocation ended before its resume; 
 /// dispatcher could not publish.
 const DEAD_LETTER_UNPUBLISHED: &str =
     "could not publish the dead letter of a trigger whose last delivery failed";
+/// The start of the line for a start found over a consumed claim.
+const START_OVER_CONSUMED: &str =
+    "the claim of a trigger whose run started recorded it consumed without a run";
+/// The start of the line for a copy that met a consumed claim.
+const CONSUMED_DROP: &str = "dropping a redelivered trigger that was consumed without a run";
+/// The start of the line for an exhausted trigger whose claim said
+/// consumed and whose run the watch or a requeue found on record.
+const EXHAUSTED_OVER_CONSUMED: &str =
+    "the claim of an exhausted trigger said it was consumed without a run";
 
 /// How long a test waits for a line, a delivery or the dispatcher.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -274,6 +287,11 @@ enum ClaimChange {
     ClaimedByAnother,
     /// Names [`ANOTHER_RUN`] on it, marked `durably_started`.
     StartedByAnother,
+    /// Consumes it, naming the run.
+    ConsumedUnderTheRun,
+    /// Names [`ANOTHER_RUN`] on it and consumes it as dead-lettered, as a
+    /// copy that took it again and ran out of deliveries would.
+    ConsumedUnderAnother,
     /// Makes the store refuse the first mark, naming [`ANOTHER_RUN`] on the
     /// claim, still `claimed`, as it does: the retry then finds no claim
     /// naming the run.
@@ -304,10 +322,30 @@ struct Stub {
     started: Notify,
     gate: Notify,
     ended: Notify,
+    /// What the next reads of the WAL answer, in order: `Err(())` for a
+    /// read that fails. Once they are used up, every read fails, as the
+    /// worker trait's own default does.
+    wal_answers: Mutex<std::collections::VecDeque<Result<Option<WalRun>, ()>>>,
+    /// How the next read of the WAL changes the claim before it answers:
+    /// a change between two reads of the claim by whoever reads the WAL.
+    change_at_wal_read: Mutex<Option<ClaimChange>>,
 }
 
 #[async_trait::async_trait]
 impl Worker for Stub {
+    async fn wal_run(&self, invocation_id: &str) -> Result<Option<WalRun>, ExecutorError> {
+        let change = self.change_at_wal_read.lock().unwrap().take();
+        if let Some(change) = change {
+            change_the_claim(&self.claim_db, change).await;
+        }
+        match self.wal_answers.lock().unwrap().pop_front() {
+            Some(Ok(answer)) => Ok(answer),
+            Some(Err(())) | None => Err(ExecutorError::WorkerStore(format!(
+                "the stub cannot say whether its WAL holds invocation {invocation_id}"
+            ))),
+        }
+    }
+
     async fn run_invocation(
         &self,
         _agent: &Agent,
@@ -505,6 +543,15 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
             "UPDATE trigger_claim SET invocation_id = ?, state = 'durably_started'",
             &[],
         ),
+        ClaimChange::ConsumedUnderTheRun => (
+            "UPDATE trigger_claim SET state = 'consumed', consumed_why = 'failed_for_good'",
+            &[],
+        ),
+        ClaimChange::ConsumedUnderAnother => (
+            "UPDATE trigger_claim SET invocation_id = ?, state = 'consumed', \
+             consumed_why = 'dead_lettered'",
+            &[],
+        ),
         // `FAIL` keeps what the trigger did before it, the spent row and the
         // other invocation's name, where `ABORT` would roll them back.
         ClaimChange::RefusedOnceThenAnother => (
@@ -611,6 +658,8 @@ impl Daemon {
             started: Notify::new(),
             gate: Notify::new(),
             ended: Notify::new(),
+            wal_answers: Mutex::default(),
+            change_at_wal_read: Mutex::default(),
         });
         Self {
             log,
@@ -647,6 +696,24 @@ impl Daemon {
     /// Start the dispatcher's consume loop, claiming as `claimant`, with
     /// its claims recovered as the daemon recovers them, over an empty WAL.
     async fn start(&mut self, claimant: &str) {
+        let dispatcher = self.dispatcher(claimant).await;
+        let (shutdown, stop) = oneshot::channel();
+        self.shutdown = Some(shutdown);
+        self.running = Some(tokio::spawn(dispatcher.run(stop)));
+    }
+
+    /// What the dead-letter watch consults about this daemon's triggers:
+    /// the claim store and the stub worker, through a dispatcher that is
+    /// not running.
+    async fn exhaustion_check(&self, claimant: &str) -> ExhaustionCheck {
+        self.dispatcher(claimant)
+            .await
+            .exhaustion_check()
+            .expect("the dispatcher holds a claim store")
+    }
+
+    /// The dispatcher [`Self::start`] runs, claiming as `claimant`.
+    async fn dispatcher(&self, claimant: &str) -> TriggerDispatcher {
         let agents = self.dirs.path().join("agents");
         std::fs::create_dir_all(&agents).unwrap();
         let definition = agents.join(format!("{}.md", self.agent));
@@ -668,17 +735,14 @@ impl Daemon {
         let claims = TriggerClaims::recover(self.claims.clone(), &starts)
             .await
             .expect("recover the claims");
-        let dispatcher = TriggerDispatcher::new(
+        TriggerDispatcher::new(
             self.bus.clone(),
             shared_registry(registry),
             self.worker.clone() as Arc<dyn Worker>,
             Arc::new(FixtureClient::new()) as Arc<dyn LlmClient>,
             1,
         )
-        .with_trigger_claims(claims, claimant);
-        let (shutdown, stop) = oneshot::channel();
-        self.shutdown = Some(shutdown);
-        self.running = Some(tokio::spawn(dispatcher.run(stop)));
+        .with_trigger_claims(claims, claimant)
     }
 
     /// Stop the consume loop and wait for every delivery it was handling,
@@ -1510,5 +1574,557 @@ async fn a_healthy_start_logs_no_release_that_gave_nothing_back() {
     assert!(
         lines.is_empty(),
         "a healthy start released nothing and said so: {lines:#?}"
+    );
+}
+
+/// **A start found over a consumed claim is one `error` line naming the
+/// run and how the claim said it was consumed** (issue 1055). The run did
+/// start, so the claim is put right, and the line is the record that it
+/// read otherwise.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_over_a_consumed_claim_is_one_error_line_naming_the_run() {
+    let mut daemon = Daemon::new(
+        "start-over-consumed",
+        Script::ChangedClaim(ClaimChange::ConsumedUnderTheRun),
+    )
+    .await;
+    let named = daemon.run_one().await;
+
+    let line = the_one_error_line_naming_the_run(&daemon, START_OVER_CONSUMED, named);
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("failed_for_good"),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("consumed_invocation_id"),
+        Some(named.1.to_string().as_str()),
+        "{line:#?}"
+    );
+}
+
+/// **A copy that meets a consumed claim is one `warn` line naming the
+/// delivery, the invocation that consumed it and how** (issue 1055).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_of_a_consumed_trigger_is_one_warn_line_naming_how_it_was_consumed() {
+    let mut daemon = Daemon::new("copy-of-consumed", Script::Nothing).await;
+    let log = daemon.log;
+    let published = daemon.publish().await;
+    let consumed_by = Uuid::now_v7().to_string();
+    let key = daemon.key(published.stream_seq);
+    daemon
+        .claims
+        .claim_trigger(key, "binary-0", &consumed_by, 0)
+        .await
+        .unwrap();
+    assert!(
+        daemon
+            .claims
+            .consume_trigger_claim(
+                key,
+                &consumed_by,
+                &fq_runtime::control_plane::store::ConsumedWhy::InvalidPayload,
+            )
+            .await
+            .unwrap()
+    );
+    daemon.start("binary-1").await;
+    let names_it = |line: &Line| {
+        line.message.starts_with(CONSUMED_DROP)
+            && line.field("consumed_invocation_id") == Some(consumed_by.as_str())
+    };
+    log.wait_for("for the copy of a consumed trigger", names_it)
+        .await;
+    daemon.stop().await;
+
+    let dropped = log.lines(names_it);
+    assert_eq!(dropped.len(), 1, "one line for the copy: {dropped:#?}");
+    let line = &dropped[0];
+    assert_eq!(line.level, tracing::Level::WARN, "{line:#?}");
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("invalid_payload"),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("stream_seq"),
+        Some(published.stream_seq.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(line.field("delivered"), Some("1"), "{line:#?}");
+}
+
+/// **The last look over a consumed claim whose run turns up corrects the
+/// claim as the first look does, and is one `error` line naming the run**
+/// (issue 1055). The claim says the trigger was consumed without a run.
+/// When the verdict is first taken the worker cannot say what its WAL
+/// holds, so the verdict is held; past the watch's limit the last look
+/// (which `dead_letter.requeue` takes too) reads the WAL again and finds
+/// the run in flight. The run started, so the claim is marked started for
+/// it, the verdict says it marked it, and the line says how the claim had
+/// said it was consumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_look_over_a_consumed_claim_marks_it_and_is_one_error_line() {
+    let daemon = Daemon::new("last-look-over-consumed", Script::Nothing).await;
+    let (seq, run) = consumed_with_its_run_found_late(&daemon).await;
+    let key = daemon.key(seq);
+
+    let verdict = daemon
+        .exhaustion_check("binary-1")
+        .await
+        .last_look(seq)
+        .await;
+
+    assert!(
+        matches!(
+            &verdict,
+            Exhausted::Started { invocation_id, mark: ClaimMark::Now, .. } if *invocation_id == run
+        ),
+        "a start, and the claim marked now: {verdict:?}"
+    );
+    let row = daemon.claims.trigger_claim(key).await.unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.invocation_id.as_deref()),
+        (ClaimState::DurablyStarted, Some(run.as_str())),
+        "the claim is marked started for the run"
+    );
+    let lines = daemon.log.lines(|line: &Line| {
+        line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+            && line.field("invocation_id") == Some(run.as_str())
+    });
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("failed_for_good"),
+        "{line:#?}"
+    );
+    assert_eq!(line.field("mark"), Some("marked started now"), "{line:#?}");
+    assert!(line.field("on_record").is_some(), "{line:#?}");
+}
+
+/// **The last look over a consumed claim it cannot mark says so** (issue
+/// 1055). As above, but the claim store refuses every update. The run
+/// started, so the verdict is still a start; the claim still says
+/// consumed, and the verdict and the line say the mark failed and that
+/// the claim still says consumed, since startup recovery will not mark it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_look_over_a_consumed_claim_it_cannot_mark_says_so() {
+    let daemon = Daemon::new("last-look-cannot-mark", Script::Nothing).await;
+    let (seq, run) = consumed_with_its_run_found_late(&daemon).await;
+    refuse_claim_marks(&daemon.claim_db, Refusals::Every).await;
+
+    let verdict = daemon
+        .exhaustion_check("binary-1")
+        .await
+        .last_look(seq)
+        .await;
+
+    assert!(
+        matches!(
+            &verdict,
+            Exhausted::Started { invocation_id, mark: ClaimMark::ConsumedNotMarked(_), .. }
+                if *invocation_id == run
+        ),
+        "a start, and the claim not marked: {verdict:?}"
+    );
+    let row = daemon.claims.trigger_claim(daemon.key(seq)).await.unwrap();
+    assert_eq!(
+        row.map(|row| row.state),
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        }),
+        "the claim still says consumed"
+    );
+    let lines = daemon.log.lines(|line: &Line| {
+        line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+            && line.field("invocation_id") == Some(run.as_str())
+    });
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let mark = lines[0].field("mark").unwrap_or_default();
+    assert!(
+        mark.starts_with("not marked: the mark failed")
+            && mark.ends_with("the claim still says consumed"),
+        "{:#?}",
+        lines[0]
+    );
+}
+
+/// A trigger published, claimed as `binary-0` under a new run and consumed
+/// as failed for good, with the stub's first WAL read failing and its
+/// second finding the run in flight: what the last look meets when the
+/// first look could not read the run's records. Returns the trigger's
+/// sequence and the run.
+async fn consumed_with_its_run_found_late(daemon: &Daemon) -> (u64, String) {
+    let published = daemon.publish().await;
+    let run = Uuid::now_v7().to_string();
+    let key = daemon.key(published.stream_seq);
+    daemon
+        .claims
+        .claim_trigger(key, "binary-0", &run, 0)
+        .await
+        .unwrap();
+    assert!(
+        daemon
+            .claims
+            .consume_trigger_claim(key, &run, &ConsumedWhy::FailedForGood)
+            .await
+            .unwrap()
+    );
+    daemon
+        .worker
+        .wal_answers
+        .lock()
+        .unwrap()
+        .extend([Err(()), Ok(Some(WalRun::InFlight))]);
+    (published.stream_seq, run)
+}
+
+/// **A consumed claim that records an operator's drop is not contradicted
+/// by the drop's ownership row, whatever its reason** (issue 1055). An
+/// operator's drop of a run that never made its first WAL write writes the
+/// run's ownership row, by design, and the claim records the drop beside
+/// its reason. So only a start in the worker's WAL contradicts it. Here the
+/// WAL holds nothing, for a claim consumed for each reason: the verdict is
+/// consumed, with the reason the claim keeps and the drop, the claim is
+/// left as it is, and no line says it was contradicted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drops_ownership_row_does_not_contradict_a_consumed_claim_that_records_it() {
+    let daemon = Daemon::new("dropped-consumed", Script::Nothing).await;
+    for why in every_reason() {
+        let (seq, run) = dropped(&daemon, why.clone(), true, Ok(None)).await;
+
+        let verdict = daemon
+            .exhaustion_check("binary-1")
+            .await
+            .last_look(seq)
+            .await;
+
+        assert_eq!(
+            verdict,
+            Exhausted::Consumed(ConsumedClaim::Checked {
+                invocation_id: Some(run.clone()),
+                why: why.clone(),
+                operator_dropped: true,
+            }),
+            "{why}: consumed, as the claim says, with the drop"
+        );
+        let row = daemon.claims.trigger_claim(daemon.key(seq)).await.unwrap();
+        assert_eq!(
+            row.map(|row| (row.state, row.operator_dropped_at.is_some())),
+            Some((ClaimState::Consumed { why: why.clone() }, true)),
+            "{why}: the claim is left as it was"
+        );
+        let lines = daemon.log.lines(|line: &Line| {
+            line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+                && line.field("invocation_id") == Some(run.as_str())
+        });
+        assert!(
+            lines.is_empty(),
+            "{why}: nothing contradicted the claim: {lines:#?}"
+        );
+    }
+}
+
+/// **A consumed claim that records no drop reads an ownership row as a
+/// start, whatever its reason** (issue 1055): the rule keys on the recorded
+/// drop, not on the reason, so a claim consumed as halted in setup with no
+/// drop recorded is no exception. Its run's ownership row is a start, the
+/// claim is marked started for the run, and the line says the claim was
+/// contradicted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_consumed_claim_that_records_no_drop_reads_an_ownership_row_as_a_start() {
+    let daemon = Daemon::new("consumed-no-drop", Script::Nothing).await;
+    for why in [ConsumedWhy::HaltedInSetup, ConsumedWhy::FailedForGood] {
+        let (seq, run) = dropped(&daemon, why.clone(), false, Ok(None)).await;
+
+        let verdict = daemon
+            .exhaustion_check("binary-1")
+            .await
+            .last_look(seq)
+            .await;
+
+        assert!(
+            matches!(
+                &verdict,
+                Exhausted::Started { invocation_id, mark: ClaimMark::Now, .. } if *invocation_id == run
+            ),
+            "{why}: a start, and the claim marked now: {verdict:?}"
+        );
+        let lines = daemon.log.lines(|line: &Line| {
+            line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+                && line.field("invocation_id") == Some(run.as_str())
+        });
+        assert_eq!(lines.len(), 1, "{why}: it is logged once: {lines:#?}");
+    }
+}
+
+/// **A dropped run that is in the WAL is a start** (issue 1055): the drop
+/// landed after the run's first WAL write, so the claim is wrong, and it is
+/// corrected as any consumed claim with a start on record is, losing its
+/// reason and the drop with its consumed state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_run_in_the_wal_is_a_start() {
+    let daemon = Daemon::new("dropped-after-start", Script::Nothing).await;
+    let (seq, run) = dropped(
+        &daemon,
+        ConsumedWhy::HaltedInSetup,
+        true,
+        Ok(Some(WalRun::InFlight)),
+    )
+    .await;
+
+    let verdict = daemon
+        .exhaustion_check("binary-1")
+        .await
+        .last_look(seq)
+        .await;
+
+    assert!(
+        matches!(
+            &verdict,
+            Exhausted::Started { invocation_id, mark: ClaimMark::Now, .. } if *invocation_id == run
+        ),
+        "a start, and the claim marked now: {verdict:?}"
+    );
+    let row = daemon.claims.trigger_claim(daemon.key(seq)).await.unwrap();
+    assert_eq!(
+        row.map(|row| (row.state, row.operator_dropped_at)),
+        Some((ClaimState::DurablyStarted, None)),
+        "marked started, and the drop goes with the consumed state"
+    );
+    let lines = daemon.log.lines(|line: &Line| {
+        line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+            && line.field("invocation_id") == Some(run.as_str())
+    });
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+}
+
+/// Every reason a claim can be consumed for, a spelling of a newer build
+/// included.
+fn every_reason() -> [ConsumedWhy; 11] {
+    [
+        ConsumedWhy::RefusedSubject,
+        ConsumedWhy::InvalidAgentId,
+        ConsumedWhy::UnknownAgent,
+        ConsumedWhy::InvalidPayload,
+        ConsumedWhy::RequeuedFromHold,
+        ConsumedWhy::AgentRemoved,
+        ConsumedWhy::FailedForGood,
+        ConsumedWhy::HaltedInSetup,
+        ConsumedWhy::ReturnedUnstarted,
+        ConsumedWhy::DeadLettered,
+        ConsumedWhy::Other("a_reason_from_a_newer_build".to_string()),
+    ]
+}
+
+/// A trigger published, claimed as `binary-0` under a new run and consumed
+/// as `why`, with the run's ownership row `failed` as an operator's drop
+/// leaves it, the drop recorded on the claim when `recorded`, and the
+/// stub's WAL answering `wal` for the run. Returns the trigger's sequence
+/// and the run.
+async fn dropped(
+    daemon: &Daemon,
+    why: ConsumedWhy,
+    recorded: bool,
+    wal: Result<Option<WalRun>, ()>,
+) -> (u64, String) {
+    let published = daemon.publish().await;
+    let run = Uuid::now_v7().to_string();
+    let key = daemon.key(published.stream_seq);
+    daemon
+        .claims
+        .claim_trigger(key, "binary-0", &run, 0)
+        .await
+        .unwrap();
+    assert!(
+        daemon
+            .claims
+            .consume_trigger_claim(key, &run, &why)
+            .await
+            .unwrap()
+    );
+    daemon
+        .claims
+        .upsert_invocation_ownership(
+            &run,
+            "binary-0",
+            0,
+            fq_runtime::control_plane::OwnerStatus::Failed,
+        )
+        .await
+        .unwrap();
+    if recorded {
+        let mut conn = claim_db_connection(&daemon.claim_db).await;
+        sqlx::query("UPDATE trigger_claim SET operator_dropped_at = 1 WHERE invocation_id = ?")
+            .bind(&run)
+            .execute(&mut conn)
+            .await
+            .expect("record the drop on the claim");
+        conn.close().await.expect("close the claim store's file");
+    }
+    daemon.worker.wal_answers.lock().unwrap().push_back(wal);
+    (published.stream_seq, run)
+}
+
+/// **The last look leaves a claim consumed under another run as it is**
+/// (issue 1055). The check reads the claim `claimed` for a run and cannot
+/// read the WAL for it; meanwhile the claim is taken again under another
+/// run and consumed as dead-lettered. The last look finds the first run in
+/// the WAL: a start, so the trigger is neither dead-lettered nor requeued.
+/// The consumed claim names another run, whose start nothing records, so
+/// nothing contradicts it: it is left as it is, and no line says a
+/// consumed claim was wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_look_leaves_a_claim_consumed_under_another_run_as_it_is() {
+    let daemon = Daemon::new("last-look-consumed-by-another", Script::Nothing).await;
+    let published = daemon.publish().await;
+    let run = Uuid::now_v7().to_string();
+    let key = daemon.key(published.stream_seq);
+    daemon
+        .claims
+        .claim_trigger(key, "binary-0", &run, 0)
+        .await
+        .unwrap();
+    *daemon.worker.change_at_wal_read.lock().unwrap() = Some(ClaimChange::ConsumedUnderAnother);
+    daemon
+        .worker
+        .wal_answers
+        .lock()
+        .unwrap()
+        .extend([Err(()), Ok(Some(WalRun::InFlight))]);
+
+    let verdict = daemon
+        .exhaustion_check("binary-1")
+        .await
+        .last_look(published.stream_seq)
+        .await;
+
+    assert!(
+        matches!(
+            &verdict,
+            Exhausted::Started { invocation_id, mark: ClaimMark::Changed, .. } if *invocation_id == run
+        ),
+        "a start for the run in the WAL, the claim not marked: {verdict:?}"
+    );
+    let row = daemon.claims.trigger_claim(key).await.unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.invocation_id.as_deref()),
+        (
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            Some(ANOTHER_RUN)
+        ),
+        "the claim consumed under another run is left as it is"
+    );
+    let lines = daemon.log.lines(|line: &Line| {
+        line.message.starts_with(EXHAUSTED_OVER_CONSUMED)
+            && line.field("invocation_id") == Some(run.as_str())
+    });
+    assert!(
+        lines.is_empty(),
+        "nothing contradicted the consumed claim: {lines:#?}"
+    );
+}
+
+/// The start of the dead-letter watch's line for an exhausted trigger whose
+/// claim says consumed and which it could not check by its limit.
+const CONSUMED_UNVERIFIED: &str = "not dead-lettering a trigger whose deliveries ran out: its \
+     claim says it was consumed without a run, and the records that could say otherwise still \
+     cannot be read";
+
+/// **Past its limit, the dead-letter watch's word on a consumed claim it
+/// could not check is one `error` line naming the run** (issue 1055). No
+/// dead letter is written, since none is due either way, so this line is
+/// the only record that a claim went unverified, and an operator reading
+/// the journal at `error` has to find it. The real watch runs on the
+/// daemon's advisory stream. The claim says consumed as dead-lettered and
+/// the stub cannot say what its WAL holds. The advisory is the broker's
+/// form with no timestamp: its age cannot be told, so the watch holds it
+/// only for its first looks (about three seconds, under the NAK delays)
+/// and its third delivery is past the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn past_the_watchs_limit_an_unverified_consumed_claim_is_one_error_line_naming_the_run() {
+    let daemon = Daemon::new("consumed-unverified", Script::Nothing).await;
+    let published = daemon.publish().await;
+    let run = Uuid::now_v7().to_string();
+    let key = daemon.key(published.stream_seq);
+    daemon
+        .claims
+        .claim_trigger(key, "binary-0", &run, 0)
+        .await
+        .unwrap();
+    assert!(
+        daemon
+            .claims
+            .consume_trigger_claim(key, &run, &ConsumedWhy::DeadLettered)
+            .await
+            .unwrap()
+    );
+    let dispatcher = daemon.dispatcher("binary-1").await;
+    let (stop, stopped) = oneshot::channel();
+    let watching = tokio::spawn(AdvisoryWatch::new(daemon.bus.clone(), &dispatcher).run(stopped));
+    let advisory = json!({
+        "type": "io.nats.jetstream.advisory.v1.max_deliver",
+        "id": Uuid::now_v7().to_string(),
+        "stream": TRIGGER_STREAM_NAME,
+        "consumer": CONSUMER_NAME,
+        "stream_seq": published.stream_seq,
+        "deliveries": TRIGGER_MAX_DELIVER,
+    });
+    daemon
+        .bus
+        .jetstream()
+        .publish(
+            format!(
+                "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{TRIGGER_STREAM_NAME}.{CONSUMER_NAME}"
+            ),
+            serde_json::to_vec(&advisory).unwrap().into(),
+        )
+        .await
+        .expect("publish the advisory")
+        .await
+        .expect("the advisory stream holds it");
+
+    let unverified = |line: &Line| {
+        line.message.starts_with(CONSUMED_UNVERIFIED)
+            && line.field("consumed_invocation_id") == Some(run.as_str())
+    };
+    daemon
+        .log
+        .wait_for("for the unverified claim", unverified)
+        .await;
+    stop.send(()).expect("the watch is running");
+    tokio::time::timeout(PATIENCE, watching)
+        .await
+        .expect("the watch stops")
+        .expect("the watch task joins")
+        .expect("the watch ran without error");
+
+    let lines = daemon.log.lines(unverified);
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert_eq!(
+        line.field("subject"),
+        Some(daemon.subject.as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("stream_seq"),
+        Some(published.stream_seq.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("dead_lettered"),
+        "{line:#?}"
+    );
+    assert!(
+        line.field("reason")
+            .is_some_and(|reason| reason.contains("could not be read")),
+        "{line:#?}"
     );
 }

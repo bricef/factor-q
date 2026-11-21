@@ -26,6 +26,15 @@
 //!   two apart: a row it finds absent may also be one the retention sweep
 //!   deleted after its run started (issue 1059).
 //! - **A row marked `durably_started`:** a start on record.
+//! - **A row marked `consumed`** ([`ConsumedClaim::Checked`]): dealt with,
+//!   and no run started, so no dead letter is due (issue 1055). It is not
+//!   taken on trust: a start on record for the run it names is a start,
+//!   and the claim is marked so (for a claim that records an operator's
+//!   drop of the run, only a start in the WAL, since the drop itself writes
+//!   the ownership row, whatever the claim's reason). When those
+//!   records cannot be read the verdict is held
+//!   ([`ConsumedClaim::Unchecked`]), and past the watch's limit no dead
+//!   letter is written for it: none is due either way.
 //! - **A `claimed` row:** first, whether a copy of the trigger is still
 //!   handling it ([`Handling`]): if so, the run may still start, and the
 //!   verdict waits for the copy to end, or for the watch's limit (below).
@@ -93,8 +102,10 @@
 
 use std::sync::Arc;
 
+use tracing::error;
+
 use crate::bus::TRIGGER_STREAM_NAME;
-use crate::control_plane::store::{ClaimState, RunRecords};
+use crate::control_plane::store::{ClaimState, ConsumedWhy, RunRecords};
 use crate::control_plane::{ControlPlaneStore, ControlPlaneStoreError, TriggerKey};
 use crate::worker::{WalRun, Worker};
 
@@ -128,6 +139,18 @@ pub enum ClaimMark {
     Changed,
     /// The mark failed, for the reason given; startup recovery marks it.
     Failed(String),
+    /// The claim said consumed, and the mark failed, for the reason given.
+    /// Startup recovery leaves a consumed claim, so it still says consumed
+    /// until a later look marks it.
+    ConsumedNotMarked(String),
+    /// The claim could not be read, for the reason given, so whether it
+    /// needed marking was not known and it was left as it was. It said
+    /// `claimed` when last read, and if it still does, startup recovery
+    /// marks it.
+    NotRead(String),
+    /// As [`Self::NotRead`], for a claim that said consumed when last read:
+    /// startup recovery leaves a consumed claim.
+    ConsumedNotRead(String),
 }
 
 impl std::fmt::Display for ClaimMark {
@@ -139,6 +162,20 @@ impl std::fmt::Display for ClaimMark {
             Self::Failed(err) => write!(
                 f,
                 "not marked: the mark failed ({err}); this daemon's next start marks it"
+            ),
+            Self::ConsumedNotMarked(err) => write!(
+                f,
+                "not marked: the mark failed ({err}); the claim still says consumed"
+            ),
+            Self::NotRead(err) => write!(
+                f,
+                "not marked: the claim could not be read ({err}); if it still says claimed, this \
+                 daemon's next start marks it"
+            ),
+            Self::ConsumedNotRead(err) => write!(
+                f,
+                "not marked: the claim could not be read ({err}); if it still says consumed, \
+                 startup recovery leaves it so"
             ),
         }
     }
@@ -165,6 +202,9 @@ pub enum Exhausted {
         /// What became of the claim, for the log line.
         mark: ClaimMark,
     },
+    /// The claim says the trigger was consumed without its run starting,
+    /// and no start found says otherwise (issue 1055).
+    Consumed(ConsumedClaim),
     /// Not decided yet: decide again later.
     Undecided {
         /// Why the verdict cannot be taken now.
@@ -173,6 +213,42 @@ pub enum Exhausted {
         /// to look if the verdict is never taken and the trigger is
         /// dead-lettered unchecked.
         invocation_id: Option<String>,
+    },
+}
+
+/// The verdict on an exhausted trigger whose claim says it was consumed
+/// without its run starting, when no start found says otherwise (issue
+/// 1055): the two verdicts on a consumed claim that are not a start, which
+/// each reader answers in a function of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumedClaim {
+    /// No start is on record for the run the claim names: dealt with, so no
+    /// dead letter is due from the watch, and the dispatcher's own dead
+    /// letter, the one it writes as it consumes a claim as dead-lettered,
+    /// can be requeued.
+    Checked {
+        /// The invocation that consumed it.
+        invocation_id: Option<String>,
+        /// How it was consumed.
+        why: ConsumedWhy,
+        /// Whether the claim records an operator's drop of the run, whose
+        /// ownership row was then not read as a start.
+        operator_dropped: bool,
+    },
+    /// The records that could contradict the claim could not be read:
+    /// decided again later, like [`Exhausted::Undecided`], but past the
+    /// watch's limit no dead letter is written for it, since none is due
+    /// either way: a run on record started, and one not on record was dealt
+    /// with.
+    Unchecked {
+        /// The invocation the claim names.
+        invocation_id: String,
+        /// How the claim says the trigger was consumed.
+        why: ConsumedWhy,
+        /// Whether the claim records an operator's drop of the run.
+        operator_dropped: bool,
+        /// Which record could not be read, and why.
+        unread: String,
     },
 }
 
@@ -222,6 +298,12 @@ impl ExhaustionCheck {
                     on_record: "on its claim, marked durably started".to_string(),
                     mark: ClaimMark::Already,
                 };
+            }
+            ClaimState::Consumed { why } => {
+                let dropped = row.operator_dropped_at.is_some();
+                return self
+                    .settle_consumed(key, row.invocation_id, why, dropped)
+                    .await;
             }
             ClaimState::Claimed => {}
         }
@@ -323,9 +405,12 @@ impl ExhaustionCheck {
     /// another id. It is read once more. Marked started is a start on
     /// record, and so is a run already read in the WAL: held instead, either
     /// would become, past the watch's limit, a dead letter marked unchecked
-    /// for a run that started. With neither, the verdict is held, naming
-    /// the run the claim names now: after a re-take, that is the run that
-    /// may yet start, and the one an operator has to look at.
+    /// for a run that started. Consumed since is settled as a consumed claim
+    /// is, unless the run read in the WAL is not the one the claim names
+    /// now: that run started, and a start read is never dropped for another
+    /// run's answer. With neither, the verdict is held, naming the run the
+    /// claim names now: after a re-take, that is the run that may yet
+    /// start, and the one an operator has to look at.
     async fn after_the_claim_changed(
         &self,
         key: TriggerKey<'_>,
@@ -334,7 +419,12 @@ impl ExhaustionCheck {
     ) -> Exhausted {
         let now = self.store.trigger_claim(key).await;
         if let Ok(Some(row)) = &now {
-            match row.state {
+            // Consumed since, the claim is settled as consumed, unless the
+            // run read in the WAL is not the one it names: that run started,
+            // and a claim consumed under another says nothing of it.
+            let settle =
+                wal.is_none() || row.invocation_id.as_deref() == Some(invocation_id.as_str());
+            match &row.state {
                 ClaimState::DurablyStarted => {
                     return Exhausted::Started {
                         invocation_id: row.invocation_id.clone().unwrap_or(invocation_id),
@@ -342,7 +432,12 @@ impl ExhaustionCheck {
                         mark: ClaimMark::Already,
                     };
                 }
-                ClaimState::Claimed => {}
+                ClaimState::Consumed { why } if settle => {
+                    let named = row.invocation_id.clone();
+                    let dropped = row.operator_dropped_at.is_some();
+                    return self.settle_consumed(key, named, why.clone(), dropped).await;
+                }
+                ClaimState::Consumed { .. } | ClaimState::Claimed => {}
             }
         }
         if wal.is_some() {
@@ -380,13 +475,34 @@ impl ExhaustionCheck {
             } => match self.worker.wal_run(&invocation_id).await {
                 Ok(Some(wal)) => {
                     let key = self.key(stream_seq);
-                    self.started(key, invocation_id, RunRecords::in_the_wal(Some(wal)))
+                    let unread = ClaimMark::NotRead;
+                    self.started_in_the_wal(key, invocation_id, wal, unread)
                         .await
                 }
                 Ok(None) | Err(_) => Exhausted::Undecided {
                     why,
                     invocation_id: Some(invocation_id),
                 },
+            },
+            // A consumed claim's run, looked for once more in the WAL.
+            Exhausted::Consumed(ConsumedClaim::Unchecked {
+                invocation_id,
+                why,
+                operator_dropped,
+                unread,
+            }) => match self.worker.wal_run(&invocation_id).await {
+                Ok(Some(wal)) => {
+                    let key = self.key(stream_seq);
+                    let unread = ClaimMark::ConsumedNotRead;
+                    self.started_in_the_wal(key, invocation_id, wal, unread)
+                        .await
+                }
+                Ok(None) | Err(_) => Exhausted::Consumed(ConsumedClaim::Unchecked {
+                    invocation_id,
+                    why,
+                    operator_dropped,
+                    unread,
+                }),
             },
             verdict => verdict,
         }
@@ -418,6 +534,142 @@ impl ExhaustionCheck {
             owner_row_status,
         }
         .where_on_record()
+    }
+
+    /// A `consumed` claim, not taken on trust (issue 1055): it says no run
+    /// started, and a start on record for the run it names is the truth.
+    /// The run is looked up as a `claimed` row's is, the WAL first and then
+    /// the ownership row, and a read that fails holds the verdict, since a
+    /// requeue that took "consumed" on trust could run the work twice. A
+    /// start found is [`Exhausted::Started`], logged at error, with the
+    /// claim marked started for the run. On a claim that records an
+    /// operator's drop of the run (`operator_dropped`) the ownership row is
+    /// the drop's and is not read: only the WAL can show a start.
+    async fn settle_consumed(
+        &self,
+        key: TriggerKey<'_>,
+        invocation_id: Option<String>,
+        why: ConsumedWhy,
+        operator_dropped: bool,
+    ) -> Exhausted {
+        let Some(invocation_id) = invocation_id else {
+            return Exhausted::Consumed(ConsumedClaim::Checked {
+                invocation_id,
+                why,
+                operator_dropped,
+            });
+        };
+        let held = |record: &str, err: String| {
+            Exhausted::Consumed(ConsumedClaim::Unchecked {
+                invocation_id: invocation_id.clone(),
+                why: why.clone(),
+                operator_dropped,
+                unread: format!("the consumed trigger's {record} could not be read: {err}"),
+            })
+        };
+        let wal = match self.worker.wal_run(&invocation_id).await {
+            Ok(wal) => wal,
+            Err(err) => return held("run in the worker's WAL", err.to_string()),
+        };
+        // An operator's drop of a run that never made its first WAL write
+        // writes the run's ownership row, so on a claim that records the
+        // drop that row is the drop's, not a start, whatever the claim's
+        // reason: only a start in the WAL says otherwise.
+        let owner_row_status = match self.store.get_invocation_owner(&invocation_id).await {
+            _ if operator_dropped => None,
+            Ok(row) => row.map(|row| row.status.as_str().to_string()),
+            Err(ControlPlaneStoreError::Malformed(_)) => {
+                Some("a status this build cannot read".into())
+            }
+            // The WAL holds the run: a start, whatever this read could not say.
+            Err(_) if wal.is_some() => None,
+            Err(err) => return held("ownership row", err.to_string()),
+        };
+        let records = RunRecords {
+            wal,
+            owner_row_status,
+        };
+        let Some(on_record) = records.where_on_record() else {
+            let invocation_id = Some(invocation_id);
+            return Exhausted::Consumed(ConsumedClaim::Checked {
+                invocation_id,
+                why,
+                operator_dropped,
+            });
+        };
+        self.consumed_started(key, invocation_id, why, on_record)
+            .await
+    }
+
+    /// A start on record for the run a `consumed` claim names: a start,
+    /// with the claim marked started for the run and an error line, since
+    /// the claim said otherwise. [`Self::settle_consumed`] comes here, and
+    /// so does the last look when it finds the run in the WAL.
+    async fn consumed_started(
+        &self,
+        key: TriggerKey<'_>,
+        invocation_id: String,
+        why: ConsumedWhy,
+        on_record: String,
+    ) -> Exhausted {
+        let mark = match self
+            .store
+            .mark_consumed_trigger_started(key, &invocation_id)
+            .await
+        {
+            Ok(true) => ClaimMark::Now,
+            Ok(false) => ClaimMark::Changed,
+            Err(err) => ClaimMark::ConsumedNotMarked(err.to_string()),
+        };
+        error!(stream_seq = key.stream_seq, %invocation_id, consumed_why = %why, %on_record,
+            %mark, "the claim of an exhausted trigger said it was consumed without a run, and \
+            its run has a start on record; taken as started, so it is neither dead-lettered \
+            nor requeued");
+        Exhausted::Started {
+            invocation_id,
+            on_record,
+            mark,
+        }
+    }
+
+    /// The last look's start found in the WAL, the claim marked as it
+    /// stands now: a `consumed` claim naming the run is corrected as
+    /// [`Self::settle_consumed`] corrects it, and any other is marked as
+    /// [`Self::started`] marks a `claimed` one. A claim that cannot be read
+    /// is left, with the mark `unread` makes, which says what becomes of a
+    /// claim in the state the verdict last read.
+    async fn started_in_the_wal(
+        &self,
+        key: TriggerKey<'_>,
+        invocation_id: String,
+        wal: WalRun,
+        unread: fn(String) -> ClaimMark,
+    ) -> Exhausted {
+        let records = RunRecords::in_the_wal(Some(wal));
+        let row = match self.store.trigger_claim(key).await {
+            Ok(row) => row,
+            // Which mark the claim needs cannot be told: the start is the
+            // verdict all the same, and the claim is left for a later look.
+            Err(err) => {
+                let on_record = records.where_on_record().unwrap_or_default();
+                let mark = unread(err.to_string());
+                return Exhausted::Started {
+                    invocation_id,
+                    on_record,
+                    mark,
+                };
+            }
+        };
+        if let Some(row) = row
+            && let ClaimState::Consumed { why } = row.state
+            && row.invocation_id.as_deref() == Some(invocation_id.as_str())
+        {
+            let on_record = records.where_on_record().unwrap_or_default();
+            return self
+                .consumed_started(key, invocation_id, why, on_record)
+                .await;
+        }
+        self.started(key, invocation_id, records).await
     }
 }
 

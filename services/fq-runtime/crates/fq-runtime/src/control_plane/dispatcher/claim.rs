@@ -464,6 +464,23 @@ impl TriggerDispatcher {
                 }
                 ClaimVerdict::Stop
             }
+            // Dealt with, and no run started (issue 1055): a copy that comes
+            // back, because the answer to its delivery was lost, is acked and
+            // dropped rather than handled again.
+            TriggerClaim::Consumed {
+                invocation_id: consumed_by,
+                why,
+            } => {
+                warn!(stream_seq = seq, delivered, subject = %msg.subject,
+                    consumed_invocation_id = %consumed_by.as_deref().unwrap_or("none"),
+                    consumed_why = %why,
+                    "dropping a redelivered trigger that was consumed without a run: it was \
+                     dealt with, and is not handled again");
+                if let Err(err) = msg.ack().await {
+                    error!(error = %err, stream_seq = seq, "failed to ack a copy of a consumed trigger");
+                }
+                ClaimVerdict::Stop
+            }
             // This process's own claim, with no start on it: settled by
             // whether a copy is still handling it and what is on record
             // (`own_claim`, #967).

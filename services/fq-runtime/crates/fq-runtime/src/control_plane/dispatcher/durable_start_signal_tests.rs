@@ -213,6 +213,10 @@ enum ClaimChange {
     /// this stages the one state in which the ack after a landed mark could
     /// tell keeping the claim from releasing it.
     MarkUndone,
+    /// Consume it, naming the run, as a consuming answer leaves a claim.
+    /// A run never starts over its own consumed claim; this stages the
+    /// state in which the record of a start must put the claim right.
+    ConsumedUnderTheRun,
 }
 
 /// The invocation a changed claim names ([`ClaimChange`]).
@@ -480,6 +484,9 @@ async fn change_the_claim(claim_db: &Path, change: ClaimChange) {
         ClaimChange::UpdatesSkipped => vec![sqlx::query(
             "CREATE TRIGGER skip_claim_updates BEFORE UPDATE ON trigger_claim \
              BEGIN SELECT RAISE(IGNORE); END",
+        )],
+        ClaimChange::ConsumedUnderTheRun => vec![sqlx::query(
+            "UPDATE trigger_claim SET state = 'consumed', consumed_why = 'failed_for_good'",
         )],
         ClaimChange::MarkUndone => vec![sqlx::query(
             "CREATE TRIGGER undo_the_mark AFTER UPDATE OF state ON trigger_claim \
@@ -2920,6 +2927,41 @@ async fn the_ack_after_a_landed_mark_gives_nothing_back() {
         claim.state == ClaimState::Claimed
             && claim.invocation_id.as_deref() == Some(run.to_string().as_str()),
         "the run's claim is left as the mark left it: {claim:?}"
+    );
+    pulled.wait_until_acked().await;
+    let sent = answers.sent().await;
+    assert!(
+        sent.acks == 1 && sent.other.is_empty(),
+        "the delivery is acked once, and nothing but keepalives is sent besides: {sent:?}"
+    );
+}
+
+/// **A run whose claim reads consumed has its start recorded over it
+/// (issue 1055).** The run makes its first WAL write and its claim says
+/// the trigger was consumed without a run. The mark leaves a consumed
+/// claim, and the record of a start the mark did not find takes it: the
+/// run did start, and left consumed, the trigger's dead letter could be
+/// requeued and run again. The claim ends started for the run and the
+/// delivery is acked once.
+#[tokio::test]
+async fn a_start_over_a_consumed_claim_is_recorded_and_acked_once() {
+    let mut pulled = Pulled::new(
+        Resolve::FireOnAChangedClaim(ClaimChange::ConsumedUnderTheRun),
+        Turn::Later,
+        Returns::Completed,
+    )
+    .await;
+    let mut answers = pulled.watch_answers().await;
+
+    pulled.handle().await;
+
+    let (_, run) = pulled.named();
+    assert_eq!(
+        pulled.probe_claim().await,
+        TriggerClaim::Started {
+            invocation_id: run.to_string()
+        },
+        "the run's start is recorded over the consumed claim"
     );
     pulled.wait_until_acked().await;
     let sent = answers.sent().await;

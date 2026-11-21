@@ -1211,7 +1211,7 @@ async fn trigger_claim_sweeps_clear_a_backlog_in_batches() {
 
     assert_eq!(
         store
-            .sweep_started_trigger_claims_batched(cutoff, 1)
+            .sweep_settled_trigger_claims_batched(cutoff, 1)
             .await
             .unwrap(),
         3
@@ -1264,7 +1264,7 @@ async fn each_trigger_claim_sweep_takes_only_its_own_state() {
         .await
         .unwrap();
 
-    assert_eq!(store.sweep_started_trigger_claims(1_000).await.unwrap(), 1);
+    assert_eq!(store.sweep_settled_trigger_claims(1_000).await.unwrap(), 1);
     assert!(
         store
             .trigger_claim_for_invocation("inv-claimed")
@@ -1643,5 +1643,678 @@ async fn a_write_the_store_refuses_by_its_own_rules_is_refused_and_no_other_fail
     assert!(
         backend(locked.as_ref().err()),
         "a locked database: {locked:?}"
+    );
+}
+
+/// A claim this test writes and then consumes, as the dispatcher's
+/// consuming answers will.
+async fn consumed(store: &ControlPlaneStore, seq: u64, invocation_id: &str, why: ConsumedWhy) {
+    store
+        .claim_trigger(key(seq), "worker-a", invocation_id, 100)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .consume_trigger_claim(key(seq), invocation_id, &why)
+            .await
+            .unwrap(),
+        "the claim is consumed"
+    );
+}
+
+/// An operator's drop of `invocation_id`'s run recorded on its consumed
+/// claim, as the drop's handler records it.
+async fn recorded_drop(store: &ControlPlaneStore, invocation_id: &str) {
+    let recorded = sqlx::query(
+        "UPDATE trigger_claim SET operator_dropped_at = 700 \
+         WHERE invocation_id = ? AND state = 'consumed'",
+    )
+    .bind(invocation_id)
+    .execute(&store.pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(recorded, 1, "the drop is recorded on the consumed claim");
+}
+
+/// **The claim table's consumed state comes in by its own rung (issue
+/// 1055).** A store at the version before that rung, with the table as it
+/// stood then and a claim in each of its two states, is opened by this
+/// build: the rung runs, every row keeps its state and its place in the
+/// table, and the table now admits `consumed`, with `consumed_why` set
+/// exactly when the state is `consumed`.
+///
+/// The version before the rung is read off the ladder by the rung's own
+/// SQL, so a rung added before or after it leaves this test as it is. The
+/// rows differ in every one of the table's seven columns, one is of
+/// another incarnation of the stream and one names no invocation, and
+/// every row comes through the rebuild whole. They are written out of key
+/// order, and two name one invocation: the rebuilt table keeps their
+/// order, which `trigger_claim_for_invocation` (the latest row naming a
+/// run) and the retention sweep (old rows first) rely on. A lost
+/// `claimed_at` would make every claim look older than the window, and
+/// the next sweep would delete every started row.
+///
+/// The store is the one every rung before it left, the termination
+/// record's included (issue 1070): its ownership table holds a row with a
+/// whole record, which comes through this rung untouched, since the two
+/// rungs rebuild different tables.
+#[tokio::test]
+async fn the_consumed_state_rung_upgrades_a_claim_table_keeping_its_rows() {
+    type Row = (String, i64, i64, String, String, Option<String>, i64);
+    async fn rows(store: &ControlPlaneStore) -> Vec<Row> {
+        sqlx::query_as(
+            "SELECT stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at \
+             FROM trigger_claim ORDER BY rowid",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap()
+    }
+    let rung = MIGRATIONS
+        .iter()
+        .find(|(_, sql)| *sql == trigger_claim::TRIGGER_CLAIM_CONSUMED_STATE_SQL)
+        .map(|(version, _)| *version)
+        .expect("the consumed-state rung is on the ladder");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    let store = ControlPlaneStore::open(&path).await.unwrap();
+    sqlx::query("DROP TABLE trigger_claim")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(TRIGGER_CLAIM_TABLE_V2_SQL)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let epoch = key(1).stream_epoch;
+    for (stream_epoch, seq, claimant, state, invocation_id, claimed_at) in [
+        (
+            epoch,
+            2,
+            "worker-b",
+            "durably_started",
+            Some("inv-started"),
+            200,
+        ),
+        (epoch, 1, "worker-a", "claimed", Some("inv-claimed"), 100),
+        (epoch, 5, "worker-c", "claimed", Some("inv-twice"), 500),
+        (epoch, 4, "worker-d", "claimed", Some("inv-twice"), 400),
+        (epoch + 1, 3, "worker-e", "claimed", None, 300),
+    ] {
+        sqlx::query(
+            "INSERT INTO trigger_claim \
+             (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(key(seq).stream)
+        .bind(stream_epoch)
+        .bind(seq as i64)
+        .bind(claimant)
+        .bind(state)
+        .bind(invocation_id)
+        .bind(claimed_at)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    }
+    let before = rows(&store).await;
+    type Owner = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    );
+    async fn owners(store: &ControlPlaneStore) -> Vec<Owner> {
+        sqlx::query_as(
+            "SELECT invocation_id, status, archive_state, ended_by, ended_at, \
+             termination_requested_at, termination_reason \
+             FROM coordination_invocation_owner ORDER BY invocation_id",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap()
+    }
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state, ended_by, ended_at, \
+          termination_requested_at, termination_requested_by, termination_reason) \
+         VALUES ('inv-dropped', 'worker-a', 100, 'failed', 'archived', 'drop', 300, 250, \
+          'operator', 'stuck')",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    let owners_before = owners(&store).await;
+    store.write_schema_version(rung - 1).await.unwrap();
+    drop(store);
+
+    let upgraded = ControlPlaneStore::open(&path).await.unwrap();
+    assert_eq!(
+        owners(&upgraded).await,
+        owners_before,
+        "the ownership table and its termination record come through untouched"
+    );
+    assert_eq!(
+        upgraded.read_schema_version().await.unwrap(),
+        Some(CONTROL_PLANE_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        rows(&upgraded).await,
+        before,
+        "every row comes through whole and in its place"
+    );
+    let dropped: Vec<Option<i64>> =
+        sqlx::query_scalar("SELECT operator_dropped_at FROM trigger_claim ORDER BY rowid")
+            .fetch_all(&upgraded.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        dropped,
+        vec![None; before.len()],
+        "no row from before the rung records an operator's drop"
+    );
+    let claimed = upgraded.trigger_claim(key(1)).await.unwrap().unwrap();
+    let started = upgraded.trigger_claim(key(2)).await.unwrap().unwrap();
+    assert_eq!(
+        (claimed.state, claimed.invocation_id.as_deref()),
+        (ClaimState::Claimed, Some("inv-claimed"))
+    );
+    assert_eq!(
+        (started.state, started.invocation_id.as_deref()),
+        (ClaimState::DurablyStarted, Some("inv-started"))
+    );
+    assert_eq!(
+        upgraded
+            .trigger_claim_for_invocation("inv-twice")
+            .await
+            .unwrap()
+            .map(|row| row.stream_seq),
+        Some(4),
+        "the latest row naming a run is still the one written last"
+    );
+
+    assert!(
+        upgraded
+            .consume_trigger_claim(key(1), "inv-claimed", &ConsumedWhy::FailedForGood)
+            .await
+            .unwrap(),
+        "the upgraded table admits a consumed claim"
+    );
+    for (state, why) in [("consumed", None), ("claimed", Some("failed_for_good"))] {
+        let refused = sqlx::query(
+            "INSERT INTO trigger_claim \
+             (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at, \
+              consumed_why) VALUES ('fq-triggers', 0, 99, 'w', ?, 'inv', 0, ?)",
+        )
+        .bind(state)
+        .bind(why)
+        .execute(&upgraded.pool)
+        .await;
+        assert!(
+            refused.is_err(),
+            "`consumed_why` goes with `consumed` and nothing else: {state} with {why:?}"
+        );
+    }
+}
+
+/// **A claim is consumed only while it is still `claimed` under the
+/// invocation consuming it (issue 1055),** as a release is scoped. A claim
+/// taken again since, one already started, one already consumed and a key
+/// with no row are all left, and reported as not consumed.
+#[tokio::test]
+async fn a_claim_is_consumed_only_while_its_invocation_holds_it() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-first", 100)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .retake_trigger_claim(key(1), "worker-a", "inv-first", "inv-again", 200)
+            .await
+            .unwrap()
+    );
+    let why = ConsumedWhy::FailedForGood;
+    assert!(
+        !store
+            .consume_trigger_claim(key(1), "inv-first", &why)
+            .await
+            .unwrap(),
+        "a claim taken again is not the first invocation's to consume"
+    );
+    assert_eq!(
+        store.trigger_claim(key(1)).await.unwrap().unwrap().state,
+        ClaimState::Claimed
+    );
+
+    store
+        .claim_trigger(key(2), "worker-a", "inv-run", 100)
+        .await
+        .unwrap();
+    assert!(store.mark_trigger_started(key(2), "inv-run").await.unwrap());
+    assert!(
+        !store
+            .consume_trigger_claim(key(2), "inv-run", &why)
+            .await
+            .unwrap(),
+        "a started claim is not consumed"
+    );
+
+    consumed(&store, 3, "inv-done", ConsumedWhy::InvalidPayload).await;
+    assert!(
+        !store
+            .consume_trigger_claim(key(3), "inv-done", &why)
+            .await
+            .unwrap(),
+        "a consumed claim is not consumed again"
+    );
+    assert_eq!(
+        store.trigger_claim(key(3)).await.unwrap().unwrap().state,
+        ClaimState::Consumed {
+            why: ConsumedWhy::InvalidPayload
+        },
+        "and keeps the reason it was consumed for"
+    );
+
+    assert!(
+        !store
+            .consume_trigger_claim(key(4), "inv-any", &why)
+            .await
+            .unwrap(),
+        "a key with no row consumes nothing"
+    );
+    assert_eq!(store.trigger_claim(key(4)).await.unwrap(), None);
+}
+
+/// **A consumed claim is the trigger's record that it was dealt with, and
+/// nothing that works on `claimed` rows touches it (issue 1055).** A copy
+/// that claims the delivery is answered `Consumed`; adoption, re-take,
+/// release, the mark and recovery's mark all leave it; and the unsettled
+/// reads that recovery and `fq doctor` use do not list it.
+#[tokio::test]
+async fn a_consumed_claim_is_answered_as_consumed_and_left_by_every_claimed_row_write() {
+    let (store, _dir) = open_fresh().await;
+    consumed(&store, 1, "inv-done", ConsumedWhy::DeadLettered).await;
+
+    assert_eq!(
+        store
+            .claim_trigger(key(1), "worker-b", "inv-copy", 200)
+            .await
+            .unwrap(),
+        TriggerClaim::Consumed {
+            invocation_id: Some("inv-done".to_string()),
+            why: ConsumedWhy::DeadLettered,
+        },
+        "a copy meets the consumed claim"
+    );
+    assert!(
+        !store
+            .take_over_trigger_claim(key(1), "worker-a", "worker-b", "inv-adopter", 200)
+            .await
+            .unwrap(),
+        "adoption leaves a consumed claim"
+    );
+    assert!(
+        !store
+            .retake_trigger_claim(key(1), "worker-a", "inv-done", "inv-again", 200)
+            .await
+            .unwrap(),
+        "a re-take leaves a consumed claim"
+    );
+    assert!(
+        !store
+            .release_trigger_claim(key(1), "inv-done")
+            .await
+            .unwrap(),
+        "a release leaves a consumed claim"
+    );
+    assert!(
+        !store
+            .mark_trigger_started(key(1), "inv-done")
+            .await
+            .unwrap(),
+        "the mark leaves a consumed claim, for the record of a start to put right"
+    );
+    assert!(
+        !store
+            .mark_unsettled_trigger_started(key(1), "inv-done")
+            .await
+            .unwrap(),
+        "recovery's mark leaves a consumed claim"
+    );
+    assert_eq!(store.unsettled_trigger_claim(key(1)).await.unwrap(), None);
+    assert!(
+        store.unsettled_trigger_claims().await.unwrap().is_empty(),
+        "the unsettled claims recovery and `fq doctor` read do not list it"
+    );
+    assert_eq!(
+        store.trigger_claim(key(1)).await.unwrap().unwrap().state,
+        ClaimState::Consumed {
+            why: ConsumedWhy::DeadLettered
+        },
+        "and it is still consumed"
+    );
+}
+
+/// **A start found over a consumed claim is recorded over it (issue
+/// 1055).** The run did start, and left consumed, the trigger's dead
+/// letter could be requeued and run again; so the record of a start the
+/// mark did not find takes the row, whatever invocation it names, and the
+/// row is started for the run with no reason left on it.
+#[tokio::test]
+async fn a_start_found_over_a_consumed_claim_is_recorded_over_it() {
+    let (store, _dir) = open_fresh().await;
+    consumed(&store, 1, "inv-other", ConsumedWhy::FailedForGood).await;
+    recorded_drop(&store, "inv-other").await;
+
+    assert_eq!(
+        store
+            .record_trigger_start(key(1), "worker-a", "inv-run", 500)
+            .await
+            .unwrap(),
+        RecordedStart::OverConsumed {
+            consumed_by: Some("inv-other".to_string()),
+            why: ConsumedWhy::FailedForGood,
+        }
+    );
+    let row = store.trigger_claim(key(1)).await.unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.invocation_id.as_deref(), row.claimed_at),
+        (ClaimState::DurablyStarted, Some("inv-run"), 100),
+        "started for the run, keeping the claim's age"
+    );
+    assert_eq!(
+        row.operator_dropped_at, None,
+        "the drop goes with the consumed state"
+    );
+}
+
+/// **A consumed claim is marked started only while it is still consumed
+/// for the run on record (issue 1055).** The dead-letter watch and requeue
+/// mark it when that run has a start on record. A `claimed` row, a
+/// consumed one naming another invocation, and a key with no row are all
+/// left, and reported as not marked; the one it marks loses its reason.
+#[tokio::test]
+async fn a_consumed_claim_is_marked_started_only_for_the_run_it_names() {
+    let (store, _dir) = open_fresh().await;
+    store
+        .claim_trigger(key(1), "worker-a", "inv-run", 100)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .mark_consumed_trigger_started(key(1), "inv-run")
+            .await
+            .unwrap(),
+        "a `claimed` row is recovery's and the dispatcher's to mark, not this"
+    );
+    consumed(&store, 2, "inv-other", ConsumedWhy::FailedForGood).await;
+    assert!(
+        !store
+            .mark_consumed_trigger_started(key(2), "inv-run")
+            .await
+            .unwrap(),
+        "a consumed claim naming another invocation is left"
+    );
+    assert!(
+        !store
+            .mark_consumed_trigger_started(key(3), "inv-run")
+            .await
+            .unwrap()
+    );
+
+    consumed(&store, 4, "inv-run", ConsumedWhy::FailedForGood).await;
+    recorded_drop(&store, "inv-run").await;
+    assert!(
+        store
+            .mark_consumed_trigger_started(key(4), "inv-run")
+            .await
+            .unwrap()
+    );
+    let row = store.trigger_claim(key(4)).await.unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.invocation_id.as_deref(), row.claimed_at),
+        (ClaimState::DurablyStarted, Some("inv-run"), 100),
+        "started for the run, keeping the claim's age"
+    );
+    assert_eq!(
+        row.operator_dropped_at, None,
+        "the drop goes with the consumed state"
+    );
+    assert_eq!(
+        store.trigger_claim(key(2)).await.unwrap().unwrap().state,
+        ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        }
+    );
+}
+
+/// **The retention sweep takes consumed claims past the window, as it
+/// takes started ones (issue 1055),** and leaves younger ones. The sweep of
+/// claims an exited process left `claimed` does not take them: a consumed
+/// claim is settled, and kept as long as a started one.
+#[tokio::test]
+async fn the_retention_sweep_takes_consumed_claims_past_the_window() {
+    let (store, _dir) = open_fresh().await;
+    consumed(&store, 1, "inv-old", ConsumedWhy::UnknownAgent).await;
+    store
+        .claim_trigger(key(2), "worker-a", "inv-young", 2_000)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .consume_trigger_claim(key(2), "inv-young", &ConsumedWhy::UnknownAgent)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        store
+            .sweep_abandoned_trigger_claims(1_000, "worker-now")
+            .await
+            .unwrap(),
+        0,
+        "the abandoned-claim sweep leaves a consumed claim, however old"
+    );
+    assert!(store.trigger_claim(key(1)).await.unwrap().is_some());
+
+    assert_eq!(store.sweep_settled_trigger_claims(1_000).await.unwrap(), 1);
+    assert_eq!(store.trigger_claim(key(1)).await.unwrap(), None);
+    assert!(store.trigger_claim(key(2)).await.unwrap().is_some());
+}
+
+/// **A claim's state reads in a log line as its column spells it, and a
+/// consumed claim with its reason (issue 1055).** The line about a release
+/// that gave nothing back names the claim's state this way.
+#[test]
+fn a_claim_state_is_named_as_its_column_spells_it() {
+    assert_eq!(ClaimState::Claimed.to_string(), "claimed");
+    assert_eq!(ClaimState::DurablyStarted.to_string(), "durably_started");
+    assert_eq!(
+        ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        }
+        .to_string(),
+        "consumed (failed_for_good)"
+    );
+}
+
+/// **A consumed claim's reason keeps its spelling (issue 1055).** Every
+/// reason reads back as itself, and a spelling this build does not know,
+/// which a newer build wrote, is kept as it is rather than refused.
+#[test]
+fn a_consumed_reason_keeps_its_spelling_and_an_unknown_one_is_kept_as_it_is() {
+    for why in [
+        ConsumedWhy::RefusedSubject,
+        ConsumedWhy::InvalidAgentId,
+        ConsumedWhy::UnknownAgent,
+        ConsumedWhy::InvalidPayload,
+        ConsumedWhy::RequeuedFromHold,
+        ConsumedWhy::AgentRemoved,
+        ConsumedWhy::FailedForGood,
+        ConsumedWhy::HaltedInSetup,
+        ConsumedWhy::ReturnedUnstarted,
+        ConsumedWhy::DeadLettered,
+    ] {
+        assert_eq!(ConsumedWhy::of_column(why.as_str()), why);
+    }
+    assert_eq!(
+        ConsumedWhy::of_column("a_reason_from_a_newer_build"),
+        ConsumedWhy::Other("a_reason_from_a_newer_build".to_string())
+    );
+    assert_eq!(
+        ConsumedWhy::Other("a_reason_from_a_newer_build".to_string()).as_str(),
+        "a_reason_from_a_newer_build"
+    );
+}
+
+/// **A claim state this build does not know is refused, never read as
+/// `claimed` (issue 1055).** A row read as `claimed` that is not is the
+/// hazard the state's enum exists to remove: a consumed trigger would be
+/// adopted and run again. The mapping names every pair of `state` and
+/// `consumed_why` the table admits and refuses any other, as the ownership
+/// table's status is refused. The rows here are seeded past the table's
+/// `CHECK`, as only a hand edit could write them.
+#[tokio::test]
+async fn a_claim_state_this_build_does_not_know_is_refused_not_read_as_claimed() {
+    assert_eq!(
+        ClaimState::parse("claimed", None),
+        Some(ClaimState::Claimed)
+    );
+    assert_eq!(
+        ClaimState::parse("durably_started", None),
+        Some(ClaimState::DurablyStarted)
+    );
+    assert_eq!(
+        ClaimState::parse("consumed", Some("failed_for_good")),
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        })
+    );
+    for (state, why) in [
+        ("a_state_from_a_newer_build", None),
+        ("consumed", None),
+        ("claimed", Some("failed_for_good")),
+        ("", None),
+    ] {
+        assert_eq!(
+            ClaimState::parse(state, why),
+            None,
+            "{state:?} with {why:?}"
+        );
+    }
+
+    let (store, _dir) = open_fresh().await;
+    let mut conn = store.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for (seq, state, why) in [
+        (1, "a_state_from_a_newer_build", None::<&str>),
+        (2, "consumed", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO trigger_claim \
+             (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at, \
+              consumed_why) VALUES (?, ?, ?, 'worker-a', ?, 'inv', 100, ?)",
+        )
+        .bind(key(seq).stream)
+        .bind(key(seq).stream_epoch)
+        .bind(seq as i64)
+        .bind(state)
+        .bind(why)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    sqlx::query("PRAGMA ignore_check_constraints = OFF")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    for seq in [1, 2] {
+        assert!(
+            matches!(
+                store.trigger_claim(key(seq)).await,
+                Err(ControlPlaneStoreError::Malformed(_))
+            ),
+            "row {seq} is refused when read"
+        );
+        assert!(
+            matches!(
+                store
+                    .claim_trigger(key(seq), "worker-b", "inv-copy", 200)
+                    .await,
+                Err(ControlPlaneStoreError::Malformed(_))
+            ),
+            "and a copy that meets row {seq} is refused, not handed a claim"
+        );
+    }
+}
+
+/// **The claim table admits only the three states, a reason exactly when
+/// the state is `consumed`, and an operator's drop only on a consumed claim
+/// (issue 1055).** The rung that adds the state rebuilds the table with a
+/// `CHECK` on each, so nothing written with the checks on, by this build or
+/// by hand, leaves a row the readers above refuse, or a drop recorded on a
+/// claim whose readers do not look for one.
+#[tokio::test]
+async fn the_claim_table_admits_only_the_three_states_and_a_reason_only_when_consumed() {
+    let (store, _dir) = open_fresh().await;
+    for (seq, state, why, dropped, admitted) in [
+        (1, "claimed", None::<&str>, None::<i64>, true),
+        (2, "durably_started", None, None, true),
+        (3, "consumed", Some("failed_for_good"), None, true),
+        (4, "a_state_from_a_newer_build", None, None, false),
+        (5, "consumed", None, None, false),
+        (6, "claimed", Some("failed_for_good"), None, false),
+        (7, "durably_started", Some("dead_lettered"), None, false),
+        (8, "consumed", Some("dead_lettered"), Some(500), true),
+        (9, "claimed", None, Some(500), false),
+        (10, "durably_started", None, Some(500), false),
+    ] {
+        let written = sqlx::query(
+            "INSERT INTO trigger_claim \
+             (stream, stream_epoch, stream_seq, claimant, state, invocation_id, claimed_at, \
+              consumed_why, operator_dropped_at) VALUES (?, ?, ?, 'worker-a', ?, 'inv', 100, ?, ?)",
+        )
+        .bind(key(seq).stream)
+        .bind(key(seq).stream_epoch)
+        .bind(seq as i64)
+        .bind(state)
+        .bind(why)
+        .bind(dropped)
+        .execute(&store.pool)
+        .await;
+        match written {
+            Ok(_) => assert!(
+                admitted,
+                "{state:?} with {why:?} and a drop at {dropped:?} must be refused"
+            ),
+            Err(err) => assert!(
+                !admitted && err.to_string().contains("CHECK constraint failed"),
+                "{state:?} with {why:?} and a drop at {dropped:?}: {err}"
+            ),
+        }
+    }
+    assert_eq!(
+        store
+            .trigger_claim(key(8))
+            .await
+            .unwrap()
+            .map(|row| (row.state, row.operator_dropped_at)),
+        Some((
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            Some(500)
+        )),
+        "a consumed claim reads back with its reason and the drop beside it"
     );
 }

@@ -118,9 +118,15 @@ impl From<TriggerClaimRow> for TriggerDeliveryView {
             stream: row.stream,
             stream_epoch: row.stream_epoch.to_string(),
             stream_seq: row.stream_seq,
+            consumed_why: match &row.state {
+                ClaimState::Consumed { why } => Some(why.as_str().to_string()),
+                ClaimState::Claimed | ClaimState::DurablyStarted => None,
+            },
+            operator_dropped_at_ms: row.operator_dropped_at,
             state: match row.state {
                 ClaimState::Claimed => TriggerClaimState::Claimed,
                 ClaimState::DurablyStarted => TriggerClaimState::DurablyStarted,
+                ClaimState::Consumed { .. } => TriggerClaimState::Consumed,
             },
             claimant: row.claimant,
             claimed_at_ms: row.claimed_at,

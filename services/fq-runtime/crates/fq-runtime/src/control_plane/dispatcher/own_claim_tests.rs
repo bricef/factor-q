@@ -50,6 +50,7 @@ use super::tests::{canned_response, registry_with, unique_agent_id};
 use super::{CONSUMER_NAME, TriggerClaims, TriggerDispatcher};
 use crate::agent::Agent;
 use crate::bus::{EventBus, TRIGGER_MAX_DELIVER, TRIGGER_STREAM_NAME};
+use crate::control_plane::store::{ClaimState, ConsumedWhy, TriggerKey};
 use crate::control_plane::{ControlPlaneStore, OwnerStatus};
 use crate::llm::LlmClient;
 use crate::llm::fixture::FixtureClient;
@@ -1234,4 +1235,111 @@ async fn a_copy_that_meets_a_first_copy_waiting_for_a_permit_is_dropped() {
     assert_eq!(first.acks, 1, "{first:?}");
     assert_eq!(arena.worker.starts().len(), 2, "each trigger starts once");
     assert_eq!(arena.claim(SEQ).await.map(|row| row.started), Some(true));
+}
+
+impl Arena {
+    /// The claim store's key for the arena's trigger.
+    fn key(&self) -> TriggerKey<'static> {
+        TriggerKey {
+            stream: TRIGGER_STREAM_NAME,
+            stream_epoch: self.bus.trigger_stream_epoch(),
+            stream_seq: SEQ,
+        }
+    }
+
+    /// The arena's trigger claimed by this daemon under `invocation_id`
+    /// and consumed, as the dispatcher's consuming answers will.
+    async fn consumed(&self, invocation_id: &str, why: ConsumedWhy) {
+        self.claims
+            .claim_trigger(self.key(), &self.claimant, invocation_id, 0)
+            .await
+            .unwrap();
+        assert!(
+            self.claims
+                .consume_trigger_claim(self.key(), invocation_id, &why)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// The claim's state, as the store reads it.
+    async fn claim_state(&self) -> Option<ClaimState> {
+        self.claims
+            .trigger_claim(self.key())
+            .await
+            .unwrap()
+            .map(|row| row.state)
+    }
+}
+
+/// **A copy that meets a consumed claim is acked and dropped, and the
+/// trigger is not run again (issue 1055).** The trigger was dealt with on
+/// an earlier delivery, which failed for good before its run started, and
+/// that delivery's ack was lost; the copy the broker brings back meets the
+/// consumed claim, is acked, and starts nothing. It is not counted: not
+/// among the duplicates dropped after a start, which it is not one of, nor
+/// anywhere else.
+#[tokio::test]
+async fn a_copy_that_meets_a_consumed_claim_is_acked_and_dropped() {
+    let (arena, _server) = arena().await;
+    arena
+        .consumed("inv-consumed", ConsumedWhy::FailedForGood)
+        .await;
+    let counted = arena.bus.consumer_ledger().record(CONSUMER_NAME);
+
+    let copy = arena.deliver(2, false).await;
+
+    assert_eq!(
+        arena.bus.consumer_ledger().record(CONSUMER_NAME),
+        counted,
+        "a copy of a consumed trigger is not counted"
+    );
+
+    assert!(
+        arena.worker.starts().is_empty(),
+        "a consumed trigger must not be run again"
+    );
+    assert_eq!((copy.acks, copy.naks), (1, 0), "{copy:?}");
+    assert_eq!(
+        arena.claim_state().await,
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        }),
+        "the claim stays consumed"
+    );
+}
+
+/// **Startup recovery leaves a consumed claim (issue 1055).** Recovery
+/// marks every `claimed` row whose run has a start on record; it reads
+/// only `claimed` rows, so a consumed claim stays consumed across a
+/// restart, here even one that is wrong: consumed as failed for good before
+/// its first WAL write, with its run on the ownership table, which a run
+/// that failed before it started never reaches. A
+/// consumed claim whose run has a start on record is put right where it is
+/// judged, by the dead-letter watch and by requeue
+/// (`a_consumed_trigger_whose_run_has_a_start_on_record_is_a_start`), and
+/// a copy that meets it is dropped either way. Until then the one thing it
+/// says wrong is the claim line of `fq invocation show`: "consumed without
+/// a run" for a run that started.
+#[tokio::test]
+async fn recovery_leaves_a_consumed_claim() {
+    let (mut arena, _server) = arena().await;
+    arena
+        .consumed("inv-consumed", ConsumedWhy::FailedForGood)
+        .await;
+    arena
+        .claims
+        .upsert_invocation_ownership("inv-consumed", &arena.claimant, 100, OwnerStatus::Failed)
+        .await
+        .unwrap();
+
+    arena.restart().await;
+
+    assert_eq!(
+        arena.claim_state().await,
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::FailedForGood
+        }),
+        "recovery must not mark a consumed claim started"
+    );
 }

@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use fq_ops::{DeadLetter, Domain, OpId, Receipt, VerbId};
 use fq_runtime::bus::TRIGGER_STREAM_NAME;
-use fq_runtime::control_plane::store::{ClaimState, TriggerClaimRow};
+use fq_runtime::control_plane::store::{ClaimState, ConsumedWhy, TriggerClaimRow};
 use fq_runtime::control_plane::{OwnerStatus, TriggerKey};
 use fq_runtime::dead_letter::{
     DEAD_LETTER_PAYLOAD_KEY, DEAD_LETTER_SOURCE_KEY, DEAD_LETTER_START_UNCHECKED_KEY,
@@ -534,7 +534,8 @@ fn assert_started(err: &fq_edge::wire::WireError, invocation: &str, event: Uuid,
     }
 }
 
-/// A refusal because the daemon cannot tell whether the run started: an
+/// A refusal the override passes, because the daemon cannot tell whether
+/// the run started or because the claim and the dead letter disagree: an
 /// `InvalidInput` (the request can say the operator checked), naming the
 /// dead letter, its sequence, why, and the override.
 fn assert_cannot_tell(err: &fq_edge::wire::WireError, why: &str, event: Uuid, seq: u64) {
@@ -1312,7 +1313,7 @@ async fn an_unchecked_dead_letter_whose_run_started_is_refused_whatever_the_flag
     let swept = world
         .control_plane()
         .await
-        .sweep_started_trigger_claims(i64::MAX)
+        .sweep_settled_trigger_claims(i64::MAX)
         .await
         .expect("sweep");
     assert_eq!(swept, 1, "the started claim is the one swept");
@@ -1839,4 +1840,397 @@ async fn while_a_copy_still_handles_the_claim_a_requeue_needs_the_flag() {
     }
 
     world.kill();
+}
+
+/// **The dispatcher's own dead letter, whose trigger it consumed, is
+/// requeued (issue 1055).** On a last delivery the dispatcher publishes the
+/// trigger's dead letter and consumes its claim: the trigger was dealt
+/// with and its run never started, so the dead letter can be requeued
+/// with no flag, and is.
+#[tokio::test]
+async fn a_dead_letter_whose_trigger_was_consumed_is_requeued() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, _) = dead_letter(43, Some(original), json!({"n": 43}));
+    world.seed(&event, Some(original)).await;
+    world.claim(43, &invocation, false).await;
+    assert!(
+        world
+            .control_plane()
+            .await
+            .consume_trigger_claim(world.claim_key(43), &invocation, &ConsumedWhy::DeadLettered)
+            .await
+            .expect("consume the claim")
+    );
+
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 43 }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+    assert_eq!(requeued.payload, json!({"n": 43}));
+
+    world.shutdown();
+}
+
+/// **The dispatcher's own dead letter is still requeued after an operator
+/// drops the run (issue 1055).** The trigger was dead-lettered and its
+/// claim consumed as dead-lettered; then an operator dropped the last
+/// delivery's run, which writes its ownership row, and the claim records the
+/// drop beside its reason. Nothing ran, and this is the trigger's own dead
+/// letter: the drop's ownership row is not a start, the reason still says
+/// dead-lettered, and the requeue goes through with no flag.
+#[tokio::test]
+async fn a_dead_letter_whose_trigger_was_consumed_and_then_dropped_is_requeued() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, _) = dead_letter(47, Some(original), json!({"n": 47}));
+    world.seed(&event, Some(original)).await;
+    world.claim(47, &invocation, false).await;
+    let store = world.control_plane().await;
+    assert!(
+        store
+            .consume_trigger_claim(world.claim_key(47), &invocation, &ConsumedWhy::DeadLettered)
+            .await
+            .expect("consume the claim")
+    );
+    // The drop: the run's ownership row, failed as the drop leaves it, and
+    // the drop recorded on the claim.
+    store
+        .upsert_invocation_ownership(
+            &invocation,
+            GONE_WORKER,
+            chrono::Utc::now().timestamp_millis(),
+            OwnerStatus::Failed,
+        )
+        .await
+        .expect("the drop's ownership row");
+    let raw = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        world.stores().control_plane.display()
+    ))
+    .await
+    .expect("open the claim store");
+    sqlx::query("UPDATE trigger_claim SET operator_dropped_at = 1 WHERE invocation_id = ?")
+        .bind(&invocation)
+        .execute(&raw)
+        .await
+        .expect("record the drop on the claim");
+
+    let requeued = world
+        .requeued(json!({ "agent_id": AGENT, "trigger_seq": 47 }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+    assert_eq!(requeued.payload, json!({"n": 47}));
+    let row = world.claim_row(47).await.expect("the claim");
+    assert_eq!(
+        (row.state, row.operator_dropped_at.is_some()),
+        (
+            ClaimState::Consumed {
+                why: ConsumedWhy::DeadLettered
+            },
+            true
+        ),
+        "the claim is left as it was"
+    );
+
+    world.shutdown();
+}
+
+/// **A consumed claim is not taken on trust (issue 1055).** Its claim says
+/// the trigger was consumed without a run, and the run it names is on the
+/// control plane's record: the start is the truth. Requeued, the work
+/// would run a second time, so the requeue is refused as for any start on
+/// record, and the claim is marked started for that run.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_has_a_start_on_record_is_refused() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(44, Some(original), json!({"n": 44}));
+    world.seed(&event, Some(original)).await;
+    world.claim(44, &invocation, false).await;
+    let store = world.control_plane().await;
+    assert!(
+        store
+            .consume_trigger_claim(world.claim_key(44), &invocation, &ConsumedWhy::DeadLettered)
+            .await
+            .expect("consume the claim")
+    );
+    store
+        .upsert_invocation_ownership(
+            &invocation,
+            GONE_WORKER,
+            chrono::Utc::now().timestamp_millis(),
+            OwnerStatus::Completed,
+        )
+        .await
+        .expect("the run's ownership row");
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 44 }), original)
+        .await;
+    assert_started(&err, &invocation, event_id, 44);
+    assert!(
+        err.to_string().contains("marked started now"),
+        "the refusal says it marked the claim; got {err}"
+    );
+    let row = world.claim_row(44).await.expect("the claim is still there");
+    assert_eq!(
+        (row.state, row.invocation_id.as_deref()),
+        (ClaimState::DurablyStarted, Some(invocation.as_str())),
+        "the claim is marked started for the run on record"
+    );
+
+    world.shutdown();
+}
+
+/// **A dead letter whose trigger's claim was consumed for a reason that
+/// writes none is refused, and the override takes it (issue 1055).** Only
+/// a trigger consumed as `dead_lettered` has a dead letter by design. One
+/// consumed as `failed_for_good` has none, so this dead letter and the
+/// claim disagree, and one of them may be about another trigger. The
+/// refusal says what the daemon found, no start on record for the run the
+/// claim names, and what to check: that this dead letter's own work did not
+/// run. It does not say that run may have started, since the daemon has
+/// just read that it did not. Once the operator has checked, the override
+/// requeues it.
+#[tokio::test]
+async fn a_consumed_trigger_whose_reason_writes_no_dead_letter_is_requeued_only_on_the_operators_word()
+ {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(45, Some(original), json!({"n": 45}));
+    world.seed(&event, Some(original)).await;
+    world.claim(45, &invocation, false).await;
+    assert!(
+        world
+            .control_plane()
+            .await
+            .consume_trigger_claim(
+                world.claim_key(45),
+                &invocation,
+                &ConsumedWhy::FailedForGood
+            )
+            .await
+            .expect("consume the claim")
+    );
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 45 }), original)
+        .await;
+    assert_cannot_tell(&err, "failed_for_good", event_id, 45);
+    let message = err.to_string();
+    for expected in [
+        format!("no start on record for the run the claim names, `{invocation}`"),
+        "this dead letter and the claim disagree, and one of them may be about another trigger"
+            .to_string(),
+        "check that this dead letter's own work did not run".to_string(),
+    ] {
+        assert!(
+            message.contains(&expected),
+            "the refusal must say `{expected}`; got {message}"
+        );
+    }
+    assert!(
+        !message.contains("may be for a trigger whose run started")
+            && !message.contains("may have started"),
+        "the daemon read that the run did not start; got {message}"
+    );
+
+    let requeued = world
+        .requeued(json!({
+            "agent_id": AGENT,
+            "trigger_seq": 45,
+            "checked_not_started": true,
+        }))
+        .await;
+    assert_eq!(requeued.requeued_from, Some(original));
+    assert_eq!(requeued.payload, json!({"n": 45}));
+
+    world.shutdown();
+}
+
+/// **A start under the run a dead letter's mark names is refused, though
+/// its trigger's claim says it was consumed for a reason that writes no
+/// dead letter (issue 1055).** The claim and the dead letter disagree, so
+/// requeue asks the records by the id of the run the mark names, the dead
+/// letter's own work, as it does when it cannot tell: that run is on the
+/// control plane's record, a start, refused with or without the override.
+/// The refusal says the claim answered and disagrees, and where the start
+/// was found, not that no claim answered.
+#[tokio::test]
+async fn a_start_under_the_run_the_mark_names_is_refused_though_the_claim_was_consumed() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let marked = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(48, Some(original), json!({"n": 48}));
+    let event = unchecked(
+        event,
+        "a copy of the trigger is still handling its claim",
+        Some(&marked),
+    );
+    world.seed(&event, Some(original)).await;
+    world.claim(48, &invocation, false).await;
+    assert!(
+        world
+            .control_plane()
+            .await
+            .consume_trigger_claim(
+                world.claim_key(48),
+                &invocation,
+                &ConsumedWhy::FailedForGood
+            )
+            .await
+            .expect("consume the claim")
+    );
+    world.owner_row(&marked).await;
+
+    for input in [
+        json!({ "agent_id": AGENT, "trigger_seq": 48 }),
+        json!({ "agent_id": AGENT, "trigger_seq": 48, "checked_not_started": true }),
+    ] {
+        let err = world.refused(input, original).await;
+        assert_started(&err, &marked, event_id, 48);
+        let message = err.to_string();
+        assert!(
+            message.contains(
+                "Its claim answered that the trigger was consumed without a run as \
+                 `failed_for_good`, which disagrees with this dead letter"
+            ) && message.contains("the start was found under the run the dead letter's mark names")
+                && !message.contains("No claim answered"),
+            "the refusal says what the claim answered; got {message}"
+        );
+    }
+
+    world.shutdown();
+}
+
+/// **A dead letter whose trigger was requeued from a hold is never
+/// requeued (issue 1055)**, whatever the request says. The claim says the
+/// trigger was consumed without a run as `requeued_from_hold`: its
+/// replacement was published under the same trigger id, so requeueing the
+/// dead letter would run the work twice. The refusal is a `Conflict`, as
+/// for a start on record, which the override does not pass, and it says
+/// the work can still be published as new work. The claim is left as it
+/// was.
+#[tokio::test]
+async fn a_dead_letter_whose_trigger_was_requeued_from_a_hold_is_refused_whatever_the_flag() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(47, Some(original), json!({"n": 47}));
+    world.seed(&event, Some(original)).await;
+    world.claim(47, &invocation, false).await;
+    assert!(
+        world
+            .control_plane()
+            .await
+            .consume_trigger_claim(
+                world.claim_key(47),
+                &invocation,
+                &ConsumedWhy::RequeuedFromHold
+            )
+            .await
+            .expect("consume the claim")
+    );
+
+    for input in [
+        json!({ "agent_id": AGENT, "trigger_seq": 47 }),
+        json!({ "agent_id": AGENT, "trigger_seq": 47, "checked_not_started": true }),
+    ] {
+        let err = world.refused(input.clone(), original).await;
+        let fq_edge::wire::WireError::Conflict { op, message } = &err else {
+            panic!("{input}: refused outright, as a Conflict; got {err:?}");
+        };
+        assert_eq!(op, "dead_letter.requeue");
+        for expected in [
+            event_id.to_string(),
+            "trigger sequence 47".to_string(),
+            "`requeued_from_hold`".to_string(),
+            "its replacement was already published under the same trigger id".to_string(),
+            "would run the work twice".to_string(),
+            "`trigger.publish`".to_string(),
+        ] {
+            assert!(
+                message.contains(&expected),
+                "{input}: the refusal must say `{expected}`; got {message}"
+            );
+        }
+        let row = world.claim_row(47).await.expect("the claim is still there");
+        assert_eq!(
+            (row.state, row.invocation_id.as_deref()),
+            (
+                ClaimState::Consumed {
+                    why: ConsumedWhy::RequeuedFromHold
+                },
+                Some(invocation.as_str())
+            ),
+            "{input}: the claim is left as it was"
+        );
+    }
+
+    world.shutdown();
+}
+
+/// **A dead letter whose trigger's consumed claim cannot be verified is not
+/// requeued on the claim's word (issue 1055).** The claim says consumed as
+/// dead-lettered, and the ownership table cannot be read, so whether the
+/// run it names started cannot be told. Requeue answers "cannot tell", as
+/// for a `claimed` row whose records cannot be read, and the override
+/// passes it.
+#[tokio::test]
+async fn a_consumed_trigger_whose_run_cannot_be_looked_up_cannot_be_told() {
+    let server = fq_test_support::NatsServer::start();
+    let world = World::start(server.url()).await;
+
+    let original = Uuid::now_v7();
+    let invocation = Uuid::now_v7().to_string();
+    let (event, event_id) = dead_letter(46, Some(original), json!({"n": 46}));
+    world.seed(&event, Some(original)).await;
+    world.claim(46, &invocation, false).await;
+    assert!(
+        world
+            .control_plane()
+            .await
+            .consume_trigger_claim(world.claim_key(46), &invocation, &ConsumedWhy::DeadLettered)
+            .await
+            .expect("consume the claim")
+    );
+    let store = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        world.stores().control_plane.display()
+    ))
+    .await
+    .expect("open the claim store");
+    sqlx::query("ALTER TABLE coordination_invocation_owner RENAME TO owner_out_of_reach")
+        .execute(&store)
+        .await
+        .expect("hide the ownership table");
+
+    let err = world
+        .refused(json!({ "agent_id": AGENT, "trigger_seq": 46 }), original)
+        .await;
+    assert_cannot_tell(&err, "could not be read", event_id, 46);
+
+    sqlx::query("ALTER TABLE owner_out_of_reach RENAME TO coordination_invocation_owner")
+        .execute(&store)
+        .await
+        .expect("put the ownership table back");
+    world.shutdown();
 }

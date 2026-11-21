@@ -109,6 +109,16 @@ impl TriggerDispatcher {
                      invocation's place, so the claim cannot be released from under a run that \
                      started");
             }
+            Ok(RecordedStart::OverConsumed { consumed_by, why }) => {
+                error!(stream_seq, %invocation_id, %trigger_id, subject, refused_marks,
+                    refused_records,
+                    consumed_invocation_id = %consumed_by.as_deref().unwrap_or("none"),
+                    consumed_why = %why,
+                    "the claim of a trigger whose run started recorded it consumed without a \
+                     run; recorded this run's start over it, since the run did start and a \
+                     consumed claim would let the trigger's dead letter be requeued and run \
+                     again");
+            }
             Ok(RecordedStart::AlreadyStarted {
                 invocation_id: started,
             }) => {
