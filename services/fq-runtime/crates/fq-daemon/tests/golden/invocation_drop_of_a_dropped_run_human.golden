@@ -1,0 +1,5 @@
+Drop of invocation bd000000-0000-7000-8000-00000000000e recorded (agent=fixer, event_id=<UUID>): already ended by an earlier drop.
+No archive of the run is expected; if its own ending arrives after all, that ending stands, and `fq invocation show` reads the final record.
+An earlier request is on record (requested 2026-01-02T03:04:56Z by on-call: stuck in a loop\n  status:   completed\u{1b}[2J and then some); the record keeps the first.
+Reason given: golden fixture drop
+Follow with `fq invocation show bd000000-0000-7000-8000-00000000000e` to read the record.

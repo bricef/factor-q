@@ -122,3 +122,59 @@ impl Armed {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A runner that drives the run at the first answer, and has let it go
+    /// by the second: the run ended in between.
+    struct EndsBetweenTheAnswers;
+
+    impl DriveHalts for EndsBetweenTheAnswers {
+        fn active_agent(&self, _: &uuid::Uuid) -> Option<fq_runtime::AgentId> {
+            Some(fq_runtime::AgentId::new("agent").unwrap())
+        }
+
+        fn arm_halt(&self, _: uuid::Uuid) -> Option<fq_runtime::worker::ArmedHalt> {
+            None
+        }
+    }
+
+    fn input(live: bool) -> DropCommandInput {
+        DropCommandInput {
+            invocation_id: uuid::Uuid::now_v7().to_string(),
+            reason: None,
+            live,
+        }
+    }
+
+    /// **A live drop of a run that ends before the halt is armed goes
+    /// ahead** (issue 1070): no halt, the agent from the runner's first
+    /// answer, and the drop records the request beside the ending the run
+    /// reached. Refusing it would lose the request.
+    #[test]
+    fn a_live_drop_of_a_run_that_ends_before_the_arm_goes_ahead() {
+        match arm_drop_halt(&EndsBetweenTheAnswers, None, &input(true)) {
+            Ok(Some(armed)) => assert_eq!(armed.agent.as_str(), "agent"),
+            Ok(None) => panic!("the drop went ahead, but without the agent the runner named"),
+            Err(refused) => panic!(
+                "a live drop of a run that ended before the halt could be armed was refused, \
+                 which loses the request: {refused:?}"
+            ),
+        }
+    }
+
+    /// A bare drop of a run this daemon drives is refused, as before: the
+    /// kill switch is opt-in.
+    #[test]
+    fn a_bare_drop_of_a_run_this_daemon_drives_is_refused() {
+        let refused = arm_drop_halt(&EndsBetweenTheAnswers, None, &input(false));
+        assert!(
+            matches!(&refused, Err(fq_edge::wire::WireError::InvalidInput { message, .. })
+                if message.contains("use --live")),
+            "{:?}",
+            refused.err()
+        );
+    }
+}

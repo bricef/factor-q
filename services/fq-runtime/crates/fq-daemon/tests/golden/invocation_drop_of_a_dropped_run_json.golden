@@ -1,0 +1,13 @@
+{
+  "invocation_id": "bd000000-0000-7000-8000-00000000000e",
+  "agent_id": "fixer",
+  "event_id": "<UUID>",
+  "reason": "golden fixture drop",
+  "case": "ended_by_an_earlier_drop",
+  "provisional": true,
+  "earlier_request": {
+    "requested_at_ms": 1767323096000,
+    "requested_by": "on-call",
+    "reason": "stuck in a loop\n  status:   completed\u001b[2J and then some"
+  }
+}

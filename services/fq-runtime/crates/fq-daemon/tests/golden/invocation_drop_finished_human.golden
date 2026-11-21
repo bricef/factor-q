@@ -1,0 +1,3 @@
+Drop of invocation 2f000000-0000-7000-8000-000000000002 recorded (agent=fixer, event_id=<UUID>): already ended when the termination was requested.
+Reason given: golden fixture drop
+Follow with `fq invocation show 2f000000-0000-7000-8000-000000000002` to read the record.

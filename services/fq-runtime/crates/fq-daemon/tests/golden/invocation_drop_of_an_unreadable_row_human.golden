@@ -1,0 +1,3 @@
+Drop of invocation ad000000-0000-7000-8000-00000000000d recorded (event_id=<UUID>), but reading it back failed, so what it found is not known: the invocation: internal error: control-plane store: malformed row from control-plane store: unknown owner status `paused`.
+Reason given: golden fixture drop
+Follow with `fq invocation show ad000000-0000-7000-8000-00000000000d` to read the record.

@@ -1,3 +1,4 @@
-Dropped invocation 3a000000-0000-7000-8000-000000000003 (agent=researcher, event_id=<UUID>).
-Reason: golden fixture drop
-Follow with `fq invocation show 3a000000-0000-7000-8000-000000000003` to see where the drop left it.
+Drop of invocation 3a000000-0000-7000-8000-000000000003 recorded (agent=researcher, event_id=<UUID>): dropped.
+That ending is provisional until the run's archive lands: if the run reached its own ending first, its own ending stands, and `fq invocation show` reads the final record.
+Reason given: golden fixture drop
+Follow with `fq invocation show 3a000000-0000-7000-8000-000000000003` to read the record.

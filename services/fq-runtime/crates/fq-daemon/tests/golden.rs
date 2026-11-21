@@ -33,8 +33,8 @@ use std::time::Duration;
 use fq_runtime::bus::TRIGGER_STREAM_NAME;
 use fq_runtime::control_plane::ownership::RowState;
 use fq_runtime::control_plane::store::{
-    ArchiveState, ControlPlaneStore, InvocationArchiveRow, MoveFacts, OwnerStatus, TriggerKey,
-    WorkerStatus,
+    ArchiveState, ControlPlaneStore, EndedBy, InvocationArchiveRow, MoveFacts, OwnerStatus,
+    TerminationRequest, TriggerKey, WorkerStatus,
 };
 use fq_runtime::events::{
     CostMetadata, Event, EventPayload, FailureKind, FailurePhase, InvocationTotals, LlmCallOrigin,
@@ -66,6 +66,15 @@ const INV_NEVER_STARTED: &str = "5d000000-0000-7000-8000-000000000005";
 const INV_AWAITING: &str = "7a000000-0000-7000-8000-000000000007";
 const INV_AGED_OUT: &str = "8b000000-0000-7000-8000-000000000008";
 const INV_EARLIER_STREAM: &str = "9c000000-0000-7000-8000-000000000009";
+/// A run that completed long before any drop of it, with no request on
+/// record (issue 1070).
+const INV_DONE: &str = "ad000000-0000-7000-8000-00000000000d";
+/// A run an operator's drop ended, its reason the kind of free text a
+/// human line must not print raw (issue 1070).
+const INV_DROPPED: &str = "bd000000-0000-7000-8000-00000000000e";
+/// The dropped run's reason: a newline that would forge a line, an escape
+/// sequence, and more text than a line holds.
+const DROPPED_REASON: &str = "stuck in a loop\n  status:   completed\u{1b}[2J and then some";
 
 /// The creation time, in nanoseconds, of the incarnation of the trigger
 /// stream the January runs' claims were made on: a minute before
@@ -115,6 +124,66 @@ fn snapshot_for(agent: &str) -> fq_runtime::events::ConfigSnapshot {
         .build()
         .unwrap()
         .to_snapshot()
+}
+
+/// An operator's drop of `invocation`, made by `on-call` at `at_ms`, as
+/// the command publishes it, saying `archive` of the run's archive.
+fn dropped(
+    agent: &str,
+    invocation: &str,
+    (seq, at_ms): (u32, i64),
+    reason: &str,
+    archive: fq_runtime::events::DropArchive,
+) -> Event {
+    stamp(
+        Event::new(
+            AgentId::new(agent).unwrap(),
+            inv(invocation),
+            EventPayload::InvocationOperatorRecovered(
+                fq_runtime::events::InvocationOperatorRecoveredPayload {
+                    action: "drop".into(),
+                    final_phase: "failed".into(),
+                    reason: Some(reason.into()),
+                    requested_by: Some("on-call".into()),
+                    archive: Some(archive),
+                },
+            ),
+        ),
+        seq,
+        at_ms,
+    )
+}
+
+/// What a private edge fixture seeds beyond the shared fixture.
+enum Extra {
+    Nothing,
+    /// [`seed_later_events`] of an invocation, so many.
+    LaterEvents(&'static str, u32),
+    /// An invocation's ownership row with a status this build cannot read.
+    UnreadableRow(&'static str),
+}
+
+/// 2100-01-01T00:00:00Z: later than anything a test does.
+const LATER_MS: i64 = 4_102_444_800_000;
+
+/// `count` model responses of `invocation`, one a second from
+/// [`LATER_MS`], in the projection.
+async fn seed_later_events(dir: &Path, invocation: &str, count: u32) {
+    let paths = fq_runtime::db::RuntimeDbPaths::under(dir);
+    let proj = ProjectionStore::open(&paths.projection)
+        .await
+        .expect("open projection");
+    for n in 0..count {
+        let event = llm_response(
+            AGENT_FIXER,
+            invocation,
+            60 + n,
+            LATER_MS + i64::from(n) * 1_000,
+            0.0,
+            None,
+        );
+        proj.insert_event(&event, None).await.expect("insert event");
+    }
 }
 
 fn triggered(agent: &str, invocation: &str, seq: u32, at_ms: i64) -> Event {
@@ -375,6 +444,42 @@ async fn seed_at(dir: &Path, base_ms: i64) {
         invocation_summary(INV_COMPLETED, 10, base_ms + 6_000, 0.000_9),
         triggered(AGENT_RESEARCHER, INV_INFLIGHT, 7, base_ms + 20_000),
         triggered(AGENT_FIXER, INV_ARCHIVED, 8, base_ms + 30_000),
+        // The request on the completed run's row is a drop's, so its drop
+        // event is on the stream too, made while the run ran (issue 1070).
+        dropped(
+            AGENT_RESEARCHER,
+            INV_COMPLETED,
+            (41, base_ms + 3_000),
+            "golden fixture request",
+            fq_runtime::events::DropArchive::Pending,
+        ),
+        triggered(AGENT_FIXER, INV_DONE, 42, base_ms + 40_000),
+        stamp(
+            Event::new(
+                AgentId::new(AGENT_FIXER).unwrap(),
+                inv(INV_DONE),
+                EventPayload::Completed(fq_runtime::events::CompletedPayload {
+                    task_status: Default::default(),
+                    result_summary: Some("Done long ago.".into()),
+                    total_llm_calls: 0,
+                    total_tool_calls: 0,
+                    total_cost: 0.0,
+                    total_duration_ms: 2_000,
+                }),
+            ),
+            43,
+            base_ms + 42_000,
+        ),
+        triggered(AGENT_FIXER, INV_DROPPED, 44, base_ms + 50_000),
+        // The run had no row on its worker: the drop said none will come,
+        // as its row reads.
+        dropped(
+            AGENT_FIXER,
+            INV_DROPPED,
+            (45, base_ms + 51_000),
+            DROPPED_REASON,
+            fq_runtime::events::DropArchive::WillNotCome,
+        ),
     ] {
         proj.insert_event(&event, None).await.expect("insert event");
     }
@@ -573,14 +678,30 @@ async fn seed_at(dir: &Path, base_ms: i64) {
     // The ownership rows as the coordination consumer leaves them: the two
     // finished runs with no archive record read their archive pending (a
     // run's ending moves its row before its archive arrives); the one
-    // whose archive is seeded below reads archived.
-    for (invocation, agent, status, archive, at) in [
+    // whose archive is seeded below reads archived. The two the run ended
+    // record it as their ender at their ending's time (the completed one's
+    // `completed` event's), and the completed one an operator's request
+    // made while it ran, two seconds before it ended. The archived one is a row from before the termination record:
+    // it names no ender and no request.
+    let request = TerminationRequest {
+        requested_at: base_ms + 3_000,
+        requested_by: Some("on-call".to_string()),
+        reason: Some("golden fixture request".to_string()),
+    };
+    let dropped_request = TerminationRequest {
+        requested_at: base_ms + 51_000,
+        requested_by: Some("on-call".to_string()),
+        reason: Some(DROPPED_REASON.to_string()),
+    };
+    for (invocation, agent, status, archive, at, ended_at, asked) in [
         (
             INV_COMPLETED,
             AGENT_RESEARCHER,
             OwnerStatus::Completed,
             ArchiveState::Pending,
             base_ms + 5_000,
+            Some(base_ms + 5_000),
+            Some(&request),
         ),
         (
             INV_FAILED,
@@ -588,6 +709,8 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             OwnerStatus::Failed,
             ArchiveState::Pending,
             base_ms + 12_000,
+            Some(base_ms + 12_000),
+            None,
         ),
         (
             INV_INFLIGHT,
@@ -595,6 +718,8 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             OwnerStatus::InFlight,
             ArchiveState::NotDue,
             base_ms + 20_000,
+            None,
+            None,
         ),
         (
             INV_ARCHIVED,
@@ -602,6 +727,28 @@ async fn seed_at(dir: &Path, base_ms: i64) {
             OwnerStatus::Completed,
             ArchiveState::Archived,
             base_ms + 31_000,
+            None,
+            None,
+        ),
+        (
+            INV_DONE,
+            AGENT_FIXER,
+            OwnerStatus::Completed,
+            ArchiveState::Pending,
+            base_ms + 42_000,
+            Some(base_ms + 42_000),
+            None,
+        ),
+        // Ended by the drop, which said none will come: the run had no
+        // row on its worker.
+        (
+            INV_DROPPED,
+            AGENT_FIXER,
+            OwnerStatus::Failed,
+            ArchiveState::WillNotCome,
+            base_ms + 51_000,
+            Some(base_ms + 51_000),
+            Some(&dropped_request),
         ),
     ] {
         assert!(
@@ -611,13 +758,20 @@ async fn seed_at(dir: &Path, base_ms: i64) {
                 RowState {
                     status,
                     archive,
-                    ended_by: None,
-                    requested: false,
+                    ended_by: ended_at.map(|_| {
+                        if invocation == INV_DROPPED {
+                            EndedBy::Drop
+                        } else {
+                            EndedBy::Run
+                        }
+                    }),
+                    requested: asked.is_some(),
                 },
                 MoveFacts {
                     worker_id: Some(agent),
                     assigned_at: Some(at),
-                    ..MoveFacts::default()
+                    ended_at,
+                    request: asked,
                 },
             )
             .await
@@ -1509,6 +1663,25 @@ impl EdgeFixture {
     /// config, never from the network fetch that `PricingTable::load`
     /// attempts.
     fn start_with_agents(definitions: &[(&str, &str)]) -> Self {
+        Self::start_seeded(definitions, Extra::Nothing)
+    }
+
+    /// The plain fixture with `count` more events of `invocation`, all
+    /// stamped long after anything a test does: the run's recent events,
+    /// its newest twenty, are all of them, so a drop made now is not among
+    /// them (issue 1070).
+    fn start_with_later_events(invocation: &'static str, count: u32) -> Self {
+        Self::start_seeded(&[], Extra::LaterEvents(invocation, count))
+    }
+
+    /// The plain fixture with `invocation`'s ownership row given a status
+    /// this build cannot read, as a newer build or a hand edit leaves one
+    /// (issue 1070).
+    fn start_with_an_unreadable_row(invocation: &'static str) -> Self {
+        Self::start_seeded(&[], Extra::UnreadableRow(invocation))
+    }
+
+    fn start_seeded(definitions: &[(&str, &str)], extra: Extra) -> Self {
         // A private seed at the SAME fixed base as the shared fixture
         // (the JSON goldens embed its literal timestamps). Registration
         // times are pinned; only heartbeats are freshened, and that
@@ -1525,6 +1698,24 @@ impl EdgeFixture {
             .expect("edge fixture runtime")
             .block_on(async {
                 seed_at(dir.path(), BASE_MS).await;
+                match extra {
+                    Extra::Nothing => {}
+                    Extra::LaterEvents(invocation, count) => {
+                        seed_later_events(dir.path(), invocation, count).await;
+                    }
+                    Extra::UnreadableRow(invocation) => {
+                        let paths = fq_runtime::db::RuntimeDbPaths::under(dir.path());
+                        let cp = ControlPlaneStore::open(&paths.control_plane)
+                            .await
+                            .expect("open control plane");
+                        assert!(
+                            cp.overwrite_owner_status_for_test(invocation, "paused")
+                                .await
+                                .expect("write the status"),
+                            "the row is there"
+                        );
+                    }
+                }
                 let stream_epoch = fq_runtime::EventBus::connect(broker.url())
                     .await
                     .expect("connect the fixture broker")
@@ -2157,9 +2348,16 @@ fn wall_clock_floor_rfc3339() -> String {
 fn seeded_identities() -> Vec<String> {
     let mut keep: Vec<String> = (1..=99).map(|n| fixed_uuid(n).to_string()).collect();
     keep.extend(
-        [INV_COMPLETED, INV_FAILED, INV_INFLIGHT, INV_ARCHIVED]
-            .iter()
-            .map(|id| id.to_string()),
+        [
+            INV_COMPLETED,
+            INV_FAILED,
+            INV_INFLIGHT,
+            INV_ARCHIVED,
+            INV_DONE,
+            INV_DROPPED,
+        ]
+        .iter()
+        .map(|id| id.to_string()),
     );
     keep
 }
@@ -2299,6 +2497,11 @@ fn check_golden_roster(name: &str, args: &[&str]) {
 /// and the identities it prints come back from the gated read that
 /// follows. The event id is minted per run, so it redacts to `<UUID>`.
 fn check_golden_drop(name: &str, args: &[&str]) {
+    check_golden_drop_of(name, args, INV_INFLIGHT);
+}
+
+/// [`check_golden_drop`] of `invocation`, whose id stays in the output.
+fn check_golden_drop_of(name: &str, args: &[&str], invocation: &str) {
     let fixture = EdgeFixture::start();
     let (exit, stdout, stderr) = fixture.run_fq(args);
     assert_eq!(
@@ -2306,7 +2509,7 @@ fn check_golden_drop(name: &str, args: &[&str]) {
         Some(0),
         "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
     );
-    let actual = redact_uuids(&redact(&stdout, &[]), &[INV_INFLIGHT]);
+    let actual = redact_uuids(&redact(&stdout, &[]), &[invocation]);
     compare_golden(name, &actual);
 }
 
@@ -2367,6 +2570,152 @@ fn golden_invocation_drop_human() {
             "--reason",
             "golden fixture drop",
         ],
+    );
+}
+
+/// A drop of a run that has ended succeeds, and says so: the request is
+/// recorded beside the ending the run had already reached (issue 1070).
+#[test]
+fn golden_invocation_drop_of_a_finished_run_human() {
+    check_golden_drop_of(
+        "invocation_drop_finished_human",
+        &[
+            "invocation",
+            "drop",
+            INV_FAILED,
+            "--reason",
+            "golden fixture drop",
+        ],
+        INV_FAILED,
+    );
+}
+
+/// A drop of a run that completed long before, with no request on
+/// record: the run had already ended (issue 1070).
+#[test]
+fn golden_invocation_drop_of_a_run_completed_long_ago_human() {
+    check_golden_drop_of(
+        "invocation_drop_completed_long_ago_human",
+        &[
+            "invocation",
+            "drop",
+            INV_DONE,
+            "--reason",
+            "golden fixture drop",
+        ],
+        INV_DONE,
+    );
+}
+
+/// A drop of a run with more later events than its recent list holds:
+/// the command reads its own event by the id the receipt names, not from
+/// that list, and says what the drop found (issue 1070).
+#[test]
+fn golden_invocation_drop_behind_later_events_human() {
+    let fixture = EdgeFixture::start_with_later_events(INV_DONE, 25);
+    let args = [
+        "invocation",
+        "drop",
+        INV_DONE,
+        "--reason",
+        "golden fixture drop",
+    ];
+    let (exit, stdout, stderr) = fixture.run_fq(&args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let actual = redact_uuids(&redact(&stdout, &[]), &[INV_DONE]);
+    compare_golden("invocation_drop_behind_later_events_human", &actual);
+}
+
+/// A drop of a run whose ownership row this build cannot read: the drop
+/// is recorded, reading it back fails, and the command says both and
+/// exits 0, never that the drop failed (issue 1070).
+#[test]
+fn golden_invocation_drop_of_an_unreadable_row_human() {
+    let fixture = EdgeFixture::start_with_an_unreadable_row(INV_DONE);
+    let args = [
+        "invocation",
+        "drop",
+        INV_DONE,
+        "--reason",
+        "golden fixture drop",
+    ];
+    let (exit, stdout, stderr) = fixture.run_fq(&args);
+    assert_eq!(
+        exit,
+        Some(0),
+        "fq {args:?} over the edge should exit 0; stderr:\n{stderr}"
+    );
+    let actual = redact_uuids(&redact(&stdout, &[]), &[INV_DONE]);
+    compare_golden("invocation_drop_of_an_unreadable_row_human", &actual);
+}
+
+/// A second drop of a run a drop ended: an earlier drop had ended it, its
+/// request is the one the record keeps, and the ending is provisional,
+/// since no archive of it will come (issue 1070).
+#[test]
+fn golden_invocation_drop_of_a_dropped_run_human() {
+    check_golden_drop_of(
+        "invocation_drop_of_a_dropped_run_human",
+        &[
+            "invocation",
+            "drop",
+            INV_DROPPED,
+            "--reason",
+            "golden fixture drop",
+        ],
+        INV_DROPPED,
+    );
+}
+
+/// The same, as JSON: the case, the provisional ending, and the earlier
+/// request exact.
+#[test]
+fn golden_invocation_drop_of_a_dropped_run_json() {
+    check_golden_drop_of(
+        "invocation_drop_of_a_dropped_run_json",
+        &[
+            "invocation",
+            "drop",
+            INV_DROPPED,
+            "--reason",
+            "golden fixture drop",
+            "--json",
+        ],
+        INV_DROPPED,
+    );
+}
+
+/// A second drop of a completed run that already has a request on
+/// record: the run had already ended when this drop was requested, though
+/// the first request reads as made while it ran (issue 1070).
+#[test]
+fn golden_invocation_drop_with_an_earlier_request_human() {
+    check_golden_drop_of(
+        "invocation_drop_with_an_earlier_request_human",
+        &[
+            "invocation",
+            "drop",
+            INV_COMPLETED,
+            "--reason",
+            "golden fixture drop",
+        ],
+        INV_COMPLETED,
+    );
+}
+
+/// `show` of a run a drop ended: who ended it, and the request, its
+/// reason one line with its control characters escaped and its length cut
+/// (issue 1070).
+#[test]
+fn golden_invocation_show_dropped_human() {
+    check_golden_edge(
+        "invocation_show_dropped_human",
+        &["invocation", "show", INV_DROPPED],
+        &["ago"],
     );
 }
 

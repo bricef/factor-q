@@ -1,4 +1,6 @@
 invocation  status     agent                    worker                   archive  summary
+bd000000    failed     fixer                    fixer                    none     —
+ad000000    completed  fixer                    fixer                    pending  —
 4e000000    completed  fixer                    fixer                    yes      —
 3a000000    in_flight  researcher               researcher               -        —
 2f000000    failed     fixer                    fixer                    pending  —
