@@ -280,7 +280,8 @@ $ fq invocation drop inv_abc12 --reason "stuck on flaky network"
 `fq invocation drop` publishes
 `invocation.operator_recovered` (see event-schema.md). The
 coordination consumer's handler writes an `invocation_archive`
-row and updates the owner status to `Failed`. A late
+row, unless the drop says no archive of the run will come, and
+updates the owner status to `Failed`. A late
 `invocation.archived` from a still-alive worker is detected by
 a no-downgrade guard and does not override the operator's
 decision.
@@ -1096,7 +1097,11 @@ CREATE TABLE coordination_invocation_owner (
 );
 -- The row follows the run's outcome: a run's ending moves it, and
 -- archive_state says separately whether the archive has reached the
--- control plane. Every move is one transition table
+-- control plane: 'none' when an operator's drop said none will come,
+-- of a run with no row on its worker and none to come there (issue
+-- 1070), which only a 'failed' row holds, and not for good: an archive
+-- that arrives is recorded, and the run's own ending makes it
+-- 'pending'. Every move is one transition table
 -- (control_plane/ownership.rs), written as a compare-and-set.
 -- The termination record beside them (issue 1070) is empty on a row
 -- written before it, which reads "not recorded". Checks across the
