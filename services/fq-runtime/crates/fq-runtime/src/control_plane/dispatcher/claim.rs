@@ -476,6 +476,8 @@ impl TriggerDispatcher {
                     consumed_why = %why,
                     "dropping a redelivered trigger that was consumed without a run: it was \
                      dealt with, and is not handled again");
+                // Its own count: not a copy of a run that started.
+                self.bus.consumer_ledger().note_consumed_drop(CONSUMER_NAME);
                 if let Err(err) = msg.ack().await {
                     error!(error = %err, stream_seq = seq, "failed to ack a copy of a consumed trigger");
                 }

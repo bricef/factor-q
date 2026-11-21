@@ -194,15 +194,18 @@ fn render_consumers(
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
                 started_not_dead_lettered,
+                consumed_dropped,
+                consumed_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
                     "  {name}: ✗ stuck — up to {redeliveries} redeliveries past its acked floor, \
-                     pending {num_pending}{}{}{}{}\n",
+                     pending {num_pending}{}{}{}{}{}\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
                     retaken_suffix(*abandoned_claim_retaken),
-                    started_suffix(*started_not_dead_lettered)
+                    started_suffix(*started_not_dead_lettered),
+                    consumed_suffix(*consumed_dropped, *consumed_not_dead_lettered)
                 ));
                 // The held-copy count does not choose this step. It only
                 // ever grows while the daemon runs, so one held copy in
@@ -224,6 +227,10 @@ fn render_consumers(
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
                 out.push_str(&started_note(*started_not_dead_lettered));
+                out.push_str(&consumed_note(
+                    *consumed_dropped,
+                    *consumed_not_dead_lettered,
+                ));
             }
             ConsumerHealth::Active {
                 name,
@@ -233,18 +240,25 @@ fn render_consumers(
                 held_duplicate_dropped,
                 abandoned_claim_retaken,
                 started_not_dead_lettered,
+                consumed_dropped,
+                consumed_not_dead_lettered,
                 ..
             } => {
                 out.push_str(&format!(
-                    "  {name}: ok (pending {num_pending}{}{}{}{})\n",
+                    "  {name}: ok (pending {num_pending}{}{}{}{}{})\n",
                     malformed_suffix(*malformed_acked),
                     duplicate_suffix(*duplicate_dropped, *held_duplicate_dropped),
                     retaken_suffix(*abandoned_claim_retaken),
-                    started_suffix(*started_not_dead_lettered)
+                    started_suffix(*started_not_dead_lettered),
+                    consumed_suffix(*consumed_dropped, *consumed_not_dead_lettered)
                 ));
                 out.push_str(&held_duplicate_note(*held_duplicate_dropped));
                 out.push_str(&retaken_note(*abandoned_claim_retaken));
                 out.push_str(&started_note(*started_not_dead_lettered));
+                out.push_str(&consumed_note(
+                    *consumed_dropped,
+                    *consumed_not_dead_lettered,
+                ));
             }
             // The halt is the other outcome of the parse boundary, and
             // the one that stops the consumer: an event in a version
@@ -455,6 +469,59 @@ fn started_note(started_not_dead_lettered: u64) -> String {
      daemon log has a warn line for each verdict naming the invocation, where its start is on \
      record and what became of its claim\n"
         .to_string()
+}
+
+/// The counts of triggers consumed without a run (issue 1055), named apart
+/// from the runs that started: `, consumed copies dropped since this
+/// daemon started: N` on the dispatcher, `, exhausted but consumed since
+/// this daemon started: N` on the dead-letter watch, or nothing for a
+/// count at zero ([`consumed_note`]).
+fn consumed_suffix(consumed_dropped: u64, consumed_not_dead_lettered: u64) -> String {
+    let mut out = String::new();
+    if consumed_dropped > 0 {
+        out.push_str(&format!(
+            ", consumed copies dropped since this daemon started: {consumed_dropped}"
+        ));
+    }
+    if consumed_not_dead_lettered > 0 {
+        out.push_str(&format!(
+            ", exhausted but consumed since this daemon started: {consumed_not_dead_lettered}"
+        ));
+    }
+    out
+}
+
+/// The lines saying what the consumed counts mean, one for each that is
+/// not zero. Neither is a fault: the trigger was dealt with, and no run
+/// of it started.
+fn consumed_note(consumed_dropped: u64, consumed_not_dead_lettered: u64) -> String {
+    let mut out = String::new();
+    if consumed_dropped > 0 {
+        out.push_str(
+            "  -> \"consumed copies dropped\" is a delivery of a trigger that an earlier delivery \
+             dealt with without a run (refused, failed for good or halted before its first WAL \
+             write, returned without a start, requeued from a hold, its agent removed during a hold, \
+             or dead-lettered), come again either because that delivery's answer did not reach the broker or because the \
+             trigger stream was replayed, after the dispatcher's durable consumer was recreated \
+             or the broker restored, which brings back every such trigger published in the last \
+             day; acked and dropped, not handled again; the daemon log has a warn line for each \
+             naming the invocation that consumed it and how, and one whose attempt (`delivered`) \
+             is 1 is a replay\n",
+        );
+    }
+    if consumed_not_dead_lettered > 0 {
+        out.push_str(
+            "  -> \"exhausted but consumed\" is a trigger whose deliveries ran out with no answer \
+             reaching the broker, though its claim records that a delivery dealt with it and no \
+             run started: no `trigger_exhausted` was written, since it would be a second record \
+             of the trigger; a trigger the dispatcher dead-lettered itself is not counted here: \
+             its claim says so, and the watch answers it as a dead letter already written; the \
+             daemon log has a line for each verdict, at warn, or at error where the run's records \
+             could not be read to check the claim, and for those `fq invocation show` on the \
+             invocation the line names says whether the run started\n",
+        );
+    }
+    out
 }
 
 /// Pure: the MCP block of `fq doctor`. Silent when no agent declares a

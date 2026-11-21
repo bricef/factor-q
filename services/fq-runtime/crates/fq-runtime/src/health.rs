@@ -181,6 +181,8 @@ async fn probe_consumer(
         held_duplicate_dropped,
         abandoned_claim_retaken,
         started_not_dead_lettered,
+        consumed_dropped,
+        consumed_not_dead_lettered,
         halted_on,
     } = record;
     // The loop's own account wins over the broker's figures: a halted
@@ -212,6 +214,8 @@ async fn probe_consumer(
         held_duplicate_dropped,
         abandoned_claim_retaken,
         started_not_dead_lettered,
+        consumed_dropped,
+        consumed_not_dead_lettered,
     }
 }
 

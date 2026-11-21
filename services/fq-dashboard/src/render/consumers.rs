@@ -29,6 +29,8 @@ pub(super) fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String
             num_redelivered,
             redeliveries,
             malformed_acked,
+            consumed_dropped,
+            consumed_not_dead_lettered,
             ..
         } => {
             let state = match consumer.progress() {
@@ -60,11 +62,22 @@ pub(super) fn consumer_row(consumer: &ConsumerHealth) -> (String, String, String
             } else {
                 String::new()
             };
+            // Triggers consumed without a run: dealt with, so neither
+            // count is a fault, but each says why a copy left no run and
+            // an exhaustion no dead letter.
+            let consumed_suffix = [
+                (*consumed_dropped, "consumed copies dropped"),
+                (*consumed_not_dead_lettered, "exhausted but consumed"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, what)| format!(r#" / <span class="muted">{what} {count}</span>"#))
+            .collect::<String>();
             (
                 esc(name),
                 state,
                 num_pending.to_string(),
-                format!("{ack_pending}{redelivery_suffix}{malformed_suffix}"),
+                format!("{ack_pending}{redelivery_suffix}{malformed_suffix}{consumed_suffix}"),
             )
         }
         // Halted on an event in a version this build does not read: the

@@ -418,6 +418,8 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
             held_duplicate_dropped,
             abandoned_claim_retaken,
             started_not_dead_lettered,
+            consumed_dropped,
+            consumed_not_dead_lettered,
         } => {
             let status = match consumer.progress() {
                 Some(ConsumerProgress::Stuck) => "✗ stuck redelivering",
@@ -511,6 +513,24 @@ fn render_consumer_health_human(consumer: &fq_ops::health::ConsumerHealth) -> St
                     "    exhausted but started: {started_not_dead_lettered} since this daemon \
                      started (deliveries ran out, but the run has a start on record; not \
                      dead-lettered)\n"
+                ));
+            }
+            // A trigger consumed without a run (issue 1055) was dealt with
+            // and never ran: a copy that comes back is dropped, and the
+            // watch writes no dead letter for it. Neither is a run that
+            // started, so neither is counted with those above.
+            if *consumed_dropped > 0 {
+                out.push_str(&format!(
+                    "    consumed copies dropped: {consumed_dropped} since this daemon started \
+                     (dealt with on an earlier delivery and no run started; acked, not handled \
+                     again)\n"
+                ));
+            }
+            if *consumed_not_dead_lettered > 0 {
+                out.push_str(&format!(
+                    "    exhausted but consumed: {consumed_not_dead_lettered} since this daemon \
+                     started (deliveries ran out, but its claim records that an earlier delivery \
+                     dealt with it and no run started; not dead-lettered)\n"
                 ));
             }
             out

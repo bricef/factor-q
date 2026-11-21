@@ -525,8 +525,10 @@ impl AdvisoryWatch {
                 }
                 Exhausted::Consumed(consumed) => {
                     let subject = self.subject_at(advisory.stream_seq).await;
-                    let long = looked_long_enough;
-                    return Ok(on_a_consumed_claim(&advisory, subject, consumed, long));
+                    let (long, ledger) = (looked_long_enough, self.bus.consumer_ledger());
+                    return Ok(on_a_consumed_claim(
+                        &advisory, subject, consumed, long, ledger,
+                    ));
                 }
                 Exhausted::Undecided { why, invocation_id } => {
                     if !looked_long_enough {

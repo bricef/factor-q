@@ -73,6 +73,8 @@ pub(crate) fn status_report() -> StatusReport {
                         held_duplicate_dropped: 0,
                         abandoned_claim_retaken: 0,
                         started_not_dead_lettered: 0,
+                        consumed_dropped: 0,
+                        consumed_not_dead_lettered: 0,
                     },
                     ConsumerHealth::Active {
                         name: "fq-coordination".to_string(),
@@ -87,6 +89,8 @@ pub(crate) fn status_report() -> StatusReport {
                         held_duplicate_dropped: 0,
                         abandoned_claim_retaken: 0,
                         started_not_dead_lettered: 0,
+                        consumed_dropped: 0,
+                        consumed_not_dead_lettered: 0,
                     },
                     // The wedge finding B4 describes, so the fixture
                     // exercises the red path the dashboard has to
@@ -104,6 +108,8 @@ pub(crate) fn status_report() -> StatusReport {
                         held_duplicate_dropped: 0,
                         abandoned_claim_retaken: 0,
                         started_not_dead_lettered: 0,
+                        consumed_dropped: 0,
+                        consumed_not_dead_lettered: 0,
                     },
                 ],
             },
@@ -126,6 +132,8 @@ pub(crate) fn status_report() -> StatusReport {
                     held_duplicate_dropped: 0,
                     abandoned_claim_retaken: 0,
                     started_not_dead_lettered: 0,
+                    consumed_dropped: 0,
+                    consumed_not_dead_lettered: 0,
                 }],
             },
         ],
@@ -201,6 +209,8 @@ pub(crate) fn doctor_report() -> DoctorReport {
                 held_duplicate_dropped: 0,
                 abandoned_claim_retaken: 0,
                 started_not_dead_lettered: 0,
+                consumed_dropped: 0,
+                consumed_not_dead_lettered: 0,
             },
             ConsumerHealth::Active {
                 name: "fq-heartbeat".to_string(),
@@ -215,6 +225,8 @@ pub(crate) fn doctor_report() -> DoctorReport {
                 held_duplicate_dropped: 0,
                 abandoned_claim_retaken: 0,
                 started_not_dead_lettered: 0,
+                consumed_dropped: 0,
+                consumed_not_dead_lettered: 0,
             },
             ConsumerHealth::Missing {
                 name: "fq-advisory-watch".to_string(),

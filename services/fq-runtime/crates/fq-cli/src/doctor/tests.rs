@@ -275,6 +275,8 @@ fn active(name: &str, stuck: bool, redeliveries: u64) -> fq_ops::health::Consume
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
         started_not_dead_lettered: 0,
+        consumed_dropped: 0,
+        consumed_not_dead_lettered: 0,
     }
 }
 
@@ -716,6 +718,139 @@ fn exhausted_triggers_that_started_are_counted_and_explained_without_a_verdict()
     );
 }
 
+/// The two counts of triggers consumed without a run (issue 1055) are
+/// named apart from the runs that started, on the dispatcher's line and
+/// the watch's, each with a line saying what it means. Not a fault: doctor
+/// lists no consumed claim, since a consumed claim is settled.
+#[test]
+fn consumed_triggers_are_counted_and_explained_apart_from_runs_that_started() {
+    let mut dispatcher = active("fq-dispatcher", false, 0);
+    let mut watch = active("fq-advisory-watch", false, 0);
+    if let fq_ops::health::ConsumerHealth::Active {
+        consumed_dropped, ..
+    } = &mut dispatcher
+    {
+        *consumed_dropped = 4;
+    }
+    if let fq_ops::health::ConsumerHealth::Active {
+        consumed_not_dead_lettered,
+        ..
+    } = &mut watch
+    {
+        *consumed_not_dead_lettered = 2;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![dispatcher, watch],
+        Vec::new(),
+    );
+    assert!(
+        !report.has_issues(),
+        "a consumed trigger, dropped or kept out of the dead letters, is not a fault"
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(&format!(
+            "  fq-dispatcher: ok (pending 0, consumed copies dropped since this daemon started: \
+             4)\n{CONSUMED_DROPPED_NOTE}"
+        )),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "  fq-advisory-watch: ok (pending 0, exhausted but consumed since this daemon \
+             started: 2)\n{CONSUMED_KEPT_NOTE}"
+        )),
+        "got:\n{out}"
+    );
+    assert!(
+        !out.contains("duplicates dropped") && !out.contains("exhausted but started"),
+        "got:\n{out}"
+    );
+}
+
+/// What `fq doctor` says under a consumed copy dropped (issue 1055): both
+/// reasons a trigger comes again, and how the log tells them apart.
+const CONSUMED_DROPPED_NOTE: &str = "  -> \"consumed copies dropped\" is a delivery of a trigger \
+     that an earlier delivery dealt with without a run (refused, failed for good or halted before \
+     its first WAL write, returned without a start, requeued from a hold, its agent removed during \
+     a hold, or dead-lettered), come again either because that delivery's answer did not reach the broker or because the trigger \
+     stream was replayed, after the dispatcher's durable consumer was recreated or the broker \
+     restored, which brings back every such trigger published in the last day; acked and \
+     dropped, not handled again; the daemon log has a warn line for each naming the invocation \
+     that consumed it and how, and one whose attempt (`delivered`) is 1 is a replay\n";
+
+/// What `fq doctor` says under exhausted but consumed (issue 1055): what is
+/// counted, what the watch answers for a claim consumed as dead-lettered,
+/// and the check for a claim it could not verify.
+const CONSUMED_KEPT_NOTE: &str = "  -> \"exhausted but consumed\" is a trigger whose deliveries \
+     ran out with no answer reaching the broker, though its claim records that a delivery dealt \
+     with it and no run started: no `trigger_exhausted` was written, since it would be a second \
+     record of the trigger; a trigger the dispatcher dead-lettered itself is not counted here: \
+     its claim says so, and the watch answers it as a dead letter already written; the daemon log \
+     has a line for each verdict, at warn, or at error where the run's records could not be read \
+     to check the claim, and for those `fq invocation show` on the invocation the line names says \
+     whether the run started\n";
+
+/// A stuck consumer's line names the counts of runs that started and of
+/// consumed triggers, each with its note, as a healthy one's does: being
+/// stuck is no reason to drop what the counts say.
+#[test]
+fn a_stuck_consumer_still_names_the_started_and_consumed_counts() {
+    let mut dispatcher = active("fq-dispatcher", true, 7);
+    let mut watch = active("fq-advisory-watch", true, 7);
+    if let fq_ops::health::ConsumerHealth::Active {
+        consumed_dropped, ..
+    } = &mut dispatcher
+    {
+        *consumed_dropped = 4;
+    }
+    if let fq_ops::health::ConsumerHealth::Active {
+        started_not_dead_lettered,
+        consumed_not_dead_lettered,
+        ..
+    } = &mut watch
+    {
+        *started_not_dead_lettered = 3;
+        *consumed_not_dead_lettered = 2;
+    }
+    let report = build_doctor_report(
+        &[],
+        &ExecutionsView::default(),
+        THRESHOLD_MS,
+        0,
+        &[],
+        vec![dispatcher, watch],
+        Vec::new(),
+    );
+    let out = render_doctor_report_human(&report);
+    assert!(
+        out.contains(
+            "  fq-dispatcher: ✗ stuck — up to 7 redeliveries past its acked floor, pending 42, \
+             consumed copies dropped since this daemon started: 4\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "  fq-advisory-watch: ✗ stuck — up to 7 redeliveries past its acked floor, pending \
+             42, exhausted but started since this daemon started: 3, exhausted but consumed \
+             since this daemon started: 2\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(out.contains(CONSUMED_DROPPED_NOTE), "got:\n{out}");
+    assert!(out.contains(CONSUMED_KEPT_NOTE), "got:\n{out}");
+    assert!(
+        out.contains("  -> \"exhausted but started\" is a trigger whose deliveries ran out"),
+        "got:\n{out}"
+    );
+}
+
 /// A stuck dead-letter watch is not said to be only a failing handler:
 /// it leaves an advisory unacked while it holds a verdict (#967), and the
 /// step names the line for that and the line for a failure.
@@ -846,6 +981,8 @@ fn a_lagging_but_progressing_consumer_is_not_an_issue() {
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
         started_not_dead_lettered: 0,
+        consumed_dropped: 0,
+        consumed_not_dead_lettered: 0,
     };
     let report = build_doctor_report(
         &[],

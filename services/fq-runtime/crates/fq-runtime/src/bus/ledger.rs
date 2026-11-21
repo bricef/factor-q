@@ -61,6 +61,23 @@ pub struct ConsumerRecord {
     /// watch's own consumer, once per verdict: an advisory whose ack was
     /// lost comes back and is counted again.
     pub started_not_dead_lettered: u64,
+    /// Trigger deliveries dropped because their claim records the trigger
+    /// consumed without a run, dealt with on an earlier delivery: a
+    /// redelivery, because that delivery's answer did not reach the
+    /// broker, or a replay of the trigger stream, though it did. Acked,
+    /// and not handled again. Not a duplicate of a run, so not in
+    /// `duplicate_dropped`.
+    pub consumed_dropped: u64,
+    /// Exhausted triggers the dead-letter watch did not dead-letter
+    /// because their claim records them consumed without a run, with no
+    /// start of the run found on record (one found is in
+    /// `started_not_dead_lettered`), or the records that could say so
+    /// unreadable past the watch's limit. One whose claim says it was
+    /// consumed as dead-lettered is answered as a dead letter already
+    /// written, the dispatcher's own, and not counted. Counted on the
+    /// watch's own consumer, once
+    /// per verdict, as `started_not_dead_lettered` is.
+    pub consumed_not_dead_lettered: u64,
     /// The event the loop halted on, once it has.
     pub halted_on: Option<UnsupportedEvent>,
 }
@@ -121,6 +138,24 @@ impl ConsumerLedger {
             .entry(consumer.to_string())
             .or_default()
             .started_not_dead_lettered += 1;
+    }
+
+    /// The dispatcher dropped a delivery whose trigger was consumed
+    /// without a run.
+    pub fn note_consumed_drop(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .consumed_dropped += 1;
+    }
+
+    /// The dead-letter watch did not dead-letter an exhausted trigger,
+    /// because its claim records it consumed without a run.
+    pub fn note_consumed_not_dead_lettered(&self, consumer: &str) {
+        self.lock()
+            .entry(consumer.to_string())
+            .or_default()
+            .consumed_not_dead_lettered += 1;
     }
 
     /// The loop halted on an event it cannot read.

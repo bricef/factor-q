@@ -196,6 +196,49 @@ pub enum ConsumerHealth {
         /// advisory whose ack was lost comes back, is decided again and is
         /// counted again, so this can count one trigger twice.
         started_not_dead_lettered: u64,
+        /// Deliveries of a trigger dropped because its claim records it
+        /// consumed without a run: an earlier delivery dealt with it and
+        /// no run started (it was refused, failed for good or was halted
+        /// by an operator before its run's first durable write, returned
+        /// without a start, was requeued from a hold, had its agent removed
+        /// during a hold, or ran out of deliveries and was dead-lettered).
+        /// The trigger came again for
+        /// one of two reasons. That earlier delivery's answer did not
+        /// reach the broker, so the broker redelivered it. Or the trigger
+        /// stream was replayed, to the dispatcher's durable consumer
+        /// recreated or reset, or after a broker restore, though the
+        /// answer had arrived; a replay brings back every trigger
+        /// published in the last day, so after one this can count every
+        /// consumed trigger of that day without any answer having been
+        /// lost. Either way the delivery is acked and dropped, and the
+        /// trigger is not handled again. Not a duplicate of a run, so
+        /// not counted in `duplicate_dropped`, which is for copies of a
+        /// run that started. Not a fault; the daemon logs each one at
+        /// warn with its subject, its sequence, its attempt (`delivered`,
+        /// 1 for a replay to a recreated consumer), the invocation that
+        /// consumed the trigger and how. Counted in memory since the
+        /// daemon started, like `duplicate_dropped`, once per delivery.
+        consumed_dropped: u64,
+        /// Triggers whose deliveries ran out but which the dead-letter
+        /// watch did not dead-letter, because their claim records that a
+        /// delivery dealt with them and no run started: a
+        /// `trigger_exhausted` dead letter would be a second record of
+        /// the trigger. Not counted in `started_not_dead_lettered`: no
+        /// start of the run was found on record (a trigger whose claim
+        /// says so but whose run does have a start on record is counted
+        /// there). Also counted here, and logged at error rather than
+        /// warn, is a trigger whose claim says so and whose run's records
+        /// the watch still could not read when it stopped holding its
+        /// verdict, about an hour after the advisory: no dead letter is
+        /// due either way, since a run on record started and one not on
+        /// record was dealt with. Not counted here is a trigger whose claim
+        /// says it was consumed as dead-lettered: the dispatcher wrote its
+        /// dead letter as it consumed the claim, so the watch, which reads
+        /// the claim first, answers it as a dead letter already written, in
+        /// neither count. Counted on the watch's own consumer, in
+        /// memory since the daemon started, once per verdict, like
+        /// `started_not_dead_lettered`.
+        consumed_not_dead_lettered: u64,
     },
     /// The consumer stopped itself on an event whose schema version
     /// this build does not read, and is holding there: the message is
