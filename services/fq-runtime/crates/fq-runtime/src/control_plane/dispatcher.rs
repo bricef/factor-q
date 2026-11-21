@@ -1462,7 +1462,7 @@ You are a test agent."#
                 // Simulate the first WAL write landing: this is what lets
                 // the dispatcher ack while the invocation is still
                 // in-flight (issue #41).
-                durable_start.fire();
+                durable_start.fire(0);
                 self.release.notified().await;
                 Ok(crate::worker::InvocationOutcome::Completed {
                     invocation_id: Uuid::now_v7(),
@@ -2341,7 +2341,7 @@ You are a test agent."#
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            durable_start.fire();
+            durable_start.fire(0);
             self.gate.acquire().await.expect("gate open").forget();
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
@@ -2569,7 +2569,7 @@ You are a test agent."#
                 .lock()
                 .unwrap()
                 .push(durable_start.invocation_id());
-            durable_start.fire();
+            durable_start.fire(0);
             Ok(crate::worker::InvocationOutcome::Completed {
                 invocation_id: Uuid::now_v7(),
                 response: canned_response(),
@@ -3708,7 +3708,7 @@ You are a test agent."#
             _delivery_attempt: Option<u32>,
             mut durable_start: crate::worker::DurableStart,
         ) -> Result<crate::worker::InvocationOutcome, ExecutorError> {
-            durable_start.fire();
+            durable_start.fire(0);
             *self.deferred_at.lock().unwrap() = Some(std::time::Instant::now());
             Ok(crate::worker::InvocationOutcome::Deferred {
                 invocation_id: self.invocation_id,
@@ -3944,7 +3944,7 @@ You are a test agent."#
             ));
             let open = self.open.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(open, SeqCst);
-            durable_start.fire();
+            durable_start.fire(0);
             self.finish.acquire().await.expect("gate open").forget();
             self.open.fetch_sub(1, SeqCst);
             if self.fail.load(SeqCst) {

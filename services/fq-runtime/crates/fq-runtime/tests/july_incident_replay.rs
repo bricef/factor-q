@@ -201,7 +201,7 @@ impl Worker for StagedWorker {
             .lock()
             .unwrap()
             .insert(invocation_id.to_string(), false);
-        durable_start.fire();
+        durable_start.fire(0);
         // An invocation that has just made its first WAL write has work
         // still to do, and the real runner's next move is always an
         // await on the store or the broker. So this stub yields once

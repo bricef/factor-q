@@ -2267,11 +2267,11 @@ async fn the_durable_start_fires_once_the_first_wal_write_has_landed() {
         durable_start,
     );
     tokio::pin!(run);
-    tokio::select! {
+    let started_at = tokio::select! {
         biased;
         signal = fired => signal.expect("the durable start fires rather than being dropped"),
         outcome = &mut run => panic!("the run ended without firing its durable start: {outcome:?}"),
-    }
+    };
 
     let row = store
         .get_invocation_state(&invocation_id.to_string())
@@ -2280,6 +2280,10 @@ async fn the_durable_start_fires_once_the_first_wal_write_has_landed() {
         .expect("the invocation's WAL row exists by the time its durable start fires");
     assert_eq!(row.step_index, 0, "the row is the first step's");
     assert_eq!(row.terminal_at, None, "the row is in flight");
+    assert_eq!(
+        started_at, row.started_at,
+        "the signal carries the run's start as its WAL row records it"
+    );
 }
 
 /// **A first WAL write that fails drops the durable start unfired

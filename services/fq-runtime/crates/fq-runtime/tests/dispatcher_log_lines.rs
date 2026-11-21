@@ -423,7 +423,7 @@ impl Worker for Stub {
                 ));
             }
             Script::DeferredThenEndedBeforeItsResume => {
-                durable_start.fire();
+                durable_start.fire(0);
                 tokio::task::yield_now().await;
                 self.ended.notify_one();
                 return Ok(InvocationOutcome::Deferred {
@@ -432,7 +432,7 @@ impl Worker for Stub {
                 });
             }
         }
-        durable_start.fire();
+        durable_start.fire(0);
         // One more turn of `handle`'s loop, which marks and acks on the
         // turn the signal fires, before the run returns.
         tokio::task::yield_now().await;

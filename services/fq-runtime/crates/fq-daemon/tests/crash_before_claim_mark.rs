@@ -189,7 +189,9 @@ async fn first_wal_write_then_die(
     // gets no further than whatever it started in the poll that fired.
     tokio::select! {
         biased;
-        signal = fired => signal.expect("the durable start fires"),
+        signal = fired => {
+            signal.expect("the durable start fires");
+        }
         outcome = &mut run => panic!("the run ended before its first WAL write: {outcome:?}"),
     }
 }

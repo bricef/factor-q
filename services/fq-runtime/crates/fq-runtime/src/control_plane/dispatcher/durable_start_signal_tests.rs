@@ -337,20 +337,20 @@ impl Worker for ResolvesThenReturns {
         }
         match self.resolve {
             Resolve::Drop => drop(durable_start),
-            Resolve::Fire => durable_start.fire(),
+            Resolve::Fire => durable_start.fire(0),
             Resolve::FireIntoRefusedMarks(refusals) => {
                 refuse_claim_marks(&self.claim_db, refusals).await;
-                durable_start.fire();
+                durable_start.fire(0);
             }
             Resolve::FireIntoLockedStore(held_for) => {
                 let refusals = Refusals::First(ATTEMPTS_IF_REFUSED_AT_ONCE);
                 refuse_claim_marks(&self.claim_db, refusals).await;
                 lock_claim_store(&self.claim_db, held_for).await;
-                durable_start.fire();
+                durable_start.fire(0);
             }
             Resolve::FireOnAChangedClaim(change) => {
                 change_the_claim(&self.claim_db, change).await;
-                durable_start.fire();
+                durable_start.fire(0);
             }
             Resolve::DropOnAChangedClaim(change) => {
                 change_the_claim(&self.claim_db, change).await;
