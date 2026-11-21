@@ -3542,6 +3542,18 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "consumed_dropped": {
+                        "description": "Deliveries of a trigger dropped because its claim records it\nconsumed without a run: an earlier delivery dealt with it and\nno run started (it was refused, failed for good or was halted\nby an operator before its run's first durable write, returned\nwithout a start, was requeued from a hold, had its agent removed\nduring a hold, or ran out of deliveries and was dead-lettered).\nThe trigger came again for\none of two reasons. That earlier delivery's answer did not\nreach the broker, so the broker redelivered it. Or the trigger\nstream was replayed, to the dispatcher's durable consumer\nrecreated or reset, or after a broker restore, though the\nanswer had arrived; a replay brings back every trigger\npublished in the last day, so after one this can count every\nconsumed trigger of that day without any answer having been\nlost. Either way the delivery is acked and dropped, and the\ntrigger is not handled again. Not a duplicate of a run, so\nnot counted in `duplicate_dropped`, which is for copies of a\nrun that started. Not a fault; the daemon logs each one at\nwarn with its subject, its sequence, its attempt (`delivered`,\n1 for a replay to a recreated consumer), the invocation that\nconsumed the trigger and how. Counted in memory since the\ndaemon started, like `duplicate_dropped`, once per delivery.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "consumed_not_dead_lettered": {
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their claim records that a\ndelivery dealt with them and no run started: a\n`trigger_exhausted` dead letter would be a second record of\nthe trigger. Not counted in `started_not_dead_lettered`: no\nstart of the run was found on record (a trigger whose claim\nsays so but whose run does have a start on record is counted\nthere). Also counted here, and logged at error rather than\nwarn, is a trigger whose claim says so and whose run's records\nthe watch still could not read when it stopped holding its\nverdict, about an hour after the advisory: no dead letter is\ndue either way, since a run on record started and one not on\nrecord was dealt with. Not counted here is a trigger whose claim\nsays it was consumed as dead-lettered: the dispatcher wrote its\ndead letter as it consumed the claim, so the watch, which reads\nthe claim first, answers it as a dead letter already written, in\nneither count. Counted on the watch's own consumer, in\nmemory since the daemon started, once per verdict, like\n`started_not_dead_lettered`.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "delivered": {
                         "description": "Stream sequence the consumer has been delivered up to —\nwhere it sits on the stream, not how far behind it is. The\ndistance from here to the stream head is not a backlog: a\nconsumer filtered to a few subjects is never offered the\nmessages in between, so that distance grows with every\nmessage anybody publishes and never comes back down.",
                         "format": "uint64",
@@ -3610,7 +3622,9 @@
                       "duplicate_dropped",
                       "held_duplicate_dropped",
                       "abandoned_claim_retaken",
-                      "started_not_dead_lettered"
+                      "started_not_dead_lettered",
+                      "consumed_dropped",
+                      "consumed_not_dead_lettered"
                     ],
                     "type": "object"
                   }
@@ -4445,6 +4459,18 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "consumed_dropped": {
+                        "description": "Deliveries of a trigger dropped because its claim records it\nconsumed without a run: an earlier delivery dealt with it and\nno run started (it was refused, failed for good or was halted\nby an operator before its run's first durable write, returned\nwithout a start, was requeued from a hold, had its agent removed\nduring a hold, or ran out of deliveries and was dead-lettered).\nThe trigger came again for\none of two reasons. That earlier delivery's answer did not\nreach the broker, so the broker redelivered it. Or the trigger\nstream was replayed, to the dispatcher's durable consumer\nrecreated or reset, or after a broker restore, though the\nanswer had arrived; a replay brings back every trigger\npublished in the last day, so after one this can count every\nconsumed trigger of that day without any answer having been\nlost. Either way the delivery is acked and dropped, and the\ntrigger is not handled again. Not a duplicate of a run, so\nnot counted in `duplicate_dropped`, which is for copies of a\nrun that started. Not a fault; the daemon logs each one at\nwarn with its subject, its sequence, its attempt (`delivered`,\n1 for a replay to a recreated consumer), the invocation that\nconsumed the trigger and how. Counted in memory since the\ndaemon started, like `duplicate_dropped`, once per delivery.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "consumed_not_dead_lettered": {
+                        "description": "Triggers whose deliveries ran out but which the dead-letter\nwatch did not dead-letter, because their claim records that a\ndelivery dealt with them and no run started: a\n`trigger_exhausted` dead letter would be a second record of\nthe trigger. Not counted in `started_not_dead_lettered`: no\nstart of the run was found on record (a trigger whose claim\nsays so but whose run does have a start on record is counted\nthere). Also counted here, and logged at error rather than\nwarn, is a trigger whose claim says so and whose run's records\nthe watch still could not read when it stopped holding its\nverdict, about an hour after the advisory: no dead letter is\ndue either way, since a run on record started and one not on\nrecord was dealt with. Not counted here is a trigger whose claim\nsays it was consumed as dead-lettered: the dispatcher wrote its\ndead letter as it consumed the claim, so the watch, which reads\nthe claim first, answers it as a dead letter already written, in\nneither count. Counted on the watch's own consumer, in\nmemory since the daemon started, once per verdict, like\n`started_not_dead_lettered`.",
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "delivered": {
                         "description": "Stream sequence the consumer has been delivered up to —\nwhere it sits on the stream, not how far behind it is. The\ndistance from here to the stream head is not a backlog: a\nconsumer filtered to a few subjects is never offered the\nmessages in between, so that distance grows with every\nmessage anybody publishes and never comes back down.",
                         "format": "uint64",
@@ -4513,7 +4539,9 @@
                       "duplicate_dropped",
                       "held_duplicate_dropped",
                       "abandoned_claim_retaken",
-                      "started_not_dead_lettered"
+                      "started_not_dead_lettered",
+                      "consumed_dropped",
+                      "consumed_not_dead_lettered"
                     ],
                     "type": "object"
                   }

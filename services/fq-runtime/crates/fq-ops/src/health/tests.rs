@@ -17,6 +17,8 @@ fn active(stuck: bool, ack_pending: u64, num_pending: u64, delivered: u64) -> Co
         held_duplicate_dropped: 0,
         abandoned_claim_retaken: 0,
         started_not_dead_lettered: 0,
+        consumed_dropped: 0,
+        consumed_not_dead_lettered: 0,
     }
 }
 
@@ -137,6 +139,8 @@ fn an_active_consumer_without_every_count_is_refused() {
         "held_duplicate_dropped",
         "abandoned_claim_retaken",
         "started_not_dead_lettered",
+        "consumed_dropped",
+        "consumed_not_dead_lettered",
     ] {
         let mut report = serde_json::json!({
             "active": {
@@ -151,7 +155,9 @@ fn an_active_consumer_without_every_count_is_refused() {
                 "duplicate_dropped": 3,
                 "held_duplicate_dropped": 0,
                 "abandoned_claim_retaken": 0,
-                "started_not_dead_lettered": 0
+                "started_not_dead_lettered": 0,
+                "consumed_dropped": 0,
+                "consumed_not_dead_lettered": 0
             }
         });
         report["active"]

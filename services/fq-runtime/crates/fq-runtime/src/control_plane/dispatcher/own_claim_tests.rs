@@ -1276,9 +1276,9 @@ impl Arena {
 /// trigger is not run again (issue 1055).** The trigger was dealt with on
 /// an earlier delivery, which failed for good before its run started, and
 /// that delivery's ack was lost; the copy the broker brings back meets the
-/// consumed claim, is acked, and starts nothing. It is not counted: not
-/// among the duplicates dropped after a start, which it is not one of, nor
-/// anywhere else.
+/// consumed claim, is acked, and starts nothing. It is counted once, as a
+/// consumed copy dropped, and nowhere else: not among the duplicates
+/// dropped after a start, which it is not one of.
 #[tokio::test]
 async fn a_copy_that_meets_a_consumed_claim_is_acked_and_dropped() {
     let (arena, _server) = arena().await;
@@ -1291,8 +1291,11 @@ async fn a_copy_that_meets_a_consumed_claim_is_acked_and_dropped() {
 
     assert_eq!(
         arena.bus.consumer_ledger().record(CONSUMER_NAME),
-        counted,
-        "a copy of a consumed trigger is not counted"
+        crate::bus::ConsumerRecord {
+            consumed_dropped: counted.consumed_dropped + 1,
+            ..counted
+        },
+        "a copy of a consumed trigger is counted as a consumed copy dropped, and as nothing else"
     );
 
     assert!(
@@ -1306,6 +1309,60 @@ async fn a_copy_that_meets_a_consumed_claim_is_acked_and_dropped() {
             why: ConsumedWhy::FailedForGood
         }),
         "the claim stays consumed"
+    );
+}
+
+/// **A replayed trigger that meets its consumed claim is counted as a
+/// consumed copy dropped (issue 1055).** A first delivery, as a durable
+/// consumer recreated or reset, or a broker restored, replays the stream:
+/// the answer to the delivery that consumed the trigger did reach the
+/// broker, and the trigger comes again all the same. It is acked, dropped
+/// and counted like a copy whose earlier answer was lost, which is why the
+/// count's description names both causes.
+#[tokio::test]
+async fn a_replayed_trigger_that_meets_its_consumed_claim_is_counted() {
+    let (arena, _server) = arena().await;
+    arena
+        .consumed("inv-consumed", ConsumedWhy::RefusedSubject)
+        .await;
+    let counted = arena.bus.consumer_ledger().record(CONSUMER_NAME);
+
+    let replayed = arena.deliver(1, false).await;
+
+    assert_eq!((replayed.acks, replayed.naks), (1, 0), "{replayed:?}");
+    assert!(arena.worker.starts().is_empty());
+    assert_eq!(
+        arena.bus.consumer_ledger().record(CONSUMER_NAME),
+        crate::bus::ConsumerRecord {
+            consumed_dropped: counted.consumed_dropped + 1,
+            ..counted
+        }
+    );
+}
+
+/// **A copy of a consumed trigger is counted whether or not its ack
+/// lands (issue 1055).** The count is of copies the dispatcher dropped, as
+/// `duplicate_dropped` is, and it is taken before the ack: an ack that
+/// fails leaves the copy to come back and be counted again, as a dropped
+/// copy is.
+#[tokio::test]
+async fn a_copy_of_a_consumed_trigger_is_counted_though_its_ack_fails() {
+    let (arena, _server) = arena().await;
+    arena
+        .consumed("inv-consumed", ConsumedWhy::FailedForGood)
+        .await;
+    let counted = arena.bus.consumer_ledger().record(CONSUMER_NAME);
+
+    let copy = arena.deliver(2, true).await;
+
+    assert_eq!((copy.acks, copy.naks), (0, 0), "the ack is lost: {copy:?}");
+    assert_eq!(
+        arena
+            .bus
+            .consumer_ledger()
+            .record(CONSUMER_NAME)
+            .consumed_dropped,
+        counted.consumed_dropped + 1
     );
 }
 

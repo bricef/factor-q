@@ -85,6 +85,16 @@ fn kept(arena: &Arena) -> u64 {
         .started_not_dead_lettered
 }
 
+/// How many exhausted triggers the watch kept out of the dead letters
+/// because their claim was consumed (issue 1055).
+fn kept_as_consumed(arena: &Arena) -> u64 {
+    arena
+        .bus
+        .consumer_ledger()
+        .record(WATCH_CONSUMER)
+        .consumed_not_dead_lettered
+}
+
 /// Deliveries 1 to `n` fail transiently before any start, and are NAKed.
 async fn fail(arena: &Arena, n: u32) {
     for delivered in 1..=n {
@@ -1250,13 +1260,15 @@ async fn a_run_read_in_the_wal_is_a_start_when_the_second_claim_read_fails() {
 /// The trigger was dealt with, its claim consumed, and the answer to its
 /// delivery never reached the broker, so its deliveries ran out on the
 /// broker's side. The watch reads the consumed claim and writes no
-/// `trigger_exhausted`: the trigger already has its record.
+/// `trigger_exhausted`: the trigger already has its record. It counts the
+/// trigger as kept out of the dead letters as consumed, not as one whose
+/// run started.
 #[tokio::test]
 async fn a_consumed_trigger_is_not_dead_lettered() {
     use crate::control_plane::store::{ClaimState, ConsumedWhy};
     let (arena, _server) = arena().await;
     publish(&arena).await;
-    consume(&arena, "inv-consumed").await;
+    consume_as(&arena, "inv-consumed", ConsumedWhy::FailedForGood).await;
     let advisory = exhaust(&arena).await;
 
     let outcome = watch(&arena)
@@ -1274,15 +1286,99 @@ async fn a_consumed_trigger_is_not_dead_lettered() {
         0,
         "not counted as a trigger whose run started"
     );
+    assert_eq!(
+        kept_as_consumed(&arena),
+        1,
+        "counted as kept out as consumed"
+    );
     let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
     assert_eq!(
         row.unwrap().map(|row| (row.state, row.invocation_id)),
         Some((
             ClaimState::Consumed {
-                why: ConsumedWhy::DeadLettered
+                why: ConsumedWhy::FailedForGood
             },
             Some("inv-consumed".to_string())
         )),
+        "the claim is left as it was"
+    );
+}
+
+/// **A consumed claim that says the trigger was dead-lettered is answered
+/// as a dead letter already written, and counted in neither count (issue
+/// 1055).** The usual consumed trigger to reach the watch: its last
+/// delivery failed, the dispatcher published its dead letter and consumed
+/// its claim as dead-lettered, and the ack was lost. The watch asks the
+/// records first, and the claim says the trigger was dead-lettered: one is
+/// already written, so none is due, and the watch withheld none, so it is
+/// counted neither as kept out because its run started nor as kept out as
+/// consumed. The change that writes the state relies on this answer.
+#[tokio::test]
+async fn a_claim_consumed_as_dead_lettered_is_answered_as_already_surfaced_and_not_counted() {
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    fail(&arena, 4).await;
+    arena.worker.queue(Run::FailsTransiently);
+    let last = arena.deliver(5, false).await;
+    assert_eq!((last.acks, last.naks), (1, 0), "{last:?}");
+    assert!(
+        dead_letter(&arena).await.is_some(),
+        "the dispatcher's own dead letter"
+    );
+    // What the change that writes the state will leave: consumed as
+    // dead-lettered.
+    consume(&arena, "inv-consumed").await;
+    let advisory = exhaust(&arena).await;
+
+    let outcome = watch(&arena)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::AlreadySurfaced);
+    assert_eq!(
+        (kept(&arena), kept_as_consumed(&arena)),
+        (0, 0),
+        "answered as already written, so counted in neither"
+    );
+}
+
+/// **Past the watch's limit, a claim consumed as dead-lettered whose run
+/// cannot be looked up is answered as already surfaced too (issue 1055).**
+/// The claim's word cannot be checked, but a dead letter is written either
+/// way, the dispatcher's own, so none is due and none was withheld: it is
+/// counted in neither count, and its claim is left as it is. Within the
+/// limit it is held, as any consumed claim that cannot be checked is.
+#[tokio::test]
+async fn past_the_limit_an_unverified_claim_consumed_as_dead_lettered_is_already_surfaced() {
+    use crate::control_plane::store::{ClaimState, ConsumedWhy};
+    let (arena, _server) = arena().await;
+    publish(&arena).await;
+    consume(&arena, "inv-consumed").await;
+    let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
+    arena
+        .worker
+        .fail_wal_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let outcome = watch(&arena)
+        .with_held_verdict_limit(PAST)
+        .handle_advisory(&advisory, LOOKED)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, AdvisoryOutcome::AlreadySurfaced);
+    assert!(
+        dead_letter(&arena).await.is_none(),
+        "the watch writes none of its own"
+    );
+    assert_eq!((kept(&arena), kept_as_consumed(&arena)), (0, 0));
+    let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
+    assert_eq!(
+        row.unwrap().map(|row| row.state),
+        Some(ClaimState::Consumed {
+            why: ConsumedWhy::DeadLettered
+        }),
         "the claim is left as it was"
     );
 }
@@ -1317,6 +1413,7 @@ async fn a_consumed_trigger_whose_run_has_a_start_on_record_is_a_start() {
         "a trigger whose run started must not be dead-lettered"
     );
     assert_eq!(kept(&arena), 1, "counted as a trigger whose run started");
+    assert_eq!(kept_as_consumed(&arena), 0, "and not as consumed");
     let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
     assert_eq!(
         row.unwrap().map(|row| (row.state, row.invocation_id)),
@@ -1352,6 +1449,11 @@ async fn a_consumed_trigger_whose_run_cannot_be_looked_up_is_held() {
         "held: {outcome:?}"
     );
     assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(
+        (kept(&arena), kept_as_consumed(&arena)),
+        (0, 0),
+        "a held verdict is not counted"
+    );
     let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
     assert_eq!(
         row.unwrap().map(|row| row.state),
@@ -1425,7 +1527,7 @@ async fn a_claim_consumed_between_the_watchs_reads_is_read_as_consumed() {
     assert!(
         arena
             .claims
-            .consume_trigger_claim(key, "inv-between", &ConsumedWhy::DeadLettered)
+            .consume_trigger_claim(key, "inv-between", &ConsumedWhy::FailedForGood)
             .await
             .unwrap()
     );
@@ -1434,6 +1536,7 @@ async fn a_claim_consumed_between_the_watchs_reads_is_read_as_consumed() {
 
     assert_eq!(outcome, AdvisoryOutcome::Consumed);
     assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(kept_as_consumed(&arena), 1);
 }
 
 /// **Past the watch's limit, a consumed claim whose run cannot be looked
@@ -1447,7 +1550,7 @@ async fn past_the_limit_a_consumed_trigger_whose_run_cannot_be_looked_up_is_not_
     use crate::control_plane::store::{ClaimState, ConsumedWhy};
     let (arena, _server) = arena().await;
     publish(&arena).await;
-    consume(&arena, "inv-consumed").await;
+    consume_as(&arena, "inv-consumed", ConsumedWhy::FailedForGood).await;
     let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
     arena
         .worker
@@ -1465,14 +1568,84 @@ async fn past_the_limit_a_consumed_trigger_whose_run_cannot_be_looked_up_is_not_
         dead_letter(&arena).await.is_none(),
         "a consumed trigger must not be dead-lettered, checked or not"
     );
+    assert_eq!(
+        (kept(&arena), kept_as_consumed(&arena)),
+        (0, 1),
+        "counted as kept out as consumed, unchecked as it is"
+    );
     let row = arena.claims.trigger_claim(consumed_key(&arena)).await;
     assert_eq!(
         row.unwrap().map(|row| row.state),
         Some(ClaimState::Consumed {
-            why: ConsumedWhy::DeadLettered
+            why: ConsumedWhy::FailedForGood
         }),
         "the claim is left as it was"
     );
+}
+
+/// Every reason a claim can be consumed for but `dead_lettered`, with one a
+/// newer build may write that this build does not know.
+fn every_reason_but_dead_lettered() -> Vec<crate::control_plane::store::ConsumedWhy> {
+    use crate::control_plane::store::ConsumedWhy;
+    vec![
+        ConsumedWhy::RefusedSubject,
+        ConsumedWhy::InvalidAgentId,
+        ConsumedWhy::UnknownAgent,
+        ConsumedWhy::InvalidPayload,
+        ConsumedWhy::RequeuedFromHold,
+        ConsumedWhy::AgentRemoved,
+        ConsumedWhy::FailedForGood,
+        ConsumedWhy::HaltedInSetup,
+        ConsumedWhy::ReturnedUnstarted,
+        ConsumedWhy::Other("a_reason_from_a_newer_build".to_string()),
+    ]
+}
+
+/// **A claim consumed for any reason but `dead_lettered` is answered as
+/// consumed and counted once, checked or, past the limit, not (issue
+/// 1055).** Only a claim consumed as `dead_lettered` records a dead letter
+/// already written, the dispatcher's own. For every other reason, one a
+/// newer build writes included, the watch withholds the dead letter: it
+/// writes none, answers consumed (or, with the run's records unread past
+/// its limit, consumed unchecked), and counts the trigger as kept out as
+/// consumed, once.
+#[tokio::test]
+async fn a_claim_consumed_for_any_other_reason_is_answered_as_consumed_and_counted_once() {
+    for why in every_reason_but_dead_lettered() {
+        for checked in [true, false] {
+            let (arena, _server) = arena().await;
+            publish(&arena).await;
+            consume_as(&arena, "inv-consumed", why.clone()).await;
+            let (watcher, advisory, answer) = if checked {
+                (
+                    watch(&arena),
+                    exhaust(&arena).await,
+                    AdvisoryOutcome::Consumed,
+                )
+            } else {
+                arena
+                    .worker
+                    .fail_wal_reads
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                (
+                    watch(&arena).with_held_verdict_limit(PAST),
+                    stamped_at_the_streams_creation(&arena, &exhaust(&arena).await),
+                    AdvisoryOutcome::ConsumedUnchecked,
+                )
+            };
+
+            let outcome = watcher.handle_advisory(&advisory, LOOKED).await.unwrap();
+
+            let case = format!("consumed as {why}, checked: {checked}");
+            assert_eq!(outcome, answer, "{case}");
+            assert!(dead_letter(&arena).await.is_none(), "{case}");
+            assert_eq!(
+                (kept(&arena), kept_as_consumed(&arena)),
+                (0, 1),
+                "{case}: counted once, as kept out as consumed"
+            );
+        }
+    }
 }
 
 /// **Past the watch's limit, a consumed claim whose run's ownership row
@@ -1483,7 +1656,8 @@ async fn past_the_limit_a_consumed_trigger_whose_ownership_row_cannot_be_read_is
 {
     let (arena, _server) = arena().await;
     publish(&arena).await;
-    consume(&arena, "inv-consumed").await;
+    let why = crate::control_plane::store::ConsumedWhy::FailedForGood;
+    consume_as(&arena, "inv-consumed", why).await;
     let advisory = stamped_at_the_streams_creation(&arena, &exhaust(&arena).await);
     exec(
         &arena.claim_db,
@@ -1499,6 +1673,7 @@ async fn past_the_limit_a_consumed_trigger_whose_ownership_row_cannot_be_read_is
 
     assert_eq!(outcome, AdvisoryOutcome::ConsumedUnchecked);
     assert!(dead_letter(&arena).await.is_none());
+    assert_eq!(kept_as_consumed(&arena), 1);
 }
 
 /// **A consumed claim whose run is in the WAL is a start though its
@@ -1818,7 +1993,20 @@ fn consumed_key(arena: &Arena) -> crate::control_plane::store::TriggerKey<'stati
 /// The arena's trigger claimed by this daemon under `invocation_id` and
 /// consumed as dead-lettered, as the dispatcher's consuming answers will.
 async fn consume(arena: &Arena, invocation_id: &str) {
-    use crate::control_plane::store::ConsumedWhy;
+    consume_as(
+        arena,
+        invocation_id,
+        crate::control_plane::store::ConsumedWhy::DeadLettered,
+    )
+    .await;
+}
+
+/// The arena's trigger claimed for `invocation_id` and consumed as `why`.
+async fn consume_as(
+    arena: &Arena,
+    invocation_id: &str,
+    why: crate::control_plane::store::ConsumedWhy,
+) {
     let key = consumed_key(arena);
     arena
         .claims
@@ -1828,7 +2016,7 @@ async fn consume(arena: &Arena, invocation_id: &str) {
     assert!(
         arena
             .claims
-            .consume_trigger_claim(key, invocation_id, &ConsumedWhy::DeadLettered)
+            .consume_trigger_claim(key, invocation_id, &why)
             .await
             .unwrap()
     );

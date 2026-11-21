@@ -2,8 +2,9 @@
 //! cannot record or acknowledge a run's durable start, cannot publish a
 //! trigger's dead letter, or resumes a deferred run that has already ended,
 //! read off the log of a dispatcher running its own consume loop; and what
-//! the dead-letter watch's check, and the watch itself past its limit, log
-//! about an exhausted trigger's consumed claim.
+//! the dead-letter watch's check, and the watch itself on a claim consumed
+//! as dead-lettered or past its limit, log about an exhausted trigger's
+//! consumed claim.
 //!
 //! **Why a binary of its own (#1031).** Whether a callsite is of interest
 //! to a subscriber is cached once for the whole process, not per thread.
@@ -60,7 +61,9 @@ use fq_runtime::control_plane::dispatcher::{
     CONSUMER_NAME, ClaimMark, ConsumedClaim, Exhausted, ExhaustionCheck, TriggerClaims,
 };
 use fq_runtime::control_plane::store::{ClaimState, ConsumedWhy, TriggerKey};
-use fq_runtime::control_plane::{AdvisoryWatch, ControlPlaneStore, TriggerClaim};
+use fq_runtime::control_plane::{
+    AdvisoryWatch, AdvisoryWatchError, ControlPlaneStore, TriggerClaim,
+};
 use fq_runtime::llm::LlmClient;
 use fq_runtime::llm::fixture::FixtureClient;
 use fq_runtime::trigger::{PublishedTrigger, Trigger};
@@ -2034,20 +2037,190 @@ async fn the_last_look_leaves_a_claim_consumed_under_another_run_as_it_is() {
 const CONSUMED_UNVERIFIED: &str = "not dead-lettering a trigger whose deliveries ran out: its \
      claim says it was consumed without a run, and the records that could say otherwise still \
      cannot be read";
+/// The start of the dead-letter watch's line for an exhausted trigger whose
+/// claim records that the dispatcher published its dead letter.
+const CONSUMED_AS_DEAD_LETTERED: &str = "not dead-lettering a trigger whose deliveries ran out: \
+     its claim records that the dispatcher published its dead letter";
 
 /// **Past its limit, the dead-letter watch's word on a consumed claim it
 /// could not check is one `error` line naming the run** (issue 1055). No
 /// dead letter is written, since none is due either way, so this line is
 /// the only record that a claim went unverified, and an operator reading
 /// the journal at `error` has to find it. The real watch runs on the
-/// daemon's advisory stream. The claim says consumed as dead-lettered and
-/// the stub cannot say what its WAL holds. The advisory is the broker's
-/// form with no timestamp: its age cannot be told, so the watch holds it
-/// only for its first looks (about three seconds, under the NAK delays)
-/// and its third delivery is past the limit.
+/// daemon's advisory stream. The claim says consumed as failed for good
+/// and the stub cannot say what its WAL holds. The advisory is the
+/// broker's form with no timestamp: its age cannot be told, so the watch
+/// holds it only for its first looks (about three seconds, under the NAK
+/// delays) and its third delivery is past the limit.
 #[tokio::test(flavor = "multi_thread")]
 async fn past_the_watchs_limit_an_unverified_consumed_claim_is_one_error_line_naming_the_run() {
-    let daemon = Daemon::new("consumed-unverified", Script::Nothing).await;
+    let Watching {
+        daemon,
+        run,
+        stream_seq,
+        stop,
+        watching,
+    } = past_the_watchs_limit("consumed-unverified", ConsumedWhy::FailedForGood).await;
+    let named = |line: &Line| {
+        line.message.starts_with(CONSUMED_UNVERIFIED)
+            && line.field("consumed_invocation_id") == Some(run.as_str())
+    };
+    daemon.log.wait_for("for the unverified claim", named).await;
+    stop_watching(stop, watching).await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
+    assert_eq!(
+        line.field("subject"),
+        Some(daemon.subject.as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("stream_seq"),
+        Some(stream_seq.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("failed_for_good"),
+        "{line:#?}"
+    );
+    assert!(
+        line.field("reason")
+            .is_some_and(|reason| reason.contains("could not be read")),
+        "{line:#?}"
+    );
+}
+
+/// **A consumed claim that says the trigger was dead-lettered is one `info`
+/// line naming the run** (issue 1055). The dispatcher publishes that dead
+/// letter as it consumes the claim, so the watch writes none and withholds
+/// none. Its line says what it knows, that the claim records the dead
+/// letter published, and names the run the claim names and the reason;
+/// nothing is logged at `warn` or `error` for the run. The real watch runs
+/// on the daemon's advisory stream, and the stub's WAL holds nothing for
+/// the run, so the claim is checked on the advisory's first delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_consumed_as_dead_lettered_is_one_info_line_naming_the_run() {
+    let Watching {
+        daemon,
+        run,
+        stream_seq,
+        stop,
+        watching,
+    } = watching_a_consumed_claim(
+        "consumed-dead-lettered-checked",
+        ConsumedWhy::DeadLettered,
+        Wal::HoldsNothing,
+    )
+    .await;
+    one_line_for_a_claim_consumed_as_dead_lettered(&daemon, &run, stream_seq, stop, watching).await;
+}
+
+/// **Past its limit, a consumed claim that says the trigger was
+/// dead-lettered is the same `info` line, unverified as it is** (issue
+/// 1055). A dead letter is written either way, the dispatcher's own, so
+/// the watch has nothing to raise: the line above, and nothing at `error`.
+/// The same stub and advisory as the error line's.
+#[tokio::test(flavor = "multi_thread")]
+async fn past_the_watchs_limit_a_claim_consumed_as_dead_lettered_is_one_info_line_naming_the_run() {
+    let Watching {
+        daemon,
+        run,
+        stream_seq,
+        stop,
+        watching,
+    } = past_the_watchs_limit("consumed-dead-lettered", ConsumedWhy::DeadLettered).await;
+    one_line_for_a_claim_consumed_as_dead_lettered(&daemon, &run, stream_seq, stop, watching).await;
+}
+
+/// The watch's one line for a claim consumed as dead-lettered, waited for
+/// and read: at `info`, naming the subject, the sequence, the run and the
+/// reason, and no line for the run at `warn` or `error`.
+async fn one_line_for_a_claim_consumed_as_dead_lettered(
+    daemon: &Daemon,
+    run: &str,
+    stream_seq: u64,
+    stop: oneshot::Sender<()>,
+    watching: tokio::task::JoinHandle<Result<(), AdvisoryWatchError>>,
+) {
+    let named = |line: &Line| {
+        line.message.starts_with(CONSUMED_AS_DEAD_LETTERED)
+            && line.field("consumed_invocation_id") == Some(run)
+    };
+    daemon
+        .log
+        .wait_for("for the claim consumed as dead-lettered", named)
+        .await;
+    stop_watching(stop, watching).await;
+
+    let lines = daemon.log.lines(named);
+    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
+    let line = &lines[0];
+    assert_eq!(line.level, tracing::Level::INFO, "{line:#?}");
+    assert_eq!(
+        line.field("subject"),
+        Some(daemon.subject.as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("stream_seq"),
+        Some(stream_seq.to_string().as_str()),
+        "{line:#?}"
+    );
+    assert_eq!(
+        line.field("consumed_why"),
+        Some("dead_lettered"),
+        "{line:#?}"
+    );
+    let raised = daemon.log.lines(|line: &Line| {
+        matches!(line.level, tracing::Level::WARN | tracing::Level::ERROR)
+            && line.field("consumed_invocation_id") == Some(run)
+    });
+    assert!(raised.is_empty(), "nothing at warn or error: {raised:#?}");
+}
+
+/// What [`watching_a_consumed_claim`] sets running.
+struct Watching {
+    daemon: Daemon,
+    run: String,
+    stream_seq: u64,
+    stop: oneshot::Sender<()>,
+    watching: tokio::task::JoinHandle<Result<(), AdvisoryWatchError>>,
+}
+
+/// What the stub answers when the watch reads its WAL for the run.
+enum Wal {
+    /// It cannot say what its WAL holds.
+    CannotBeRead,
+    /// Its WAL holds nothing for the run.
+    HoldsNothing,
+}
+
+/// [`watching_a_consumed_claim`] with a WAL that cannot be read: past the
+/// watch's limit by the advisory's third delivery.
+async fn past_the_watchs_limit(label: &str, why: ConsumedWhy) -> Watching {
+    watching_a_consumed_claim(label, why, Wal::CannotBeRead).await
+}
+
+/// A daemon whose trigger is claimed by an exited process and consumed as
+/// `why`, its stub answering reads of its WAL as `wal` says, and the real
+/// dead-letter watch running on its advisory stream with the broker's
+/// advisory for the trigger, which has no timestamp. With a WAL that
+/// cannot be read, the watch holds its verdict for its first looks and is
+/// past its limit by the third delivery.
+async fn watching_a_consumed_claim(label: &str, why: ConsumedWhy, wal: Wal) -> Watching {
+    let daemon = Daemon::new(label, Script::Nothing).await;
+    if let Wal::HoldsNothing = wal {
+        daemon
+            .worker
+            .wal_answers
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(Ok(None), 16));
+    }
     let published = daemon.publish().await;
     let run = Uuid::now_v7().to_string();
     let key = daemon.key(published.stream_seq);
@@ -2059,7 +2232,7 @@ async fn past_the_watchs_limit_an_unverified_consumed_claim_is_one_error_line_na
     assert!(
         daemon
             .claims
-            .consume_trigger_claim(key, &run, &ConsumedWhy::DeadLettered)
+            .consume_trigger_claim(key, &run, &why)
             .await
             .unwrap()
     );
@@ -2087,44 +2260,25 @@ async fn past_the_watchs_limit_an_unverified_consumed_claim_is_one_error_line_na
         .expect("publish the advisory")
         .await
         .expect("the advisory stream holds it");
+    Watching {
+        daemon,
+        run,
+        stream_seq: published.stream_seq,
+        stop,
+        watching,
+    }
+}
 
-    let unverified = |line: &Line| {
-        line.message.starts_with(CONSUMED_UNVERIFIED)
-            && line.field("consumed_invocation_id") == Some(run.as_str())
-    };
-    daemon
-        .log
-        .wait_for("for the unverified claim", unverified)
-        .await;
+/// Stop the watch [`watching_a_consumed_claim`] set running and wait for
+/// it, which must have run without error.
+async fn stop_watching(
+    stop: oneshot::Sender<()>,
+    watching: tokio::task::JoinHandle<Result<(), AdvisoryWatchError>>,
+) {
     stop.send(()).expect("the watch is running");
     tokio::time::timeout(PATIENCE, watching)
         .await
         .expect("the watch stops")
         .expect("the watch task joins")
         .expect("the watch ran without error");
-
-    let lines = daemon.log.lines(unverified);
-    assert_eq!(lines.len(), 1, "it is logged once: {lines:#?}");
-    let line = &lines[0];
-    assert_eq!(line.level, tracing::Level::ERROR, "{line:#?}");
-    assert_eq!(
-        line.field("subject"),
-        Some(daemon.subject.as_str()),
-        "{line:#?}"
-    );
-    assert_eq!(
-        line.field("stream_seq"),
-        Some(published.stream_seq.to_string().as_str()),
-        "{line:#?}"
-    );
-    assert_eq!(
-        line.field("consumed_why"),
-        Some("dead_lettered"),
-        "{line:#?}"
-    );
-    assert!(
-        line.field("reason")
-            .is_some_and(|reason| reason.contains("could not be read")),
-        "{line:#?}"
-    );
 }

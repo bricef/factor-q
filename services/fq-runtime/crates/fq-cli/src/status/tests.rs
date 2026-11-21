@@ -50,6 +50,8 @@ fn report() -> StatusReport {
                 held_duplicate_dropped: 0,
                 abandoned_claim_retaken: 0,
                 started_not_dead_lettered: 0,
+                consumed_dropped: 0,
+                consumed_not_dead_lettered: 0,
             }],
         }],
         registry: StatusRegistry {
@@ -276,6 +278,8 @@ fn active(num_pending: u64) -> StreamHealth {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     }
 }
@@ -405,6 +409,8 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -444,6 +450,8 @@ fn a_consumer_that_dropped_duplicate_deliveries_says_how_many() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -482,6 +490,8 @@ fn a_consumer_that_dropped_held_duplicates_says_how_many_apart() {
             held_duplicate_dropped: 2,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -520,6 +530,8 @@ fn a_consumer_that_took_abandoned_claims_again_says_how_many_apart() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 3,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -557,6 +569,8 @@ fn a_watch_that_kept_started_triggers_out_of_the_dead_letters_says_how_many() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 2,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -564,6 +578,63 @@ fn a_watch_that_kept_started_triggers_out_of_the_dead_letters_says_how_many() {
             "    exhausted but started: 2 since this daemon started (deliveries ran out, but the \
              run has a start on record; not dead-lettered)\n"
         ),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("consumed"), "got:\n{out}");
+}
+
+/// The two counts of triggers consumed without a run (issue 1055) are each
+/// a line of their own, named apart from the runs that started: copies the
+/// dispatcher dropped, and exhaustions the watch kept out of the dead
+/// letters. Neither is folded into the counts of runs that started.
+#[test]
+fn consumed_triggers_are_counted_apart_from_runs_that_started() {
+    let active =
+        |name: &str, consumed_dropped, consumed_not_dead_lettered| ConsumerHealth::Active {
+            name: name.to_string(),
+            delivered: 3,
+            ack_pending: 0,
+            num_pending: 0,
+            num_redelivered: 0,
+            redeliveries: 0,
+            stuck: false,
+            malformed_acked: 0,
+            duplicate_dropped: 0,
+            held_duplicate_dropped: 0,
+            abandoned_claim_retaken: 0,
+            started_not_dead_lettered: 0,
+            consumed_dropped,
+            consumed_not_dead_lettered,
+        };
+    let out = render_stream_health_human(&StreamHealth::Available {
+        stream: "fq-triggers".to_string(),
+        messages: 3,
+        bytes: 512,
+        first_seq: 1,
+        last_seq: 3,
+        consumers: vec![
+            active("fq-dispatcher", 4, 0),
+            active("fq-advisory-watch", 0, 2),
+        ],
+    });
+    assert!(
+        out.contains(
+            "  consumer fq-dispatcher: ✓ caught up (delivered 3, pending 0)\n    consumed copies \
+             dropped: 4 since this daemon started (dealt with on an earlier delivery and no run \
+             started; acked, not handled again)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "  consumer fq-advisory-watch: ✓ caught up (delivered 3, pending 0)\n    exhausted but \
+             consumed: 2 since this daemon started (deliveries ran out, but its claim records \
+             that an earlier delivery dealt with it and no run started; not dead-lettered)\n"
+        ),
+        "got:\n{out}"
+    );
+    assert!(
+        !out.contains("duplicate dropped") && !out.contains("exhausted but started"),
         "got:\n{out}"
     );
 }
@@ -592,6 +663,8 @@ fn a_redelivering_dead_letter_watch_is_described_as_holding_or_retrying() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(
@@ -660,6 +733,8 @@ fn outstanding_redeliveries_are_rendered_with_their_bound() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     });
     assert!(out.contains("(delivered 5, pending 1)"), "got:\n{out}");

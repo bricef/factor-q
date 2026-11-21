@@ -115,6 +115,8 @@ fn a_filtered_consumer_far_behind_the_head_with_nothing_pending_is_caught_up() {
             held_duplicate_dropped: 0,
             abandoned_claim_retaken: 0,
             started_not_dead_lettered: 0,
+            consumed_dropped: 0,
+            consumed_not_dead_lettered: 0,
         }],
     }];
     let html = health(
@@ -174,6 +176,48 @@ fn health_shows_a_halted_consumer_and_the_malformed_count() {
     );
     assert!(html.contains("seq 60745 unacked"), "got: {html}");
     assert!(html.contains("malformed acked 2"), "got: {html}");
+}
+
+/// The two counts of triggers consumed without a run show beside the
+/// consumer that counted them, named apart, and only when not zero: copies
+/// the dispatcher dropped, and exhaustions the watch kept out of the dead
+/// letters. Neither is a fault, so neither is a warning.
+#[test]
+fn health_shows_the_consumed_counts_beside_their_consumer() {
+    use fq_ops::health::{ConsumerHealth, StreamHealth};
+
+    let mut status = crate::fixtures::status_report();
+    let Some(StreamHealth::Available { consumers, .. }) = status.streams.first_mut() else {
+        panic!("the fixture's first stream is available");
+    };
+    let Some(ConsumerHealth::Active {
+        consumed_dropped,
+        consumed_not_dead_lettered,
+        ..
+    }) = consumers.first_mut()
+    else {
+        panic!("the fixture's first consumer is active");
+    };
+    *consumed_dropped = 4;
+    *consumed_not_dead_lettered = 2;
+    let html = health(
+        &status,
+        &crate::fixtures::doctor_report(),
+        Some(&crate::fixtures::signal_counts()),
+    );
+    assert!(
+        html.contains(
+            r#" / <span class="muted">consumed copies dropped 4</span> / <span class="muted">exhausted but consumed 2</span></td>"#
+        ),
+        "got: {html}"
+    );
+
+    let quiet = health(
+        &crate::fixtures::status_report(),
+        &crate::fixtures::doctor_report(),
+        Some(&crate::fixtures::signal_counts()),
+    );
+    assert!(!quiet.contains("consumed"), "got: {quiet}");
 }
 
 #[test]

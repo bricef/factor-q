@@ -128,6 +128,8 @@ fn the_report_roundtrips_through_its_declared_shape() {
                     held_duplicate_dropped: 0,
                     abandoned_claim_retaken: 0,
                     started_not_dead_lettered: 0,
+                    consumed_dropped: 0,
+                    consumed_not_dead_lettered: 0,
                 }],
             },
         ],

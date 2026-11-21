@@ -562,9 +562,10 @@ async fn an_expected_consumer_that_does_not_exist_is_reported_missing_by_name() 
 
 /// The probe carries the dispatcher's claim counts from the consumer
 /// ledger into the report, each into its own field: both duplicate counts
-/// (#968) and the count of its own abandoned claims taken again (#967).
-/// Every golden reports them at zero, so this is what would notice two
-/// swapped, or one dropped on the way.
+/// (#968), the count of its own abandoned claims taken again (#967), the
+/// watch's exhausted but started, and the two counts of triggers consumed
+/// without a run (issue 1055). Every golden reports them at zero, so this
+/// is what would notice two swapped, or one dropped on the way.
 #[tokio::test]
 async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     let server = crate::test_support::nats::test_nats();
@@ -589,6 +590,12 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
     for _ in 0..4 {
         ledger.note_started_not_dead_lettered(&durable);
     }
+    for _ in 0..5 {
+        ledger.note_consumed_drop(&durable);
+    }
+    for _ in 0..6 {
+        ledger.note_consumed_not_dead_lettered(&durable);
+    }
 
     let health = probe_stream(
         &bus.jetstream(),
@@ -606,6 +613,8 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
         held_duplicate_dropped,
         abandoned_claim_retaken,
         started_not_dead_lettered,
+        consumed_dropped,
+        consumed_not_dead_lettered,
         ..
     } = &consumers[0]
     else {
@@ -616,10 +625,13 @@ async fn the_probe_reports_each_duplicate_count_in_its_own_field() {
             *duplicate_dropped,
             *held_duplicate_dropped,
             *abandoned_claim_retaken,
-            *started_not_dead_lettered
+            *started_not_dead_lettered,
+            *consumed_dropped,
+            *consumed_not_dead_lettered
         ),
-        (1, 2, 3, 4),
-        "one copy dropped after its run started, two before a start was recorded, and three \
-         abandoned claims taken again"
+        (1, 2, 3, 4, 5, 6),
+        "one copy dropped after its run started, two before a start was recorded, three \
+         abandoned claims taken again, four exhausted but started, five consumed copies dropped \
+         and six exhausted but consumed"
     );
 }
