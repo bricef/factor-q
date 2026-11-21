@@ -376,13 +376,21 @@ fq invocation show <invocation-id>
 ```
 
 `fq invocation list` reads the control plane's ownership rows, and a run
-started from a trigger gets its row when it ends, or when something
-else happens to it first: startup recovery restores it, it is reported
-ambiguous, or you drop it. **A run still running is therefore not in the
-list**, `--status=in_flight` included. `fq doctor`'s current executions
-count it, and `fq invocation show <id>` shows its live execution
-([#721](https://github.com/bricef/factor-q/issues/721) is the open
-question of a row from the run's start). A run that has ended reads
+started from a trigger gets its row at its first WAL write, its durable
+start: `in_flight`, under the daemon's worker id, with the run's own
+start as its `started` time
+([#721](https://github.com/bricef/factor-q/issues/721)). So a run that
+is running is in the list, `--status=in_flight` included, from that
+moment, and its ending moves the row on. A run still in setup, before
+that write, is not, and nor is one whose row that write could not make
+(the daemon logs it at error) or one an earlier build started: such a
+run gets its row when it ends, or when something else happens to it
+first (startup recovery restores it, it is reported ambiguous, or you
+drop it). `fq doctor`'s current executions read the worker's own
+record of its runs, which holds a run from that same first WAL write
+until it ends, so they count a run whose row was never written as well;
+neither sees a run still in setup. `fq invocation show <id>` shows a
+running run's live execution. A run that has ended reads
 `completed` or `failed` from the moment its ending is folded, whether or
 not its archive has reached the control plane yet, and the list's
 `archive` column says which: `pending` until it has, `held` while the
@@ -2166,7 +2174,8 @@ payload is this dead letter's, and check that run with
 `fq invocation show <id>`. `fq doctor`'s `Current executions` only
 counts the runs in flight in this daemon and names the stuck ones, so
 it can say whether any run is going, not which; `fq invocation list`
-reads only ownership rows and so misses a run still going. Without
+reads only ownership rows, which carry no trigger payload, and misses a
+run whose row was never written. Without
 `--trigger-seq`, `fq dead-letters requeue` takes the agent's newest
 dead letter, and a refusal says which it took: its sequence and event
 id, and that it was the newest.

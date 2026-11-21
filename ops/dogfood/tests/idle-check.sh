@@ -2,9 +2,10 @@
 # The "is the daemon idle?" question the unattended scripts ask before
 # they stop or prune anything must be put to `fq doctor --json`'s live
 # execution count, never to `fq invocation list --status in_flight`: the
-# ownership table that listing reads is not written on dispatch, so it
-# answered "idle" while trigger-dispatched agents were mid-tool and the
-# deploy's drain killed them (#721). This pins the surface each script
+# ownership table that listing reads had no row for a running run before
+# #721, so it answered "idle" while trigger-dispatched agents were
+# mid-tool and the deploy's drain killed them, and it still misses a run
+# whose row was never written. This pins the surface each script
 # asks, and the jq that reads the answer — with the daemon absent, an
 # unparseable answer must read as "unknown", never as 0.
 #

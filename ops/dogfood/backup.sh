@@ -51,7 +51,8 @@ flock -n 9 || { [ "$AUTO" = 1 ] && { say "a deploy or backup is running — skip
 
 # The same question deploy.sh asks, of the same surface: `fq doctor`'s
 # live execution count, never `invocation list --status in_flight`,
-# which is blind to trigger-dispatched runs (#721).
+# which misses a run whose ownership row was never written (deploy.sh
+# says when, #721).
 if [ "$AUTO" = 1 ] && [ -n "$(docker compose ps -q --status running fqd 2>/dev/null)" ]; then
     inflight="$(if out="$(docker compose exec -T fqd fq doctor --json 2>/dev/null)"; then printf '%s' "$out" | jq -rn '(try input catch {}) | .executions.in_flight // "unknown"' 2>/dev/null || echo unknown; else echo unknown; fi)"
     [ "$inflight" = "0" ] || { say "${inflight} invocation(s) in flight (or the daemon cannot be asked) — deferring the backup"; exit 0; }

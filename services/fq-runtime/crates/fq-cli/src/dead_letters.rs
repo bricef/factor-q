@@ -127,8 +127,8 @@ fn names_no_trigger(d: &fq_ops::dead_letter::DeadLetter) -> bool {
 ///
 /// A dead letter that names no run (its claim, or its mark, could not be
 /// read) points at the agent's `triggered` events, which name each run and
-/// carry its payload: `fq invocation list` reads only ownership rows, so
-/// it misses a run still going in this daemon.
+/// carry its payload: `fq invocation list` reads only ownership rows,
+/// which carry none, and misses a run whose row was never written.
 ///
 /// A dead letter the watch wrote naming no trigger (issues 1054, 1066) gets
 /// a line saying why: listed under the system sentinel with no payload, its
@@ -136,8 +136,9 @@ fn names_no_trigger(d: &fq_ops::dead_letter::DeadLetter) -> bool {
 /// position on the stream as it is now. One that is also unchecked cannot
 /// be requeued, so no requeue checks its run: its line says how to tell
 /// whether the run started from what `fq invocation show` prints, the
-/// `Live execution:` block included, since a run still going in this daemon
-/// has no coordination row, and that a copy can still start the run after
+/// `Live execution:` block included, since a run still going has no
+/// coordination row when its start could not write one or an earlier
+/// build started it, and that a copy can still start the run after
 /// you look. With no run named either, its `seq=` is still the handle
 /// `fq doctor`'s stranded trigger claims are listed by, but a claim the
 /// report does not list shows nothing, and nothing on such a dead letter
