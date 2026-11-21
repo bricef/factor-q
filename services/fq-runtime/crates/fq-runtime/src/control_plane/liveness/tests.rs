@@ -390,6 +390,59 @@ async fn a_failed_publish_does_not_consume_the_crossing() {
     assert_quiet(&mut sub, "a published crossing is not re-reported").await;
 }
 
+/// **A run dropped with no archive to come is settled, and listed**
+/// (issue 1070). Its ownership row reads `failed` with its archive `none`:
+/// that closes the run for the stuck sweep and `fq doctor`'s executions,
+/// as any recorded ending does, and the invocation list reads the row,
+/// its archive `none`.
+#[tokio::test]
+async fn a_run_dropped_with_no_archive_to_come_is_settled_and_listed() {
+    let server = crate::test_support::nats::test_nats();
+    let fixture = Fixture::new(server.url()).await;
+    let dropped = fixture.in_flight(10 * THRESHOLD_MS).await;
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(fixture._dir.path().join("cp.db")),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO coordination_invocation_owner \
+         (invocation_id, worker_id, assigned_at, status, archive_state) \
+         VALUES (?, 'w', 1, 'failed', 'none')",
+    )
+    .bind(&dropped)
+    .execute(&raw)
+    .await
+    .unwrap();
+
+    assert!(
+        super::is_closed_by_control_plane(&fixture.control_plane, &dropped)
+            .await
+            .expect("the row reads"),
+        "a run recorded failed with no archive to come is not settled: the stuck sweep and \
+         `fq doctor` would go on reading its worker row as live"
+    );
+    let views = Views::open(&crate::db::RuntimeDbPaths {
+        worker: fixture._dir.path().join("worker.db"),
+        control_plane: fixture._dir.path().join("cp.db"),
+        projection: fixture._dir.path().join("projection.db"),
+    })
+    .await
+    .expect("open the read views over the fixture's three stores");
+    let listed = views
+        .invocations(None, 10)
+        .await
+        .expect("the invocation list reads the row");
+    let listed = serde_json::to_value(&listed).unwrap();
+    assert_eq!(
+        listed[0]["archive_state"],
+        serde_json::json!("none"),
+        "{listed}"
+    );
+}
+
 /// The classifier itself, without a database. Three verdicts, and the
 /// one that matters: an open call younger than the long-dispatch
 /// threshold outranks a silent WAL row, because a model turn in flight
