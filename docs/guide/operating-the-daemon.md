@@ -400,6 +400,33 @@ ownership row the list included names the run. The JSON still carries
 that as `archived`, so a row can read `"archived": false` beside
 `"archive_state": "archived"`.
 
+The `ended by` column says who ended a run: `run` when it reached its
+own ending, `drop` when your drop did, and `-` while it has not ended.
+A row written before the daemon recorded who ended a run says `-` too,
+and `fq invocation show` reads `ended by: not recorded` for it: the row
+does not know, and says nothing it does not know. `show` gives the time
+as well (`ended by: run at 2026-01-02T03:04:10Z`), and a `termination:`
+line when an operator asked for the run to be terminated: how its
+ending reads beside the request (`dropped`; `already ended when the
+termination was requested`; or `requested while running; it reached its
+own ending first`), then the request's time, who asked and the reason,
+each only where the record has it. The record keeps the first request,
+so this line is the first one's. Who asked and the reason are printed
+on that one line. A newline, an escape sequence or another control
+character in them is written as an escape (`\n`, `\u{1b}`), and so is a
+bidirectional control or an invisible character (a zero-width space, a
+line separator, a tag character). What is printed is cut with `…` at
+200 characters for the reason and 80 for who asked, escapes included.
+The JSON of `list`, `show` and
+`fq workers show`'s owned rows carries the same exact, as `ended_by`
+(`run`, `drop` or null), `ended_at_ms` and a `termination` object
+(`requested_at_ms`, `requested_by`, `reason`), null where there is none.
+`fq workers show` adds `ended by run` or `ended by drop` to each owned
+run that has ended. The dashboard's invocation list has the column too,
+with the reading as the cell's title, and its detail page the same
+`ended by` and `termination` rows as `show`, who asked and the reason
+shown on one line the same way.
+
 The list is ordered by the time each run's row was first written,
 newest first: when the run ended, for a run started from a trigger, or
 the run's start, for one startup recovery restored or whose ending the
@@ -427,8 +454,8 @@ goes on past it. Other reads fail on it: `fq invocation list` with no
 retention sweep once a stale worker owns the row. `fq invocation drop`
 of the run works: it stops the run and marks the worker's row finished,
 and the archive record is then written from the worker's archive, as
-for any run, though the command says that reading the run back failed,
-since `show` fails on the row. The drop records nothing on the ownership row, which keeps reading
+for any run. The command says the drop was recorded and that reading
+it back failed, since `show` fails on the row, and exits 0. The drop records nothing on the ownership row, which keeps reading
 as it did, and only a hand edit of `coordination_invocation_owner`
 clears it ([#1082](https://github.com/bricef/factor-q/issues/1082)).
 Such an edit sets `status` and `archive_state` together, to a pair a row
@@ -496,6 +523,10 @@ token your request came in on) and your `--reason`. A run that had not
 ended reads `failed`, ended by the drop, with its archive `pending`, or
 `none` when no archive of it will come. A run that had already ended
 keeps its ending, `completed` included, and only the request is added.
+One exception: a run that failed in `setup` has no ownership row, so a
+drop of it afterwards is recorded as having ended it, and `show` reads
+`ended by: drop` beside the run's own older `failed`
+([#1121](https://github.com/bricef/factor-q/issues/1121)).
 A second drop changes nothing. The drop writes no archive record: the
 worker's archive brings the run's real final state, so a run dropped as
 it finishes keeps that state, and its record agrees with its row.
@@ -519,9 +550,47 @@ publish failed and you released the row before the sweeper's next
 pass, or the held ending was itself too large for the broker). Released,
 such a row is archived without its ending, so if your drop was folded
 first and the run had failed by itself, the row reads ended by the
-drop. `fq invocation show` and
-`list` do not show the ender or the request yet: they are in the
-ownership table, `coordination_invocation_owner`.
+drop.
+
+`fq invocation drop` succeeds whenever the run exists, one that has
+already ended included, and says what this drop found. It reads its own
+event's time against the ending on the row read back at the drop's
+receipt:
+
+- `dropped`: this drop ended the run;
+- `already ended by an earlier drop`: an earlier drop had;
+- `already ended when the termination was requested`: the run had
+  ended, by itself, at or before this drop's time;
+- `requested while running; it reached its own ending first`: the run
+  ended after this drop was requested, its own mark landing first.
+
+When the request on record is not this drop's, the command says so,
+with that earlier request's time, who asked and why: the record keeps
+the first. While the ending can still be replaced, a drop's until the
+run's archive lands, it says that if the run reached its own ending
+first, that ending stands, and that `fq invocation show` reads the
+final record. Where no archive is expected (`none`), it says that, and
+that the run's own ending stands if it arrives after all. A run whose
+own ending came first and is folded after the receipt reads `dropped`
+there, and its own ending in `show` afterwards. The command reads its
+own event by the id its receipt names, so a run with more events than
+`show` lists still says what the drop found. If the drop cannot be read
+back at all, the command says the drop was recorded, that reading it
+back failed and why, and exits 0: the drop is on the record either
+way.
+`--json` carries the same as `case` (`dropped`,
+`ended_by_an_earlier_drop`, `already_ended` or
+`reached_its_own_ending_first`, null where the row does not say),
+`provisional` (true while the ending can still be replaced) and
+`earlier_request` (the request on record when it is not this one's, null
+otherwise); a drop that could not be read back carries
+`read_back_failed`, with the agent and the case null. The two times come from two clocks if the run and the drop
+are handled by different hosts, and an ending within the clocks'
+difference of the request can then be read the wrong way round; a
+daemon today is one host. A `--live` drop of a run that ends in the
+instant before its halt is armed is no longer refused: the request is
+recorded beside the ending the run reached. `fq invocation show` reads
+the record back, as the invocation list section says.
 
 A step already running when you drop the run is not interrupted. A tool
 call in flight finishes, and its result is recorded; a model call in
