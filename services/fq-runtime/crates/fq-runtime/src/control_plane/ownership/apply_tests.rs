@@ -24,6 +24,10 @@ fn states() -> Vec<Option<RowState>> {
             states.push(Some(RowState::ended(ending, archive)));
         }
     }
+    states.push(Some(RowState::ended(
+        Ending::Failed,
+        ArchiveState::WillNotCome,
+    )));
     states
 }
 
@@ -113,7 +117,7 @@ async fn every_event_from_every_state_answers_and_moves_as_decided() {
             }
         }
     }
-    assert_eq!(cases, 7 * 13);
+    assert_eq!(cases, 8 * 15);
 }
 
 /// **A durable start writes the row its run lacks, and leaves every other
@@ -374,4 +378,56 @@ async fn a_lost_insert_is_decided_again_on_the_row_that_won() {
         *store.written.lock().unwrap(),
         vec![(Some(RowState::IN_FLIGHT), RowState::AMBIGUOUS)]
     );
+}
+
+/// **The pairs a row can hold are the ones the store admits** (issue
+/// 1070). `RowState::is_valid` says which status and archive state go
+/// together, and the store's checks say the same of every row written;
+/// the table moves only to valid pairs, so the two agreeing is what keeps
+/// the consumer from attempting a write the store refuses. Every pair is
+/// written straight into the table: the store takes exactly the valid
+/// ones, `failed·none` among them, and refuses the rest.
+#[tokio::test]
+async fn the_pairs_a_row_can_hold_are_the_ones_the_store_admits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("control-plane.db");
+    ControlPlaneStore::open(&path).await.unwrap();
+    let raw = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    let statuses = [
+        OwnerStatus::InFlight,
+        OwnerStatus::Ambiguous,
+        OwnerStatus::Completed,
+        OwnerStatus::Failed,
+    ];
+    let archives = [
+        ArchiveState::NotDue,
+        ArchiveState::Pending,
+        ArchiveState::Archived,
+        ArchiveState::WillNotCome,
+    ];
+    for status in statuses {
+        for archive in archives {
+            let pair = RowState { status, archive };
+            let written = sqlx::query(
+                "INSERT INTO coordination_invocation_owner \
+                 (invocation_id, worker_id, assigned_at, status, archive_state) \
+                 VALUES (?, 'w', 1, ?, ?)",
+            )
+            .bind(pair.name())
+            .bind(status.as_str())
+            .bind(archive.as_str())
+            .execute(&raw)
+            .await;
+            assert_eq!(
+                written.is_ok(),
+                pair.is_valid(),
+                "{}: the store and the table disagree: {written:?}",
+                pair.name()
+            );
+        }
+    }
 }

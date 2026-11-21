@@ -24,8 +24,9 @@ use crate::events::Event;
 ///   loop logs it at warn too. A refused move of the ownership row leaves
 ///   the row as it is, and the handlers then do the rest of the event, as
 ///   for a row this build cannot read ([`leaves_the_row_as_it_is`]). No
-///   write the consumer makes is meant to be refused, so this is a guard,
-///   not a path the consumer takes.
+///   move the ownership table decides is one the store's checks refuse
+///   (`RowState::is_valid`), so this is a guard, not a path the consumer
+///   takes.
 ///
 /// Every other error, a contended row's included, is transient and
 /// redelivered.

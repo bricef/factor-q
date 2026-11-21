@@ -198,7 +198,8 @@ pub struct InvocationSummaryView {
     /// Whether the control plane holds the invocation's archive. A run
     /// reads as finished from the moment its ending is folded, and this
     /// says whether its archive followed: `pending` until it does, `held`
-    /// while the worker's archive sweeper is holding it back.
+    /// while the worker's archive sweeper is holding it back, `none` when
+    /// an operator's drop said none will come.
     #[serde(default)]
     pub archive_state: InvocationArchiveState,
     /// One-line operator summary; see
@@ -230,6 +231,13 @@ pub enum InvocationArchiveState {
     /// The archive record was written: from the worker's archive, or by an
     /// operator's drop.
     Archived,
+    /// No archive will come: an operator's drop ended a run that had no
+    /// row on its worker and none to come there, and no record was
+    /// written. The run is settled. An archive that arrives after all is
+    /// recorded, and the run's own ending makes it `pending`. `none` on
+    /// the wire.
+    #[serde(rename = "none")]
+    WillNotCome,
 }
 
 // A trigger delivery and the dispatcher's claim on it — its own module,

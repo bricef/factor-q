@@ -1,8 +1,9 @@
-//! The fold of a drop ignores what its event records of who asked and of
-//! the run's archive (issue 1070): `requested_by` and `archive` are
-//! carried for the fold that will record a termination request and an
-//! archive that never comes, and until then the drop moves a row exactly as
-//! a drop without them does.
+//! The fold of a drop ignores who asked, and an archive that may come
+//! (issue 1070): `requested_by` is carried for the fold that will record a
+//! termination request, and a drop whose `archive` is `pending`, or a value
+//! this build does not know, moves a row exactly as a drop without them
+//! does. A drop saying `none` is the one the fold reads
+//! (`archive_none_tests.rs`).
 //!
 //! The payload is built from JSON, so this reads the same before the fields
 //! exist (an unknown key is ignored) as after (the fields are read and
@@ -97,17 +98,17 @@ fn recorded(archive: &str) -> serde_json::Value {
 }
 
 /// From each row a drop can find (none, in flight, finished), a drop that
-/// records who asked and either archive leaves the row and the archive
-/// record a drop without them leaves.
+/// records who asked, with an archive that may come, leaves the row and
+/// the archive record a drop without them leaves.
 #[tokio::test]
-async fn the_fold_of_a_drop_ignores_who_asked_and_the_archive() {
+async fn the_fold_of_a_drop_ignores_who_asked_and_an_archive_that_may_come() {
     let fixture = Fixture::new().await;
     for (start, seed) in [
         ("no row", None),
         ("in flight", Some(OwnerStatus::InFlight)),
         ("completed", Some(OwnerStatus::Completed)),
     ] {
-        for archive in ["pending", "none", "a value a later build adds"] {
+        for archive in ["pending", "a value a later build adds"] {
             let (bare, with) = (Uuid::now_v7(), Uuid::now_v7());
             if let Some(status) = seed {
                 for id in [bare, with] {

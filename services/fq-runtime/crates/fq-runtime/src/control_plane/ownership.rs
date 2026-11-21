@@ -14,9 +14,11 @@
 //! `archive_state` ([`ArchiveState`]) records beside it whether the control
 //! plane holds the run's archive record: `not_due` while the run has not
 //! ended, `pending` once it has and until the record is written,
-//! `archived` after. So the pairs a row can hold are `in_flight·not_due`,
+//! `archived` after, and `none` when an operator's drop said no archive of
+//! the run will come. So the pairs a row can hold are `in_flight·not_due`,
 //! `ambiguous·not_due`, `completed·pending`, `completed·archived`,
-//! `failed·pending` and `failed·archived` ([`RowState::is_valid`]).
+//! `failed·pending`, `failed·archived` and `failed·none`
+//! ([`RowState::is_valid`], the same pairs the store's checks admit).
 //!
 //! There is also no row at all, which is where a triggered run still
 //! running stands: its row is written when it ends, or when something
@@ -38,19 +40,20 @@
 //!
 //! ## The transitions
 //!
-//! | event \ from | no row | in_flight | ambiguous | completed·pending | completed·archived | failed·pending | failed·archived |
-//! |---|---|---|---|---|---|---|---|
-//! | `triggered`, `archive_acked`, `operator_resumed` | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
-//! | `failed` in `setup` | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
-//! | the run durably starts | in_flight | duplicate | refused | refused | refused | refused | refused |
-//! | recovery restores the run | in_flight | in_flight | in_flight | refused | refused | refused | refused |
-//! | `ambiguous` | ambiguous | ambiguous | duplicate | refused | refused | refused | refused |
-//! | `completed` | completed·pending | completed·pending | completed·pending | duplicate | duplicate | conflict | conflict |
-//! | `failed`, not in `setup` | failed·pending | failed·pending | failed·pending | conflict | conflict | duplicate | duplicate |
-//! | `archived`, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | conflict: failed·archived | conflict |
-//! | `archived`, phase `failed` | failed·archived | failed·archived | failed·archived | conflict: completed·archived | conflict | failed·archived | duplicate |
-//! | termination request (a drop), phase `failed` | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | duplicate |
-//! | termination request, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | completed·archived | completed·archived |
+//! | event \ from | no row | in_flight | ambiguous | completed·pending | completed·archived | failed·pending | failed·archived | failed·none |
+//! |---|---|---|---|---|---|---|---|---|
+//! | `triggered`, `archive_acked`, `operator_resumed` | ignored | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
+//! | `failed` in `setup` | ignored | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
+//! | the run durably starts | in_flight | duplicate | refused | refused | refused | refused | refused | refused |
+//! | recovery restores the run | in_flight | in_flight | in_flight | refused | refused | refused | refused | refused |
+//! | `ambiguous` | ambiguous | ambiguous | duplicate | refused | refused | refused | refused | refused |
+//! | `completed` | completed·pending | completed·pending | completed·pending | duplicate | duplicate | conflict | conflict | completed·pending |
+//! | `failed`, not in `setup` | failed·pending | failed·pending | failed·pending | conflict | conflict | duplicate | duplicate | failed·pending |
+//! | `archived`, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | conflict: failed·archived | conflict | conflict: failed·archived |
+//! | `archived`, phase `failed` | failed·archived | failed·archived | failed·archived | conflict: completed·archived | conflict | failed·archived | duplicate | failed·archived |
+//! | termination request (a drop), phase `failed` | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | failed·archived | duplicate | failed·archived |
+//! | termination request, phase `failed`, no archive to come | failed·none | failed·none | failed·none | failed·archived | failed·archived | failed·archived | duplicate | duplicate |
+//! | termination request, phase `completed` | completed·archived | completed·archived | completed·archived | completed·archived | duplicate | completed·archived | completed·archived | completed·archived |
 //!
 //! - **Ignored**: the event never touches the row. `triggered` is
 //!   published before the run's first WAL write, also by a run refused
@@ -113,6 +116,16 @@
 //!   every state, as it always has, and can turn a finished run to
 //!   `failed`. What that leaves inconsistent in the archive record is
 //!   issue 1070's.
+//! - **No archive to come** (issue 1070): a drop whose event says
+//!   `archive: none`, because the run has no row on the dropping daemon's
+//!   worker, none will be written there, and no archive is on record,
+//!   ends a run that had not ended `failed·none`, and the consumer writes
+//!   no archive record for it ([`ArchiveExpected`]). A finished row takes
+//!   such a drop as any other. A phase `completed` is never `none`, which
+//!   no row may hold, and is taken as any other drop. `none` is not final:
+//!   an archive that arrives is recorded as on `failed·pending`, and the
+//!   run's own ending replaces the drop's, its archive pending, since the
+//!   ending brings an archive with it.
 //!
 //! Who a row names: a row an event creates takes the event's worker id
 //! (the worker's own on `invocation.archived`, on recovery's restore and
@@ -263,9 +276,23 @@ impl RowState {
     }
 
     /// Whether a row can hold the pair: a run that has not ended has no
-    /// archive due, and a run that has ended has one.
+    /// archive due, a run that has ended has one, and only a failed run
+    /// can have none to come. These are the pairs the store's checks
+    /// admit, so no move this table decides is one the store refuses.
     pub fn is_valid(self) -> bool {
-        self.ending().is_none() == (self.archive == ArchiveState::NotDue)
+        matches!(
+            (self.status, self.archive),
+            (
+                OwnerStatus::InFlight | OwnerStatus::Ambiguous,
+                ArchiveState::NotDue
+            ) | (
+                OwnerStatus::Completed,
+                ArchiveState::Pending | ArchiveState::Archived
+            ) | (
+                OwnerStatus::Failed,
+                ArchiveState::Pending | ArchiveState::Archived | ArchiveState::WillNotCome
+            )
+        )
     }
 }
 
@@ -305,10 +332,11 @@ pub enum OwnershipEvent {
     /// `invocation.archive_acked`, the control plane's own answer to it.
     ArchiveAcked,
     /// `invocation.operator_recovered`: an operator asked for the run to
-    /// be terminated, a drop, with the ending its `final_phase` names.
-    /// The request ends the run from every state; issue 1070 records it
-    /// beside the run's outcome instead.
-    TerminationRequested(Ending),
+    /// be terminated, a drop, with the ending its `final_phase` names and
+    /// what its event says of the run's archive. The request ends the run
+    /// from every state; issue 1070 records it beside the run's outcome
+    /// instead.
+    TerminationRequested(Ending, ArchiveExpected),
     /// `invocation.operator_resumed`.
     OperatorResumed,
 }
@@ -339,7 +367,7 @@ impl OwnershipEvent {
         match self {
             OwnershipEvent::Ended(ending)
             | OwnershipEvent::Archived(ending)
-            | OwnershipEvent::TerminationRequested(ending) => Some(ending),
+            | OwnershipEvent::TerminationRequested(ending, _) => Some(ending),
             OwnershipEvent::Triggered
             | OwnershipEvent::DurablyStarted
             | OwnershipEvent::Restored
@@ -351,7 +379,7 @@ impl OwnershipEvent {
     }
 
     /// Every event, for the tests that drive each from every state.
-    pub const ALL: [OwnershipEvent; 13] = [
+    pub const ALL: [OwnershipEvent; 15] = [
         OwnershipEvent::Triggered,
         OwnershipEvent::DurablyStarted,
         OwnershipEvent::Restored,
@@ -362,10 +390,38 @@ impl OwnershipEvent {
         OwnershipEvent::Archived(Ending::Completed),
         OwnershipEvent::Archived(Ending::Failed),
         OwnershipEvent::ArchiveAcked,
-        OwnershipEvent::TerminationRequested(Ending::Completed),
-        OwnershipEvent::TerminationRequested(Ending::Failed),
+        OwnershipEvent::TerminationRequested(Ending::Completed, ArchiveExpected::Yes),
+        OwnershipEvent::TerminationRequested(Ending::Failed, ArchiveExpected::Yes),
+        OwnershipEvent::TerminationRequested(Ending::Completed, ArchiveExpected::No),
+        OwnershipEvent::TerminationRequested(Ending::Failed, ArchiveExpected::No),
         OwnershipEvent::OperatorResumed,
     ];
+}
+
+/// What an operator's drop says of the run's archive (issue 1070): whether
+/// one may follow the drop, as the daemon that published it knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveExpected {
+    /// One may: the drop said `pending`, said nothing (published by a
+    /// build before the field), or said a value this build does not know.
+    Yes,
+    /// None will: the drop said `none`. The run had no row on the
+    /// dropping daemon's worker, none was to be written there, and no
+    /// archive was on record.
+    No,
+}
+
+impl ArchiveExpected {
+    /// What a drop's event says, its `archive` field read: only `none` is
+    /// [`ArchiveExpected::No`]; everything else reads as an archive that
+    /// may come, the answer that waits for it.
+    pub fn of_drop(archive: Option<crate::events::DropArchive>) -> Self {
+        match archive {
+            Some(crate::events::DropArchive::WillNotCome) => ArchiveExpected::No,
+            Some(crate::events::DropArchive::Pending | crate::events::DropArchive::Unknown)
+            | None => ArchiveExpected::Yes,
+        }
+    }
 }
 
 /// Which of the event's facts replace the row's in a move. A row an event
@@ -421,7 +477,11 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
                 to: RowState::ended(ending, ArchiveState::Pending),
                 owner: Owner::Keep,
             },
-            E::Archived(ending) | E::TerminationRequested(ending) => Decision::Move {
+            E::TerminationRequested(Ending::Failed, ArchiveExpected::No) => Decision::Move {
+                to: RowState::ended(Ending::Failed, ArchiveState::WillNotCome),
+                owner: Owner::Keep,
+            },
+            E::Archived(ending) | E::TerminationRequested(ending, _) => Decision::Move {
                 to: RowState::ended(ending, ArchiveState::Archived),
                 owner: Owner::Keep,
             },
@@ -447,6 +507,14 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
             to: RowState::ended(reported, ArchiveState::Pending),
             owner: Owner::Keep,
         },
+        // A drop that said no archive would come is not final: the run's
+        // own ending replaces it, and brings its archive.
+        (E::Ended(reported), Some(_)) if row.archive == ArchiveState::WillNotCome => {
+            Decision::Move {
+                to: RowState::ended(reported, ArchiveState::Pending),
+                owner: Owner::Keep,
+            }
+        }
         (E::Ended(reported), Some(recorded)) if reported == recorded => Decision::Duplicate,
         (E::Ended(_), Some(_)) => Decision::Conflict { then: None },
         (E::Archived(reported), None) => Decision::Move {
@@ -470,7 +538,16 @@ pub fn transition(current: Option<RowState>, event: OwnershipEvent) -> Decision 
                 },
             }
         }
-        (E::TerminationRequested(ending), _) => {
+        (E::TerminationRequested(Ending::Failed, ArchiveExpected::No), None) => Decision::Move {
+            to: RowState::ended(Ending::Failed, ArchiveState::WillNotCome),
+            owner: Owner::Keep,
+        },
+        (E::TerminationRequested(Ending::Failed, ArchiveExpected::No), Some(_))
+            if row.archive == ArchiveState::WillNotCome =>
+        {
+            Decision::Duplicate
+        }
+        (E::TerminationRequested(ending, _), _) => {
             let to = RowState::ended(ending, ArchiveState::Archived);
             if row == to {
                 Decision::Duplicate

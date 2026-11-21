@@ -51,6 +51,11 @@
                 "const": "archived",
                 "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
                 "type": "string"
+              },
+              {
+                "const": "none",
+                "description": "No archive will come: an operator's drop ended a run that had no\nrow on its worker and none to come there, and no record was\nwritten. The run is settled. An archive that arrives after all is\nrecorded, and the run's own ending makes it `pending`. `none` on\nthe wire.",
+                "type": "string"
               }
             ]
           }
@@ -68,7 +73,7 @@
           "archive_state": {
             "$ref": "#/$defs/InvocationArchiveState",
             "default": "not_due",
-            "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
+            "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back, `none` when\nan operator's drop said none will come."
           },
           "archived": {
             "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation. That is when the invocation has no ownership row, when\nits row fell outside the list's limit, or when a status filter left\nits row out, since the archive half of the list takes no filter.\nIt says where the row came from, not whether the archive record was\nwritten, which is `archive_state` (`archived` on every archive-only\nrow).",
@@ -362,6 +367,11 @@
                 "const": "archived",
                 "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
                 "type": "string"
+              },
+              {
+                "const": "none",
+                "description": "No archive will come: an operator's drop ended a run that had no\nrow on its worker and none to come there, and no record was\nwritten. The run is settled. An archive that arrives after all is\nrecorded, and the run's own ending makes it `pending`. `none` on\nthe wire.",
+                "type": "string"
               }
             ]
           },
@@ -435,7 +445,7 @@
               "archive_state": {
                 "$ref": "#/$defs/InvocationArchiveState",
                 "default": "not_due",
-                "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
+                "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back, `none` when\nan operator's drop said none will come."
               },
               "archived": {
                 "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation. That is when the invocation has no ownership row, when\nits row fell outside the list's limit, or when a status filter left\nits row out, since the archive half of the list takes no filter.\nIt says where the row came from, not whether the archive record was\nwritten, which is `archive_state` (`archived` on every archive-only\nrow).",
@@ -1074,6 +1084,11 @@
                 "const": "archived",
                 "description": "The archive record was written: from the worker's archive, or by an\noperator's drop.",
                 "type": "string"
+              },
+              {
+                "const": "none",
+                "description": "No archive will come: an operator's drop ended a run that had no\nrow on its worker and none to come there, and no record was\nwritten. The run is settled. An archive that arrives after all is\nrecorded, and the run's own ending makes it `pending`. `none` on\nthe wire.",
+                "type": "string"
               }
             ]
           },
@@ -1090,7 +1105,7 @@
               "archive_state": {
                 "$ref": "#/$defs/InvocationArchiveState",
                 "default": "not_due",
-                "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back."
+                "description": "Whether the control plane holds the invocation's archive. A run\nreads as finished from the moment its ending is folded, and this\nsays whether its archive followed: `pending` until it does, `held`\nwhile the worker's archive sweeper is holding it back, `none` when\nan operator's drop said none will come."
               },
               "archived": {
                 "description": "True for an archive-only row: one the merged list read from\n`invocation_archive` because no ownership row it listed names the\ninvocation. That is when the invocation has no ownership row, when\nits row fell outside the list's limit, or when a status filter left\nits row out, since the archive half of the list takes no filter.\nIt says where the row came from, not whether the archive record was\nwritten, which is `archive_state` (`archived` on every archive-only\nrow).",

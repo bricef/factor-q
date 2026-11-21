@@ -225,13 +225,15 @@ pub fn invocations(
 
 /// The archive column: whether the control plane holds the run's archive.
 /// A run reads finished from its ending; this says whether the archive
-/// followed, and marks the one the worker's archive sweeper is holding
-/// back, which waits for an operator (the health page lists why).
+/// followed, marks the one the worker's archive sweeper is holding back,
+/// which waits for an operator (the health page lists why), and names a
+/// dropped run's that will never come, which waits for nothing.
 fn archive_cell(state: InvocationArchiveState) -> &'static str {
     match state {
         InvocationArchiveState::NotDue => r#"<span class="muted">—</span>"#,
         InvocationArchiveState::Pending => "pending",
         InvocationArchiveState::Held => r#"<span class="warn">held</span>"#,
         InvocationArchiveState::Archived => "yes",
+        InvocationArchiveState::WillNotCome => r#"<span class="muted">none</span>"#,
     }
 }

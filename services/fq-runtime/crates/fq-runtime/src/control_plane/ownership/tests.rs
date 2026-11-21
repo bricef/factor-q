@@ -5,7 +5,7 @@ use super::*;
 use proptest::prelude::*;
 
 /// Every state a row can be in, `None` for no row.
-const STATES: [Option<RowState>; 7] = [
+const STATES: [Option<RowState>; 8] = [
     None,
     Some(RowState::IN_FLIGHT),
     Some(RowState::AMBIGUOUS),
@@ -24,6 +24,10 @@ const STATES: [Option<RowState>; 7] = [
     Some(RowState {
         status: OwnerStatus::Failed,
         archive: ArchiveState::Archived,
+    }),
+    Some(RowState {
+        status: OwnerStatus::Failed,
+        archive: ArchiveState::WillNotCome,
     }),
 ];
 
@@ -46,6 +50,7 @@ fn short(state: RowState) -> &'static str {
         (OwnerStatus::Completed, ArchiveState::Archived) => "completed·archived",
         (OwnerStatus::Failed, ArchiveState::Pending) => "failed·pending",
         (OwnerStatus::Failed, ArchiveState::Archived) => "failed·archived",
+        (OwnerStatus::Failed, ArchiveState::WillNotCome) => "failed·none",
         other => panic!("not a state a row can hold: {other:?}"),
     }
 }
@@ -65,15 +70,16 @@ fn cell(decision: Decision) -> Cell {
 
 /// The table in the module doc, row by row, in the order of [`STATES`]:
 /// no row, in_flight, ambiguous, completed·pending, completed·archived,
-/// failed·pending, failed·archived.
-fn expected(event: OwnershipEvent) -> [Cell; 7] {
+/// failed·pending, failed·archived, failed·none.
+fn expected(event: OwnershipEvent) -> [Cell; 8] {
     use Cell::{Conflict, ConflictThen, Duplicate, Ignored, Refused, To};
     use OwnershipEvent as E;
     match event {
-        E::Triggered | E::ArchiveAcked | E::OperatorResumed | E::SetupFailed => [Ignored; 7],
+        E::Triggered | E::ArchiveAcked | E::OperatorResumed | E::SetupFailed => [Ignored; 8],
         E::DurablyStarted => [
             To("in_flight"),
             Duplicate,
+            Refused,
             Refused,
             Refused,
             Refused,
@@ -88,11 +94,13 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             Refused,
             Refused,
             Refused,
+            Refused,
         ],
         E::Ambiguous => [
             To("ambiguous"),
             To("ambiguous"),
             Duplicate,
+            Refused,
             Refused,
             Refused,
             Refused,
@@ -106,6 +114,7 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             Duplicate,
             Conflict,
             Conflict,
+            To("completed·pending"),
         ],
         E::Ended(Ending::Failed) => [
             To("failed·pending"),
@@ -115,6 +124,7 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             Conflict,
             Duplicate,
             Duplicate,
+            To("failed·pending"),
         ],
         E::Archived(Ending::Completed) => [
             To("completed·archived"),
@@ -124,6 +134,7 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             Duplicate,
             ConflictThen("failed·archived"),
             Conflict,
+            ConflictThen("failed·archived"),
         ],
         E::Archived(Ending::Failed) => [
             To("failed·archived"),
@@ -133,8 +144,9 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             Conflict,
             To("failed·archived"),
             Duplicate,
+            To("failed·archived"),
         ],
-        E::TerminationRequested(Ending::Failed) => [
+        E::TerminationRequested(Ending::Failed, ArchiveExpected::Yes) => [
             To("failed·archived"),
             To("failed·archived"),
             To("failed·archived"),
@@ -142,13 +154,26 @@ fn expected(event: OwnershipEvent) -> [Cell; 7] {
             To("failed·archived"),
             To("failed·archived"),
             Duplicate,
+            To("failed·archived"),
         ],
-        E::TerminationRequested(Ending::Completed) => [
+        E::TerminationRequested(Ending::Failed, ArchiveExpected::No) => [
+            To("failed·none"),
+            To("failed·none"),
+            To("failed·none"),
+            To("failed·archived"),
+            To("failed·archived"),
+            To("failed·archived"),
+            Duplicate,
+            Duplicate,
+        ],
+        // A phase `completed` is never `none`, which no row may hold.
+        E::TerminationRequested(Ending::Completed, _) => [
             To("completed·archived"),
             To("completed·archived"),
             To("completed·archived"),
             To("completed·archived"),
             Duplicate,
+            To("completed·archived"),
             To("completed·archived"),
             To("completed·archived"),
         ],
@@ -189,7 +214,7 @@ fn every_event_from_every_state_does_what_the_table_says() {
             cells += 1;
         }
     }
-    assert_eq!(cells, 7 * 13, "the table covers every cell");
+    assert_eq!(cells, 8 * 15, "the table covers every cell");
 }
 
 /// Who the row names after each move: a move keeps the row's worker
@@ -289,8 +314,15 @@ proptest! {
             if let Some(ending) = row.and_then(RowState::ending) {
                 let after_ending = next.and_then(RowState::ending);
                 prop_assert!(after_ending.is_some(), "a finished run never goes back in progress");
-                if !matches!(event, OwnershipEvent::TerminationRequested(_)) {
-                    prop_assert_eq!(after_ending, Some(ending), "only a termination request changes an ending");
+                let over_no_archive = row.map(|state| state.archive) == Some(ArchiveState::WillNotCome)
+                    && matches!(event, OwnershipEvent::Ended(_));
+                if !matches!(event, OwnershipEvent::TerminationRequested(..)) && !over_no_archive {
+                    prop_assert_eq!(
+                        after_ending,
+                        Some(ending),
+                        "only a termination request, or the run's own ending over a drop that \
+                         said no archive would come, changes an ending"
+                    );
                 }
             }
             if row.map(|state| state.archive) == Some(ArchiveState::Archived) {
@@ -300,8 +332,25 @@ proptest! {
                     "an archive written stays written"
                 );
             }
-            if let OwnershipEvent::TerminationRequested(ending) = event {
-                prop_assert_eq!(next, Some(RowState::ended(ending, ArchiveState::Archived)));
+            if let OwnershipEvent::TerminationRequested(ending, expected) = event {
+                let no_archive_to_come = ending == Ending::Failed
+                    && expected == ArchiveExpected::No
+                    && row.is_none_or(|state| {
+                        state.ending().is_none() || state.archive == ArchiveState::WillNotCome
+                    });
+                let archive = if no_archive_to_come {
+                    ArchiveState::WillNotCome
+                } else {
+                    ArchiveState::Archived
+                };
+                prop_assert_eq!(next, Some(RowState::ended(ending, archive)));
+            }
+            if next.map(|state| state.archive) == Some(ArchiveState::WillNotCome) {
+                prop_assert_eq!(
+                    next.map(|state| state.status),
+                    Some(OwnerStatus::Failed),
+                    "only a failed row has no archive to come"
+                );
             }
             row = next;
         }
