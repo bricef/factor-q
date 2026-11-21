@@ -3,6 +3,7 @@
 //! same access it had inline.
 
 use super::*;
+use crate::control_plane::projection::store::{InvocationCostSummary, ModelCostSummary};
 use crate::control_plane::store::{InvocationArchiveRow, WorkerRow, WorkerStatus};
 use crate::worker::store::{DispatchStatus, InvocationStateRow, ToolDispatchRow};
 
