@@ -139,7 +139,11 @@ it is the licence to keep changing shape quickly.
   dogfood instance moved onto the stack on 2026-09-12 and runs on a
   dedicated internal host; deploys run hourly via `deploy --auto` from
   the `ops` service, which also runs hygiene and the nightly backup — no
-  host crontab. The runbook is in
+  host crontab. ADR-0036's acceptance drill on the guest (one scheduled
+  deploy end to end, one unattended rollback from an `fq-ops` image
+  whose probe cannot pass, a nightly set restored, an empty host
+  crontab) is the maintainer's to run, and is not recorded as run. The
+  runbook is in
   [ops/dogfood](ops/dogfood/README.md), and the move itself — pre-flight,
   the restore set, the day's sequence, acceptance, rollback and
   retirement — is recorded in the
@@ -259,14 +263,145 @@ which is not built; it now reads: the two replay tests in
 `fq-runtime/tests/july_incident_replay.rs`
 (`an_invocation_that_outlives_the_ack_window_is_not_redelivered` and
 `a_trigger_redelivered_before_its_first_wal_write_starts_once`) and the
-twelve dispatcher and store unit tests ADR-0032 names pass in
-`just runtime-ci`. The review is a snapshot and is not edited. The
-2026-07-18 replay now produces its broker-own redelivery by blocking the
-stalled invocation's thread, because the setup keepalive
+twelve dispatcher and store unit tests below pass in
+`just runtime-ci`. The review is a snapshot and is not edited.
+
+**The tests the criterion names, and what each pins.** They were moved
+here from ADR-0032, which keeps the properties and the code each rests
+on; paths are relative to `services/fq-runtime/crates/fq-runtime/src/`,
+as in that record, unless they begin with a crate name.
+
+"Unit" tests are in `control_plane/dispatcher.rs` and
+`control_plane/store/tests.rs`. The dispatcher ones run against a real
+`nats-server` process. Those that exercise the claim also use a real
+control-plane SQLite store; they pull a message themselves and pass it
+to `handle` directly. No unit test runs the consume loop with a claim
+store installed.
+
+"Replay" tests are in
+[`fq-runtime/tests/july_incident_replay.rs`](services/fq-runtime/crates/fq-runtime/tests/july_incident_replay.rs).
+They run `TriggerDispatcher::run`, the daemon's own entry point, on the
+production durable with its production ack window, with the claim store
+installed as `fq-daemon/src/hosted.rs` installs it. Every redelivery in
+them is the broker's own.
+
+**In every test the worker is a stub** at the `Worker` seam, which fires
+`DurableStart` when the test says its first WAL write has landed. No
+reducer, WAL or model call is involved.
+
+| Property | Test |
+|---|---|
+| A trigger is acked at its invocation's first WAL write, while the invocation is still running | Unit: `started_claim_acks_duplicate_without_second_invocation` (first half). Replay: `an_invocation_that_outlives_the_ack_window_is_not_redelivered` |
+| An invocation that outlives the ack window is delivered once (2026-07-06) | Replay: `an_invocation_that_outlives_the_ack_window_is_not_redelivered`. The invocation stays in flight for 33 s against a 30 s window; the broker reports one delivery and no redelivery, and the claim drops nothing |
+| A trigger is not acked before its first WAL write, so a crash there loses nothing | Unit: `trigger_is_not_acked_before_the_first_wal_write` |
+| A transient failure before the first WAL write is retried; a permanent one is not | Unit: `transient_failure_before_first_wal_write_naks_for_redelivery`, `permanent_failure_before_first_wal_write_acks`, `ambiguous_wal_resume_verdict_acks_without_redelivery` |
+| A copy redelivered while the first is held un-started starts nothing and does not resolve the first copy's delivery (2026-09-16) | Unit: `redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once`. The redelivery is forced with a NAK; saturation is a per-agent cap |
+| A trigger redelivered before its first WAL write starts one invocation, with a second trigger queued behind it (2026-07-18) | Replay: `a_trigger_redelivered_before_its_first_wal_write_starts_once`. One worker permit; the redelivery is the broker's own, from the 30 s deadline passing; each trigger starts once as `attempt: 1` |
+| A copy arriving after durable start is acked, counted and starts nothing | Unit: `started_claim_acks_duplicate_without_second_invocation` (second half). The copy is a clone of the first delivery fed back in, not a broker redelivery |
+| A waiting trigger is kept alive across a whole ack window | Unit: `a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain`, `a_paused_models_trigger_is_held_and_started_once_after_the_pause` |
+| A released claim can be won again; a requeue releases the old sequence | Unit: `held_claims_stop_same_worker_and_are_adopted_from_another_worker` (middle), `requeue_held_releases_old_stream_sequence_claim` |
+| A `claimed` row under another id is adopted on the next delivery | Unit: `held_claims_stop_same_worker_and_are_adopted_from_another_worker` (end) |
+| A recreated stream starts a new claim space | Unit: `a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delivery`, `trigger_claim_state_machine_round_trip` |
+
+Two things in that table are thinner than they look. No test has the
+broker redeliver a trigger *after* its durable start, because the ack
+prevents exactly that; the `Started` arm is exercised only by feeding a
+copy in by hand. And no test checks where the real `ReducerRunner` fires
+`DurableStart`: that it fires after the first `upsert_invocation_state`
+and not before rests on reading `run_loop_inner`.
+
+When ADR-0032 was accepted, no test covered these cases it states:
+
+- a trigger stream recreated under a running daemon, which the daemon
+  does not notice until it reconnects (its section 1);
+- a crash between the first WAL write and the claim's `durably_started`
+  update, which starts the trigger twice (its first gap, derived from
+  the code);
+- a live process holding a claim it will never settle (its third gap,
+  derived from the code);
+- two dispatchers consuming one trigger stream (its part on more than one
+  worker, question 1): no test ran two dispatchers against one stream.
+
+Since ADR-0038 (2026-11-19) a requeue from a hold consumes the old
+sequence's claim instead of releasing it, so the test the table names
+for "a requeue releases the old sequence",
+`requeue_held_releases_old_stream_sequence_claim`, became
+`requeue_held_consumes_old_stream_sequence_claim`. The runs below are of
+2026-11-11 and keep the old name.
+
+The 2026-07-18 replay used the second of the two routes to a redelivery
+before durable start that ADR-0032's
+[section 5](docs/adrs/accepted/0032-exactly-once-trigger-dispatch.md#5-which-mechanism-bounds-which-incident)
+names, a start slower than the ack window, because it needs no fault
+injection: the deadline simply passes.
+
+**The runs.** Run on 2026-11-11. The unit tests ran at `1ce79ab5`; the
+replay tests ran on that commit plus the test file
+([#955](https://github.com/bricef/factor-q/pull/955)).
+
+```console
+$ mise exec node@24.21.0 -- just test-runtime --lib -- \
+    started_claim_acks_duplicate_without_second_invocation \
+    trigger_is_not_acked_before_the_first_wal_write \
+    redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once \
+    held_claims_stop_same_worker_and_are_adopted_from_another_worker \
+    requeue_held_releases_old_stream_sequence_claim \
+    transient_failure_before_first_wal_write_naks_for_redelivery \
+    permanent_failure_before_first_wal_write_acks \
+    ambiguous_wal_resume_verdict_acks_without_redelivery \
+    a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain \
+    a_paused_models_trigger_is_held_and_started_once_after_the_pause \
+    trigger_claim_state_machine_round_trip \
+    a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delivery
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 61.22s
+
+$ mise exec node@24.21.0 -- just test-runtime --test july_incident_replay
+test an_invocation_that_outlives_the_ack_window_is_not_redelivered ... ok
+test a_trigger_redelivered_before_its_first_wal_write_starts_once ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.28s
+```
+
+Each mechanism was then disabled with a local change that was not
+committed, and the same tests run again.
+
+With the claim's arbitration off (`claim_delivery` returning `Proceed`
+from its `Started` and same-claimant `Held` arms), the 2026-07-18 replay
+fails with the incident itself, a third start for the stalled trigger
+stamped `attempt: 2`:
+
+```text
+test a_trigger_redelivered_before_its_first_wal_write_starts_once ... FAILED
+assertion `left == right` failed: each trigger starts exactly one invocation, as its first delivery. A third start for the stalled trigger, stamped `attempt: 2`, is the 2026-07-18 incident
+  left: [Start { trigger: 01a1c9d5-0e52-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e6c-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e52-…, attempt: Some(2) }]
+ right: [Start { trigger: 01a1c9d5-0e52-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e6c-…, attempt: Some(1) }]
+```
+
+The three unit tests of the claim fail with it:
+`redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once`
+("the duplicate is refused rather than held: Elapsed(())"),
+`started_claim_acks_duplicate_without_second_invocation` ("the duplicate
+is answered rather than held: Elapsed(())") and
+`held_claims_stop_same_worker_and_are_adopted_from_another_worker`. The
+2026-07-06 replay stays green with the claim off, which is the split
+in ADR-0032's [section 5](docs/adrs/accepted/0032-exactly-once-trigger-dispatch.md#5-which-mechanism-bounds-which-incident).
+
+With the ack removed from `mark_durable_started`, the 2026-07-06 replay
+fails:
+
+```text
+test an_invocation_that_outlives_the_ack_window_is_not_redelivered ... FAILED
+the trigger must be acked at the invocation's first WAL write, while the invocation is still in flight (num_ack_pending=1 after 5s)
+```
+
+and so does `started_claim_acks_duplicate_without_second_invocation`
+("trigger not acked while the invocation is still in-flight
+(num_ack_pending=1) — the redelivery-storm regression").
+
+The 2026-07-18 replay now produces its broker-own redelivery by blocking
+the stalled invocation's thread, because the setup keepalive
 ([#1039](https://github.com/bricef/factor-q/pull/1039)) closes the
-route ADR-0032's section 5 says it used, a start slower than the ack
-window; the property it certifies is unchanged, and a third test in
-that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
+route it used, a start slower than the ack window; the property it
+certifies is unchanged, and a third test in that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
 redelivered. ADR-0032's one edit since 2026-11-11 records the finished
 retry ladder (2026-11-14); it is not edited for the keepalive, for the
@@ -899,14 +1034,43 @@ omitted rather than drawn as orphans.
 
 ## Not built yet
 
-Multi-agent orchestration (ADR-0007, accepted but unbuilt) ·
-memory + skills services · context compaction · container isolation
-(ADR-0010, accepted but unbuilt) · observability floor
-(JSON logs, metrics, alerting) · production-grade NATS credentials and
-rotation · tagged binary releases (the
+Multi-agent orchestration (ADR-0007, accepted but unbuilt), and with
+it ADR-0012's graph format, whose authoring was planned as hand-written
+YAML first, then CLI tooling for validation, visualisation and dry-run,
+then a visual authoring UI that reads and writes the YAML files, then
+LLM-assisted authoring and optimisation ·
+memory + skills services · context compaction · isolation beyond the
+phase-1 process sandbox (ADR-0010's containers and ADR-0028's
+tool-scoped tiers, harness-owned workspace and egress proxy, accepted
+but unbuilt, so ADR-0029's FUSE crate is unadopted;
+[SECURITY.md](SECURITY.md) has the exposures; ADR-0028 planned the
+order as the virtual filesystem on fq-store first, then the network
+proxy, then the code-execution tiers (WASM mounting the VFS, FUSE for
+host binaries), and draft ADR-0037 leaves the order to the isolation
+design session) · observability floor
+(JSON logs, metrics, alerting, cross-process tracing) · production-grade
+NATS credentials and rotation · tagged binary releases (the
 rolling `main-latest` channel — the tarball and the container images —
 is built, see [ops/dogfood](ops/dogfood/README.md), but no `v*` release
-has shipped).
+has shipped), and the CLA or DCO that ADR-0022 requires before the first
+outside contribution · the event log's archive service (ADR-0026; the
+[event schema](docs/design/committed/event-schema.md#retention-and-the-trails-lifetime)
+says what holds instead), and so the deploy event ADR-0027 meant to
+record there · a per-origin cost breakdown: the origin of a call (agent
+turn, sampling, elicitation) is on the cost-bearing events, but
+`fq costs` and the cost reports group spend by agent, invocation and
+model only (ADR-0004, ADR-0017) · the `_meta` cost protocol for MCP
+services (ADR-0021 §2) · the operation registry's MCP server face, and
+fq-store as a second registry instance (ADR-0006); its Appendix D is
+not in the code either, since `fq_ops::Synthetic` still derives a Get ·
+the typed operations ADR-0016 gives agents for side effects (only the
+runtime writes annotations, #90) · agent signatures and compiled prompt
+artifacts (ADR-0014) · a versioned subprocess tool protocol (ADR-0015;
+MCP is the one external tool path) · published JSON Schemas for agent
+frontmatter and graph definitions, a filesystem watcher for agent
+definitions (`fq reload` is how they reload) and `{{…}}` templating in
+an agent's body (ADR-0005, ADR-0012) · a CI job that re-runs the storage
+GC's TLA⁺ models (ADR-0030; they are run by hand).
 
 ## Pointers
 
