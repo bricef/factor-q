@@ -681,7 +681,8 @@ move of the
 row is decided by one transition function and written as a
 compare-and-set on the state it was decided from: a late
 `invocation.ambiguous` never puts a finished run back to triage, an
-operator's drop still wins, a second ending is refused and logged at
+operator's drop of a run that has ended keeps that ending and records
+its request beside it, a second ending is refused and logged at
 error, and a `failed` in `setup` (published only while the run's WAL
 holds no row) writes no row, so it records no start. A row this build
 cannot read is left as it is, and no event, start or stuck sweep waits
@@ -726,7 +727,17 @@ without moving the row and it is not folded again; and the row
 and the run's archive record can disagree when an archive names the
 other ending; an operator's drop no longer writes an archive record,
 and records its request beside the run's outcome instead of rewriting
-it ([#1070](https://github.com/bricef/factor-q/issues/1070)). And an
+it ([#1070](https://github.com/bricef/factor-q/issues/1070)). The
+operator surfaces read that record: `fq invocation list`, `show`,
+`fq workers show` and the dashboard say who ended a run and when, and
+the first termination request beside its ending, and
+`fq invocation drop` succeeds whenever the run exists and says what that
+drop found, read from its own time. Still open there: a drop of a run
+that failed in `setup` reads as having ended it
+([#1121](https://github.com/bricef/factor-q/issues/1121)), and a drop of
+a run whose archive is on record but whose row has not ended leaves the
+row `pending` for good
+([#1120](https://github.com/bricef/factor-q/issues/1120)). And an
 event the broker refuses for its size now ends its run
 ([#828](https://github.com/bricef/factor-q/issues/828)): one terminal
 `failed` of kind `payload_too_large` names the refused event, its size
