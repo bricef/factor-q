@@ -217,7 +217,7 @@ pub fn operator_registry(
                     // resolves from that rather than from a projection this
                     // daemon may be ahead of — an armed halt and a NotFound
                     // can never be the same answer (#107).
-                    let armed = arm_drop_halt(&runner, queued.as_ref(), &input)?;
+                    let armed = arm_drop_halt(runner.as_ref(), queued.as_ref(), &input)?;
                     let driving_agent = armed.as_ref().map(|armed| armed.agent.clone());
                     let archive = drop_archive::after_the_drop(
                         &worker_store,
