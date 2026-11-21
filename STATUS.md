@@ -403,14 +403,13 @@ the stalled invocation's thread, because the setup keepalive
 route it used, a start slower than the ack window; the property it
 certifies is unchanged, and a third test in that file, `a_setup_that_outlasts_the_ack_window_is_not_redelivered`,
 pins that an awaiting setup longer than the production window is not
-redelivered. ADR-0032's one edit since 2026-11-11 records the finished
-retry ladder (2026-11-14); it is not edited for the keepalive, for the
+redelivered. ADR-0032 is not edited for the keepalive, for the
 settling of a daemon's own claims, for the dead-letter watch's reading
 of the records, for the mark's report of what it marked, for the
 release's scope to its own invocation or for the claim's consumed
 state, so these of its statements are
 now out of date: section 5's account of the two routes to a redelivery
-before durable start, and of the replay using the second; gap 3 as a
+before durable start; gap 3 as a
 whole, now closed (below), its "a start that takes longer than the whole
 retry ladder" included; the row of section 2's table for a claim the
 same process holds, which "Stops" with "No log line and no count";

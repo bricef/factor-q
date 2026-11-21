@@ -8,39 +8,50 @@ supersede earlier ones; guides track the current state).
 Accepted ADRs live in `accepted/`, drafts in `draft/`, each named
 `NNNN-slug.md`.
 
-## Status and Implementation are different questions
+## Status
 
-Every ADR carries two lines near the top, and they answer different things:
+Every ADR opens with a Status section, and its status is one of three:
 
-```text
-Status: Accepted
-Implementation: partial — the edge and the typed registry ship (#489, #498);
-                the MCP server face is not built (#84)
-```
+- **Draft** — written down and not yet accepted. A draft lives in `draft/`
+  and can still change.
+- **Accepted** — decided. An accepted ADR lives in `accepted/`, and its body
+  is not rewritten: a later decision gets an ADR of its own.
+- **Superseded by ADR-NNNN** — a later ADR replaced the decision. The record
+  stays in `accepted/` as it was, with that pointer on its Status line.
 
-- **`Status:`** — what we decided, and whether a later ADR has replaced it.
-  `Proposed` / `Accepted` / `Superseded by ADR-NNNN`. This is the historical
-  record and does not change because code did or did not get written.
-- **`Implementation:`** — whether the thing exists, as one of **`pending`**,
-  **`partial`** or **`complete`**, followed by a short note naming the PRs
-  and issues involved. Partial is the interesting case: say which half
-  shipped and which did not.
+The Status line also carries pointers to the records around it: `Refines`
+or `Addendum to ADR-NNNN` on an ADR that extends or adjusts a decision that
+still stands, and `Refined by ADR-NNNN` on the one it refines; `Partially
+superseded by ADR-NNNN` when only part of a decision is replaced; `Amends`
+when an ADR changes a clause of another. On an accepted ADR, such a pointer
+is the only edit its Status line takes; [AGENTS.md](../../AGENTS.md) has the
+rule.
 
-**Why both.** Until 2026-08-26 an ADR said only `Status: Accepted`, and a
-reader had no way to tell a decision that shipped from one nobody had
-started. A review that year found five accepted ADRs describing systems that
-were never built and saying nothing about it, and two that shipped the
-current architecture and were equally silent. Neither is a documentation
-error in the ordinary sense — the decisions really were accepted. The
-missing information was construction state, and the fix is to state it
-rather than leave it to inference.
+## What an ADR holds
 
-Keep the note short and pointed at evidence. `Implementation: complete
-(#498)` is worth more than a paragraph, because the PR carries the detail
-and does not go stale.
+An ADR records a decision: its context, the decision itself, its
+consequences, the alternatives considered, and what the decision does not
+cover. A sentence saying what the decision leaves out belongs in it; a
+sentence saying when the rest will be done does not.
 
-A design doc's *folder* answers the same question for prose:
-[`design/committed/` vs `design/aspirational/`](../design/README.md).
+An ADR carries no delivery state. It does not say what is built, shipped,
+verified or scheduled, or in which phase, pull request or issue the work
+lands, and it holds no implementation, rollout, migration or phase plan.
+That state moves with the work, and it lives where it is kept current:
+
+- [STATUS.md](../../STATUS.md) — what runs today, and what is not built yet;
+- [MILESTONES.md](../../MILESTONES.md) — what each milestone means, and
+  whether it is reached;
+- the [issues](https://github.com/bricef/factor-q/issues) and the
+  [plans](../plans/README.md) — the work itself.
+
+Until 2026-11-21 every ADR also carried an `Implementation:` line, saying
+whether the decision was built. The lines were taken out on the
+maintainer's instruction, and what they said that was recorded nowhere
+else moved to STATUS.md.
+
+For prose, a design doc's *folder* says whether the thing it describes is
+built: [`design/committed/` vs `design/aspirational/`](../design/README.md).
 
 ## Accepted
 
@@ -53,33 +64,33 @@ A design doc's *folder* answers the same question for prose:
 | [0005](accepted/0005-agent-definition-format.md) | Agent definition format — Markdown + YAML frontmatter |
 | [0006](accepted/0006-registry-first-api.md) | Registry-first runtime API — typed operations, CQRS surface, derived interfaces; replaces the prior draft, amends ADR-0031 (Appendix A); NATS is not an external control surface (Appendix C); a synthetic has no Get (Appendix D); `worker.prune` is retired, not evented (Appendix E) |
 | [0009](accepted/0009-technology-choices.md) | Technology choices (Rust runtime) |
-| [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) — the agent-scoped unit of isolation is superseded by [ADR-0028](accepted/0028-tool-scoped-isolation-and-workspace.md), and neither model is built; the phase-1 process sandbox is what runs (#209) |
+| [0010](accepted/0010-agent-execution-isolation.md) | Agent execution isolation (containers by default; nothing-by-default sandbox) — the agent-scoped unit of isolation is superseded by [ADR-0028](accepted/0028-tool-scoped-isolation-and-workspace.md) |
 | [0011](accepted/0011-event-bus-and-persistence.md) | Event bus and persistence (NATS + JetStream) — persistence/source-of-truth role partially superseded by [ADR-0026](accepted/0026-event-log-system-of-record.md); bus role stands |
-| [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format — unimplemented, and its subject-wired structure is superseded by [ADR-0007](accepted/0007-inter-agent-communication.md); do not author a graph from it |
+| [0012](accepted/0012-graph-definition-format.md) | Execution graph definition format — its subject-wired structure is superseded by [ADR-0007](accepted/0007-inter-agent-communication.md); do not author a graph from it |
 | [0013](accepted/0013-memory-as-mcp-service.md) | Memory as an MCP service |
 | [0014](accepted/0014-agent-harness-as-reducer.md) | Agent harness as a reducer with a runtime-owned loop |
 | [0015](accepted/0015-rust-runtime-polyglot-tools.md) | Rust runtime, polyglot tools, language boundary at the event bus |
-| [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs — the *shape* agent side effects must take; the annotation operations it names (`annotations.add_note`, `annotations.record_confidence`) are not built, and the annotations layer is runtime-written today (#90) |
+| [0016](accepted/0016-typed-operations-no-free-form-apis.md) | Typed operations exposed to agents, no free-form storage APIs — the *shape* agent side effects must take |
 | [0017](accepted/0017-mcp-human-in-the-loop.md) | Autonomous resolution of MCP human-in-the-loop primitives (the capability-grant policy) |
 | [0018](accepted/0018-mcp-server-initiated-execution.md) | Execution model for server-initiated MCP calls (sampling/elicitation/roots) |
-| [0019](accepted/0019-skill-format.md) | Skill format and discovery — none of it is built, and since #514 the `skills: access:` frontmatter it documents is rejected as an unknown key, so a definition carrying it fails to load rather than running without the declared restriction |
+| [0019](accepted/0019-skill-format.md) | Skill format and discovery |
 | [0020](accepted/0020-mcp-notification-handling.md) | MCP server notifications — drained in the daemon, tools refresh between invocations |
 | [0021](accepted/0021-mcp-cost-control-and-memory-boundary.md) | Cost control for MCP services via `_meta` (budget hint + cost report); memory stays MCP; embedding boundary deferred to the storage design |
 | [0022](accepted/0022-binary-distribution-and-licensing.md) | Binary distribution (musl/Apple Silicon release matrix, install.sh, cargo-binstall) and BSL 1.1 licensing |
-| [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) — layer 1 (CAS, name index, GC, access control) is built; layers 2 and 3 (extraction, embeddings, vector index) are not, which is what blocks ADR-0013 and ADR-0019 |
+| [0023](accepted/0023-storage-and-vector-foundation.md) | Storage, extraction, and vector index foundation (Phase 2 pillar #2) |
 | [0024](accepted/0024-separate-databases-storage-foundation.md) | Separate databases for the storage foundation's three stores (refines ADR-0023 F9) |
 | [0007](accepted/0007-inter-agent-communication.md) | Inter-agent communication — agents never touch the transport; one graph executor with two authoring surfaces (declared graphs + spawn as sugar); per-traversal budget with an ε cost floor; graduated from the April draft |
-| [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) — **not built**, so it is a direction, not a durability guarantee: today's `invocation_archive` is swept at 30 days |
+| [0026](accepted/0026-event-log-system-of-record.md) | A dedicated CAS-backed archive service is the event log's system of record (supersedes ADR-0011's source-of-truth half; NATS becomes transport) |
 | [0027](accepted/0027-graceful-drain-deploys.md) | Deploys are a graceful drain — a `fq drain` control command suspends in-flight invocations to a step boundary; the new binary resumes via recovery (not kill-and-replace) (verb folded into `fq down`, #271) |
-| [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation — none of its seven Decision clauses is built |
-| [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 — the pick stands, unadopted, because ADR-0028's VFS does not exist |
+| [0028](accepted/0028-tool-scoped-isolation-and-workspace.md) | Tool-scoped isolation + a harness-owned virtual filesystem (safe by construction); supersedes ADR-0010's agent-scoped unit of isolation |
+| [0029](accepted/0029-fuse-binding-crate.md) | FUSE binding crate for the harness-owned VFS is `fuse-backend-rs` (`fuse3` fallback), chosen by a blind bake-off; refines ADR-0028 |
 | [0030](accepted/0030-object-manifest-gc-back-off.md) | Object/manifest GC uses back-off (no generations) — objects get the block protocol's claim CAS + reserve-before-rely, but a writer meeting a claimed object retries rather than minting a generation; TLC-checked, refines ADR-0023 (F2) |
-| [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; capability-token-over-TLS auth (Appendix A, superseding the original shared secret) as swappable middleware; built |
-| [0032](accepted/0032-exactly-once-trigger-dispatch.md) | A duplicate trigger delivery is refused by a durable claim in the control-plane store, keyed on stream, stream-incarnation epoch and sequence and arbitrated before anything else happens to the delivery; the trigger is still acked at the invocation's first WAL write — accepted 2026-11-11 in the form that landed (#809), not the trigger inbox it was drafted as, which is kept as a deferred design; correct for one daemon and assumes one, with the multi-worker consequences and the condition for reopening written down (#835); leftover #954 (the retry ladder, #953, finished 2026-11-11) |
+| [0031](accepted/0031-daemon-cli-split.md) | Split the runtime and CLI into `fqd` and `fq` over a typed tarpc control interface; capability-token-over-TLS auth (Appendix A, superseding the original shared secret) as swappable middleware |
+| [0032](accepted/0032-exactly-once-trigger-dispatch.md) | A duplicate trigger delivery is refused by a durable claim in the control-plane store, keyed on stream, stream-incarnation epoch and sequence and arbitrated before anything else happens to the delivery; the trigger is still acked at the invocation's first WAL write — accepted 2026-11-11 in the form that landed (#809), not the trigger inbox it was drafted as, which is kept as a deferred design; correct for one daemon and assumes one, with the multi-worker consequences and the condition for reopening written down (#835) |
 | [0033](accepted/0033-bsl-reaffirmation.md) | BSL 1.1 stands after the 2026-07-25 cleanroom review's finding 1.4 — reaffirms [ADR-0022](accepted/0022-binary-distribution-and-licensing.md) §7 unamended; costs carried knowingly, the named-scenario gap left open, revisit triggers proposed |
 | [0034](accepted/0034-reasoning-as-a-content-part.md) | Reasoning is a content part and `Message` is an enum over turn kinds; reasoning replays within an invocation and is stripped across one; parts stay internal and stop at the operator boundary, which receives a reasoning concept that distinguishes absence from opacity |
-| [0035](accepted/0035-container-image-and-compose-supervision.md) | The deployable unit is a container image tagged with its commit, and docker compose is the supervisor and stack definition — no systemd units; a minimal distroless image is the bare-envelope gate and a fat dogfood image layers the agent toolchain on it until the worker / control-plane split; refines [ADR-0027](accepted/0027-graceful-drain-deploys.md), answers #553 — built through #587 (images, publishing, the stack, the tag-bump deploy, bootstrap, backups, probes on every image); the live instance moved onto the stack on 2026-09-12 |
-| [0036](accepted/0036-ops-image-and-scheduler-service.md) | The stack schedules its own operations: an `fq-ops` image carries the deploy, hygiene and backup scripts and their schedule, a compose `ops` service fires each as a one-shot sibling container, and the host crontab and bootstrap's script copy retire; narrows [ADR-0035](accepted/0035-container-image-and-compose-supervision.md) clause 7 to "never into a container that runs the daemon or an agent" — accepted 2026-09-12, built through #715, #716 and the slice that accepted it; the acceptance drill on the guest is pending |
+| [0035](accepted/0035-container-image-and-compose-supervision.md) | The deployable unit is a container image tagged with its commit, and docker compose is the supervisor and stack definition — no systemd units; a minimal distroless image is the bare-envelope gate and a fat dogfood image layers the agent toolchain on it until the worker / control-plane split; refines [ADR-0027](accepted/0027-graceful-drain-deploys.md), answers #553 |
+| [0036](accepted/0036-ops-image-and-scheduler-service.md) | The stack schedules its own operations: an `fq-ops` image carries the deploy, hygiene and backup scripts and their schedule, a compose `ops` service fires each as a one-shot sibling container, and the host crontab and bootstrap's script copy retire; narrows [ADR-0035](accepted/0035-container-image-and-compose-supervision.md) clause 7 to "never into a container that runs the daemon or an agent" |
 | [0038](accepted/0038-a-trigger-dealt-with-and-not-run-keeps-its-claim-consumed.md) | A trigger dealt with and not run keeps its claim as `consumed`, with its reason and, beside it, any operator's drop of the run, and the claim is written before the delivery is acked; refines [ADR-0032](accepted/0032-exactly-once-trigger-dispatch.md), whose §4 ("Every other ack gives the claim back") it replaces for those answers |
 
 ## Draft

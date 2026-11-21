@@ -15,13 +15,6 @@ signature bound to an implementation strategy, and an edge as
 `{ from, to, guard, bind }`. **Do not author a graph from the example
 below.**
 
-Implementation: pending — nothing implements this format. There is no graph
-loader, no `Graph`/`GraphDefinition` type, no `parse_graph` under
-`services/`, and no `.yaml` graph definition in the tree; ADR-0007's Context
-calls it "a spec without an engine". All five Consequences below are
-unrealised, including the published JSON Schema. The two-node vertical that
-would build an executor is held, not stalled (#414, #429).
-
 ## Context
 
 Agent definitions (ADR-0005) specify what an individual agent is. A separate concern is how agents are wired together — what events flow between them, where work enters and exits the system, and what structural patterns (fan-out, fan-in, approval gates) govern the topology.
@@ -100,13 +93,6 @@ edges:
 - **Spawn/exec** — dynamic, per-agent capabilities granted in the graph definition. An agent with spawn permission can create child agents at runtime within the dataflow; this is runtime dynamism, not graph mutation.
 - **Graph versioning** — the learning loop can author new versions of the graph, but a running graph is always a specific version. Changes are versioned replacements, not live mutations.
 
-### Incremental path
-
-1. Manually authored YAML graph definitions (phase 1+)
-2. CLI tooling for validation, visualisation, and dry-run
-3. Visual authoring UI that reads and writes the YAML files
-4. LLM-assisted graph authoring and optimisation
-
 ### Rationale
 
 YAML is widely understood, diffs cleanly, and is natively validateable against JSON Schema. The format is simple enough to author by hand for small graphs and structured enough for tooling to parse and render. A visual UI is the expected long-term authoring experience but is not required to start — manually authored YAML is a viable starting point.
@@ -120,11 +106,7 @@ YAML is widely understood, diffs cleanly, and is natively validateable against J
 ## Consequences
 
 - Graph definitions are stored as `.yaml` files alongside agent definition directories
-- A JSON Schema for graph definitions, enabling editor validation — **not
-  built**, and neither is the format it would describe. No `*.schema.json`
-  exists in the repo; `schemars` is used for operation params and
-  operator-surface types only. Same gap as
-  [ADR-0005](0005-agent-definition-format.md)'s frontmatter schema
+- A JSON Schema for graph definitions, enabling editor validation
 - The runtime validates graph definitions at load time (no dangling agent references, compatible pub/sub wiring)
 - Spawn and exec are capabilities granted per-agent in the graph, not global permissions
 - Graph versions are tracked; the learning loop produces new versions rather than mutating the running graph

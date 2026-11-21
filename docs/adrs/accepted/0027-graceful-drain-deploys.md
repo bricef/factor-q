@@ -14,30 +14,6 @@ resume model those depend on. Refined by
 [ADR-0035](0035-container-image-and-compose-supervision.md), which fixes
 the packaging and supervision around the drain.
 
-Implementation: complete, and in daily use. Drain is the default bring-down
-(#23, #24, #29, #32, then #303 folding it into `fq down` per #271), and the
-dogfood deploy script uses it, citing this ADR by number. **Read the verb as
-`fq down`, not `fq drain`, throughout the Decision below** — see the
-Addendum. Manual rollback exists (`deploy.sh <previous-sha>`). Two of the
-Open questions have since been answered and are annotated there. Still open:
-the post-deploy health gate and automated rollback (#339) and an auto-deploy
-watcher. **Closed 2026-09-12 by
-[ADR-0035](0035-container-image-and-compose-supervision.md) /
-[#587](https://github.com/bricef/factor-q/issues/587):** both shipped with the
-compose stack. `ops/dogfood/deploy.sh` is the health gate and the rollback — it
-checks the tag on the running containers, waits for the daemon's `Runtime
-ready` and for each adapter's own probe, and returns to the previous tag when
-the new build does not come up — and `deploy.sh --auto` is the auto-deploy
-watcher, run hourly from the instance's crontab behind an idle check.
-**Resolved 2026-09-05 by [#509](https://github.com/bricef/factor-q/issues/509)
-/ [#550](https://github.com/bricef/factor-q/issues/550):** the operator escape
-from a stalled drain listed below as still open now exists. The drain holds the
-signal streams and selects on them, so a **second SIGTERM** — or a Ctrl-C, or
-`fq down --now` — ends the bounded wait and runs the same clean teardown: the
-worker is deregistered and `system.shutdown` is published, naming both the stop
-and what escalated it. SIGKILL remains the only thing that costs those
-guarantees. The original text below is left as written.
-
 ## Context
 
 The dogfood daemon is stateful and long-running: it holds in-flight agent
@@ -143,10 +119,7 @@ exerciser.
 (ADR-0020), and ack-on-dispatch; composes with ADR-0010 (containers /
 isolation) and would reuse the
 [ADR-0026](../accepted/0026-event-log-system-of-record.md)
-event log for the audit of a deploy as a first-class event. That last
-interlock is intent only, and rests on two things that do not exist: there
-is no deploy event (no deploy payload and no deploy subject), and ADR-0026's
-archive service is itself unbuilt.
+event log for the audit of a deploy as a first-class event.
 
 ## Alternatives considered
 
@@ -168,22 +141,12 @@ archive service is itself unbuilt.
   already emitted an external side effect? (The safety argument above assumes
   the result is persisted at the boundary; the mid-step hard-stop case
   inherits crash-recovery's existing categorisation.)
-- ~~**The drain deadline *T*** and the exact hard-stop fallback
-  semantics.~~ **Answered.** *T* is `drain_deadline_ms`, a config setting
-  defaulting to 120 s; past it, `fq down` hard-stops and recovery takes
-  over. The dogfood deploy leaves the fallback to compose:
-  `stop_grace_period` (`FQ_STOP_GRACE`, 150 s by default) must exceed
-  `drain_deadline_ms`, and the two are changed together. The
-  operator-abort half is not answered — a stalled drain still has no
-  escape but SIGKILL (#509).
+- **The drain deadline *T*** and the exact hard-stop fallback semantics.
 - **Health-check definition** (consumers connected? a synthetic trigger
   round-trips?) and the **rollback mechanism** (image pinning, versions
   retained) — likely a companion ADR on the CD pipeline + safety layer.
 - Whether the **auto-deploy watcher** is a separate adapter (like the GitHub
   issue watcher) or integrated into the runtime.
-- **Build order:** `fq drain` + a manual deploy script first, to exercise the
-  graceful handoff under controlled conditions; containerisation and the
-  auto-deploy watcher layered on once the roll is proven.
 
 ## Addendum (2026-07-18)
 

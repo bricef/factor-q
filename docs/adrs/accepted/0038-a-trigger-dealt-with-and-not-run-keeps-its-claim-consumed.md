@@ -13,11 +13,6 @@ requeue was settled there in review the same day, and the rule for an
 operator's drop on 2026-11-19, replacing an earlier one under which a
 drop relabelled the claim as halted in setup.
 
-Implementation: complete, in the change that adds this record
-([#1055](https://github.com/bricef/factor-q/issues/1055)); what it leaves
-open is tracked in
-[#1113](https://github.com/bricef/factor-q/issues/1113).
-
 ## Context
 
 Under ADR-0032 §4 a delivery answered without a run released its claim
@@ -90,9 +85,7 @@ what a run that started leaves behind.
   was one, the drop.
 - §4: "Every other ack gives the claim back", and its list of answers
   that leave no row behind. Only the answers in Decision 2 that NAK give
-  the claim back now; the others keep it, consumed. The test it names
-  for a requeue from a hold, "a requeue releases the old sequence",
-  becomes one that consumes it.
+  the claim back now; the others keep it, consumed.
 
 ## Consequences
 
@@ -101,8 +94,7 @@ what a run that started leaves behind.
 - `fq invocation show`'s trigger line is what tells a run an operator
   dropped before its first WAL write from one that started: a
   coordination status alone no longer does.
-- What stays open is tracked in
-  [#1113](https://github.com/bricef/factor-q/issues/1113): a consume the
+- What stays open: a consume the
   store refuses, with a lost ack on top, still lets a copy take the
   claim again, which only holding the ack on a store write would close;
   a stop between a hold's replacement publish and the consume leaves the

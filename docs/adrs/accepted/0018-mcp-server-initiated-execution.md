@@ -4,14 +4,6 @@
 
 Accepted (2026-05-31)
 
-Implementation: complete — built as specified. `run_model_with_llm` is the
-single arbiter path for every LLM call, server-initiated or not, and the
-validation seam shipped with all three named types (`Validator`,
-`ValidatorChain`, `ValidatorResult`). It went past `DefaultAllow`: a concrete
-redactor is wired in, including on the `CreateMessageResult` outbound path,
-which is the security boundary §4 argues for. One §4 follow-on remains open —
-`includeContext` injection through the inbound redact chain (#345).
-
 ## Context
 
 [ADR-0017](./0017-mcp-human-in-the-loop.md) settled the *policy*
@@ -160,8 +152,7 @@ auditable (a validator may emit an event) and cannot be bypassed
 by the handler. Concrete validators — e.g. a `HighEntropyRedactor`
 or a `ValidateRequestPolicy` — are added to the chain without
 touching the seam. Which validators ship beyond `DefaultAllow` is
-a later scoping call (Step 8's policy surface); the seam and the
-default land with sampling.
+a later scoping call (Step 8's policy surface).
 
 Elicitation sharpens why the inbound seam is non-optional: its
 `requestedSchema` is a **named extraction channel** — a server can

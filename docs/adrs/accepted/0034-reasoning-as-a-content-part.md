@@ -6,47 +6,7 @@ Accepted (2026-08-26). Output of the co-design sessions of 2026-08-25 and
 2026-08-26, per [CONTRIBUTING § Design sessions](../../../CONTRIBUTING.md) —
 *"the session's output is the design document itself"*. Records the maintainer
 decisions taken on [#437](https://github.com/bricef/factor-q/issues/437) on
-2026-07-28, 2026-08-25 and 2026-08-26. Execution is sequenced by
-[the plan](../../plans/closed/2026-08-25-reasoning-as-message-parts.md).
-
-Implementation: complete (#510) — every decision here is built. `Message`
-is the enum (D1); the response chain carries `Vec<AssistantPart>` (D3);
-reasoning round-trips for OpenAI-compatible and Anthropic providers with the
-cross-model strip at the adapter (D5); the consumer barrier strips payload
-reasoning, not just annotations (D6); the operator surface carries
-`TurnReasoning` behind `fq invocation transcript --reasoning` and the
-dashboard's raw disclosure (D4, D7); `reasoning_tokens` rides on the cost
-record (D8). Verified live on 2026-09-04 against kimi-k3 (OpenRouter),
-`claude-opus-5` and a `gpt-4o-mini` control: every reasoning part was carried
-byte-identically into the following request, and Anthropic accepted its own
-signed blocks back (`experiments/reasoning-round-trip/`, live run section).
-The Anthropic path rode a fork of `genai` from 2026-08-26 until 2026-09-04;
-upstream landed its own fix (PR #275 there, released in `0.7.0-beta.21`)
-and factor-q moved to that release with the wire goldens under
-`fq-runtime/tests/snapshots/reasoning_wire/` proving nothing the provider
-or the reducer sees changed across the switch. No fork remains.
-Tool-result batching (D1b) is emitted since 2026-09-05 (#511): a parallel
-turn's results go out as one `tool_results` message, in call order. D2's
-Gemini row is built since 2026-09-05 (#600): a bare `thoughtSignature` is
-recorded as an opaque part and replayed on the function call it came with —
-verified against a Gemini mock and wire goldens, and live on 2026-09-07
-against `gemini-3.8-flash` (AI Studio): every signature and thought summary
-carried, three tool turns in a row accepted. The recorded `reasoning_tokens`
-reaches no operator surface yet (#536). Since 2026-09-06 the adapter records
-an assistant turn's parts in the order they arrived, reasoning included — I6
-taken literally, and what a Gemini signature needs to ride back on the part
-it belongs to — and asks every provider for the readable side of its
-reasoning: Anthropic's `thinking.display: summarized` on adaptive models and
-Gemini's `includeThoughts`. Without the former every Opus 5 thinking block
-came back with an empty text, which is what the 2026-09-04 run recorded and
-this ADR called the provider's data; it was a missing request field. With it
-the live matrix of 2026-09-06 recorded a readable summary beside the
-signature, carried and accepted; the matrix now judges its own event log and
-runs nightly. genai 0.7.0-beta.23 (2026-09-08) carries the three changes
-factor-q sent upstream (jeremychone/rust-genai #301, #302, #303): OpenRouter's
-signed and encrypted `reasoning_details` now round-trip, closing #603; a
-Gemini signature rides back on the part it arrived on; and Anthropic's
-thinking share reaches `reasoning_tokens`.
+2026-07-28, 2026-08-25 and 2026-08-26.
 
 Contract precondition for [#414](https://github.com/bricef/factor-q/issues/414)
 (confirmed exit criterion). Amends

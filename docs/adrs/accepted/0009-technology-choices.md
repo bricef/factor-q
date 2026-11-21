@@ -7,11 +7,6 @@ open were settled by [ADR-0011](0011-event-bus-and-persistence.md) (NATS +
 JetStream, SQLite projection), whose source-of-truth half was in turn
 amended by [ADR-0026](0026-event-log-system-of-record.md).
 
-Implementation: complete — the runtime, event bus, executor and work engine
-are Rust; `async-nats` and JetStream carry the bus; SQLite carries the
-stores. One prediction did not come true and is corrected in Consequences:
-the authoring surfaces are declarative text files, not Rust embedded DSLs.
-
 ## Context
 
 factor-q needs a host language, an event bus implementation, and a persistence layer. These choices affect the contributor pool, the extension model, the deployment story, and performance characteristics.
@@ -59,8 +54,7 @@ These tradeoffs are accepted because the DSL and type-safety benefits compound o
   factor for choosing Rust; the thing it decided was then built another way.
   The other reasons above are unaffected
 - Custom tools and extensions are language-agnostic, communicating via
-  MCP. (The subprocess tool protocol this also predicted was not built —
-  see [ADR-0015](0015-rust-runtime-polyglot-tools.md))
+  MCP
 - Contributors need Rust proficiency to work on the core — extension authors do not
 - Event bus and persistence technology choices were left open here and
   settled by [ADR-0011](0011-event-bus-and-persistence.md), as amended by

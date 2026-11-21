@@ -4,11 +4,6 @@
 
 Accepted
 
-Implementation: complete — model choice is a per-agent frontmatter field
-resolved through `genai`, with per-model pricing in cost tracking and a
-per-agent reasoning effort (#144). Note the runtime settled on
-explicit-or-inherited rather than explicit-only; see the last Consequence.
-
 ## Context
 
 Agent systems require LLM calls, and different agents have different cost/capability requirements. A supervisory planning agent needs frontier-level reasoning. A document summariser needs speed and low cost. A classification agent may use a fine-tuned specialist model.
@@ -31,4 +26,4 @@ Different tasks have fundamentally different cost/capability profiles. Using a f
   `model:` loads against the worker's `agents.default_model`, and only
   *neither* fails. (The original consequence read "must specify their model
   … explicitly"; the daemon's explicit-or-inherited semantics are the
-  authoritative shape — #508 tracks the client validator still rejecting it.)
+  authoritative shape.)

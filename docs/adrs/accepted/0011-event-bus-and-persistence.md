@@ -11,16 +11,6 @@ projection *to be* rebuilt from that archive rather than from NATS. The
 NATS-with-JetStream **event-bus and messaging-backbone** decision (subjects,
 pub/sub, request/reply, replay-within-window) remains in force.
 
-Implementation: partial — the bus half shipped and carries the whole system
-(NATS + JetStream over `async-nats`, SQLite projections through `sqlx`, split
-into three stores by #262/#269). ADR-0026's half did not: **the archive
-service does not exist**, so the projection is still replayed from NATS, not
-from any archive — `services/fq-runtime/crates/fq-runtime/src/db.rs` calls
-`projection.db` "derived from the NATS stream; disposable (delete + replay
-rebuilds it)". Read the supersession note above as the decided direction, not
-as a description of today. § Where events durably live today records what
-actually holds.
-
 ## Context
 
 factor-q's event bus is the foundational primitive — every subsystem communicates through it. It must provide persistent ordered event storage, pub/sub with topic filtering, replay, and request/reply semantics. The choice must also align with the self-hosted, single-tenant deployment model while leaving room to grow.
@@ -80,33 +70,8 @@ NATS does not support arbitrary SQL-like queries over the event log. For complex
 - All *runtime* subsystems (agent executor, task engine, cost tracking)
   communicate through NATS subjects. The CLI stopped:
   [ADR-0006](0006-registry-first-api.md) D8 and Appendix C narrowed `fq.*` to
-  internal infrastructure, and the migration reached zero remaining call
-  points (#498), so `fq` reaches the daemon over the authenticated edge and
-  links no NATS at all. The first-party Go adapters remain direct publishers
-  on the internal SPI (#478, #479)
+  internal infrastructure
 - SQLite is used as a projection store for complex queries, not as the event
-  source of truth. True of `projection.db`, and only of it — the split into
-  three stores (#262) left `worker.db` and `control-plane.db` declared as
-  non-rebuildable sources of truth for in-flight state, coordination,
-  schedules and the invocation archive
+  source of truth
 - JetStream's key-value store may reduce or eliminate the need for a separate configuration database
 - The system can scale from single-node to clustered NATS without architectural changes
-
-## Where events durably live today
-
-Neither this ADR nor [ADR-0026](0026-event-log-system-of-record.md) describes
-the current shape, because the archive service ADR-0026 decides on is
-unbuilt. What holds as of 2026-08:
-
-| Surface | Lifetime | Record status |
-|---|---|---|
-| NATS `fq-events` | 30 days by default, operator-set with `[events].max_age` | The only complete payload-bearing event trail |
-| `projection.db` (`events`) | 30 days default (`[state].retention_days`) | Derived and disposable; typed columns, no payloads. Cost-bearing rows (`llm_response`, `llm_failure`, `invocation_summary`) are exempt and kept indefinitely |
-| `invocation_archive` in `control-plane.db` | 30 days default — the same `[state].retention_days`, keyed on `archived_at` | Per-invocation final phase and state blob, not the trail. Non-rebuildable while it lives |
-
-SQLite therefore does carry genuine source-of-truth duty today — for
-coordination and for invocation outcomes — under a 30-day sweep, and nothing
-beyond the cost-bearing projection rows outlives retention. The maintained
-version of this table is in
-[event-schema.md](../../design/committed/event-schema.md); consult that when
-the answer has to be current.

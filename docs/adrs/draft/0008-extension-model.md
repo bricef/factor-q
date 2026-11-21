@@ -4,17 +4,6 @@
 
 Draft
 
-Implementation: pending as a decision, but reality has answered most of it
-without this draft moving. Option C is decided and built — MCP is the
-extension point for tools (ADR-0013/0017/0018, `mcp:` is first-class agent
-frontmatter, [the MCP guide](../../guide/mcp.md) is the live reference).
-Option A is what agent definitions actually use: `.md` files in well-known
-directories, hot-reloaded through the daemon's registry. Options B and D
-have no trace in the tree. What is genuinely open is skills — and they are
-more open than this draft implies: [ADR-0019](../accepted/0019-skill-format.md)
-fixed a format, and none of it is built. Packaging, versioning and scoping
-are the residue.
-
 ## Context
 
 Power users need to extend factor-q with custom tools, skills (prompt + tool bundles), agent types, and trigger sources. MCP (Model Context Protocol) provides one integration path for external tool providers, but the broader question of how users package, distribute, and version extensions is open.

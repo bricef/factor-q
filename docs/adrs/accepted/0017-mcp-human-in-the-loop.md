@@ -4,17 +4,6 @@
 
 Accepted (2026-05-28)
 
-Implementation: partial — the mechanism is built, the operator surface is
-not. `FactorQClientHandler`
-(`services/fq-runtime/crates/fq-runtime/src/mcp.rs`) handles
-`sampling/createMessage`, `elicitation/create` and `roots/list` and fires
-`roots/list_changed`; the capability grants (`sampling`, `roots`,
-`elicitation`, with both validation modes) are real agent-definition fields
-(plan: [MCP client full spec](../../plans/closed/2026-05-28-mcp-client-full-spec.md)).
-The unrealised promise is §4's cost breakdown — the attribution is captured
-but nothing renders it; see the note there and
-[ADR-0004](0004-cost-controls-from-day-one.md) § Cost attribution.
-
 ## Context
 
 Bringing factor-q's MCP client up to full spec (see
@@ -109,18 +98,6 @@ invocation budget is never an opaque total: where spend went and
 on whose behalf should be visible, distinguishing a server's
 sampling/elicitation spend from the agent's own reasoning.
 
-**Built as of 2026-08-26: the attribution, not the surface.**
-`LlmCallOrigin::Sampling { server }` / `Elicitation { server }` is stamped
-on the cost-bearing events, so the breakdown is recoverable from the event
-stream. Nothing renders it — `fq costs` prints one table keyed by `agent_id`
-plus a `framework` remainder, and the cost reports break down by agent,
-invocation and model only. An operator today cannot separate a server's
-sampling spend from the agent's own reasoning without reading raw event
-JSON. This is the same gap as
-[ADR-0004](0004-cost-controls-from-day-one.md) § Cost attribution — one
-gap asserted in two ADRs — and this is the stronger argument for closing
-it, since sampling spend is a third party spending your budget.
-
 ### Attenuation under delegation
 
 The sampling / elicitation / roots grants are capabilities, so
@@ -137,8 +114,7 @@ beyond the parent's ceiling.
   advertise the corresponding client capabilities at handshake.
 - Agent definitions / sandbox gain capability fields: sampling
   `{allowed, ceiling}` and elicitation `{allowed}`; roots are
-  derived from the existing filesystem sandbox. These fields are
-  consumed by the plan's Step 8.
+  derived from the existing filesystem sandbox.
 - Sampling cost flows through ADR-0004 cost controls and the
   event bus; ungranted or over-ceiling requests deny without
   calling the model.

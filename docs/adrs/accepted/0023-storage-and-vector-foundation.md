@@ -17,32 +17,6 @@ boundary deferred by
 that section's other two questions — local model vs metered API, and
 embed-at-write vs embed-at-query — are not answered here and remain open.
 
-Implementation: partial, by layer.
-
-- **Layer 1 (CAS + name index): built**, and built well — BLAKE3-keyed
-  content-defined blocks with JSON manifests, FastCDC per F8, the mutable
-  name index with the two-level refcounts GC needs, a `tarpc` service per
-  F6, event-sourced grants per the access-control section, and GC
-  ([M1c](../../plans/closed/2026-06-30-m1c-gc-implementation.md), refined by
-  [ADR-0030](0030-object-manifest-gc-back-off.md)). F9's open follow-up was
-  properly closed by [ADR-0024](0024-separate-databases-storage-foundation.md).
-- **Layer 2 (representation / extraction): not built.** No extractor code,
-  and no JSON-RPC-over-stdio plugin host (F7).
-- **Layer 3 (index / embedding): not built.** `services/fq-store/src/` has
-  no embedding or vector code at all; `sqlite-vec` is not a dependency;
-  there is no `Retriever → Fuser → Reranker` pipeline (F5) and no
-  embedding-space key (F10). The `index` module is the *storage name index*,
-  not a vector index.
-
-This matters beyond this file: [ADR-0013](0013-memory-as-mcp-service.md)
-(memory), [ADR-0019](0019-skill-format.md) (skills) and ADR-0021 §4 (the
-embedding boundary) all rest on layer 3, so the "shared semantic-search
-substrate" they build on does not exist yet. The plan is paused, not
-abandoned —
-[the storage/vector plan](../../plans/active/2026-06-27-storage-vector-foundation.md)
-records M3 (extraction) as next, deprioritised behind the M0
-loop-hardening track.
-
 ## Context
 
 Phase 2 pillar #2 is the shared semantic-search substrate that both the
@@ -330,8 +304,7 @@ key.
 - The v1 traits must already carry the expensive-to-retrofit shape
   (range/streaming, embedding-space key, ACL-on-name, async/remote-ready).
 - Once layer 1 + a minimal layer 3 exist, Memory (pillar #3) and Skills
-  (pillar #4) can proceed largely in parallel on top. Layer 1 exists; layer 3
-  does not, which is why both remain blocked (see Status).
+  (pillar #4) can proceed largely in parallel on top.
 
 ## References
 

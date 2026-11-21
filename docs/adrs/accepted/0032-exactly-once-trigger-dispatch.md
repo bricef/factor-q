@@ -23,19 +23,6 @@ under [The deferred design](#the-deferred-design-the-trigger-inbox)
 below, and in full in §5 of the
 [closed execution plan](../../plans/closed/2026-07-18-exactly-once-trigger-dispatch.md).
 
-Implementation: complete for what this record decides. The claim and its
-stream-epoch key are on `main` (#809, PR #817), as are the ack at
-durable start ([#41](https://github.com/bricef/factor-q/issues/41)), the
-30-second first-delivery window
-([#810](https://github.com/bricef/factor-q/issues/810)) and publish-side
-deduplication ([#825](https://github.com/bricef/factor-q/issues/825)).
-The retry ladder was finished on 2026-11-11
-([#953](https://github.com/bricef/factor-q/issues/953), closed), so one
-leftover is open: an operator surface for the trigger-to-invocation link
-([#954](https://github.com/bricef/factor-q/issues/954)).
-[What this design does not close](#what-this-design-does-not-close)
-lists five gaps that are known and accepted with this record.
-
 Code references are to `main` at `1ce79ab5`. Paths are relative to
 `services/fq-runtime/crates/fq-runtime/src/` unless they begin with a
 crate name.
@@ -102,7 +89,7 @@ table. The epoch is the stream's creation time in nanoseconds, read from
 stream info by `EventBus::ensure_trigger_stream` and served by
 `EventBus::trigger_stream_epoch`. It is read once, at connect: a stream
 recreated under a running daemon is not noticed until that daemon
-reconnects. No test covers that case.
+reconnects.
 
 ### 2. The claim is a row in the control-plane store, and arbitration comes first
 
@@ -187,9 +174,7 @@ things: a keepalive tick that slips (2026-09-16), or a start that takes
 longer than the ack window between its claim and its first WAL write.
 `handle` sends no keepalive during that part of `run_invocation`, which
 in `ReducerRunner::run_loop_for` covers workspace provisioning, starting
-the agent's grant-bearing MCP servers and publishing `triggered`. The
-replay test below uses the second route, because it needs no fault
-injection: the deadline simply passes.
+the agent's grant-bearing MCP servers and publishing `triggered`.
 
 ### 6. The trigger inbox is not built
 
@@ -222,128 +207,29 @@ are not in the issue:
 The decision carries a named condition for reopening it, at the end of
 [What this means for more than one worker](#what-this-means-for-more-than-one-worker).
 
-## What holds, and the test that shows it
+## What holds
 
-Every row names the code it rests on and a test that was run for this
-record.
+Every row names the code it rests on.
 
-"Unit" tests are in `control_plane/dispatcher.rs` and
-`control_plane/store/tests.rs`. The dispatcher ones run against a real
-`nats-server` process. Those that exercise the claim also use a real
-control-plane SQLite store; they pull a message themselves and pass it
-to `handle` directly. No unit test runs the consume loop with a claim
-store installed.
-
-"Replay" tests are in
-[`fq-runtime/tests/july_incident_replay.rs`](../../../services/fq-runtime/crates/fq-runtime/tests/july_incident_replay.rs).
-They run `TriggerDispatcher::run`, the daemon's own entry point, on the
-production durable with its production ack window, with the claim store
-installed as `fq-daemon/src/hosted.rs` installs it. Every redelivery in
-them is the broker's own.
-
-**In every test the worker is a stub** at the `Worker` seam, which fires
-`DurableStart` when the test says its first WAL write has landed. No
-reducer, WAL or model call is involved.
-
-| Property | Rests on | Test |
-|---|---|---|
-| A trigger is acked at its invocation's first WAL write, while the invocation is still running | `mark_durable_started` | Unit: `started_claim_acks_duplicate_without_second_invocation` (first half). Replay: `an_invocation_that_outlives_the_ack_window_is_not_redelivered` |
-| An invocation that outlives the ack window is delivered once (2026-07-06) | The same | Replay: `an_invocation_that_outlives_the_ack_window_is_not_redelivered`. The invocation stays in flight for 33 s against a 30 s window; the broker reports one delivery and no redelivery, and the claim drops nothing |
-| A trigger is not acked before its first WAL write, so a crash there loses nothing | The `select!` in `handle` | Unit: `trigger_is_not_acked_before_the_first_wal_write` |
-| A transient failure before the first WAL write is retried; a permanent one is not | `trigger_fate` | Unit: `transient_failure_before_first_wal_write_naks_for_redelivery`, `permanent_failure_before_first_wal_write_acks`, `ambiguous_wal_resume_verdict_acks_without_redelivery` |
-| A copy redelivered while the first is held un-started starts nothing and does not resolve the first copy's delivery (2026-09-16) | `claim_delivery`, same-claimant `Held` arm | Unit: `redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once`. The redelivery is forced with a NAK; saturation is a per-agent cap |
-| A trigger redelivered before its first WAL write starts one invocation, with a second trigger queued behind it (2026-07-18) | The same | Replay: `a_trigger_redelivered_before_its_first_wal_write_starts_once`. One worker permit; the redelivery is the broker's own, from the 30 s deadline passing; each trigger starts once as `attempt: 1` |
-| A copy arriving after durable start is acked, counted and starts nothing | `claim_delivery`, `Started` arm | Unit: `started_claim_acks_duplicate_without_second_invocation` (second half). The copy is a clone of the first delivery fed back in, not a broker redelivery |
-| A waiting trigger is kept alive across a whole ack window | `hold_tick`, `acquire_run_permit` | Unit: `a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain`, `a_paused_models_trigger_is_held_and_started_once_after_the_pause` |
-| A released claim can be won again; a requeue releases the old sequence | `release_trigger_claim` | Unit: `held_claims_stop_same_worker_and_are_adopted_from_another_worker` (middle), `requeue_held_releases_old_stream_sequence_claim` |
-| A `claimed` row under another id is adopted on the next delivery | `take_over_trigger_claim` | Unit: `held_claims_stop_same_worker_and_are_adopted_from_another_worker` (end) |
-| A recreated stream starts a new claim space | `TriggerKey::stream_epoch` | Unit: `a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delivery`, `trigger_claim_state_machine_round_trip` |
-
-Two things in that table are thinner than they look. No test has the
-broker redeliver a trigger *after* its durable start, because the ack
-prevents exactly that; the `Started` arm is exercised only by feeding a
-copy in by hand. And no test checks where the real `ReducerRunner` fires
-`DurableStart`: that it fires after the first `upsert_invocation_state`
-and not before rests on reading `run_loop_inner`.
-
-### The runs
-
-Run on 2026-11-11. The unit tests ran at `1ce79ab5`; the replay tests
-ran on that commit plus the test file
-([#955](https://github.com/bricef/factor-q/pull/955)).
-
-```console
-$ mise exec node@24.21.0 -- just test-runtime --lib -- \
-    started_claim_acks_duplicate_without_second_invocation \
-    trigger_is_not_acked_before_the_first_wal_write \
-    redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once \
-    held_claims_stop_same_worker_and_are_adopted_from_another_worker \
-    requeue_held_releases_old_stream_sequence_claim \
-    transient_failure_before_first_wal_write_naks_for_redelivery \
-    permanent_failure_before_first_wal_write_acks \
-    ambiguous_wal_resume_verdict_acks_without_redelivery \
-    a_permit_wait_keeps_the_trigger_alive_and_is_interrupted_by_drain \
-    a_paused_models_trigger_is_held_and_started_once_after_the_pause \
-    trigger_claim_state_machine_round_trip \
-    a_claim_from_an_earlier_stream_incarnation_does_not_drop_a_fresh_delivery
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1013 filtered out; finished in 61.22s
-
-$ mise exec node@24.21.0 -- just test-runtime --test july_incident_replay
-test an_invocation_that_outlives_the_ack_window_is_not_redelivered ... ok
-test a_trigger_redelivered_before_its_first_wal_write_starts_once ... ok
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.28s
-```
-
-Each mechanism was then disabled with a local change that was not
-committed, and the same tests run again.
-
-With the claim's arbitration off (`claim_delivery` returning `Proceed`
-from its `Started` and same-claimant `Held` arms), the 2026-07-18 replay
-fails with the incident itself, a third start for the stalled trigger
-stamped `attempt: 2`:
-
-```text
-test a_trigger_redelivered_before_its_first_wal_write_starts_once ... FAILED
-assertion `left == right` failed: each trigger starts exactly one invocation, as its first delivery. A third start for the stalled trigger, stamped `attempt: 2`, is the 2026-07-18 incident
-  left: [Start { trigger: 01a1c9d5-0e52-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e6c-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e52-…, attempt: Some(2) }]
- right: [Start { trigger: 01a1c9d5-0e52-…, attempt: Some(1) }, Start { trigger: 01a1c9d5-0e6c-…, attempt: Some(1) }]
-```
-
-The three unit tests of the claim fail with it:
-`redelivered_held_trigger_is_dropped_and_its_original_copy_starts_once`
-("the duplicate is refused rather than held: Elapsed(())"),
-`started_claim_acks_duplicate_without_second_invocation` ("the duplicate
-is answered rather than held: Elapsed(())") and
-`held_claims_stop_same_worker_and_are_adopted_from_another_worker`. The
-2026-07-06 replay stays green with the claim off, which is the split in
-[§5](#5-which-mechanism-bounds-which-incident).
-
-With the ack removed from `mark_durable_started`, the 2026-07-06 replay
-fails:
-
-```text
-test an_invocation_that_outlives_the_ack_window_is_not_redelivered ... FAILED
-the trigger must be acked at the invocation's first WAL write, while the invocation is still in flight (num_ack_pending=1 after 5s)
-```
-
-and so does `started_claim_acks_duplicate_without_second_invocation`
-("trigger not acked while the invocation is still in-flight
-(num_ack_pending=1) — the redelivery-storm regression").
-
-**The amended Phase 2 exit criterion.** The production-readiness review
-asks that "the incident-replay integration test from the exactly-once
-plan passes". That test was the gate of the plan's PR-3, which is not
-built. Under this record the criterion is: the two tests in
-`fq-runtime/tests/july_incident_replay.rs` and the twelve unit tests
-named above pass in `just runtime-ci`. The review itself is a snapshot
-and is not edited; the amendment is recorded here and in
-[STATUS.md](../../../STATUS.md).
+| Property | Rests on |
+|---|---|
+| A trigger is acked at its invocation's first WAL write, while the invocation is still running | `mark_durable_started` |
+| An invocation that outlives the ack window is delivered once (2026-07-06) | The same |
+| A trigger is not acked before its first WAL write, so a crash there loses nothing | The `select!` in `handle` |
+| A transient failure before the first WAL write is retried; a permanent one is not | `trigger_fate` |
+| A copy redelivered while the first is held un-started starts nothing and does not resolve the first copy's delivery (2026-09-16) | `claim_delivery`, same-claimant `Held` arm |
+| A trigger redelivered before its first WAL write starts one invocation, with a second trigger queued behind it (2026-07-18) | The same |
+| A copy arriving after durable start is acked, counted and starts nothing | `claim_delivery`, `Started` arm |
+| A waiting trigger is kept alive across a whole ack window | `hold_tick`, `acquire_run_permit` |
+| A released claim can be won again; a requeue releases the old sequence | `release_trigger_claim` |
+| A `claimed` row under another id is adopted on the next delivery | `take_over_trigger_claim` |
+| A recreated stream starts a new claim space | `TriggerKey::stream_epoch` |
 
 ## What this design does not close
 
 These were found by reading the code for this record, except the second,
 which a test found. Each is stated as what the code does. None is one of
-the incidents, and none has its own issue yet.
+the incidents.
 
 1. **A crash between the first WAL write and the claim's
    `durably_started` update starts the trigger twice.** The WAL row is
@@ -356,8 +242,8 @@ the incidents, and none has its own issue yet.
    broker redelivers the trigger it finds a `claimed` row under another
    id, adopts it and starts a second invocation. Nothing on the claim
    row says the first one started. The window is the time between two
-   SQLite commits, normally milliseconds. Derived from the code; not
-   reproduced by a test. This is the residual the
+   SQLite commits, normally milliseconds. Derived from the code. This is
+   the residual the
    [2026-07-25 cleanroom review](../../reviews/2026-07-25-factor-q-cleanroom-review.md)
    named in its §4.2 and left to the inbox plan, where the claim is the
    first durable write and carries a pre-allocated invocation id. It
@@ -392,9 +278,7 @@ the incidents, and none has its own issue yet.
    the second case the invocation is running, so the verdict is false.
    The same happens to a start that takes longer than the whole retry
    ladder to reach its first WAL write. Derived from the code, and the
-   comment on that arm in `claim.rs` describes the hazard; not
-   reproduced by a test. #954's scope includes a `fq doctor` check for
-   old `claimed` rows, which detects this and does not repair it.
+   comment on that arm in `claim.rs` describes the hazard.
 
 4. **A duplicate dropped before durable start leaves no trace.** The
    `Started` arm logs and counts. The same-claimant `Held` arm does
@@ -408,7 +292,7 @@ the incidents, and none has its own issue yet.
    never deleted and `control_plane/retention.rs` does not sweep the
    table: one row per started trigger for the life of the instance. See
    [retention](#6-retention-of-claim-rows) for how long a row has to
-   live. Noted on #954 as a Phase 3 bounded-growth item.
+   live.
 
 ## What this means for more than one worker
 
@@ -466,9 +350,6 @@ not a lock on the state.
   table is then shared and the insert is atomic across processes, so
   `Won` is exclusive. Adoption makes this the worst case, as the next
   question shows.
-
-None of this is covered by a test: no test runs two dispatchers against
-one stream.
 
 **The inbox.** A NATS KV bucket, `fq-trigger-claims`, on the broker
 every instance already shares, with the KV revision-0 `create` as the
@@ -693,21 +574,6 @@ worker window to its threshold. How much longer than the floor to keep a
 row is a question about the forensic link (#954), and the two should be
 decided together.
 
-### Which plan slice answers which gap
-
-The slices are in §6 of the closed plan. None is scheduled.
-
-| Slice | What it was | The gap it answers |
-|---|---|---|
-| PR-2, claim registry in NATS KV | A claim every instance can see | Question 1, for shape C |
-| PR-3, inbox dispatch | Claim, ack, start from the claim; pre-allocated invocation id; own-claim startup scan; one duplicate-drop path that logs and counts | Question 3; and the first and fourth single-daemon gaps |
-| PR-4, multi-worker recovery | Adoption gated on staleness; bounded start attempts; dead-letter disposition | Question 2, with the fencing addition noted there. It does not answer question 4 |
-| PR-5, pull discipline | One pull request per held permit | Question 5, distribution of work |
-| PR-7, watcher alarm and doctor checks | A warning on more than one pull request per issue; claim health checks | Question 5, detection; and detecting the third single-daemon gap |
-| No slice | | Question 4 (#475) and question 6 as it applies to the table that landed |
-
-PR-1's remainder is #954 and PR-6's remainder is #953.
-
 ### The condition for reopening this decision
 
 **Before a second process consumes the trigger stream.** That is the
@@ -805,14 +671,9 @@ From the draft of 2026-07-19, still standing:
   first two gaps in
   [What this design does not close](#what-this-design-does-not-close):
   a crash between the first WAL write and the claim update, and a worker
-  that fires and returns in one poll. Neither is tracked by an issue at
-  the time of writing.
+  that fires and returns in one poll.
 - The claim table is unbounded until retention is added.
 - A second process consuming the trigger stream is not supported, and
   with the adoption rule as it stands it is worse than unsupported: on a
   shared store it turns a redelivery into a duplicate. Nothing in the
   code refuses that deployment.
-- The retry ladder is finished (#953, closed 2026-11-11):
-  `TRIGGER_RETRY_BACKOFF` is `[30s, 2m, 5m, 12m]` on `main`, it is pacing
-  and not part of the safety argument, and a trigger that fails every
-  delivery dead-letters 19.5 minutes after its first.

@@ -9,15 +9,6 @@ indistinguishable from neglect (the rule in
 [STATUS.md](../../../STATUS.md): *anything held carries a named exit
 condition*).
 
-Implementation: not applicable — this ADR sequences work, it does not
-build any. The work it orders is the graph executor's first pass
-([#414](https://github.com/bricef/factor-q/issues/414)) first, then the
-isolation design session
-([context](../../design/aspirational/agent-isolation-discussion-context.md))
-and the ladder it settles
-([#208](https://github.com/bricef/factor-q/issues/208),
-[#209](https://github.com/bricef/factor-q/issues/209)).
-
 ## Context
 
 Two isolation models are accepted and neither is built.
@@ -65,7 +56,8 @@ order in which that session and the executor happen.
 3. **What the hold covers.** No isolation substrate work is built standalone
    before the design session: not the proxy (#208), not the containers
    (#209), not workspace overlays. Incremental isolation issues are not
-   filed; findings go to the context document.
+   filed; findings go to the
+   [context document](../../design/aspirational/agent-isolation-discussion-context.md).
 
 4. **What the hold does not cover.** Credential *scope* is not substrate
    and shrinks the blast radius without touching it, so it proceeds on its

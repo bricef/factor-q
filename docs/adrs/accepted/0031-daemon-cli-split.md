@@ -4,22 +4,6 @@
 
 Accepted 2026-07-20 by Brice — proposed 2026-07-17.
 
-Implementation: complete — the split shipped. `fq-daemon` is a workspace
-member producing `bin/fqd` (#356, then #498 "split fq and fqd, and fq links
-no daemon"); the client is thin and gated (`thin_client_gate.rs`, and
-`edge_migration_gate.rs`'s `REMAINING = 0`); the daemon reads `fqd.toml` and
-the client an optional `fq.toml`; `install.sh` and the deploy ship both
-(#499, #513). Appendix A's biscuit capability tokens are live — `fq token
-list` / `fq token attenuate` are shipped verbs and every connection presents
-a token — and the client pins the server fingerprint, which closes the
-"Server-cert trust" open question.
-
-Two clauses below name things that were never built and by decision never
-will be: the *generated* client wrappers and the `ControlService` trait.
-Both are annotated in place. Still true, and worth stating because it is a
-security posture: `fqd↔NATS` and `worker↔NATS` remain unauthenticated on
-loopback, exactly as the Consequences say.
-
 ## Context
 
 Today `fq` is one binary that is both the **daemon** (`fq run`) and the
@@ -120,8 +104,7 @@ local-store fallback (that would re-link `sqlx` into `fq`).
   consequence's crate topology into `fq-ops` + `fq-edge` but left the trait
   in the list.)
 - Two-binary distribution touches the ADR-0022 release matrix and
-  `install.sh` — which came true, and is now a *three*-binary distribution
-  (`fq`, `fqd`, `fq-cas`); see [ADR-0022](0022-binary-distribution-and-licensing.md) §3.
+  `install.sh`.
 
 ## Alternatives considered
 
