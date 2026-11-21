@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::control_plane::liveness::StuckSweep;
+use crate::control_plane::store::WorkerStatus;
 use crate::test_support::nats::test_nats;
 use crate::worker::store::{InvocationStateRow, WorkerStore};
 use futures::{Stream, StreamExt};
