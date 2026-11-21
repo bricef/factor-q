@@ -1678,7 +1678,8 @@ lost. A halt and a malformed count never read as one thing, because
 they call for opposite responses.
 
 **The dispatcher counts the copies of a trigger that meet a claim
-already taken, three kinds apart.** It arbitrates every delivery against
+already taken, three kinds apart, and a fourth, the copies of a trigger
+consumed without a run.** It arbitrates every delivery against
 the trigger's claim (see
 [Which trigger started a run](#which-trigger-started-a-run-and-claimed-deliveries-that-never-settled)),
 and a copy the claim refuses starts nothing: the count and its warn
@@ -1772,6 +1773,29 @@ something else.)
   double fault lands here too: a run that failed for good before its
   first durable write, whose claim could not be given back, or was
   given up on, and whose ack was lost, is run once more.
+- **Consumed copies dropped.** The claim records the trigger consumed
+  without a run: an earlier delivery dealt with it and no run started
+  (it was refused, failed for good or was halted before its first
+  durable write, returned without a start, was requeued from a hold, had
+  its agent removed during a hold, or ran out of deliveries and was
+  dead-lettered). The trigger came again
+  for one of two reasons: that delivery's answer did not reach the
+  broker, so the broker redelivered it; or the trigger stream was
+  replayed, after the dispatcher's durable consumer was deleted and
+  recreated or its state was lost in a broker restore (see
+  [How long a claim is kept](#how-long-a-claim-is-kept)), though the
+  answer had arrived. A replay brings back every trigger published in
+  the last day, so after one this count can hold every trigger consumed
+  that day, with no answer lost. Either way the delivery is acked and
+  dropped, and the trigger is not handled again. It is not a duplicate
+  of a run, so it is counted apart from those above: `consumed copies
+  dropped` on the dispatcher's line, with a line saying what it means,
+  and on a line of its own in `fq status`. Its warn line is `dropping a
+  redelivered trigger that was consumed without a run`, naming the
+  invocation that consumed the trigger and how; its attempt
+  (`delivered`) is 1 for a replay to a recreated consumer, and more for
+  a redelivery. No answer consumes a trigger yet, so this count stays at
+  zero until one does.
 
 The warn lines are `dropping duplicate trigger delivery after durable
 start`, `acking a redelivered trigger whose claim this daemon holds`,
@@ -1946,6 +1970,24 @@ meanwhile under `Current executions` as stuck.
      warn line for each verdict naming the invocation, where its start
      is on record and what became of its claim
 ```
+
+A trigger whose claim records that a delivery dealt with it and no run
+started, with no start of its run on record, is counted apart:
+`exhausted but consumed` on the watch's line, with a line saying what it
+means, and on a line of its own in `fq status`. It is not counted as
+exhausted but started. A trigger whose claim says so and whose run's
+records the watch still could not read at its limit is counted there
+too, and logged at error rather than warn, naming the invocation to
+check with `fq invocation show` (see
+[a consumed claim](#which-trigger-started-a-run-and-claimed-deliveries-that-never-settled)).
+Not counted there is a trigger whose claim says it was consumed as
+`dead_lettered`: the dispatcher published its dead letter on its last
+delivery as it consumed the claim, so the watch, which reads the claim
+before anything else, answers it as a dead letter already written and
+counts it in neither count, checked or, past its limit, not. Its line, at
+info, is `not dead-lettering a trigger whose deliveries ran out: its claim
+records that the dispatcher published its dead letter`. No answer
+consumes a trigger yet, so this count stays at zero until one does.
 
 Three cases are neither, and the watch holds its verdict on them,
 NAKing the advisory to decide again when it comes back: the claim store
@@ -2462,9 +2504,15 @@ and `dead_lettered` among them, and `--json` carries it as
 `consumed_why`; a spelling a later build adds is shown as it is. A copy
 of the trigger that meets a consumed claim is acked and dropped, logged
 at warn as `dropping a redelivered trigger that was consumed without a
-run`, with no count. The dead-letter watch writes no `trigger_exhausted`
-for it, logged at warn as `not dead-lettering a trigger whose deliveries
-ran out`. `fq dead-letters requeue` requeues the dead letter of a
+run`, and counted as a consumed copy dropped (see
+[the dispatcher's counts](#when-a-consumer-stops-making-progress)).
+The dead-letter watch writes no `trigger_exhausted` for it, logged at
+warn as `not dead-lettering a trigger whose deliveries ran out`, and
+counts it as exhausted but consumed, unless the claim says it was
+consumed as `dead_lettered`: the dispatcher wrote that dead letter
+itself, so the watch answers it as one already written and counts it in
+neither count. Neither count is folded into
+the counts of runs that started. `fq dead-letters requeue` requeues the dead letter of a
 trigger consumed as `dead_lettered`, the one reason that writes one,
 since its run never started. It refuses that of a trigger consumed as
 `requeued_from_hold`, whatever you pass: the trigger's replacement was
