@@ -4,10 +4,6 @@
 
 Accepted
 
-Implementation: complete — `fqd` is the persistent daemon and `fq` a thin
-client that connects to it (#498, ADR-0031); the client API layer is the
-authenticated edge over the typed operation registry (ADR-0006).
-
 ## Context
 
 factor-q could run as a foreground CLI application (like Claude Code or OpenCode) or as a persistent server process. The target use cases — software development, systems operations, regulatory analysis — all require agents that run continuously and react to events without a human at the terminal.

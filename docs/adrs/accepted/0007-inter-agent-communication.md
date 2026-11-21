@@ -15,11 +15,6 @@ operations); and adds spawn to the capability-grant lineage of
 §7, which flagged this as the frontier the project's "multi-agent" identity
 depends on.
 
-Implementation: pending — nothing here is built. There is no graph executor
-and no spawn; the reserved `trace_id` / `parent_event_id` envelope fields
-this ADR makes load-bearing exist but carry no traversal yet. Its two-node
-vertical plan is **held, not stalled** (#414, #429).
-
 ## Context
 
 factor-q's identity is a multi-agent runtime, but multi-agent is unbuilt: there
@@ -104,16 +99,11 @@ communicate over the transport; the harness does.**
    net built for the reducer
    ([reducer verification](../../plans/closed/2026-07-05-reducer-verification.md))
    extends to graph scope — a traversal produces a canonical, stitched event
-   trace; the per-traversal budget holds under a crash mid-graph. The two-layer
-   (reducer + graph) proof is a correctness guarantee unusual in this space, and
-   a deliberate goal.
-
-8. **Build order: the substrate first.** The first thing stood up is a
-   **declared two-node graph** (e.g. implementer → reviewer) on a minimal graph
-   executor — no spawn, no dynamic construction. Because nodes may be
-   deterministic, the executor's invariants (ordering, budget debit, trace
-   stitching, failure routing) are testable with **zero LLM calls**. Spawn is
-   layered on afterward as sugar over the proven substrate.
+   trace; the per-traversal budget holds under a crash mid-graph. Because nodes
+   may be deterministic, the executor's invariants (ordering, budget debit,
+   trace stitching, failure routing) are testable with **zero LLM calls**. The
+   two-layer (reducer + graph) proof is a correctness guarantee unusual in this
+   space, and a deliberate goal.
 
 ## Rationale
 

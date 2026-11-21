@@ -4,30 +4,6 @@
 
 Accepted
 
-Implementation: pending — **none of this is built**, and the Consequences
-below are written in the present tense as though it were. There is no skill
-registry service and no `skill.search` / `skill.list` / `skill.activate` /
-`skill.deactivate` tool; the entire built-in set is discovery, exec,
-file_read, file_write, report_outcome, self_inspect. There is no vector
-index — `services/fq-store/src/` contains no embedding or vector code, so
-the "shared vector database" this ADR,
-[ADR-0013](0013-memory-as-mcp-service.md) and
-[ADR-0023](0023-storage-and-vector-foundation.md) all lean on has no
-implementation. No skill instruction reaches the system prompt: the
-runtime's preamble is a fixed `Environment:` block. (`meta/skills/` in this
-repo holds Claude Code skills for factor-q's own development agents — it is
-unrelated to this ADR.) Read every Consequence below as intent.
-
-**The `skills: access:` block below is unbuilt, and now fails loudly.**
-`Frontmatter` (`services/fq-runtime/crates/fq-agent/src/definition.rs`)
-still has no `skills` field, but it now carries `deny_unknown_fields`, so
-an agent definition written to this ADR is **rejected at load** and
-`fq agent validate` reports the unknown field rather than a clean bill.
-That is the fix for #514: an author can no longer believe they declared
-an access restriction that does not exist — they get an error instead.
-The frontmatter now matches daemon config, which was always tightened
-this way, where an unknown setting is an error rather than a shrug.
-
 ## Context
 
 Skills are reusable bundles of prompt instructions and domain knowledge that shape how an agent approaches work. factor-q needs a skill format that is human-readable, composable, and manageable at scale across a swarm of agents.
@@ -72,14 +48,6 @@ Skill descriptions are embedded at registration time and stored in a vector data
 The vector database is a shared primitive with the memory MCP service (ADR-0013) — the same underlying infrastructure with different collections. This avoids duplicating embedding and search infrastructure.
 
 ### Namespace-based access control
-
-> **Not implemented, and now a hard error — see Status.** The runtime's
-> frontmatter parser still has no `skills` field, and since #514 it
-> rejects unknown top-level keys outright. A definition carrying the
-> block below therefore **fails to load**, with an error naming `skills`
-> as an unknown field. It no longer loads silently without the
-> restriction — but it does not work either. Nothing here grants or
-> denies anything today.
 
 Agent definitions declare which skill namespaces they can access:
 
@@ -129,9 +97,6 @@ Even after discovery, skills are loaded progressively:
 - **Active discovery** — agents search when they need a skill, not passively loaded with everything
 
 ## Consequences
-
-*None of the following has happened; they are the consequences the decision
-would have if it were built. See Status.*
 
 - The skill registry is an MCP service with embedding-based search
 - Skills are embedded at registration time; the registry maintains a vector index

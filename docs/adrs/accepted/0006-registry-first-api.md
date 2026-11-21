@@ -7,16 +7,6 @@ Accepted on 2026-07-20 by Brice — proposed 2026-07-18. Replaces the prior draf
 Amends ADR-0031 (Appendix A). Informed by the interface inventory of
 2026-07-18 and #84.
 
-Implementation: partial — the `fq-ops` registry and the authenticated edge
-shipped in 2026-07 (#346, #354, #360), and the fleet-sized verb migration
-closed in 2026-08 (#438 through #498). Every client verb is now a declared
-op over the edge (the migration gate reads zero), the dashboard reads
-through the same registry, and the `fq.control.*` NATS subjects are gone.
-Not built: the MCP server face and the fq-store registry instance (#84).
-Note also that Appendix B's Phase 3e resolution closed the codegen fallback
-unexercised — the "generated typed client wrappers" of D6, the two
-consequence bullets and Appendix A are superseded by it.
-
 ## Context
 
 factor-q's operator surface is described many times over. A read operation
@@ -163,8 +153,7 @@ own events, whose envelopes carry the authenticated operator identity;
 queries and streams audit per an `OpMeta` flag (read audit is opt-in, not
 noise). #183's "trim the RPC surface" becomes a permission declaration.
 fq-store adopts the same `fq-ops` crate and vocabulary as a second registry
-instance; unifying its transport under `fqd`'s edge is sequenced with M5
-(open).
+instance.
 
 ### D8 — NATS is internal infrastructure, not public API
 
@@ -264,33 +253,6 @@ default posture.
 - Crash-domain separation of fq-store is preserved regardless of the
   transport-unification outcome.
 
-## Migration
-
-The sketch below was the shape at proposal time. **It is not the numbering
-that ran**, and the rest of this ADR — Appendix B's "Phase 3e", "the
-Phase-4 inventory" — uses the executed plan's numbering instead, as does
-the code. The authoritative sequence is
-[the registry + split execution plan](../../plans/closed/2026-07-20-registry-and-split-execution.md):
-Phase 3 = exemplars, Phase 4 = fleet migration, Phase 5 = split the binary,
-Phase 6 = MCP operator face. Read phase numbers anywhere else in this
-document as the plan's, not this list's.
-
-- **Stage A** — adopt this ADR; amend ADR-0031 per Appendix A. Decision
-  only.
-- **Stage B** — `fq-ops` crate + three exemplar ops, one per kind:
-  `invocation.show` (Query), `invocation.drop` (Command),
-  `invocation.transcript.tail` (Stream), wired through the generic edge
-  behind 0031 auth. Old paths intact.
-- **Stage C** — fleet-sized migration of the remaining ops; CLI and
-  dashboard flip to the typed client; delete the `ReadService` mirror.
-  Completes #261/#264 as side effects.
-- **Stage D** — MCP server face; traversal ops land registry-native.
-- **Stage E** — fq-store registry instance; ADR-0016 built-in convergence;
-  transport unification per M5 sequencing.
-
-Stages A–B are human work (days). Stage C is ~17 near-identical PRs — fleet
-fodder once the exemplars fix the pattern.
-
 ## Alternatives considered
 
 - **ADR-0031 as drafted (hand-enumerated `ControlService`).** Adopts the
@@ -318,7 +280,7 @@ fodder once the exemplars fix the pattern.
 ## Open questions (deferred by decision)
 
 - Secret bootstrap/rotation UX and cert pinning — inherited from ADR-0031.
-- CAS transport unification under the `fqd` edge — sequencing with M5.
+- CAS transport unification under the `fqd` edge.
 - REST activation criterion (first external consumer).
 - Server-side filter language for `event.tail` (subject globs vs. typed
   filters).
@@ -540,32 +502,11 @@ category is a declared op.
 ### Consequences for the migration
 
 - The remaining `fq.control.*` bindings (`reload`, `down`,
-  `invocation.resume`) are legacy. They retire with their verbs' flips
-  in cohort 4.3 of the Phase-4 inventory, and `invocation.drop`'s is
-  already gone (PR #441).
+  `invocation.resume`) are legacy.
 - `invocation.resume` becomes a declared verb mirroring
   `invocation.drop` rather than keeping its request/reply subject.
   Consistency between two actions on one resource was the trigger for
   this amendment; the principle is what generalises it.
-- **A known inconsistency, tracked rather than fixed here.**
-  [`docs/design/committed/trigger-wire-contract.md`](../../design/committed/trigger-wire-contract.md)
-  still describes the trigger transport as "a stable,
-  language-agnostic **public** interface" for "an **external** trigger
-  source — in any language", which predates D8's narrowing to a
-  co-located first-party SPI and contradicts it head-on. That doc is
-  committed, so the repo currently holds two committed documents
-  disagreeing about whether `fq.trigger.*` is public. It is filed for
-  reconciliation, together with a post-migration sweep of every doc
-  that offers NATS as an external interface. This appendix describes
-  the decision, not yet the state of the documentation.
-
-  **Resolved 2026-08-13** (`196b951`, PR #482): the trigger wire
-  contract now opens by calling itself an "internal SPI for co-located,
-  first-party adapters" and says it "is **not** a public interface for
-  arbitrary external callers". The two documents no longer disagree.
-  The wider sweep is not finished — the Go adapters still publish
-  direct to NATS (#478, #479) — so the sweep's subject outlives this
-  particular fix.
 
 ## Appendix D — Amendment: a synthetic has no Get (2026-08-06)
 
@@ -614,29 +555,6 @@ registry's stored load errors a "named, typed computation over
 resources" stretches the report definition. `control.doctor` already
 stretches it the same way. The alternative is a second read mechanism
 carved out for one nature, which is the larger cost.
-
-### Not yet realised in code
-
-`fq_ops::Synthetic` still carries a `state_schema`, and the registry
-still derives `Get` for it — so the contract crate and this decision
-disagree until cohort 4.4 of the
-[Phase-4 inventory](../../plans/closed/2026-07-28-phase-4-call-point-inventory.md),
-where the `Control` declaration lands. The correction is not a
-one-liner: it touches `Synthetic::new`'s type parameter, the
-registry's `derived_ops` and its synthetic-Get resolve arm, three
-assertions in `fq-ops/tests/registry.rs`, the `ControlState` fixture,
-`opid.rs`'s module documentation, and the committed schema-snapshot
-oracle `tests/snapshots/exemplar_registry.json`, whose `synthetic`
-entry serialises a `state_schema` today. Sequenced with 4.4
-deliberately; noted here so the gap is a known one rather than drift.
-
-*(This note originally added "It also needs `Control` report identities
-that do not exist yet." They exist: `ControlReport::{Doctor, Status}`
-ships and is wired through the daemon, the CLI, the dashboard and the
-edge tests (#484, #487). The rest of the gap above is still open, though
-its blast radius has shrunk — the only surviving `.synthetic::<…>`
-declaration in the tree is a test fixture; the production registry
-declares no synthetic at all.)*
 
 ## Appendix E — Amendment: `worker.prune` is retired, not evented (2026-08-10)
 

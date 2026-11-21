@@ -16,30 +16,6 @@ and the operations scripts move into the stack as an `fq-ops` image and
 an `ops` service, and clause 7 narrows to the containers that run the
 daemon or an agent.
 
-Implementation: complete — the images (clauses 1, 3, 4 and the daemon's
-half of 6 and 8) are built and published: `services/fq-runtime/Dockerfile`
-holds the `minimal`, `dogfood`, `watcher`, `cron` and `dashboard` targets,
-assembled from the release binaries rather than compiled in-image, with
-one volume at `/var/lib/factor-q` and a `HEALTHCHECK` on the daemon
-([#587](https://github.com/bricef/factor-q/issues/587), slice 1); every
-merge to `main` pushes them to `ghcr.io/bricef/<name>` tagged with the
-twelve-hex commit the binaries report and with a moving `main-latest`
-(slice 2); `ops/dogfood/compose.yml` is the stack definition and
-supervisor of clause 2 with clause 7's network shape and the one volume
-of clause 6 (slice 3); `ops/dogfood/deploy.sh` is clause 5's tag bump —
-pull, prove every image's binary reports the tag, `docker compose stop`
-as the drain, `up -d`, verify on the running containers — and the
-`setsid` launchers and the release tree are gone (slice 4); a
-`bootstrap.sh` provisions a dedicated host, `deploy.sh --auto` is hourly
-continuous delivery with an idle check and automatic rollback, and
-`hygiene.sh`, `backup.sh` and `restore.sh` bound the volume and make the
-instance restorable (slice 5); the adapter and dashboard images carry
-their own probes — each binary serves a loopback `/healthz` and asks it
-under the `HEALTHCHECK` — completing clause 8, `deploy.sh` waits on
-them, and `notify.sh` is the channel for what the unattended scripts
-find (slice 6 and after). The live instance moved onto the stack on
-2026-09-12 ([#587](https://github.com/bricef/factor-q/issues/587)).
-
 ## Context
 
 The dogfood stack is four processes — `fqd`, `github-watcher`,
@@ -314,14 +290,8 @@ role.
   endpoint on the daemon or an `exec`-form `HEALTHCHECK` that runs `fq`
   against the edge with a token from the state volume. The former needs
   daemon code; the latter needs no code and a credential in the probe.
-- ~~**Migrating the live instance.** Whether the edge identity is
-  copied or rotated on the move.~~ **Answered 2026-09-12:** copied, on
-  the rehearsal and again on the cutover. The operator's pairing
-  travelled with it in `state/client/`, so no client re-paired and the
-  dashboard's token stayed valid. A copied identity mints no new admin
-  token and writes no `state/edge/admin.token` — the client-side pairing
-  is the only copy of it — so carrying `state/client/` is what makes the
-  copy cheaper than the rotation this ADR recommended.
+- **Migrating the live instance.** Whether the edge identity is
+  copied or rotated on the move.
 - **One volume for the whole stack.** Compose can mount subpaths of
   one named volume into several containers, which would fold the
   JetStream store and Caddy's data into the daemon's volume and make

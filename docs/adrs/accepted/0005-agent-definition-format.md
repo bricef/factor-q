@@ -4,13 +4,6 @@
 
 Accepted
 
-Implementation: partial — Markdown + YAML frontmatter is the authoring
-format, parsed by `fq-agent` and hot-reloaded by the daemon; the live
-reference is [the agent-definitions guide](../../guide/agent-definitions.md).
-Three predictions in Consequences and Rationale did not land: the published
-JSON Schema, the filesystem watcher, and `{{…}}` body templating. See the
-notes at each.
-
 ## Context
 
 The agent definition is the primary artefact users author. It must be:
@@ -116,12 +109,6 @@ let agent = Agent::build("researcher")
 
 **Templating** — the Markdown body can support template variables (e.g. `{{task.description}}`, `{{context.files}}`) injected at invocation time, enabling parameterised agents.
 
-> Not what shipped. There is no `{{…}}` body templating. The runtime
-> prepends a fixed `Environment:` preamble (#143) and resolves
-> `${workspace}` **only inside tool path parameters** — everywhere else,
-> including file contents and command arguments, the body is passed
-> through verbatim.
-
 ### Tradeoffs accepted
 
 - **No compile-time validation of agent definitions** — the Markdown format is validated at load time, not compile time. Invalid definitions are caught when the runtime parses them, not when they're authored. JSON Schema validation and runtime error messages must be clear enough to compensate.
@@ -133,18 +120,9 @@ let agent = Agent::build("researcher")
 - Agent definitions are stored as `.md` files in well-known directories
 - Agent definitions are hot-reloaded on request: an operator (or an
   automation) runs `fq reload`, and the daemon swaps a freshly-loaded
-  registry in atomically. The predicted filesystem watcher was not built —
-  editing a file does not, on its own, take effect
+  registry in atomically
 - A JSON Schema for the frontmatter, enabling editor validation and
-  autocomplete — **not built**. No `*.schema.json` exists in the repo and
-  `fq-agent` does not depend on `schemars`; frontmatter is parsed straight
-  into a private `Frontmatter` struct by `yaml_serde` (the maintained
-  continuation of `serde_yaml`). Unknown top-level
-  keys are **rejected** — the struct carries `deny_unknown_fields`, so a
-  misspelled key now fails the definition to load rather than being
-  dropped in silence (#514). That closes the failure behind the
-  [ADR-0019](0019-skill-format.md) `skills:` finding: a definition
-  carrying an unrecognised block no longer loads without it
+  autocomplete
 - The Rust builder pattern remains the internal API for constructing agents programmatically
 - Graph and workflow definitions are a separate concern (see
   [ADR-0012](0012-graph-definition-format.md), execution graph format)

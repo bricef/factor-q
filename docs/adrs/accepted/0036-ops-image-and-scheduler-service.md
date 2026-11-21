@@ -12,24 +12,6 @@ containers) to *never into a container that runs the daemon or an agent*,
 with that clause's reason intact; ADR-0035's Status line carries the
 `Refined by` pointer.
 
-Implementation: built, in the three slices the Implementation section
-lays out — the `fq-ops` image
-([#715](https://github.com/bricef/factor-q/pull/715)), the `ops` service
-running hygiene and backup
-([#716](https://github.com/bricef/factor-q/pull/716)), and the deploy as
-a sibling with the host crontab and bootstrap's script copy retired (the
-change that moved this record to `accepted/`). The acceptance drill —
-one hourly deploy from the scheduler, one unattended rollback of a
-broken ops image, a nightly set from the service, an empty host crontab
-— is the maintainer's to run on the dogfood guest after rollout; until
-it has run, this record says "built", not "proven". The worked example
-that prompted it is
-[#707](https://github.com/bricef/factor-q/pull/707) (merged 2026-09-12):
-a change to what the hourly deploy's notification says reached `main`
-with CI green and changed nothing on the dogfood host, because the host
-runs a *copy* of `deploy.sh` that only a re-run of `bootstrap.sh`
-refreshes.
-
 ## Context
 
 ADR-0035 made the container image the deployable unit and compose the
@@ -262,39 +244,7 @@ check cover the operations layer for free.
   name comes from `.env` rather than `hostname`.
 - The deploy's bring-down list does not gain the `ops` service, and its
   `up` recreates the scheduler last; a rollback replays that sequence.
-  Both are consequences of clause 3 and are where the implementation is
-  most likely to be wrong, so the acceptance drill below exercises both.
-
-## Implementation
-
-One PR per slice, each behind the gates, in this order.
-
-1. **The image.** The `ops` Dockerfile target, the `fq-ops` dispatcher
-   with `--version`, the pins, `docker-build` / `docker-check` /
-   `docker-publish` and `main-artifacts.yml`. Nothing on the host changes.
-2. **The scheduler, running hygiene and backup.** The `ops` compose
-   service with its two mounts, probe and the in-image crontab carrying
-   the hygiene and backup lines as one-shot siblings; the host crontab
-   shrinks to the deploy line. Job output moves to the container log;
-   `notify.sh` takes the host name from `.env`; hygiene asks the runtime
-   for its readings.
-3. **The deploy as a sibling.** `deploy.sh --auto` moves into the
-   crontab; `deploy.sh` pulls, verifies, ups and rolls back `fq-ops`
-   with the rest; the host crontab goes; `bootstrap.sh` stops copying
-   scripts and installing cron; the README's runbook is rewritten in
-   `docker compose run --rm ops` verbs; ADR-0035 gains its pointer and
-   this ADR moves to `accepted/`.
-4. **Hardening, as its own decision:** the socket proxy; off-host copies
-   of the backup sets (`FQ_BACKUP_HOOK`, unchanged by this ADR).
-
-**Acceptance**, on the dogfood guest: one hourly deploy observed end to
-end from the scheduler, with the notification naming the build and what
-landed; one rollback drill — a tag whose `fq-ops` probe cannot pass is
-deployed and the instance is back on the previous tag with the previous
-schedule, unattended; a nightly set produced by the scheduler and
-restored by `docker compose run --rm ops restore`; `hygiene --report`
-from the scheduler's log; `crontab -l` for the deploy user empty;
-`bootstrap.sh` re-run changing nothing under the instance directory.
+  Both are consequences of clause 3.
 
 ## Open questions
 
@@ -303,9 +253,6 @@ from the scheduler's log; `crontab -l` for the deploy user empty;
   leaving bootstrap with nothing tracked to copy. Left on the host for
   now: compose reads the file before any image is pulled, and a stack
   definition that lives outside the images is the ordinary shape.
-- Whether the socket proxy belongs in slice 2 rather than slice 4. It
-  does not change the design; it changes how much of the runtime's API a
-  compromised ops container reaches.
 - Whether `restore.sh`, which brings the whole stack down and up, wants
   to be a sibling or stays a by-hand verb run from the host with the
   image's copy of the script. A sibling works — it is the same invariant

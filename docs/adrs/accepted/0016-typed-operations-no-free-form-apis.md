@@ -4,18 +4,6 @@
 
 Accepted
 
-Implementation: pending — the named operations do not exist.
-`annotations.add_note`, `annotations.record_confidence`,
-`record_observation` and `workflow_context` appear nowhere under
-`services/`. The annotations layer *is* live, but every writer is host code
-— the dispatcher, the advisory watch and the runner — so no agent path can
-write one; #90 was closed by documenting that gap rather than by opening the
-channel (#492). What survives, and is honoured, is the *shape* this ADR
-mandates for agent side effects: the typed operation registry of
-[ADR-0006](0006-registry-first-api.md) is that discipline applied to the
-operator surface. Read this ADR as the intended interface, not a shipped
-one.
-
 ## Context
 
 Agents in factor-q have side-effecting capabilities beyond producing their declared output: they may write to memory, contribute to workflow context, attach annotations to events, reference artifacts, and (for exploratory signatures) write to a scratchpad. The interface through which agents express these side effects is an architectural decision with significant consequences.

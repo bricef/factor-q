@@ -347,6 +347,8 @@ Then the chores the move unblocks:
 - STATUS.md's dogfood paragraph (it says the instance has not moved).
 - The phase-0 plan's "The dogfood instance" bullet.
 - ADR-0035's `Implementation:` line — the last "not built" is this move.
+  (Done 2026-11-21, by removing the line: ADRs no longer carry one, and
+  STATUS.md holds what they said.)
 - The ops README's "Migrating an instance onto the stack": after the
   move it is a runbook for the next host, not the launcher shape; fold
   this plan's set-packaging into it or point at `backup.sh`.
