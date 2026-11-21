@@ -978,11 +978,30 @@ pub enum ControlPlaneStoreError {
 
     #[error("malformed row from control-plane store: {0}")]
     Malformed(String),
+
+    /// The store refused a write by its own rules: a check, a key or a
+    /// trigger, SQLite's constraint family. The same write is refused
+    /// again, so a retry changes nothing.
+    #[error("control-plane store refused the write: {0}")]
+    Refused(String),
 }
 
 impl From<sqlx::Error> for ControlPlaneStoreError {
     fn from(err: sqlx::Error) -> Self {
-        ControlPlaneStoreError::Backend(err.to_string())
+        // SQLite's extended result codes keep the primary one in their
+        // low byte: 19 is SQLITE_CONSTRAINT, whatever the extended kind.
+        let constraint = match &err {
+            sqlx::Error::Database(db) => db
+                .code()
+                .and_then(|code| code.parse::<i32>().ok())
+                .is_some_and(|code| code & 0xff == 19),
+            _ => false,
+        };
+        if constraint {
+            ControlPlaneStoreError::Refused(err.to_string())
+        } else {
+            ControlPlaneStoreError::Backend(err.to_string())
+        }
     }
 }
 
