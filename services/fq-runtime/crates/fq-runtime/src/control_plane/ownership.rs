@@ -30,16 +30,15 @@
 //! that has not ended, and a drop as the ender only of a `failed` run
 //! ([`RowState::is_valid`], the same states the store's checks admit).
 //!
-//! There is also no row at all, which is where a triggered run still
-//! running stands: its row is written when it ends, or when something
-//! else happens to it first (recovery restores it, it is reported
-//! ambiguous, an operator drops it). The table below has a run's durable
-//! start, its first WAL write, as a second writer of the
-//! `no row → in_flight` edge beside recovery's restore (issue 721).
-//! Nothing writes it yet: the dispatcher is to apply it at the run's
-//! first WAL write, after it marks the trigger's claim started, so that
-//! a running run has a row from that moment. No event removes a row, and
-//! nothing else does.
+//! There is also no row at all, which is where a run stands before its
+//! first WAL write. The dispatcher writes the row at that write, the
+//! run's durable start, after it marks the trigger's claim started
+//! (`dispatcher/claim/started_row.rs`, issue 721): the second writer of
+//! the `no row → in_flight` edge, beside recovery's restore. A run whose
+//! row that write could not make, or one started by a build before it,
+//! has none until something else happens to it (it ends, recovery
+//! restores it, it is reported ambiguous, an operator drops it). No event
+//! removes a row, and nothing else does.
 //!
 //! Why the archive sweeper holds a `pending` row is not stored. A hold is
 //! one daemon run's verdict, kept in the worker's memory and offered again
@@ -375,15 +374,14 @@ impl OwnerRow {
 
 /// What reaches the row: an event the coordination consumer folds,
 /// startup recovery's restore of a run it will resume, or a run's durable
-/// start, which nothing applies yet (issue 721's next change makes the
-/// dispatcher apply it).
+/// start, which the dispatcher applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipEvent {
     /// `triggered`, published before the run's first WAL write.
     Triggered,
     /// The run made its first WAL write: it durably started, and the
     /// daemon that saw the write owns it from the run's start (issue 721).
-    /// Nothing applies it yet.
+    /// The dispatcher applies it once it has marked the trigger's claim.
     DurablyStarted,
     /// Startup recovery restores a run its WAL holds in flight, to resume
     /// it.

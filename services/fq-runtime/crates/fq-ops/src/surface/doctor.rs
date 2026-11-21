@@ -34,9 +34,11 @@ pub struct DoctorWorkers {
 }
 
 /// In-flight / current-execution view, read from the worker-local
-/// `invocation_state` table (the reliable live view — the CP owner
-/// table's `in_flight` status is not populated by trigger dispatch
-/// yet; see issue #50).
+/// `invocation_state` table, which holds a run from its first durable
+/// write until it ends. The control plane's ownership rows name a run
+/// from that same write, but not one whose row that write could not make
+/// or one an earlier build started, so these counts can include runs the
+/// control plane's `in_flight` does not list.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
 pub struct DoctorExecutions {
     pub in_flight: i64,

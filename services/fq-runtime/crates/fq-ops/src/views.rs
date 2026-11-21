@@ -62,9 +62,11 @@ pub struct RecoveryView {
     pub stale_worker_ids: Vec<String>,
 }
 
-/// In-flight / stuck execution counts, read from the worker WAL — the
-/// reliable live view (the CP owner table's `in_flight` is not populated by
-/// trigger dispatch yet; see issue #50).
+/// In-flight / stuck execution counts, read from the worker WAL, which
+/// holds a run from its first WAL write until it ends. The control plane's
+/// ownership rows name a run from that same write, but not one whose row
+/// that write could not make or one an earlier build started, so this is
+/// the count that sees every run going.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecutionsView {
     pub in_flight: i64,
@@ -180,11 +182,14 @@ pub struct InvocationSummaryView {
     /// `assigned_at` for ownership rows; `archived_at` for archive-only
     /// rows.
     pub assigned_at_ms: i64,
-    /// When the invocation began: `assigned_at` (dispatch time — the
-    /// closest thing to a start the coordination store records) for
-    /// ownership rows, the archive's true `started_at` for archive-only
-    /// rows. Unlike `assigned_at_ms`, this means the same thing on both
-    /// row kinds — the list surface's "started" column.
+    /// When the invocation began: for an ownership row its `assigned_at`,
+    /// which is the run's own start as its WAL records it for a row written
+    /// at the run's durable start, restored by startup recovery or created
+    /// by a held ending, and the time the row was first written for one
+    /// another event created (the run's ending, a report that it is
+    /// ambiguous, or a drop); the archive's true `started_at` for
+    /// archive-only rows. Unlike `assigned_at_ms`, this means the same thing
+    /// on both row kinds — the list surface's "started" column.
     pub started_at_ms: i64,
     /// True for an archive-only row: one the merged list read from
     /// `invocation_archive` because no ownership row it listed names the
