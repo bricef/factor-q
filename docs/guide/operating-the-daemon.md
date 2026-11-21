@@ -1463,6 +1463,43 @@ anybody. The thresholds are `[bus]` in
 `fqd.toml`: `stuck_after_redeliveries` decides when retrying becomes
 stuck, and the escalation and log rate are configured there too.
 
+**Some events are acknowledged without being retried.** A malformed
+event is one, and an event for an ownership row this build cannot read
+is another (see [Triaging unresolved invocations](#triaging-unresolved-invocations)).
+A write the control-plane store refuses by its own rules is the third:
+a check, a key, a NOT NULL column or a trigger refuses the same write
+again on every delivery, and on `fq-coordination`, which applies events
+strictly in order, a retry would hold every later event behind it for
+good. The coordination consumer acknowledges such an event and logs
+`the control-plane store refused the event's write for good; the event
+is acknowledged, and that write is not made` at error, with the
+invocation, the agent, the event's type and the store's own words in
+`error`; the shared loop then logs `handler rejected message
+permanently; acking (no retry)` at warn. What else the event does
+depends on which write was refused:
+
+- **The move of the run's ownership row.** The row is left as it is, as
+  for a row this build cannot read, and the rest of the event still
+  takes effect: an `invocation.archived` is recorded and acknowledged to
+  the worker, and a drop stops the run, marking the worker's record of it
+  finished, and writes its archive record. The archive's or the drop's
+  own line comes first, at warn, saying the row is left as it is: three
+  lines in all. One exception: when the store refused the row's insert
+  and there is no row, the archive is recorded and not acknowledged,
+  since the worker would then delete the run's only other record. The
+  worker keeps its record and sends the archive again at every sweep,
+  each time with these lines, the first saying the archive is recorded
+  and not acknowledged.
+- **The archive record's own insert.** Nothing more is done. An
+  `invocation.archived` is not acknowledged, so the worker sends it again
+  at every sweep, each time with the two lines; a drop neither moves the
+  run's row nor stops the run.
+
+The consumer makes no write it means the store to refuse, so these lines
+are a fault to report, not a state to wait out, and restarting changes
+nothing. `fq doctor` does not show them; the daemon log is where to
+look.
+
 ### When a consumer halts on an event it cannot read
 
 Every event carries the envelope's `schema_version`, and every consumer
