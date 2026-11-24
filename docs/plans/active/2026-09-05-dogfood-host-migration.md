@@ -344,7 +344,9 @@ the move; rotate them on their own schedule.
 
 Then the chores the move unblocks:
 
-- STATUS.md's dogfood paragraph (it says the instance has not moved).
+- STATUS.md's dogfood paragraph (it said the instance has not moved).
+  (Done 2026-09-12 in `a86120b0`: the paragraph records the move onto
+  the stack and the dedicated internal host.)
 - The phase-0 plan's "The dogfood instance" bullet.
 - ADR-0035's `Implementation:` line — the last "not built" is this move.
   (Done 2026-11-21, by removing the line: ADRs no longer carry one, and
@@ -352,6 +354,10 @@ Then the chores the move unblocks:
 - The ops README's "Migrating an instance onto the stack": after the
   move it is a runbook for the next host, not the launcher shape; fold
   this plan's set-packaging into it or point at `backup.sh`.
+  (Done 2026-09-12 in `ffe48624`: the section is now "Moving an
+  instance to another host", a backup/bootstrap/restore runbook for
+  any destination that records the move off the launcher shape as
+  history and points at `backup`.)
 - Close #587. Move this plan to `closed/` with what actually happened.
 
 ## Risks
