@@ -1327,8 +1327,8 @@ async fn v11_to_v12_migration_opens_and_the_terminal_outcome_round_trips() {
 }
 
 /// v13 (issue 1108): a failed call's row keeps the `llm.failure` it ended
-/// in, whole, written while the row is `dispatched`, before it is closed.
-/// Rows closed before v13 keep none.
+/// in, whole, written by the statement that closes the row. Rows closed
+/// before v13 keep none.
 #[tokio::test]
 async fn v12_to_v13_migration_opens_and_a_failed_calls_row_keeps_its_llm_failure() {
     use crate::events::{Event, EventPayload, LlmErrorKind, LlmFailurePayload};
@@ -1381,22 +1381,35 @@ async fn v12_to_v13_migration_opens_and_a_failed_calls_row_keeps_its_llm_failure
         )
         .await
         .unwrap();
+    let message = "model returned an empty response";
     assert!(
         store
-            .write_llm_failure_event(inv, req, &event)
+            .write_llm_failed(inv, req, message, 0.001, 3, &event)
             .await
             .is_err(),
         "an intent row is not one a call's failure closes"
     );
     store.write_llm_dispatched(inv, req, 2).await.unwrap();
     store
-        .write_llm_failure_event(inv, req, &event)
+        .write_llm_failed(inv, req, message, 0.001, 3, &event)
         .await
         .unwrap();
-    store
-        .write_llm_completed(inv, req, "model returned an empty response", true, 0.001, 3)
-        .await
-        .unwrap();
+    let row = store.get_llm_dispatch(inv, req).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            row.status,
+            row.is_error,
+            row.cost_usd,
+            row.response.as_deref()
+        ),
+        (
+            DispatchStatus::Completed,
+            Some(true),
+            Some(0.001),
+            Some(message)
+        ),
+        "the same write closes the row as failed, with its cost"
+    );
     let stored = store
         .llm_failure_event(inv, req)
         .await
@@ -1409,7 +1422,7 @@ async fn v12_to_v13_migration_opens_and_a_failed_calls_row_keeps_its_llm_failure
     );
     assert!(
         store
-            .write_llm_failure_event(inv, req, &event)
+            .write_llm_failed(inv, req, message, 0.001, 4, &event)
             .await
             .is_err(),
         "a closed row is not written again"

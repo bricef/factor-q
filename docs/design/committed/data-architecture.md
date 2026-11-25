@@ -239,7 +239,7 @@ A call that fails is closed `completed` with `is_error` and its
 cost, and only then are its `llm.dispatched` and `llm.failure`
 published. The `llm.failure` is the only event that carries the
 call's usage and cost, so the row keeps it, envelope and
-`event_id` included, written before the row is closed
+`event_id` included, written by the statement that closes the row
 (`llm_dispatch.failure_event`, worker schema v13,
 [#1108](https://github.com/bricef/factor-q/issues/1108)). A crash
 after the close and before the run's terminal mark leaves the run
