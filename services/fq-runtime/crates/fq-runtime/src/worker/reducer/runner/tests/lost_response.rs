@@ -567,6 +567,14 @@ async fn a_row_without_the_calls_own_response_publishes_none() {
             )),
             "{planted}: nothing goes out in the call's name"
         );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::LlmResponse(_)))
+                .count(),
+            2,
+            "{planted}: nothing goes out but the resumed run's own calls' responses"
+        );
         let Ok(InvocationOutcome::Completed { cost, .. }) = resumed else {
             panic!("{planted}: the run goes on to its end: {resumed:?}");
         };
